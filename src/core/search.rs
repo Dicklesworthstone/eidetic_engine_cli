@@ -9724,6 +9724,18 @@ async fn run_search_inner_with_performance(
     let retrieve_start = Instant::now();
     let search_result = if let Some(retrieval) = live_snapshot_retrieval {
         Ok(retrieval)
+    } else if crate::core::index::index_generation_is_verified_empty(&index_dir)
+        .map_err(SearchError::IndexIncompatible)?
+    {
+        // Empty init/repair generations use a model-free hash placeholder.
+        // No query vector is needed, and comparing its placeholder producer
+        // with a selected semantic model would incorrectly require a rebuild.
+        // Keep the ordinary merge, visibility, audit and reporting path below.
+        Ok(runtime_fallback::Retrieval {
+            hits: Vec::new(),
+            degraded: Vec::new(),
+            applied: source_mode.applied,
+        })
     } else {
         search_sync_with_performance(
             cx,
@@ -10426,18 +10438,29 @@ async fn run_diag_search_in_snapshot(
     }
 
     let config = options.two_tier_config_for_limit(scoring_candidate_limit);
-    let mut diag_result = diag_search_sync(
-        cx,
-        &index_dir,
-        &options.query,
-        scoring_candidate_limit as usize,
-        config,
-        options.explain,
-        source_mode.applied,
-        fusion_weights,
-        fast_embedder_override,
-    )
-    .await?;
+    let mut diag_result = if crate::core::index::index_generation_is_verified_empty(&index_dir)
+        .map_err(SearchError::IndexIncompatible)?
+    {
+        empty_diag_search_result(
+            source_mode.applied,
+            config.rrf_k,
+            scoring_candidate_limit as usize,
+            fusion_weights,
+        )
+    } else {
+        diag_search_sync(
+            cx,
+            &index_dir,
+            &options.query,
+            scoring_candidate_limit as usize,
+            config,
+            options.explain,
+            source_mode.applied,
+            fusion_weights,
+            fast_embedder_override,
+        )
+        .await?
+    };
     #[cfg(unix)]
     drop(generation_lease);
     apply_live_evidence_visibility_to_diag(
@@ -11681,6 +11704,42 @@ struct DiagSearchSyncResult {
     final_hits: Vec<SearchHit>,
     final_elapsed_ms: f64,
     errors: Vec<String>,
+}
+
+fn empty_diag_search_result(
+    source_mode: SearchSourceMode,
+    rrf_k: f64,
+    limit: usize,
+    fusion_weights: SearchFusionWeights,
+) -> DiagSearchSyncResult {
+    let semantic_available = source_mode.uses_embeddings();
+    DiagSearchSyncResult {
+        candidate_metadata: BTreeMap::new(),
+        pre_fusion: PreFusionDiagnostics {
+            lexical: SearchArmDiagnostics {
+                available: cfg!(feature = "lexical-bm25"),
+                score_scale: "bm25_tfidf",
+                elapsed_ms: 0.0,
+                results: Vec::new(),
+                error: (!cfg!(feature = "lexical-bm25"))
+                    .then(|| "lexical index not found".to_owned()),
+            },
+            semantic_fast: SearchArmDiagnostics {
+                available: semantic_available,
+                score_scale: "cosine_similarity",
+                elapsed_ms: 0.0,
+                results: Vec::new(),
+                error: (!semantic_available).then(|| {
+                    "semantic arm not executed because source mode resolved to lexical_only"
+                        .to_owned()
+                }),
+            },
+        },
+        fusion: build_fusion_diagnostics(&[], &[], rrf_k, limit, fusion_weights),
+        final_hits: Vec::new(),
+        final_elapsed_ms: 0.0,
+        errors: Vec::new(),
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -15179,6 +15238,548 @@ mod tests {
     fn write_current_index_metadata(index_dir: &Path, documents_total: u32) -> TestResult {
         crate::core::index::write_memory_eval_index_metadata(index_dir, documents_total)
             .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    mod empty_generations {
+        use super::*;
+        use crate::core::index::{
+            IndexRebuildOptions, IndexRebuildStatus, IndexRebuildTrigger,
+            index_generation_is_verified_empty, record_index_rebuild_request,
+            repair_requested_index_with_cx_bounded_and_stack,
+        };
+        use frankensearch::core::generation::EmbeddingIdentityBundleV1;
+        use frankensearch::core::traits::ModelCategory;
+        use frankensearch::index::VectorIndex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct SemanticFixture {
+            hash: HashEmbedder,
+            identity: EmbeddingIdentityBundleV1,
+            calls: AtomicUsize,
+        }
+
+        impl SemanticFixture {
+            fn new(dimension: usize, producer: &str) -> Self {
+                let hash = HashEmbedder::new(dimension, frankensearch::HashAlgorithm::FnvModular);
+                let mut identity = hash.identity().expect("hash identity").clone();
+                producer.clone_into(&mut identity.producer.backend);
+                identity.validate().expect("fixture producer identity");
+                Self {
+                    hash,
+                    identity,
+                    calls: AtomicUsize::new(0),
+                }
+            }
+        }
+
+        impl Embedder for SemanticFixture {
+            fn embed<'a>(
+                &'a self,
+                cx: &'a asupersync::Cx,
+                text: &'a str,
+            ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.hash.embed(cx, text)
+            }
+            fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+                Ok(&self.identity)
+            }
+            fn id(&self) -> &str {
+                self.hash.id()
+            }
+            fn model_name(&self) -> &str {
+                self.hash.model_name()
+            }
+            fn dimension(&self) -> usize {
+                self.hash.dimension()
+            }
+            fn is_ready(&self) -> bool {
+                true
+            }
+            fn is_semantic(&self) -> bool {
+                true
+            }
+            fn category(&self) -> ModelCategory {
+                ModelCategory::StaticEmbedder
+            }
+        }
+
+        struct Fixture {
+            _root: tempfile::TempDir,
+            options: SearchOptions,
+            rebuild: IndexRebuildOptions,
+            workspace_id: String,
+        }
+
+        impl Fixture {
+            fn new() -> Self {
+                let root = tempfile::tempdir().expect("fixture directory");
+                let workspace = root.path().canonicalize().expect("canonical workspace");
+                std::fs::create_dir(workspace.join(".ee")).expect("store directory");
+                std::fs::write(
+                    workspace.join(".ee/config.toml"),
+                    "[memory]\ninclude_global = false\n",
+                )
+                .expect("workspace-only fixture");
+                let database = workspace.join(".ee/ee.db");
+                let index = workspace.join(".ee/index");
+                let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+                let db = DbConnection::open_file(&database).expect("create fixture source");
+                db.migrate().expect("migrate fixture source");
+                db.insert_workspace(
+                    &workspace_id,
+                    &CreateWorkspaceInput {
+                        path: workspace.display().to_string(),
+                        name: None,
+                    },
+                )
+                .expect("fixture workspace");
+                db.close().expect("close fixture source");
+                let rebuild = IndexRebuildOptions {
+                    workspace_path: workspace.clone(),
+                    database_path: Some(database.clone()),
+                    index_dir: Some(index.clone()),
+                    dry_run: false,
+                };
+                let report = crate::core::index::rebuild_index(&rebuild).expect("empty rebuild");
+                assert_eq!(report.status, IndexRebuildStatus::NoDocuments);
+                assert!(report.errors.is_empty());
+                assert!(index_generation_is_verified_empty(&index).expect("verified empty build"));
+                let options = SearchOptions {
+                    workspace_path: workspace,
+                    database_path: Some(database),
+                    index_dir: Some(index),
+                    query: "The copper kestrel release preserves exact producer identity."
+                        .to_owned(),
+                    limit: 10,
+                    speed: SpeedMode::Instant,
+                    explain: true,
+                    as_of: None,
+                    include_tombstoned: false,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
+                    relevance_floor: Some(0.0),
+                    dedup_mode: SearchDedupMode::DocId,
+                    source_mode: SearchSourceMode::SemanticOnly,
+                    strict_source_mode: true,
+                    memory_scope: MemoryScope::Workspace,
+                    strict_scope: false,
+                };
+                Self {
+                    _root: root,
+                    options,
+                    rebuild,
+                    workspace_id,
+                }
+            }
+
+            fn index(&self) -> &Path {
+                self.options.index_dir.as_deref().expect("index path")
+            }
+
+            fn snapshot(&self) -> BTreeMap<PathBuf, Vec<u8>> {
+                fn visit(root: &Path, path: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+                    for entry in std::fs::read_dir(path).expect("snapshot directory") {
+                        let entry = entry.expect("snapshot entry");
+                        let path = entry.path();
+                        if entry.file_type().expect("snapshot type").is_dir() {
+                            visit(root, &path, files);
+                        } else {
+                            files.insert(
+                                path.strip_prefix(root)
+                                    .expect("relative path")
+                                    .to_path_buf(),
+                                std::fs::read(path).expect("snapshot file"),
+                            );
+                        }
+                    }
+                }
+                let mut files = BTreeMap::new();
+                visit(
+                    &self.options.workspace_path,
+                    &self.options.workspace_path,
+                    &mut files,
+                );
+                files
+            }
+
+            fn edit_metadata(&self, edit: impl FnOnce(&mut serde_json::Value)) {
+                let path = self.index().join("meta.json");
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).expect("read metadata"))
+                        .expect("parse metadata");
+                edit(&mut value);
+                std::fs::write(path, serde_json::to_vec(&value).expect("encode metadata"))
+                    .expect("write fixture metadata");
+            }
+        }
+
+        #[test]
+        fn verified_empty_generation_reads_skip_semantic_identity_and_embedding() {
+            for dimension in [256, 512] {
+                let mut fixture = Fixture::new();
+                let producer = Arc::new(SemanticFixture::new(dimension, "empty-read-producer"));
+                let rejected = search_sync(
+                    fixture.index(),
+                    &fixture.options.query,
+                    10,
+                    fixture.options.two_tier_config_for_limit(10),
+                    false,
+                    SearchSourceMode::SemanticOnly,
+                    &Deterministic::from_seed(0),
+                    Some(producer.clone()),
+                )
+                .expect_err("raw semantic engine rejects the empty placeholder producer");
+                assert!(rejected.contains("producer_revision"), "{rejected}");
+                let before = fixture.snapshot();
+                for mode in [
+                    SearchSourceMode::SemanticOnly,
+                    SearchSourceMode::Hybrid,
+                    SearchSourceMode::LexicalOnly,
+                ] {
+                    fixture.options.source_mode = mode;
+                    let report = run_search_with_embedder(&fixture.options, producer.clone())
+                        .expect("valid empty ordinary search");
+                    assert_eq!(report.status, SearchStatus::NoResults);
+                    assert!(report.results.is_empty() && report.errors.is_empty());
+                    assert_eq!(report.source_mode_applied, mode);
+                    let diag = run_diag_search_with_embedder(&fixture.options, producer.clone())
+                        .expect("valid empty diagnostic search");
+                    assert_eq!(diag.final_report.status, SearchStatus::NoResults);
+                    assert!(diag.final_report.results.is_empty() && diag.errors.is_empty());
+                    assert!(diag.pre_fusion.lexical.results.is_empty());
+                    assert!(diag.pre_fusion.semantic_fast.results.is_empty());
+                    assert!(diag.fusion.per_doc_contribution.is_empty());
+                }
+                assert_eq!(producer.calls.load(Ordering::Relaxed), 0);
+                assert_eq!(
+                    fixture.snapshot(),
+                    before,
+                    "empty reads must remain observational"
+                );
+                let db = DbConnection::open_file_read_only(fixture.options.resolve_database_path())
+                    .expect("inspect empty registry");
+                assert!(
+                    db.list_model_registry_entries(&fixture.workspace_id)
+                        .expect("registry")
+                        .is_empty()
+                );
+            }
+        }
+
+        #[test]
+        fn verified_empty_generation_first_semantic_repair_preserves_backend_rejection() {
+            for dimension in [256, 512] {
+                let fixture = Fixture::new();
+                let selected = Arc::new(SemanticFixture::new(dimension, "first-write-selected"));
+                let foreign = Arc::new(SemanticFixture::new(
+                    dimension,
+                    "first-write-other-producer",
+                ));
+                let db = DbConnection::open_file(fixture.options.resolve_database_path())
+                    .expect("source");
+                let memory_id =
+                    crate::models::MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+                db.insert_memory(
+                    &memory_id,
+                    &test_memory_input(&fixture.workspace_id, &fixture.options.query),
+                )
+                .expect("first source memory");
+                let job_id = format!("sidx_{:026}", 1);
+                db.insert_search_index_job(
+                    &job_id,
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: fixture.workspace_id.clone(),
+                        job_type: crate::db::SearchIndexJobType::FullRebuild,
+                        document_source: None,
+                        document_id: None,
+                        documents_total: 1,
+                    },
+                )
+                .expect("first memory index job");
+                assert!(
+                    record_index_rebuild_request(
+                        &fixture.options.workspace_path,
+                        IndexRebuildTrigger::IndexError,
+                        "index_incompatible",
+                        "2026-10-01T00:00:00Z",
+                        0
+                    )
+                    .was_recorded()
+                );
+                let repair = || {
+                    let rebuild = &fixture.rebuild;
+                    let selected = selected.clone();
+                    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+                        repair_requested_index_with_cx_bounded_and_stack(
+                            &cx,
+                            rebuild,
+                            64,
+                            Some(EmbedderStack::from_parts(selected, None)),
+                        )
+                        .await
+                    })
+                    .expect("repair runtime")
+                    .expect("first semantic repair")
+                };
+                assert!(repair());
+                assert!(!repair(), "completed request remains idempotent");
+                assert_eq!(
+                    db.get_search_index_job(&job_id)
+                        .expect("job")
+                        .expect("stored job")
+                        .status,
+                    "completed"
+                );
+                let expected_generation = db
+                    .get_workspace_generation(&fixture.workspace_id)
+                    .expect("generation");
+                let status = crate::core::index::get_index_status_with_embedder(
+                    &crate::core::index::IndexStatusOptions {
+                        workspace_path: fixture.options.workspace_path.clone(),
+                        database_path: fixture.options.database_path.clone(),
+                        index_dir: fixture.options.index_dir.clone(),
+                    },
+                    None,
+                    false,
+                    selected.as_ref(),
+                )
+                .expect("selected generation status");
+                assert_eq!(status.index_generation, expected_generation);
+                assert!(
+                    !index_generation_is_verified_empty(fixture.index())
+                        .expect("nonempty generation")
+                );
+                db.close().expect("close source");
+                let report = run_search_with_embedder(&fixture.options, selected.clone())
+                    .expect("selected read");
+                assert_eq!(report.status, SearchStatus::Success);
+                assert_eq!(report.results[0].doc_id, memory_id);
+                let diag = run_diag_search_with_embedder(&fixture.options, selected.clone())
+                    .expect("selected diag");
+                assert_eq!(diag.final_report.results[0].doc_id, memory_id);
+                let before = fixture.snapshot();
+                let report = run_search_with_embedder(&fixture.options, foreign.clone())
+                    .expect("producer refusal report");
+                assert_eq!(report.status, SearchStatus::IndexError);
+                assert!(report.results.is_empty());
+                assert!(
+                    report
+                        .errors
+                        .iter()
+                        .any(|error| error.contains("producer_revision"))
+                );
+                assert_eq!(foreign.calls.load(Ordering::Relaxed), 0);
+                // Diagnostics also reject the final producer join. Its
+                // existing pre-fusion probe embeds separately, so do not
+                // confuse that observational probe with ordinary admission.
+                assert!(run_diag_search_with_embedder(&fixture.options, foreign.clone()).is_err());
+                assert_eq!(fixture.snapshot(), before);
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn verified_empty_generation_doctor_stage_reads_without_model_registration() {
+            let mut fixture = Fixture::new();
+            let database = fixture.options.resolve_database_path();
+            let source_before = std::fs::read(&database).expect("source before doctor staging");
+            let workspace = fixture.options.workspace_path.clone();
+            let staged = workspace.join(".ee/doctor-empty-index");
+            let stage_path = staged.clone();
+            crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                crate::core::index::doctor_repair::stage(&cx, &workspace, &stage_path).await
+            })
+            .expect("doctor staging runtime")
+            .expect("empty doctor generation");
+            assert_eq!(
+                std::fs::read(&database).expect("source after doctor staging"),
+                source_before
+            );
+            fixture.options.index_dir = Some(staged);
+            let before = fixture.snapshot();
+            for dimension in [256, 512] {
+                let producer = Arc::new(SemanticFixture::new(dimension, "doctor-empty-reader"));
+                let report = run_search_with_embedder(&fixture.options, producer.clone())
+                    .expect("doctor empty read");
+                assert_eq!(report.status, SearchStatus::NoResults);
+                let diag = run_diag_search_with_embedder(&fixture.options, producer.clone())
+                    .expect("doctor empty diag");
+                assert_eq!(diag.final_report.status, SearchStatus::NoResults);
+                assert_eq!(producer.calls.load(Ordering::Relaxed), 0);
+            }
+            assert_eq!(fixture.snapshot(), before);
+            let db = DbConnection::open_file_read_only(database).expect("doctor source observer");
+            assert!(
+                db.list_model_registry_entries(&fixture.workspace_id)
+                    .expect("registry")
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn verified_empty_generation_refuses_corrupt_missing_forged_and_wal_tiers() {
+            for corruption in [
+                "missing",
+                "corrupt",
+                "fast_record",
+                "fast_wal",
+                "quality_wal",
+                "quality_missing",
+                "quality_corrupt",
+                "quality_unexpected",
+                "lexical_missing",
+                "lexical_corrupt",
+                "lexical_record",
+                "security",
+            ] {
+                let fixture = Fixture::new();
+                let fast_path = fixture.index().join("vector.fast.idx");
+                let mut vector = vec![0.0; 256];
+                vector[0] = 1.0;
+                match corruption {
+                    "missing" => {
+                        std::fs::rename(&fast_path, fixture.index().join("saved-fast.idx"))
+                            .expect("hide fast tier")
+                    }
+                    "corrupt" => {
+                        std::fs::write(&fast_path, b"broken fast tier").expect("corrupt fast tier")
+                    }
+                    "quality_missing" => fixture.edit_metadata(|value| {
+                        value["tierDocumentCounts"]["quality"] = serde_json::json!(0);
+                    }),
+                    "quality_corrupt" => {
+                        fixture.edit_metadata(|value| {
+                            value["tierDocumentCounts"]["quality"] = serde_json::json!(0)
+                        });
+                        std::fs::write(
+                            fixture.index().join("vector.quality.idx"),
+                            b"broken quality tier",
+                        )
+                        .expect("corrupt quality tier");
+                    }
+                    "quality_unexpected" => {
+                        VectorIndex::create(
+                            &fixture.index().join("vector.quality.idx"),
+                            "fnv1a-256",
+                            256,
+                        )
+                        .expect("unexpected quality writer")
+                        .finish()
+                        .expect("unexpected quality tier");
+                    }
+                    "lexical_missing" => std::fs::rename(
+                        fixture.index().join("lexical"),
+                        fixture.index().join("saved-lexical"),
+                    )
+                    .expect("hide lexical tier"),
+                    "lexical_corrupt" => std::fs::write(
+                        fixture.index().join("lexical/meta.json"),
+                        b"broken lexical metadata",
+                    )
+                    .expect("corrupt lexical tier"),
+                    "fast_record" => {
+                        let mut writer =
+                            VectorIndex::create(&fast_path, "fnv1a-256", 256).expect("forged tier");
+                        writer
+                            .write_record("forged-record", &vector)
+                            .expect("record");
+                        writer.finish().expect("finish forged tier");
+                    }
+                    "fast_wal" | "quality_wal" => {
+                        let path = if corruption == "quality_wal" {
+                            let path = fixture.index().join("vector.quality.idx");
+                            VectorIndex::create(&path, "fnv1a-256", 256)
+                                .expect("quality writer")
+                                .finish()
+                                .expect("empty quality tier");
+                            fixture.edit_metadata(|value| {
+                                value["tierDocumentCounts"]["quality"] = serde_json::json!(0)
+                            });
+                            path
+                        } else {
+                            fast_path
+                        };
+                        let mut index = VectorIndex::open(&path).expect("WAL tier");
+                        index
+                            .append("uncompacted-record", &vector)
+                            .expect("append WAL");
+                        assert_eq!(index.record_count(), 0);
+                        assert_eq!(index.wal_record_count(), 1);
+                    }
+                    "lexical_record" => {
+                        std::fs::rename(
+                            fixture.index().join("lexical"),
+                            fixture.index().join("saved-lexical"),
+                        )
+                        .expect("retain original lexical tier");
+                        let index = fixture.index().to_path_buf();
+                        let documents = vec![IndexableDocument::new(
+                            "forged-lexical",
+                            &fixture.options.query,
+                        )];
+                        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                            crate::core::index::build_lexical_tier(&cx, &index, &documents).await
+                        })
+                        .expect("lexical runtime")
+                        .expect("forged lexical tier");
+                    }
+                    "security" => fixture.edit_metadata(|value| {
+                        value["evidenceSecurityPolicyEpoch"] = serde_json::json!(0)
+                    }),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    index_generation_is_verified_empty(fixture.index()).is_err(),
+                    "{corruption}"
+                );
+                let producer = Arc::new(SemanticFixture::new(512, "reject-unverified-empty"));
+                let before = fixture.snapshot();
+                assert!(
+                    run_search_with_embedder(&fixture.options, producer.clone()).is_err(),
+                    "{corruption}"
+                );
+                assert!(
+                    run_diag_search_with_embedder(&fixture.options, producer.clone()).is_err(),
+                    "{corruption}"
+                );
+                assert_eq!(producer.calls.load(Ordering::Relaxed), 0, "{corruption}");
+                assert_eq!(
+                    fixture.snapshot(),
+                    before,
+                    "rejected read mutated {corruption}"
+                );
+            }
+        }
+
+        #[test]
+        fn verified_empty_generation_preserves_declared_model_mismatch() {
+            let fixture = Fixture::new();
+            let selected = Arc::new(SemanticFixture::new(512, "selected-empty-producer"));
+            VectorIndex::create(
+                &fixture.index().join("vector.fast.idx"),
+                "other-semantic-model",
+                512,
+            )
+            .expect("other empty model tier")
+            .finish()
+            .expect("finish empty tier");
+            fixture.edit_metadata(|value| {
+                value["storedModelId"] = serde_json::json!("other-semantic-model");
+                value["storedDimension"] = serde_json::json!(512);
+            });
+            assert!(
+                index_generation_is_verified_empty(fixture.index())
+                    .expect("physically empty generation")
+            );
+            let before = fixture.snapshot();
+            assert!(run_search_with_embedder(&fixture.options, selected.clone()).is_err());
+            assert!(run_diag_search_with_embedder(&fixture.options, selected.clone()).is_err());
+            assert_eq!(selected.calls.load(Ordering::Relaxed), 0);
+            assert_eq!(fixture.snapshot(), before);
+        }
     }
 
     fn run_similar_with_posture(

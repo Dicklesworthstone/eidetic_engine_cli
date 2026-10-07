@@ -5603,6 +5603,41 @@ pub(crate) fn validate_index_corpus_compatibility_with_embedder(
         .map(|_| ())
 }
 
+/// Prove that an admitted generation has no searchable records before skipping
+/// query embedding. Callers must retain their generation lease and run normal
+/// snapshot/identity admission first; an empty hash generation is not a claim
+/// that its placeholder vector space matches the selected semantic model.
+pub(crate) fn index_generation_is_verified_empty(index_dir: &Path) -> Result<bool, String> {
+    let metadata_path = index_dir.join(INDEX_METADATA_FILE);
+    let metadata = parse_index_metadata(index_dir)?
+        .ok_or_else(|| format!("index metadata '{}' is missing", metadata_path.display()))?;
+    if metadata.document_count != Some(0) {
+        return Ok(false);
+    }
+    if let Some(error) =
+        index_metadata_compatibility_error_with_identity(&metadata_path, &metadata, None)
+    {
+        return Err(error);
+    }
+    let tiers = metadata
+        .tier_document_counts
+        .ok_or_else(|| "index metadata is missing tierDocumentCounts".to_owned())?;
+    verify_published_tier_counts(index_dir, 0, tiers.quality.is_some())?;
+    // record_count() describes only the immutable main file. A zero header
+    // alongside uncompacted WAL records cannot certify an empty generation.
+    let fast = open_fast_vector_index_read_only(index_dir).map_err(|error| error.detail)?;
+    if fast.wal_record_count() != 0 {
+        return Err("zero-document fast tier contains vector WAL records".to_owned());
+    }
+    if let Some(quality) =
+        open_quality_vector_index_read_only(index_dir).map_err(|error| error.detail)?
+        && quality.wal_record_count() != 0
+    {
+        return Err("zero-document quality tier contains vector WAL records".to_owned());
+    }
+    Ok(true)
+}
+
 fn unique_index_metadata_temp_path(meta_path: &Path) -> Result<PathBuf, IndexRebuildError> {
     let file_name = meta_path.file_name().ok_or_else(|| {
         IndexRebuildError::Index(format!(

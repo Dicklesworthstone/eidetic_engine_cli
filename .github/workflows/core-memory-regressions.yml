@@ -292,6 +292,7 @@ jobs:
           index-repair-serial core::index::tests::requested_index_repair_
           index-backend-identity core::index::remote_embedding_space_tests::
           index-backend-selection core::index::tests::explicit_remote_backend_outranks_rejected_workspace_registration
+          search-empty-generation-serial core::search::tests::empty_generations::
           search-index-freshness core::search::tests::search_degradations_
           search-snapshot-generation core::search::tests::snapshot_generation_context_search_uses_its_database_snapshot
           search-generation-cache core::search::tests::search_generation_cache_follows_exchange_with_identical_metadata
@@ -455,6 +456,7 @@ jobs:
           context-index core::context::tests::readonly_pack_preserves_stale_queued_index_while_writable_pack_reconciles
           index-workspace core::index::tests::process_index_jobs_respects_requested_workspace_over_newest_row
           index-repair core::index::tests::requested_index_repair_
+          search-empty-generation-parallel core::search::tests::empty_generations::
           index-source-snapshot core::index::source_snapshot::tests::
           index-anchor-backfill core::index::tests::index_rebuild_backfills_anchors_for_unanchored_memory
           index-reembed core::index::tests::index_reembed_
