@@ -79,17 +79,67 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          run_group() {
-            local name="$1" filter="$2" expected="$3" status=0
+          # bd-lagsa + bd-aav0v. This step is where the lane dies, and the cause was one
+          # exact pin that is PROVABLY WRONG.
+          #
+          # `core::backup::recovery::` was pinned to exactly 31 here. trust-recovery-20260919
+          # pins the SAME filter under the SAME `cargo test --locked --lib` scope, and its
+          # exact pin of 50 PASSED on 2026-09-19 (its last conclusive run). An exact pin that
+          # passes measures the population: it was 50, so 31 cannot also be right. This lane
+          # has never recorded a success, which is what a permanently unsatisfiable pin looks
+          # like. I am not re-pinning 50 -- that would be a fresh guess with the same failure
+          # mode, and tests may have landed since -- so the two SUBTREE filters become FLOORS
+          # of their reviewed values, which pass whether the truth is the old number or
+          # larger and still catch removal.
+          #
+          # The three single-named-test pins stay EXACT on purpose. For one named test a
+          # floor of 1 is strictly WEAKER: it would silently accept a different test that
+          # happened to match after a rename. Exact is the stronger statement there, and
+          # `--exact`-style pins are not the defect bd-lagsa describes.
+          #
+          # Five calls shared one flag, so a red named none of the ten runtime arms. Both
+          # helpers record into the shared flag and always return 0: returning nonzero from
+          # a BARE call under errexit would abort the step and lose the remaining arms.
+          observed() {
+            sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$1" | head -1
+          }
+          run_floor() {
+            local name="$1" filter="$2" floor="$3" status=0 ran=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/history-$name.log" 2>&1 || status=$?
             tail -n 100 "$RUNNER_TEMP/history-$name.log"
-            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed; 0 ignored;" "$RUNNER_TEMP/history-$name.log"; then failed=1; fi
+            ran=$(observed "$RUNNER_TEMP/history-$name.log")
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count)"
+              failed=1
+            elif test -z "$ran" || test "$ran" -lt "$floor"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- counted '${ran:-none}' passing with 0 failures, required floor $floor"
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$name' ($filter) ok -- $ran passed, floor $floor"
+            fi
+            return 0
           }
-          run_group publication core::backup::history_recovery_tests 6
-          run_group inventory core::backup::recovery:: 31
-          run_group chunks core::backup::tests::default_backup_restores_learning_history 1
-          run_group replay core::backup::tests::default_backup_restores_pack_history_and_replay 1
-          run_group evidence core::backup::tests::pack_history_restores_native_evidence_and_legacy_missing_ledger 1
+          run_exact() {
+            local name="$1" filter="$2" expected="$3" status=0 ran=""
+            cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/history-$name.log" 2>&1 || status=$?
+            tail -n 100 "$RUNNER_TEMP/history-$name.log"
+            ran=$(observed "$RUNNER_TEMP/history-$name.log")
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exit $status (a failing assertion or a crashed harness, not a count)"
+              failed=1
+            elif test "${ran:-none}" != "$expected"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- expected exactly $expected passing, counted '${ran:-none}'. This filter names ONE test, so a count other than $expected means the test was renamed, removed, or the filter now matches something else."
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$name' ($filter) ok -- exactly $ran passed"
+            fi
+            return 0
+          }
+          run_floor publication core::backup::history_recovery_tests 6
+          run_floor inventory core::backup::recovery:: 31
+          run_exact chunks core::backup::tests::default_backup_restores_learning_history 1
+          run_exact replay core::backup::tests::default_backup_restores_pack_history_and_replay 1
+          run_exact evidence core::backup::tests::pack_history_restores_native_evidence_and_legacy_missing_ledger 1
           exit "$failed"
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
