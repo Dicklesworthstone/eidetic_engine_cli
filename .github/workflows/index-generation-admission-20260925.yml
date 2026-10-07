@@ -60,8 +60,30 @@ jobs:
         run: |
           set -euo pipefail
           paths=(src/core/index.rs src/core/index_generation_watermark.rs)
-          test ! -f src/core/index_generation_watermark.rs
-          test "$(git rev-parse HEAD:src/core/index.rs)" = c09fb551d055c1fe90cdbbe63d0c7d1952ca8518
+          # bd-aav0v: these two guards were BARE `test` commands under `set -euo pipefail`,
+          # so either one aborted the step with NO OUTPUT AT ALL. This lane fails in eight
+          # milliseconds -- step start 03:07:09.9692624Z, error 03:07:09.9770461Z in run
+          # 37559823155 -- with an empty log and the whole verify job skipped.
+          #
+          # The first guard is CORRECT AND WORKING. `test ! -f` means "refuse to deliver if
+          # the file is already present"; it IS present (450 lines, 14 #[test], mounted at
+          # src/core/index.rs:69 via #[path]), so the feature is delivered and the guard fires
+          # exactly as designed. Being a bare `test`, its only way to say "already delivered,
+          # nothing to do" was a bare nonzero exit, which renders as a red lane with no log.
+          #
+          # EXIT CODES AND CONDITIONS ARE UNCHANGED -- both still exit 1 on the same
+          # conditions. Deciding whether an already-delivered lane should instead succeed,
+          # skip, or be retired changes what this lane PUBLISHES, and that is an owner's call.
+          # This only makes it say which of the two guards stopped it, and why.
+          if test -f src/core/index_generation_watermark.rs; then
+            echo "ATTRIBUTION: guard 'src/core/index_generation_watermark.rs must not exist' STOPPED this lane -- the file IS present, so this delivery has ALREADY LANDED and the lane is refusing to apply it twice. This is the guard working, not a defect in the tree. Disposition (retire the lane, or make an already-delivered run succeed) is an owner decision."
+            exit 1
+          fi
+          actual_index_blob=$(git rev-parse HEAD:src/core/index.rs)
+          if test "$actual_index_blob" != c09fb551d055c1fe90cdbbe63d0c7d1952ca8518; then
+            echo "ATTRIBUTION: guard 'src/core/index.rs blob pin' STOPPED this lane -- expected c09fb551d055c1fe90cdbbe63d0c7d1952ca8518, found $actual_index_blob. The file has changed since this delivery was authored, so its patch is no longer known to apply."
+            exit 1
+          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           push_source() {
