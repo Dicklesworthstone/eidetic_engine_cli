@@ -91,10 +91,37 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          cargo test --locked --lib core::index::source_snapshot::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-index/source-tests.log" || failed=1
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-index/source-tests.log" || failed=1
-          cargo test --locked --lib core::index::tests::index_rebuild_backfills_anchors_for_unanchored_memory -- --exact 2>&1 | tee "$RUNNER_TEMP/doctor-index/writable-parity.log" || failed=1
-          grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-index/writable-parity.log" || failed=1
+          # bd-aav0v: four arms under one flag -- two suites, each with a tool outcome and
+          # an assertion. A red step named none of them.
+          #
+          # The second pair's `1 passed` is EXACT and stays exact, deliberately: the
+          # command is `--exact` on a single named test, so the correct count is
+          # definitionally 1 and a floor of 1 would accept a filter that silently matched
+          # a different single test. This is the one shape where an exact count is right
+          # and a floor is weaker. The first arm keeps its `[1-9][0-9]*` floor because its
+          # filter is a whole module that is expected to grow.
+          snap_exit=0
+          cargo test --locked --lib core::index::source_snapshot::tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/doctor-index/source-tests.log" || snap_exit=$?
+          if test "$snap_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'core::index::source_snapshot::tests::' FAILED -- cargo exit $snap_exit (tool failure, not an assertion)"
+            failed=1
+          elif ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-index/source-tests.log"; then
+            echo "ATTRIBUTION: arm 'core::index::source_snapshot::tests::' FAILED -- no passing-with-zero-failures summary line"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'core::index::source_snapshot::tests::' ok"
+          fi
+          parity_exit=0
+          cargo test --locked --lib core::index::tests::index_rebuild_backfills_anchors_for_unanchored_memory -- --exact 2>&1 | tee "$RUNNER_TEMP/doctor-index/writable-parity.log" || parity_exit=$?
+          if test "$parity_exit" -ne 0; then
+            echo "ATTRIBUTION: arm 'index_rebuild_backfills_anchors_for_unanchored_memory' FAILED -- cargo exit $parity_exit (tool failure, not an assertion)"
+            failed=1
+          elif ! grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/doctor-index/writable-parity.log"; then
+            echo "ATTRIBUTION: arm 'index_rebuild_backfills_anchors_for_unanchored_memory' FAILED -- expected exactly 1 passing (--exact on one named test); a zero here means the name no longer resolves"
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'index_rebuild_backfills_anchors_for_unanchored_memory' ok"
+          fi
           exit "$failed"
       - name: Publish verified implementation directly to main
         env:
