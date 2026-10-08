@@ -42,6 +42,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # IDEMPOTENCY GUARD (bd-delivery-lanes-stuck-publish-to-main-hpgw8).
+          #
+          # This lane dies at scripts/delivery/procedure-atomic-20260921.py:163,
+          # `assert not Path(TEST_TARGET).exists(), "test target already exists"`. That assert
+          # is CORRECT and is refusing to re-deliver: the target exists because the delivery
+          # landed. Last run 35619731730, 2026-09-21, failed on exactly that line.
+          #
+          # NOTE this lane is NOT a bd-aav0v silent-abort case, despite carrying bare guards
+          # in these steps. The statement that kills it is a python assert that names its own
+          # file, line and message. A bare guard being PRESENT in a dying step does not mean
+          # the guard is what failed -- same correction as ask-semantic.
+          #
+          # DELIVERED, verified in the tree rather than inferred from this lane's output:
+          #   src/core/outcome_procedure_atomic_tests.rs           exists, 15 KB
+          #   src/core/outcome.rs:9357  #[path = "outcome_procedure_atomic_tests.rs"]
+          #                                                        MOUNTED, so its tests run
+          #   that file holds exactly 9 #[test]                    which is the number the
+          #                                                        script itself asserts
+          #                                                        (tests.count(b"#[test]") == 9)
+          # Mount plus count is what makes this conclusive: the file existing proves only that
+          # bytes are on disk, while the #[path] mount proves the 9 tests COMPILE and RUN.
+          #
+          # exit 0 per the operator decision of 2026-10-07, following 4372cef4a. Bounded: the
+          # `verify` job `needs: publish`, so succeeding here is what lets it run AT ALL --
+          # it has been SKIPPED since September, and it is what executes the nine procedure
+          # atomicity regressions plus the existing atomic-learning behaviour check against
+          # the delivered source. Refusing here verifies nothing; succeeding verifies nine.
+          if test -f src/core/outcome_procedure_atomic_tests.rs \
+            && grep -Fq '#[path = "outcome_procedure_atomic_tests.rs"]' src/core/outcome.rs; then
+            echo "ATTRIBUTION: delivery ALREADY PRESENT -- src/core/outcome_procedure_atomic_tests.rs exists and is mounted at src/core/outcome.rs via #[path], so its nine regressions already compile and run on main. The python integrator would refuse at its own 'test target already exists' assert. Succeeding instead so the verify job can run those nine regressions, which refusing here prevents entirely. Skipped: the apply and the commit."
+            exit 0
+          fi
           test "$(git hash-object scripts/delivery/procedure-atomic-20260921.py)" = '189e9e5428ae8c51e94dae90877f479f2de551ac'
           test "$(git hash-object scripts/delivery/procedure-atomic-20260921-tests.txt)" = '0d74255dbf79c4f3893b4272e453446592703736'
           python scripts/delivery/procedure-atomic-20260921.py
@@ -67,6 +99,30 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -- "${paths[@]}"
+          # NOTHING-TO-COMMIT IS THE ALREADY-DELIVERED PATH, and it must not fail here
+          # (bd-...hpgw8). The guard in the previous step exits 0 without editing anything, so
+          # this step would reach `git commit` with an empty index and abort under `set -e`.
+          # Guarding only the apply would have RELOCATED the red one step down instead of
+          # clearing it -- the mistake eval-retrieval-diagnostics was about.
+          #
+          # `source` MUST still be emitted. The verify job consumes it as PUBLISHED_SOURCE and
+          # runs `git merge-base --is-ancestor "$PUBLISHED_SOURCE" HEAD`; an empty value makes
+          # that die, so skipping the output would just move the failure into the job this
+          # change exists to let run.
+          #
+          # AND BE PLAIN ABOUT WHAT THAT COSTS: with source=HEAD, verify's provenance pair
+          # (`--is-ancestor` and `git diff --exit-code "$PUBLISHED_SOURCE" HEAD`) compares HEAD
+          # to itself and is therefore VACUOUS on this path. That is accurate rather than
+          # weakened -- nothing was published, so there is no earlier revision to compare
+          # against -- but it does mean the verdict rests entirely on verify's nine procedure
+          # atomicity regressions and its atomic-learning behaviour check, not on provenance.
+          # Stating it here so a reader does not mistake a trivially-satisfied check for
+          # evidence.
+          if git diff --cached --quiet -- "${paths[@]}"; then
+            echo "ATTRIBUTION: nothing to commit -- the three reviewed paths are already at their delivered contents, so there is no publication to make. Emitting source=HEAD so the verify job still runs; its provenance comparison is HEAD-to-HEAD and therefore vacuous on this path, and the nine procedure atomicity regressions carry the verdict."
+            echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           git commit -m 'fix(outcome): commit procedure scoring and feedback evidence atomically' -m 'Apply procedure counters, confidence, utility and retirement history in the feedback/audit transaction and write-intake fence. Retain the standalone transactional API and expose a caller-owned variant to avoid nested BEGIN. Recheck procedure ownership inside the transaction; preserve signal aliases, weights, neutral behavior, dry-run and quarantine. Add nine real-store rollback, same-ID retry, retirement, scope and API regressions. Exact source hashes, edited-unit nightly rustfmt parsing and git diff checks passed before publication. Rust compilation and runtime results are not claimed by this commit; the separate read-only job exercises them.'
           header=$(python -c 'import base64,os; print(base64.b64encode(("x-access-token:" + os.environ["GH_TOKEN"]).encode()).decode())')
           echo "::add-mask::$header"
@@ -75,9 +131,18 @@ jobs:
               echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            test "$attempt" -lt 3
+            # bd-aav0v: both of the next two were bare, so either one aborted this step with
+            # NO OUTPUT and a red delivery lane said nothing about which happened. They mean
+            # opposite things, and the remedies differ (re-run versus inspect a conflict).
+            if test "$attempt" -ge 3; then
+              echo "ATTRIBUTION: PUBLICATION failed, not verification -- all three pushes to main were rejected. The reviewed source and every check above this loop were fine; only the push lost its race three times. Re-run the lane."
+              exit 1
+            fi
             git fetch origin main
-            git diff --exit-code "$base" origin/main -- "${paths[@]}"
+            if ! git diff --exit-code "$base" origin/main -- "${paths[@]}"; then
+              echo "ATTRIBUTION: CONCURRENT CHANGE to the reviewed paths -- origin/main has moved these files since $base, so this delivery's exact-hash review no longer describes the target. Refusing to merge over someone else's change to the same paths; the diff is above. This needs a human reading, not a re-run."
+              exit 1
+            fi
             git merge --no-edit origin/main
             base=$(git rev-parse origin/main)
           done
