@@ -181,7 +181,18 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --lib core::outcome::procedure_atomic_tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/procedure-atomic-tests.log"
-          grep -Fq 'test result: ok. 9 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/procedure-atomic-tests.log"
+          # FLOOR, at a MEASURED value (bd-lagsa, bd-aav0v). Was a bare exact-count grep.
+          # Measured on RCH 2026-10-08: `cargo test --locked --lib
+          # core::outcome::procedure_atomic_tests` -> ok. 9 passed; 0 failed. That is also the
+          # count the delivery script asserts about its own payload
+          # (scripts/delivery/procedure-atomic-20260921.py: tests.count(b"#[test]") == 9), so
+          # two independent sources agree on 9.
+          atomic_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/procedure-atomic-tests.log" | head -1)
+          if test -z "$atomic_ran" || test "$atomic_ran" -lt 9; then
+            echo "ATTRIBUTION: arm 'core::outcome::procedure_atomic_tests::' STOPPED this lane -- passing-with-zero-failures count '${atomic_ran:-none}', required floor 9. An empty count means no 'test result: ok.' line at all, which is what a filter matching zero tests looks like."
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'core::outcome::procedure_atomic_tests::' ok -- ran $atomic_ran tests (floor 9, measured 9 on 2026-10-08), 0 failed."
       - name: Preserve existing atomic memory learning behavior
         run: |
           set -euo pipefail

@@ -184,8 +184,22 @@ jobs:
           status=0
           cargo test --locked --lib 'eval::runner::retrieval_diagnostic_tests::' -- --test-threads=2 > "$RUNNER_TEMP/eval-diagnostics-unit.log" 2>&1 || status=$?
           tail -n 120 "$RUNNER_TEMP/eval-diagnostics-unit.log"
-          test "$status" -eq 0
-          grep -Fq 'test result: ok. 6 passed; 0 failed;' "$RUNNER_TEMP/eval-diagnostics-unit.log"
+          # TWO bare guards were here (bd-aav0v): `test "$status" -eq 0` and an exact-count
+          # grep. Either aborted the step with NO output, and they mean different things -- a
+          # failing test versus a changed population.
+          if test "$status" -ne 0; then
+            echo "ATTRIBUTION: arm 'eval::runner::retrieval_diagnostic_tests::' STOPPED this lane -- cargo exited $status, so a test FAILED or the harness crashed. This is not a count mismatch; the failing test is in the tail above."
+            exit 1
+          fi
+          # FLOOR, at a MEASURED value (bd-lagsa). Measured on RCH 2026-10-08:
+          # `cargo test --locked --lib 'eval::runner::retrieval_diagnostic_tests::'`
+          # -> ok. 6 passed; 0 failed. Exact reds this lane when the subtree grows.
+          diag_unit_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/eval-diagnostics-unit.log" | head -1)
+          if test -z "$diag_unit_ran" || test "$diag_unit_ran" -lt 6; then
+            echo "ATTRIBUTION: arm 'eval::runner::retrieval_diagnostic_tests::' STOPPED this lane -- passing-with-zero-failures count '${diag_unit_ran:-none}', required floor 6. An empty count means no 'test result: ok.' line at all, which is what a filter matching zero tests looks like."
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'eval::runner::retrieval_diagnostic_tests::' ok -- ran $diag_unit_ran tests (floor 6, measured 6 on 2026-10-08), 0 failed."
       - name: Execute real CLI diagnostic contracts
         if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
         run: |

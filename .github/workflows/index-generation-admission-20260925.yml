@@ -215,7 +215,16 @@ jobs:
           git rev-parse HEAD | tee "$RUNNER_TEMP/generation-source-sha.log"
           cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/generation-check.log"
           cargo test --locked --lib 'core::index::generation_watermark::tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-tests.log"
-          grep -Fq 'test result: ok. 14 passed; 0 failed;' "$RUNNER_TEMP/generation-tests.log"
+          # FLOOR, at a MEASURED value (bd-lagsa, bd-aav0v). Was a bare exact-count grep,
+          # which reds this lane when the subtree GROWS and aborts with no output. Measured
+          # on RCH 2026-10-08: `cargo test --locked --lib
+          # 'core::index::generation_watermark::tests::'` -> ok. 14 passed; 0 failed.
+          gen_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/generation-tests.log" | head -1)
+          if test -z "$gen_ran" || test "$gen_ran" -lt 14; then
+            echo "ATTRIBUTION: arm 'core::index::generation_watermark::tests::' STOPPED this lane -- passing-with-zero-failures count '${gen_ran:-none}', required floor 14. An empty count means no 'test result: ok.' line at all, which is what a filter matching zero tests looks like."
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'core::index::generation_watermark::tests::' ok -- ran $gen_ran tests (floor 14, measured 14 on 2026-10-08), 0 failed."
       - name: Exercise existing reader and rollback recovery behavior
         if: ${{ !cancelled() }}
         run: |

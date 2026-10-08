@@ -174,7 +174,15 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --lib 'core::index::rollback_manifest::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recovery-rejection-tests.log"
-          grep -Fq 'test result: ok. 15 passed; 0 failed;' "$RUNNER_TEMP/recovery-rejection-tests.log"
+          # FLOOR, at a MEASURED value (bd-lagsa, bd-aav0v). Was a bare exact-count grep.
+          # Measured on RCH 2026-10-08: `cargo test --locked --lib
+          # 'core::index::rollback_manifest::'` -> ok. 15 passed; 0 failed.
+          rollback_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/recovery-rejection-tests.log" | head -1)
+          if test -z "$rollback_ran" || test "$rollback_ran" -lt 15; then
+            echo "ATTRIBUTION: arm 'core::index::rollback_manifest::' STOPPED this lane -- passing-with-zero-failures count '${rollback_ran:-none}', required floor 15. An empty count means no 'test result: ok.' line at all, which is what a filter matching zero tests looks like."
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'core::index::rollback_manifest::' ok -- ran $rollback_ran tests (floor 15, measured 15 on 2026-10-08), 0 failed."
       - name: Execute existing publication and read-lease regressions
         if: ${{ !cancelled() }}
         shell: bash

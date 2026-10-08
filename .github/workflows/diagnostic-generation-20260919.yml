@@ -115,7 +115,21 @@ jobs:
           git rev-parse HEAD | tee "$RUNNER_TEMP/diag-source-sha.log"
           cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/diag-check.log"
           cargo test --locked --lib 'core::search::diagnostic_snapshot::tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/diag-tests.log"
-          grep -Fq 'test result: ok. 15 passed; 0 failed;' "$RUNNER_TEMP/diag-tests.log"
+          # FLOOR, at a MEASURED value (bd-lagsa, bd-aav0v). This was a bare
+          # `grep -Fq 'test result: ok. 15 passed'`: an exact count, which reds this lane the
+          # moment a test is ADDED to the subtree, and which aborted the step with no output
+          # when it did. Measured on RCH 2026-10-08 against this exact filter:
+          #     cargo test --locked --lib 'core::search::diagnostic_snapshot::tests::'
+          #     -> test result: ok. 15 passed; 0 failed
+          # So 15 is correct TODAY and is kept as the floor rather than guessed. A count
+          # below 15 still fails -- coverage removed, or a filter that stopped matching after
+          # a rename -- while growth no longer reds the lane.
+          diag_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/diag-tests.log" | head -1)
+          if test -z "$diag_ran" || test "$diag_ran" -lt 15; then
+            echo "ATTRIBUTION: arm 'core::search::diagnostic_snapshot::tests::' STOPPED this lane -- passing-with-zero-failures count '${diag_ran:-none}', required floor 15. An empty count means NO 'test result: ok.' line at all, which is what a filter matching zero tests looks like and is treated as a failure, not as a zero."
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'core::search::diagnostic_snapshot::tests::' ok -- ran $diag_ran tests (floor 15, measured 15 on 2026-10-08), 0 failed."
       - name: Exercise actual CLI search and the registered global integration module
         if: ${{ !cancelled() }}
         run: |
