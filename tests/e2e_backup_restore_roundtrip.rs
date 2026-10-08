@@ -859,7 +859,28 @@ fn warm_published_index(
     // sides back on the fallback, and the test would then pass for the OLD reason while
     // looking like it passed for the new one. The JSON artifact lands on whichever machine
     // ran the test, so stdout is the only copy a remote run brings back.
-    eprintln!("[bd-bka39] {side} warm index published {documents_total} documents");
+    // The BREAKDOWN, not just the total. A first run reported `3` for a workspace seeded
+    // with 4 memories and the total alone could not say why: two of the four seeds are
+    // `procedural`, which the rebuild counts under rules_indexed rather than
+    // memories_indexed, and a sealed memory is skipped outright
+    // (src/core/index.rs:4196). The JSON artifact above carries all of this but it stays
+    // on whichever machine ran the test, so a remote run brings back only what is printed.
+    let part = |key: &str| -> i64 {
+        report
+            .pointer(&format!("/data/{key}"))
+            .and_then(JsonValue::as_i64)
+            .unwrap_or(-1)
+    };
+    eprintln!(
+        "[bd-bka39] {side} warm index published {documents_total} documents \
+         (memories={} sessions={} artifacts={} rules={} evidence={}; -1 means the field \
+         was absent)",
+        part("memories_indexed"),
+        part("sessions_indexed"),
+        part("artifacts_indexed"),
+        part("rules_indexed"),
+        part("evidence_indexed"),
+    );
     Ok(documents_total)
 }
 
@@ -2440,9 +2461,32 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &source_context_stdout,
         "restored canonical context selection matches source context byte-for-byte",
     )?;
+    // EMPTY-WORLD GUARD, and it is load-bearing for everything above it (bd-bka39).
+    //
+    // `context_item_contents` returns an empty Vec for an empty `items` array, and
+    // `ensure_equal(vec![], vec![])` passes. So two EMPTY packs satisfy both this
+    // comparison and the byte-identity check above it, and the test would report success
+    // having compared nothing. That hole predates `warm_published_index`, but the warm is
+    // what makes it reachable: the pack query is verbatim the content of seed 0, so if a
+    // published index ever excluded that document, both sides would retrieve nothing,
+    // agree perfectly, and look green.
+    //
+    // Asserting non-empty on the SOURCE side specifically: it is the side with no
+    // excuse. The restored side is allowed to differ in trust and degradation (see
+    // canonical_context_stdout), but the source store is the one the query was written
+    // for, and a pack with no items there means retrieval is broken, not that restore is.
+    let source_items = context_item_contents(&source_context, "source context")?;
+    ensure(
+        !source_items.is_empty(),
+        format!(
+            "source pack returned at least one item for the query {CONTEXT_QUERY:?} \
+             (it returned none, so every comparison in this test would be between two \
+             empty packs and would pass without comparing anything)"
+        ),
+    )?;
     ensure_equal(
         &context_item_contents(&restored_context, "restored context")?,
-        &context_item_contents(&source_context, "source context")?,
+        &source_items,
         "restored context item contents match source context",
     )?;
 
