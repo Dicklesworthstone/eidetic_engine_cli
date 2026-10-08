@@ -4247,7 +4247,8 @@ impl ReviewLessons {
                 continue;
             };
             let mut supported = false;
-            for sentence in review_lesson_sentences(&text) {
+            let from_user = span.role.as_deref() == Some("user");
+            for sentence in review_lesson_sentences(&text, from_user) {
                 supported = true;
                 let key = sentence.to_ascii_lowercase();
                 if sentences.len() < REVIEW_LESSON_MAX_SENTENCES && seen.insert(key) {
@@ -4286,7 +4287,14 @@ impl ReviewLessons {
 }
 
 /// Directive sentences in projected conversation text, in source order.
-fn review_lesson_sentences(text: &str) -> Vec<String> {
+///
+/// A sentence the speaker labels as a lesson ("Lesson for next time: bump
+/// the version before publishing") is one, whatever verb follows. A user's
+/// bare imperative ("Add a priority column to the tasks table") is a request
+/// for the task at hand, so a user sentence needs a rule marker or a lesson
+/// label to count (measured on the real-shape oracle,
+/// bd-reality-core-convergence-1azkt.46).
+fn review_lesson_sentences(text: &str, from_user: bool) -> Vec<String> {
     let mut lessons = Vec::new();
     for raw in review_sentences(text) {
         let sentence = raw
@@ -4296,11 +4304,21 @@ fn review_lesson_sentences(text: &str) -> Vec<String> {
             .trim_start_matches([')', '.', ' '])
             .trim();
         let sentence = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
+        let (sentence, labelled) = match review_lesson_label_remainder(&sentence) {
+            Some(rest) => (rest.to_owned(), true),
+            None => (sentence, false),
+        };
         let length = sentence.chars().count();
         if !(REVIEW_LESSON_MIN_CHARS..=REVIEW_LESSON_MAX_CHARS).contains(&length) {
             continue;
         }
-        if review_sentence_is_directive(&sentence) {
+        let accepted = match review_sentence_directive_kind(&sentence) {
+            ReviewDirectiveKind::Narration => false,
+            ReviewDirectiveKind::RuleMarker => true,
+            ReviewDirectiveKind::Imperative => labelled || !from_user,
+            ReviewDirectiveKind::Plain => labelled,
+        };
+        if accepted {
             lessons.push(sentence);
         }
     }
@@ -4330,7 +4348,54 @@ fn review_sentences(text: &str) -> Vec<&str> {
     sentences
 }
 
-fn review_sentence_is_directive(sentence: &str) -> bool {
+/// The text after an explicit lesson label, if the sentence opens with one.
+fn review_lesson_label_remainder(sentence: &str) -> Option<&str> {
+    const LABELS: &[&str] = &[
+        "lesson for next time",
+        "lesson learned",
+        "lessons learned",
+        "lesson",
+        "rule of thumb",
+        "key takeaway",
+        "takeaway",
+        "note to self",
+        "for next time",
+        "next time",
+        "in future",
+        "in the future",
+        "going forward",
+        "from now on",
+    ];
+    let lower = sentence.to_ascii_lowercase();
+    LABELS.iter().find_map(|label| {
+        let rest = lower.strip_prefix(label)?;
+        let separator = rest.chars().next()?;
+        if !matches!(separator, ':' | ',' | ' ') {
+            return None;
+        }
+        // A bare word prefix ("lessons" in "lessons are fun") is not a label
+        // unless a ':' or ',' follows the label, except for "from now on".
+        if separator == ' ' && *label != "from now on" {
+            return None;
+        }
+        let rest = sentence[label.len() + separator.len_utf8()..].trim_start();
+        (!rest.is_empty()).then_some(rest)
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReviewDirectiveKind {
+    /// Assistant narration or a plan ("Let me run the tests").
+    Narration,
+    /// Contains a rule marker ("always", "must", "instead of", ...).
+    RuleMarker,
+    /// Opens with an imperative verb and carries no rule marker.
+    Imperative,
+    /// None of the above.
+    Plain,
+}
+
+fn review_sentence_directive_kind(sentence: &str) -> ReviewDirectiveKind {
     let lower = sentence.to_ascii_lowercase().replace('’', "'");
     // Assistant narration and plans describe what is about to happen, not a
     // reusable rule: "Let me run the tests", "I'll update the schema".
@@ -4340,7 +4405,7 @@ fn review_sentence_is_directive(sentence: &str) -> bool {
         "this ", "that ", "it ", "there ",
     ];
     if NARRATION.iter().any(|prefix| lower.starts_with(prefix)) {
-        return false;
+        return ReviewDirectiveKind::Narration;
     }
     const IMPERATIVE_VERBS: &[&str] = &[
         "always",
@@ -4385,9 +4450,6 @@ fn review_sentence_is_directive(sentence: &str) -> bool {
             .strip_prefix(verb)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', ',', ':']))
     });
-    if starts_imperative {
-        return true;
-    }
     const RULE_MARKERS: &[&str] = &[
         " must ",
         " must not ",
@@ -4403,7 +4465,13 @@ fn review_sentence_is_directive(sentence: &str) -> bool {
         " rather than ",
     ];
     let padded = format!(" {lower} ");
-    RULE_MARKERS.iter().any(|marker| padded.contains(marker))
+    if RULE_MARKERS.iter().any(|marker| padded.contains(marker)) {
+        ReviewDirectiveKind::RuleMarker
+    } else if starts_imperative {
+        ReviewDirectiveKind::Imperative
+    } else {
+        ReviewDirectiveKind::Plain
+    }
 }
 
 fn compact_excerpt(excerpt: &str) -> String {
@@ -17013,6 +17081,59 @@ mod tests {
             .get(name)
             .map(String::as_str)
             .ok_or_else(|| format!("event missing field {name}; fields={:?}", event.fields))
+    }
+
+    #[test]
+    fn labelled_lessons_count_whatever_verb_follows() {
+        let text = "Published ledger 0.9.0. Lesson for next time: bump the version in Cargo.toml and commit it before running cargo publish; crates.io rejects a version that already exists.";
+        assert_eq!(
+            super::review_lesson_sentences(text, false),
+            vec!["bump the version in Cargo.toml and commit it before running cargo publish"]
+        );
+        assert_eq!(
+            super::review_lesson_sentences(
+                "Rule of thumb: never assert on sleep-based timing in tests.",
+                false
+            ),
+            vec!["never assert on sleep-based timing in tests"]
+        );
+        assert_eq!(
+            super::review_lesson_sentences(
+                "Thanks. From now on always run cargo clippy before pushing.",
+                true
+            ),
+            vec!["always run cargo clippy before pushing"]
+        );
+        // A label word without a separator is ordinary prose.
+        assert!(super::review_lesson_label_remainder("Lessons are tracked in the wiki").is_none());
+        // A label cannot launder narration into a rule.
+        assert!(
+            super::review_lesson_sentences("From now on I will check the logs first.", false)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_users_bare_imperative_is_a_task_request_not_a_lesson() {
+        for request in [
+            "Add a priority column to the tasks table and ship the migration.",
+            "test lease_expires_after_ttl fails maybe one run in five.",
+            "Run the release for ledger 0.9.0.",
+        ] {
+            assert!(
+                super::review_lesson_sentences(request, true).is_empty(),
+                "{request}"
+            );
+        }
+        // The same imperative from the assistant, or a user rule, still counts.
+        assert_eq!(
+            super::review_lesson_sentences("Run cargo fmt --check before committing.", false),
+            vec!["Run cargo fmt --check before committing"]
+        );
+        assert_eq!(
+            super::review_lesson_sentences("Always run cargo fmt --check before committing.", true),
+            vec!["Always run cargo fmt --check before committing"]
+        );
     }
 
     #[test]

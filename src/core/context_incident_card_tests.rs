@@ -127,7 +127,7 @@ impl Fixture {
             "tool_call",
             "assistant",
             &json!({"type": "assistant", "message": {"role": "assistant", "content": [
-                {"type": "tool_use", "id": "toolu_2", "name": "Bash", "input": {"command": "cargo test"}}
+                {"type": "tool_use", "id": "toolu_2", "name": "Bash", "input": {"command": "cargo build"}}
             ]}}),
         );
         self.line(
@@ -137,7 +137,7 @@ impl Fixture {
             "user",
             &json!({"type": "user", "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": "toolu_2", "is_error": false,
-                 "content": "test result: ok. 2 passed"}
+                 "content": "Finished dev profile"}
             ]}}),
         );
         let report = crate::core::cass_error_recall::record_session_error_recall(
@@ -425,4 +425,55 @@ fn caller_floor_preserves_a_strong_turn_hidden_by_a_weak_matched_card() {
             assert!(degraded.is_empty());
         }
     }
+}
+
+#[test]
+fn evidence_far_below_the_best_match_stays_out_of_the_pack() {
+    let fixture = Fixture::new();
+    let session = fixture.session(0x59_0201);
+    let mut lines = Vec::new();
+    for (number, text) in [
+        (1, "Clippy needless_borrow fails CI under -D warnings."),
+        (2, "Remove the borrow so encode_key takes the owned string."),
+        (3, "Decision: use SQLite in WAL mode for the cache."),
+    ] {
+        lines.push(fixture.line(
+            &session,
+            number,
+            "message",
+            "assistant",
+            &json!({"type": "assistant", "message": {"role": "assistant",
+                "content": [{"type": "text", "text": text}]}}),
+        ));
+    }
+    let mut candidates = vec![
+        fixture.candidate(&lines[0], 0.56),
+        fixture.candidate(&lines[1], 0.14),
+        fixture.candidate(&lines[2], 0.04),
+    ];
+    let mut degraded = Vec::new();
+    apply_direct_evidence_query_relative_floor(&mut candidates, &mut degraded);
+
+    let kept = candidates
+        .iter()
+        .map(|candidate| candidate.item.evidence_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(kept, vec![lines[0].as_str(), lines[1].as_str()]);
+    assert_eq!(degraded.len(), 1);
+    assert_eq!(degraded[0].code, "context_evidence_below_relative_floor");
+    assert!(
+        degraded[0]
+            .message
+            .starts_with("1 imported evidence candidate(s)")
+    );
+
+    // Degenerate relevance (hash fallback scores everything 0) keeps every span.
+    let mut flat = vec![
+        fixture.candidate(&lines[0], 0.0),
+        fixture.candidate(&lines[2], 0.0),
+    ];
+    let mut degraded = Vec::new();
+    apply_direct_evidence_query_relative_floor(&mut flat, &mut degraded);
+    assert_eq!(flat.len(), 2);
+    assert!(degraded.is_empty());
 }
