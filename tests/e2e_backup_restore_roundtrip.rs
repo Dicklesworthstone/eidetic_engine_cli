@@ -718,6 +718,107 @@ fn snapshot_corpus_size(value: &JsonValue) -> String {
     "<path not taken>".to_owned()
 }
 
+/// True when two canonical pack values differ ONLY in floating-point numbers, and every
+/// such difference is within `tolerance` (bd-64w73).
+///
+/// Deliberately conservative in three ways, because a tolerance is exactly the kind of
+/// loosening that quietly stops a test from asserting anything:
+///   - a differing KEY SET returns false, so a dropped or added field is never tolerated;
+///   - any non-numeric difference (string, bool, null, array length) returns false, which
+///     is what keeps `why` text, degradation prose and digests under exact comparison;
+///   - a numeric pair that is not representable as f64, or differs by more than the
+///     tolerance, returns false.
+///
+/// Note it accepts the case where NOTHING differs numerically either: callers only reach
+/// it after a byte comparison already failed, so "no differences found" there means key
+/// order or numeric formatting, which the reporting path below describes better than this
+/// function could.
+fn json_differs_only_by_float_tolerance(
+    expected: &JsonValue,
+    actual: &JsonValue,
+    tolerance: f64,
+) -> bool {
+    match (expected, actual) {
+        (JsonValue::Object(left), JsonValue::Object(right)) => {
+            if left.len() != right.len() {
+                return false;
+            }
+            left.iter().all(|(key, left_value)| {
+                right.get(key).is_some_and(|right_value| {
+                    json_differs_only_by_float_tolerance(left_value, right_value, tolerance)
+                })
+            })
+        }
+        (JsonValue::Array(left), JsonValue::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(left_value, right_value)| {
+                        json_differs_only_by_float_tolerance(left_value, right_value, tolerance)
+                    })
+        }
+        (JsonValue::Number(left), JsonValue::Number(right)) => {
+            match (left.as_f64(), right.as_f64()) {
+                (Some(left_value), Some(right_value)) => {
+                    (left_value - right_value).abs() <= tolerance
+                }
+                // A number f64 cannot represent is compared exactly rather than guessed at.
+                _ => left == right,
+            }
+        }
+        _ => expected == actual,
+    }
+}
+
+#[test]
+fn float_tolerance_accepts_only_bounded_numeric_drift() {
+    // POSITIVE CONTROL for the tolerance above (bd-64w73). A tolerance that accepted more
+    // than it claims would silently retire this file's strongest assertion, so each way it
+    // must REFUSE is exercised here.
+    let base = serde_json::json!({"scores": {"relevance": 0.474952}, "why": "via lexical"});
+
+    let within = serde_json::json!({"scores": {"relevance": 0.4749525}, "why": "via lexical"});
+    assert!(
+        json_differs_only_by_float_tolerance(&base, &within, 1e-6),
+        "a 5e-7 drift is inside the tolerance and must be accepted"
+    );
+
+    let beyond = serde_json::json!({"scores": {"relevance": 0.474911}, "why": "via lexical"});
+    assert!(
+        !json_differs_only_by_float_tolerance(&base, &beyond, 1e-6),
+        "the 4.1e-5 delta actually measured must NOT be swallowed by a 1e-6 tolerance"
+    );
+
+    let text_changed =
+        serde_json::json!({"scores": {"relevance": 0.474952}, "why": "via semantic"});
+    assert!(
+        !json_differs_only_by_float_tolerance(&base, &text_changed, 1e-6),
+        "a string difference must never be tolerated"
+    );
+
+    let key_added = serde_json::json!({
+        "scores": {"relevance": 0.474952, "extra": 1}, "why": "via lexical"
+    });
+    assert!(
+        !json_differs_only_by_float_tolerance(&base, &key_added, 1e-6),
+        "an added key must never be tolerated"
+    );
+
+    let key_missing = serde_json::json!({"scores": {"relevance": 0.474952}});
+    assert!(
+        !json_differs_only_by_float_tolerance(&base, &key_missing, 1e-6),
+        "a dropped key must never be tolerated"
+    );
+
+    let array_len = serde_json::json!({"items": [1.0, 2.0]});
+    let array_short = serde_json::json!({"items": [1.0]});
+    assert!(
+        !json_differs_only_by_float_tolerance(&array_len, &array_short, 1e-6),
+        "a changed array length must never be tolerated"
+    );
+}
+
 fn ensure_context_json_bytes_equal(
     actual_raw: &JsonValue,
     expected_raw: &JsonValue,
@@ -726,6 +827,43 @@ fn ensure_context_json_bytes_equal(
     ctx: &str,
 ) -> TestResult {
     if actual_stdout == expected_stdout {
+        return Ok(());
+    }
+    // SCORE WOBBLE IS NOT A DIFFERENCE THIS COMPARISON CAN ASSERT (bd-64w73).
+    //
+    // Measured 2026-10-08 by `two_index_builds_of_one_store_score_identically`: two
+    // independent `ee index rebuild` publications of the SAME store, same rows, same
+    // document counts, produce relevance differing by 1.9e-5. No backup, no restore, no
+    // side path. So byte-identity of SCORES is not a property this pipeline provides, and
+    // it could never have held here -- with or without a restore in the middle.
+    //
+    //     hybrid, two stores   5.2e-5
+    //     lexical, two stores  4.1e-5
+    //     lexical, ONE store   1.9e-5
+    //
+    // Six explanations were eliminated first: embedding backend (falsified -- the delta
+    // survives lexical_only --strict-source-mode), workspace path (`None` on the rebuild
+    // path), tags (`&[]`), insertion order (`ORDER BY m.id ASC`, ids preserved), the
+    // searchable body (it IS memory.content), and restore itself.
+    //
+    // WHAT IS STILL ASSERTED, and why this is a tolerance rather than an exclusion: the
+    // SELECTION is identical in every run that reached this point -- same item 0, same
+    // ordering. Dropping the score pointers from the comparison would blind the test to a
+    // real relevance regression; allowing a bounded wobble keeps one catchable. 1e-6 is
+    // two orders below the measured noise, so a genuine change still fails here while
+    // rebuild nondeterminism does not.
+    //
+    // Any NON-numeric difference, and any numeric difference above the tolerance, still
+    // fails through the reporting path below.
+    let canonical_expected_probe: JsonValue = serde_json::from_slice(expected_stdout)
+        .map_err(|error| format!("{ctx}: re-reading canonical expected JSON: {error}"))?;
+    let canonical_actual_probe: JsonValue = serde_json::from_slice(actual_stdout)
+        .map_err(|error| format!("{ctx}: re-reading canonical actual JSON: {error}"))?;
+    if json_differs_only_by_float_tolerance(
+        &canonical_expected_probe,
+        &canonical_actual_probe,
+        1e-6,
+    ) {
         return Ok(());
     }
     // bd-bka39: DIFF WHAT WAS ACTUALLY COMPARED. The equality test above is on the
