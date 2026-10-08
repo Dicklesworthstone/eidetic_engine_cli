@@ -134,14 +134,13 @@ struct InvalidJsonCase {
 }
 
 const INVALID_JSON_CASES: &[InvalidJsonCase] = &[
-    // Branch 1: malformed JSON. `not valid json` is a leading-identifier
-    // that serde_json rejects immediately with a deterministic
-    // "expected value" prefix. We only assert on "expected value" so a
-    // serde_json revision that tweaks the line/column tail still passes.
+    // Branch 1: malformed JSON. The initial `n` starts serde_json's `null`
+    // parser, which rejects the following `o` with "expected ident".
+    // Pin that diagnostic without coupling the envelope to its line/column tail.
     InvalidJsonCase {
         branch: "serde_parse_fails",
         sessions_payload: "not valid json",
-        message_tail: "expected value",
+        message_tail: "expected ident",
     },
     // Branch 2: valid JSON, but the top-level object has neither
     // "sessions" nor the legacy "hits" array. parse_sessions_json
