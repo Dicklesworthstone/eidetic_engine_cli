@@ -76,8 +76,25 @@ jobs:
           # skip, or be retired changes what this lane PUBLISHES, and that is an owner's call.
           # This only makes it say which of the two guards stopped it, and why.
           if test -f src/core/index_generation_watermark.rs; then
-            echo "ATTRIBUTION: guard 'src/core/index_generation_watermark.rs must not exist' STOPPED this lane -- the file IS present, so this delivery has ALREADY LANDED and the lane is refusing to apply it twice. This is the guard working, not a defect in the tree. Disposition (retire the lane, or make an already-delivered run succeed) is an owner decision."
-            exit 1
+            # bd-aav0v / bd-...hpgw8: ALREADY DELIVERED IS A SUCCESS, NOT A REFUSAL.
+            #
+            # This guard means the file is present, so the delivery landed by some route and
+            # there is nothing to apply. It used to abort -- first silently, then (after
+            # 6ea8c48c3) with a message -- which displayed a permanent red for a feature that
+            # is in the tree. Operator decision 2026-10-07: an already-delivered lane should
+            # succeed.
+            #
+            # Exiting 0 here is deliberate and bounded. The `verify` job `needs: integrate`,
+            # so it still runs and still executes the fourteen admission regressions against
+            # the delivered source; this skips only the APPLY and the PUSH, which have nothing
+            # left to do. The lane's purpose -- the feature is on main and verified -- is
+            # satisfied on this path, which is the same reasoning as 4372cef4a for
+            # verify-ask-admission.
+            #
+            # The blob pin below keeps `exit 1`. "Cannot deliver against an unrecognised tree"
+            # is a real refusal and is not what this branch covers.
+            echo "ATTRIBUTION: delivery ALREADY PRESENT -- src/core/index_generation_watermark.rs exists, so there is nothing to apply or push. Succeeding rather than refusing: the verify job still runs the admission regressions against the delivered source, so 'on main and verified' both hold. Skipped: the patch apply and the push."
+            exit 0
           fi
           actual_index_blob=$(git rev-parse HEAD:src/core/index.rs)
           if test "$actual_index_blob" != c09fb551d055c1fe90cdbbe63d0c7d1952ca8518; then
