@@ -14361,6 +14361,12 @@ pub const EVIDENCE_SECURITY_RESCREEN_MAX_BATCH: u32 = 500;
 /// the schema's 64 KiB excerpt ceiling this caps one page at 8 MiB of excerpt
 /// payload before row metadata.
 const INDEX_SOURCE_READ_PAGE_SIZE: u32 = 128;
+/// Page size of the evidence admission scan. Each page re-reads and re-sorts
+/// every candidate row (the cross-session keyset cursor cannot seek), so a
+/// scan costs pages x rows; at 5k imported spans 128-row pages made it the
+/// largest share of every write. 512 rows of at most 64 KiB keeps one page
+/// bounded while cutting the pages four-fold.
+const EVIDENCE_SOURCE_READ_PAGE_SIZE: u32 = 512;
 pub const EVIDENCE_SCREENING_VERSION: u32 = 1;
 pub const EVIDENCE_SECURITY_POLICY_EPOCH: u32 = 1;
 pub const EVIDENCE_CANONICAL_PROVENANCE_REVISION: u32 = 1;
@@ -16678,7 +16684,7 @@ impl DbConnection {
                     visitor(row.span)?;
                 }
             }
-            if page_len < usize::try_from(INDEX_SOURCE_READ_PAGE_SIZE).unwrap_or(usize::MAX) {
+            if page_len < usize::try_from(EVIDENCE_SOURCE_READ_PAGE_SIZE).unwrap_or(usize::MAX) {
                 break;
             }
         }
@@ -16704,7 +16710,7 @@ impl DbConnection {
                 "e.workspace_id = ?1",
                 vec![
                     Value::Text(workspace_id.to_owned()),
-                    Value::BigInt(i64::from(INDEX_SOURCE_READ_PAGE_SIZE)),
+                    Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE)),
                 ],
             ),
             (None, Some(cursor)) => (
@@ -16715,7 +16721,7 @@ impl DbConnection {
                     Value::BigInt(i64::from(cursor.start_line)),
                     Value::BigInt(i64::from(cursor.end_line)),
                     Value::Text(cursor.evidence_id.clone()),
-                    Value::BigInt(i64::from(INDEX_SOURCE_READ_PAGE_SIZE)),
+                    Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE)),
                 ],
             ),
             (Some(session_id), None) => (
@@ -16723,7 +16729,7 @@ impl DbConnection {
                 vec![
                     Value::Text(workspace_id.to_owned()),
                     Value::Text(session_id.to_owned()),
-                    Value::BigInt(i64::from(INDEX_SOURCE_READ_PAGE_SIZE)),
+                    Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE)),
                 ],
             ),
             (Some(session_id), Some(cursor)) => (
@@ -16734,7 +16740,7 @@ impl DbConnection {
                     Value::BigInt(i64::from(cursor.start_line)),
                     Value::BigInt(i64::from(cursor.end_line)),
                     Value::Text(cursor.evidence_id.clone()),
-                    Value::BigInt(i64::from(INDEX_SOURCE_READ_PAGE_SIZE)),
+                    Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE)),
                 ],
             ),
         };
@@ -52801,7 +52807,7 @@ UPDATE memories
             "session visitor streams every row without a workspace snapshot vector",
         )?;
 
-        let total = super::INDEX_SOURCE_READ_PAGE_SIZE.saturating_add(3);
+        let total = super::EVIDENCE_SOURCE_READ_PAGE_SIZE.saturating_add(3);
         for index in 0..total {
             let evidence_id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
                 0x850_a00 + u128::from(index),
@@ -52836,7 +52842,7 @@ UPDATE memories
         )?;
         ensure_equal(
             &scan.max_page_rows,
-            &super::INDEX_SOURCE_READ_PAGE_SIZE,
+            &super::EVIDENCE_SOURCE_READ_PAGE_SIZE,
             "no joined evidence/session source read exceeds the fixed page bound",
         )?;
         ensure_equal(
