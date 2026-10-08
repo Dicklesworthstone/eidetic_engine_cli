@@ -214,8 +214,21 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          target/debug/ee --json eval report fx.release_failure.v1 > "$RUNNER_TEMP/eval-diagnostics-report.json" 2> "$RUNNER_TEMP/eval-diagnostics-report-stderr.log" || failed=1
-          cargo test --locked --test integration_e_f 'eval_report_e2e::' -- --test-threads=1 > "$RUNNER_TEMP/eval-diagnostics-golden.log" 2>&1 || failed=1
+          # bd-aav0v: the vacuity floor below names the COUNT arm, but these two arms wrote
+          # the shared `failed` flag in silence -- and they are completely different kinds of
+          # failure. The first is the PRODUCT refusing to produce a report (stderr is already
+          # captured to its own file, which nothing was pointing a reader at); the second is
+          # the test harness failing. Redness is unchanged: both still set the same flag, and
+          # both still run so neither masks the other.
+          if ! target/debug/ee --json eval report fx.release_failure.v1 > "$RUNNER_TEMP/eval-diagnostics-report.json" 2> "$RUNNER_TEMP/eval-diagnostics-report-stderr.log"; then
+            echo "ATTRIBUTION: arm 'ee eval report fx.release_failure.v1' FAILED -- the BINARY refused or crashed, which is a product failure and not a test or count failure. Its stderr was captured separately; the first lines follow."
+            sed -n '1,20p' "$RUNNER_TEMP/eval-diagnostics-report-stderr.log" || true
+            failed=1
+          fi
+          if ! cargo test --locked --test integration_e_f 'eval_report_e2e::' -- --test-threads=1 > "$RUNNER_TEMP/eval-diagnostics-golden.log" 2>&1; then
+            echo "ATTRIBUTION: arm 'integration_e_f eval_report_e2e::' FAILED AT CARGO -- a test failed or the harness crashed, which is NOT the vacuity floor below. The log tail follows."
+            failed=1
+          fi
           tail -n 120 "$RUNNER_TEMP/eval-diagnostics-golden.log"
           # bd-sj2p7: `eval_report_e2e` WAS PASSED AS A TARGET AND IS NOT ONE.
           # Cargo.toml sets `autotests = false` and declares 46 [[test]] targets;

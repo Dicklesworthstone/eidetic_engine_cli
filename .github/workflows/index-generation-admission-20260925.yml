@@ -264,11 +264,28 @@ jobs:
               echo "ATTRIBUTION: $label ok -- $actual tests ran, floor $floor"
             fi
           }
-          cargo test --locked --lib 'core::index::read_lease::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-readers.log" || failed=1
+          # bd-aav0v: the `floor` helper names its own `$label`, so the COUNT arm of each
+          # of these three was already attributed -- but the CARGO arm was a bare
+          # `|| failed=1`, so a crashed harness or a failing test on any of the three set
+          # the shared flag in silence. Count drift said which filter; a real failure said
+          # nothing, which is the inverse of what a reader needs.
+          #
+          # `cargo_arm` keeps the pipeline shape (the `tee` must stay, since `floor` reads
+          # the log) and reports WHICH filter's cargo invocation failed. Redness unchanged:
+          # it still sets the same flag, and every arm still runs so none masks another.
+          cargo_arm() {
+            local label="$1" log="$2"
+            shift 2
+            if ! cargo test --locked --lib "$@" -- --test-threads=2 2>&1 | tee "$log"; then
+              echo "ATTRIBUTION: arm '$label' FAILED AT CARGO -- a test failed or the harness crashed, which is NOT the count check below. Read the log above for the failing test; the count arm for this filter may also report, and the cargo failure is the cause."
+              failed=1
+            fi
+          }
+          cargo_arm 'read_lease' "$RUNNER_TEMP/generation-readers.log" 'core::index::read_lease::'
           floor "$RUNNER_TEMP/generation-readers.log" 1 'read_lease'
-          cargo test --locked --lib 'core::index::rollback_manifest::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-rollback.log" || failed=1
+          cargo_arm 'rollback_manifest' "$RUNNER_TEMP/generation-rollback.log" 'core::index::rollback_manifest::'
           floor "$RUNNER_TEMP/generation-rollback.log" 1 'rollback_manifest'
-          cargo test --locked --lib recover_interrupted -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/generation-recovery.log" || failed=1
+          cargo_arm 'recover_interrupted' "$RUNNER_TEMP/generation-recovery.log" recover_interrupted
           floor "$RUNNER_TEMP/generation-recovery.log" 1 'recover_interrupted'
           exit "$failed"
       - name: Production lint and module formatting
