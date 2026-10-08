@@ -37,6 +37,7 @@ pub mod health;
 pub mod import;
 pub mod process;
 pub mod session;
+pub mod transcript;
 
 mod import_discovery;
 

@@ -38,7 +38,7 @@ use crate::models::{
 };
 use crate::search::{
     ARTIFACT_INDEX_PROJECTION_SCHEMA_V1, CanonicalSearchDocument,
-    EVIDENCE_INDEX_PROJECTION_SCHEMA_V2, EmbedderStack, HashEmbedder, IndexBuilder,
+    EVIDENCE_INDEX_PROJECTION_SCHEMA_V3, EmbedderStack, HashEmbedder, IndexBuilder,
     MEMORY_INDEX_PROJECTION_SCHEMA_V1, RULE_INDEX_PROJECTION_SCHEMA_V1, RuleIndexProjection,
     SESSION_INDEX_PROJECTION_SCHEMA_V1, artifact_to_document, evidence_span_to_document,
     memory_to_document_with_context_anchors_and_typed_fields, rule_to_document,
@@ -923,7 +923,7 @@ pub fn expected_index_corpus_revision() -> &'static CorpusRevision {
             ),
             (
                 "import",
-                EVIDENCE_INDEX_PROJECTION_SCHEMA_V2,
+                EVIDENCE_INDEX_PROJECTION_SCHEMA_V3,
                 EVIDENCE_INDEX_ADMISSION_REVISION_V1,
             ),
         ] {

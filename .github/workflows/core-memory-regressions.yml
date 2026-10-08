@@ -334,6 +334,11 @@ jobs:
           recall-review-authority core::recall::scan::review_tests::
           recall-source-projection core::recall::scan::projection::tests::
           ask-long-evidence core::ask::corpus::admission::long_evidence_tests::
+          cass-reader-projection db::tests::cass_reader_projection_
+          cass-reader-plain-identity db::tests::evidence_reader_projection_preserves_plain_and_non_cass_bytes
+          cass-transcript-admission db::tests::transcript_admission_rechecks_raw_records_for_new_and_existing_rows
+          cass-search-projection search::tests::evidence_document_projects_real_transcripts_without_envelope_or_reasoning_tokens
+          cass-search-refusal search::tests::refused_transcript_documents_never_recover_raw_json_as_searchable_text
           resume-transcript-privacy core::resume::transcripts::privacy_tests::
           search-producer-integrity core::search::runtime_fallback::tests::
           ask-semantic-runtime core::ask::semantic::
