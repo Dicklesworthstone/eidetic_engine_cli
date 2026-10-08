@@ -216,8 +216,37 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo test --locked --features mcp --lib mcp::ask::live_tests:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/mcp-ask-live.log"
-          grep -Eq 'test result: ok\. 6 passed; 0 failed' "$RUNNER_TEMP/mcp-ask-live.log"
+          # bd-...hpgw8 / bd-aav0v: THE FILTER WAS WRONG BY ONE CHARACTER, and the pin was
+          # right all along. This read `mcp::ask::live_tests::` -- a `live_tests` submodule
+          # nested inside `ask` -- but src/mcp.rs:36-37 mounts the file as a SIBLING:
+          #
+          #     #[path = "mcp_ask_live_tests.rs"]
+          #     mod ask_live_tests;
+          #
+          # so the real path is `mcp::ask_live_tests::`. The old filter matched ZERO tests.
+          # Measured in run 37713486930: `test result: ok. 0 passed; 0 failed; 12166
+          # filtered out`, immediately followed by the step's exit 1, because a grep for
+          # "6 passed" cannot match a run that executed nothing.
+          #
+          # src/mcp_ask_live_tests.rs holds exactly 6 `#[test]`, so the pin of 6 is correct
+          # and becomes satisfiable for the first time by fixing the selector rather than
+          # the number. This is the same class as core-loop-regressions' zero-matching
+          # filter: an assertion that cannot be satisfied is worse than a stale count,
+          # because no number repairs it.
+          cargo test --locked --features mcp --lib mcp::ask_live_tests:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/mcp-ask-live.log"
+          # The bare grep gave this step no voice: a zero-match and a genuine count change
+          # aborted identically and silently. A zero now says so explicitly, because the
+          # remedy is to fix the FILTER, not the pin.
+          live_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/mcp-ask-live.log" | head -1)
+          if test "${live_ran:-none}" = "0"; then
+            echo "ATTRIBUTION: arm 'mcp::ask_live_tests::' STOPPED this lane -- the filter matched ZERO tests (cargo exited 0 and reported 'ok. 0 passed'). That is an unsatisfiable selector, not a stale count: src/mcp.rs:36 mounts the module as 'ask_live_tests', a sibling of 'ask', so any filter spelling it 'ask::live_tests' selects nothing and no pin value can repair it."
+            exit 1
+          fi
+          if test -z "$live_ran" || test "$live_ran" -lt 6; then
+            echo "ATTRIBUTION: arm 'mcp::ask_live_tests::' STOPPED this lane -- passing-with-zero-failures count '${live_ran:-none}', required 6. An empty count means no 'test result: ok.' line at all, which is what a failed build or a crashed harness looks like."
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'mcp::ask_live_tests::' ok -- ran $live_ran tests (required 6), 0 failed."
       - name: Run existing MCP unit regressions
         shell: bash
         run: |
