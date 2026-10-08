@@ -771,61 +771,6 @@ fn json_differs_only_by_float_tolerance(
     }
 }
 
-#[test]
-fn why_normalization_drops_the_numbers_and_keeps_the_retrieval_path() {
-    // POSITIVE CONTROL for the why normalization (bd-64w73). It exists to tolerate two
-    // unstable digits; if it also erased the prose it would be silently retiring the one
-    // assertion that distinguishes a lexical match from a semantic one.
-    let pack = |why: &str| {
-        serde_json::json!({
-            "schema": "ee.response.v2",
-            "success": true,
-            "data": {"pack": {
-                "schema": "ee.pack.v2",
-                "slo": slo_fixture(),
-                "items": [{"content": "c", "why": why}],
-                "snapshotIdentity": {"components": {
-                    "request": "blake3:a", "referenceTime": "blake3:b",
-                    "qualityScoring": "blake3:c", "items": "blake3:d",
-                    "omitted": "blake3:e", "degraded": "blake3:f",
-                    "coordination": "blake3:g", "renderedText": "blake3:h"
-                }, "digest": "blake3:i"}
-            }}
-        })
-    };
-    let rendered = |why: &str| {
-        String::from_utf8(canonical_context_stdout(pack(why)).expect("canonicalizes"))
-            .expect("utf-8")
-    };
-
-    // The two sides that differ ONLY in the rounded numbers must come out equal.
-    let high = rendered("matched 'x' via lexical (relevance 0.4000, utility 0.5000)");
-    let low = rendered("matched 'x' via lexical (relevance 0.3999, utility 0.5000)");
-    assert_eq!(high, low, "a flipped fourth decimal must normalize away");
-    assert!(
-        high.contains("matched 'x' via lexical"),
-        "the prose and the retrieval path must survive: {high}"
-    );
-    assert!(
-        !high.contains("0.4000") && !high.contains("0.3999"),
-        "the rendered relevance must not survive: {high}"
-    );
-
-    // A changed retrieval PATH must still differ. This is the hole the normalization could
-    // have opened, and the reason it replaces only the parenthetical.
-    let semantic = rendered("matched 'x' via semantic (relevance 0.4000, utility 0.5000)");
-    assert_ne!(
-        high, semantic,
-        "lexical vs semantic must remain a difference"
-    );
-    // So must a changed matched CONTENT.
-    let other = rendered("matched 'y' via lexical (relevance 0.4000, utility 0.5000)");
-    assert_ne!(
-        high, other,
-        "a different matched content must remain a difference"
-    );
-}
-
 /// Bound on pack score drift between two index builds (bd-64w73).
 ///
 /// NOW ZERO, deliberately, which makes the comparison EXACT on numbers.
@@ -1428,8 +1373,13 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
         // changed instead of only that some hash moved. The `renderedText` digest covered
         // the why text, which is normalized and compared below rather than dropped.
         // The other five components stay under full byte comparison and are guarded.
-        "/data/pack/snapshotIdentity/components/items",
-        "/data/pack/snapshotIdentity/components/renderedText",
+        // items and renderedText WERE excluded here. Both were digests over score-bearing
+        // content, and a hash has no tolerance, so while scores wobbled they converted a
+        // permitted drift into a hard failure. The wobble is gone -- it was the pack's
+        // wall-clock validity reference time, now pinned with `--as-of` -- and the scores
+        // compare EXACTLY at PACK_SCORE_TOLERANCE = 0.0. A digest over exact content is
+        // itself exact, so both are back under full comparison. Restoring them matters:
+        // `items` is the only check that covers the item digest at all.
         "/data/degraded",
         "/degraded",
         "/data/pack/advisoryBanner",
@@ -1439,29 +1389,17 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     ] {
         remove_json_pointer(&mut value, pointer);
     }
-    // NORMALIZE `why`, DO NOT DROP IT (bd-64w73). Each item's why text reads
-    //     matched '<content>' via lexical (relevance 0.4000, utility 0.5000)
-    // and that parenthetical renders relevance to four decimals -- which the measured
-    // 1.9e-5 rebuild wobble is enough to flip (0.4000 vs 0.3999). Asserting a four-decimal
-    // rendering of a number tolerated at PACK_SCORE_TOLERANCE is incoherent, so the numbers go.
+    // `why` WAS normalized here (bd-64w73): its text renders relevance to four decimals,
+    // and a 1.9e-5 score wobble was enough to flip the last digit (0.4000 vs 0.3999), so
+    // the parenthetical was replaced with "(scores normalized)". That is no longer needed.
+    // The wobble was the pack's wall-clock validity reference time, now pinned with
+    // `--as-of`, and the scores compare EXACTLY at PACK_SCORE_TOLERANCE = 0.0. A rendering
+    // of an exact number is exact, so the full why text -- prose, matched content,
+    // retrieval path AND the rendered scores -- is back under byte comparison.
     //
-    // The PROSE stays compared, and it is the valuable half: it names the matched content
-    // and the retrieval path. "via lexical" vs "via semantic" is exactly the kind of
-    // divergence this test exists to catch, and dropping the whole field to escape two
-    // digits would have discarded it. Only the parenthetical is replaced.
-    if let Some(items) = value
-        .pointer_mut("/data/pack/items")
-        .and_then(JsonValue::as_array_mut)
-    {
-        for item in items {
-            if let Some(why) = item.get_mut("why")
-                && let Some(text) = why.as_str()
-                && let Some(open) = text.rfind(" (relevance ")
-            {
-                *why = JsonValue::String(format!("{} (scores normalized)", &text[..open]));
-            }
-        }
-    }
+    // `why_normalization_drops_the_numbers_and_keeps_the_retrieval_path` is removed with
+    // it: a control for a normalizer that no longer exists would pass while testing
+    // nothing, which is the exact failure mode this file has now hit twice.
     // THE SURVIVING COMPONENTS MUST STILL BE THERE. Removing `components/request` and
     // `digest` is only safe while the other six components remain under comparison; if a
     // future change stopped emitting `snapshotIdentity/components` at all, every remaining
