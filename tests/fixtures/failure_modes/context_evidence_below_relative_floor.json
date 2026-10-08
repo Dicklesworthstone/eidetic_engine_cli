@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "context_evidence_below_relative_floor",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.11",
+    "epic_letter": "RC"
+  },
+  "surfaces": [
+    "ee pack (direct imported-evidence lane)",
+    "ee context (soft-deprecated alias, same evidence lane)"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Imported evidence spans matched the query only weakly (below 25% of the best evidence hit's relevance), typically on a common query word, and the caller set no explicit relevance floor. They are left out of the pack instead of filling the token budget with off-topic transcript lines; the degradation counts them and names the floor applied.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee import cass --workspace . --limit 20",
+      "ee index rebuild --workspace ."
+    ],
+    "invocation": "ee pack \"clippy needless borrow error in CI\" --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "context_evidence_below_relative_floor",
+    "severity": "low",
+    "message_contains": ["of the best evidence match"],
+    "repair_contains": "--relevance-floor 0"
+  }
+}

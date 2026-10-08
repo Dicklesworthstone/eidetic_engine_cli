@@ -14399,6 +14399,9 @@ fn collect_direct_evidence_pack_candidates(
         };
         candidates.push(candidate);
     }
+    if relevance_floor.is_none() {
+        apply_direct_evidence_query_relative_floor(&mut candidates, degraded);
+    }
     // Preference and error-class collapse discard alternatives. Apply the
     // caller's final-score floor first so a weak directly matched card cannot
     // hide an eligible source turn that would bring the card at a higher score.
@@ -14437,6 +14440,51 @@ fn collect_direct_evidence_pack_candidates(
         );
     }
     Ok(candidates)
+}
+
+/// Share of the best direct-evidence relevance a transcript span must reach to
+/// enter a pack when the caller set no explicit relevance floor.
+const DIRECT_EVIDENCE_RELATIVE_FLOOR: f32 = 0.25;
+
+/// Keep imported evidence that is competitive with the best evidence hit for
+/// this query (bd-reality-core-convergence-1azkt.11, finding R9).
+///
+/// Lexical retrieval over a transcript corpus matches almost every span on
+/// some query word ("in", "error", "CI"), and the evidence lane used to admit
+/// every admitted hit until the token budget ran out. On the real-shape oracle
+/// a 3,000-token pack for "clippy needless borrow error in CI" carried 17
+/// spans, 11 of them from unrelated sessions at 8-15% of the top hit's
+/// relevance. Spans below [`DIRECT_EVIDENCE_RELATIVE_FLOOR`] times the best
+/// evidence relevance are therefore left out and counted in a degradation. An
+/// explicit `--relevance-floor` (including 0) replaces this default entirely.
+fn apply_direct_evidence_query_relative_floor(
+    candidates: &mut Vec<DirectEvidencePackCandidate>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    let best = candidates
+        .iter()
+        .map(|candidate| candidate.item.relevance.into_inner())
+        .filter(|relevance| relevance.is_finite())
+        .fold(0.0_f32, f32::max);
+    if best <= 0.0 {
+        return;
+    }
+    let floor = best * DIRECT_EVIDENCE_RELATIVE_FLOOR;
+    let before = candidates.len();
+    candidates.retain(|candidate| candidate.item.relevance.into_inner() >= floor);
+    let excluded = before - candidates.len();
+    if excluded > 0 {
+        push_degradation(
+            degraded,
+            "context_evidence_below_relative_floor",
+            ContextResponseSeverity::Low,
+            format!(
+                "{excluded} imported evidence candidate(s) scored below {:.0}% of the best evidence match (relevance {floor:.4}) and were left out of the pack.",
+                DIRECT_EVIDENCE_RELATIVE_FLOOR * 100.0
+            ),
+            Some("Pass --relevance-floor 0 to include every admitted evidence match.".to_owned()),
+        );
+    }
 }
 
 /// One admitted evidence row as a pack candidate. `matched_through` names the
