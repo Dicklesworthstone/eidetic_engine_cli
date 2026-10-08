@@ -11734,4 +11734,18 @@ pub fn unrelated_context() -> u64 {{
         assert!(first.starts_with("pack_"));
         Ok(())
     }
+
+    #[test]
+    fn pack_storage_errors_never_suggest_init() {
+        let transient = super::ContextPackError::Storage(
+            "Read snapshot unavailable: snapshot pin 1 was poisoned or expired by the read-pool lifecycle watchdog".to_owned(),
+        );
+        let hint = transient.repair_hint().unwrap_or_default();
+        assert!(hint.starts_with("Retry the command"), "{hint}");
+        let other = super::ContextPackError::Storage("database disk image is malformed".to_owned());
+        assert_eq!(other.repair_hint(), Some("ee doctor --json"));
+        for error in [transient, other] {
+            assert!(!error.repair_hint().unwrap_or_default().contains("ee init"));
+        }
+    }
 }

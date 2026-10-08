@@ -1492,7 +1492,13 @@ impl ContextPackError {
     #[must_use]
     pub fn repair_hint(&self) -> Option<&str> {
         match self {
-            Self::Storage(_) => Some("ee init --workspace ."),
+            // `ee init` creates state; it never repairs an existing store.
+            // A read snapshot the watchdog expired, or a busy/locked database,
+            // is transient under load: retrying is the repair.
+            Self::Storage(message) if storage_error_is_transient(message) => Some(
+                "Retry the command; the store was busy or the read snapshot expired under load. If it persists: ee doctor --json",
+            ),
+            Self::Storage(_) => Some("ee doctor --json"),
             // The full dynamic repair (exact looked-for path, nearby stores,
             // conditional init LAST) is built by the CLI mapping via
             // `core::storeless_workspace_error`; this static hint only backs
@@ -1510,6 +1516,21 @@ impl ContextPackError {
     pub const fn is_policy_denied(&self) -> bool {
         matches!(self, Self::PolicyDenied(_))
     }
+}
+
+fn storage_error_is_transient(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "snapshot pin",
+        "watchdog",
+        "database is locked",
+        "database is busy",
+        "sqlite_busy",
+        "busy timeout",
+        "contention",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 impl std::fmt::Display for ContextPackError {
@@ -4089,10 +4110,12 @@ async fn run_context_pack_with_performance_inner(
     let mut response_degraded = degraded.clone();
     response_degraded.extend(slo.context_degradations());
     let consensus_conflicts = crate::pack::analyze_pack_consensus_conflicts(&draft);
+    // A pack of native evidence or rules has content even with no memories;
+    // only an empty pack lacks a consensus neighborhood worth reporting.
     push_consensus_conflict_degradations(
         &mut response_degraded,
         &consensus_conflicts,
-        draft.items.len(),
+        draft.items.len() + draft.evidence_items.len() + draft.rule_items.len(),
     );
     if options.persist_pack {
         push_global_items_not_persisted_degradation(
