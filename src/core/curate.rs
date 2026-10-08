@@ -4057,12 +4057,55 @@ fn capture_dedupe_status_suppresses(status: &CaptureSuggestionDedupeStatus) -> b
 fn review_topic_key(excerpt: &str) -> String {
     let tokens = normalized_review_tokens(excerpt);
     topic_from_keywords(&tokens).unwrap_or_else(|| {
-        tokens
-            .iter()
-            .find(|token| token.len() >= 5)
-            .cloned()
+        // The most frequent content word, not the alphabetically first one:
+        // "bump the version ... already exists" must not become `already`.
+        let mut counts = BTreeMap::<String, usize>::new();
+        let content_words = crate::core::ask::tokenize_for_ask(excerpt)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        for token in excerpt
+            .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+            .map(str::to_ascii_lowercase)
+        {
+            if token.len() >= 5
+                && content_words.contains(&token)
+                && !review_stopword(&token)
+                && !review_filler_word(&token)
+            {
+                *counts.entry(token).or_default() += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by(|(left, left_count), (right, right_count)| {
+                left_count.cmp(right_count).then_with(|| right.cmp(left))
+            })
+            .map(|(token, _)| token)
             .unwrap_or_else(|| "noise".to_owned())
     })
+}
+
+/// Common long words that never name a topic.
+fn review_filler_word(token: &str) -> bool {
+    matches!(
+        token,
+        "already"
+            | "again"
+            | "always"
+            | "being"
+            | "could"
+            | "every"
+            | "first"
+            | "never"
+            | "other"
+            | "still"
+            | "their"
+            | "there"
+            | "thing"
+            | "think"
+            | "using"
+            | "would"
+    )
 }
 
 fn topic_from_keywords(tokens: &BTreeSet<String>) -> Option<String> {
@@ -4122,6 +4165,41 @@ fn topic_from_keywords(tokens: &BTreeSet<String>) -> Option<String> {
             ],
         ),
         ("cass", &["cass", "session", "span", "transcript"]),
+        (
+            "release",
+            &[
+                "changelog",
+                "crates",
+                "publish",
+                "published",
+                "release",
+                "releases",
+                "semver",
+                "version",
+            ],
+        ),
+        (
+            "compilation",
+            &[
+                "borrow",
+                "borrowck",
+                "compile",
+                "compiler",
+                "rustc",
+                "typecheck",
+            ],
+        ),
+        (
+            "deployment",
+            &[
+                "bucket",
+                "container",
+                "deploy",
+                "deployment",
+                "docker",
+                "dockerfile",
+            ],
+        ),
     ];
 
     TOPICS.iter().find_map(|(topic, keywords)| {
@@ -17111,6 +17189,28 @@ mod tests {
             super::review_lesson_sentences("From now on I will check the logs first.", false)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn topic_keys_name_the_subject_not_the_first_long_word() {
+        assert_eq!(
+            super::review_topic_key(
+                "bump the version in Cargo.toml and commit it before running cargo publish; crates.io rejects a version that already exists"
+            ),
+            "release"
+        );
+        assert_eq!(
+            super::review_topic_key("E0502: remove the entry first so the borrow ends"),
+            "compilation"
+        );
+        // Fallback: the most frequent content word, ties broken alphabetically.
+        assert_eq!(
+            super::review_topic_key(
+                "Already handled: the queue drains, and the queue stays bounded."
+            ),
+            "queue"
+        );
+        assert_eq!(super::review_topic_key("ok so yes"), "noise");
     }
 
     #[test]
