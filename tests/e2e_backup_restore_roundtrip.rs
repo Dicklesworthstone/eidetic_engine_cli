@@ -1198,6 +1198,28 @@ fn two_index_builds_of_one_store_score_identically() -> TestResult {
             "--source-mode",
             "lexical_only",
             "--strict-source-mode",
+            // PIN THE VALIDITY REFERENCE TIME (bd-64w73). Experiment 2 showed the wobble is
+            // at QUERY time, not in index construction, and src/core/context.rs:1640 is a
+            // wall-clock default:
+            //
+            //     context_validity_reference_time(options, &options.filters)
+            //         .unwrap_or_else(Utc::now)
+            //
+            // so every pack evaluates validity against a DIFFERENT instant. That is
+            // time-varying by construction, which is exactly the shape of a difference that
+            // survives an identical index and an identical store.
+            //
+            // This is a PROBE as much as a fix: if pinning it makes two packs off one index
+            // byte-identical, the mechanism is confirmed; if the delta survives, a seventh
+            // hypothesis is eliminated and the cause is elsewhere in the query path. Applied
+            // here first, and NOT yet to the round-trip test, so the answer arrives from the
+            // test built to ask it.
+            //
+            // A fixed future instant rather than a captured `now`: these seeds carry no
+            // valid_to, so 2030 includes all of them, and a literal keeps the test
+            // reproducible instead of merely self-consistent within one run.
+            "--as-of",
+            "2030-01-01T00:00:00Z",
         ])?;
         packs.push(pack);
     }
@@ -1251,6 +1273,10 @@ fn two_index_builds_of_one_store_score_identically() -> TestResult {
         "--source-mode",
         "lexical_only",
         "--strict-source-mode",
+        // Same pinned instant as the two packs above; the whole point is that all three
+        // evaluate validity against one reference time instead of three wall-clock reads.
+        "--as-of",
+        "2030-01-01T00:00:00Z",
     ])?;
     let first = canonical_context_stdout(packs[0].clone())?;
     let repacked = canonical_context_stdout(repack.clone())?;
