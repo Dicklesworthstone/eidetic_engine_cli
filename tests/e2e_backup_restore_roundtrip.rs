@@ -984,14 +984,23 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
              identity rather than tolerating a store-local generation counter"
                 .to_owned()
         })?;
+    // CAMEL CASE, copied from the serializer rather than from the Rust struct.
+    // src/output/mod.rs:2990-2997 writes these keys literally:
+    //     request, referenceTime, qualityScoring, items, omitted, degraded,
+    //     coordination, renderedText
+    // I first wrote the struct's snake_case field names here, and the guard then failed on
+    // the first run that ever reached it -- correctly, but for my reason rather than a
+    // product one. The unit test did not catch it because I had invented its fixture with
+    // snake_case keys, so it validated the guard against a document shape that does not
+    // exist. The fixture below now uses the serialized names.
     for required in [
-        "reference_time",
-        "quality_scoring",
+        "referenceTime",
+        "qualityScoring",
         "items",
         "omitted",
         "degraded",
         "coordination",
-        "rendered_text",
+        "renderedText",
     ] {
         if !components.contains_key(required) {
             return Err(format!(
@@ -1075,15 +1084,18 @@ fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclu
             "schema": "ee.pack.v2",
             "items": [],
             "slo": slo_fixture(),
+            // Keys copied from the serializer at src/output/mod.rs:2990-2997, NOT from
+            // the Rust struct. An invented snake_case fixture here is what let the guard's
+            // camelCase bug reach a real run.
             "snapshotIdentity": {"components": {
                 "request": "blake3:aaa",
-                "reference_time": "blake3:bbb",
-                "quality_scoring": "blake3:ccc",
+                "referenceTime": "blake3:bbb",
+                "qualityScoring": "blake3:ccc",
                 "items": "blake3:ddd",
                 "omitted": "blake3:eee",
                 "degraded": "blake3:fff",
                 "coordination": "blake3:ggg",
-                "rendered_text": "blake3:hhh"
+                "renderedText": "blake3:hhh"
             }, "digest": "blake3:iii"}
         }}
     });
