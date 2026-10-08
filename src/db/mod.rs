@@ -11417,6 +11417,173 @@ END;
     "blake3:v128_pack_rule_items_2026_10_07",
 );
 
+/// Rewrite the pack workspace guards without joins
+/// (bd-reality-core-convergence-1azkt.47, measured on the real-shape oracle).
+///
+/// V126/V128 expressed each guard as `EXISTS (SELECT 1 FROM evidence_spans e
+/// JOIN sessions s ... JOIN pack_records p ...)`. FrankenSQLite evaluates such
+/// a join inside a trigger WHEN as a materialized hash join over the whole
+/// tables, so every pack item insert scanned every evidence span and session:
+/// at 5k imported spans one 45-item pack spent most of its 40 s persisting
+/// evidence items. The same predicates as single-row primary-key scalar
+/// subqueries are lookups. Semantics are unchanged: a missing pack, source or
+/// session makes a comparison NULL, which `coalesce(..., 0)` turns into a
+/// refusal exactly as the failed EXISTS did.
+pub const V129_PACK_GUARD_TRIGGERS_WITHOUT_JOINS: Migration = Migration::new(
+    129,
+    "pack_guard_triggers_without_joins",
+    r#"
+DROP TRIGGER IF EXISTS pack_items_native_workspace_insert;
+CREATE TRIGGER pack_items_native_workspace_insert
+BEFORE INSERT ON pack_items
+WHEN (NEW.rule_id IS NOT NULL AND NOT coalesce(
+    (SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)) OR (NEW.evidence_span_id IS NOT NULL AND NOT coalesce(
+    (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id) IS NOT NULL
+    AND (SELECT workspace_id FROM evidence_spans WHERE id = NEW.evidence_span_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id)
+    AND (SELECT workspace_id FROM sessions
+         WHERE id = (SELECT session_id FROM evidence_spans WHERE id = NEW.evidence_span_id))
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0))
+BEGIN
+    SELECT RAISE(ABORT, 'native pack item source must belong to the pack workspace');
+END;
+
+DROP TRIGGER IF EXISTS pack_items_native_workspace_update;
+CREATE TRIGGER pack_items_native_workspace_update
+BEFORE UPDATE OF pack_id, rule_id, evidence_span_id ON pack_items
+WHEN (NEW.rule_id IS NOT NULL AND NOT coalesce(
+    (SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)) OR (NEW.evidence_span_id IS NOT NULL AND NOT coalesce(
+    (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id) IS NOT NULL
+    AND (SELECT workspace_id FROM evidence_spans WHERE id = NEW.evidence_span_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id)
+    AND (SELECT workspace_id FROM sessions
+         WHERE id = (SELECT session_id FROM evidence_spans WHERE id = NEW.evidence_span_id))
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0))
+BEGIN
+    SELECT RAISE(ABORT, 'native pack item source must belong to the pack workspace');
+END;
+
+DROP TRIGGER IF EXISTS pack_omissions_native_workspace_insert;
+CREATE TRIGGER pack_omissions_native_workspace_insert
+BEFORE INSERT ON pack_omissions
+WHEN (NEW.rule_id IS NOT NULL AND NOT coalesce(
+    (SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)) OR (NEW.evidence_span_id IS NOT NULL AND NOT coalesce(
+    (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id) IS NOT NULL
+    AND (SELECT workspace_id FROM evidence_spans WHERE id = NEW.evidence_span_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id)
+    AND (SELECT workspace_id FROM sessions
+         WHERE id = (SELECT session_id FROM evidence_spans WHERE id = NEW.evidence_span_id))
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0))
+BEGIN
+    SELECT RAISE(ABORT, 'native pack omission source must belong to the pack workspace');
+END;
+
+DROP TRIGGER IF EXISTS pack_omissions_native_workspace_update;
+CREATE TRIGGER pack_omissions_native_workspace_update
+BEFORE UPDATE OF pack_id, rule_id, evidence_span_id ON pack_omissions
+WHEN (NEW.rule_id IS NOT NULL AND NOT coalesce(
+    (SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)) OR (NEW.evidence_span_id IS NOT NULL AND NOT coalesce(
+    (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id) IS NOT NULL
+    AND (SELECT workspace_id FROM evidence_spans WHERE id = NEW.evidence_span_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id)
+    AND (SELECT workspace_id FROM sessions
+         WHERE id = (SELECT session_id FROM evidence_spans WHERE id = NEW.evidence_span_id))
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0))
+BEGIN
+    SELECT RAISE(ABORT, 'native pack omission source must belong to the pack workspace');
+END;
+
+DROP TRIGGER IF EXISTS pack_impressions_native_workspace_insert;
+CREATE TRIGGER pack_impressions_native_workspace_insert
+BEFORE INSERT ON pack_candidate_impressions
+WHEN coalesce((SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id) = NEW.workspace_id, 0) = 0 OR (NEW.rule_id IS NOT NULL AND NOT coalesce((SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id) = NEW.workspace_id, 0)) OR (NEW.evidence_span_id IS NOT NULL AND NOT coalesce(
+    (SELECT workspace_id FROM evidence_spans WHERE id = NEW.evidence_span_id) = NEW.workspace_id
+    AND (SELECT workspace_id FROM sessions
+         WHERE id = (SELECT session_id FROM evidence_spans WHERE id = NEW.evidence_span_id)) = NEW.workspace_id,
+    0))
+BEGIN
+    SELECT RAISE(ABORT, 'pack impression and native source must belong to the pack workspace');
+END;
+
+DROP TRIGGER IF EXISTS pack_impressions_native_workspace_update;
+CREATE TRIGGER pack_impressions_native_workspace_update
+BEFORE UPDATE OF pack_id, workspace_id, rule_id, evidence_span_id ON pack_candidate_impressions
+WHEN coalesce((SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id) = NEW.workspace_id, 0) = 0 OR (NEW.rule_id IS NOT NULL AND NOT coalesce((SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id) = NEW.workspace_id, 0)) OR (NEW.evidence_span_id IS NOT NULL AND NOT coalesce(
+    (SELECT workspace_id FROM evidence_spans WHERE id = NEW.evidence_span_id) = NEW.workspace_id
+    AND (SELECT workspace_id FROM sessions
+         WHERE id = (SELECT session_id FROM evidence_spans WHERE id = NEW.evidence_span_id)) = NEW.workspace_id,
+    0))
+BEGIN
+    SELECT RAISE(ABORT, 'pack impression and native source must belong to the pack workspace');
+END;
+
+DROP TRIGGER IF EXISTS pack_evidence_items_workspace_insert;
+CREATE TRIGGER pack_evidence_items_workspace_insert
+BEFORE INSERT ON pack_evidence_items
+WHEN NOT coalesce(
+    (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id) IS NOT NULL
+    AND (SELECT workspace_id FROM evidence_spans WHERE id = NEW.evidence_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id)
+    AND (SELECT workspace_id FROM sessions
+         WHERE id = (SELECT session_id FROM evidence_spans WHERE id = NEW.evidence_id))
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)
+BEGIN
+    SELECT RAISE(ABORT, 'pack evidence and session must belong to the pack workspace');
+END;
+
+DROP TRIGGER IF EXISTS pack_evidence_items_workspace_update;
+CREATE TRIGGER pack_evidence_items_workspace_update
+BEFORE UPDATE OF pack_id, evidence_id ON pack_evidence_items
+WHEN NOT coalesce(
+    (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id) IS NOT NULL
+    AND (SELECT workspace_id FROM evidence_spans WHERE id = NEW.evidence_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id)
+    AND (SELECT workspace_id FROM sessions
+         WHERE id = (SELECT session_id FROM evidence_spans WHERE id = NEW.evidence_id))
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)
+BEGIN
+    SELECT RAISE(ABORT, 'pack evidence and session must belong to the pack workspace');
+END;
+
+DROP TRIGGER IF EXISTS pack_rule_items_workspace_insert;
+CREATE TRIGGER pack_rule_items_workspace_insert
+BEFORE INSERT ON pack_rule_items
+WHEN NOT coalesce(
+    (SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)
+BEGIN
+    SELECT RAISE(ABORT, 'pack rule must belong to the pack workspace');
+END;
+
+DROP TRIGGER IF EXISTS pack_rule_items_workspace_update;
+CREATE TRIGGER pack_rule_items_workspace_update
+BEFORE UPDATE OF pack_id, rule_id ON pack_rule_items
+WHEN NOT coalesce(
+    (SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)
+BEGIN
+    SELECT RAISE(ABORT, 'pack rule must belong to the pack workspace');
+END;
+"#,
+    "blake3:v129_pack_guard_triggers_without_joins_2026_10_08",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -11547,6 +11714,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V126_TYPED_PACK_AUXILIARY_IDENTITY,
     V127_EVIDENCE_ADMISSION_VERDICTS,
     V128_PACK_RULE_ITEMS,
+    V129_PACK_GUARD_TRIGGERS_WITHOUT_JOINS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -67910,3 +68078,7 @@ UPDATE memories
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "pack_guard_trigger_tests.rs"]
+mod pack_guard_trigger_tests;
