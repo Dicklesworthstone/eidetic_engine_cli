@@ -1218,7 +1218,67 @@ fn two_index_builds_of_one_store_score_identically() -> TestResult {
         ),
     )?;
 
+    // EXPERIMENT 2 (bd-64w73), and it is the half that localizes the defect. Pack the
+    // FIRST index a second time -- same store, same index directory, same query, nothing
+    // rebuilt. That separates the two places the wobble could live:
+    //
+    //   these two packs AGREE     -> scoring is deterministic given a fixed index, so the
+    //                                nondeterminism is in index CONSTRUCTION (build time)
+    //   these two packs DIFFER    -> scoring itself varies over an identical index, so it
+    //                                is a QUERY-time effect and rebuilding is irrelevant
+    //
+    // Worth doing here rather than in a separate test because the index and the seeds are
+    // already built: one extra pack buys the distinction. Compared EXACTLY -- no tolerance
+    // -- because over one unchanged index there is no legitimate source of drift, and
+    // using the tolerance here would hide precisely what the experiment asks.
+    let first_index_arg = staging
+        .path()
+        .join("first-index")
+        .to_string_lossy()
+        .into_owned();
+    let (repack, _raw) = run_ee_raw(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "pack",
+        CONTEXT_QUERY,
+        "--database",
+        &db_arg,
+        "--index-dir",
+        &first_index_arg,
+        "--candidate-pool",
+        "1",
+        "--source-mode",
+        "lexical_only",
+        "--strict-source-mode",
+    ])?;
     let first = canonical_context_stdout(packs[0].clone())?;
+    let repacked = canonical_context_stdout(repack.clone())?;
+    let scoring_is_deterministic = first == repacked;
+    eprintln!(
+        "[bd-64w73] two packs off ONE index are {} -- so the wobble is {}",
+        if scoring_is_deterministic {
+            "IDENTICAL"
+        } else {
+            "DIFFERENT"
+        },
+        if scoring_is_deterministic {
+            "in index CONSTRUCTION, not in scoring"
+        } else {
+            "in SCORING, and rebuilding is irrelevant"
+        }
+    );
+    ensure(
+        scoring_is_deterministic,
+        format!(
+            "packing the SAME index twice must be byte-identical; it is not, which means \
+             scoring is nondeterministic at query time and bd-64w73's cause is NOT index \
+             construction. first={} bytes, repack={} bytes",
+            first.len(),
+            repacked.len()
+        ),
+    )?;
+
     let second = canonical_context_stdout(packs[1].clone())?;
     ensure_context_json_bytes_equal(
         &packs[1],
