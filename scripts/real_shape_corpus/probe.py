@@ -289,6 +289,15 @@ def main():
             if codes & {"weak_query_recall", "no_relevant_results", "weak_semantic_evidence", "low_recall_after_floor"} or not result_nodes(sp or {}):
                 neg_flagged += 1
 
+        write_times = []
+        for index in range(3):
+            code, wp, elapsed, err = run_ee(ee, ["remember", f"Probe write-cost sample {index}: rotate the staging bucket credentials monthly.",
+                                                 "--workspace", workspace, "--json"], env, workspace)
+            if code != 0:
+                raise Harness(f"ee remember failed ({code}): {err[-400:]}")
+            write_times.append(elapsed)
+        event("write_cost", seconds=[round(t, 3) for t in write_times])
+
         learn = learn_metrics(ee, env, workspace, manifest, path_by_session, judgments, corpus)
         summary["learn"] = learn
 
@@ -312,7 +321,8 @@ def main():
                                "items_per_pack": round(packed_items / max(1, len(queries)), 2)}
         m["negative_query_flag_rate"] = {"value": neg_flagged / len(judgments["negative_queries"])}
         m["PAP"] = learn.get("PAP", {"status": "unavailable", "reason": "no proposals"})
-        m["WCS"] = {"status": "unavailable", "reason": "write-cost scaling needs the scale profile (--target-records at 1k/5k/50k)"}
+        m["WCS"] = {"remember_p50_seconds": med(write_times), "corpus_records": manifest["total_records"],
+                    "note": "slope = d log(remember_p50) / d log(corpus_records) across runs at several --target-records"}
         summary["per_query"] = per_query
     except Harness as error:
         summary["harness_error"] = str(error)
