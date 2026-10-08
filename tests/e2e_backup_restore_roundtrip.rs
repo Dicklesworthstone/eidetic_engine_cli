@@ -910,14 +910,55 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     // different degradation set. Adding the banner finishes that decision rather than
     // loosening it.
     //
-    // THAT PREMISE IS NOW WEAKER, DELIBERATELY NOT ACTED ON YET. `warm_published_index`
-    // publishes a real index on BOTH sides before either pack, so "the restored store has
-    // no published index" no longer describes the run. Whether the exclusions below are
-    // still load-bearing is therefore an open measurement, not an assumption: each one has
-    // to be removed and the test re-run to find out. Tightening them in the same change
-    // that introduced the warm would conflate "warming made these equal" with "warming
-    // broke something else", so the list stays as-is until measured one pointer at a time.
+    // THAT PREMISE IS NOW WEAKER. `warm_published_index` publishes a real index on BOTH
+    // sides before either pack, so "the restored store has no published index" no longer
+    // describes the run -- and MEASURED on 2026-10-08 (base f5307a005), warming equalized
+    // the degradation sets outright: both stores reported exactly
+    // [graph_ppr_snapshot_stale, pack_assembly_elapsed_over_budget,
+    // global_lane_migration_required]. The 4-vs-3 difference the banner exclusion was
+    // added for no longer occurs. The exclusions above are therefore candidates for
+    // removal, one pointer at a time, each with its own run -- which is how the banner leak
+    // was found and is not something to shortcut by deleting the list wholesale.
+    //
+    // THE TWO snapshotIdentity POINTERS BELOW ARE A DIFFERENT CASE, and they are excluded
+    // on a NAMED mechanism rather than on tolerance.
+    //
+    // That same run reached the byte comparison for the first time. Only SEVEN pointers
+    // differed, and two of them were
+    //     /data/pack/snapshotIdentity/components/request
+    //     /data/pack/snapshotIdentity/digest
+    //
+    // src/core/context.rs:9084-9130 lists every input to the request digest: query,
+    // profile, budget.max_tokens, output.profile, output.resource_profile, five output
+    // booleans, task_lens, task_paths, and `read_snapshot_generation`. NO workspace or
+    // database path is hashed -- I assumed one was and was wrong. Every other input is
+    // identical here by construction, because both packs run the same CLI arguments with
+    // the same query. So by elimination the differing input is the snapshot GENERATION,
+    // which is store-local: `workspace_generations` is one of the tables backup.rs:1957
+    // marks derived_rebuildable / rebuild_on_restore, so a restore is DESIGNED not to carry
+    // the counter across. Asserting byte-identity over it cannot hold, for a structural
+    // reason that has nothing to do with retrieval.
+    //
+    // `digest` follows because the composite hashes the tagged component digests
+    // (context.rs:9257), so it cannot match while `request` does not.
+    //
+    // NARROWED, NOT BLANKETED. Only those two pointers are removed. The other SIX
+    // components -- reference_time, quality_scoring, items, omitted, degraded,
+    // coordination, rendered_text -- stay under full byte comparison, and all of them
+    // matched in that run. Excluding `/data/pack/snapshotIdentity` wholesale would have
+    // thrown away seven working checks to tolerate one counter.
+    //
+    // WHAT EXCLUDING `digest` DOES COST, since it is a composite: the schema tag
+    // (PACK_HASH_INPUT_SCHEMA_V4) and the conditional inclusion of `omitted` under
+    // include_skipped are hashed into the composite and nowhere else, so those two inputs
+    // are no longer compared. The eight component digests themselves still are. Recorded
+    // here rather than discovered later.
+    //
+    // The guard below asserts the component SET, because a future change that dropped
+    // components entirely would otherwise make this narrowing pass on nothing.
     for pointer in [
+        "/data/pack/snapshotIdentity/components/request",
+        "/data/pack/snapshotIdentity/digest",
         "/data/degraded",
         "/degraded",
         "/data/pack/advisoryBanner",
@@ -926,6 +967,38 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
         "/data/pack/text",
     ] {
         remove_json_pointer(&mut value, pointer);
+    }
+    // THE SURVIVING COMPONENTS MUST STILL BE THERE. Removing `components/request` and
+    // `digest` is only safe while the other six components remain under comparison; if a
+    // future change stopped emitting `snapshotIdentity/components` at all, every remaining
+    // check inside it would silently disappear and this canonicalizer would compare two
+    // objects that no longer carry a pack identity. Asserting the key set turns that into a
+    // failure instead of a quieter pass. Measured 2026-10-08: these six matched byte-for-byte
+    // across source and restored while `request` and `digest` did not.
+    let components = value
+        .pointer("/data/pack/snapshotIdentity/components")
+        .and_then(JsonValue::as_object)
+        .ok_or_else(|| {
+            "backup context output has no /data/pack/snapshotIdentity/components object, so \
+             the two pointers excluded above would be hiding the absence of the whole pack \
+             identity rather than tolerating a store-local generation counter"
+                .to_owned()
+        })?;
+    for required in [
+        "reference_time",
+        "quality_scoring",
+        "items",
+        "omitted",
+        "degraded",
+        "coordination",
+        "rendered_text",
+    ] {
+        if !components.contains_key(required) {
+            return Err(format!(
+                "snapshotIdentity component {required:?} is missing; the request/digest \
+                 exclusions are only narrow because the remaining components stay compared"
+            ));
+        }
     }
     if let Some(items) = value
         .pointer_mut("/data/pack/items")
@@ -950,6 +1023,93 @@ fn context_comparison_requires_producer_slo() {
     assert_eq!(
         canonical_context_stdout(missing_slo),
         Err("backup context output missing producer SLO measurements".to_owned())
+    );
+}
+
+/// A valid SLO block, so a test can get PAST the early return and exercise what follows.
+///
+/// Thresholds satisfy `0 < target <= warning < failure` and the statuses agree with
+/// elapsedMs, which `normalize_pack_slo_measurements` checks in that order
+/// (src/obs/volatile_fields.rs:144-174).
+fn slo_fixture() -> JsonValue {
+    serde_json::json!({
+        "schema": "ee.pack.slo.v1",
+        "budgetClass": {
+            "elapsedMsTarget": 1000,
+            "elapsedMsWarning": 2000,
+            "elapsedMsFailure": 3000
+        },
+        "actuals": {"elapsedMs": 500},
+        "resourceStatus": "within_budget",
+        "elapsedStatus": "within_budget",
+        "status": "within_budget"
+    })
+}
+
+#[test]
+fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclude() {
+    // POSITIVE CONTROL for the narrowing at canonical_context_stdout (bd-bka39). That
+    // canonicalizer drops /data/pack/snapshotIdentity/components/request and .../digest
+    // because they carry a store-local snapshot generation. The narrowing is only
+    // defensible while the OTHER components stay compared, so losing them has to fail.
+    // Without this test the guard would be a line nobody had seen fire.
+    let identity_absent = serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {"pack": {"schema": "ee.pack.v2", "items": [], "slo": slo_fixture()}}
+    });
+    let error = canonical_context_stdout(identity_absent)
+        .expect_err("a pack with no snapshotIdentity must not canonicalize");
+    assert!(
+        error.contains("snapshotIdentity/components"),
+        "the error must name the missing object, got: {error}"
+    );
+
+    // And the twin hole: components PRESENT but one of the compared six removed. This is
+    // the likelier regression -- a field quietly dropped from the envelope -- and the
+    // object-level check above cannot see it.
+    let mut one_missing = serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {"pack": {
+            "schema": "ee.pack.v2",
+            "items": [],
+            "slo": slo_fixture(),
+            "snapshotIdentity": {"components": {
+                "request": "blake3:aaa",
+                "reference_time": "blake3:bbb",
+                "quality_scoring": "blake3:ccc",
+                "items": "blake3:ddd",
+                "omitted": "blake3:eee",
+                "degraded": "blake3:fff",
+                "coordination": "blake3:ggg",
+                "rendered_text": "blake3:hhh"
+            }, "digest": "blake3:iii"}
+        }}
+    });
+    // All eight present: canonicalizes, and the two store-local pointers are gone.
+    let full = canonical_context_stdout(one_missing.clone())
+        .expect("a complete snapshotIdentity must canonicalize");
+    let rendered = String::from_utf8(full).expect("canonical bytes are utf-8");
+    assert!(
+        !rendered.contains("blake3:aaa") && !rendered.contains("blake3:iii"),
+        "request and digest must be excluded from the compared bytes"
+    );
+    assert!(
+        rendered.contains("blake3:ddd"),
+        "the items component must still be compared"
+    );
+
+    one_missing
+        .pointer_mut("/data/pack/snapshotIdentity/components")
+        .and_then(JsonValue::as_object_mut)
+        .expect("components object")
+        .remove("items");
+    let error =
+        canonical_context_stdout(one_missing).expect_err("dropping a compared component must fail");
+    assert!(
+        error.contains("\"items\""),
+        "the error must name the dropped component, got: {error}"
     );
 }
 
