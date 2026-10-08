@@ -71,10 +71,14 @@ jobs:
           # exactly as designed. Being a bare `test`, its only way to say "already delivered,
           # nothing to do" was a bare nonzero exit, which renders as a red lane with no log.
           #
-          # EXIT CODES AND CONDITIONS ARE UNCHANGED -- both still exit 1 on the same
-          # conditions. Deciding whether an already-delivered lane should instead succeed,
-          # skip, or be retired changes what this lane PUBLISHES, and that is an owner's call.
-          # This only makes it say which of the two guards stopped it, and why.
+          # THE TWO GUARDS NOW END DIFFERENTLY, and the difference is the point. Whether an
+          # already-delivered lane should succeed rather than refuse was an owner's call,
+          # because it changes what this lane PUBLISHES; it was decided on 2026-10-07 in
+          # favour of succeeding, following 4372cef4a. So:
+          #   already delivered  -> exit 0, nothing to apply, verify still runs (see below)
+          #   blob pin stale     -> exit 1, a real "cannot deliver against this tree"
+          # Both still say which guard stopped the lane and why, which is what the empty
+          # 8ms failure could not do.
           if test -f src/core/index_generation_watermark.rs; then
             # bd-aav0v / bd-...hpgw8: ALREADY DELIVERED IS A SUCCESS, NOT A REFUSAL.
             #
