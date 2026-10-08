@@ -122,11 +122,60 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # bd-lagsa / bd-aav0v. This step used to compare each arm's count EXACTLY and
+          # record the result in a shared `failed` flag with no output, so a mismatch
+          # ended the step at a bare `exit "$failed"` naming no arm, no filter and no
+          # number. Run 37660994662 (2026-10-07 17:41Z) is the instance: all four suites
+          # printed `0 failed`, and the lane still died 3ms after the last one.
+          #
+          # The cause was cargo counting 28 for core::global_store:: against a pin of 27.
+          # b3e08c1bc, three hours earlier, added
+          # `default_user_data_root_requires_absolute_xdg_and_preserves_home_fallback`
+          # to src/core/global_store.rs -- a config fix with a test for it, i.e. plain
+          # progress, which reddened a primer-admission delivery lane that has nothing to
+          # do with XDG path resolution. An exact count fails in the direction of progress.
+          #
+          # FLOORS, at the ORIGINAL reviewed values, not today's counts. All four filters
+          # end in `::`, so each names a population that grows; the precedent for flooring
+          # those while keeping single-test pins exact is d26210858, and there are no
+          # single-test pins here. Keeping 27 rather than ratcheting to 28 follows
+          # external-ingestion-20260919's reasoning verbatim -- "the reviewed minimum
+          # rather than re-pinning, and the observed count prints so the gap stays
+          # visible". 28 includes a test nobody reviewed as part of this lane's charter,
+          # and ratcheting to it would red the lane again if that config test were later
+          # moved to another module, which is a reorganisation, not a coverage loss.
+          #
+          # A below-floor count still fails: a suite that SHRANK means coverage was
+          # removed or a filter stopped matching, which is the direction worth stopping.
+          #
+          # ACCUMULATION IS PRESERVED, AND IT IS SAFE TO PRESERVE. Each arm sets the flag
+          # and RETURNS rather than calling `exit 1`: `run_group` is a shell function, so
+          # an `exit` there would end the whole step and skip the remaining arms, turning
+          # "run all four and report all four" into "stop at the first". That is a
+          # diagnostic loss, not a gain. It is not a publication interlock either -- the
+          # `git push` lives in the `integrate` job, not in `verify` -- so nothing is
+          # published on the strength of a later arm.
           run_group() {
-            local name="$1" filter="$2" expected="$3" status=0
+            local name="$1" filter="$2" floor="$3" status=0 observed=
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/primer-$name.log" 2>&1 || status=$?
             tail -n 100 "$RUNNER_TEMP/primer-$name.log"
-            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/primer-$name.log"; then failed=1; fi
+            observed=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed;.*/\1/p' "$RUNNER_TEMP/primer-$name.log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' ($filter) STOPPED this lane -- cargo exited $status, so the suite did not pass. This is a TEST FAILURE, not a count mismatch; the failing test is in the tail above. Observed summary count: ${observed:-none}."
+              failed=1
+              return 0
+            fi
+            if test -z "$observed"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) STOPPED this lane -- cargo exited 0 but printed no 'test result: ok. N passed; 0 failed;' line, so the population could not be read. That is what a filter matching ZERO tests looks like, and an unreadable population is treated as a failure rather than as a pass."
+              failed=1
+              return 0
+            fi
+            if test "$observed" -lt "$floor"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) STOPPED this lane -- ran $observed tests with 0 failures, BELOW the floor of $floor. The suite shrank: coverage was removed, or the filter stopped matching after a rename or a module move. Adding tests is fine and only raises this number."
+              failed=1
+              return 0
+            fi
+            echo "ATTRIBUTION: arm '$name' ($filter) ok -- ran $observed tests (floor $floor), 0 failed."
           }
           run_group admission 'core::primer::seal_tests::' 7
           run_group existing 'core::primer::tests::' 16
