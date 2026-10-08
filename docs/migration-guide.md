@@ -183,6 +183,36 @@ stand in for the complete window. Sources previously stored only as oversized
 withheld markers need re-import to recover their text; rebuilding an index
 cannot reconstruct source bytes that were never stored.
 
+## Shared Context-Pack Budgets
+
+Result caps and pagination now operate on a common ranked population of admitted
+memories, procedural rules, and imported evidence. Ranking compares relevance,
+then utility, then canonical entity kind and identity. Existing memory-only
+candidate ordering is preserved. A query with `budget.maxResults: 1` can now
+select its best native evidence hit even when memory candidates are available.
+When a linked memory and its source evidence both occur in that population,
+their highest-ranked representative uses the result slot; later pages do not
+repeat the alternative representation.
+
+The memory selector still applies its configured MMR or facility-location
+policy. Rules and evidence then compete for the shared token budget in their
+combined rank order. A native item may replace strictly weaker selected memory
+identities only after a complete feasible replacement has been found. All
+selected LODs of a displaced memory move together. The anti-pattern reservation
+is protected, and an oversized candidate cannot evict items that it cannot
+replace. A memory retained to represent a higher-ranked native hit also stays
+protected from later lower-ranked native hits. Selection does not refill the
+memory pool after a replacement.
+
+This changes which items a new pack may select. The cache policy key changes so
+older memory-first results are reassembled. There is no database migration or
+wire-format change for this selection policy: selected natives retain their
+existing identity, revision and provenance, and historical packs remain
+replayable. Displaced memories produce one persisted omission per memory
+identity, including the token cost of all removed LODs. Native budget exclusions
+are included in aggregate audit counts and response diagnostics; the broader
+typed native omission contract remains separate work.
+
 ## Core Documents
 
 - [Mechanical Boundary Command Inventory](./mechanical-boundary-command-inventory.md) — full command matrix

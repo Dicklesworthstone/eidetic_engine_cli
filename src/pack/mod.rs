@@ -2326,6 +2326,113 @@ impl PackDraft {
             .saturating_add(self.evidence_items.len())
     }
 
+    /// Release memory budget for a caller's already-feasible native selection.
+    /// A memory's selected LODs move together, and any anti-pattern-first LOD
+    /// protects the whole identity. Native entities retain their own identities
+    /// and positions relative to every other retained item.
+    pub(crate) fn omit_memories_for_native_budget(&mut self, memory_ids: &[MemoryId]) -> usize {
+        let mut omitted_ids: BTreeSet<_> = memory_ids.iter().copied().collect();
+        for item in &self.items {
+            if item.selected_in == PackSelectionPhase::AntiPatternFirst {
+                omitted_ids.remove(&item.memory_id);
+            }
+        }
+        if !self
+            .items
+            .iter()
+            .any(|item| omitted_ids.contains(&item.memory_id))
+        {
+            return 0;
+        }
+
+        let previous_count = self.items.len();
+        let mut kept = Vec::with_capacity(previous_count);
+        let mut budget_omissions = BTreeMap::<MemoryId, PackOmission>::new();
+        for item in std::mem::take(&mut self.items) {
+            if omitted_ids.contains(&item.memory_id) {
+                if let Some(omission) = budget_omissions.get_mut(&item.memory_id) {
+                    omission.estimated_tokens = omission
+                        .estimated_tokens
+                        .saturating_add(item.estimated_tokens);
+                } else {
+                    budget_omissions.insert(
+                        item.memory_id,
+                        PackOmission {
+                            memory_id: item.memory_id,
+                            estimated_tokens: item.estimated_tokens,
+                            relevance: item.relevance,
+                            utility: item.utility,
+                            attempt_family_multiplicity: item.attempt_family_multiplicity,
+                            reason: PackOmissionReason::TokenBudgetExceeded,
+                            rejected_at: PackRejectionStage::Selection,
+                            feasible: false,
+                            could_fit_with_budget: None,
+                        },
+                    );
+                }
+            } else {
+                kept.push(item);
+            }
+        }
+        self.items = kept;
+        // Durable omissions are unique by MemoryId. Replace any earlier LOD
+        // omission for a displaced identity with its complete removed token
+        // cost; an already-omitted variant did not consume selected budget.
+        self.omitted
+            .retain(|omission| !budget_omissions.contains_key(&omission.memory_id));
+        self.omitted.extend(budget_omissions.into_values());
+
+        // Natives may already sit between memory ranks after earlier budget
+        // replacements. Compact the complete order, not each kind separately.
+        let mut ranks = self
+            .items
+            .iter_mut()
+            .map(|item| (item.rank, Some(item.memory_id), &mut item.rank))
+            .chain(
+                self.rule_items
+                    .iter_mut()
+                    .map(|item| (item.rank, None, &mut item.rank)),
+            )
+            .chain(
+                self.evidence_items
+                    .iter_mut()
+                    .map(|item| (item.rank, None, &mut item.rank)),
+            )
+            .collect::<Vec<_>>();
+        ranks.sort_by_key(|(rank, _, _)| *rank);
+        let mut memory_ranks = BTreeMap::new();
+        for (index, (old_rank, memory_id, rank)) in ranks.into_iter().enumerate() {
+            let next_rank = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            *rank = next_rank;
+            if let Some(memory_id) = memory_id {
+                memory_ranks.insert((memory_id, old_rank), next_rank);
+            }
+        }
+
+        self.used_tokens = self
+            .items
+            .iter()
+            .map(|item| item.estimated_tokens)
+            .chain(self.rule_items.iter().map(|item| item.estimated_tokens))
+            .chain(self.evidence_items.iter().map(|item| item.estimated_tokens))
+            .fold(0, u32::saturating_add);
+        self.selection_audit.selected_count = self.selected_item_count();
+        self.selection_audit.omitted_count = self.omitted.len();
+        self.selection_audit.budget_used = self.used_tokens;
+        self.selection_audit.selected_items = selected_items_from_draft_items(&self.items);
+        self.selection_audit.steps.retain_mut(|step| {
+            let Some(rank) = memory_ranks.get(&(step.memory_id, step.rank)) else {
+                return false;
+            };
+            step.rank = *rank;
+            true
+        });
+        self.selection_audit.steps.sort_by_key(|step| step.rank);
+        refresh_selection_audit_objective_after_guard(&mut self.selection_audit, &self.items);
+        self.hash = None;
+        previous_count - self.items.len()
+    }
+
     /// bd-1n0np.7.5 — pack-time contradiction guard. Keeps a maximal conflict-free
     /// subset in standing order, recording suppressed neighbors as
     /// [`PackOmissionReason::ContradictionSuppressed`] omissions. Every suppression
@@ -8081,15 +8188,15 @@ fn refresh_selection_audit_objective_after_guard(
     audit: &mut PackSelectionAudit,
     items: &[PackDraftItem],
 ) {
-    let selected_phase_by_memory: std::collections::BTreeMap<String, PackSelectionPhase> = items
+    let selected_phase_by_item: BTreeMap<_, _> = items
         .iter()
-        .map(|item| (item.memory_id.to_string(), item.selected_in))
+        .map(|item| ((item.memory_id, item.rank), item.selected_in))
         .collect();
     let mut objective_value = 0.0_f32;
     let mut steps = Vec::with_capacity(items.len());
     for mut step in std::mem::take(&mut audit.steps) {
-        let Some(selection_phase) = selected_phase_by_memory
-            .get(&step.memory_id.to_string())
+        let Some(selection_phase) = selected_phase_by_item
+            .get(&(step.memory_id, step.rank))
             .copied()
         else {
             continue;
@@ -10637,6 +10744,320 @@ mod tests {
             .iter()
             .find(|item| item.memory_id == memory_id)
             .ok_or_else(|| format!("expected selected item for memory {memory_id}"))
+    }
+
+    fn native_budget_draft(objective: PackSelectionObjective) -> Result<PackDraft, String> {
+        let mut draft = draft_from_candidates(vec![
+            candidate(1, 0.9, 0.8, 10)?,
+            candidate(2, 0.4, 0.3, 20)?,
+            candidate(3, 0.3, 0.2, 30)?,
+            candidate(4, 0.8, 0.7, 15)?,
+            candidate(3, 0.3, 0.2, 5)?,
+            candidate(1, 0.9, 0.8, 3)?,
+        ])?;
+        let strict_phase = match objective {
+            PackSelectionObjective::MmrRedundancy => PackSelectionPhase::StrictMmr,
+            PackSelectionObjective::FacilityLocation => PackSelectionPhase::FacilityLocation,
+        };
+        let phases = [
+            PackSelectionPhase::AntiPatternFirst,
+            strict_phase,
+            strict_phase,
+            strict_phase,
+            PackSelectionPhase::CoverageFill,
+            PackSelectionPhase::CoverageFill,
+        ];
+        for ((item, rank), phase) in draft.items.iter_mut().zip([1, 3, 4, 6, 8, 9]).zip(phases) {
+            item.rank = rank;
+            item.selected_in = phase;
+            if item.memory_id == memory_id(1) {
+                item.section = PackSection::Failures;
+            }
+        }
+        let mut objective_value = 0.0;
+        draft.selection_audit.steps = draft
+            .items
+            .iter()
+            .zip([0.8_f32, 0.4, 0.3, 0.2, 0.15, 0.1])
+            .map(|(item, marginal_gain)| {
+                if item.selected_in != PackSelectionPhase::CoverageFill {
+                    objective_value += marginal_gain;
+                }
+                super::PackSelectionStep {
+                    rank: item.rank,
+                    memory_id: item.memory_id,
+                    marginal_gain,
+                    objective_value,
+                    token_cost: item.estimated_tokens,
+                    feasible: true,
+                    covered_features: vec![format!("retained-source-{}", item.rank)],
+                }
+            })
+            .collect();
+        draft.selection_audit.objective = objective;
+        draft.selection_audit.total_objective_value = objective_value;
+        draft.selection_audit.selected_items = super::selected_items_from_draft_items(&draft.items);
+        // Typed natives deliberately share UUID payloads with the memories
+        // that will be removed. They must never be treated as those memories.
+        draft.rule_items.push(super::PackRuleItem {
+            rank: 2,
+            rule_id: super::RuleId::from_uuid(Uuid::from_u128(2)).to_string(),
+            entity_revision: format!("blake3:{}", blake3::hash(b"native rule").to_hex()),
+            section: PackSection::ProceduralRules,
+            content: "Bound retry work before dispatching it.".to_owned(),
+            estimated_tokens: 7,
+            relevance: score(0.95)?,
+            utility: score(0.8)?,
+            provenance: vec![provenance("file://AGENTS.md#L2")?],
+            why: "higher-ranked native rule".to_owned(),
+            trust: PackTrustSignal::new(TrustClass::HumanExplicit, None),
+        });
+        draft.evidence_items.push(super::PackEvidenceItem {
+            rank: 7,
+            evidence_id: super::EvidenceId::from_uuid(Uuid::from_u128(3)).to_string(),
+            entity_revision: format!("blake3:{}", blake3::hash(b"native evidence").to_hex()),
+            session_id: crate::models::SessionId::from_uuid(Uuid::from_u128(5)).to_string(),
+            start_line: 7,
+            end_line: 9,
+            section: PackSection::Evidence,
+            content: "The bounded retry recovered the worker.".to_owned(),
+            estimated_tokens: 11,
+            relevance: score(0.9)?,
+            utility: score(0.7)?,
+            provenance: vec![provenance("file://incident.jsonl#L7-L9")?],
+            why: "higher-ranked native evidence".to_owned(),
+            trust: PackTrustSignal::new(TrustClass::CassEvidence, None),
+        });
+        draft.omitted.push(super::PackOmission::from_candidate(
+            &candidate(99, 0.01, 0.1, 100)?,
+            PackOmissionReason::BelowRelevanceFloor,
+            None,
+        ));
+        draft.used_tokens += 18;
+        draft.selection_audit.candidate_count = 9;
+        draft.selection_audit.selected_count = draft.selected_item_count();
+        draft.selection_audit.omitted_count = draft.omitted.len();
+        draft.selection_audit.budget_used = draft.used_tokens;
+        draft.hash = Some("blake3:before-native-replacement".to_owned());
+        Ok(draft)
+    }
+
+    #[test]
+    fn native_budget_omission_updates_mixed_ranks_tokens_and_memory_audits() -> TestResult {
+        for objective in [
+            PackSelectionObjective::MmrRedundancy,
+            PackSelectionObjective::FacilityLocation,
+        ] {
+            let mut draft = native_budget_draft(objective)?;
+            let before = draft.clone();
+            let mut expected_rule = before.rule_items.clone();
+            expected_rule[0].rank = 2;
+            let mut expected_evidence = before.evidence_items.clone();
+            expected_evidence[0].rank = 4;
+
+            let count = draft.omit_memories_for_native_budget(&[
+                memory_id(3),
+                memory_id(2),
+                memory_id(3),
+                memory_id(1),
+                memory_id(99),
+            ]);
+
+            ensure_equal(&count, &3, "remove each requested memory LOD exactly once")?;
+            ensure_equal(
+                &draft
+                    .items
+                    .iter()
+                    .map(|item| (item.memory_id, item.rank))
+                    .collect::<Vec<_>>(),
+                &vec![(memory_id(1), 1), (memory_id(4), 3), (memory_id(1), 5)],
+                "retained memory ranks preserve the complete cross-kind order",
+            )?;
+            ensure_equal(
+                &draft.rule_items,
+                &expected_rule,
+                "native rule identity and payload",
+            )?;
+            ensure_equal(
+                &draft.evidence_items,
+                &expected_evidence,
+                "native evidence identity and payload",
+            )?;
+            ensure_equal(&draft.used_tokens, &46, "retained memory and native tokens")?;
+            ensure_equal(&draft.selected_item_count(), &5, "all-kind selection count")?;
+            ensure_equal(
+                &draft.selection_audit.selected_count,
+                &5,
+                "all-kind audit count",
+            )?;
+            ensure_equal(&draft.selection_audit.budget_used, &46, "audit token total")?;
+            ensure_equal(
+                &draft.selection_audit.candidate_count,
+                &9,
+                "candidate population stays fixed",
+            )?;
+            ensure_equal(
+                &draft.selection_audit.omitted_count,
+                &3,
+                "audit omission count",
+            )?;
+            ensure_equal(
+                &draft.omitted[0],
+                &before.omitted[0],
+                "earlier omission stays intact",
+            )?;
+            ensure_equal(
+                &draft.omitted[1..]
+                    .iter()
+                    .map(|item| (item.memory_id, item.estimated_tokens))
+                    .collect::<Vec<_>>(),
+                &vec![(memory_id(2), 20), (memory_id(3), 35)],
+                "only displaced memories acquire omissions",
+            )?;
+            ensure(
+                draft.omitted[1..].iter().all(|item| {
+                    item.reason == PackOmissionReason::TokenBudgetExceeded
+                        && item.rejected_at == PackRejectionStage::Selection
+                        && !item.feasible
+                        && item.could_fit_with_budget.is_none()
+                }),
+                "native displacement is a budget rejection at selection",
+            )?;
+            ensure_equal(
+                &draft.selection_audit.selected_items,
+                &vec![
+                    PackSelectedItem {
+                        rank: 1,
+                        memory_id: memory_id(1),
+                        token_cost: 10,
+                        feasible: true,
+                    },
+                    PackSelectedItem {
+                        rank: 3,
+                        memory_id: memory_id(4),
+                        token_cost: 15,
+                        feasible: true,
+                    },
+                    PackSelectedItem {
+                        rank: 5,
+                        memory_id: memory_id(1),
+                        token_cost: 3,
+                        feasible: true,
+                    },
+                ],
+                "memory certificates retain their global ranks without fake native IDs",
+            )?;
+            let mut expected_steps = vec![
+                before.selection_audit.steps[0].clone(),
+                before.selection_audit.steps[3].clone(),
+                before.selection_audit.steps[5].clone(),
+            ];
+            for ((step, rank), objective_value) in expected_steps
+                .iter_mut()
+                .zip([1, 3, 5])
+                .zip([0.8, 1.0, 1.0])
+            {
+                step.rank = rank;
+                step.objective_value = objective_value;
+            }
+            ensure_equal(
+                &draft.selection_audit.steps,
+                &expected_steps,
+                "ranked memory objective steps",
+            )?;
+            ensure_close(
+                draft.selection_audit.total_objective_value,
+                1.0,
+                "retained objective excludes removed and coverage-only gains",
+            )?;
+            ensure_equal(
+                &draft.hash,
+                &None,
+                "changed selection invalidates the pack hash",
+            )?;
+
+            let once = draft.clone();
+            ensure_equal(
+                &draft.omit_memories_for_native_budget(&[memory_id(2), memory_id(3)]),
+                &0,
+                "repeated omission does nothing",
+            )?;
+            ensure_equal(&draft, &once, "repeated omission is byte-for-byte stable")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_budget_omission_preserves_whole_protected_groups_and_exact_noops() -> TestResult {
+        let mut draft = native_budget_draft(PackSelectionObjective::MmrRedundancy)?;
+        let before = draft.clone();
+        for requested in [
+            vec![],
+            vec![memory_id(99)],
+            vec![memory_id(1), memory_id(1), memory_id(99)],
+        ] {
+            ensure_equal(
+                &draft.omit_memories_for_native_budget(&requested),
+                &0,
+                "no removable selected identity",
+            )?;
+            ensure_equal(
+                &draft,
+                &before,
+                "no-op keeps content, ranks, omissions, audits and hash exactly",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_budget_omission_replaces_existing_rows_for_the_removed_identity() -> TestResult {
+        let mut draft = native_budget_draft(PackSelectionObjective::MmrRedundancy)?;
+        let unrelated = draft.omitted[0].clone();
+        for tokens in [100, 200] {
+            draft.omitted.push(super::PackOmission::from_candidate(
+                &candidate(3, 0.3, 0.2, tokens)?,
+                PackOmissionReason::RedundantCandidate,
+                None,
+            ));
+        }
+        ensure_equal(
+            &draft.omit_memories_for_native_budget(&[memory_id(3), memory_id(3)]),
+            &2,
+            "both selected LODs were removed",
+        )?;
+        ensure_equal(
+            &draft.omitted.len(),
+            &2,
+            "one durable omission per identity",
+        )?;
+        ensure_equal(
+            &draft.omitted[0],
+            &unrelated,
+            "unrelated omission is unchanged",
+        )?;
+        ensure_equal(
+            &draft.omitted[1].memory_id,
+            &memory_id(3),
+            "removed identity",
+        )?;
+        ensure_equal(
+            &draft.omitted[1].estimated_tokens,
+            &35,
+            "only removed selected LOD costs contribute to the replacement",
+        )?;
+        ensure_equal(
+            &draft.omitted[1].reason,
+            &PackOmissionReason::TokenBudgetExceeded,
+            "the current whole-identity omission replaces obsolete LOD reasons",
+        )?;
+        ensure_equal(
+            &draft.selection_audit.omitted_count,
+            &2,
+            "canonical omission count",
+        )?;
+        ensure_equal(&draft.used_tokens, &66, "only selected LODs release budget")?;
+        Ok(())
     }
 
     #[test]

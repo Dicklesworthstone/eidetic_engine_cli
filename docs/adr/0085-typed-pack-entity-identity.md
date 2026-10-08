@@ -331,13 +331,51 @@ reassembled through native admission.
 
 This slice uses the existing `PackRuleItem`, `pack_rule_items`, native replay,
 and rule-outcome paths. It does not complete the coordinated v3 migration or
-the entity-generic selection and omission work described above. The existing
-native lane spends the shared result and token budgets after memory selection;
-it preserves retrieval order among rules, but does not provide cross-kind
-relevance ranking. The public
+the entity-generic selection and omission work described above. At this slice,
+the native lane spent result and token budgets after memory selection and did
+not provide cross-kind relevance ranking. The budget amendment below replaces
+that ordering. The public
 regression in `tests/rule_mark_update_e2e.rs` exercises shared-source rules,
 an independent source-memory hit, persistence, replay, pack-rank feedback,
 retry idempotence, and unchanged source and sibling rules.
+
+### Shared result and token budgets (2026-10-08 amendment)
+
+The current native paths share result caps and page offsets with memories in
+one deterministic population. Priority is descending relevance, descending
+utility, then the canonical entity kind and ID order. A linked memory and its
+source evidence use their highest-priority representative before a cap or page
+spends a slot on that group. A memory-only score discount therefore cannot
+erase the stronger native source. Memory-only candidate ordering remains
+unchanged.
+
+Memory assembly retains its existing MMR or facility-location objective. The
+native rule and evidence population then competes in combined priority order.
+When a native item cannot fit, assembly first plans a complete feasible removal
+of strictly lower-priority selected memory identities. Every LOD of a memory
+moves together, and an anti-pattern-first selection protects the entire
+identity. Only a complete plan may mutate the draft. Earlier, higher-priority
+native selections are retained. If a selected memory represents an earlier
+native hit, later lower-priority hits cannot evict that representative. This
+removes source-phase starvation without
+inventing a memory identity, assigning fixed source quotas, or allowing an
+oversized native item to empty an otherwise useful pack.
+
+Removed memory LODs produce one omission per native memory identity, summing
+their token costs to respect persisted omission uniqueness. Ranks are compacted
+across all kinds, memory selection steps and objective totals are refreshed,
+and all-kind counts and tokens describe the retained pack. Native items keep
+their exact content, revision, provenance and replay identity. The cache policy
+key changes; the hash encoding and wire formats do not.
+
+This bounded improvement does not complete the entity-generic candidate,
+objective and omission model above. Memory selection is not rerun to refill
+slack after displacement. Native exclusions are counted and diagnosed without
+fabricating memory-shaped omission rows. Verification is mounted under
+`core::context::mixed_selection_tests` and `pack::tests::native_budget_omission_`,
+including real admitted evidence, displacement, read-only persisted replay,
+mixed caps/pages, infeasible replacements, protected memory groups, and audit
+accounting for both memory objectives.
 
 ## Verification
 

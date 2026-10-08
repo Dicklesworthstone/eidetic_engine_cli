@@ -3891,7 +3891,8 @@ pub fn unrelated_context() -> u64 {{
                 expected_indices.len().min(1),
                 "{name}"
             );
-            super::append_direct_evidence_pack_items(
+            super::append_ranked_native_pack_items(
+                Vec::new(),
                 evidence_candidates,
                 &request,
                 &mut draft,
@@ -3959,7 +3960,8 @@ pub fn unrelated_context() -> u64 {{
                 &mut degraded,
             )
             .expect("valid fixture relevance floor");
-            super::append_direct_evidence_pack_items(
+            super::append_ranked_native_pack_items(
+                Vec::new(),
                 evidence_candidates,
                 &limited,
                 &mut draft,
@@ -4054,7 +4056,8 @@ pub fn unrelated_context() -> u64 {{
                             candidates,
                         )
                         .map_err(|error| error.to_string())?;
-                        super::append_direct_evidence_pack_items(
+                        super::append_ranked_native_pack_items(
+                            Vec::new(),
                             evidence,
                             &limited,
                             &mut draft,
@@ -4177,7 +4180,13 @@ pub fn unrelated_context() -> u64 {{
                 memories,
             )
             .map_err(|error| error.to_string())?;
-            super::append_direct_evidence_pack_items(evidence, request, &mut draft, &mut degraded);
+            super::append_ranked_native_pack_items(
+                Vec::new(),
+                evidence,
+                request,
+                &mut draft,
+                &mut degraded,
+            );
             assert_eq!(draft.evidence_items.len(), offset as usize);
             if offset == 1 {
                 assert_eq!(draft.evidence_items[0].evidence_id, evidence_ids[1]);
@@ -4286,7 +4295,8 @@ pub fn unrelated_context() -> u64 {{
                     memories,
                 )
                 .map_err(|error| error.to_string())?;
-                super::append_direct_evidence_pack_items(
+                super::append_ranked_native_pack_items(
+                    Vec::new(),
                     evidence,
                     request,
                     &mut draft,

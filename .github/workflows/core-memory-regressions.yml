@@ -385,6 +385,8 @@ jobs:
           pack-default-reservation pack::tests::anti_pattern_first_accepts_exact_relevance_floor_boundary
           pack-default-floor-explanation pack::tests::why_not_selected_reports_below_score_floor
           pack-native-floor core::context::relevance_floor_tests::
+          pack-mixed-source-budget core::context::mixed_selection_tests::
+          pack-native-budget-audit pack::tests::native_budget_omission_
           pack-incident-cards core::context::incident_card_tests::
           pack-floor-cache core::context::tests::pack_l2_feature_flags_distinguish_default_and_explicit_relevance_floors
           CASES

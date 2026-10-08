@@ -842,8 +842,9 @@ fn sourced_rules_keep_distinct_identity_order_and_persisted_replay() {
     let mut draft =
         crate::pack::assemble_draft("prepare release", request.budget, resolved.memories.clone())
             .unwrap();
-    append_direct_rule_pack_items(
+    append_ranked_native_pack_items(
         resolved.candidates.clone(),
+        Vec::new(),
         &request,
         &mut draft,
         &mut resolved.degraded,
@@ -851,6 +852,19 @@ fn sourced_rules_keep_distinct_identity_order_and_persisted_replay() {
     assert_eq!(draft.items.len(), 1);
     assert_eq!(draft.rule_items.len(), 3);
     assert_eq!(draft.selected_item_count(), 4);
+    let selected_rules = vec![
+        first.rule.clone(),
+        second.rule.clone(),
+        sourceless.rule.clone(),
+    ];
+    assert_eq!(
+        draft
+            .rule_items
+            .iter()
+            .map(|item| item.rule_id.clone())
+            .collect::<Vec<_>>(),
+        selected_rules
+    );
     assert_eq!(
         draft
             .rule_items
@@ -879,7 +893,7 @@ fn sourced_rules_keep_distinct_identity_order_and_persisted_replay() {
         rows.iter()
             .map(|row| row.rule_id.clone())
             .collect::<Vec<_>>(),
-        expected
+        selected_rules
     );
     let record = f.db.get_pack_record(&pack_id).unwrap().unwrap();
     assert_eq!(record.item_count, 4);
@@ -897,8 +911,8 @@ fn sourced_rules_keep_distinct_identity_order_and_persisted_replay() {
         assert_eq!(entry["rank"], item.rank);
         assert!(entry.get("memoryId").is_none());
     }
-    // A native page retains the same ordering, including its offset past an
-    // independently selected source memory.
+    // All rules have higher utility than the independent source memory, so
+    // the final page contains the last rule and that memory, not a rule tail.
     let mut memories = resolved.memories.clone();
     let mut rules = resolved.candidates.clone();
     let page = apply_pagination_with_rules(
@@ -914,13 +928,14 @@ fn sourced_rules_keep_distinct_identity_order_and_persisted_replay() {
         &mut Vec::new(),
     );
     assert_eq!(page.total, 4);
-    assert!(memories.is_empty());
+    assert_eq!(memories.len(), 1);
+    assert_eq!(memories[0].memory_id.to_string(), first.memory);
     assert_eq!(
         rules
             .iter()
             .map(|item| item.rule_id.clone())
             .collect::<Vec<_>>(),
-        vec![sourceless.rule, second.rule]
+        vec![sourceless.rule]
     );
     request.max_results = Some(1);
     let mut limited = crate::pack::assemble_draft(
@@ -929,7 +944,13 @@ fn sourced_rules_keep_distinct_identity_order_and_persisted_replay() {
         Vec::<PackCandidate>::new(),
     )
     .unwrap();
-    append_direct_rule_pack_items(resolved.candidates, &request, &mut limited, &mut Vec::new());
+    append_ranked_native_pack_items(
+        resolved.candidates,
+        Vec::new(),
+        &request,
+        &mut limited,
+        &mut Vec::new(),
+    );
     assert_eq!(limited.rule_items.len(), 1);
     assert_eq!(limited.rule_items[0].rule_id, first.rule);
 }
@@ -1032,30 +1053,37 @@ fn native_rules_share_memory_result_and_token_caps_without_aliasing() {
     let total = memory_draft.used_tokens + resolved.candidates[0].estimated_tokens;
     request.max_results = Some(1);
     let mut capped = memory_draft.clone();
-    append_direct_rule_pack_items(
+    append_ranked_native_pack_items(
         resolved.candidates.clone(),
+        Vec::new(),
         &request,
         &mut capped,
         &mut Vec::new(),
     );
     assert_eq!(capped.selected_item_count(), 1);
     assert!(
-        capped.rule_items.is_empty(),
-        "native tail shares the existing memory-first result cap"
+        capped.items.is_empty(),
+        "the weaker memory yields its capped result slot"
+    );
+    assert_eq!(capped.rule_items.len(), 1);
+    assert_eq!(
+        capped.omitted[0].reason,
+        PackOmissionReason::ExcludedByFilter
     );
     request.max_results = None;
-    for (budget, expected_rules) in [(total - 1, 0), (total, 1)] {
+    for (budget, expected_memories) in [(total - 1, 0), (total, 1)] {
         let mut draft = memory_draft.clone();
         draft.budget = crate::pack::TokenBudget::new(budget).unwrap();
         request.budget = draft.budget;
-        append_direct_rule_pack_items(
+        append_ranked_native_pack_items(
             resolved.candidates.clone(),
+            Vec::new(),
             &request,
             &mut draft,
             &mut Vec::new(),
         );
-        assert_eq!(draft.items.len(), 1);
-        assert_eq!(draft.rule_items.len(), expected_rules);
+        assert_eq!(draft.items.len(), expected_memories);
+        assert_eq!(draft.rule_items.len(), 1);
         assert!(draft.used_tokens <= budget);
     }
     request.sections = vec![PackSection::ProceduralRules];
@@ -1074,7 +1102,13 @@ fn native_rules_share_memory_result_and_token_caps_without_aliasing() {
         Vec::<PackCandidate>::new(),
     )
     .unwrap();
-    append_direct_rule_pack_items(rules, &request, &mut only_rules, &mut Vec::new());
+    append_ranked_native_pack_items(
+        rules,
+        Vec::new(),
+        &request,
+        &mut only_rules,
+        &mut Vec::new(),
+    );
     assert_eq!(only_rules.rule_items.len(), 1);
     assert_eq!(only_rules.rule_items[0].rule_id, pair.rule);
     assert_eq!(only_rules.used_tokens, request.budget.max_tokens());
@@ -1120,4 +1154,179 @@ fn native_sourced_rules_reject_stale_revision_without_borrowing_parent_body() {
             .any(|entry| entry.code == "context_rule_hit_unhydrated"
                 && entry.message.contains("stale derived index revision"))
     );
+}
+
+fn linked_selection_fixture() -> (
+    PackCandidate,
+    DirectEvidencePackCandidate,
+    DirectEvidencePackCandidate,
+) {
+    let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x811));
+    let memory = PackCandidate::new(PackCandidateInput {
+        memory_id,
+        section: PackSection::Evidence,
+        content: "The packaging repair retained the workspace identity.".to_owned(),
+        estimated_tokens: 1,
+        // A memory-only penalty can lower the transferred source relevance.
+        relevance: UnitScore::parse(0.2).unwrap(),
+        utility: UnitScore::neutral(),
+        provenance: vec![
+            PackProvenance::new(
+                ProvenanceUri::from_str("manual://linked-selection").unwrap(),
+                "The retained packaging observation",
+            )
+            .unwrap(),
+        ],
+        why: "The memory's final ranking includes an attempt-family discount.".to_owned(),
+    })
+    .unwrap();
+    let session_id = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x812)).to_string();
+    let evidence =
+        |seed, relevance, linked_memory_id: Option<MemoryId>| DirectEvidencePackCandidate {
+            linked_memory_id: linked_memory_id.map(|id| id.to_string()),
+            incident_card: false,
+            source: "lexical".to_owned(),
+            item: PackEvidenceItem {
+                rank: 0,
+                evidence_id: EvidenceId::from_uuid(uuid::Uuid::from_u128(seed)).to_string(),
+                entity_revision: format!("blake3:{}", "3".repeat(64)),
+                session_id: session_id.clone(),
+                start_line: 1,
+                end_line: 2,
+                section: PackSection::Evidence,
+                content: format!("The packaging repair {seed} passed the replay regression."),
+                estimated_tokens: 80,
+                relevance: UnitScore::parse(relevance).unwrap(),
+                utility: UnitScore::neutral(),
+                provenance: vec![
+                    PackProvenance::new(
+                        ProvenanceUri::from_str(&format!("cass-session://{session_id}#L1-2"))
+                            .unwrap(),
+                        "The observed repair and verification",
+                    )
+                    .unwrap(),
+                ],
+                why: "The transcript independently matches the packaging repair.".to_owned(),
+                trust: PackTrustSignal::new(TrustClass::CassEvidence, None),
+            },
+        };
+    (
+        memory,
+        evidence(0x813, 0.95, Some(memory_id)),
+        evidence(0x814, 0.8, None),
+    )
+}
+
+#[test]
+fn a_skipped_linked_source_keeps_its_representative_against_later_weaker_evidence() {
+    for unlinked_relevance in [0.8, 0.99] {
+        for reverse in [false, true] {
+            let (memory, linked, mut unlinked) = linked_selection_fixture();
+            unlinked.item.relevance = UnitScore::parse(unlinked_relevance).unwrap();
+            let unlinked_id = unlinked.item.evidence_id.clone();
+            let mut request = ContextRequest::from_query("packaging repair").unwrap();
+            request.budget = TokenBudget::new(80).unwrap();
+            let mut draft =
+                crate::pack::assemble_draft(&request.query, request.budget, vec![memory]).unwrap();
+            assert_eq!(draft.items.len(), 1);
+            let selected_before = draft.items.clone();
+            let tokens_before = draft.used_tokens;
+            assert!(tokens_before > 0);
+            let mut evidence = vec![linked, unlinked];
+            if reverse {
+                evidence.reverse();
+            }
+            append_ranked_native_pack_items(
+                Vec::new(),
+                evidence,
+                &request,
+                &mut draft,
+                &mut Vec::new(),
+            );
+            if unlinked_relevance < 0.95 {
+                assert_eq!(draft.items, selected_before);
+                assert_eq!(draft.used_tokens, tokens_before);
+                assert!(draft.evidence_items.is_empty());
+                assert!(
+                    draft.omitted.is_empty(),
+                    "the source and its representative must not both disappear"
+                );
+            } else {
+                assert!(draft.items.is_empty());
+                assert_eq!(draft.evidence_items.len(), 1);
+                assert_eq!(draft.evidence_items[0].evidence_id, unlinked_id);
+                assert_eq!(draft.used_tokens, 80);
+            }
+        }
+    }
+}
+
+#[test]
+fn linked_groups_keep_the_best_real_representation_before_caps_and_page_offsets() {
+    for memory_relevance in [0.2, 0.99] {
+        for reverse in [false, true] {
+            let (mut memory, linked, unlinked) = linked_selection_fixture();
+            memory.relevance = UnitScore::parse(memory_relevance).unwrap();
+            let mut second_linked = linked.clone();
+            second_linked.item.evidence_id =
+                EvidenceId::from_uuid(uuid::Uuid::from_u128(0x815)).to_string();
+            second_linked.item.relevance = UnitScore::parse(0.9).unwrap();
+            let representative_id = if memory_relevance < 0.95 {
+                linked.item.evidence_id.clone()
+            } else {
+                memory.memory_id.to_string()
+            };
+            let expected = vec![representative_id, unlinked.item.evidence_id.clone()];
+            let mut evidence = vec![linked, unlinked, second_linked];
+            if reverse {
+                evidence.reverse();
+            }
+            let mut capped_memories = vec![memory.clone()];
+            let mut capped_evidence = evidence.clone();
+            apply_pagination_with_rules(
+                &mut capped_memories,
+                &mut Vec::new(),
+                &mut capped_evidence,
+                &None,
+                Some(1),
+                &mut Vec::new(),
+            );
+            let capped_ids = capped_memories
+                .iter()
+                .map(|item| item.memory_id.to_string())
+                .chain(
+                    capped_evidence
+                        .iter()
+                        .map(|item| item.item.evidence_id.clone()),
+                )
+                .collect::<Vec<_>>();
+            assert_eq!(capped_ids, vec![expected[0].clone()]);
+            let mut selected = Vec::new();
+            for offset in 0..=2 {
+                let mut memories = vec![memory.clone()];
+                let mut page_evidence = evidence.clone();
+                let page = apply_pagination_with_rules(
+                    &mut memories,
+                    &mut Vec::new(),
+                    &mut page_evidence,
+                    &Some(ContextPagination {
+                        offset,
+                        limit: 1,
+                        query_hash: "linked-representative".to_owned(),
+                    }),
+                    None,
+                    &mut Vec::new(),
+                );
+                assert_eq!(page.total, 2, "one representative per linked group");
+                assert_eq!(page.page_size, u32::from(offset < 2));
+                selected.extend(memories.iter().map(|item| item.memory_id.to_string()));
+                selected.extend(
+                    page_evidence
+                        .iter()
+                        .map(|item| item.item.evidence_id.clone()),
+                );
+            }
+            assert_eq!(selected, expected);
+        }
+    }
 }

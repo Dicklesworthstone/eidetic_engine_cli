@@ -77,6 +77,21 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+### Shared context-pack selection
+
+- Query-file result caps and pagination now rank admitted memories, procedural
+  rules, and native evidence together by relevance, utility, and stable typed
+  identity. A relevant transcript hit can occupy the first result instead of
+  losing its slot to every memory and rule candidate.
+- Rules and evidence compete in the same token budget. A higher-ranked native
+  item can replace weaker selected memories when the complete replacement fits;
+  memory LODs move together and the reserved anti-pattern stays protected.
+  Infeasible replacements leave the selected pack intact.
+- Displaced memories retain budget omissions, and ranks, token accounting,
+  objective audit, persistence, and replay follow the resulting mixed pack.
+  Native items retain their rule or evidence identities and source revisions.
+  Older cached selections are reassembled under the new policy.
+
 ### Readable CASS evidence
 
 - CASS readers share a bounded, typed projection for Claude and Codex transcript

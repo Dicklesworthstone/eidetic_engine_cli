@@ -3770,29 +3770,6 @@ async fn run_context_pack_with_performance_inner(
         options.relevance_floor,
         &mut degraded,
     )?);
-    if let Some(max_results) = request.max_results {
-        let max_results = max_results as usize;
-        if candidates.len() > max_results {
-            let trimmed = candidates.len().saturating_sub(max_results);
-            candidates.truncate(max_results);
-            let noun = if trimmed == 1 {
-                "candidate"
-            } else {
-                "candidates"
-            };
-            push_degradation(
-                &mut degraded,
-                "context_query_max_results_applied",
-                ContextResponseSeverity::Low,
-                format!("{trimmed} context {noun} excluded by query-file budget.maxResults."),
-                Some(
-                    "Increase budget.maxResults or budget.candidatePool in the query file."
-                        .to_string(),
-                ),
-            );
-        }
-    }
-
     let pagination_info = apply_pagination_with_rules(
         &mut candidates,
         &mut rule_candidates,
@@ -3928,8 +3905,13 @@ async fn run_context_pack_with_performance_inner(
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     apply_context_pack_contradiction_guard(read_connection, &mut draft);
     if concurrent_limit_retry_after_ms.is_none() {
-        append_direct_rule_pack_items(rule_candidates, &request, &mut draft, &mut degraded);
-        append_direct_evidence_pack_items(evidence_candidates, &request, &mut draft, &mut degraded);
+        append_ranked_native_pack_items(
+            rule_candidates,
+            evidence_candidates,
+            &request,
+            &mut draft,
+            &mut degraded,
+        );
     }
     if !policy_omissions.is_empty() {
         let omitted_count = policy_omissions.len();
@@ -3938,7 +3920,10 @@ async fn run_context_pack_with_performance_inner(
             .selection_audit
             .candidate_count
             .saturating_add(omitted_count);
-        draft.selection_audit.omitted_count = draft.omitted.len();
+        draft.selection_audit.omitted_count = draft
+            .selection_audit
+            .omitted_count
+            .saturating_add(omitted_count);
         draft.hash = None;
     }
     let below_relevance_floor_count = draft
@@ -5689,8 +5674,49 @@ fn apply_pagination(
     )
 }
 
-/// Paginate memory, then direct-rule, then direct-evidence candidates as one
-/// ordered sequence.
+/// A comparison key keeps native kinds distinct even when an identifier is
+/// represented as a string at the existing pack boundary.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ContextPackEntityKey {
+    Memory(MemoryId),
+    Rule(String),
+    Evidence(String),
+}
+
+#[derive(Clone, Debug)]
+struct ContextPackPriority {
+    relevance: UnitScore,
+    utility: UnitScore,
+    entity: ContextPackEntityKey,
+}
+
+fn compare_context_pack_priority(
+    left: &ContextPackPriority,
+    right: &ContextPackPriority,
+) -> std::cmp::Ordering {
+    right
+        .relevance
+        .into_inner()
+        .total_cmp(&left.relevance.into_inner())
+        .then_with(|| {
+            right
+                .utility
+                .into_inner()
+                .total_cmp(&left.utility.into_inner())
+        })
+        .then_with(|| left.entity.cmp(&right.entity))
+}
+
+#[derive(Clone, Copy)]
+enum ContextPackCandidateSlot {
+    Memory(usize),
+    Rule(usize),
+    Evidence(usize),
+}
+
+/// Apply result caps and page offsets to one ranked candidate population.
+/// Native evidence and rules must not lose their places merely because their
+/// source kind used to follow every memory in an implicit concatenation.
 fn apply_pagination_with_rules(
     candidates: &mut Vec<PackCandidate>,
     rule_candidates: &mut Vec<crate::pack::PackRuleItem>,
@@ -5699,97 +5725,163 @@ fn apply_pagination_with_rules(
     max_results: Option<u32>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> PaginationInfo {
-    if let Some(max_results) = max_results {
-        let rule_limit = (max_results as usize).saturating_sub(candidates.len());
-        if rule_candidates.len() > rule_limit {
-            let trimmed = rule_candidates.len() - rule_limit;
-            rule_candidates.truncate(rule_limit);
-            push_direct_rule_result_limit_degradation(degraded, trimmed);
-        }
+    if pagination.is_none() && max_results.is_none() {
+        return PaginationInfo::default();
     }
+
+    // A linked memory and its evidence are alternative representations.
+    // Memory-only scoring (such as an attempt-family discount) can make the
+    // source evidence stronger, so do not discard it merely for having a link.
+    // Choose the best member before caps and pages, independent of page offset.
+    let memory_ids = candidates
+        .iter()
+        .map(|candidate| candidate.memory_id)
+        .collect::<BTreeSet<_>>();
+    let linked_memory_ids = evidence_candidates
+        .iter()
+        .filter_map(|candidate| {
+            candidate
+                .linked_memory_id
+                .as_deref()
+                .and_then(|id| MemoryId::from_str(id).ok())
+                .filter(|id| memory_ids.contains(id))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut ranked = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            (
+                ContextPackPriority {
+                    relevance: candidate.relevance,
+                    utility: candidate.utility,
+                    entity: ContextPackEntityKey::Memory(candidate.memory_id),
+                },
+                ContextPackCandidateSlot::Memory(index),
+            )
+        })
+        .chain(rule_candidates.iter().enumerate().map(|(index, item)| {
+            (
+                ContextPackPriority {
+                    relevance: item.relevance,
+                    utility: item.utility,
+                    entity: ContextPackEntityKey::Rule(item.rule_id.clone()),
+                },
+                ContextPackCandidateSlot::Rule(index),
+            )
+        }))
+        .chain(
+            evidence_candidates
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    (
+                        ContextPackPriority {
+                            relevance: candidate.item.relevance,
+                            utility: candidate.item.utility,
+                            entity: ContextPackEntityKey::Evidence(
+                                candidate.item.evidence_id.clone(),
+                            ),
+                        },
+                        ContextPackCandidateSlot::Evidence(index),
+                    )
+                }),
+        )
+        .collect::<Vec<_>>();
+    if !rule_candidates.is_empty() || !evidence_candidates.is_empty() {
+        ranked.sort_by(|(left, _), (right, _)| compare_context_pack_priority(left, right));
+    }
+    let mut represented_links = BTreeSet::new();
+    ranked.retain(|(_, slot)| {
+        let group = match slot {
+            ContextPackCandidateSlot::Memory(index) => {
+                Some(candidates[*index].memory_id).filter(|id| linked_memory_ids.contains(id))
+            }
+            ContextPackCandidateSlot::Evidence(index) => evidence_candidates[*index]
+                .linked_memory_id
+                .as_deref()
+                .and_then(|id| MemoryId::from_str(id).ok())
+                .filter(|id| linked_memory_ids.contains(id)),
+            ContextPackCandidateSlot::Rule(_) => None,
+        };
+        group.is_none_or(|id| represented_links.insert(id))
+    });
+    if let Some(max_results) = max_results {
+        let mut memory_trimmed = 0_usize;
+        let mut rule_trimmed = 0_usize;
+        let mut evidence_trimmed = 0_usize;
+        for (_, slot) in ranked.iter().skip(max_results as usize) {
+            match slot {
+                ContextPackCandidateSlot::Memory(_) => memory_trimmed += 1,
+                ContextPackCandidateSlot::Rule(_) => rule_trimmed += 1,
+                ContextPackCandidateSlot::Evidence(_) => evidence_trimmed += 1,
+            }
+        }
+        ranked.truncate(max_results as usize);
+        if memory_trimmed > 0 {
+            let noun = if memory_trimmed == 1 {
+                "candidate"
+            } else {
+                "candidates"
+            };
+            push_degradation(
+                degraded,
+                "context_query_max_results_applied",
+                ContextResponseSeverity::Low,
+                format!(
+                    "{memory_trimmed} context {noun} excluded by query-file budget.maxResults."
+                ),
+                Some(
+                    "Increase budget.maxResults or budget.candidatePool in the query file."
+                        .to_owned(),
+                ),
+            );
+        }
+        push_direct_rule_result_limit_degradation(degraded, rule_trimmed);
+        push_direct_evidence_result_limit_degradation(degraded, evidence_trimmed);
+    }
+    let total = ranked.len();
+    let offset = pagination.as_ref().map_or(0, |page| page.offset as usize);
+    let limit = pagination
+        .as_ref()
+        .map_or(total, |page| page.limit as usize);
+    let remaining = total.saturating_sub(offset);
+    let page_size = remaining.min(limit);
+    let has_more = remaining > limit;
+    let page_slots = ranked
+        .iter()
+        .skip(offset)
+        .take(page_size)
+        .map(|(_, slot)| *slot)
+        .collect::<Vec<_>>();
+    *candidates = page_slots
+        .iter()
+        .filter_map(|slot| match slot {
+            ContextPackCandidateSlot::Memory(index) => candidates.get(*index).cloned(),
+            _ => None,
+        })
+        .collect();
+    *rule_candidates = page_slots
+        .iter()
+        .filter_map(|slot| match slot {
+            ContextPackCandidateSlot::Rule(index) => rule_candidates.get(*index).cloned(),
+            _ => None,
+        })
+        .collect();
+    *evidence_candidates = page_slots
+        .iter()
+        .filter_map(|slot| match slot {
+            ContextPackCandidateSlot::Evidence(index) => evidence_candidates.get(*index).cloned(),
+            _ => None,
+        })
+        .collect();
+
     let Some(pagination) = pagination else {
         return PaginationInfo::default();
     };
 
-    // The existing selector suppresses evidence represented by a selected
-    // linked memory. Apply that rule to the whole paginated candidate set so
-    // offsets and totals do not depend on which memory happens to be on this
-    // page, and a later page cannot reintroduce its linked evidence duplicate.
-    let memory_ids = candidates
-        .iter()
-        .map(|candidate| candidate.memory_id.to_string())
-        .collect::<BTreeSet<_>>();
-    evidence_candidates.retain(|candidate| {
-        !candidate
-            .linked_memory_id
-            .as_ref()
-            .is_some_and(|memory_id| memory_ids.contains(memory_id))
-    });
-    // Memory candidates were already query-capped before pagination. Apply
-    // the remaining cap to the native tail before calculating page offsets.
-    // Without pagination, selection retains its existing shared result cap.
-    if let Some(max_results) = max_results {
-        let evidence_limit = (max_results as usize)
-            .saturating_sub(candidates.len())
-            .saturating_sub(rule_candidates.len());
-        if evidence_candidates.len() > evidence_limit {
-            let trimmed = evidence_candidates.len() - evidence_limit;
-            evidence_candidates.truncate(evidence_limit);
-            push_direct_evidence_result_limit_degradation(degraded, trimmed);
-        }
-    }
-    let memory_total = candidates.len();
-    let rule_total = rule_candidates.len();
-    let total = memory_total
-        .saturating_add(rule_total)
-        .saturating_add(evidence_candidates.len());
-    let offset = pagination.offset as usize;
-    let limit = pagination.limit as usize;
-
-    if offset >= total {
-        candidates.clear();
-        rule_candidates.clear();
-        evidence_candidates.clear();
-        return PaginationInfo {
-            applied: true,
-            offset: pagination.offset,
-            limit: pagination.limit,
-            page_size: 0,
-            total: u32::try_from(total).unwrap_or(u32::MAX),
-            has_more: false,
-            next_cursor: None,
-        };
-    }
-
-    let remaining = total.saturating_sub(offset);
-    let page_size = remaining.min(limit);
-    let has_more = remaining > limit;
-
-    *candidates = candidates
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .cloned()
-        .collect();
-    *rule_candidates = rule_candidates
-        .iter()
-        .skip(offset.saturating_sub(memory_total))
-        .take(page_size.saturating_sub(candidates.len()))
-        .cloned()
-        .collect();
-    *evidence_candidates = evidence_candidates
-        .iter()
-        .skip(offset.saturating_sub(memory_total.saturating_add(rule_total)))
-        .take(
-            page_size
-                .saturating_sub(candidates.len())
-                .saturating_sub(rule_candidates.len()),
-        )
-        .cloned()
-        .collect();
-
     let next_cursor = if has_more {
-        let next_offset = offset + limit;
+        let next_offset = offset.saturating_add(limit);
         let cursor = crate::models::PaginationCursor {
             offset: u32::try_from(next_offset).unwrap_or(u32::MAX),
             query_hash: pagination.query_hash.clone(),
@@ -5799,7 +5891,7 @@ fn apply_pagination_with_rules(
         None
     };
 
-    if offset > 0 || has_more {
+    if offset < total && (offset > 0 || has_more) {
         push_degradation(
             degraded,
             "context_pagination_applied",
@@ -8341,10 +8433,12 @@ fn context_pack_l2_feature_flags_hash(
     hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
     // Cached packs from before caller floors reached assembly must be rebuilt.
     hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v1");
+    // Native sources now compete with lower-ranked selected memories for the
+    // shared budget. A memory-first cached pack cannot satisfy that policy.
+    hash_labeled_bytes(&mut hasher, "mixed_source_budget_policy", b"v1");
     if options.pagination.is_some() {
-        // Cached pages from the memory-only offset policy can repeat native
-        // evidence and claim an empty population. Recompute those pages.
-        hash_labeled_bytes(&mut hasher, "native_evidence_pagination_policy", b"v1");
+        // Offsets and maxResults operate on one ranked native-entity union.
+        hash_labeled_bytes(&mut hasher, "native_evidence_pagination_policy", b"v2");
     }
     hash_labeled_bool(
         &mut hasher,
@@ -14206,46 +14300,235 @@ fn direct_rule_pack_candidates(
     items
 }
 
-/// Append direct rule items after memory selection and before direct
-/// evidence, within the remaining token budget and result cap.
-fn append_direct_rule_pack_items(
-    candidates: Vec<crate::pack::PackRuleItem>,
+enum NativePackCandidate {
+    Rule(crate::pack::PackRuleItem),
+    Evidence(DirectEvidencePackCandidate),
+}
+
+impl NativePackCandidate {
+    fn priority(&self) -> ContextPackPriority {
+        match self {
+            Self::Rule(item) => ContextPackPriority {
+                relevance: item.relevance,
+                utility: item.utility,
+                entity: ContextPackEntityKey::Rule(item.rule_id.clone()),
+            },
+            Self::Evidence(candidate) => ContextPackPriority {
+                relevance: candidate.item.relevance,
+                utility: candidate.item.utility,
+                entity: ContextPackEntityKey::Evidence(candidate.item.evidence_id.clone()),
+            },
+        }
+    }
+
+    fn estimated_tokens(&self) -> u32 {
+        match self {
+            Self::Rule(item) => item.estimated_tokens,
+            Self::Evidence(candidate) => candidate.item.estimated_tokens,
+        }
+    }
+}
+
+struct NativePackEvictionGroup {
+    priority: ContextPackPriority,
+    estimated_tokens: u64,
+    item_count: usize,
+    eligible: bool,
+}
+
+/// Find a complete feasible replacement before mutating selection. An
+/// oversized native item must never clear useful memory and then fail to fit.
+/// A memory's selected LODs move together; an anti-pattern reservation or an
+/// equal/higher-ranked member protects the entire memory identity.
+fn native_pack_memory_displacements(
+    priority: &ContextPackPriority,
+    estimated_tokens: u32,
+    request: &ContextRequest,
+    draft: &PackDraft,
+    represented_memory_ids: &BTreeSet<MemoryId>,
+) -> Option<Vec<MemoryId>> {
+    let budget = u64::from(draft.budget.max_tokens());
+    let mut next_tokens = u64::from(draft.used_tokens) + u64::from(estimated_tokens);
+    let mut next_count = draft.selected_item_count().saturating_add(1);
+    let result_limit = request
+        .max_results
+        .map_or(usize::MAX, |limit| limit as usize);
+    if next_tokens <= budget && next_count <= result_limit {
+        return Some(Vec::new());
+    }
+    if u64::from(estimated_tokens) > budget || result_limit == 0 {
+        return None;
+    }
+
+    let mut groups = BTreeMap::<MemoryId, NativePackEvictionGroup>::new();
+    for item in &draft.items {
+        let item_priority = ContextPackPriority {
+            relevance: item.relevance,
+            utility: item.utility,
+            entity: ContextPackEntityKey::Memory(item.memory_id),
+        };
+        let eligible = !represented_memory_ids.contains(&item.memory_id)
+            && item.selected_in != crate::pack::PackSelectionPhase::AntiPatternFirst
+            && compare_context_pack_priority(priority, &item_priority).is_lt();
+        let group = groups
+            .entry(item.memory_id)
+            .or_insert_with(|| NativePackEvictionGroup {
+                priority: item_priority.clone(),
+                estimated_tokens: 0,
+                item_count: 0,
+                eligible: true,
+            });
+        group.estimated_tokens = group
+            .estimated_tokens
+            .saturating_add(u64::from(item.estimated_tokens));
+        group.item_count = group.item_count.saturating_add(1);
+        group.eligible &= eligible;
+        if compare_context_pack_priority(&item_priority, &group.priority).is_lt() {
+            group.priority = item_priority;
+        }
+    }
+    let mut groups = groups
+        .into_iter()
+        .filter(|(_, group)| group.eligible)
+        .collect::<Vec<_>>();
+    groups.sort_by(|(_, left), (_, right)| {
+        compare_context_pack_priority(&right.priority, &left.priority)
+    });
+    let mut displaced = Vec::new();
+    for (memory_id, group) in groups {
+        next_tokens = next_tokens.saturating_sub(group.estimated_tokens);
+        next_count = next_count.saturating_sub(group.item_count);
+        displaced.push(memory_id);
+        if next_tokens <= budget && next_count <= result_limit {
+            return Some(displaced);
+        }
+    }
+    None
+}
+
+/// Admit native sources in their shared ranking order. The memory selector
+/// still supplies its MMR/facility-location choice; a better-ranked native
+/// item can reclaim budget only from strictly weaker selected memories.
+/// No source receives a fixed quota or a manufactured memory identity.
+fn append_ranked_native_pack_items(
+    rules: Vec<crate::pack::PackRuleItem>,
+    evidence: Vec<DirectEvidencePackCandidate>,
     request: &ContextRequest,
     draft: &mut PackDraft,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) {
-    let mut result_limit_count = 0_usize;
-    let mut appended = 0_usize;
-    for mut item in candidates {
-        if request
-            .max_results
-            .is_some_and(|limit| draft.selected_item_count() >= limit as usize)
+    let mut candidates = rules
+        .into_iter()
+        .map(NativePackCandidate::Rule)
+        .chain(evidence.into_iter().map(NativePackCandidate::Evidence))
+        .map(|candidate| (candidate.priority(), candidate))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return;
+    }
+    candidates.sort_by(|(left, _), (right, _)| compare_context_pack_priority(left, right));
+    let candidate_count = candidates.len();
+    let mut rule_result_limit = 0_usize;
+    let mut evidence_result_limit = 0_usize;
+    let mut rule_token_limit = 0_usize;
+    let mut evidence_token_limit = 0_usize;
+    let mut linked_duplicates = 0_usize;
+    let mut represented_memory_ids = BTreeSet::new();
+    for (priority, candidate) in candidates {
+        if let NativePackCandidate::Evidence(evidence) = &candidate
+            && let Some(memory_id) = evidence
+                .linked_memory_id
+                .as_deref()
+                .and_then(|id| MemoryId::from_str(id).ok())
+            && draft.items.iter().any(|item| item.memory_id == memory_id)
         {
-            result_limit_count = result_limit_count.saturating_add(1);
+            // Candidates arrive best first. Once this memory represents a
+            // skipped source, a later weaker source cannot erase both of them.
+            represented_memory_ids.insert(memory_id);
+            linked_duplicates = linked_duplicates.saturating_add(1);
             continue;
         }
-        let Some(next_used_tokens) = draft.used_tokens.checked_add(item.estimated_tokens) else {
+        let estimated_tokens = candidate.estimated_tokens();
+        let Some(displacements) = native_pack_memory_displacements(
+            &priority,
+            estimated_tokens,
+            request,
+            draft,
+            &represented_memory_ids,
+        ) else {
+            let result_limited = request
+                .max_results
+                .is_some_and(|limit| draft.selected_item_count() >= limit as usize);
+            match (&candidate, result_limited) {
+                (NativePackCandidate::Rule(_), true) => rule_result_limit += 1,
+                (NativePackCandidate::Evidence(_), true) => evidence_result_limit += 1,
+                (NativePackCandidate::Rule(_), false) => rule_token_limit += 1,
+                (NativePackCandidate::Evidence(_), false) => evidence_token_limit += 1,
+            }
             continue;
         };
-        if next_used_tokens > draft.budget.max_tokens() {
-            continue;
+        let token_limited = u64::from(draft.used_tokens) + u64::from(estimated_tokens)
+            > u64::from(draft.budget.max_tokens());
+        let displaced_count = draft.omit_memories_for_native_budget(&displacements);
+        if !token_limited {
+            // Normal orchestration applies the joint result cap before
+            // assembly. Direct callers can still replace a weaker item at
+            // that cap; do not mislabel that result-slot exclusion as tokens.
+            for omission in draft
+                .omitted
+                .iter_mut()
+                .filter(|omission| displacements.contains(&omission.memory_id))
+            {
+                omission.reason = PackOmissionReason::ExcludedByFilter;
+            }
         }
-        item.rank =
-            u32::try_from(draft.selected_item_count().saturating_add(1)).unwrap_or(u32::MAX);
-        draft.rule_items.push(item);
-        draft.used_tokens = next_used_tokens;
-        appended = appended.saturating_add(1);
+        let rank = u32::try_from(draft.selected_item_count().saturating_add(1)).unwrap_or(u32::MAX);
+        let selection_note = if displaced_count > 0 {
+            format!("; shared budget ranking displaced {displaced_count} lower-ranked memory items")
+        } else {
+            "; selected within the shared native-source budget".to_owned()
+        };
+        match candidate {
+            NativePackCandidate::Rule(mut item) => {
+                item.rank = rank;
+                item.why.push_str(&selection_note);
+                draft.rule_items.push(item);
+            }
+            NativePackCandidate::Evidence(mut candidate) => {
+                candidate.item.rank = rank;
+                candidate.item.why.push_str(&selection_note);
+                draft.evidence_items.push(candidate.item);
+            }
+        }
+        // Feasibility was checked in u64 before the eviction was committed.
+        draft.used_tokens += estimated_tokens;
     }
-    if appended > 0 {
-        draft.selection_audit.candidate_count = draft
-            .selection_audit
-            .candidate_count
-            .saturating_add(appended);
-        draft.selection_audit.selected_count = draft.selected_item_count();
-        draft.selection_audit.budget_used = draft.used_tokens;
-        draft.hash = None;
+    let omitted_native_count = rule_result_limit
+        .saturating_add(evidence_result_limit)
+        .saturating_add(rule_token_limit)
+        .saturating_add(evidence_token_limit)
+        .saturating_add(linked_duplicates);
+    draft.selection_audit.candidate_count = draft
+        .selection_audit
+        .candidate_count
+        .saturating_add(candidate_count);
+    draft.selection_audit.selected_count = draft.selected_item_count();
+    draft.selection_audit.omitted_count = draft.omitted.len().saturating_add(omitted_native_count);
+    draft.selection_audit.budget_used = draft.used_tokens;
+    draft.hash = None;
+    push_direct_rule_result_limit_degradation(degraded, rule_result_limit);
+    push_direct_evidence_result_limit_degradation(degraded, evidence_result_limit);
+    if rule_token_limit > 0 || evidence_token_limit > 0 {
+        push_degradation(
+            degraded,
+            "context_filtered_results",
+            ContextResponseSeverity::Low,
+            format!(
+                "{rule_token_limit} procedural rule and {evidence_token_limit} imported evidence candidates omitted by the shared token budget (token_budget_exceeded); stronger evidence, its selected representatives and the anti-pattern reservation were retained."
+            ),
+            Some("Increase budget.maxTokens in the query file or narrow the query.".to_owned()),
+        );
     }
-    push_direct_rule_result_limit_degradation(degraded, result_limit_count);
 }
 
 fn push_direct_rule_result_limit_degradation(
@@ -14810,57 +15093,6 @@ fn collapse_incident_cards_by_error_class(
         collapsed.push(candidate);
     }
     collapsed
-}
-
-fn append_direct_evidence_pack_items(
-    candidates: Vec<DirectEvidencePackCandidate>,
-    request: &ContextRequest,
-    draft: &mut PackDraft,
-    degraded: &mut Vec<ContextResponseDegradation>,
-) {
-    let selected_memory_ids = draft
-        .items
-        .iter()
-        .map(|item| item.memory_id.to_string())
-        .collect::<BTreeSet<_>>();
-    let mut result_limit_count = 0_usize;
-    for candidate in candidates {
-        if candidate
-            .linked_memory_id
-            .as_ref()
-            .is_some_and(|memory_id| selected_memory_ids.contains(memory_id))
-        {
-            continue;
-        }
-        if request
-            .max_results
-            .is_some_and(|limit| draft.selected_item_count() >= limit as usize)
-        {
-            result_limit_count = result_limit_count.saturating_add(1);
-            continue;
-        }
-        let mut item = candidate.item;
-        let Some(next_used_tokens) = draft.used_tokens.checked_add(item.estimated_tokens) else {
-            continue;
-        };
-        if next_used_tokens > draft.budget.max_tokens() {
-            continue;
-        }
-        item.rank =
-            u32::try_from(draft.selected_item_count().saturating_add(1)).unwrap_or(u32::MAX);
-        draft.evidence_items.push(item);
-        draft.used_tokens = next_used_tokens;
-    }
-    if !draft.evidence_items.is_empty() {
-        draft.selection_audit.candidate_count = draft
-            .selection_audit
-            .candidate_count
-            .saturating_add(draft.evidence_items.len());
-        draft.selection_audit.selected_count = draft.selected_item_count();
-        draft.selection_audit.budget_used = draft.used_tokens;
-        draft.hash = None;
-    }
-    push_direct_evidence_result_limit_degradation(degraded, result_limit_count);
 }
 
 fn push_direct_evidence_result_limit_degradation(
@@ -15607,8 +15839,8 @@ mod relevance_floor_tests {
         assert_eq!(page.total, 6);
         assert_eq!(page.page_size, 4);
         assert!(!page.has_more);
-        assert!(candidates.memories.is_empty());
-        assert_eq!(candidates.rules.len(), 2);
+        assert_eq!(candidates.memories.len(), 1);
+        assert_eq!(candidates.rules.len(), 1);
         assert_eq!(candidates.evidence.len(), 2);
 
         let mut request_input = ContextRequestInput::for_query("prepare release");
@@ -15625,11 +15857,17 @@ mod relevance_floor_tests {
                 ..crate::pack::PackAssemblyOptions::default()
             },
         )
-        .expect("empty memory page");
-        append_direct_rule_pack_items(candidates.rules, &request, &mut draft, &mut degraded);
-        append_direct_evidence_pack_items(candidates.evidence, &request, &mut draft, &mut degraded);
+        .expect("ranked mixed-source page");
+        append_ranked_native_pack_items(
+            candidates.rules,
+            candidates.evidence,
+            &request,
+            &mut draft,
+            &mut degraded,
+        );
         assert_eq!(draft.selected_item_count(), 4);
-        assert_eq!(draft.rule_items.len(), 2);
+        assert_eq!(draft.items.len(), 1);
+        assert_eq!(draft.rule_items.len(), 1);
         assert_eq!(draft.evidence_items.len(), 2);
         assert_eq!(draft.used_tokens, 40);
         assert!(
@@ -15701,5 +15939,9 @@ mod candidate_pool_tests;
 #[cfg(test)]
 #[path = "context_incident_card_tests.rs"]
 mod incident_card_tests;
+
+#[cfg(test)]
+#[path = "context_mixed_selection_tests.rs"]
+mod mixed_selection_tests;
 
 include!("context_test_module.rs");
