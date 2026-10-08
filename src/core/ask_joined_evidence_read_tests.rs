@@ -282,7 +282,33 @@ fn evidence_read_failure_withholds_answers_and_releases_the_snapshot() {
 
 #[test]
 fn claude_code_envelope_metadata_does_not_withhold_its_message() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
+    // Real session ids are random ULIDs; a low-entropy fixture id hid that the
+    // citation URI was screened like free text and refused as a token.
+    let session = SessionId::from_uuid(uuid::Uuid::from_u128(
+        0x8f3a_c91d_44e2_7b6a_0d15_e8c2_9a71_53bf,
+    ))
+    .to_string();
+    fixture
+        .db
+        .insert_session(
+            &session,
+            &CreateSessionInput {
+                workspace_id: fixture.workspace.clone(),
+                cass_session_id: "upstream-claude-code-session".to_owned(),
+                source_path: None,
+                agent_name: Some("claude_code".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 2,
+                token_count: None,
+                content_hash: format!("blake3:{}", "b".repeat(64)),
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+    fixture.session = session;
     let record = |text: &str| {
         serde_json::json!({
             "parentUuid": null, "isSidechain": false, "userType": "external",

@@ -107,7 +107,7 @@ pub(super) fn append_evidence(
             if content.trim().is_empty() || !public_evidence_body(&content) {
                 return Ok(());
             }
-            let Some(provenance_uri) = public_provenance(&span.canonical_provenance_uri()) else {
+            let Some(provenance_uri) = evidence_provenance(&span) else {
                 return Ok(());
             };
             let mut source_memory_ids = Vec::new();
@@ -239,6 +239,24 @@ fn public_file_path(path: &str) -> bool {
         && !drive_path
         && !path.split(['/', '\\']).any(|part| part == "..")
         && public_text(path)
+}
+
+/// Citation URI for an admitted evidence span.
+///
+/// A CASS span's URI is minted by ee from its own session id
+/// (`cass-session://sess_<ulid>#L..`), never from transcript text, so it is
+/// cited as is. Running the free-text secret detectors over it refused every
+/// real span: a random 26-character ULID reads as a high-entropy token (test
+/// fixtures used low-entropy ids, which is why this went unseen).
+fn evidence_provenance(span: &crate::db::StoredEvidenceSpan) -> Option<String> {
+    let value = span.canonical_provenance_uri();
+    if let Ok(uri @ ProvenanceUri::CassSession { .. }) = ProvenanceUri::from_str(&value)
+        && crate::models::SessionId::from_str(&span.session_id).is_ok()
+        && uri.to_string() == value
+    {
+        return Some(value);
+    }
+    public_provenance(&value)
 }
 
 fn public_provenance(value: &str) -> Option<String> {
