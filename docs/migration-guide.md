@@ -153,11 +153,20 @@ Bootstrap and linked-session learning require the stricter message projection.
 An otherwise readable summary or record containing reasoning does not supply a
 lesson or appear in a lesson's supporting provenance.
 
-The import excerpt limit remains 64 KiB. Supported single-record envelopes can
-be bounded within that limit. Larger structured windows that cannot be bounded
-without losing their record structure are withheld with
-`external_ingestion_oversized`; a truncated valid prefix cannot stand in for the
-complete window.
+The import excerpt limit remains 64 KiB. Supported single-record envelopes and
+multi-record JSONL windows share that byte budget across their message bodies.
+Every record retains its envelope, role, order and observed text; short replies
+remain complete while long bodies receive bounded excerpts. Full-source
+screening runs before shortening, including decoded credentials in later
+records or omitted tails. Source line and byte locators retain the upstream
+range rather than referring to the shortened JSON.
+
+Windows with unsupported members, ambiguous fields, instruction risk, excessive
+metadata, or insufficient room for observed text from every record remain
+withheld with `external_ingestion_oversized`. A truncated valid prefix cannot
+stand in for the complete window. Sources previously stored only as oversized
+withheld markers need re-import to recover their text; rebuilding an index
+cannot reconstruct source bytes that were never stored.
 
 ## Core Documents
 

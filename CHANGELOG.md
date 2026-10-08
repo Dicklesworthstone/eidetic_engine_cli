@@ -99,6 +99,11 @@ future changelog pass expands those rows into full capability sections.
 - Oversized structured imports that cannot be bounded safely remain withheld.
   Truncation cannot discard an unsafe neighboring record and admit the remaining
   valid JSON prefix as conversation evidence.
+- Safe multi-record CASS windows now fit the 64 KiB import limit by sharing the
+  escaped-byte budget across message bodies. Later short replies stay complete,
+  every member keeps its role, envelope and observed text, and long summaries
+  can be bounded too. Screening still covers the complete source before any
+  shortening, including credentials in later records and omitted tails.
 
 ## [0.17.0] - 2026-10-02
 

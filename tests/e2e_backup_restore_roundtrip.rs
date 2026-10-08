@@ -1499,7 +1499,7 @@ fn slo_fixture() -> JsonValue {
 }
 
 #[test]
-fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclude() {
+fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclude() -> TestResult {
     // POSITIVE CONTROL for the narrowing at canonical_context_stdout (bd-bka39). That
     // canonicalizer drops /data/pack/snapshotIdentity/components/request and .../digest
     // because they carry a store-local snapshot generation. The narrowing is only
@@ -1511,7 +1511,8 @@ fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclu
         "data": {"pack": {"schema": "ee.pack.v2", "items": [], "slo": slo_fixture()}}
     });
     let error = canonical_context_stdout(identity_absent)
-        .expect_err("a pack with no snapshotIdentity must not canonicalize");
+        .err()
+        .ok_or_else(|| "a pack with no snapshotIdentity must not canonicalize".to_owned())?;
     assert!(
         error.contains("snapshotIdentity/components"),
         "the error must name the missing object, got: {error}"
@@ -1544,8 +1545,9 @@ fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclu
     });
     // All eight present: canonicalizes, and exactly TWO pointers are gone.
     let full = canonical_context_stdout(one_missing.clone())
-        .expect("a complete snapshotIdentity must canonicalize");
-    let rendered = String::from_utf8(full).expect("canonical bytes are utf-8");
+        .map_err(|error| format!("a complete snapshotIdentity must canonicalize: {error}"))?;
+    let rendered = String::from_utf8(full)
+        .map_err(|error| format!("canonical bytes must be UTF-8: {error}"))?;
     for (digest, label) in [
         ("blake3:aaa", "request (store-local snapshot generation)"),
         ("blake3:iii", "digest (composite of the above)"),
@@ -1583,14 +1585,16 @@ fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclu
     one_missing
         .pointer_mut("/data/pack/snapshotIdentity/components")
         .and_then(JsonValue::as_object_mut)
-        .expect("components object")
+        .ok_or_else(|| "snapshot identity fixture missing components object".to_owned())?
         .remove("qualityScoring");
-    let error =
-        canonical_context_stdout(one_missing).expect_err("dropping a compared component must fail");
+    let error = canonical_context_stdout(one_missing)
+        .err()
+        .ok_or_else(|| "dropping a compared component must fail".to_owned())?;
     assert!(
         error.contains("\"qualityScoring\""),
         "the error must name the dropped component, got: {error}"
     );
+    Ok(())
 }
 
 fn json_str<'a>(value: &'a JsonValue, pointer: &str, context: &str) -> Result<&'a str, String> {
