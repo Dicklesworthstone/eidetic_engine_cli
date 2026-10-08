@@ -826,6 +826,13 @@ fn why_normalization_drops_the_numbers_and_keeps_the_retrieval_path() {
     );
 }
 
+/// Bound on pack score drift between two index builds (bd-64w73).
+///
+/// Sits ABOVE the largest wobble measured and an order BELOW the smallest change worth
+/// catching. Named rather than inlined so the two places that depend on it -- the
+/// comparison and its control -- cannot drift apart.
+const PACK_SCORE_TOLERANCE: f64 = 1e-4;
+
 #[test]
 fn float_tolerance_accepts_only_bounded_numeric_drift() {
     // POSITIVE CONTROL for the tolerance above (bd-64w73). A tolerance that accepted more
@@ -833,22 +840,34 @@ fn float_tolerance_accepts_only_bounded_numeric_drift() {
     // must REFUSE is exercised here.
     let base = serde_json::json!({"scores": {"relevance": 0.474952}, "why": "via lexical"});
 
-    let within = serde_json::json!({"scores": {"relevance": 0.4749525}, "why": "via lexical"});
+    // THE BOUND IS CHECKED FROM BOTH SIDES, with values taken from real runs rather than
+    // invented. The first version of this control asserted the opposite of what the
+    // comparison needed -- it demanded that the 4.1e-5 delta be REJECTED, which is what a
+    // 1e-6 bound does, and the e2e then failed on exactly that delta. The control agreed
+    // with the bug because both came from the same wrong intuition about which side of the
+    // noise the bound belongs on.
+    //
+    // Measured wobble, five runs: 1.0e-5, 1.9e-5, 4.1e-5, 4.2e-5, 5.2e-5.
+    let largest_measured_wobble =
+        serde_json::json!({"scores": {"relevance": 0.474952 - 5.2e-5}, "why": "via lexical"});
     assert!(
-        json_differs_only_by_float_tolerance(&base, &within, 1e-6),
-        "a 5e-7 drift is inside the tolerance and must be accepted"
+        json_differs_only_by_float_tolerance(&base, &largest_measured_wobble, PACK_SCORE_TOLERANCE),
+        "the LARGEST wobble actually measured (5.2e-5) must be accepted, or the comparison \
+         fails on rebuild nondeterminism it cannot do anything about"
     );
 
-    let beyond = serde_json::json!({"scores": {"relevance": 0.474911}, "why": "via lexical"});
+    let meaningful_regression =
+        serde_json::json!({"scores": {"relevance": 0.474952 - 1e-3}, "why": "via lexical"});
     assert!(
-        !json_differs_only_by_float_tolerance(&base, &beyond, 1e-6),
-        "the 4.1e-5 delta actually measured must NOT be swallowed by a 1e-6 tolerance"
+        !json_differs_only_by_float_tolerance(&base, &meaningful_regression, PACK_SCORE_TOLERANCE),
+        "a 1e-3 relevance change is the smallest shift worth catching and must NOT be \
+         swallowed -- a tolerance that accepted it would retire this assertion"
     );
 
     let text_changed =
         serde_json::json!({"scores": {"relevance": 0.474952}, "why": "via semantic"});
     assert!(
-        !json_differs_only_by_float_tolerance(&base, &text_changed, 1e-6),
+        !json_differs_only_by_float_tolerance(&base, &text_changed, PACK_SCORE_TOLERANCE),
         "a string difference must never be tolerated"
     );
 
@@ -856,20 +875,20 @@ fn float_tolerance_accepts_only_bounded_numeric_drift() {
         "scores": {"relevance": 0.474952, "extra": 1}, "why": "via lexical"
     });
     assert!(
-        !json_differs_only_by_float_tolerance(&base, &key_added, 1e-6),
+        !json_differs_only_by_float_tolerance(&base, &key_added, PACK_SCORE_TOLERANCE),
         "an added key must never be tolerated"
     );
 
     let key_missing = serde_json::json!({"scores": {"relevance": 0.474952}});
     assert!(
-        !json_differs_only_by_float_tolerance(&base, &key_missing, 1e-6),
+        !json_differs_only_by_float_tolerance(&base, &key_missing, PACK_SCORE_TOLERANCE),
         "a dropped key must never be tolerated"
     );
 
     let array_len = serde_json::json!({"items": [1.0, 2.0]});
     let array_short = serde_json::json!({"items": [1.0]});
     assert!(
-        !json_differs_only_by_float_tolerance(&array_len, &array_short, 1e-6),
+        !json_differs_only_by_float_tolerance(&array_len, &array_short, PACK_SCORE_TOLERANCE),
         "a changed array length must never be tolerated"
     );
 }
@@ -904,9 +923,20 @@ fn ensure_context_json_bytes_equal(
     // WHAT IS STILL ASSERTED, and why this is a tolerance rather than an exclusion: the
     // SELECTION is identical in every run that reached this point -- same item 0, same
     // ordering. Dropping the score pointers from the comparison would blind the test to a
-    // real relevance regression; allowing a bounded wobble keeps one catchable. 1e-6 is
-    // two orders below the measured noise, so a genuine change still fails here while
-    // rebuild nondeterminism does not.
+    // real relevance regression; allowing a bounded wobble keeps one catchable.
+    //
+    // THE BOUND MUST SIT ABOVE THE NOISE AND BELOW A MEANINGFUL CHANGE. I first wrote 1e-6
+    // and justified it as "two orders below the measured noise", which is exactly
+    // backwards: a tolerance below the noise REJECTS the noise, and the run proved it --
+    // the deltas survived at 1.0e-5 and 4.2e-5 and still failed. Measured wobble across
+    // five runs:
+    //
+    //     1.0e-5, 1.9e-5, 4.1e-5, 4.2e-5, 5.2e-5      max 5.2e-5
+    //
+    // so 1e-4 is roughly 2x above the largest observed wobble, and relevance here lives
+    // around 0.4 where a genuine regression moves 1e-3 at least -- an order below the
+    // smallest change worth catching and an order above the largest noise seen. Both
+    // margins are stated because a tolerance with only one of them is a guess.
     //
     // Any NON-numeric difference, and any numeric difference above the tolerance, still
     // fails through the reporting path below.
@@ -917,7 +947,7 @@ fn ensure_context_json_bytes_equal(
     if json_differs_only_by_float_tolerance(
         &canonical_expected_probe,
         &canonical_actual_probe,
-        1e-6,
+        PACK_SCORE_TOLERANCE,
     ) {
         return Ok(());
     }
@@ -1277,7 +1307,7 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
         // -- `items` covers the item scores, `renderedText` covers the why text, which
         // embeds relevance rounded to four decimals. Index rebuild is nondeterministic at
         // 1.9e-5 (measured: two builds of ONE store, same rows, no restore involved), and
-        // once the underlying number is tolerated within 1e-6, a DIGEST of it cannot be
+        // once the underlying number is tolerated within PACK_SCORE_TOLERANCE, a DIGEST of it cannot be
         // asserted: a hash has no tolerance, so it converts a permitted wobble into a hard
         // failure.
         //
@@ -1302,7 +1332,7 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     //     matched '<content>' via lexical (relevance 0.4000, utility 0.5000)
     // and that parenthetical renders relevance to four decimals -- which the measured
     // 1.9e-5 rebuild wobble is enough to flip (0.4000 vs 0.3999). Asserting a four-decimal
-    // rendering of a number tolerated at 1e-6 is incoherent, so the numbers go.
+    // rendering of a number tolerated at PACK_SCORE_TOLERANCE is incoherent, so the numbers go.
     //
     // The PROSE stays compared, and it is the valuable half: it names the matched content
     // and the retrieval path. "via lexical" vs "via semantic" is exactly the kind of
@@ -1348,7 +1378,7 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     // exist. The fixture below now uses the serialized names.
     // FIVE, not seven. `request` has always been excluded (store-local snapshot
     // generation); `items` and `renderedText` joined it in 72527d90a because both are
-    // digests over score-bearing content that is now tolerated at 1e-6, and a hash has no
+    // digests over score-bearing content that is now tolerated at PACK_SCORE_TOLERANCE, and a hash has no
     // tolerance.
     //
     // I added those two exclusions and left this list at seven, so the guard demanded
