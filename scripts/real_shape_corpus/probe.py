@@ -292,6 +292,26 @@ def main():
                               "pack_items": q_items, "pack_degraded": sorted(degraded_codes(pk.get("degraded", [])))})
             event("query", id=q["id"], recall_at_5=recall5[-1], pack_items=len(items))
 
+        # ask: answered with a citation from a judged scenario, or abstained.
+        ask_answered, ask_cited_relevant, ask_negative_abstained = 0, 0, 0
+        for q in queries:
+            code, ap, elapsed, err = run_ee(ee, ["ask", q["query"], "--workspace", workspace, "--json"], env, workspace)
+            data = (ap or {}).get("data", {})
+            if data and not data.get("abstained", True):
+                ask_answered += 1
+                relevant_scenarios = {locators[label]["slug"] for label in q["relevant"]}
+                for citation in data.get("citations") or []:
+                    loc = locate(citation, path_by_session)
+                    if loc is not None and scenario_of.get(loc[0]) in relevant_scenarios:
+                        ask_cited_relevant += 1
+                        break
+        for query in judgments["negative_queries"]:
+            code, ap, elapsed, err = run_ee(ee, ["ask", query, "--workspace", workspace, "--json"], env, workspace)
+            if ((ap or {}).get("data") or {}).get("abstained", False):
+                ask_negative_abstained += 1
+        event("ask", answered=ask_answered, cited_relevant=ask_cited_relevant,
+              negative_abstained=ask_negative_abstained)
+
         neg_flagged = 0
         for query in judgments["negative_queries"]:
             code, sp, elapsed, err = run_ee(ee, ["search", query, "--workspace", workspace, "--json"], env, workspace)
@@ -333,6 +353,9 @@ def main():
                                   "definition": "queries whose top 5 include a span from a judged scenario (or a seeded copy)"}
         m["pack_scenario_precision"] = {"value": round(on_scenario_items / packed_items, 4) if packed_items else None}
         m["negative_query_flag_rate"] = {"value": neg_flagged / len(judgments["negative_queries"])}
+        m["ask"] = {"answered_rate": round(ask_answered / len(queries), 4) if queries else None,
+                    "cited_relevant_rate": round(ask_cited_relevant / len(queries), 4) if queries else None,
+                    "negative_abstain_rate": round(ask_negative_abstained / len(judgments["negative_queries"]), 4)}
         m["PAP"] = learn.get("PAP", {"status": "unavailable", "reason": "no proposals"})
         m["WCS"] = {"remember_p50_seconds": med(write_times), "corpus_records": manifest["total_records"],
                     "note": "slope = d log(remember_p50) / d log(corpus_records) across runs at several --target-records"}

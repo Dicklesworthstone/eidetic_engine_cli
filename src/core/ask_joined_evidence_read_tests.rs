@@ -279,3 +279,28 @@ fn evidence_read_failure_withholds_answers_and_releases_the_snapshot() {
     fixture.db.begin_read_snapshot().unwrap();
     fixture.db.commit_read_snapshot().unwrap();
 }
+
+#[test]
+fn claude_code_envelope_metadata_does_not_withhold_its_message() {
+    let fixture = Fixture::new();
+    let record = |text: &str| {
+        serde_json::json!({
+            "parentUuid": null, "isSidechain": false, "userType": "external",
+            "cwd": "/home/dev/ledger", "sessionId": "5f0c", "version": "2.0.14",
+            "gitBranch": "main", "type": "assistant", "uuid": "9a1e",
+            "timestamp": "2026-09-01T09:00:00.000Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}
+        })
+        .to_string()
+    };
+    let safe = fixture.evidence(5, &record(BODY));
+    fixture.evidence(
+        6,
+        &record("Run cargo fmt using file:///home/private/withheld-canary."),
+    );
+    let corpus = fixture.corpus();
+    assert_eq!(corpus.candidates.len(), 1, "{:?}", corpus.candidates);
+    assert_eq!(corpus.candidates[0].memory_id, safe.id);
+    assert!(corpus.candidates[0].content.contains(BODY));
+    assert!(!corpus.candidates[0].content.contains("/home/dev"));
+}

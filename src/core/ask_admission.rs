@@ -80,10 +80,15 @@ pub(super) fn append_evidence(
             let Ok(id) = EvidenceId::from_str(&span.id) else {
                 return Ok(());
             };
+            // The stored envelope is never quoted, so only the projected body
+            // below is screened for public release. Screening the envelope
+            // refused every Claude Code record: each one carries the session's
+            // absolute `cwd`, so `ee ask` never saw imported Claude Code history
+            // (measured on the real-shape oracle). A plain excerpt projects to
+            // itself and is screened exactly as before.
             if span.workspace_id != workspace_id
                 || span.excerpt.trim().is_empty()
                 || span.excerpt == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
-                || !public_evidence_body(&span.excerpt)
             {
                 return Ok(());
             }
