@@ -1281,17 +1281,23 @@ fn two_index_builds_of_one_store_score_identically() -> TestResult {
     let first = canonical_context_stdout(packs[0].clone())?;
     let repacked = canonical_context_stdout(repack.clone())?;
     let scoring_is_deterministic = first == repacked;
+    // The branches below were written while `--as-of` was unpinned, when a same-index
+    // disagreement was the open question. With the reference time pinned there is no
+    // disagreement left to localize, so the old "the wobble is in index CONSTRUCTION"
+    // wording became FALSE the moment this started passing -- it reported a wobble that
+    // no longer exists. Replaced with what each outcome now means.
     eprintln!(
-        "[bd-64w73] two packs off ONE index are {} -- so the wobble is {}",
+        "[bd-64w73] two packs off ONE index with a pinned --as-of are {}{}",
         if scoring_is_deterministic {
             "IDENTICAL"
         } else {
             "DIFFERENT"
         },
         if scoring_is_deterministic {
-            "in index CONSTRUCTION, not in scoring"
+            " -- as expected once the wall-clock reference time is removed"
         } else {
-            "in SCORING, and rebuilding is irrelevant"
+            " -- UNEXPECTED: a pinned reference time should make these exact, so a \
+             second cause is present and the time hypothesis is incomplete"
         }
     );
     ensure(
@@ -2913,6 +2919,15 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         // The embedding tier's own equivalence across restore is a different property and
         // needs its own test, because restore is DESIGNED not to carry the registry.
         //
+        // AND PIN THE VALIDITY REFERENCE TIME (bd-64w73), which is what actually made this
+        // comparison deterministic. src/core/context.rs:1640 defaults it to `Utc::now`, so
+        // each pack evaluated validity against a DIFFERENT instant -- and that, not index
+        // nondeterminism, was the whole 5.2e-5 score delta this test chased for weeks.
+        //
+        // Proved by `two_index_builds_of_one_store_score_identically`: unpinned, two packs
+        // off ONE index differ; pinned, they are byte-identical AND so are two independent
+        // builds. Same instant on both sides here for the same reason.
+        //
         // STRICT, because `--source-mode` alone is a PREFERENCE: its help says strict
         // "fail[s] instead of falling back when the requested retrieval source is
         // unavailable" (src/cli/mod.rs:3270). Without strict, a side that could not open
@@ -2923,6 +2938,8 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         "--source-mode",
         "lexical_only",
         "--strict-source-mode",
+        "--as-of",
+        "2030-01-01T00:00:00Z",
     ])?;
     let source_pack_elapsed = source_pack_started.elapsed();
     eprintln!(
@@ -3173,6 +3190,10 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         "--source-mode",
         "lexical_only",
         "--strict-source-mode",
+        // Must match the source pack's instant exactly; an unpinned reference time on
+        // either side reintroduces the 5.2e-5 delta this test spent weeks on.
+        "--as-of",
+        "2030-01-01T00:00:00Z",
     ])?;
     // The ratio is the number that settles it. Both sides hold an identical 3-document
     // index, so a restored/source ratio near 1 means the pack is simply expensive in a
