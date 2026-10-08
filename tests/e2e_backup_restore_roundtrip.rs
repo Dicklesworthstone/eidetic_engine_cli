@@ -1425,22 +1425,25 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     // product one. The unit test did not catch it because I had invented its fixture with
     // snake_case keys, so it validated the guard against a document shape that does not
     // exist. The fixture below now uses the serialized names.
-    // FIVE, not seven. `request` has always been excluded (store-local snapshot
-    // generation); `items` and `renderedText` joined it in 72527d90a because both are
-    // digests over score-bearing content that is now tolerated at PACK_SCORE_TOLERANCE, and a hash has no
-    // tolerance.
+    // SEVEN: every component except `request`, which alone stays excluded because it
+    // carries a store-local snapshot generation.
     //
-    // I added those two exclusions and left this list at seven, so the guard demanded
-    // components the canonicalizer had just removed and failed every test that reached it.
-    // It caught my own contradiction on the first run -- which is the behaviour I wanted
-    // from it, just aimed at me. Keeping the list and the exclusions adjacent in this
-    // function is the only thing that makes the inconsistency visible at all.
+    // This list has now been wrong in BOTH directions, from the same cause. 72527d90a
+    // excluded `items` and `renderedText` and left the list at seven, so the guard demanded
+    // components the canonicalizer had just removed. f808106e2 un-excluded them and left
+    // the list at five, so the guard stopped checking two components that are compared
+    // again. Three places encode one fact -- this list, the exclusion list above, and the
+    // control test's absent/present assertions -- and a change to any one of them is a
+    // change to all three. Adjacency is not enough on its own; that is what the control
+    // exists for.
     for required in [
         "referenceTime",
         "qualityScoring",
+        "items",
         "omitted",
         "degraded",
         "coordination",
+        "renderedText",
     ] {
         if !components.contains_key(required) {
             return Err(format!(
@@ -1539,28 +1542,40 @@ fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclu
             }, "digest": "blake3:iii"}
         }}
     });
-    // All eight present: canonicalizes, and the FOUR excluded pointers are gone.
+    // All eight present: canonicalizes, and exactly TWO pointers are gone.
     let full = canonical_context_stdout(one_missing.clone())
         .expect("a complete snapshotIdentity must canonicalize");
     let rendered = String::from_utf8(full).expect("canonical bytes are utf-8");
     for (digest, label) in [
         ("blake3:aaa", "request (store-local snapshot generation)"),
         ("blake3:iii", "digest (composite of the above)"),
-        ("blake3:ddd", "items (digest over tolerated scores)"),
-        ("blake3:hhh", "renderedText (digest over the why text)"),
     ] {
         assert!(
             !rendered.contains(digest),
             "{label} must be excluded from the compared bytes: {rendered}"
         );
     }
-    // And a still-compared component must survive. Checking one by value, not just that
-    // the object exists, because an exclusion list that quietly swallowed everything would
+    // And every still-compared component must SURVIVE, checked by value rather than by the
+    // object merely existing -- an exclusion list that quietly swallowed everything would
     // otherwise look identical to a correct one.
-    assert!(
-        rendered.contains("blake3:ccc"),
-        "qualityScoring must still be compared: {rendered}"
-    );
+    //
+    // `items` and `renderedText` are in this list now, and that is the whole point of
+    // editing this control: f808106e2 un-excluded them once the score wobble was fixed, and
+    // this assertion is what fails if they are ever silently dropped again.
+    for (digest, label) in [
+        ("blake3:bbb", "referenceTime"),
+        ("blake3:ccc", "qualityScoring"),
+        ("blake3:ddd", "items"),
+        ("blake3:eee", "omitted"),
+        ("blake3:fff", "degraded"),
+        ("blake3:ggg", "coordination"),
+        ("blake3:hhh", "renderedText"),
+    ] {
+        assert!(
+            rendered.contains(digest),
+            "{label} must still be compared: {rendered}"
+        );
+    }
 
     // Dropping a STILL-REQUIRED component must fail and name it. This used `items` until
     // 72527d90a excluded that one; a control asserting a now-excluded component would have
