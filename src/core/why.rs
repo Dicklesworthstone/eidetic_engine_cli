@@ -1559,7 +1559,11 @@ fn explain_evidence_with_connection(
         None
     };
 
-    let egress = crate::policy::redact_public_replay_body(&span.excerpt);
+    // Explain with the projected message body the pack and search show, not
+    // the transcript envelope: every Claude Code record's absolute `cwd` made
+    // the envelope screen withhold the whole explanation. A plain excerpt
+    // projects to itself and is screened exactly as before.
+    let egress = crate::policy::redact_public_replay_body(&span.reader_text());
     let redaction_classes =
         serde_json::from_str::<Vec<String>>(&span.redaction_classes_json).unwrap_or_default();
     let latest_pack_selection =
