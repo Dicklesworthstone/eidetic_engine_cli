@@ -133,7 +133,7 @@ jobs:
           # named none of them. One of the three counts is stale; the other two are not, and
           # they are deliberately left alone.
           #
-          #   core::global_store::                       27  LEFT EXACT (see below)
+          #   core::global_store::                       27  was EXACT, now FLOOR (measured 28)
           #   core::search::diagnostic_snapshot::tests::  14  STALE, actual 15 -> FLOOR
           #   core::search::rule_admission::...seed_tests::  6  LEFT EXACT (see below)
           #
@@ -147,12 +147,33 @@ jobs:
           # `seed` stays EXACT because seed-authority-20260919 pins the identical filter at 6
           # and has RECENT SUCCESSES, so 6 is a cargo measurement, not a guess.
           #
-          # `store` stays EXACT because I could not measure it and will not guess. Its filter
-          # ends in `::`, so it matches the whole subtree, and my counter does not recurse
-          # into submodules -- it reports 20 for a population that is certainly larger. A
-          # floor at 27 would be no safer than the exact 27, and a floor at 20 would weaken
-          # the gate on an unmeasured number. primer-admission-20260919 pins it at 27 too, so
-          # if 27 is wrong it is wrong in two lanes and belongs in one repair, not this one.
+          # `store` WAS left exact on the reasoning below, and the measurement has since
+          # arrived, so it is now a FLOOR. Keeping the original note, because the condition it
+          # set is exactly what was met:
+          #
+          #   "I could not measure it and will not guess. Its filter ends in `::`, so it
+          #    matches the whole subtree, and my counter does not recurse into submodules --
+          #    it reports 20 for a population that is certainly larger. A floor at 27 would
+          #    be no safer than the exact 27, and a floor at 20 would weaken the gate on an
+          #    unmeasured number. primer-admission-20260919 pins it at 27 too, so if 27 is
+          #    wrong it is wrong in two lanes and belongs in one repair, not this one."
+          #
+          # It is wrong in both lanes, and cargo said so three times without my counter:
+          #   this lane,  run 37607508968  "arm 'store' ... expected exactly 27, counted 28"
+          #   primer-adm, run 37660994662  summary line `test result: ok. 28 passed`
+          #   static      21 #[test] in src/core/global_store.rs + 7 in
+          #               global_store_revision_tests.rs (mounted at :839) = 28
+          #
+          # b3e08c1bc added the 28th on 2026-10-07 at 14:31 --
+          # `default_user_data_root_requires_absolute_xdg_and_preserves_home_fallback`, a
+          # config fix with a test for it. core-memory-regressions.yml already pins that test
+          # BY NAME, so its existence is corroborated by a third lane.
+          #
+          # "A floor at 27 would be no safer than the exact 27" was true under ignorance and
+          # is false now: exact 27 FAILS on today's tree while floor 27 passes and still
+          # catches a shrink. The floor stays at the REVIEWED 27 rather than ratcheting to 28,
+          # matching external-ingestion-20260919 and the primer-admission repair -- 28
+          # includes a test nobody reviewed as part of this lane's charter.
           run_group() {
             local name="$1" filter="$2" expected="$3" mode="${4:-exact}" status=0 ran=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/global-$name.log" 2>&1 || status=$?
@@ -175,7 +196,7 @@ jobs:
             fi
             return 0
           }
-          run_group store 'core::global_store::' 27
+          run_group store 'core::global_store::' 27 floor
           run_group diagnostic 'core::search::diagnostic_snapshot::tests::' 14 floor
           run_group seed 'core::search::rule_admission::memory_revisions::seed_tests::' 6
           exit "$failed"
