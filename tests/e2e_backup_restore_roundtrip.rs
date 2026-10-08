@@ -787,6 +787,82 @@ fn remove_json_pointer(value: &mut JsonValue, pointer: &str) {
     }
 }
 
+/// Publish a real index for one side of the round-trip and report how many
+/// documents it contains.
+///
+/// bd-bka39: the two `ee pack` probes used to point `--index-dir` at a path
+/// that was never created, on both sides. That equalized DISK state and
+/// nothing else. With no published index each pack falls back to projecting
+/// the whole corpus into an ephemeral in-memory lexical engine
+/// (`src/core/search.rs:11320`), so the comparison ran between two fallback
+/// paths over unequal DATABASES -- the restored store is missing every table
+/// `src/core/backup.rs:1957` marks `rebuild_on_restore`, `memory_anchor_index`
+/// among them. That cost the test three ways: a relevance delta with no
+/// mechanism, a different degradation set that had to be excluded from the
+/// canonical bytes, and `budget_exhausted` deadlines on the source pack even
+/// on an idle host (three of five runs never reached the assertion at all).
+///
+/// Warming both sides is the owner-authorized remedy (2026-10-07). `ee index
+/// rebuild` is the right instrument rather than a fixture: ADR 0064 wires the
+/// anchor reverse index rebuild into the same pass as the search documents
+/// (`src/core/index.rs:4218`), and the same pass backfills
+/// `evidence_admission_verdicts`, so one command restores three of those
+/// derived tables from each side's own rows.
+///
+/// `no_documents` is a SUCCESS status with exit 0, so `run_ee` cannot catch
+/// it. An empty restored index is precisely the asymmetry being removed here,
+/// and it would make the pack silently fall back again, which is why the count
+/// comes back to the caller to be compared across sides instead of merely
+/// being asserted nonzero here.
+fn warm_published_index(
+    workspace_arg: &str,
+    database_arg: &str,
+    index_dir_arg: &str,
+    side: &str,
+) -> Result<u64, String> {
+    let report = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "index",
+        "rebuild",
+        "--database",
+        database_arg,
+        "--index-dir",
+        index_dir_arg,
+    ])?;
+    persist_json_artifact(&format!("bka39_index_warm_{side}"), &report)?;
+    ensure_equal(
+        &report.pointer("/data/status").and_then(JsonValue::as_str),
+        &Some("success"),
+        &format!("{side} index warm status"),
+    )?;
+    ensure_equal(
+        &report.pointer("/data/dry_run").and_then(JsonValue::as_bool),
+        &Some(false),
+        &format!("{side} index warm actually wrote an index"),
+    )?;
+    let documents_total = report
+        .pointer("/data/documents_total")
+        .and_then(JsonValue::as_u64)
+        .ok_or_else(|| format!("{side} index warm report has no documents_total"))?;
+    ensure(
+        documents_total > 0,
+        format!(
+            "{side} index warm published a NON-EMPTY index (documents_total was \
+             {documents_total}, which would leave the pack on the whole-corpus fallback this \
+             warm exists to avoid)"
+        ),
+    )?;
+    // Printed, not only asserted and persisted. A pass here only means something if the two
+    // counts were actually observed: a warm that indexed the wrong corpus would put both
+    // sides back on the fallback, and the test would then pass for the OLD reason while
+    // looking like it passed for the new one. The JSON artifact lands on whichever machine
+    // ran the test, so stdout is the only copy a remote run brings back.
+    eprintln!("[bd-bka39] {side} warm index published {documents_total} documents");
+    Ok(documents_total)
+}
+
 fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     if !ee::obs::normalize_pack_slo_measurements(&mut value)? {
         return Err("backup context output missing producer SLO measurements".to_owned());
@@ -811,6 +887,14 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     // derived_rebuildable / rebuild_on_restore), so it retrieves differently and reports a
     // different degradation set. Adding the banner finishes that decision rather than
     // loosening it.
+    //
+    // THAT PREMISE IS NOW WEAKER, DELIBERATELY NOT ACTED ON YET. `warm_published_index`
+    // publishes a real index on BOTH sides before either pack, so "the restored store has
+    // no published index" no longer describes the run. Whether the exclusions below are
+    // still load-bearing is therefore an open measurement, not an assumption: each one has
+    // to be removed and the test re-run to find out. Tightening them in the same change
+    // that introduced the warm would conflate "warming made these equal" with "warming
+    // broke something else", so the list stays as-is until measured one pointer at a time.
     for pointer in [
         "/data/degraded",
         "/degraded",
@@ -1873,8 +1957,12 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     let workspace = staging.path().join("ws");
     let backup_dir = staging.path().join("backups");
     let side_path = staging.path().join("restored");
-    let source_context_index = staging.path().join("source-empty-index");
-    let restored_context_index = staging.path().join("restored-empty-index");
+    // bd-bka39: these were `source-empty-index` / `restored-empty-index` and the
+    // directories were never created. Both sides now publish a real index before
+    // packing (see `warm_published_index`), so the old names would describe the
+    // opposite of what the test does.
+    let source_context_index = staging.path().join("source-warm-index");
+    let restored_context_index = staging.path().join("restored-warm-index");
 
     std::fs::create_dir_all(&workspace).map_err(|error| format!("mkdir ws: {error}"))?;
 
@@ -2088,6 +2176,12 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     // restoration is still verified directly against the SQLite store below;
     // here we keep a byte-identity check that the same `ee pack` query produces
     // identical output before and after the backup/restore round-trip.
+    let source_index_documents = warm_published_index(
+        &workspace_arg,
+        &src_db_arg,
+        &source_context_index_arg,
+        "source",
+    )?;
     let (source_context, _source_context_stdout) = run_ee_raw(&[
         "--workspace",
         &workspace_arg,
@@ -2308,6 +2402,23 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     )?;
     drop(restored_conn);
     enable_ppr_context_feature(&side_path)?;
+    let restored_index_documents = warm_published_index(
+        &side_path_arg,
+        &restored_db_path_arg,
+        &restored_context_index_arg,
+        "restored",
+    )?;
+    // The comparability precondition, asserted BEFORE the bytes are compared so a byte diff
+    // below can never be blamed on one side having fewer documents to retrieve from. Equal
+    // counts are what "both sides retrieve from equivalent state" means operationally, and
+    // the pack comparison is only meaningful once it holds. A failure here is the more
+    // interesting outcome of the two: it would be a product finding about restore
+    // completeness rather than an assertion defect.
+    ensure_equal(
+        &restored_index_documents,
+        &source_index_documents,
+        "restored warm index covers exactly the documents the source index covers",
+    )?;
     let (restored_context, _restored_context_stdout) = run_ee_raw(&[
         "--workspace",
         &side_path_arg,
