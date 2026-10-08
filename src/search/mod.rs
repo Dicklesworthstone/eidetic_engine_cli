@@ -44,11 +44,11 @@ pub(crate) const MEMORY_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.memory_index_proj
 pub(crate) const SESSION_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.session_index_projection.v1";
 pub(crate) const ARTIFACT_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.artifact_index_projection.v1";
 pub(crate) const RULE_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.rule_index_projection.v1";
-/// v2 (bd-reality-core-convergence-1azkt.45): imported transcript evidence is
-/// indexed as its projected message text, not its raw JSONL envelope. The bump
-/// changes the corpus revision, so every existing index is reported stale and
-/// rebuilt rather than silently mixing the two projections.
-pub(crate) const EVIDENCE_INDEX_PROJECTION_SCHEMA_V2: &str = "ee.evidence_index_projection.v2";
+/// v3 (bd-reality-core-convergence-1azkt.45): the shared typed projection
+/// excludes reasoning and unprojectable records, handles summaries, and labels
+/// each message with its actual role. Changing the corpus revision prevents
+/// reuse of indexes containing the previous raw-envelope fallback.
+pub(crate) const EVIDENCE_INDEX_PROJECTION_SCHEMA_V3: &str = "ee.evidence_index_projection.v3";
 pub const MEMORY_ANCHOR_SCHEMA_METADATA_KEY: &str = "memory_anchor_schema";
 pub const MEMORY_ANCHOR_COUNT_METADATA_KEY: &str = "memory_anchor_count";
 pub const MEMORY_ANCHOR_KINDS_METADATA_KEY: &str = "memory_anchor_kinds";
@@ -1095,19 +1095,17 @@ pub fn rule_to_document(projection: &RuleIndexProjection) -> CanonicalSearchDocu
 #[must_use]
 pub fn evidence_span_to_document(span: &crate::db::StoredEvidenceSpan) -> CanonicalSearchDocument {
     let egress = crate::policy::screen_external_text_for_ingestion(&span.excerpt);
+    let reader_text = span.reader_text();
     let withheld = egress.redacted
         || egress.instruction_like
-        || !matches!(egress.instruction_risk, "none" | "low");
+        || !matches!(egress.instruction_risk, "none" | "low")
+        || reader_text.trim().is_empty();
     let safe_excerpt = if withheld {
         "[EVIDENCE_WITHHELD]".to_owned()
-    } else if egress.content == span.excerpt {
-        // Index and show what a reader can use: the message body of a
-        // transcript record, not the envelope keys, ids and escapes around it
-        // (bd-reality-core-convergence-1azkt.45). Provenance, the content hash
-        // and the line locator still name the exact stored source bytes.
-        span.reader_text().into_owned()
     } else {
-        egress.content
+        // Refused structured projections cannot fall back to the screened
+        // envelope. The complete stored source still owns the hash and locator.
+        reader_text.into_owned()
     };
     let (content, content_truncated) = content_preview_with_flag(&safe_excerpt);
     let label = if span.is_derived_incident_card() {
@@ -4680,6 +4678,67 @@ mod tests {
         assert!(!indexable.metadata.contains_key("metadata_json"));
         assert!(!rendered.contains("/Users/alice"));
         assert!(!rendered.contains("raw-42"));
+    }
+
+    #[test]
+    fn evidence_document_projects_real_transcripts_without_envelope_or_reasoning_tokens() {
+        let body = "Résumé: run cargo fmt before the release.\nKeep the \"golden\" fixture.";
+        for record in [
+            json!({
+                "parentUuid": "fixture-parent", "isSidechain": false,
+                "promptId": "fixture-prompt", "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "internal-only reasoning canary"},
+                    {"type": "text", "text": body}
+                ]}
+            }),
+            json!({"type": "response_item", "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": body}]
+            }}),
+            json!({"type": "event_msg", "payload": {
+                "type": "agent_message", "message": body
+            }}),
+        ] {
+            let raw = record.to_string();
+            let span = make_test_evidence_span(&raw);
+            let document = super::evidence_span_to_document(&span);
+            assert_eq!(document.id(), span.id);
+            assert_eq!(document.content(), format!("assistant: {body}"));
+            let indexed = document.into_indexable();
+            assert_eq!(indexed.metadata["content"], format!("assistant: {body}"));
+            assert_eq!(indexed.metadata["content_hash"], span.content_hash);
+            assert_eq!(indexed.metadata["start_line"], "42");
+            assert_eq!(indexed.metadata["end_line"], "42");
+            assert_eq!(span.excerpt, raw, "projection must not rewrite evidence");
+            for scaffolding in [
+                "parentUuid",
+                "isSidechain",
+                "promptId",
+                "response_item",
+                "internal-only",
+            ] {
+                assert!(!indexed.content.contains(scaffolding));
+            }
+        }
+    }
+
+    #[test]
+    fn refused_transcript_documents_never_recover_raw_json_as_searchable_text() {
+        for raw in [
+            r#"{"type":"assistant","content":[{"type":"thinking","thinking":"unobserved repair canary"}]}"#,
+            r#"{"type":"assistant","content":"first body","message":"ambiguous second body"}"#,
+            r#"{"type":"assistant","content":"first body","content":"duplicate second body"}"#,
+            r#"{"type":"assistant","content":[{"type":"unknown","text":"unknown block canary"}]}"#,
+            r#"{"type":"assistant","content":"truncated body"#,
+        ] {
+            let span = make_test_evidence_span(raw);
+            let document = super::evidence_span_to_document(&span).into_indexable();
+            assert_eq!(document.content, "[EVIDENCE_WITHHELD]", "{raw}");
+            assert_eq!(document.metadata["content"], "[EVIDENCE_WITHHELD]");
+            assert!(!document.metadata.contains_key("content_hash"));
+            assert_eq!(span.excerpt, raw);
+        }
     }
 
     #[test]
