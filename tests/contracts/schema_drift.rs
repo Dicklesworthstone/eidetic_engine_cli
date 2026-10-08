@@ -1860,6 +1860,7 @@ mod tests {
         "error_fingerprints",
         "error_repair_links",
         "evidence_admission_verdicts",
+        "evidence_reader_projections",
         "evidence_spans",
         "feedback_events",
         "feedback_events_v037",
