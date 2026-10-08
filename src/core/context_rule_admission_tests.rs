@@ -252,7 +252,7 @@ fn minimum_trust_uses_the_live_rule_in_both_parent_trust_directions() {
     filters.trust.require_posture = Some("advisory".to_owned());
     assert_eq!(
         sources(&f.resolve(&ids, &filters).candidates),
-        BTreeSet::from([strong_rule.rule])
+        BTreeSet::from([strong_rule.rule.clone()])
     );
     filters
         .trust
@@ -513,7 +513,7 @@ fn redaction_categories_describe_the_selected_rule_body() {
     let resolved = f.resolve(&ids, &filters);
     assert_eq!(
         sources(&resolved.candidates),
-        BTreeSet::from([private_parent.rule])
+        BTreeSet::from([private_parent.rule.clone()])
     );
     assert_eq!(resolved.metrics.redaction_filtered_candidates, 1);
     assert!(!resolved.candidates[0].content.contains(secret_body));
