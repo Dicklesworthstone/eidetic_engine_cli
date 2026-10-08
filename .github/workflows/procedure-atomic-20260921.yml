@@ -171,8 +171,34 @@ jobs:
         run: |
           set -euo pipefail
           git rev-parse HEAD | tee "$RUNNER_TEMP/procedure-atomic-source.log"
-          git merge-base --is-ancestor "$PUBLISHED_SOURCE" HEAD
-          git diff --exit-code "$PUBLISHED_SOURCE" HEAD -- src/db/mod.rs src/core/outcome.rs src/core/outcome_procedure_atomic_tests.rs Cargo.toml Cargo.lock rust-toolchain.toml
+          # bd-aav0v: both guards below were BARE, so this step aborted with nothing but
+          # `##[error]Process completed with exit code 1` -- and they fail for completely
+          # different reasons.
+          #
+          # MEASURED CAUSE of the 2026-10-08 failure (run 37742039930): neither guard is
+          # about this delivery. PUBLISHED_SOURCE was b04d25448 and `src/db/mod.rs` had
+          # gained 61 lines across two PEER commits (a1e185291, 7e8068c65) in the 18
+          # minutes between the publish job and this job's checkout. The diff is therefore
+          # non-empty and the step fails -- having verified nothing about the procedure
+          # atomicity work it exists to verify.
+          #
+          # This is a RACE BY CONSTRUCTION, not drift: src/db/mod.rs is one of the three
+          # delivered paths AND one of the busiest files in the tree, so "unchanged between
+          # two jobs minutes apart" is a condition this repo does not satisfy. Narrowing
+          # the path list cannot fix it, because the contested file is the delivery target.
+          #
+          # NOT WEAKENED. Both still fail the step; they now say which one fired and
+          # whether a re-run can help. Deciding whether this provenance check should
+          # compare FILE BYTES at all -- rather than asserting the delivered content is
+          # still present -- changes what the lane guarantees and belongs to its owner.
+          if ! git merge-base --is-ancestor "$PUBLISHED_SOURCE" HEAD; then
+            echo "ATTRIBUTION: PROVENANCE guard STOPPED this lane -- the published source $PUBLISHED_SOURCE is NOT an ancestor of this job's HEAD ($(git rev-parse HEAD)). That means the publish job's commit is not on this branch at all: a force-push, a reset, or a verify job that checked out a different ref. Re-running will not help until those two agree."
+            exit 1
+          fi
+          if ! git diff --exit-code "$PUBLISHED_SOURCE" HEAD -- src/db/mod.rs src/core/outcome.rs src/core/outcome_procedure_atomic_tests.rs Cargo.toml Cargo.lock rust-toolchain.toml; then
+            echo "ATTRIBUTION: CONCURRENT CHANGE STOPPED this lane, not a delivery failure -- one of the reviewed paths moved between the published source $PUBLISHED_SOURCE and this job's HEAD. The diff above names the file. src/db/mod.rs and Cargo.lock are shared, high-traffic paths, so a peer merging during this run is the common cause and a RE-RUN usually clears it. Nothing here says the procedure atomicity work is wrong; the regressions that test it run in the steps below."
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
