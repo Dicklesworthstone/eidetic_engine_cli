@@ -78,6 +78,23 @@ pub(super) struct Delta {
 }
 
 impl Delta {
+    // Its only caller is the MAX_DELTA_DOCUMENTS assertion in this file's `#[cfg(test)]`
+    // module (`assert_eq!(delta.len(), MAX_DELTA_DOCUMENTS)`), and `cargo clippy --lib`
+    // does not compile cfg(test), so the lint sees a method nobody calls. Under
+    // `-D warnings` that became `error: method `len` is never used` and took the WHOLE
+    // production lint gate down -- which reddened primer-admission-20260919 and
+    // index-generation-admission-20260925 at their clippy step, after every one of their
+    // own test arms had passed.
+    //
+    // Annotated rather than deleted: the test assertion is a real use, and removing a
+    // bound-checking helper to satisfy a lint that cannot see its caller would be fixing
+    // the wrong thing. Annotated rather than `#[cfg(test)]`-gated because `pub(super)`
+    // says this was meant to be callable from production, and gating it would quietly
+    // remove that option.
+    #[allow(
+        dead_code,
+        reason = "called only from this file's cfg(test) module, which cargo clippy --lib does not compile"
+    )]
     pub(super) fn len(&self) -> usize {
         self.upserts.len().saturating_add(self.removals.len())
     }
