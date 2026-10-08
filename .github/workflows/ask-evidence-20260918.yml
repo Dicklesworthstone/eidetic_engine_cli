@@ -59,14 +59,46 @@ jobs:
           status=0
           cargo test --locked --lib core::ask::corpus::admission::evidence::tests:: -- --nocapture > "$RUNNER_TEMP/evidence-focused.log" 2>&1 || status=$?
           tail -n 140 "$RUNNER_TEMP/evidence-focused.log"
-          grep -Eq 'test result: ok\. 9 passed; 0 failed' "$RUNNER_TEMP/evidence-focused.log" || status=1
+          # bd-aav0v: ONE VARIABLE, TWO STATES. `status` took `$?` from cargo and also a
+          # literal 1 from the count check, so `exit "$status"` named neither -- a failing
+          # test and a changed population produced the same red. The remedies are opposite:
+          # fix the code, versus update or floor the pin.
+          #
+          # Exit code and redness are UNCHANGED: any failing arm still fails the step, and
+          # both arms are still evaluated so neither can mask the other.
+          evidence_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/evidence-focused.log" | head -1)
+          if test "$status" -ne 0; then
+            echo "ATTRIBUTION: arm 'core::ask::corpus::admission::evidence::tests::' FAILED -- cargo exited $status, so a test failed or the harness crashed. Not a count mismatch; the failing test is in the tail above. Summary count: ${evidence_ran:-none}."
+          elif test -z "$evidence_ran"; then
+            echo "ATTRIBUTION: arm 'core::ask::corpus::admission::evidence::tests::' FAILED -- cargo exited 0 but printed no 'test result: ok. N passed; 0 failed' line. That is what a filter matching ZERO tests looks like, and it is treated as a failure, not as a count of zero."
+            status=1
+          elif test "$evidence_ran" != 9; then
+            echo "ATTRIBUTION: arm 'core::ask::corpus::admission::evidence::tests::' FAILED -- expected exactly 9 passing, counted $evidence_ran. If $evidence_ran is GREATER the suite grew and this pin is stale (bd-lagsa); if LOWER a test was removed. This pin is NOT yet measured, so it stays exact rather than being floored on a guess."
+            status=1
+          else
+            echo "ATTRIBUTION: arm 'core::ask::corpus::admission::evidence::tests::' ok -- exactly 9 passed, 0 failed."
+          fi
           exit "$status"
       - name: Execute new and existing public ask contracts before publication
         run: |
           status=0
           cargo test --locked --test contracts ask_lifecycle -- --nocapture > "$RUNNER_TEMP/evidence-cli.log" 2>&1 || status=$?
           tail -n 160 "$RUNNER_TEMP/evidence-cli.log"
-          grep -Eq 'test result: ok\. 20 passed; 0 failed' "$RUNNER_TEMP/evidence-cli.log" || status=1
+          # bd-aav0v: same shared-flag shape as the step above -- `status` carried both
+          # cargo's exit and the count check's literal 1. Exit code and redness unchanged;
+          # both arms still evaluated.
+          lifecycle_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/evidence-cli.log" | head -1)
+          if test "$status" -ne 0; then
+            echo "ATTRIBUTION: arm 'contracts ask_lifecycle' FAILED -- cargo exited $status, so a test failed or the harness crashed. Not a count mismatch; the failing test is in the tail above. Summary count: ${lifecycle_ran:-none}."
+          elif test -z "$lifecycle_ran"; then
+            echo "ATTRIBUTION: arm 'contracts ask_lifecycle' FAILED -- cargo exited 0 but printed no 'test result: ok. N passed; 0 failed' line. That is what a filter matching ZERO tests looks like, and it is treated as a failure, not as a count of zero."
+            status=1
+          elif test "$lifecycle_ran" != 20; then
+            echo "ATTRIBUTION: arm 'contracts ask_lifecycle' FAILED -- expected exactly 20 passing, counted $lifecycle_ran. If $lifecycle_ran is GREATER the suite grew and this pin is stale (bd-lagsa); if LOWER a test was removed. This pin is NOT yet measured, so it stays exact rather than being floored on a guess."
+            status=1
+          else
+            echo "ATTRIBUTION: arm 'contracts ask_lifecycle' ok -- exactly 20 passed, 0 failed."
+          fi
           exit "$status"
       - name: Commit tested production feature directly to main
         run: |
