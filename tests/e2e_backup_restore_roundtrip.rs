@@ -4898,6 +4898,15 @@ fn re_backup_of_restored_state_reproduces_the_records_root() -> TestResult {
         .and_then(JsonValue::as_str)
         .ok_or_else(|| format!("restore reported no restored database path: {restore}"))?
         .to_owned();
+    // The restore must have put the store UNDER the side path we asked for. The
+    // re-backups below address it by `--workspace side_arg`, which is only the
+    // same store if this holds; without it they could silently re-backup the
+    // SOURCE workspace and the identity assertion would compare a backup with
+    // itself and always pass.
+    ensure(
+        restored_db.starts_with(&side_arg),
+        format!("restore placed the store outside --side-path {side_arg}: {restored_db}"),
+    )?;
     let imported = restore
         .pointer("/data/counts/memoriesImported")
         .and_then(JsonValue::as_u64)
@@ -4909,6 +4918,18 @@ fn re_backup_of_restored_state_reproduces_the_records_root() -> TestResult {
         format!("restore must import the seeded memories, imported {imported}"),
     )?;
 
+    // ADDRESS THE RESTORED STORE BY ITS OWN WORKSPACE ROOT, not by the source
+    // workspace plus an overridden --database.
+    //
+    // `--workspace <source> --database <restored>` looks equivalent and is not:
+    // the restored database carries no row for the SOURCE workspace path, so
+    // `backup create` refuses with `{"code":"not_found","message":"workspace not
+    // found: <source>"}` in 0 s. Probed directly before fixing this.
+    //
+    // I had copied that pairing from scripts/e2e_backup_roundtrip.sh, which does
+    // `ee backup create --workspace "$WS" --database "$rs_db"`. That script is one
+    // of the 52 e2e orphans nothing invokes (bd-udjrq), so the pairing had never
+    // executed anywhere -- which is exactly how an unexecuted pattern propagates.
     let second = run_ee(&[
         "backup",
         "create",
@@ -4918,9 +4939,7 @@ fn re_backup_of_restored_state_reproduces_the_records_root() -> TestResult {
         "none",
         "--include-graph-cache=false",
         "--workspace",
-        &ws,
-        "--database",
-        &restored_db,
+        &side_arg,
         "--json",
     ])?;
     let root_after = records_root(&second, "second backup")?;
@@ -4944,9 +4963,7 @@ fn re_backup_of_restored_state_reproduces_the_records_root() -> TestResult {
         "--tags",
         "cjt23,control",
         "--workspace",
-        &ws,
-        "--database",
-        &restored_db,
+        &side_arg,
         "--json",
     ])?;
     let third = run_ee(&[
@@ -4958,9 +4975,7 @@ fn re_backup_of_restored_state_reproduces_the_records_root() -> TestResult {
         "none",
         "--include-graph-cache=false",
         "--workspace",
-        &ws,
-        "--database",
-        &restored_db,
+        &side_arg,
         "--json",
     ])?;
     let root_changed = records_root(&third, "third backup")?;
