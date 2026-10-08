@@ -36,6 +36,59 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # IDEMPOTENCY GUARD (bd-delivery-lanes-stuck-publish-to-main-hpgw8, bd-aav0v).
+          #
+          # This step had NO guard at all: it rewrote hunk headers in its own patch, applied
+          # it, and published, unconditionally. So it was guaranteed to fail the moment it
+          # succeeded. Run 37579638854 is what that looks like -- twelve lines of
+          # "patch does not apply" across all six target files, which reads as "the feature
+          # is broken" when the truth is the opposite.
+          #
+          # THE FEATURE IS DELIVERED. Verified in the tree, not inferred from this lane's own
+          # output -- every symbol the patch adds is present, in production AND in the
+          # contracts, each exactly once:
+          #   src/eval/runner.rs                    pub fn retrieval_degradations(
+          #   src/eval/runner.rs                    pub fn compute_search_query_metrics(
+          #   src/cli/mod.rs                        fn write_eval_retrieval_diagnostics<W: Write>(
+          #   tests/contracts/eval_science.rs       fn eval_retrieval_run_preserves_real_...(
+          #   tests/contracts/science_analytics.rs  assert_eval_retrieval_diagnostics(
+          #
+          # ALL-OR-NOTHING, NOT ANY. A partially delivered tree must still REFUSE: skipping on
+          # the first marker would abandon the rest of a half-applied delivery. Present-but-
+          # incomplete therefore falls through to the unconditional path below, where
+          # `git apply --check` is the right thing to fail on.
+          #
+          # WHY exit 0 AND NOT exit 1. Operator decision 2026-10-07, following 4372cef4a: an
+          # already-delivered lane succeeds rather than refusing. It is bounded here because
+          # `integrate-and-verify` is ONE job -- exiting this step does not skip the later
+          # steps, so the pinned-dependency resolve, the six diagnostic unit regressions, the
+          # real-CLI contracts and the historical quality golden all still run against the
+          # delivered source. "On main and verified" both hold on this path.
+          #
+          # THE GUARD COVERS THE WHOLE STEP, deliberately. Guarding only `git apply` would
+          # move the failure three blocks down to the publish block's
+          # `assert set(changed) in (set(paths), ...)`, which requires those six files to have
+          # CHANGED and so fails on an empty diff. A guard that relocates a red instead of
+          # resolving it is worse than no guard, because the next reader has to rediscover it.
+          delivered=1
+          for pin in \
+            'src/eval/runner.rs|pub fn retrieval_degradations(' \
+            'src/eval/runner.rs|pub fn compute_search_query_metrics(' \
+            'src/cli/mod.rs|fn write_eval_retrieval_diagnostics<W: Write>(' \
+            'tests/contracts/eval_science.rs|fn eval_retrieval_run_preserves_real_search_degradations_for_each_query(' \
+            'tests/contracts/science_analytics.rs|assert_eval_retrieval_diagnostics(' \
+          ; do
+            pin_path=${pin%%|*}
+            pin_text=${pin#*|}
+            if ! grep -Fq "$pin_text" "$pin_path"; then
+              echo "ATTRIBUTION: delivery marker ABSENT -- $pin_path does not contain '$pin_text', so this tree is not (or not fully) delivered and the patch below must run."
+              delivered=0
+            fi
+          done
+          if test "$delivered" -eq 1; then
+            echo "ATTRIBUTION: delivery ALREADY PRESENT -- all five reviewed symbols are in the tree across src/eval/runner.rs, src/cli/mod.rs and both contract files, so there is nothing to apply or publish. Succeeding rather than refusing: the later steps in this job still run the six diagnostic regressions, the real-CLI contracts and the quality golden against the delivered source. Skipped: the patch header rewrite, the apply, and the publish."
+            exit 0
+          fi
           python3 - <<'PY'
           import hashlib, pathlib
           path = pathlib.Path('scripts/delivery/eval-retrieval-diagnostics-20260921.patch')
