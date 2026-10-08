@@ -378,13 +378,48 @@ fn tracked_files(root: &Path) -> Option<Vec<PathBuf>> {
     if files.is_empty() { None } else { Some(files) }
 }
 
-fn scan(root: &Path) -> Vec<Violation> {
-    let mut files = tracked_files(root).unwrap_or_else(|| {
-        let mut walked = Vec::new();
-        collect_files(root, root, &mut walked);
-        walked
-    });
+/// What `scan` actually looked at, so a count is interpretable.
+///
+/// THE POPULATION IS NOT FIXED, and that is the whole reason this exists. With
+/// git, the scan is `git ls-files`, which includes tracked files inside
+/// dot-directories -- `.beads/issues.jsonl` among them. Without git it is a
+/// filesystem walk that descends only into `WALKED_DOT_DIRECTORIES`, and
+/// `.beads` is deliberately not in that list.
+///
+/// The `--clean-overlay` verify lane materialises the committed tree with NO
+/// `.git`, so the SMALLER population is the one scanned on the lane where this
+/// guard actually executes. A bare violation count therefore reads as "the
+/// published set" while describing a subset of it: measured 2026-10-08, the
+/// same revision reports 62 places on a worker and considerably more locally,
+/// because the tracker is invisible to the walk.
+///
+/// Reporting the source and the denominator does not fix that asymmetry -- it
+/// makes it impossible to misread, which is the same thing the vision-coverage
+/// gate does when it prints "NOT A MEASUREMENT" beside its own zero.
+struct ScanReport {
+    source: &'static str,
+    files_scanned: usize,
+    violations: Vec<Violation>,
+}
+
+fn scan(root: &Path) -> ScanReport {
+    let (mut files, source) = match tracked_files(root) {
+        Some(tracked) => (
+            tracked,
+            "git ls-files (includes tracked dot-directory files)",
+        ),
+        None => {
+            let mut walked = Vec::new();
+            collect_files(root, root, &mut walked);
+            (
+                walked,
+                "filesystem walk -- git unavailable, so .beads/ and every other \
+                 dot-directory outside WALKED_DOT_DIRECTORIES were NOT scanned",
+            )
+        }
+    };
     files.sort();
+    let files_scanned = files.len();
 
     let mut violations = Vec::new();
     for path in files {
@@ -418,23 +453,38 @@ fn scan(root: &Path) -> Vec<Violation> {
                     excerpt: line.chars().take(160).collect(),
                 });
                 if violations.len() >= 200 {
-                    return violations;
+                    return ScanReport {
+                        source,
+                        files_scanned,
+                        violations,
+                    };
                 }
             }
         }
     }
-    violations
+    ScanReport {
+        source,
+        files_scanned,
+        violations,
+    }
 }
 
 #[test]
 fn no_private_fleet_identifiers_are_published() {
     let root = repository_root();
-    let violations = scan(&root);
+    let ScanReport {
+        source,
+        files_scanned,
+        violations,
+    } = scan(&root);
     assert!(
         violations.is_empty(),
-        "private fleet identifiers found in {} place(s); replace them with \
+        "private fleet identifiers found in {} place(s) across {} file(s), scanned via {}; \
+         replace them with \
          neutral placeholders such as worker-01 / worker-a / windows-host-1:\n{}",
         violations.len(),
+        files_scanned,
+        source,
         violations
             .iter()
             .map(|violation| {
