@@ -828,10 +828,23 @@ fn why_normalization_drops_the_numbers_and_keeps_the_retrieval_path() {
 
 /// Bound on pack score drift between two index builds (bd-64w73).
 ///
-/// Sits ABOVE the largest wobble measured and an order BELOW the smallest change worth
-/// catching. Named rather than inlined so the two places that depend on it -- the
-/// comparison and its control -- cannot drift apart.
-const PACK_SCORE_TOLERANCE: f64 = 1e-4;
+/// NOW ZERO, deliberately, which makes the comparison EXACT on numbers.
+///
+/// This was 1e-4 to absorb a 5.2e-5 score wobble. That wobble had a cause -- `ee pack`
+/// defaulted its validity reference time to `Utc::now()` (src/core/context.rs:1640), so
+/// every pack evaluated against a different instant -- and the cause is now removed by
+/// pinning `--as-of` on every pack in this file. Measured: unpinned, two packs off ONE
+/// index differ; pinned, they are byte-identical, and so are two independent index builds.
+///
+/// A tolerance that outlives its reason is a silent weakening: at 1e-4 a genuine 5e-5
+/// relevance regression would pass unnoticed. Zero keeps the machinery and its control --
+/// which still prove that a changed string, an added key, a dropped key or a changed array
+/// length are NEVER tolerated -- while asserting the numbers exactly.
+///
+/// If a future run fails here on a small numeric difference, that is information: it means
+/// a second time-like input exists that `--as-of` does not pin, and the right response is
+/// to find it rather than to raise this constant back up.
+const PACK_SCORE_TOLERANCE: f64 = 0.0;
 
 #[test]
 fn float_tolerance_accepts_only_bounded_numeric_drift() {
@@ -847,21 +860,27 @@ fn float_tolerance_accepts_only_bounded_numeric_drift() {
     // with the bug because both came from the same wrong intuition about which side of the
     // noise the bound belongs on.
     //
-    // Measured wobble, five runs: 1.0e-5, 1.9e-5, 4.1e-5, 4.2e-5, 5.2e-5.
-    let largest_measured_wobble =
-        serde_json::json!({"scores": {"relevance": 0.474952 - 5.2e-5}, "why": "via lexical"});
+    // Measured wobble, five runs: 1.0e-5, 1.9e-5, 4.1e-5, 4.2e-5, 5.2e-5. All of it came
+    // from an unpinned wall-clock reference time, which `--as-of` now removes, so the
+    // comparison asserts numbers EXACTLY and the bound is 0.0.
+    //
+    // The case that used to demand 5.2e-5 be ACCEPTED is gone, and its removal is the
+    // point: a tolerance kept past its cause would let a genuine 5e-5 relevance regression
+    // through. What this control still has to prove is that ZERO does not mean "accept
+    // nothing" -- identical values must pass -- and that no NON-numeric difference is ever
+    // waved through regardless of the bound.
+    let identical = serde_json::json!({"scores": {"relevance": 0.474952}, "why": "via lexical"});
     assert!(
-        json_differs_only_by_float_tolerance(&base, &largest_measured_wobble, PACK_SCORE_TOLERANCE),
-        "the LARGEST wobble actually measured (5.2e-5) must be accepted, or the comparison \
-         fails on rebuild nondeterminism it cannot do anything about"
+        json_differs_only_by_float_tolerance(&base, &identical, PACK_SCORE_TOLERANCE),
+        "identical values must pass at a zero bound, or the comparison can never succeed"
     );
 
-    let meaningful_regression =
-        serde_json::json!({"scores": {"relevance": 0.474952 - 1e-3}, "why": "via lexical"});
+    let smallest_wobble =
+        serde_json::json!({"scores": {"relevance": 0.474952 - 1.0e-5}, "why": "via lexical"});
     assert!(
-        !json_differs_only_by_float_tolerance(&base, &meaningful_regression, PACK_SCORE_TOLERANCE),
-        "a 1e-3 relevance change is the smallest shift worth catching and must NOT be \
-         swallowed -- a tolerance that accepted it would retire this assertion"
+        !json_differs_only_by_float_tolerance(&base, &smallest_wobble, PACK_SCORE_TOLERANCE),
+        "at a zero bound even the SMALLEST wobble ever measured (1.0e-5) must now fail -- \
+         if it reappears, a second unpinned time-like input exists and that is the finding"
     );
 
     let text_changed =
