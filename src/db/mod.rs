@@ -52950,7 +52950,10 @@ UPDATE memories
             crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8566_0002)).to_string();
         let evidence_id =
             crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8566_0003)).to_string();
-        connection.insert_session(&session_id, &session_input("source-commitment-session"))?;
+        // Portable recovery preserves session fields without host-local source paths.
+        let mut session_input = session_input("source-commitment-session");
+        session_input.source_path = None;
+        connection.insert_session(&session_id, &session_input)?;
         connection.insert_evidence_span(
             &legacy_id,
             &evidence_span_input(&session_id, "legacy-source-slot", 1),
@@ -53025,6 +53028,7 @@ UPDATE memories
         restored.migrate()?;
         setup_workspace(&restored)?;
         restored.insert_session_for_recovery(&session)?;
+        assert_eq!(restored.get_session(&session_id)?, Some(session.clone()));
         restored.insert_evidence_span_for_recovery(&stored)?;
         assert_eq!(
             restored.get_evidence_span(&evidence_id)?,
