@@ -110,6 +110,10 @@ future changelog pass expands those rows into full capability sections.
   every member keeps its role, envelope and observed text, and long summaries
   can be bounded too. Screening still covers the complete source before any
   shortening, including credentials in later records and omitted tails.
+- Oversized Claude messages with mixed visible text and thinking blocks now
+  retain useful reply text. Screened reasoning blocks remain unchanged as fixed
+  envelope overhead, never enter search/pack content, and do not gain learning
+  eligibility through truncation.
 
 ## [0.17.0] - 2026-10-02
 

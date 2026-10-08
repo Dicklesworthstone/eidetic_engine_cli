@@ -171,6 +171,11 @@ screening runs before shortening, including decoded credentials in later
 records or omitted tails. Source line and byte locators retain the upstream
 range rather than referring to the shortened JSON.
 
+Claude messages containing both visible text and thinking blocks can also be
+bounded. Screened thinking and redacted-thinking blocks remain intact as fixed
+overhead; only visible message text shrinks. Those blocks stay excluded from
+reader text and keep the record ineligible for strict lesson extraction.
+
 Windows with unsupported members, ambiguous fields, instruction risk, excessive
 metadata, or insufficient room for observed text from every record remain
 withheld with `external_ingestion_oversized`. A truncated valid prefix cannot
