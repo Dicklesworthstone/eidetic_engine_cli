@@ -193,16 +193,23 @@ fn admitted_item(span: &StoredEvidenceSpan) -> Option<ResumeTranscriptItem> {
         || span.end_line < span.start_line
         || span.excerpt.trim().is_empty()
         || span.excerpt == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
-        || !public_excerpt(&span.excerpt)
     {
         return None;
     }
-    let provenance_uri = span.canonical_provenance_uri();
-    if crate::policy::redact_public_replay_text(&provenance_uri).redacted {
+    // Publish and screen the projected message body, not the transcript
+    // envelope (bd-reality-core-convergence-1azkt.45). Screening the envelope
+    // withheld every Claude Code record, whose `cwd` is an absolute path; a
+    // plain excerpt projects to itself and is screened exactly as before.
+    let text = span.reader_text();
+    if text.trim().is_empty() || !public_excerpt(&text) {
         return None;
     }
-    let mut end = span.excerpt.len().min(TRANSCRIPT_CONTENT_BYTE_CAP);
-    while !span.excerpt.is_char_boundary(end) {
+    // The URI is minted from the validated native session id and line range,
+    // never from transcript text. Screening it as free text refused every real
+    // span: a random ULID reads as a high-entropy token.
+    let provenance_uri = span.canonical_provenance_uri();
+    let mut end = text.len().min(TRANSCRIPT_CONTENT_BYTE_CAP);
+    while !text.is_char_boundary(end) {
         end -= 1;
     }
     Some(ResumeTranscriptItem {
@@ -214,11 +221,11 @@ fn admitted_item(span: &StoredEvidenceSpan) -> Option<ResumeTranscriptItem> {
         selection_reason: "recent_admitted_transcript",
         start_line: line_number(span.start_line)?,
         end_line: line_number(span.end_line)?,
-        content: span.excerpt[..end].to_owned(),
+        content: text[..end].to_owned(),
         content_byte_start: 0,
         content_byte_end: end,
-        excerpt_bytes: span.excerpt.len(),
-        content_truncated: end < span.excerpt.len(),
+        excerpt_bytes: text.len(),
+        content_truncated: end < text.len(),
     })
 }
 

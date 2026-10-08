@@ -257,3 +257,60 @@ fn safe_long_history_keeps_native_revision_and_exact_multibyte_prefix_without_wr
     );
     fixture.assert_unchanged(&row);
 }
+
+#[test]
+fn claude_code_history_with_a_real_session_id_is_resumable() {
+    let mut fixture = Fixture::new();
+    // A random ULID, as real imports mint, not a low-entropy fixture id.
+    let session = SessionId::from_uuid(uuid::Uuid::from_u128(
+        0x8f3a_c91d_44e2_7b6a_0d15_e8c2_9a71_53bf,
+    ))
+    .to_string();
+    fixture
+        .db
+        .insert_session(
+            &session,
+            &CreateSessionInput {
+                workspace_id: fixture.workspace.clone(),
+                cass_session_id: "resume-claude-code-session".to_owned(),
+                source_path: None,
+                agent_name: Some("claude_code".to_owned()),
+                model: None,
+                started_at: Some("2026-01-02T00:00:00Z".to_owned()),
+                ended_at: Some("2026-01-02T01:00:00Z".to_owned()),
+                message_count: 1,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(b"resume-cc").to_hex()),
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+    fixture.session = session.clone();
+    let record = serde_json::json!({
+        "parentUuid": null, "isSidechain": false, "userType": "external",
+        "cwd": "/home/dev/ledger", "sessionId": "5f0c", "version": "2.0.14",
+        "gitBranch": "main", "type": "assistant", "uuid": "9a1e",
+        "timestamp": "2026-01-02T00:30:00.000Z",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Bump the version before running cargo publish."}]}
+    })
+    .to_string();
+    let span = fixture.evidence(40, &record);
+    let history = fixture.history();
+    let item = history
+        .sessions
+        .iter()
+        .find(|entry| entry.session_id == session)
+        .and_then(|entry| entry.items.first())
+        .expect("the Claude Code span is resumable");
+    assert_eq!(item.evidence_id, span.id);
+    assert!(
+        item.content
+            .contains("Bump the version before running cargo publish.")
+    );
+    assert!(!item.content.contains("/home/dev"), "{}", item.content);
+    assert!(
+        item.provenance_uri
+            .starts_with(&format!("cass-session://{session}#L40"))
+    );
+}
