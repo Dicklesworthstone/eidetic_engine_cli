@@ -477,3 +477,50 @@ fn evidence_far_below_the_best_match_stays_out_of_the_pack() {
     assert_eq!(flat.len(), 2);
     assert!(degraded.is_empty());
 }
+
+#[test]
+fn evidence_restated_across_sessions_is_packed_once() {
+    let fixture = Fixture::new();
+    let mut ids = Vec::new();
+    for (seed, text) in [
+        (
+            0x59_0301,
+            "Published tally 1.2.0. Lesson for next time: bump the version in Cargo.toml and commit it before running cargo publish.",
+        ),
+        (
+            0x59_0302,
+            "Published sprocket 0.11.0. Lesson for next time: bump the version in Cargo.toml and commit it before running cargo publish.",
+        ),
+        (
+            0x59_0303,
+            "Clippy runs with -D warnings in CI, so fix needless_borrow before pushing.",
+        ),
+    ] {
+        let session = fixture.session(seed);
+        ids.push(fixture.line(
+            &session,
+            1,
+            "message",
+            "assistant",
+            &json!({"type": "assistant", "message": {"role": "assistant",
+                "content": [{"type": "text", "text": text}]}}),
+        ));
+    }
+    let mut candidates = vec![
+        fixture.candidate(&ids[0], 0.56),
+        fixture.candidate(&ids[1], 0.56),
+        fixture.candidate(&ids[2], 0.40),
+    ];
+    let mut degraded = Vec::new();
+    collapse_near_duplicate_evidence(&mut candidates, &mut degraded);
+    let kept = candidates
+        .iter()
+        .map(|candidate| candidate.item.evidence_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(kept, vec![ids[0].as_str(), ids[2].as_str()]);
+    assert_eq!(degraded.len(), 1);
+    assert_eq!(
+        degraded[0].code,
+        "context_evidence_near_duplicates_collapsed"
+    );
+}
