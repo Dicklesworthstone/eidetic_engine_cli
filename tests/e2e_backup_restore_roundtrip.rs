@@ -1346,14 +1346,22 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     // product one. The unit test did not catch it because I had invented its fixture with
     // snake_case keys, so it validated the guard against a document shape that does not
     // exist. The fixture below now uses the serialized names.
+    // FIVE, not seven. `request` has always been excluded (store-local snapshot
+    // generation); `items` and `renderedText` joined it in 72527d90a because both are
+    // digests over score-bearing content that is now tolerated at 1e-6, and a hash has no
+    // tolerance.
+    //
+    // I added those two exclusions and left this list at seven, so the guard demanded
+    // components the canonicalizer had just removed and failed every test that reached it.
+    // It caught my own contradiction on the first run -- which is the behaviour I wanted
+    // from it, just aimed at me. Keeping the list and the exclusions adjacent in this
+    // function is the only thing that makes the inconsistency visible at all.
     for required in [
         "referenceTime",
         "qualityScoring",
-        "items",
         "omitted",
         "degraded",
         "coordination",
-        "renderedText",
     ] {
         if !components.contains_key(required) {
             return Err(format!(
@@ -1452,28 +1460,41 @@ fn canonical_context_requires_the_snapshot_identity_components_it_does_not_exclu
             }, "digest": "blake3:iii"}
         }}
     });
-    // All eight present: canonicalizes, and the two store-local pointers are gone.
+    // All eight present: canonicalizes, and the FOUR excluded pointers are gone.
     let full = canonical_context_stdout(one_missing.clone())
         .expect("a complete snapshotIdentity must canonicalize");
     let rendered = String::from_utf8(full).expect("canonical bytes are utf-8");
+    for (digest, label) in [
+        ("blake3:aaa", "request (store-local snapshot generation)"),
+        ("blake3:iii", "digest (composite of the above)"),
+        ("blake3:ddd", "items (digest over tolerated scores)"),
+        ("blake3:hhh", "renderedText (digest over the why text)"),
+    ] {
+        assert!(
+            !rendered.contains(digest),
+            "{label} must be excluded from the compared bytes: {rendered}"
+        );
+    }
+    // And a still-compared component must survive. Checking one by value, not just that
+    // the object exists, because an exclusion list that quietly swallowed everything would
+    // otherwise look identical to a correct one.
     assert!(
-        !rendered.contains("blake3:aaa") && !rendered.contains("blake3:iii"),
-        "request and digest must be excluded from the compared bytes"
-    );
-    assert!(
-        rendered.contains("blake3:ddd"),
-        "the items component must still be compared"
+        rendered.contains("blake3:ccc"),
+        "qualityScoring must still be compared: {rendered}"
     );
 
+    // Dropping a STILL-REQUIRED component must fail and name it. This used `items` until
+    // 72527d90a excluded that one; a control asserting a now-excluded component would have
+    // passed while testing nothing.
     one_missing
         .pointer_mut("/data/pack/snapshotIdentity/components")
         .and_then(JsonValue::as_object_mut)
         .expect("components object")
-        .remove("items");
+        .remove("qualityScoring");
     let error =
         canonical_context_stdout(one_missing).expect_err("dropping a compared component must fail");
     assert!(
-        error.contains("\"items\""),
+        error.contains("\"qualityScoring\""),
         "the error must name the dropped component, got: {error}"
     );
 }
