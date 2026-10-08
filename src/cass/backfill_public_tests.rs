@@ -13,7 +13,35 @@ fn reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs() -> Tes
         fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
         fs::write(&source, "{}\n").map_err(|e| e.to_string())?;
         let binary = bin_dir.join("cass");
-        write_fake_cass_binary_with_view_lines(&binary, &workspace, &source, 1)?;
+        let write_view = |line_count: u32| -> TestResult {
+            if !migrated_history {
+                return write_fake_cass_binary_with_view_lines(
+                    &binary, &workspace, &source, line_count,
+                );
+            }
+            // A short, noncanonical JSON record can retain its exact source
+            // bytes across v0.17 imports. Canonical JSON could instead be an
+            // unmarked normalized projection and must remain unverifiable.
+            let lines: Vec<_> = (1..=line_count)
+                .map(|line| {
+                    json!({
+                        "line": line,
+                        "content": format!(r#"{{ "type": "user", "message": {{ "role": "user", "content": "index me {line}" }} }}"#),
+                        "highlighted": line == 1,
+                    })
+                })
+                .collect();
+            let view = serde_json::to_string_pretty(&json!({
+                "path": source.to_string_lossy(),
+                "target_line": 1,
+                "context": DEFAULT_VIEW_CONTEXT,
+                "lines": lines,
+                "total_lines": line_count,
+            }))
+            .map_err(|e| e.to_string())?;
+            write_fake_cass_binary_with_verbatim_view(&binary, &workspace, &source, &view)
+        };
+        write_view(1)?;
         let database = root.join("ee.db");
         let client = CassClient::with_binary(binary.clone()).with_timeout(Duration::from_secs(5));
         let mut options = CassImportOptions {
@@ -53,6 +81,65 @@ fn reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs() -> Tes
                 "UPDATE evidence_spans SET producer_kind = 'legacy_unknown', cass_span_id = '{reference}', search_eligibility = 'denied', pack_eligibility = 'denied'"
             ))
             .map_err(|e| e.to_string())?;
+            for row in db
+                .list_evidence_spans_for_session(&id)
+                .map_err(|e| e.to_string())?
+            {
+                let mut metadata: JsonValue = serde_json::from_str(
+                    row.metadata_json
+                        .as_deref()
+                        .ok_or("missing source metadata")?,
+                )
+                .map_err(|e| e.to_string())?;
+                ensure(
+                    metadata
+                        .as_object_mut()
+                        .ok_or("source metadata is not an object")?
+                        .remove("cassSource")
+                        .is_some(),
+                    "current fixture must initially contain a source commitment",
+                )?;
+                let classes: Vec<String> =
+                    serde_json::from_str(&row.redaction_classes_json).map_err(|e| e.to_string())?;
+                // Recreate the actual old producer metadata hash as well;
+                // no historical field may attest to a modern commitment.
+                let producer_metadata = json!({
+                    "schema": CASS_EVIDENCE_SPAN_SCHEMA_V1,
+                    "redactionStatus": row.secret_redaction_status,
+                    "redactionClasses": classes,
+                })
+                .to_string();
+                metadata["sourceMetadataHash"] = json!(format!(
+                    "blake3:{}",
+                    blake3::hash(producer_metadata.as_bytes()).to_hex()
+                ));
+                db.execute_raw(&format!(
+                    "UPDATE evidence_spans SET metadata_json = '{}' WHERE id = '{}'",
+                    metadata.to_string().replace('\'', "''"),
+                    row.id.replace('\'', "''"),
+                ))
+                .map_err(|e| e.to_string())?;
+                let migrated = db
+                    .get_evidence_span(&row.id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("missing migrated evidence")?;
+                let migrated_metadata: JsonValue = serde_json::from_str(
+                    migrated
+                        .metadata_json
+                        .as_deref()
+                        .ok_or("missing migrated metadata")?,
+                )
+                .map_err(|e| e.to_string())?;
+                ensure(
+                    migrated_metadata.get("cassSource").is_none(),
+                    "legacy snapshot must not fabricate a source commitment",
+                )?;
+                ensure_equal(
+                    &migrated_metadata,
+                    &metadata,
+                    "legacy snapshot retains the exact old producer metadata hash",
+                )?;
+            }
         }
         let old_spans = db
             .list_evidence_spans_for_session(&id)
@@ -62,7 +149,7 @@ fn reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs() -> Tes
 
         // The fixture deliberately keeps discovery's message_count and
         // modified values unchanged. Only the complete view reveals growth.
-        write_fake_cass_binary_with_view_lines(&binary, &workspace, &source, 4)?;
+        write_view(4)?;
         options.include_spans = true;
         let grown = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
         ensure_equal(&grown.sessions_imported, &1, "one session backfilled")?;
@@ -242,11 +329,59 @@ fn reimport_backfills_existing_transcripts_and_reconciles_snapshot_jobs() -> Tes
             "completed snapshot is idempotent",
         )?;
 
-        write_fake_cass_binary_with_view_lines(&binary, &workspace, &source, 2)?;
+        write_view(2)?;
         let before_refusal = durable_counts()?;
-        ensure(
-            import_cass_sessions(&client, &options).is_err(),
-            "shortened history must fail closed",
+        let before_history = imported_history_snapshot(&db, &refreshed_session.workspace_id, &id)?;
+        let before_ledger = db
+            .get_import_ledger(
+                published
+                    .ledger_id
+                    .as_deref()
+                    .ok_or("missing published ledger")?,
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or("missing durable published ledger")?;
+        let refused = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+        ensure_equal(
+            &refused.status.as_str(),
+            &"completed_with_refusals",
+            "shortened history must produce an explicit session refusal",
+        )?;
+        ensure_equal(&refused.sessions.len(), &1, "one refused session report")?;
+        ensure_equal(
+            &refused.sessions[0].status,
+            &ImportSessionStatus::Refused(CassHistoryRefusal::Missing),
+            "missing retained source is refused",
+        )?;
+        ensure_equal(
+            &(
+                refused.sessions_imported,
+                refused.sessions_skipped,
+                refused.spans_imported,
+                refused.index_jobs_queued,
+            ),
+            &(0, 1, 0, 0),
+            "refusal cannot count captured evidence or publication work",
+        )?;
+        ensure_equal(
+            &refused.sessions[0].index_job_id,
+            &None,
+            "a refused session cannot publish a shortened snapshot",
+        )?;
+        ensure_history_refusal_ledger(
+            &db,
+            &refused,
+            (
+                before_ledger.imported_session_count,
+                before_ledger.imported_span_count,
+            ),
+            before_ledger.attempt_count + 1,
+            &[source.to_string_lossy().as_ref()],
+        )?;
+        ensure_equal(
+            &imported_history_snapshot(&db, &refreshed_session.workspace_id, &id)?,
+            &before_history,
+            "refusal preserves every historical row, metadata field, and audit",
         )?;
         ensure_equal(
             &durable_counts()?,
