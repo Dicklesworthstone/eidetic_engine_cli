@@ -126,14 +126,50 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
+          # bd-lagsa + bd-aav0v. THIS HELPER HAD NO MODE PARAMETER, so every arm was an
+          # exact count and there was no way to floor one without flooring all three. It
+          # also folded three distinct failures into one silent `failed=1`: a cargo failure,
+          # a missing result line, and a count mismatch produced identical output, namely
+          # none.
+          #
+          # MEASURED on RCH 2026-10-08, one filtered run per arm off a single lib harness:
+          #     core::search::rule_admission::memory_revisions::seed_tests::   6 passed
+          #     core::search::rule_admission::memory_revisions::tests::        8 passed
+          # Both pins are CORRECT. They become FLOORS anyway, because both filters end in
+          # `::` and so name growing populations -- a pin that is right today reds this
+          # delivery lane the next time anyone adds a test to either module, which is the
+          # defect this bead exists for.
+          #
+          # `similar` STAYS EXACT: it names one test in full, so 1 is derivable by
+          # construction and a floor of 1 would weakly accept a renamed test. Hence the
+          # mode parameter rather than a blanket conversion -- the default is `exact` so
+          # that arm needed no change, and the two subtree arms opt in.
+          #
+          # Note the default differs from diagnostic-snapshot-20260919, whose own run_group
+          # defaults to `floor`. Same helper name, opposite defaults, per lane.
           run_group() {
-            local name="$1" filter="$2" expected="$3" status=0
+            local name="$1" filter="$2" expected="$3" mode="${4:-exact}" status=0 ran=""
             cargo test --locked --lib "$filter" -- --test-threads=2 > "$RUNNER_TEMP/seed-$name.log" 2>&1 || status=$?
             tail -n 80 "$RUNNER_TEMP/seed-$name.log"
-            if test "$status" -ne 0 || ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/seed-$name.log"; then failed=1; fi
+            ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/seed-$name.log" | head -1)
+            if test "$status" -ne 0; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exited $status, so a test failed or the harness crashed. Not a count mismatch; the failing test is in the tail above. Summary count: ${ran:-none}."
+              failed=1
+            elif test -z "$ran"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- cargo exited 0 but printed no 'test result: ok. N passed; 0 failed' line. That is what a filter matching ZERO tests looks like, and it is treated as a failure rather than as a count of zero."
+              failed=1
+            elif test "$mode" = floor && test "$ran" -lt "$expected"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- ran $ran tests, below the floor of $expected. The suite SHRANK: coverage removed, or the filter stopped matching after a rename."
+              failed=1
+            elif test "$mode" = exact && test "$ran" != "$expected"; then
+              echo "ATTRIBUTION: arm '$name' ($filter) FAILED -- expected exactly $expected passing, counted $ran. If $ran is GREATER the suite grew and this pin is stale; if LOWER a test was removed."
+              failed=1
+            else
+              echo "ATTRIBUTION: arm '$name' ($filter) ok -- ran $ran tests ($mode $expected), 0 failed."
+            fi
           }
-          run_group admission 'core::search::rule_admission::memory_revisions::seed_tests::' 6
-          run_group revisions 'core::search::rule_admission::memory_revisions::tests::' 8
+          run_group admission 'core::search::rule_admission::memory_revisions::seed_tests::' 6 floor
+          run_group revisions 'core::search::rule_admission::memory_revisions::tests::' 8 floor
           run_group similar 'core::search::tests::run_similar_hash_embedder_falls_back_to_lexical_and_excludes_seed' 1
           exit "$failed"
       - name: Check all targets and production Clippy
