@@ -10,6 +10,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use ee::db::{
     CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
@@ -2203,6 +2204,16 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &source_context_index_arg,
         "source",
     )?;
+    // bd-bka39: TIME BOTH PACKS. The restored pack has died at its 60s command deadline
+    // (exit 130, budget_exhausted) while the source pack succeeded, with both sides
+    // retrieving from an identical 3-document index. Those two facts do not distinguish
+    // "both packs sit just under the ceiling and the restored one is marginally slower"
+    // from "the restored store is pathologically slower to read", and the remedies differ
+    // completely: the first is a budget-headroom question, the second is a product defect
+    // in the restored read path. Nothing in the log answered it -- the test emits no
+    // per-phase timing, and rch merges stdout and stderr out of order, so surrounding
+    // timestamps cannot be differenced either.
+    let source_pack_started = Instant::now();
     let (source_context, _source_context_stdout) = run_ee_raw(&[
         "--workspace",
         &workspace_arg,
@@ -2216,6 +2227,12 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         "--candidate-pool",
         "1",
     ])?;
+    let source_pack_elapsed = source_pack_started.elapsed();
+    eprintln!(
+        "[bd-bka39] source pack took {:.1}s (ee pack's command deadline is 60s release, \
+         300s debug after 99cfd324b)",
+        source_pack_elapsed.as_secs_f64()
+    );
     let source_context_stdout = canonical_context_stdout(source_context.clone())?;
 
     // 4. Create the backup with redaction = none so content survives intact.
@@ -2440,6 +2457,7 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &source_index_documents,
         "restored warm index covers exactly the documents the source index covers",
     )?;
+    let restored_pack_started = Instant::now();
     let (restored_context, _restored_context_stdout) = run_ee_raw(&[
         "--workspace",
         &side_path_arg,
@@ -2453,6 +2471,21 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         "--candidate-pool",
         "1",
     ])?;
+    // The ratio is the number that settles it. Both sides hold an identical 3-document
+    // index, so a restored/source ratio near 1 means the pack is simply expensive in a
+    // debug build (a budget question), while a large ratio means reading a RESTORED store
+    // is itself slow (a product question). Printed on the success path because that is the
+    // only path that reaches here -- when the restored pack exceeds its deadline, run_ee_raw
+    // returns Err and the elapsed time is lost, so a FAILING run still has to be read as
+    // ">= the deadline" rather than as a measurement.
+    let restored_pack_elapsed = restored_pack_started.elapsed();
+    eprintln!(
+        "[bd-bka39] restored pack took {:.1}s vs source {:.1}s (ratio {:.2}x); both over an \
+         identical {source_index_documents}-document index",
+        restored_pack_elapsed.as_secs_f64(),
+        source_pack_elapsed.as_secs_f64(),
+        restored_pack_elapsed.as_secs_f64() / source_pack_elapsed.as_secs_f64().max(0.001),
+    );
     let restored_context_stdout = canonical_context_stdout(restored_context.clone())?;
     ensure_context_json_bytes_equal(
         &restored_context,
