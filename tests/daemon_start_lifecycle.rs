@@ -573,6 +573,25 @@ fn daemon_start_emits_daemon_start_failed_on_unbindable_socket() -> TestResult {
     let socket_path = blocker.join("daemon.sock");
 
     let result = (|| {
+        // ASSERT THE FIXTURE'S PREMISE, so this arm cannot pass without it
+        // (bd-env-satisfied-failure-assertions-0y1e9 acceptance item 2).
+        //
+        // Choosing the secure short root above removes the COMPETING cause, but
+        // it does not prove the intended cause is present: if `secure_socket_path`
+        // ever returned a directory, or the write silently produced something
+        // other than a regular file, `create_dir_all` would succeed and this test
+        // would need a new reason to fail. Its sibling in
+        // tests/harness_hook_install_audit.rs guards its premise the same way
+        // ("the fixture's socket must be ABSENT, or this arm proves nothing"), and
+        // a standing guard is worth more than a one-time fixture-removed control
+        // because it is re-run on every execution rather than observed once.
+        ensure(
+            blocker.is_file(),
+            format!(
+                "the fixture's blocker must be a regular FILE, or this arm proves nothing: {}",
+                blocker.display()
+            ),
+        )?;
         let envelope = run_daemon_start(&socket_path)?;
         ensure(
             envelope.pointer("/success").and_then(Value::as_bool) == Some(false),
