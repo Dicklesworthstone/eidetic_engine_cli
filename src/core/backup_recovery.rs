@@ -497,7 +497,10 @@ mod tests {
         let plan = RestoreInventory::from_manifest(&value).unwrap();
         assert_eq!(plan.expected.get("pack_rule_items"), Some(&0));
         assert_eq!(plan.expected.len() + 1, REQUIRED_TABLES.len());
-        assert_eq!(value, original, "authenticated archive bytes are not rewritten");
+        assert_eq!(
+            value, original,
+            "authenticated archive bytes are not rewritten"
+        );
     }
 
     #[test]
@@ -539,7 +542,11 @@ mod tests {
     #[test]
     fn supplied_schema_metadata_must_be_supported_even_with_complete_inventory() {
         let current = crate::db::MIGRATIONS.last().unwrap().version();
-        for version in [json!(0), json!(u64::from(current) + 1), json!("private-canary")] {
+        for version in [
+            json!(0),
+            json!(u64::from(current) + 1),
+            json!("private-canary"),
+        ] {
             let mut value = manifest();
             value["graphCache"] = json!({"schemaVersion": version});
             let error = RestoreInventory::from_manifest(&value).err().unwrap();
