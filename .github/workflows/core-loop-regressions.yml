@@ -177,7 +177,39 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --test contracts workspace_relocation:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/relocation-public.log"
-          grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relocation-public.log"
+          # UNSATISFIABLE FILTER, MEASURED (bd-lagsa, bd-aav0v). This arm cannot pass, and
+          # not because of a count: the filter selects ZERO tests from this target.
+          #
+          #     cargo test --locked --test contracts 'workspace_relocation::'
+          #       on RCH 2026-10-08 -> exit 0, `test result: ok. 0 passed`, one summary line
+          #
+          # `workspace_relocation` appears in exactly ONE file in the repository,
+          # src/db/mod.rs, and in NO file under tests/. The three tests
+          # (workspace_relocation_rebinds_addressing_and_keeps_memories_4vwiz,
+          # _refuses_wrong_store_and_unknown_rows_4vwiz, _is_its_own_rollback_4vwiz) are LIB
+          # tests, so no filter can find them in the `contracts` integration target. The pin
+          # of 2 is unreachable by construction, and this lane has failed its last three runs.
+          #
+          # NOT SILENTLY REDIRECTED. The arm above in this same step already covers those
+          # three via `--lib db::tests::workspace_relocation_` at a floor of 1, so this step
+          # is both broken and redundant -- but whether this lane should verify the relocation
+          # loop through a public/integration surface AT ALL, and which target that would be,
+          # is the lane owner's intent and not something to infer from a filter that never
+          # matched. Pointing it at the lib would just duplicate the arm above and hide the
+          # question.
+          #
+          # So the red stays and now says what it is. A bare `grep -Fq` here aborted with no
+          # output at all, which is how an unreachable assertion survives for weeks.
+          relocation_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/relocation-public.log" | head -1)
+          if test "${relocation_ran:-none}" = "0"; then
+            echo "ATTRIBUTION: arm 'contracts workspace_relocation::' STOPPED this lane -- the filter matched ZERO tests in the 'contracts' target (cargo exited 0 and reported 'ok. 0 passed'). This is not a stale count; it is an unsatisfiable filter. The workspace_relocation tests are LIB tests in src/db/mod.rs and are already covered by the --lib arm above at floor 1. Deciding which target should carry a public-surface check for this, or whether to retire this step, is the lane owner's call."
+            exit 1
+          fi
+          if test -z "$relocation_ran" || test "$relocation_ran" -lt 2; then
+            echo "ATTRIBUTION: arm 'contracts workspace_relocation::' STOPPED this lane -- passing-with-zero-failures count '${relocation_ran:-none}', required 2. An empty count means no 'test result: ok.' line at all."
+            exit 1
+          fi
+          echo "ATTRIBUTION: arm 'contracts workspace_relocation::' ok -- ran $relocation_ran tests (required 2)."
       - name: Report strict Clippy and repository formatting
         if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: |

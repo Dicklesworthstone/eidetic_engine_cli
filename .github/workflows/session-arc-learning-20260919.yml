@@ -126,7 +126,25 @@ jobs:
           run_group drift core::curate::tests::apply_curation_candidate_rejects_create_derived_evidence_attachment_drift 1 || failed=1
           run_group specificity specificity_score_credits_valid_canonical_session_provenance_not_empty_schemes 1 || failed=1
           timeout 15m cargo test --locked --test session_arc_learning_cli -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/session-arc-cli.log" || failed=1
-          grep -Fq 'test result: ok. 3 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/session-arc-cli.log" || failed=1
+          # STALE EXACT PIN, MEASURED (bd-lagsa). This demanded exactly 3 from the whole
+          # session_arc_learning_cli target. Measured on RCH 2026-10-08:
+          #     cargo test --locked --test session_arc_learning_cli -- --test-threads=2
+          #     -> test result: ok. 13 passed; 0 failed
+          # The suite grew from 3 to 13 with every test passing, so this arm has been
+          # failing BECAUSE MORE TESTS PASS -- the exact defect this bead is about.
+          #
+          # FLOOR AT THE REVIEWED 3, not a re-pin to 13, matching
+          # external-ingestion-20260919 and today's other conversions: 13 includes ten tests
+          # nobody reviewed as part of this lane's charter, and ratcheting would red the lane
+          # again on the next legitimate move. The observed count prints either way, so the
+          # gap stays visible.
+          arc_cli_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/session-arc-cli.log" | head -1)
+          if test -z "$arc_cli_ran" || test "$arc_cli_ran" -lt 3; then
+            echo "ATTRIBUTION: arm 'session_arc_learning_cli' FAILED -- passing-with-zero-failures count '${arc_cli_ran:-none}', required floor 3. An empty count means no 'test result: ok.' line at all, which is what a target that failed to build or matched nothing looks like, and is treated as a failure rather than a zero."
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'session_arc_learning_cli' ok -- ran $arc_cli_ran tests (floor 3, measured 13 on 2026-10-08), 0 failed."
+          fi
           exit "$failed"
       - name: Commit tested source directly to main without replacing concurrent work
         id: publish

@@ -189,7 +189,14 @@ jobs:
           run_group diagnostic 'core::search::diagnostic_snapshot::tests' 10
           run_group existing 'core::search::tests::diag_search_' 1
           run_group evidence 'core::search::tests::live_evidence_admission_filters' 1
-          run_group recovery 'core::index::read_lease::snapshot_recovery_tests' 8 exact
+          # MEASURED 2026-10-08 and converted from `exact` to the helper's default floor.
+          # `cargo test --locked --lib 'core::index::read_lease::snapshot_recovery_tests'`
+          # on RCH -> ok. 8 passed; 0 failed. So 8 is correct today, which is precisely why
+          # it should not stay exact: this filter names a module, so the next test added to
+          # snapshot_recovery_tests reds a delivery lane that has nothing to do with it.
+          # (This lane's run_group defaults to floor -- mode="${4:-floor}" -- so dropping the
+          # explicit `exact` token is the whole change.)
+          run_group recovery 'core::index::read_lease::snapshot_recovery_tests' 8
           # bd-aav0v: a FIFTH pair of arms in this step, inline rather than through run_group,
           # which is why it was easy to miss: a tool exit and an exact count, both folded into
           # the same `failed`.

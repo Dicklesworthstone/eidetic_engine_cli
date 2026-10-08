@@ -198,7 +198,16 @@ jobs:
           }
           run_group store 'core::global_store::' 27 floor
           run_group diagnostic 'core::search::diagnostic_snapshot::tests::' 14 floor
-          run_group seed 'core::search::rule_admission::memory_revisions::seed_tests::' 6
+          # MEASURED 2026-10-08, so this arm stops relying on another lane's success.
+          # `cargo test --locked --lib 'core::search::rule_admission::memory_revisions::seed_tests::'`
+          # on RCH -> ok. 6 passed; 0 failed. It was left EXACT earlier on the weaker
+          # ground that seed-authority-20260919 pins the identical filter at 6 and had
+          # recent successes -- corroboration, not a measurement. Now it is a measurement,
+          # and since the filter ends in `::` it names a growing population, so it becomes
+          # a floor at the measured 6 for the same reason the store arm did.
+          # This lane's run_group defaults to `exact` (mode="${4:-exact}"), hence the
+          # explicit token.
+          run_group seed 'core::search::rule_admission::memory_revisions::seed_tests::' 6 floor
           exit "$failed"
       - name: Execute real CLI search context and global-store integration
         if: ${{ !cancelled() }}
