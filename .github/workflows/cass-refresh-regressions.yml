@@ -7,6 +7,10 @@ on:
       - src/core/index*.rs
       - src/db/**
       - src/policy/**
+      - tests/release_*.rs
+      - tests/e2e_cass_import*.rs
+      - tests/conformance/cass_contracts.rs
+      - tests/fixtures/failure_modes/cass_import_history_refused.json
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -99,6 +103,32 @@ jobs:
           cargo test --locked --lib cass::import:: -- --test-threads=1 \
             2>&1 | tee "$RUNNER_TEMP/cass-refresh-import.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/cass-refresh-import.log"
+      - name: Verify ingestion and durable source commitments
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          while read -r label filter; do
+            cargo test --locked --lib "$filter" -- --test-threads=1 \
+              2>&1 | tee "$RUNNER_TEMP/cass-refresh-$label.log"
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/cass-refresh-$label.log"
+          done <<'CASES'
+          ingestion policy::ingestion::
+          source-commitment db::tests::cass_source_commitment_
+          transcript-admission db::tests::transcript_admission_rechecks_raw_records_for_new_and_existing_rows
+          CASES
+      - name: Verify CASS contracts, CLI imports and release contracts
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --test cass_contracts -- --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/cass-refresh-contracts.log"
+          cargo test --locked --test integration_e_f e2e_cass_import -- --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/cass-refresh-cli.log"
+          cargo test --locked --test integration_n_r release_ -- --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/cass-refresh-release.log"
+          for selection in contracts cli release; do
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/cass-refresh-$selection.log"
+          done
       - name: Check all Cargo targets
         if: ${{ !cancelled() }}
         run: |

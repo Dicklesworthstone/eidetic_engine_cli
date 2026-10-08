@@ -130,11 +130,15 @@ fn withhold_encoded_record(
     // Do not guess a duplicate key's role, retain encoded secrets on parse
     // failure, or turn a rejected tool record into plain-text message evidence.
     // The unknown record kind fails transcript admission; only its digest and
-    // a fixed reason survive. No source text appears in diagnostics either.
+    // fixed refusal fields survive. Keep an explicit redaction marker so the
+    // database can validate the inherited classification after the import
+    // boundary has already discarded the source. No source text appears in
+    // diagnostics either.
     let marker = serde_json::json!({
         "type": "external_ingestion_withheld",
         "reason": reason,
         "sourceDigest": format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
+        "redaction": format!("[REDACTED:{reason}]"),
     })
     .to_string();
     let mut report = screen_scanning_view(&marker).0;

@@ -24332,8 +24332,10 @@ fn cass_import_response_v2(
     report: &CassImportReport,
     degradation: Option<&CassImportDegradation>,
 ) -> serde_json::Value {
-    let degraded = degradation
-        .into_iter()
+    let history = report.history_degradation();
+    let degraded = history
+        .iter()
+        .chain(degradation)
         .map(CassImportDegradation::data_json)
         .collect::<Vec<_>>();
     serde_json::json!({

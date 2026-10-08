@@ -30,6 +30,517 @@ fn span(session: &CassSessionInfo, line: u32, content: &str) -> CassViewSpanForI
     .unwrap()
 }
 
+/// Model an already-persisted historical producer without passing its bytes
+/// through today's insertion screener. Recovery/upgrade keeps these exact rows.
+fn historical_excerpt(
+    db: &DbConnection,
+    id: &str,
+    excerpt: &str,
+    keep_source: bool,
+    clean: bool,
+) -> StoredEvidenceSpan {
+    let row = db.get_evidence_span(id).unwrap().unwrap();
+    let hash = format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex());
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
+    metadata["canonicalExcerptHash"] = hash.clone().into();
+    if !keep_source {
+        metadata.as_object_mut().unwrap().remove("cassSource");
+    }
+    if clean {
+        metadata["secretRedactionStatus"] = "clean".into();
+        metadata["redactionClasses"] = json!([]);
+    }
+    db.execute_raw(&format!(
+        "UPDATE evidence_spans SET excerpt = {}, content_hash = {}, canonical_excerpt_hash = {}, metadata_json = {}, secret_redaction_status = {}, redaction_classes_json = {} WHERE id = {}",
+        sql_text(excerpt), sql_text(&hash), sql_text(&hash), sql_text(&metadata.to_string()),
+        sql_text(if clean { "clean" } else { &row.secret_redaction_status }),
+        sql_text(if clean { "[]" } else { &row.redaction_classes_json }), sql_text(id),
+    )).unwrap();
+    db.get_evidence_span(id).unwrap().unwrap()
+}
+
+#[test]
+fn source_commitment_reconciles_encoded_screening_without_rewriting_provenance() {
+    let source = format!(
+        r#"{{ "type": "assistant", "message": {{"role":"assistant","content":"Release passed. \u001b label-ghp_{}"}} }}"#,
+        "Q".repeat(36),
+    );
+    let (db, workspace, id, session, spans) = fixture(1, &[&source]);
+    let evidence_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+    // This is the v0.17.0 screen_scanning_view representation. Retain a
+    // source-aware producer's commitment while changing only the old encoding.
+    let old_excerpt = crate::policy::redact_git_capture_text(&source).content;
+    assert_ne!(old_excerpt, spans[0].excerpt);
+    let old = historical_excerpt(&db, &evidence_id, &old_excerpt, true, false);
+    let old_audits = db
+        .list_audit_by_target("evidence_span", &evidence_id, None)
+        .unwrap();
+    completed(&db, &stable_search_index_job_id(&workspace, &id));
+
+    let first = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+    assert!(first.changed);
+    assert!(first.added_lines.is_empty());
+    assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+    let audits = db
+        .list_audit_by_target("evidence_span", &evidence_id, None)
+        .unwrap();
+    for original in &old_audits {
+        assert!(
+            audits.contains(original),
+            "original redaction audit must survive"
+        );
+    }
+    let reconciliation = audits
+        .iter()
+        .find(|audit| audit.action == "cass.evidence.screening_reconciled")
+        .unwrap();
+    let details: serde_json::Value =
+        serde_json::from_str(reconciliation.details.as_deref().unwrap()).unwrap();
+    assert_eq!(details["sourceProof"], "captured_source_commitment");
+    assert_eq!(details["historicalEvidenceRewritten"], false);
+    assert!(
+        !reconciliation
+            .details
+            .as_deref()
+            .unwrap()
+            .contains(&"Q".repeat(36))
+    );
+    let job = first.index_job_id.unwrap();
+    let stored_session = db.get_session(&id).unwrap();
+    for _ in 0..2 {
+        let retry = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+        assert!(!retry.changed);
+        assert_eq!(retry.index_job_id.as_deref(), Some(job.as_str()));
+        assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+        assert_eq!(db.get_session(&id).unwrap(), stored_session);
+        assert_eq!(
+            db.list_audit_by_target("evidence_span", &evidence_id, None)
+                .unwrap(),
+            audits
+        );
+    }
+    completed(&db, &job);
+    assert!(
+        refresh_session(&db, &workspace, &id, &session, &spans)
+            .unwrap()
+            .index_job_id
+            .is_none()
+    );
+}
+
+#[test]
+fn v017_complete_clean_source_can_reconcile_a_new_withholding_representation() {
+    let source = r#"{"type":"assistant","content":"Historical notation \uD800"}"#;
+    let (db, workspace, id, session, spans) = fixture(1, &[source]);
+    assert!(spans[0].excerpt.contains("external_ingestion_withheld"));
+    let evidence_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+    let old = historical_excerpt(&db, &evidence_id, source, false, true);
+    let first = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+    assert!(first.changed);
+    assert!(first.added_lines.is_empty());
+    assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+    let audits = db
+        .list_audit_by_target("evidence_span", &evidence_id, None)
+        .unwrap();
+    let audit = audits
+        .iter()
+        .find(|a| a.action == "cass.evidence.screening_reconciled")
+        .unwrap();
+    let details: serde_json::Value =
+        serde_json::from_str(audit.details.as_deref().unwrap()).unwrap();
+    assert_eq!(details["sourceProof"], "retained_complete_excerpt");
+    assert!(!old.metadata_json.as_deref().unwrap().contains("cassSource"));
+    assert!(
+        !refresh_session(&db, &workspace, &id, &session, &spans)
+            .unwrap()
+            .changed
+    );
+    // A digest observed during upgrade never gets written back as a purported
+    // import-time commitment, even after another retry.
+    assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+}
+
+#[test]
+fn legacy_withholding_digest_reconciles_once_and_rejects_untrusted_markers() {
+    let source = json!({
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "Review the observed build result."},
+            {"type": "text", "text": format!(
+                "{}original-source-tail", "Release verification passed. ".repeat(4000)
+            )},
+        ]},
+    })
+    .to_string();
+    let digest = format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex());
+    let marker = json!({
+        "type": "external_ingestion_withheld",
+        "reason": "external_ingestion_oversized",
+        "sourceDigest": digest,
+        "redaction": "[REDACTED:external_ingestion_oversized]",
+    })
+    .to_string();
+    // A legacy producer withheld this oversized mixed-content envelope.
+    // Today's projector preserves its thinking block and bounds visible text.
+    let (db, workspace, id, session, spans) =
+        legacy_withholding_fixture(&source, &marker, &["external_ingestion_oversized"]);
+    assert!(spans[0].excerpt.contains("[TRUNCATED]"));
+    assert!(!spans[0].excerpt.contains("external_ingestion_withheld"));
+    let evidence_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+    let old = db.get_evidence_span(&evidence_id).unwrap().unwrap();
+    assert_eq!(old.excerpt, marker);
+    assert_eq!(old.search_eligibility, "quarantined");
+    assert!(!old.metadata_json.as_deref().unwrap().contains("cassSource"));
+    let original_audits = db.list_audit_entries(Some(&workspace), None).unwrap();
+    let first = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+    assert!(first.changed);
+    assert!(first.added_lines.is_empty());
+    let job = first.index_job_id.unwrap();
+    let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
+    assert!(original_audits.iter().all(|audit| audits.contains(audit)));
+    let reconciliations: Vec<_> = audits
+        .iter()
+        .filter(|audit| audit.action == "cass.evidence.screening_reconciled")
+        .collect();
+    assert_eq!(reconciliations.len(), 1);
+    let details: serde_json::Value =
+        serde_json::from_str(reconciliations[0].details.as_deref().unwrap()).unwrap();
+    assert_eq!(details["sourceProof"], "retained_withholding_digest");
+    assert_eq!(details["sourceContentHash"], digest);
+    assert_eq!(details["historicalEvidenceRewritten"], false);
+    assert!(
+        !reconciliations[0]
+            .details
+            .as_deref()
+            .unwrap()
+            .contains("original-source-tail")
+    );
+    let stored_session = db.get_session(&id).unwrap();
+    let jobs = db.list_search_index_jobs(&workspace, None).unwrap();
+    for _ in 0..2 {
+        let retry = refresh_session(&db, &workspace, &id, &session, &spans).unwrap();
+        assert!(!retry.changed);
+        assert!(retry.added_lines.is_empty());
+        assert_eq!(retry.index_job_id.as_deref(), Some(job.as_str()));
+        assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+        assert_eq!(db.get_session(&id).unwrap(), stored_session);
+        assert_eq!(
+            db.list_audit_entries(Some(&workspace), None).unwrap(),
+            audits
+        );
+        assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
+    }
+    let changed = span(
+        &session,
+        1,
+        &source.replace("original-source-tail", "modified-source-tail"),
+    );
+    assert_eq!(changed.excerpt, spans[0].excerpt);
+    let error = refresh_session(&db, &workspace, &id, &session, &[changed])
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("cass_refresh_history_changed"));
+    assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+    assert_eq!(db.get_session(&id).unwrap(), stored_session);
+    assert_eq!(
+        db.list_audit_entries(Some(&workspace), None).unwrap(),
+        audits
+    );
+    assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
+
+    let mut extra: serde_json::Value = serde_json::from_str(&marker).unwrap();
+    extra["unexpected"] = true.into();
+    for (case, excerpt, classes) in [
+        (
+            "malformed JSON marker",
+            marker.strip_suffix('}').unwrap().to_owned(),
+            vec!["external_ingestion_oversized"],
+        ),
+        (
+            "marker with extra field",
+            extra.to_string(),
+            vec!["external_ingestion_oversized"],
+        ),
+        ("untrusted upstream marker", marker.clone(), Vec::new()),
+    ] {
+        let (db, workspace, id, session, spans) =
+            legacy_withholding_fixture(&source, &excerpt, &classes);
+        let evidence = db.list_evidence_spans_for_session(&id).unwrap();
+        if classes.is_empty() {
+            assert_eq!(
+                evidence[0].redaction_classes_json,
+                "[\"inherited_source_redaction\"]"
+            );
+        }
+        let before = db.get_session(&id).unwrap();
+        let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
+        let jobs = db.list_search_index_jobs(&workspace, None).unwrap();
+        for _ in 0..2 {
+            let error = refresh_session(&db, &workspace, &id, &session, &spans)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cass_refresh_history_unverifiable"),
+                "{case}: {error}"
+            );
+            assert_eq!(db.list_evidence_spans_for_session(&id).unwrap(), evidence);
+            assert_eq!(db.get_session(&id).unwrap(), before);
+            assert_eq!(
+                db.list_audit_entries(Some(&workspace), None).unwrap(),
+                audits
+            );
+            assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
+        }
+    }
+}
+
+fn legacy_withholding_fixture(source: &str, excerpt: &str, classes: &[&str]) -> Fixture {
+    let (db, workspace, id, session, _) = fixture(1, &[]);
+    let current = span(&session, 1, source);
+    let mut legacy = current.clone();
+    legacy.excerpt = excerpt.to_owned();
+    legacy.content_hash = format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex());
+    legacy.redacted = !classes.is_empty();
+    legacy.redacted_reasons = classes.iter().map(|class| (*class).to_owned()).collect();
+    let mut input = evidence_input(&workspace, &id, &legacy);
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(input.metadata_json.as_deref().unwrap()).unwrap();
+    metadata.as_object_mut().unwrap().remove("cassSource");
+    input.metadata_json = Some(metadata.to_string());
+    let evidence_id = stable_evidence_id(&id, &legacy.cass_span_id);
+    db.insert_evidence_span(&evidence_id, &input).unwrap();
+    if legacy.redacted {
+        db.insert_audit(
+            &stable_cass_redaction_audit_id(&evidence_id),
+            &cass_redaction_audit_input(&workspace, &id, &evidence_id, &legacy),
+        )
+        .unwrap();
+    }
+    (db, workspace, id, session, vec![current])
+}
+
+#[test]
+fn legacy_canonical_json_cannot_authenticate_unmarked_v017_normalization() {
+    let canonical =
+        json!({"type": "assistant", "content": "Release verification passed."}).to_string();
+    let padded = format!(
+        "{}{canonical}",
+        " ".repeat(super::super::ingestion::MAX_EXCERPT_BYTES)
+    );
+    assert!(padded.len() > super::super::ingestion::MAX_EXCERPT_BYTES);
+    // Both an oversized source normalized by v0.17 and an originally compact
+    // source produce this same clean stored record. The missing commitment
+    // cannot be reconstructed from that record or from the current source.
+    for original in [&padded, &canonical] {
+        let (db, workspace, id, session, spans) = fixture(1, &[original]);
+        assert_eq!(spans[0].excerpt, canonical);
+        let evidence_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+        let old = historical_excerpt(&db, &evidence_id, &canonical, false, true);
+        assert!(!old.metadata_json.as_deref().unwrap().contains("cassSource"));
+        let before = db.get_session(&id).unwrap();
+        let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
+        let jobs = db.list_search_index_jobs(&workspace, None).unwrap();
+        for observed in [&padded, &canonical] {
+            let incoming = vec![span(&session, 1, observed)];
+            let error = refresh_session(&db, &workspace, &id, &session, &incoming)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cass_refresh_history_unverifiable")
+            );
+            assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+            assert_eq!(db.get_session(&id).unwrap(), before);
+            assert_eq!(
+                db.list_audit_entries(Some(&workspace), None).unwrap(),
+                audits
+            );
+            assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
+        }
+    }
+}
+
+#[test]
+fn legacy_canonical_jsonl_cannot_authenticate_unmarked_stream_normalization() {
+    let canonical = [
+        json!({"type": "assistant", "content": "Release verification passed."}).to_string(),
+        json!({"type": "assistant", "content": "No new diagnostics were reported."}).to_string(),
+    ]
+    .join("\n");
+    let padded = format!(
+        "{}{canonical}",
+        " ".repeat(super::super::ingestion::MAX_EXCERPT_BYTES)
+    );
+    // The producer on main before source commitments could normalize a whole
+    // JSONL window without a marker when its compact representation fit.
+    for original in [&padded, &canonical] {
+        let (db, workspace, id, session, spans) = fixture(1, &[original]);
+        assert_eq!(spans[0].excerpt, canonical);
+        let evidence_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+        let old = historical_excerpt(&db, &evidence_id, &canonical, false, true);
+        let before = db.get_session(&id).unwrap();
+        let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
+        let jobs = db.list_search_index_jobs(&workspace, None).unwrap();
+        for observed in [&padded, &canonical] {
+            let incoming = vec![span(&session, 1, observed)];
+            let error = refresh_session(&db, &workspace, &id, &session, &incoming)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cass_refresh_history_unverifiable")
+            );
+            assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+            assert_eq!(db.get_session(&id).unwrap(), before);
+            assert_eq!(
+                db.list_audit_entries(Some(&workspace), None).unwrap(),
+                audits
+            );
+            assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
+        }
+    }
+
+    // A clean, unmarked, noncanonical short window cannot be a canonical
+    // normalization result and still retains its exact original source.
+    let noncanonical = canonical.replace('{', "{ ");
+    let (db, workspace, id, session, spans) = fixture(1, &[&noncanonical]);
+    assert_eq!(spans[0].excerpt, noncanonical);
+    let evidence_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+    let old = historical_excerpt(&db, &evidence_id, &noncanonical, false, true);
+    assert!(
+        !refresh_session(&db, &workspace, &id, &session, &spans)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+}
+
+#[test]
+fn changed_source_is_refused_even_when_redaction_or_bounding_hides_the_change() {
+    let secret_a = format!("Release passed. label-ghp_{}", "Q".repeat(36));
+    let secret_b = format!("Release passed. label-ghp_{}", "R".repeat(36));
+    let long_a = json!({"type":"assistant", "message":{"role":"assistant", "content":format!("{}end-A", "Useful release observation. ".repeat(4000))}}).to_string();
+    let long_b = long_a.replace("end-A", "end-B");
+    for (original, changed) in [(secret_a, secret_b), (long_a, long_b)] {
+        let (db, workspace, id, _, old) = fixture(1, &[&original]);
+        let latest = discovered(2);
+        let altered = span(&latest, 1, &changed);
+        assert_eq!(
+            altered.excerpt, old[0].excerpt,
+            "fixture must hide the source edit in screening"
+        );
+        assert_ne!(altered.source_hash, old[0].source_hash);
+        let before = db.get_session(&id).unwrap();
+        let evidence = db.list_evidence_spans_for_session(&id).unwrap();
+        let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
+        let incoming = vec![
+            altered,
+            span(&latest, 2, "Must roll back beside changed history."),
+        ];
+        let error = refresh_session(&db, &workspace, &id, &latest, &incoming)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("cass_refresh_history_changed"));
+        assert_eq!(db.get_session(&id).unwrap(), before);
+        assert_eq!(db.list_evidence_spans_for_session(&id).unwrap(), evidence);
+        assert_eq!(
+            db.list_audit_entries(Some(&workspace), None).unwrap(),
+            audits
+        );
+        assert_eq!(db.count_table_rows("search_index_jobs").unwrap(), 1);
+    }
+}
+
+#[test]
+fn unverifiable_legacy_redactions_never_acquire_a_fabricated_source_commitment() {
+    let source = format!(
+        r#"{{"type":"assistant","content":"\u001b label-ghp_{}"}}"#,
+        "Q".repeat(36)
+    );
+    let (db, workspace, id, session, spans) = fixture(1, &[&source]);
+    let evidence_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+    let old_excerpt = crate::policy::redact_git_capture_text(&source).content;
+    let old = historical_excerpt(&db, &evidence_id, &old_excerpt, false, false);
+    let before = db.get_session(&id).unwrap();
+    let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
+    for raw in [&source, &source.replace(&"Q".repeat(36), &"R".repeat(36))] {
+        let incoming = vec![span(&session, 1, raw)];
+        let error = refresh_session(&db, &workspace, &id, &session, &incoming)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("cass_refresh_history_unverifiable")
+        );
+        assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+        assert_eq!(db.get_session(&id).unwrap(), before);
+        assert_eq!(
+            db.list_audit_entries(Some(&workspace), None).unwrap(),
+            audits
+        );
+    }
+}
+
+#[test]
+fn utf8_truncated_legacy_prefix_is_not_mistaken_for_complete_source() {
+    for retreat in 1..=3 {
+        let prefix = "x".repeat(super::super::ingestion::MAX_EXCERPT_BYTES - retreat);
+        let source = format!("{prefix}🦀 discarded historical tail");
+        let old_excerpt =
+            super::super::truncate_excerpt(&source, super::super::ingestion::MAX_EXCERPT_BYTES);
+        assert_eq!(old_excerpt, prefix);
+        let (db, workspace, id, session, spans) = fixture(1, &[&source]);
+        let evidence_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+        let old = historical_excerpt(&db, &evidence_id, &old_excerpt, false, true);
+        let before = db.get_session(&id).unwrap();
+        let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
+        // The second source has genuinely lost the tail, yet is byte-equal to
+        // the retained prefix. Neither observation can prove the old source.
+        for observed in [&source, &prefix] {
+            let incoming = vec![span(&session, 1, observed)];
+            let error = refresh_session(&db, &workspace, &id, &session, &incoming)
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cass_refresh_history_unverifiable")
+            );
+            assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+            assert_eq!(db.get_session(&id).unwrap(), before);
+            assert_eq!(
+                db.list_audit_entries(Some(&workspace), None).unwrap(),
+                audits
+            );
+        }
+    }
+}
+
+#[test]
+fn reconciliation_audit_and_checkpoint_roll_back_with_a_failed_index_job() {
+    let source = r#"{"type":"assistant","content":"Historical notation \uD800"}"#;
+    let (db, workspace, id, session, spans) = fixture(1, &[source]);
+    let evidence_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+    let old = historical_excerpt(&db, &evidence_id, source, false, true);
+    let before = db.get_session(&id).unwrap();
+    let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
+    db.execute_raw("CREATE TRIGGER reject_reconciled_job BEFORE INSERT ON search_index_jobs BEGIN SELECT RAISE(ABORT, 'reconciliation-test-injected-failure'); END").unwrap();
+    assert!(refresh_session(&db, &workspace, &id, &session, &spans).is_err());
+    assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+    assert_eq!(db.get_session(&id).unwrap(), before);
+    assert_eq!(
+        db.list_audit_entries(Some(&workspace), None).unwrap(),
+        audits
+    );
+    assert_eq!(db.count_table_rows("search_index_jobs").unwrap(), 1);
+}
+
 type Fixture = (
     DbConnection,
     String,

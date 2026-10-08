@@ -37,6 +37,7 @@ const PAGED_VIEW_CONTEXT: u32 = 64;
 const IMPORT_SOURCE_KIND: &str = "cass";
 const CASS_REDACTION_AUDIT_SCHEMA_V1: &str = "ee.cass.redaction_audit.v1";
 const CASS_REDACTION_AUDIT_ACTION: &str = "cass.evidence.redacted";
+const CASS_EXCERPT_PRODUCER_VERSION: u32 = 1;
 const CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1: &str = "ee.cass.subprocess_diagnostics.v1";
 /// Upper bound on the total `cass view --json` stdout we will buffer before
 /// parsing. Real `cass` emits a single pretty-printed `{...,"lines":[...]}`
@@ -101,8 +102,8 @@ pub struct ImportedCassSession {
     pub missing_metadata: Vec<String>,
 }
 
-/// Response-affecting degradation emitted when durable CASS import succeeds
-/// but its derived search-index publication does not.
+/// Response-affecting degradation emitted when an import refuses individual
+/// session histories or its derived search-index publication fails.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CassImportDegradation {
     pub code: &'static str,
@@ -129,6 +130,53 @@ pub enum ImportSessionStatus {
     Imported,
     Skipped,
     WouldImport,
+    /// This session was left untouched; later sessions were still processed.
+    Refused(CassHistoryRefusal),
+}
+
+/// A history-integrity refusal is local to one session, not a storage outage.
+/// Keep this vocabulary closed so unrelated DB failures still abort the run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CassHistoryRefusal {
+    Changed,
+    Missing,
+    Unverifiable,
+}
+
+impl CassHistoryRefusal {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Changed => "cass_refresh_history_changed",
+            Self::Missing => "cass_refresh_history_missing",
+            Self::Unverifiable => "cass_refresh_history_unverifiable",
+        }
+    }
+
+    #[must_use]
+    pub const fn repair(self) -> &'static str {
+        match self {
+            Self::Changed | Self::Missing => {
+                "Restore the original complete CASS transcript before retrying this session; its retained evidence was not changed."
+            }
+            Self::Unverifiable => {
+                "Inspect the original import and source backup: this legacy excerpt has no complete-source commitment. Retain its historical evidence; use --since to exclude it when importing newer sessions."
+            }
+        }
+    }
+
+    fn from_db_error(error: &DbError) -> Option<Self> {
+        let DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message,
+        } = error
+        else {
+            return None;
+        };
+        [Self::Changed, Self::Missing, Self::Unverifiable]
+            .into_iter()
+            .find(|reason| message.starts_with(&format!("{}:", reason.code())))
+    }
 }
 
 impl ImportSessionStatus {
@@ -139,6 +187,7 @@ impl ImportSessionStatus {
             Self::Imported => "imported",
             Self::Skipped => "skipped",
             Self::WouldImport => "would_import",
+            Self::Refused(_) => "refused",
         }
     }
 }
@@ -167,6 +216,26 @@ pub struct CassImportReport {
 }
 
 impl CassImportReport {
+    /// Partial progress remains visible in the normal response envelope.
+    /// An unprovable legacy source must never be described as a successful
+    /// reconciliation or hidden among ordinary already-imported sessions.
+    #[must_use]
+    pub fn history_degradation(&self) -> Option<CassImportDegradation> {
+        let refused = self
+            .sessions
+            .iter()
+            .filter(|session| matches!(session.status, ImportSessionStatus::Refused(_)))
+            .count();
+        (refused > 0).then(|| CassImportDegradation {
+            code: "cass_import_history_refused",
+            severity: "high",
+            message: format!(
+                "{refused} CASS sessions were refused because retained history changed, is missing, or cannot be verified across screening versions. Their evidence was preserved and other sessions were processed."
+            ),
+            repair: "Inspect sessions[].refusalCode and sessions[].repair; restore original source evidence before retrying refused sessions.".to_owned(),
+        })
+    }
+
     /// Mark every queued import job as published and remove the obsolete
     /// manual-rebuild action.
     pub fn record_index_publish_success(&mut self) {
@@ -224,7 +293,7 @@ impl CassImportReport {
             },
             "sessions": self.sessions.iter().map(|session| {
                 let source_path = redact_import_report_source_ref(&session.source_path);
-                json!({
+                let mut value = json!({
                     "sourcePath": source_path,
                     "sessionId": session.session_id,
                     "indexJobId": session.index_job_id,
@@ -232,7 +301,12 @@ impl CassImportReport {
                     "spansImported": session.spans_imported,
                     "messageCount": session.message_count,
                     "missingMetadata": session.missing_metadata,
-                })
+                });
+                if let ImportSessionStatus::Refused(reason) = session.status {
+                    value["refusalCode"] = reason.code().into();
+                    value["repair"] = reason.repair().into();
+                }
+                value
             }).collect::<Vec<_>>(),
         })
     }
@@ -269,6 +343,22 @@ impl CassImportReport {
                 admitted = admission.admitted,
                 quarantined = admission.quarantined,
             ));
+        }
+        if let Some(degradation) = self.history_degradation() {
+            summary.push_str(&format!(
+                "  {}: {}\n",
+                degradation.code, degradation.message
+            ));
+            for session in &self.sessions {
+                if let ImportSessionStatus::Refused(reason) = session.status {
+                    summary.push_str(&format!(
+                        "    {}: {}. {}\n",
+                        session.session_id.as_deref().unwrap_or("unknown session"),
+                        reason.code(),
+                        reason.repair(),
+                    ));
+                }
+            }
         }
         summary
     }
@@ -726,6 +816,7 @@ pub fn import_cass_sessions(
     let mut spans_imported = 0_u32;
     let mut index_jobs_queued = 0_u32;
     let mut evidence_admission = EvidenceAdmissionTally::default();
+    let mut first_history_refusal = None;
 
     let import_result: Result<(), CassImportError> = (|| {
         for session in sessions {
@@ -742,13 +833,34 @@ pub fn import_cass_sessions(
                     // have omitted evidence. Revisit only when the caller has
                     // explicitly requested spans and obtained a complete view.
                     let refreshed = if options.include_spans {
-                        Some(refresh::refresh_session(
+                        match refresh::refresh_session(
                             &connection,
                             &workspace_id,
                             &session_id,
                             &session,
                             &spans,
-                        )?)
+                        ) {
+                            Ok(report) => Some(report),
+                            Err(error) => {
+                                let Some(reason) = CassHistoryRefusal::from_db_error(&error) else {
+                                    return Err(error.into());
+                                };
+                                first_history_refusal
+                                    .get_or_insert(CassImportError::Storage(error));
+                                cursor.record_skipped();
+                                skipped = skipped.saturating_add(1);
+                                session_reports.push(ImportedCassSession {
+                                    source_path: session.source_path,
+                                    session_id: Some(session_id),
+                                    index_job_id: None,
+                                    status: ImportSessionStatus::Refused(reason),
+                                    spans_imported: 0,
+                                    message_count: session.message_count,
+                                    missing_metadata: session.missing_metadata,
+                                });
+                                continue;
+                            }
+                        }
                     } else {
                         None
                     };
@@ -844,7 +956,7 @@ pub fn import_cass_sessions(
         &cursor,
         imported,
         spans_imported,
-        None,
+        first_history_refusal.as_ref(),
     )?;
 
     Ok(CassImportReport {
@@ -861,7 +973,12 @@ pub fn import_cass_sessions(
         spans_imported,
         index_jobs_queued,
         index_required_action: Some(index_required_action(&workspace_path, Some(&database_path))),
-        status: "completed".to_string(),
+        status: if first_history_refusal.is_some() {
+            "completed_with_refusals"
+        } else {
+            "completed"
+        }
+        .to_string(),
         sessions: session_reports,
         evidence_admission,
     })
@@ -1657,6 +1774,10 @@ struct CassViewSpanForImport {
     role: Option<CassRole>,
     excerpt: String,
     content_hash: String,
+    /// Commitment to the complete CASS line before decoding, redaction or
+    /// bounding. This never retains rejected source bytes.
+    source_hash: blake3::Hash,
+    source_bytes: usize,
     redacted: bool,
     redacted_reasons: Vec<String>,
 }
@@ -1870,6 +1991,8 @@ fn parse_view_line_value(
         // accepts them on the persist path (`ee review session --propose`). `blake3_hex`
         // returns a BARE hex digest, so prefix it here. See issue #10.
         content_hash: format!("blake3:{}", blake3_hex(&safe_excerpt)),
+        source_hash: blake3::hash(content.as_bytes()),
+        source_bytes: content.len(),
         excerpt: safe_excerpt,
         redacted,
         redacted_reasons,
@@ -2182,6 +2305,12 @@ fn evidence_input(
                 "schema": CASS_EVIDENCE_SPAN_SCHEMA_V1,
                 "redactionStatus": if span.redacted { "redacted" } else { "clean" },
                 "redactionClasses": span.redacted_reasons,
+                "cassSource": {
+                    "schema": "ee.cass.source.v1",
+                    "contentHash": format!("blake3:{}", span.source_hash.to_hex()),
+                    "byteLength": span.source_bytes,
+                    "excerptProducerVersion": CASS_EXCERPT_PRODUCER_VERSION,
+                },
             })
             .to_string(),
         ),
@@ -5246,5 +5375,914 @@ mod tests {
             second_session.starts_with("sess_") && second_session.len() == 31,
             "second session id shape",
         )
+    }
+
+    /// Issue #65: the CASS parser supplies inherited redaction classes to the
+    /// real store, which is a different boundary from inserting raw text into
+    /// the database. Rejected records must not abort later session imports.
+    #[cfg(unix)]
+    #[test]
+    fn import_unreadable_encoded_json_preserves_later_sessions_and_retry_identity() -> TestResult {
+        let root = unique_test_dir("withheld-encoded-import")?;
+        let bin_dir = root.join("bin");
+        let workspace_path = root.join("workspace");
+        fs::create_dir_all(&bin_dir).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&workspace_path).map_err(|error| error.to_string())?;
+        fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        let encoded_token = format!("\\u0067hp_{}", "Q".repeat(36));
+        let fixtures = [
+            (
+                "lone-surrogate",
+                format!(
+                    "{{\"type\":\"assistant\",\"content\":\"rejectedsourcecanary {encoded_token} \\uD800\"}}"
+                ),
+            ),
+            (
+                "duplicate-key",
+                format!(
+                    "{{\"type\":\"assistant\",\"content\":\"rejectedsourcecanary {encoded_token}\",\"metadata\":{{\"x\":1,\"x\":2}}}}"
+                ),
+            ),
+            (
+                "bracketed-log",
+                format!("[warn] rejectedsourcecanary {encoded_token} could not be decoded"),
+            ),
+            (
+                "valid-after-withheld",
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": "quartzfollowupproof compilation and release verification passed.",
+                    },
+                })
+                .to_string(),
+            ),
+        ];
+        let mut sessions = Vec::new();
+        let mut view_cases = String::new();
+        for (name, raw) in &fixtures {
+            let path = workspace_path.join(format!("{name}.jsonl"));
+            fs::write(&path, format!("{raw}\n")).map_err(|error| error.to_string())?;
+            sessions.push(json!({
+                "path": path.to_string_lossy(),
+                "workspace": workspace_path.to_string_lossy(),
+                "agent": "codex",
+                "modified": "2026-10-08T12:34:00Z",
+                "message_count": 1,
+                "content_hash": format!("blake3:{}", blake3::hash(raw.as_bytes()).to_hex()),
+            }));
+            // Exercise the real multi-line CASS envelope, including an
+            // invalid JSON *content string* inside a valid transport envelope.
+            let view = serde_json::to_string_pretty(&json!({
+                "path": path.to_string_lossy(),
+                "target_line": 1,
+                "context": DEFAULT_VIEW_CONTEXT,
+                "total_lines": 1,
+                "lines": [{"line": 1, "content": raw, "highlighted": true}],
+            }))
+            .map_err(|error| error.to_string())?;
+            view_cases.push_str(&format!(
+                "  */{name}.jsonl) cat <<'EE_CASS_WITHHELD_VIEW'\n{view}\nEE_CASS_WITHHELD_VIEW\n;;\n"
+            ));
+        }
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n sessions) cat <<'EE_CASS_WITHHELD_SESSIONS'\n{}\nEE_CASS_WITHHELD_SESSIONS\n;;\n view) for source_path in \"$@\"; do :; done\n case \"$source_path\" in\n{view_cases} *) exit 2;;\n esac\n;;\n *) exit 2;;\nesac\n",
+            json!({"sessions": sessions}),
+        );
+        let cass_binary = bin_dir.join("cass");
+        fs::write(&cass_binary, script).map_err(|error| error.to_string())?;
+        fs::set_permissions(&cass_binary, fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        let database_path = root.join("ee.db");
+        let client = CassClient::with_binary(cass_binary).with_timeout(Duration::from_secs(5));
+        let options = CassImportOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            limit: 4,
+            since: None,
+            dry_run: false,
+            include_spans: true,
+        };
+        let first = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &first.status.as_str(),
+            &"completed",
+            "first import completes",
+        )?;
+        ensure_equal(
+            &first.sessions_discovered,
+            &4,
+            "all fixture sessions discovered",
+        )?;
+        ensure_equal(&first.sessions_imported, &4, "later valid session imported")?;
+        ensure_equal(&first.spans_imported, &4, "all source lines retained")?;
+        ensure_equal(
+            &first.evidence_admission.quarantined,
+            &3,
+            "withheld rows quarantined",
+        )?;
+        ensure_equal(
+            &first.evidence_admission.admitted,
+            &1,
+            "valid row remains admitted",
+        )?;
+
+        let connection = DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
+        let workspace_id = stable_workspace_id(&workspace_path.to_string_lossy());
+        let mut original_rows = Vec::new();
+        for (index, (name, raw)) in fixtures.iter().enumerate() {
+            let path = workspace_path.join(format!("{name}.jsonl"));
+            let session_id = stable_session_id(&workspace_id, &path.to_string_lossy());
+            let session = connection
+                .get_session(&session_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("missing {name} session"))?;
+            let rows = connection
+                .list_evidence_spans_for_session(&session_id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(&rows.len(), &1, "one durable source line")?;
+            let row = &rows[0];
+            ensure_equal(&row.start_line, &1, "original start line")?;
+            ensure_equal(&row.end_line, &1, "original end line")?;
+            ensure_equal(
+                &row.id,
+                &stable_evidence_id(&session_id, &format!("{}:1", path.to_string_lossy())),
+                "stable evidence identity",
+            )?;
+            ensure_equal(
+                &row.content_hash,
+                &format!("blake3:{}", blake3::hash(row.excerpt.as_bytes()).to_hex()),
+                "stored screened hash",
+            )?;
+            if index < 3 {
+                let withheld: JsonValue =
+                    serde_json::from_str(&row.excerpt).map_err(|e| e.to_string())?;
+                ensure_equal(
+                    &withheld["type"],
+                    &json!("external_ingestion_withheld"),
+                    "withheld kind",
+                )?;
+                ensure_equal(
+                    &withheld["redaction"],
+                    &json!("[REDACTED:external_ingestion_encoded_json_unreadable]"),
+                    "durable storage marker",
+                )?;
+                ensure_equal(
+                    &withheld["sourceDigest"],
+                    &json!(format!("blake3:{}", blake3::hash(raw.as_bytes()).to_hex())),
+                    "digest binds rejected source",
+                )?;
+                ensure_equal(
+                    &row.secret_redaction_status.as_str(),
+                    &"redacted",
+                    "inherited posture",
+                )?;
+                ensure_equal(
+                    &serde_json::from_str::<JsonValue>(&row.redaction_classes_json)
+                        .map_err(|e| e.to_string())?,
+                    &json!(["external_ingestion_encoded_json_unreadable"]),
+                    "inherited refusal classification",
+                )?;
+                ensure(
+                    !row.is_search_admitted_for_session(&workspace_id, &session),
+                    "withheld row is not searchable",
+                )?;
+                ensure(
+                    !row.is_direct_pack_admitted_for_session(&workspace_id, &session),
+                    "withheld row cannot enter a pack",
+                )?;
+            } else {
+                ensure(
+                    row.excerpt.contains("quartzfollowupproof"),
+                    "later useful evidence survives",
+                )?;
+                ensure(
+                    row.is_search_admitted_for_session(&workspace_id, &session),
+                    "later evidence remains searchable",
+                )?;
+                ensure(
+                    row.is_direct_pack_admitted_for_session(&workspace_id, &session),
+                    "later evidence remains packable",
+                )?;
+            }
+            original_rows.push(rows);
+        }
+        let audits = connection
+            .list_audit_by_action(CASS_REDACTION_AUDIT_ACTION, None)
+            .map_err(|e| e.to_string())?;
+        ensure_equal(&audits.len(), &3, "one audit per withheld line")?;
+        for rows in original_rows.iter().take(3) {
+            ensure(
+                audits
+                    .iter()
+                    .any(|audit| audit.target_id.as_deref() == Some(rows[0].id.as_str())),
+                "redaction audit identifies exact retained evidence",
+            )?;
+        }
+        connection.close().map_err(|e| e.to_string())?;
+
+        let retry = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+        ensure_equal(&retry.status.as_str(), &"completed", "retry completes")?;
+        ensure_equal(&retry.sessions_imported, &0, "no duplicate sessions")?;
+        ensure_equal(
+            &retry.sessions_skipped,
+            &4,
+            "every unchanged session skipped",
+        )?;
+        ensure_equal(&retry.spans_imported, &0, "no duplicate evidence")?;
+        let connection = DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
+        for rows in &original_rows {
+            let repeated = connection
+                .list_evidence_spans_for_session(&rows[0].session_id)
+                .map_err(|e| e.to_string())?;
+            ensure_equal(
+                &repeated,
+                rows,
+                "retry preserves full historical evidence row",
+            )?;
+        }
+        ensure_equal(
+            &connection
+                .list_audit_by_action(CASS_REDACTION_AUDIT_ACTION, None)
+                .map_err(|e| e.to_string())?,
+            &audits,
+            "retry preserves exact redaction audit records",
+        )?;
+        let ledger = connection
+            .get_import_ledger(first.ledger_id.as_deref().ok_or("missing import ledger")?)
+            .map_err(|e| e.to_string())?
+            .ok_or("missing durable import ledger")?;
+        ensure_equal(
+            &ledger.status.as_str(),
+            &"completed",
+            "ledger is not poisoned",
+        )?;
+        ensure(ledger.error_code.is_none(), "ledger has no import error")?;
+        ensure_equal(
+            &ledger.imported_session_count,
+            &4,
+            "ledger session totals are idempotent",
+        )?;
+        ensure_equal(
+            &ledger.imported_span_count,
+            &4,
+            "ledger evidence totals are idempotent",
+        )?;
+        connection.close().map_err(|e| e.to_string())?;
+
+        for forbidden in ["rejectedsourcecanary".to_owned(), "Q".repeat(36)] {
+            ensure(
+                !first.data_json().to_string().contains(&forbidden),
+                "first response hides rejected source",
+            )?;
+            ensure(
+                !retry.data_json().to_string().contains(&forbidden),
+                "retry response hides rejected source",
+            )?;
+            ensure(
+                !serde_json::to_string(&audits)
+                    .map_err(|e| e.to_string())?
+                    .contains(&forbidden),
+                "audits hide rejected source",
+            )?;
+            for suffix in ["", "-wal", "-shm"] {
+                let path = PathBuf::from(format!("{}{suffix}", database_path.to_string_lossy()));
+                if path.is_file() {
+                    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+                    ensure(
+                        !bytes
+                            .windows(forbidden.len())
+                            .any(|window| window == forbidden.as_bytes()),
+                        "database files must not retain rejected source content",
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn history_import_fixture(
+        prefix: &str,
+    ) -> TestResultWith<(PathBuf, CassClient, CassImportOptions)> {
+        let root = unique_test_dir(prefix)?;
+        let bin_dir = root.join("bin");
+        let workspace_path = root.join("workspace");
+        fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
+        fs::create_dir_all(&workspace_path).map_err(|e| e.to_string())?;
+        fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+        let binary = bin_dir.join("cass");
+        let client = CassClient::with_binary(binary.clone()).with_timeout(Duration::from_secs(5));
+        let options = CassImportOptions {
+            workspace_path,
+            database_path: Some(root.join("ee.db")),
+            limit: 10,
+            since: None,
+            dry_run: false,
+            include_spans: true,
+        };
+        Ok((binary, client, options))
+    }
+
+    #[cfg(unix)]
+    fn write_history_cass_fixture(
+        binary: &Path,
+        workspace: &Path,
+        sources: &[(&str, &str)],
+    ) -> TestResultWith<Vec<CassSessionInfo>> {
+        let mut sessions = Vec::new();
+        let mut view_cases = String::new();
+        for (name, raw) in sources {
+            let path = workspace.join(format!("{name}.jsonl"));
+            fs::write(&path, format!("{raw}\n")).map_err(|e| e.to_string())?;
+            sessions.push(json!({
+                "path": path.to_string_lossy(),
+                "workspace": workspace.to_string_lossy(),
+                "agent": "codex",
+                "modified": "2026-10-08T12:34:00Z",
+                "message_count": 1,
+                // Deliberately hold discovery metadata constant when the
+                // transcript changes: only full source evidence can prove it.
+                "content_hash": "fixed-discovery-content-hash",
+            }));
+            let view = serde_json::to_string_pretty(&json!({
+                "path": path.to_string_lossy(),
+                "target_line": 1,
+                "context": DEFAULT_VIEW_CONTEXT,
+                "total_lines": 1,
+                "lines": [{"line": 1, "content": raw, "highlighted": true}],
+            }))
+            .map_err(|e| e.to_string())?;
+            view_cases.push_str(&format!(
+                "  {}) cat <<'EE_CASS_HISTORY_VIEW'\n{view}\nEE_CASS_HISTORY_VIEW\n;;\n",
+                shell_quote_command_arg(&path.to_string_lossy()),
+            ));
+        }
+        let session_json = json!({"sessions": sessions}).to_string();
+        fs::write(binary, format!(
+            "#!/bin/sh\ncase \"$1\" in\n sessions) cat <<'EE_CASS_HISTORY_SESSIONS'\n{session_json}\nEE_CASS_HISTORY_SESSIONS\n;;\n view) for source_path in \"$@\"; do :; done\n case \"$source_path\" in\n{view_cases} *) exit 2;;\n esac\n;;\n *) exit 2;;\nesac\n",
+        ))
+        .map_err(|e| e.to_string())?;
+        fs::set_permissions(binary, fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+        parse_sessions_json(session_json.as_bytes()).map_err(|e| e.to_string())
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug, PartialEq)]
+    struct ImportedHistorySnapshot {
+        session: crate::db::StoredSession,
+        evidence: Vec<crate::db::StoredEvidenceSpan>,
+        audits: Vec<crate::db::StoredAuditEntry>,
+        jobs: Vec<crate::db::StoredSearchIndexJob>,
+    }
+
+    #[cfg(unix)]
+    fn imported_history_snapshot(
+        db: &DbConnection,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> TestResultWith<ImportedHistorySnapshot> {
+        let session = db
+            .get_session(session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("missing historical session")?;
+        let evidence = db
+            .list_evidence_spans_for_session(session_id)
+            .map_err(|e| e.to_string())?;
+        let mut audits = db
+            .list_audit_by_target("session", session_id, None)
+            .map_err(|e| e.to_string())?;
+        for row in &evidence {
+            audits.extend(
+                db.list_audit_by_target("evidence_span", &row.id, None)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        audits.sort_by(|left, right| left.id.cmp(&right.id));
+        let jobs = db
+            .list_search_index_jobs(workspace_id, None)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|job| job.document_id.as_deref() == Some(session_id))
+            .collect();
+        Ok(ImportedHistorySnapshot {
+            session,
+            evidence,
+            audits,
+            jobs,
+        })
+    }
+
+    #[cfg(unix)]
+    fn ensure_history_refusal_ledger(
+        db: &DbConnection,
+        report: &CassImportReport,
+        expected_totals: (u32, u32),
+        expected_attempt_count: u32,
+        private_values: &[&str],
+    ) -> TestResult {
+        let ledger = db
+            .get_import_ledger(report.ledger_id.as_deref().ok_or("missing import ledger")?)
+            .map_err(|e| e.to_string())?
+            .ok_or("missing durable import ledger")?;
+        ensure_equal(
+            &ledger.status.as_str(),
+            &"failed",
+            "partial progress must not record a wholly successful ledger attempt",
+        )?;
+        ensure_equal(
+            &(ledger.imported_session_count, ledger.imported_span_count),
+            &expected_totals,
+            "ledger keeps cumulative successful work without counting refusals or retries",
+        )?;
+        ensure_equal(
+            &ledger.attempt_count,
+            &expected_attempt_count,
+            "ledger tracks every completed retry",
+        )?;
+        ensure(
+            ledger.started_at.is_none() && ledger.completed_at.is_some(),
+            "a refused attempt must finish its ledger",
+        )?;
+        ensure_equal(
+            &ledger.error_code.as_deref(),
+            &Some("storage"),
+            "history refusal retains the storage error category",
+        )?;
+        let first_refusal = report
+            .sessions
+            .iter()
+            .find_map(|session| match session.status {
+                ImportSessionStatus::Refused(reason) => Some(reason),
+                _ => None,
+            })
+            .ok_or("missing refused session in report")?;
+        let message = ledger
+            .error_message
+            .as_deref()
+            .ok_or("missing durable history refusal")?;
+        ensure(
+            message.contains(&format!("{}:", first_refusal.code())),
+            "ledger retains the first session history refusal",
+        )?;
+        for private_value in private_values {
+            ensure(
+                !message.contains(*private_value),
+                "ledger refusal must omit raw source and private locators",
+            )?;
+        }
+        let cursor: JsonValue = serde_json::from_str(
+            ledger
+                .cursor_json
+                .as_deref()
+                .ok_or("missing ledger cursor")?,
+        )
+        .map_err(|e| e.to_string())?;
+        ensure_equal(
+            &cursor["sessionsDiscovered"],
+            &json!(report.sessions_discovered),
+            "ledger accounts for all discovered sessions",
+        )?;
+        ensure_equal(
+            &cursor["sessionsImported"],
+            &json!(report.sessions_imported),
+            "ledger cursor records this attempt's successful sessions",
+        )?;
+        ensure_equal(
+            &cursor["sessionsSkipped"],
+            &json!(report.sessions_skipped),
+            "ledger cursor accounts for refused and unchanged sessions",
+        )?;
+        ensure_equal(
+            &cursor["spansImported"],
+            &json!(report.spans_imported),
+            "ledger cursor records this attempt's successful evidence",
+        )?;
+        ensure_equal(
+            &cursor["complete"],
+            &json!(true),
+            "a refusal does not stop discovery of later sessions",
+        )?;
+        ensure_equal(
+            &db.count_table_rows("import_ledger")
+                .map_err(|e| e.to_string())?,
+            &1,
+            "retries reuse the source ledger",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_refuses_changed_secrets_even_when_screened_excerpts_match_and_imports_later_sessions()
+    -> TestResult {
+        let (binary, client, options) = history_import_fixture("history-secret-change")?;
+        let original_token = format!("ghp_{}", "Q".repeat(36));
+        let changed_token = format!("ghp_{}", "R".repeat(36));
+        let original = json!({
+            "type": "assistant",
+            "content": format!("Compilation passed. label-{original_token}"),
+        })
+        .to_string();
+        let changed = original.replace(&original_token, &changed_token);
+        let source_path = options.workspace_path.join("history.jsonl");
+        let original_span = parse_view_line_value(
+            &json!({"line": 1, "content": original}),
+            &source_path.to_string_lossy(),
+        )
+        .map_err(|e| e.to_string())?;
+        let changed_span = parse_view_line_value(
+            &json!({"line": 1, "content": changed}),
+            &source_path.to_string_lossy(),
+        )
+        .map_err(|e| e.to_string())?;
+        ensure_equal(
+            &original_span.excerpt,
+            &changed_span.excerpt,
+            "different secrets have identical screened representations",
+        )?;
+        ensure_equal(
+            &original_span.content_hash,
+            &changed_span.content_hash,
+            "excerpt hashes cannot detect this rewrite",
+        )?;
+        ensure(
+            original_span.source_hash != changed_span.source_hash,
+            "complete sources differ",
+        )?;
+        write_history_cass_fixture(&binary, &options.workspace_path, &[("history", &original)])?;
+        let initial = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+        ensure_equal(&initial.sessions_imported, &1, "initial history imported")?;
+        let database = options
+            .database_path
+            .as_deref()
+            .ok_or("missing database path")?;
+        let workspace_id = stable_workspace_id(&options.workspace_path.to_string_lossy());
+        let session_id = stable_session_id(&workspace_id, &source_path.to_string_lossy());
+        let db = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        let before = imported_history_snapshot(&db, &workspace_id, &session_id)?;
+        ensure_equal(&before.evidence.len(), &1, "one original evidence row")?;
+        let metadata: JsonValue = serde_json::from_str(
+            before.evidence[0]
+                .metadata_json
+                .as_deref()
+                .ok_or("missing evidence metadata")?,
+        )
+        .map_err(|e| e.to_string())?;
+        ensure_equal(
+            &metadata["cassSource"]["contentHash"],
+            &json!(format!(
+                "blake3:{}",
+                blake3::hash(original.as_bytes()).to_hex()
+            )),
+            "stored commitment describes original complete source",
+        )?;
+        db.close().map_err(|e| e.to_string())?;
+
+        let valid = json!({"type": "assistant", "content": "quartzcontinuationproof build and release checks passed."}).to_string();
+        write_history_cass_fixture(
+            &binary,
+            &options.workspace_path,
+            &[("history", &changed), ("later", &valid)],
+        )?;
+        let mut later_snapshot = None;
+        for attempt in 0..2 {
+            let report = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+            ensure_equal(
+                &report.status.as_str(),
+                &"completed_with_refusals",
+                "history refusal remains visible",
+            )?;
+            ensure_equal(
+                &report.sessions_imported,
+                &u32::from(attempt == 0),
+                "later session imported once",
+            )?;
+            ensure_equal(
+                &report.spans_imported,
+                &u32::from(attempt == 0),
+                "later evidence imported once",
+            )?;
+            ensure_equal(
+                &report.sessions[0].status,
+                &ImportSessionStatus::Refused(CassHistoryRefusal::Changed),
+                "changed raw secret is refused",
+            )?;
+            ensure_equal(
+                &report.data_json()["sessions"][0]["refusalCode"],
+                &json!("cass_refresh_history_changed"),
+                "machine-readable refusal",
+            )?;
+            ensure(
+                report.history_degradation().is_some(),
+                "partial progress carries a degradation",
+            )?;
+            ensure_equal(
+                &report.sessions[1].status,
+                &if attempt == 0 {
+                    ImportSessionStatus::Imported
+                } else {
+                    ImportSessionStatus::Skipped
+                },
+                "unaffected later session processed",
+            )?;
+            for token in [&original_token, &changed_token] {
+                ensure(
+                    !report.data_json().to_string().contains(token),
+                    "report omits raw secret",
+                )?;
+                ensure(
+                    !report.human_summary().contains(token),
+                    "human refusal omits raw secret",
+                )?;
+            }
+            let db = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+            ensure_equal(
+                &report.ledger_id,
+                &initial.ledger_id,
+                "history refusal retains the original import ledger identity",
+            )?;
+            ensure_history_refusal_ledger(
+                &db,
+                &report,
+                (2, 2),
+                attempt + 2,
+                &[
+                    &original_token,
+                    &changed_token,
+                    &source_path.to_string_lossy(),
+                ],
+            )?;
+            ensure_equal(
+                &imported_history_snapshot(&db, &workspace_id, &session_id)?,
+                &before,
+                "refusal preserves session, rows, audits and jobs",
+            )?;
+            let later_id = stable_session_id(
+                &workspace_id,
+                &options.workspace_path.join("later.jsonl").to_string_lossy(),
+            );
+            let observed = imported_history_snapshot(&db, &workspace_id, &later_id)?;
+            ensure_equal(&observed.evidence.len(), &1, "later evidence is durable")?;
+            ensure(
+                observed.evidence[0]
+                    .is_search_admitted_for_session(&workspace_id, &observed.session),
+                "later evidence remains admitted",
+            )?;
+            if let Some(previous) = &later_snapshot {
+                ensure_equal(&observed, previous, "retry leaves later history unchanged")?;
+            } else {
+                later_snapshot = Some(observed);
+            }
+            ensure_equal(
+                &db.count_table_rows("sessions").map_err(|e| e.to_string())?,
+                &2,
+                "no duplicate sessions",
+            )?;
+            ensure_equal(
+                &db.count_table_rows("evidence_spans")
+                    .map_err(|e| e.to_string())?,
+                &2,
+                "no duplicate evidence",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_preserves_unverifiable_v017_redacted_and_truncated_history_while_importing_later_sessions()
+    -> TestResult {
+        let (binary, client, options) = history_import_fixture("history-v017-unverifiable")?;
+        let token = format!("ghp_{}", "Q".repeat(36));
+        // v0.17.0's policy/ingestion.rs screened these original JSON bytes
+        // without decoding Unicode; the redactor replaced only the bearer.
+        let encoded = format!(
+            "{{\"type\":\"assistant\",\"content\":\"Build passed. \\u0043ase label-{token}\"}}"
+        );
+        let old_encoded = encoded.replace(&token, "[REDACTED:github_token]");
+        // v0.17.0's cass/ingestion.rs fell back to a 64 KiB raw prefix for
+        // unsupported structured input. The current policy withholds the
+        // complete record instead. The missing tail cannot be authenticated.
+        let oversized =
+            json!({"type": "future_record", "content": "Build observation. ".repeat(5000)})
+                .to_string();
+        let old_oversized = truncate_excerpt(&oversized, ingestion::MAX_EXCERPT_BYTES);
+        let valid = json!({"type": "assistant", "content": "quartzupgradeproof release verification passed."}).to_string();
+        let discovered = write_history_cass_fixture(
+            &binary,
+            &options.workspace_path,
+            &[
+                ("old-encoded", &encoded),
+                ("old-oversized", &oversized),
+                ("later", &valid),
+            ],
+        )?;
+        let database = options
+            .database_path
+            .as_deref()
+            .ok_or("missing database path")?;
+        let db = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        db.migrate().map_err(|e| e.to_string())?;
+        let workspace_id =
+            ensure_workspace(&db, &options.workspace_path).map_err(|e| e.to_string())?;
+        let mut historical = Vec::new();
+        for (index, (raw, old_excerpt, classes)) in [
+            (
+                encoded.as_str(),
+                old_encoded.as_str(),
+                vec!["github_token".to_owned()],
+            ),
+            (oversized.as_str(), old_oversized.as_str(), Vec::new()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let source = &discovered[index];
+            let session_id = stable_session_id(&workspace_id, &source.source_path);
+            db.insert_session(&session_id, &session_input(&workspace_id, source))
+                .map_err(|e| e.to_string())?;
+            let mut legacy_span =
+                parse_view_line_value(&json!({"line": 1, "content": raw}), &source.source_path)
+                    .map_err(|e| e.to_string())?;
+            ensure(
+                legacy_span.excerpt != old_excerpt,
+                "fixture must cross an actual screening representation change",
+            )?;
+            legacy_span.excerpt = old_excerpt.to_owned();
+            legacy_span.content_hash =
+                format!("blake3:{}", blake3::hash(old_excerpt.as_bytes()).to_hex());
+            legacy_span.redacted = !classes.is_empty();
+            legacy_span.redacted_reasons = classes;
+            let mut input = evidence_input(&workspace_id, &session_id, &legacy_span);
+            // Recreate exactly the pre-source-commitment input metadata. Do
+            // not label a current digest as one observed by the old importer.
+            let mut metadata: JsonValue = serde_json::from_str(
+                input
+                    .metadata_json
+                    .as_deref()
+                    .ok_or("missing fixture metadata")?,
+            )
+            .map_err(|e| e.to_string())?;
+            metadata
+                .as_object_mut()
+                .ok_or("metadata is not an object")?
+                .remove("cassSource");
+            input.metadata_json = Some(metadata.to_string());
+            let evidence_id = stable_evidence_id(&session_id, &legacy_span.cass_span_id);
+            db.insert_evidence_span(&evidence_id, &input)
+                .map_err(|e| e.to_string())?;
+            if legacy_span.redacted {
+                db.insert_audit(
+                    &stable_cass_redaction_audit_id(&evidence_id),
+                    &cass_redaction_audit_input(
+                        &workspace_id,
+                        &session_id,
+                        &evidence_id,
+                        &legacy_span,
+                    ),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            let job_id = stable_search_index_job_id(&workspace_id, &session_id);
+            db.insert_search_index_job(
+                &job_id,
+                &search_index_job_input(&workspace_id, &session_id),
+            )
+            .map_err(|e| e.to_string())?;
+            let before = imported_history_snapshot(&db, &workspace_id, &session_id)?;
+            ensure_equal(
+                &before.evidence[0].excerpt.as_str(),
+                &old_excerpt,
+                "fixture retains the v0.17 excerpt bytes",
+            )?;
+            let stored_metadata: JsonValue = serde_json::from_str(
+                before.evidence[0]
+                    .metadata_json
+                    .as_deref()
+                    .ok_or("missing legacy metadata")?,
+            )
+            .map_err(|e| e.to_string())?;
+            ensure(
+                stored_metadata.get("cassSource").is_none(),
+                "historical provenance has no fabricated source commitment",
+            )?;
+            historical.push(before);
+        }
+        db.close().map_err(|e| e.to_string())?;
+
+        let mut later_snapshot = None;
+        for attempt in 0..2 {
+            let report = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+            ensure_equal(
+                &report.status.as_str(),
+                &"completed_with_refusals",
+                "legacy uncertainty is explicit",
+            )?;
+            ensure_equal(
+                &report.sessions_imported,
+                &u32::from(attempt == 0),
+                "later session imported exactly once",
+            )?;
+            ensure_equal(
+                &report.spans_imported,
+                &u32::from(attempt == 0),
+                "later evidence imported exactly once",
+            )?;
+            for index in 0..2 {
+                ensure_equal(
+                    &report.sessions[index].status,
+                    &ImportSessionStatus::Refused(CassHistoryRefusal::Unverifiable),
+                    "lossy legacy evidence cannot prove complete source equality",
+                )?;
+                ensure_equal(
+                    &report.data_json()["sessions"][index]["refusalCode"],
+                    &json!("cass_refresh_history_unverifiable"),
+                    "legacy refusal code",
+                )?;
+            }
+            ensure_equal(
+                &report.sessions[2].status,
+                &if attempt == 0 {
+                    ImportSessionStatus::Imported
+                } else {
+                    ImportSessionStatus::Skipped
+                },
+                "unaffected later session processed",
+            )?;
+            ensure(
+                report.history_degradation().is_some(),
+                "legacy refusal carries degradation",
+            )?;
+            ensure(
+                !report.data_json().to_string().contains(&token),
+                "upgrade report omits source token",
+            )?;
+            let db = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+            ensure_history_refusal_ledger(
+                &db,
+                &report,
+                (1, 1),
+                attempt + 1,
+                &[
+                    &token,
+                    &encoded,
+                    &oversized,
+                    &discovered[0].source_path,
+                    &discovered[1].source_path,
+                ],
+            )?;
+            for before in &historical {
+                ensure_equal(
+                    &imported_history_snapshot(&db, &workspace_id, &before.session.id)?,
+                    before,
+                    "upgrade refusal preserves every historical field and audit",
+                )?;
+            }
+            let later_id = stable_session_id(&workspace_id, &discovered[2].source_path);
+            let observed = imported_history_snapshot(&db, &workspace_id, &later_id)?;
+            ensure_equal(
+                &observed.evidence.len(),
+                &1,
+                "unaffected evidence persisted",
+            )?;
+            ensure(
+                observed.evidence[0]
+                    .is_search_admitted_for_session(&workspace_id, &observed.session),
+                "unaffected evidence remains searchable",
+            )?;
+            if let Some(previous) = &later_snapshot {
+                ensure_equal(
+                    &observed,
+                    previous,
+                    "retry preserves later imported history",
+                )?;
+            } else {
+                later_snapshot = Some(observed);
+            }
+            ensure(
+                db.list_audit_by_action("cass.evidence.screening_reconciled", None)
+                    .map_err(|e| e.to_string())?
+                    .is_empty(),
+                "unproven source never receives a reconciliation audit",
+            )?;
+            ensure_equal(
+                &db.count_table_rows("sessions").map_err(|e| e.to_string())?,
+                &3,
+                "upgrade creates no duplicate sessions",
+            )?;
+            ensure_equal(
+                &db.count_table_rows("evidence_spans")
+                    .map_err(|e| e.to_string())?,
+                &3,
+                "upgrade creates no duplicate evidence",
+            )?;
+            db.close().map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 }

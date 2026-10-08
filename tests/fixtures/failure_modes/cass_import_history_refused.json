@@ -1,0 +1,23 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cass_import_history_refused",
+  "introduced_by": { "bead": "gh-66", "epic_letter": "I" },
+  "surfaces": ["import cass"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A retained CASS source line changed or disappeared, or a legacy lossy excerpt cannot prove its complete source across screening versions. That session is preserved and later sessions continue importing.",
+    "setup_commands": [
+      "ee import cass --workspace . --json",
+      "# Revisit an unverifiable v0.17.0 excerpt, or change a previously imported source line."
+    ],
+    "invocation": "ee import cass --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "cass_import_history_refused",
+    "severity": "high",
+    "message_contains": ["CASS sessions were refused", "evidence was preserved", "other sessions were processed"],
+    "repair_contains": "sessions[].refusalCode",
+    "repair_string": "Inspect sessions[].refusalCode and sessions[].repair; restore original source evidence before retrying refused sessions."
+  }
+}

@@ -14434,6 +14434,69 @@ const EVIDENCE_SOURCE_READ_PAGE_SIZE: u32 = 512;
 pub const EVIDENCE_SCREENING_VERSION: u32 = 1;
 pub const EVIDENCE_SECURITY_POLICY_EPOCH: u32 = 1;
 pub const EVIDENCE_CANONICAL_PROVENANCE_REVISION: u32 = 1;
+pub(crate) const CASS_SOURCE_COMMITMENT_SCHEMA_V1: &str = "ee.cass.source.v1";
+const CASS_SOURCE_COMMITMENT_MAX_BYTES: u64 = 1024 * 1024;
+
+/// A commitment captured from a complete CASS source line before screening.
+///
+/// This is distinct from the excerpt hash and upstream locator hash. It carries
+/// no source text or path, grants no admission authority, and is never inferred
+/// for historical evidence that did not retain its complete source bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CassSourceCommitment {
+    pub(crate) schema: String,
+    pub(crate) content_hash: String,
+    pub(crate) byte_length: u64,
+    pub(crate) excerpt_producer_version: u32,
+}
+
+impl CassSourceCommitment {
+    pub(crate) fn is_valid(&self) -> bool {
+        self.schema == CASS_SOURCE_COMMITMENT_SCHEMA_V1
+            && is_canonical_blake3_hash(&self.content_hash)
+            && (1..=CASS_SOURCE_COMMITMENT_MAX_BYTES).contains(&self.byte_length)
+            && self.excerpt_producer_version > 0
+    }
+
+    /// Read an optional commitment without treating a malformed claim as an
+    /// older row. Decode the typed object from the original JSON so duplicate
+    /// fields are refused rather than erased by `Value`'s last-key-wins parser.
+    pub(crate) fn from_metadata(metadata_json: Option<&str>) -> Result<Option<Self>> {
+        let Some(raw) = metadata_json else {
+            return Ok(None);
+        };
+        let metadata: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|_| malformed_evidence_input("evidence metadata must be valid JSON"))?;
+        if !metadata.is_object() {
+            return Ok(None);
+        }
+        let metadata: CassSourceMetadata = serde_json::from_str(raw)
+            .map_err(|_| malformed_evidence_input("invalid CASS source commitment"))?;
+        Ok(metadata.cass_source)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CassSourceMetadata {
+    #[serde(default, deserialize_with = "deserialize_cass_source_commitment")]
+    cass_source: Option<CassSourceCommitment>,
+}
+
+fn deserialize_cass_source_commitment<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<CassSourceCommitment>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let source = CassSourceCommitment::deserialize(deserializer)?;
+    if !source.is_valid() {
+        return Err(serde::de::Error::custom("invalid CASS source commitment"));
+    }
+    Ok(Some(source))
+}
+
 /// Revision of the row-level evidence admission function whose result
 /// `evidence_admission_verdicts` caches. Bump it whenever transcript
 /// classification, reader projection, ingestion screening or any admission
@@ -15137,7 +15200,13 @@ impl StoredEvidenceSpan {
         let Some(object) = metadata.as_object() else {
             return false;
         };
-        if object.len() != 13
+        let Ok(cass_source) = CassSourceCommitment::from_metadata(Some(raw)) else {
+            return false;
+        };
+        if cass_source.is_some() && producer_kind != EvidenceProducerKind::CassImport {
+            return false;
+        }
+        if object.len() != 13 + usize::from(cass_source.is_some())
             || object.get("schema").and_then(serde_json::Value::as_str)
                 != Some(EVIDENCE_SECURITY_METADATA_SCHEMA_V1)
             || object
@@ -15384,10 +15453,23 @@ fn prepare_evidence_security(input: &CreateEvidenceSpanInput) -> Result<Prepared
             producer_kind.as_str()
         )));
     }
-    if let Some(metadata) = input.metadata_json.as_deref() {
-        serde_json::from_str::<serde_json::Value>(metadata).map_err(|error| {
-            malformed_evidence_input(format!("evidence metadata must be valid JSON: {error}"))
-        })?;
+    let cass_source = CassSourceCommitment::from_metadata(input.metadata_json.as_deref())?;
+    if cass_source.is_some() {
+        let input_metadata = input
+            .metadata_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        if producer_kind != EvidenceProducerKind::CassImport
+            || input_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("schema"))
+                .and_then(serde_json::Value::as_str)
+                != Some(crate::models::CASS_EVIDENCE_SPAN_SCHEMA_V1)
+        {
+            return Err(malformed_evidence_input(
+                "CASS source commitment requires CASS import metadata",
+            ));
+        }
     }
 
     let supplied_excerpt_hash = canonical_evidence_hash(&input.excerpt);
@@ -15460,7 +15542,7 @@ fn prepare_evidence_security(input: &CreateEvidenceSpanInput) -> Result<Prepared
         ))
     })?;
     let source_metadata_hash = input.metadata_json.as_deref().map(canonical_evidence_hash);
-    let safe_metadata_json = serde_json::json!({
+    let mut safe_metadata = serde_json::json!({
         "schema": EVIDENCE_SECURITY_METADATA_SCHEMA_V1,
         "producerKind": producer_kind.as_str(),
         "screeningVersion": EVIDENCE_SCREENING_VERSION,
@@ -15474,8 +15556,12 @@ fn prepare_evidence_security(input: &CreateEvidenceSpanInput) -> Result<Prepared
         "canonicalExcerptHash": &canonical_excerpt_hash,
         "upstreamRefHash": &upstream_ref_hash,
         "sourceMetadataHash": source_metadata_hash,
-    })
-    .to_string();
+    });
+    if let Some(source) = cass_source {
+        safe_metadata["cassSource"] = serde_json::to_value(source)
+            .map_err(|_| malformed_evidence_input("invalid CASS source commitment"))?;
+    }
+    let safe_metadata_json = safe_metadata.to_string();
 
     Ok(PreparedEvidenceSecurity {
         producer_kind,
@@ -15621,6 +15707,14 @@ fn legacy_evidence_rescreen_decision(
     workspace_id: &str,
     span: &StoredEvidenceSpan,
 ) -> Result<LegacyEvidenceRescreenDecision> {
+    // This path infers an unknown producer and replaces its old metadata. A
+    // source-backed CASS row never belongs to that selection. Refuse an
+    // inconsistent legacy row instead of silently erasing a source commitment.
+    if CassSourceCommitment::from_metadata(span.metadata_json.as_deref())?.is_some() {
+        return Err(malformed_evidence_input(
+            "legacy evidence rescreen cannot replace CASS source provenance",
+        ));
+    }
     let Some(producer_kind) = infer_legacy_evidence_producer(span.role.as_deref()) else {
         return Ok(LegacyEvidenceRescreenDecision {
             prepared: prepare_quarantined_legacy_evidence(span),
@@ -52842,6 +52936,261 @@ UPDATE memories
             .get_search_admitted_evidence_span(&evidence_id, "wsp_01234567890123456789012345")?
             .is_some();
         ensure(admitted, "redacted CASS evidence must pass live admission")
+    }
+
+    #[test]
+    fn cass_source_commitment_round_trips_without_exposing_or_rewriting_history() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8566_0001)).to_string();
+        let legacy_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8566_0002)).to_string();
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8566_0003)).to_string();
+        connection.insert_session(&session_id, &session_input("source-commitment-session"))?;
+        connection.insert_evidence_span(
+            &legacy_id,
+            &evidence_span_input(&session_id, "legacy-source-slot", 1),
+        )?;
+        let legacy = connection.get_evidence_span(&legacy_id)?.unwrap();
+        assert_eq!(
+            super::CassSourceCommitment::from_metadata(legacy.metadata_json.as_deref())?,
+            None,
+        );
+        let legacy_metadata: serde_json::Value =
+            serde_json::from_str(legacy.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(legacy_metadata.as_object().unwrap().len(), 13);
+
+        let raw = "Build passed; api_key=PRIVATE_SOURCE_SENTINEL_123456789.";
+        let screened = crate::policy::screen_external_text_for_ingestion(raw);
+        assert!(screened.redacted);
+        let source = super::CassSourceCommitment {
+            schema: super::CASS_SOURCE_COMMITMENT_SCHEMA_V1.to_owned(),
+            content_hash: super::canonical_evidence_hash(raw),
+            byte_length: raw.len() as u64,
+            excerpt_producer_version: 1,
+        };
+        let mut input = evidence_span_input(&session_id, "/private/source/session.jsonl:7", 7);
+        input.excerpt = screened.content;
+        input.content_hash = super::canonical_evidence_hash(&input.excerpt);
+        input.inherited_redaction_classes = screened.redacted_reasons;
+        input.metadata_json = Some(
+            serde_json::json!({
+                "schema": crate::models::CASS_EVIDENCE_SPAN_SCHEMA_V1,
+                "cassSource": source,
+                "sourcePath": "/private/source/session.jsonl",
+                "untrustedAnnotation": "PRIVATE_METADATA_SENTINEL",
+            })
+            .to_string(),
+        );
+        connection.insert_evidence_span(&evidence_id, &input)?;
+        let stored = connection.get_evidence_span(&evidence_id)?.unwrap();
+        assert_eq!(
+            super::CassSourceCommitment::from_metadata(stored.metadata_json.as_deref())?,
+            Some(source.clone()),
+        );
+        assert_ne!(stored.content_hash, source.content_hash);
+        assert_eq!(stored.excerpt, input.excerpt);
+        let metadata_text = stored.metadata_json.as_deref().unwrap();
+        assert!(!metadata_text.contains("PRIVATE_SOURCE_SENTINEL"));
+        assert!(!metadata_text.contains("PRIVATE_METADATA_SENTINEL"));
+        assert!(!metadata_text.contains("/private/"));
+        assert!(!stored.excerpt.contains("PRIVATE_SOURCE_SENTINEL"));
+        let metadata: serde_json::Value = serde_json::from_str(metadata_text).unwrap();
+        assert_eq!(metadata.as_object().unwrap().len(), 14);
+        assert_eq!(
+            metadata["sourceMetadataHash"],
+            super::canonical_evidence_hash(input.metadata_json.as_deref().unwrap()),
+        );
+        let session = connection.get_session(&session_id)?.unwrap();
+        assert!(stored.is_search_admitted_for_session(WORKSPACE, &session));
+        assert!(legacy.is_search_admitted_for_session(WORKSPACE, &session));
+        assert_eq!(connection.get_evidence_span(&legacy_id)?, Some(legacy));
+        let rescreen = connection.rescreen_legacy_evidence_for_workspace(
+            WORKSPACE,
+            10,
+            true,
+            Some("source-commitment-test"),
+        )?;
+        assert_eq!(rescreen.selected, 0);
+        assert_eq!(
+            connection.get_evidence_span(&evidence_id)?,
+            Some(stored.clone())
+        );
+
+        let restored = DbConnection::open_memory()?;
+        restored.migrate()?;
+        setup_workspace(&restored)?;
+        restored.insert_session_for_recovery(&session)?;
+        restored.insert_evidence_span_for_recovery(&stored)?;
+        assert_eq!(
+            restored.get_evidence_span(&evidence_id)?,
+            Some(stored.clone())
+        );
+        assert!(
+            restored
+                .get_search_admitted_evidence_span(&evidence_id, WORKSPACE)?
+                .is_some()
+        );
+
+        // An inconsistent legacy producer cannot cause rescreen to discard
+        // the commitment. Its refusal leaves the entire session transaction
+        // and existing audit history intact.
+        restored.execute_raw("UPDATE evidence_spans SET producer_kind = 'legacy_unknown'")?;
+        let before_rescreen = restored.get_evidence_span(&evidence_id)?;
+        let audit_count = restored.count_table_rows("audit_log")?;
+        for apply in [false, true] {
+            let error = restored
+                .rescreen_legacy_evidence_for_workspace(WORKSPACE, 10, apply, None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("cannot replace CASS source provenance"));
+            assert_eq!(restored.get_evidence_span(&evidence_id)?, before_rescreen);
+            assert_eq!(restored.count_table_rows("audit_log")?, audit_count);
+        }
+
+        // The existing cached-verdict binding includes the complete metadata.
+        // A malformed or unknown addition cannot reuse that admitted verdict.
+        let (_, binding) = stored.admission_verdict_record();
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!({"schema": "PRIVATE_SOURCE_SENTINEL"}),
+        ] {
+            let mut altered = stored.clone();
+            let mut changed_metadata = metadata.clone();
+            changed_metadata["cassSource"] = invalid;
+            altered.metadata_json = Some(changed_metadata.to_string());
+            assert!(altered.recorded_admission_verdict(Some(&binding)).is_none());
+            assert!(!altered.is_search_admitted_with_recorded_verdict(
+                WORKSPACE,
+                &session,
+                Some(&binding),
+            ));
+        }
+        let mut altered = stored.clone();
+        let mut changed_metadata = metadata;
+        changed_metadata["unexpectedField"] = serde_json::json!(true);
+        altered.metadata_json = Some(changed_metadata.to_string());
+        assert!(!altered.is_search_admitted_for_session(WORKSPACE, &session));
+        Ok(())
+    }
+
+    #[test]
+    fn cass_source_commitment_rejects_malformed_and_foreign_claims_before_writes() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8566_0011)).to_string();
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x8566_0012)).to_string();
+        connection.insert_session(&session_id, &session_input("invalid-commitment-session"))?;
+        let mut input = evidence_span_input(&session_id, "invalid-commitment-span", 1);
+        let valid = serde_json::json!({
+            "schema": super::CASS_SOURCE_COMMITMENT_SCHEMA_V1,
+            "contentHash": super::canonical_evidence_hash(&input.excerpt),
+            "byteLength": input.excerpt.len(),
+            "excerptProducerVersion": 1,
+        });
+        let mut malformed = vec![
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!("PRIVATE_SOURCE_SENTINEL"),
+        ];
+        for (key, value) in [
+            ("schema", serde_json::json!("unsupported")),
+            ("contentHash", serde_json::json!("blake3:short")),
+            (
+                "contentHash",
+                serde_json::json!(format!("blake3:{}", "A".repeat(64))),
+            ),
+            ("byteLength", serde_json::json!(0)),
+            ("byteLength", serde_json::json!(-1)),
+            ("byteLength", serde_json::json!(1_048_577)),
+            ("byteLength", serde_json::json!(1.5)),
+            ("excerptProducerVersion", serde_json::json!(0)),
+            (
+                "excerptProducerVersion",
+                serde_json::json!(4_294_967_296_u64),
+            ),
+            ("rawSource", serde_json::json!("PRIVATE_SOURCE_SENTINEL")),
+        ] {
+            let mut source = valid.clone();
+            source[key] = value;
+            malformed.push(source);
+        }
+        let tables = [
+            "evidence_spans",
+            "evidence_admission_verdicts",
+            "evidence_reader_projections",
+        ];
+        let before = tables
+            .iter()
+            .map(|table| connection.count_table_rows(table))
+            .collect::<super::Result<Vec<_>>>()?;
+        for source in malformed {
+            input.metadata_json = Some(
+                serde_json::json!({
+                    "schema": crate::models::CASS_EVIDENCE_SPAN_SCHEMA_V1,
+                    "cassSource": source,
+                })
+                .to_string(),
+            );
+            let error = connection
+                .insert_evidence_span(&evidence_id, &input)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("CASS source commitment"));
+            assert!(!error.contains("PRIVATE_SOURCE_SENTINEL"));
+        }
+        let duplicate_inner = format!(
+            "{{\"schema\":\"{}\",\"contentHash\":\"{}\",\"byteLength\":1,\"byteLength\":1,\"excerptProducerVersion\":1}}",
+            super::CASS_SOURCE_COMMITMENT_SCHEMA_V1,
+            super::canonical_evidence_hash(&input.excerpt),
+        );
+        for metadata in [
+            format!(
+                "{{\"schema\":\"{}\",\"cassSource\":{valid},\"cassSource\":{valid}}}",
+                crate::models::CASS_EVIDENCE_SPAN_SCHEMA_V1,
+            ),
+            format!(
+                "{{\"schema\":\"{}\",\"cassSource\":{duplicate_inner}}}",
+                crate::models::CASS_EVIDENCE_SPAN_SCHEMA_V1,
+            ),
+            serde_json::json!({"schema": "unrelated-producer", "cassSource": valid}).to_string(),
+        ] {
+            input.metadata_json = Some(metadata);
+            assert!(
+                connection
+                    .insert_evidence_span(&evidence_id, &input)
+                    .is_err()
+            );
+        }
+        input.producer_kind = super::EvidenceProducerKind::DocsBootstrap;
+        input.role = Some("docs_bootstrap".to_owned());
+        input.span_kind = "file".to_owned();
+        input.metadata_json = Some(
+            serde_json::json!({
+                "schema": crate::models::CASS_EVIDENCE_SPAN_SCHEMA_V1,
+                "cassSource": valid,
+            })
+            .to_string(),
+        );
+        let error = connection
+            .insert_evidence_span(&evidence_id, &input)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires CASS import metadata"));
+        let after = tables
+            .iter()
+            .map(|table| connection.count_table_rows(table))
+            .collect::<super::Result<Vec<_>>>()?;
+        assert_eq!(after, before);
+        Ok(())
     }
 
     /// bd-reality-core-convergence-1azkt.47: a write-time admission verdict is

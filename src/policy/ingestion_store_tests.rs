@@ -464,11 +464,97 @@ fn malformed_encoded_records_remain_quarantined_after_database_screening() -> Te
         withheld["reason"],
         "external_ingestion_encoded_json_unreadable"
     );
+    assert_eq!(
+        withheld["redaction"],
+        "[REDACTED:external_ingestion_encoded_json_unreadable]"
+    );
     assert_eq!(withheld["sourceDigest"], hash(&raw));
     assert_eq!(document.content, "[EVIDENCE_WITHHELD]");
     assert!(!document.metadata.contains_key("content_hash"));
     assert!(!document.content.contains(&token));
     assert!(!document.content.contains(&"Q".repeat(36)));
+    db.close()?;
+    Ok(())
+}
+
+#[test]
+fn prescreened_withheld_records_satisfy_inherited_redaction_contract() -> TestResult {
+    let (db, ws, session_id) = database()?;
+    let session = db.get_session(&session_id)?.ok_or("missing session")?;
+    let first_token = format!("ghp_{}", "Q".repeat(36));
+    let second_token = format!("ghp_{}", "R".repeat(36));
+    let colliding_keys = serde_json::json!({
+        "type": "assistant",
+        "content": "rejectedsourcecanary",
+        "metadata": { first_token.clone(): 1, second_token.clone(): 2 },
+    })
+    .to_string()
+    .replace("ghp_", "\\u0067hp_");
+    for (index, (raw, reason)) in [
+        (
+            r#"{"type":"assistant","content":"rejectedsourcecanary \uD800"}"#.to_owned(),
+            "external_ingestion_encoded_json_unreadable",
+        ),
+        (
+            colliding_keys,
+            "external_ingestion_encoded_json_redaction_invalid",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Import screens before the database does. The inherited class must
+        // still be validated even though the rejected source is already gone.
+        let screened = screen(&raw);
+        assert!(screened.redacted);
+        assert_eq!(screened.redacted_reasons, [reason]);
+        let mut record = input(&ws, &session_id, &screened.content);
+        record.cass_span_id = format!("prescreened-withheld-{index}");
+        record.start_line = 50 + index as u32;
+        record.end_line = record.start_line;
+        record.inherited_redaction_classes = screened.redacted_reasons;
+        let id = EvidenceId::from_uuid(Uuid::from_u128(950 + index as u128)).to_string();
+        db.insert_evidence_span(&id, &record)?;
+        let stored = db
+            .get_evidence_span(&id)?
+            .ok_or("missing withheld evidence")?;
+        let withheld: serde_json::Value = serde_json::from_str(&stored.excerpt)?;
+        assert_eq!(withheld["type"], "external_ingestion_withheld");
+        assert_eq!(withheld["reason"], reason);
+        assert_eq!(withheld["redaction"], format!("[REDACTED:{reason}]"));
+        assert_eq!(withheld["sourceDigest"], hash(&raw));
+        assert_eq!(stored.excerpt, record.excerpt);
+        assert_eq!(stored.content_hash, hash(&stored.excerpt));
+        assert_eq!(stored.cass_span_id, hash(&record.cass_span_id));
+        assert_eq!(stored.start_line, record.start_line);
+        assert_eq!(stored.end_line, record.end_line);
+        assert_eq!(stored.secret_redaction_status, "redacted");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stored.redaction_classes_json)?,
+            serde_json::json!([reason])
+        );
+        assert_eq!(stored.search_eligibility, "quarantined");
+        assert_eq!(stored.pack_eligibility, "quarantined");
+        assert!(!stored.is_derivation_admitted_for_session(&ws, &session));
+        assert!(db.get_search_admitted_evidence_span(&id, &ws)?.is_none());
+        let document = crate::search::evidence_span_to_document(&stored).into_indexable();
+        assert_eq!(document.content, "[EVIDENCE_WITHHELD]");
+        for forbidden in [
+            "rejectedsourcecanary",
+            first_token.as_str(),
+            second_token.as_str(),
+        ] {
+            assert!(!stored.excerpt.contains(forbidden));
+            assert!(
+                !stored
+                    .metadata_json
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(forbidden)
+            );
+            assert!(!serde_json::to_string(&document.metadata)?.contains(forbidden));
+        }
+    }
     db.close()?;
     Ok(())
 }

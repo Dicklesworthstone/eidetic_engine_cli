@@ -44,11 +44,11 @@
         "since": { "type": ["string", "null"] },
         "sessionsDiscovered": { "type": "integer" },
         "sessionsImported": { "type": "integer" },
-        "sessionsSkipped": { "type": "integer" },
+        "sessionsSkipped": { "type": "integer", "description": "Already-imported sessions plus explicitly refused historical sessions; inspect sessions[].status." },
         "spansImported": { "type": "integer" },
         "indexJobsQueued": { "type": "integer" },
         "indexRequiredAction": { "type": ["string", "null"] },
-        "status": { "type": "string" },
+        "status": { "type": "string", "description": "completed, completed_with_refusals, or dry_run. A completed_with_refusals run preserves refused sessions and processes other sessions." },
         "evidenceAdmission": {
           "type": "object",
           "description": "Admission of the spans this run wrote. quarantineReasons counts each kept-out span by its first policy reason: record_kind:<kind>, record_role:<role>, span:<kind>/<role>, or instruction:<signal>.",
@@ -65,6 +65,7 @@
         },
         "sessions": {
           "type": "array",
+          "description": "Per-session status is imported, skipped, would_import, or refused. Refused entries additionally carry refusalCode and repair; their historical rows were not changed.",
           "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
         }
       }

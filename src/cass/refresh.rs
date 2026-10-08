@@ -1,7 +1,7 @@
 //! Extend a previously imported CASS session without rewriting its evidence.
 //!
 //! Discovery is a snapshot, not proof that an already-known session is finished.
-//! Compare the complete newly screened transcript with the retained CASS rows,
+//! Compare original-source commitments with the retained CASS rows,
 //! preserve every existing identity/link/admission decision, and capture missing
 //! spans with their normal DB screening. Metadata, new evidence, audits and a
 //! revision-specific index job commit in one writer-fenced transaction.
@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::db::{
-    CreateAuditInput, CreateSessionInput, DbConnection, DbError, DbOperation,
-    EvidenceAdmissionTally, SearchIndexJobStatus, StoredSession,
+    CassSourceCommitment, CreateAuditInput, CreateSessionInput, DbConnection, DbError, DbOperation,
+    EvidenceAdmissionTally, SearchIndexJobStatus, StoredEvidenceSpan, StoredSession,
 };
 use crate::models::AuditId;
 
@@ -106,6 +106,8 @@ pub(super) fn refresh_session(
             // inconsistent source locator or payload create an unrefreshable
             // checkpoint, even when a future caller bypasses the view parser.
             if span.start_line == 0
+                || span.source_bytes == 0
+                || span.source_bytes > super::CASS_STDOUT_LINE_MAX_BYTES
                 || span.end_line != span.start_line
                 || span.cass_span_id != format!("{}:{}", discovered.source_path, span.start_line)
                 || span.content_hash
@@ -126,6 +128,7 @@ pub(super) fn refresh_session(
         }
         let previous = connection.list_evidence_spans_for_session(session_id)?;
         let mut retained = BTreeSet::new();
+        let mut reconciliations = Vec::new();
         for row in &previous {
             if row.workspace_id != workspace_id || row.session_id != session_id {
                 return Err(refusal("cass_refresh_scope_mismatch"));
@@ -162,10 +165,25 @@ pub(super) fn refresh_session(
                 || row.end_line != span.end_line
                 || row.span_kind != span.span_kind.as_str()
                 || row.role.as_deref() != span.role.map(|role| role.as_str())
-                || row.excerpt != span.excerpt
-                || row.content_hash != span.content_hash
             {
                 return Err(refusal("cass_refresh_history_changed"));
+            }
+            if let Some(proof) = retained_source_proof(row, span)? {
+                let (audit_id, audit) =
+                    reconciliation_audit(workspace_id, session_id, row, span, proof);
+                if let Some(existing) = connection.get_audit(&audit_id)? {
+                    if existing.workspace_id != audit.workspace_id
+                        || existing.actor != audit.actor
+                        || existing.action != audit.action
+                        || existing.target_type != audit.target_type
+                        || existing.target_id != audit.target_id
+                        || existing.details != audit.details
+                    {
+                        return Err(refusal("cass_refresh_reconciliation_audit_conflict"));
+                    }
+                } else {
+                    reconciliations.push((audit_id, audit));
+                }
             }
         }
 
@@ -182,6 +200,7 @@ pub(super) fn refresh_session(
         let revision = snapshot_revision(workspace_id, session_id, &input, &incoming);
         let changed = metadata_changed
             || !additions.is_empty()
+            || !reconciliations.is_empty()
             || checkpoint
                 .as_ref()
                 .is_some_and(|saved| saved.snapshot_revision != revision);
@@ -243,6 +262,9 @@ pub(super) fn refresh_session(
             }
             added_lines.push(span.end_line);
         }
+        for (audit_id, audit) in &reconciliations {
+            connection.insert_audit(audit_id, audit)?;
+        }
         // Persist the checkpoint even when discovery fields did not change.
         // Its job and every captured row belong to this same transaction.
         update_metadata(connection, workspace_id, session_id, &input)?;
@@ -269,6 +291,7 @@ pub(super) fn refresh_session(
                         "snapshotRevision": revision,
                         "addedSpanCount": added_lines.len(),
                         "retainedCassSpanCount": retained.len(),
+                        "reconciledScreeningCount": reconciliations.len(),
                         "metadataChanged": metadata_changed,
                     })
                     .to_string(),
@@ -283,6 +306,164 @@ pub(super) fn refresh_session(
             admission,
         })
     })
+}
+
+/// Return a proof label only when the screened representation changed. Never
+/// re-admit or replace a historical row to make a comparison succeed.
+///
+/// New rows commit to the full original line, including bytes removed by
+/// redaction and bounding. Old imports did not keep that commitment. Only an
+/// intact clean excerpt or a strictly recognized importer withholding digest
+/// can prove retained source evidence. A complete excerpt cannot attest to any
+/// serialization normalization done before it was stored; never relabel it as
+/// an import-time raw commitment. A lossy projection cannot prove source identity.
+fn retained_source_proof(
+    row: &StoredEvidenceSpan,
+    span: &CassViewSpanForImport,
+) -> Result<Option<&'static str>, DbError> {
+    let retained_hash = format!("blake3:{}", blake3::hash(row.excerpt.as_bytes()).to_hex());
+    if row.content_hash != retained_hash
+        || row
+            .canonical_excerpt_hash
+            .as_ref()
+            .is_some_and(|hash| hash != &retained_hash)
+    {
+        return Err(refusal("cass_refresh_history_changed"));
+    }
+    let observed_hash = format!("blake3:{}", span.source_hash.to_hex());
+    let proof = if let Some(source) =
+        CassSourceCommitment::from_metadata(row.metadata_json.as_deref())
+            .map_err(|_| refusal("cass_refresh_history_changed"))?
+    {
+        let metadata: serde_json::Value =
+            serde_json::from_str(row.metadata_json.as_deref().unwrap_or(""))
+                .map_err(|_| refusal("cass_refresh_history_changed"))?;
+        if row.producer_kind != "cass_import"
+            || metadata["schema"] != crate::db::EVIDENCE_SECURITY_METADATA_SCHEMA_V1
+            || metadata["producerKind"] != row.producer_kind
+            || metadata["canonicalExcerptHash"] != retained_hash
+        {
+            return Err(refusal("cass_refresh_history_changed"));
+        }
+        if source.content_hash != observed_hash || source.byte_length != span.source_bytes as u64 {
+            return Err(refusal("cass_refresh_history_changed"));
+        }
+        "captured_source_commitment"
+    } else if complete_legacy_excerpt(row) {
+        if retained_hash != observed_hash || row.excerpt.len() != span.source_bytes {
+            return Err(refusal("cass_refresh_history_changed"));
+        }
+        "retained_complete_excerpt"
+    } else if let Some(digest) = legacy_withheld_source_digest(row) {
+        if digest != observed_hash {
+            return Err(refusal("cass_refresh_history_changed"));
+        }
+        "retained_withholding_digest"
+    } else {
+        // Neither a session's path/mtime/size hash nor replaying the old lossy
+        // screener can authenticate discarded bytes. Do not manufacture a
+        // historical source digest from the new observation.
+        return Err(refusal("cass_refresh_history_unverifiable"));
+    };
+    Ok((row.excerpt != span.excerpt || row.content_hash != span.content_hash).then_some(proof))
+}
+
+fn complete_legacy_excerpt(row: &StoredEvidenceSpan) -> bool {
+    row.secret_redaction_status == "clean"
+        && serde_json::from_str::<Vec<String>>(&row.redaction_classes_json)
+            .is_ok_and(|classes| classes.is_empty())
+        // UTF-8 truncation can retreat up to three bytes from the old cap.
+        // Every length in that interval can be an unmarked lossy prefix.
+        && row.excerpt.len() < super::ingestion::MAX_EXCERPT_BYTES - 3
+        && !row.excerpt.contains("[REDACTED:")
+        && !row.excerpt.contains("[TRUNCATED]")
+        && !legacy_excerpt_may_be_normalized_json(&row.excerpt)
+}
+
+fn legacy_excerpt_may_be_normalized_json(excerpt: &str) -> bool {
+    // v0.17 could turn an oversized, whitespace-padded JSON object into a
+    // short canonical record without marking it as truncated or redacted;
+    // later producers also normalized object streams joined by newlines.
+    // Those records retained semantic content but did not retain source bytes.
+    // An already-canonical original is indistinguishable, so neither may
+    // confer a complete-source proof without an independent commitment.
+    if !excerpt.starts_with('{') {
+        return false;
+    }
+    excerpt.split('\n').all(|line| {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        value.is_object() && serde_json::to_string(&value).is_ok_and(|canonical| canonical == line)
+    })
+}
+
+fn legacy_withheld_source_digest(row: &StoredEvidenceSpan) -> Option<String> {
+    if row.producer_kind != "cass_import" || row.secret_redaction_status != "redacted" {
+        return None;
+    }
+    let classes: Vec<String> = serde_json::from_str(&row.redaction_classes_json).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&row.excerpt).ok()?;
+    let reason = value.get("reason")?.as_str()?;
+    if !matches!(
+        reason,
+        "external_ingestion_oversized"
+            | "external_ingestion_encoded_json_unreadable"
+            | "external_ingestion_encoded_json_redaction_invalid"
+    ) || !classes.iter().any(|class| class == reason)
+    {
+        return None;
+    }
+    let digest = value.get("sourceDigest")?.as_str()?;
+    // Byte-for-byte comparison also rejects extra/duplicate keys, altered
+    // classifications, and arbitrary source objects that only resemble a marker.
+    let expected = serde_json::json!({
+        "type": "external_ingestion_withheld",
+        "reason": reason,
+        "sourceDigest": digest,
+        "redaction": format!("[REDACTED:{reason}]"),
+    })
+    .to_string();
+    (row.excerpt == expected).then(|| digest.to_owned())
+}
+
+fn reconciliation_audit(
+    workspace_id: &str,
+    session_id: &str,
+    row: &StoredEvidenceSpan,
+    span: &CassViewSpanForImport,
+    proof: &str,
+) -> (String, CreateAuditInput) {
+    let details = serde_json::json!({
+        "schema": "ee.cass.screening_reconciliation.v1",
+        "sessionId": session_id,
+        "evidenceId": row.id,
+        "sourceProof": proof,
+        "sourceContentHash": format!("blake3:{}", span.source_hash.to_hex()),
+        "observedSourceByteLength": span.source_bytes,
+        "retainedExcerptHash": row.content_hash,
+        "observedExcerptHash": span.content_hash,
+        "observedExcerptProducerVersion": super::CASS_EXCERPT_PRODUCER_VERSION,
+        "historicalEvidenceRewritten": false,
+    })
+    .to_string();
+    let id = AuditId::from_uuid(stable_uuid(&format!(
+        "audit:cass-screening-reconciliation:{}:{}",
+        row.id,
+        blake3::hash(details.as_bytes()).to_hex()
+    )))
+    .to_string();
+    (
+        id,
+        CreateAuditInput {
+            workspace_id: Some(workspace_id.to_owned()),
+            actor: Some("ee import cass".to_owned()),
+            action: "cass.evidence.screening_reconciled".to_owned(),
+            target_type: Some("evidence_span".to_owned()),
+            target_id: Some(row.id.clone()),
+            details: Some(details),
+        },
+    )
 }
 
 fn same_metadata(stored: &StoredSession, input: &CreateSessionInput) -> bool {
@@ -430,7 +611,7 @@ fn snapshot_revision(
     spans: &BTreeMap<&str, &CassViewSpanForImport>,
 ) -> String {
     let mut hash = blake3::Hasher::new();
-    hash.update(b"ee.cass.refresh_snapshot.v1\0");
+    hash.update(b"ee.cass.refresh_snapshot.v2\0");
     let metadata = serde_json::json!([
         workspace_id,
         session_id,
@@ -453,6 +634,8 @@ fn snapshot_revision(
             span.span_kind.as_str(),
             span.role.map(|role| role.as_str()),
             span.content_hash,
+            format!("blake3:{}", span.source_hash.to_hex()),
+            span.source_bytes,
             span.redacted,
             span.redacted_reasons
         ])
@@ -723,6 +906,45 @@ mod canonical_reference_tests {
         );
     }
 
+    /// Model the metadata that existed before complete-source commitments.
+    /// Keep the old producer metadata hash too, rather than leaving a hidden
+    /// hash of a modern `cassSource` claim in this historical fixture.
+    fn use_legacy_source_metadata(db: &DbConnection, evidence_id: &str) {
+        let row = db.get_evidence_span(evidence_id).unwrap().unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
+        assert!(
+            metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("cassSource")
+                .is_some()
+        );
+        let classes: Vec<String> = serde_json::from_str(&row.redaction_classes_json).unwrap();
+        let producer_metadata = json!({
+            "schema": crate::models::CASS_EVIDENCE_SPAN_SCHEMA_V1,
+            "redactionStatus": row.secret_redaction_status,
+            "redactionClasses": classes,
+        })
+        .to_string();
+        metadata["sourceMetadataHash"] = json!(format!(
+            "blake3:{}",
+            blake3::hash(producer_metadata.as_bytes()).to_hex()
+        ));
+        db.execute_raw(&format!(
+            "UPDATE evidence_spans SET metadata_json = {} WHERE id = {}",
+            sql_text(&metadata.to_string()),
+            sql_text(evidence_id),
+        ))
+        .unwrap();
+        let stored = db.get_evidence_span(evidence_id).unwrap().unwrap();
+        assert!(
+            CassSourceCommitment::from_metadata(stored.metadata_json.as_deref())
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn migrated_history_can_grow_without_regaining_admission_or_changing_ids() {
         for producer in ["cass_import", "legacy_unknown"] {
@@ -736,6 +958,9 @@ mod canonical_reference_tests {
                     sql_text(&first_id),
                 ))
                 .unwrap();
+                if producer == "legacy_unknown" {
+                    use_legacy_source_metadata(&db, &first_id);
+                }
                 if raw_reference {
                     db.execute_raw(&format!(
                         "UPDATE evidence_spans SET cass_span_id = {} WHERE id = {}",
@@ -806,6 +1031,9 @@ mod canonical_reference_tests {
             "UPDATE evidence_spans SET producer_kind = 'legacy_unknown', search_eligibility = 'denied', pack_eligibility = 'denied'",
         )
         .unwrap();
+        for row in db.list_evidence_spans_for_session(&id).unwrap() {
+            use_legacy_source_metadata(&db, &row.id);
+        }
         let mut incoming: Vec<_> = (1..=3).map(|line| span(&session, line)).collect();
         let mut missing = incoming.clone();
         missing.remove(0);
@@ -830,6 +1058,34 @@ mod canonical_reference_tests {
             &incoming,
             "cass_refresh_history_changed",
         );
+    }
+
+    #[test]
+    fn legacy_unknown_source_commitment_cannot_authorize_refresh() {
+        let (db, workspace, id, session) = fixture("/private/legacy-source-claim.jsonl", 1);
+        let first = span(&session, 1);
+        let evidence_id = stable_evidence_id(&id, &first.cass_span_id);
+        let stored = db.get_evidence_span(&evidence_id).unwrap().unwrap();
+        assert!(
+            CassSourceCommitment::from_metadata(stored.metadata_json.as_deref())
+                .unwrap()
+                .is_some()
+        );
+        db.execute_raw(
+            "UPDATE evidence_spans SET producer_kind = 'legacy_unknown', search_eligibility = 'denied', pack_eligibility = 'denied'",
+        )
+        .unwrap();
+        let incoming = [first, span(&session, 2)];
+        for _ in 0..2 {
+            assert_refresh_refused_without_writes(
+                &db,
+                &workspace,
+                &id,
+                &session,
+                &incoming,
+                "cass_refresh_history_changed",
+            );
+        }
     }
 
     #[test]
@@ -864,6 +1120,7 @@ mod canonical_reference_tests {
             sql_text(&original.cass_span_id),
         ))
         .unwrap();
+        use_legacy_source_metadata(&db, &historical_id);
         let retained = db.get_evidence_span(&historical_id).unwrap().unwrap();
         let incoming = [original, span(&session, 2)];
         let report = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
