@@ -238,6 +238,9 @@ def main():
 
         queries = [q for q in judgments["retrieval"] if args.queries == "all" or q["split"] == "evaluation"]
         recall5, distractor_hits, search_times = [], 0, []
+        scenario_hit5, on_scenario_items = [], 0
+        scenario_of = {sess["path"]: sess["slug"].rsplit("-g", 1)[0] if not sess["core"] else sess["slug"]
+                       for sess in manifest["sessions"]}
         pack_times, useful_chars, total_chars = [], 0, 0
         packed_items, packed_distractors, packed_relevant, on_topic_items = 0, 0, 0, 0
         per_query = []
@@ -247,10 +250,15 @@ def main():
             if sp is None:
                 raise Harness(f"search returned no JSON ({code}): {err[-400:]}")
             hits = result_nodes(sp)
-            hit_labels = [labels_hit(locate(h, path_by_session), locators) for h in hits]
+            hit_locs = [locate(h, path_by_session) for h in hits]
+            hit_labels = [labels_hit(loc, locators) for loc in hit_locs]
             top5 = set().union(*hit_labels[:5]) if hit_labels else set()
             relevant = set(q["relevant"])
             recall5.append(len(top5 & relevant) / len(relevant))
+            # At scale, seeded copies of a judged scenario are equally right.
+            relevant_scenarios = {locators[label]["slug"] for label in relevant}
+            scenario_hit5.append(any(loc is not None and scenario_of.get(loc[0]) in relevant_scenarios
+                                     for loc in hit_locs[:5]))
             distractor_hits += len(top5 & set(q["distractors"]))
 
             code, pk, elapsed, err = run_ee(ee, ["pack", q["query"], "--workspace", workspace,
@@ -271,6 +279,8 @@ def main():
                 packed_items += 1
                 if loc is not None and loc[0] in relevant_paths:
                     on_topic_items += 1
+                if loc is not None and scenario_of.get(loc[0]) in relevant_scenarios:
+                    on_scenario_items += 1
                 if lab & set(q["distractors"]) or lab & {"distract_espresso", "distract_lunch"}:
                     packed_distractors += 1
                 if lab & relevant:
@@ -319,6 +329,9 @@ def main():
         m["pack_precision"] = {"value": round(on_topic_items / packed_items, 4) if packed_items else None,
                                "definition": "packed items from a session holding a judged-relevant record / packed items",
                                "items_per_pack": round(packed_items / max(1, len(queries)), 2)}
+        m["scenario_hit_at_5"] = {"value": round(sum(scenario_hit5) / len(scenario_hit5), 4) if scenario_hit5 else None,
+                                  "definition": "queries whose top 5 include a span from a judged scenario (or a seeded copy)"}
+        m["pack_scenario_precision"] = {"value": round(on_scenario_items / packed_items, 4) if packed_items else None}
         m["negative_query_flag_rate"] = {"value": neg_flagged / len(judgments["negative_queries"])}
         m["PAP"] = learn.get("PAP", {"status": "unavailable", "reason": "no proposals"})
         m["WCS"] = {"remember_p50_seconds": med(write_times), "corpus_records": manifest["total_records"],

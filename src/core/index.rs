@@ -10185,8 +10185,15 @@ fn get_index_status_with_connection_mode(
             &owned_connection
         };
         if let Some(workspace_id) = workspace_id_for_index_status(db, &options.workspace_path)? {
-            let (counts, admission, generation) =
-                get_db_stats(db, &workspace_id, caller_holds_snapshot)?;
+            let fast = if caller_holds_snapshot {
+                published_corpus_counts_at_current_generation(db, &workspace_id, &index_dir)?
+            } else {
+                None
+            };
+            let (counts, admission, generation) = match fast {
+                Some(stats) => stats,
+                None => get_db_stats(db, &workspace_id, caller_holds_snapshot)?,
+            };
             let embedding = Some(embedding_posture_for_document_count(
                 db,
                 &workspace_id,
@@ -10655,6 +10662,46 @@ fn get_db_stats(
         .get_workspace_generation(workspace_id)?
         .or(Some(u64::from(counts.total())));
     Ok((counts, evidence_admission, generation))
+}
+
+/// Corpus counts for an index generation published at the database's current
+/// generation, without re-reading the corpus (bd-reality-core-convergence-1azkt.47).
+///
+/// Search, pack and remember probe index status inside their read snapshot,
+/// and every probe paged through all admitted evidence (plus every memory,
+/// artifact and rule) only to report counts: about half of a search at 5k
+/// imported spans on the real-shape oracle. Every source write bumps the
+/// workspace generation (trigger-maintained), so when the published metadata
+/// names the current generation the corpus is the one it counted. Evidence
+/// admission buckets come from two grouped COUNT queries; the candidate rows
+/// that did not validate are the candidates the index did not take.
+/// `None` means "count the slow way": no, foreign, corrupt or older metadata.
+/// Standalone `ee index status` never takes this path.
+fn published_corpus_counts_at_current_generation(
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+) -> Result<Option<(IndexDocumentCounts, EvidenceAdmissionReport, Option<u64>)>, DbError> {
+    let Some(generation) = db.get_workspace_generation(workspace_id)? else {
+        return Ok(None);
+    };
+    let metadata = read_index_metadata_with_identity(index_dir, Ok(None));
+    if !metadata.present
+        || metadata.corruption_error.is_some()
+        || metadata.compatibility_error.is_some()
+        || metadata.generation != Some(generation)
+    {
+        return Ok(None);
+    }
+    let Some(counts) = metadata.document_counts else {
+        return Ok(None);
+    };
+    let Some(admission) =
+        db.evidence_admission_report_for_indexed_count(workspace_id, counts.evidence)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((counts, admission, Some(generation))))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -17027,6 +17074,22 @@ mod tests {
                 && ready.db_evidence_quarantined_count == 0
                 && ready.db_evidence_denied_count == 0,
             format!("drain must restore Ready at the exact DB generation: {ready:?}"),
+        )?;
+        // The in-snapshot probe (search, pack) reuses the counts published at
+        // this generation instead of rescanning; it must report the same corpus.
+        let probed = get_index_status_in_current_snapshot(&status_options, &connection)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            probed.health == ready.health
+                && probed.db_generation == ready.db_generation
+                && probed.db_memory_count == ready.db_memory_count
+                && probed.db_session_count == ready.db_session_count
+                && probed.db_artifact_count == ready.db_artifact_count
+                && probed.db_rule_count == ready.db_rule_count
+                && probed.db_evidence_admitted_count == ready.db_evidence_admitted_count
+                && probed.db_evidence_quarantined_count == ready.db_evidence_quarantined_count
+                && probed.db_evidence_denied_count == ready.db_evidence_denied_count,
+            format!("generation-matched probe must equal the full scan: {probed:?} vs {ready:?}"),
         )?;
 
         let before_repeat = index_regular_file_snapshot(&index_dir)?;

@@ -14412,13 +14412,14 @@ fn collect_direct_evidence_pack_candidates(
         relevance_floor,
         degraded,
     )?;
-    let candidates = prefer_incident_cards(
+    let mut candidates = prefer_incident_cards(
         connection,
         &workspace_ids,
         filters,
         &request.query,
         candidates,
     );
+    collapse_near_duplicate_evidence(&mut candidates, degraded);
     if rejected_live_admission > 0 {
         push_degradation(
             degraded,
@@ -14483,6 +14484,77 @@ fn apply_direct_evidence_query_relative_floor(
                 DIRECT_EVIDENCE_RELATIVE_FLOOR * 100.0
             ),
             Some("Pass --relevance-floor 0 to include every admitted evidence match.".to_owned()),
+        );
+    }
+}
+
+/// Token-set Jaccard similarity at or above which two evidence candidates say
+/// the same thing.
+const EVIDENCE_NEAR_DUPLICATE_JACCARD: f32 = 0.8;
+
+/// Keep one copy of evidence that recurs across sessions.
+///
+/// Agents repeat themselves: the same lesson, prompt or tool summary appears
+/// in many transcripts with only a crate name or version changed. Each copy
+/// matched with the same relevance, so on the real-shape oracle at 5k spans a
+/// 3,000-token pack spent its whole budget on 48 restatements of one lesson.
+/// A candidate whose content tokens overlap an earlier (better-ranked) one by
+/// [`EVIDENCE_NEAR_DUPLICATE_JACCARD`] or more is dropped; very short texts
+/// must match exactly. The degradation counts what was collapsed.
+fn collapse_near_duplicate_evidence(
+    candidates: &mut Vec<DirectEvidencePackCandidate>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    // Numbers (versions, line counts, timestamps) do not change what a span
+    // says, so restatements that differ only in them still collapse.
+    fn tokens(text: &str) -> BTreeSet<String> {
+        text.split(|ch: char| !ch.is_alphanumeric())
+            .filter(|token| !token.is_empty() && !token.chars().all(|ch| ch.is_ascii_digit()))
+            .map(str::to_lowercase)
+            .collect()
+    }
+    fn near_duplicate(left: &BTreeSet<String>, right: &BTreeSet<String>) -> bool {
+        let (small, large) = if left.len() <= right.len() {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        if small.len() < 4 {
+            return small == large;
+        }
+        // |A ∩ B| / |A ∪ B| can reach the threshold only if |A| / |B| does.
+        if (small.len() as f32) < (large.len() as f32) * EVIDENCE_NEAR_DUPLICATE_JACCARD {
+            return false;
+        }
+        let shared = small.intersection(large).count();
+        let union = left.len() + right.len() - shared;
+        union > 0 && shared as f32 >= union as f32 * EVIDENCE_NEAR_DUPLICATE_JACCARD
+    }
+
+    let mut kept: Vec<BTreeSet<String>> = Vec::new();
+    let before = candidates.len();
+    candidates.retain(|candidate| {
+        let current = tokens(&candidate.item.content);
+        if kept
+            .iter()
+            .any(|previous| near_duplicate(previous, &current))
+        {
+            return false;
+        }
+        kept.push(current);
+        true
+    });
+    let collapsed = before - candidates.len();
+    if collapsed > 0 {
+        push_degradation(
+            degraded,
+            "context_evidence_near_duplicates_collapsed",
+            ContextResponseSeverity::Low,
+            format!(
+                "{collapsed} imported evidence candidate(s) restated an earlier selected span (token overlap at least {:.0}%) and were collapsed into it.",
+                EVIDENCE_NEAR_DUPLICATE_JACCARD * 100.0
+            ),
+            None,
         );
     }
 }

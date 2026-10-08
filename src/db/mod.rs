@@ -16814,6 +16814,54 @@ impl DbConnection {
             .collect()
     }
 
+    /// The admission report a full scan would produce, given how many search
+    /// candidates an index generation published at the current workspace
+    /// generation accepted. `None` when the counts cannot be reconciled (more
+    /// accepted than candidates), so the caller falls back to the scan.
+    pub(crate) fn evidence_admission_report_for_indexed_count(
+        &self,
+        workspace_id: &str,
+        indexed_admitted: u32,
+    ) -> Result<Option<EvidenceAdmissionReport>> {
+        let mut report = EvidenceAdmissionReport::default();
+        for (producer, eligibility, count) in
+            self.count_non_candidate_evidence(workspace_id, None)?
+        {
+            report.record_many(&producer, &eligibility, false, count);
+        }
+        let sql = format!(
+            "SELECT COUNT(*) FROM evidence_spans e WHERE e.workspace_id = ?1 AND {EVIDENCE_SEARCH_CANDIDATE_PREDICATE}"
+        );
+        let rows = self.query_for(
+            DbOperation::Query,
+            &sql,
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        let candidates = rows.first().map_or(Ok(0_i64), |row| {
+            required_i64(row, 0, DbOperation::Query, "candidate_count")
+        })?;
+        let Ok(candidates) = u32::try_from(candidates) else {
+            return Ok(None);
+        };
+        if indexed_admitted > candidates {
+            return Ok(None);
+        }
+        // EVIDENCE_SEARCH_CANDIDATE_PREDICATE fixes producer and eligibility.
+        report.record_many(
+            EvidenceProducerKind::CassImport.as_str(),
+            "admitted",
+            true,
+            indexed_admitted,
+        );
+        report.record_many(
+            EvidenceProducerKind::CassImport.as_str(),
+            "admitted",
+            false,
+            candidates - indexed_admitted,
+        );
+        Ok(Some(report))
+    }
+
     /// Count evidence spans for a workspace.
     pub fn count_evidence_spans_for_workspace(&self, workspace_id: &str) -> Result<usize> {
         let rows = self.query_for(
