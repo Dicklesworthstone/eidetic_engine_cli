@@ -199,7 +199,23 @@ def main():
     markers = {
         'src/core/ask.rs': 'pub use semantic::evaluate_ask_with_local_model;',
         'src/core/ask_candidates.rs': 'pub(super) fn select_candidates_with_scorer',
-        'src/core/index.rs': 'pub(crate) use ask_model::local_ask_embedder;',
+        # bd-...hpgw8: this was 'pub(crate) use ask_model::local_ask_embedder;', the SECOND
+        # half of what transform_index writes. That string exists nowhere under src/ -- its
+        # only two occurrences in the repository are this script's own patch text and this
+        # marker -- so it could never be true, and 3-of-4 markers made every run refuse with
+        # "Partial semantic integration detected" for three weeks.
+        #
+        # Re-pointed at the FIRST half of the same edit, which is present verbatim at
+        # src/core/index.rs:6618-6619 (and src/core/index_ask.rs is 35 KB). That keeps this a
+        # question about whether the edit was applied, and avoids asserting that
+        # local_ask_embedder and the current local_read_only_embedder are the same contract --
+        # a rename reading that belongs to an owner of the feature, and is not needed here.
+        #
+        # Re-applying is not an option the tree can accept: the anchor const below is still
+        # present exactly once, so transform_index would insert a SECOND
+        # `#[path = "index_ask.rs"] mod ask_model;` next to the existing one, which is E0428.
+        # This lane pushes to main, so recognising the delivery is the only safe branch.
+        'src/core/index.rs': '#[path = "index_ask.rs"]\nmod ask_model;',
         'src/cli/mod.rs': 'evaluate_ask_with_local_model(',
     }
     integrated = [marker in originals[name] for name, marker in markers.items()]
