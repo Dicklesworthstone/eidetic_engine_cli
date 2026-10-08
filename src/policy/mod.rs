@@ -6,6 +6,8 @@
 
 pub mod import_auth;
 mod ingestion;
+#[cfg(all(test, unix))]
+pub(crate) use ingestion::with_screen_memo_budget_for_test;
 pub mod memory_decay;
 pub mod producer_normalization;
 pub mod security_profile;

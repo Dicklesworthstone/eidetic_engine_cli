@@ -5663,6 +5663,203 @@ mod tests {
         Ok(())
     }
 
+    /// The full-source screening memo outlives each bounded CASS view. Exercise
+    /// repeated cache eviction through subprocess import, durable admission,
+    /// and refresh without allocating a multi-gigabyte source fixture.
+    #[cfg(unix)]
+    #[test]
+    fn import_large_sources_bounds_screening_memo_and_preserves_later_session_retry() -> TestResult
+    {
+        const MEMO_BUDGET: usize = 256 * 1024;
+        let (binary, client, options) = history_import_fixture("bounded-screening-memo")?;
+        let token = format!("ghp_{}", "Q".repeat(36));
+        let mut fixtures = Vec::new();
+        for name in ["large-a", "large-b", "large-c"] {
+            let mut content = format!(
+                "{name} compilation observation. {}",
+                "Build passed. ".repeat(9000)
+            );
+            if name == "large-b" {
+                // This encoded secret is beyond the retained excerpt. Cache
+                // eviction must not make screening a prefix-only operation.
+                content.push_str(&format!(" label-{token}"));
+            }
+            let raw = json!({"type": "assistant", "content": content})
+                .to_string()
+                .replace("ghp_", "\\u0067hp_");
+            ensure(
+                raw.len() > ingestion::MAX_EXCERPT_BYTES
+                    && raw.len() < CASS_STDOUT_LINE_MAX_BYTES / 2,
+                "large fixture crosses excerpt bounding but respects source limits",
+            )?;
+            fixtures.push((name, raw));
+        }
+        fixtures.push((
+            "later",
+            json!({"type": "assistant", "content": "quartzmemocontinuation build and release verification passed."}).to_string(),
+        ));
+        let sources = fixtures
+            .iter()
+            .map(|(name, raw)| (*name, raw.as_str()))
+            .collect::<Vec<_>>();
+        let discovered = write_history_cass_fixture(&binary, &options.workspace_path, &sources)?;
+        let database = options.database_path.as_deref().ok_or("missing database")?;
+        let workspace_id = stable_workspace_id(&options.workspace_path.to_string_lossy());
+        let (result, peak_bytes, evictions) = crate::policy::with_screen_memo_budget_for_test(
+            MEMO_BUDGET,
+            || -> TestResult {
+                let first = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+                ensure_equal(
+                    &first.status.as_str(),
+                    &"completed",
+                    "large import completes",
+                )?;
+                ensure_equal(&first.sessions_imported, &4, "later session is imported")?;
+                ensure_equal(&first.spans_imported, &4, "all four source lines persist")?;
+                ensure_equal(
+                    &first.evidence_admission.admitted,
+                    &4,
+                    "safe bounded evidence remains admitted",
+                )?;
+                ensure_equal(
+                    &first.evidence_admission.quarantined,
+                    &0,
+                    "cache pressure does not change admission",
+                )?;
+                let db = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+                let mut snapshots = Vec::new();
+                for (index, source) in discovered.iter().enumerate() {
+                    let session_id = stable_session_id(&workspace_id, &source.source_path);
+                    let snapshot = imported_history_snapshot(&db, &workspace_id, &session_id)?;
+                    ensure_equal(&snapshot.evidence.len(), &1, "one row per source")?;
+                    let row = &snapshot.evidence[0];
+                    ensure(
+                        row.excerpt.len() <= ingestion::MAX_EXCERPT_BYTES,
+                        "stored excerpt is bounded",
+                    )?;
+                    ensure(
+                        !row.excerpt.contains(&token),
+                        "stored excerpt cannot expose the source credential",
+                    )?;
+                    ensure(
+                        row.is_search_admitted_for_session(&workspace_id, &snapshot.session)
+                            && row.is_direct_pack_admitted_for_session(
+                                &workspace_id,
+                                &snapshot.session,
+                            ),
+                        "cache eviction preserves live search and pack admission",
+                    )?;
+                    ensure_equal(
+                        &row.content_hash,
+                        &format!("blake3:{}", blake3::hash(row.excerpt.as_bytes()).to_hex()),
+                        "canonical evidence hash",
+                    )?;
+                    let metadata: JsonValue = serde_json::from_str(
+                        row.metadata_json
+                            .as_deref()
+                            .ok_or("missing source metadata")?,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    ensure_equal(
+                        &metadata["cassSource"]["contentHash"],
+                        &json!(format!(
+                            "blake3:{}",
+                            blake3::hash(fixtures[index].1.as_bytes()).to_hex()
+                        )),
+                        "commitment retains complete original source identity",
+                    )?;
+                    if index == 1 {
+                        ensure_equal(
+                            &row.secret_redaction_status.as_str(),
+                            &"redacted",
+                            "tail credential was screened",
+                        )?;
+                        ensure(
+                            row.redaction_classes_json.contains("github_token"),
+                            "tail redaction classification survives bounding",
+                        )?;
+                        ensure(
+                            row.excerpt.contains("[REDACTED:"),
+                            "bounded redaction keeps its storage marker",
+                        )?;
+                        ensure_equal(
+                            &snapshot
+                                .audits
+                                .iter()
+                                .filter(|audit| audit.action == CASS_REDACTION_AUDIT_ACTION)
+                                .count(),
+                            &1,
+                            "redaction has one durable audit",
+                        )?;
+                    }
+                    if index == 3 {
+                        ensure(
+                            row.excerpt.contains("quartzmemocontinuation"),
+                            "later useful text survives",
+                        )?;
+                    }
+                    snapshots.push(snapshot);
+                }
+                db.close().map_err(|e| e.to_string())?;
+                let retry = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+                ensure_equal(
+                    &retry.status.as_str(),
+                    &"completed",
+                    "retry completes after further eviction",
+                )?;
+                ensure_equal(
+                    &retry.sessions_imported,
+                    &0,
+                    "retry creates no new sessions",
+                )?;
+                ensure_equal(&retry.spans_imported, &0, "retry creates no new evidence")?;
+                ensure_equal(
+                    &retry.sessions_skipped,
+                    &4,
+                    "every unchanged session is recognized",
+                )?;
+                ensure_equal(
+                    &retry.ledger_id,
+                    &first.ledger_id,
+                    "retry retains the ledger identity",
+                )?;
+                let db = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+                for before in &snapshots {
+                    ensure_equal(
+                        &imported_history_snapshot(&db, &workspace_id, &before.session.id)?,
+                        before,
+                        "evicted screening is recomputed without rewriting rows, sessions, audits, or publication jobs",
+                    )?;
+                }
+                let ledger = db
+                    .get_import_ledger(first.ledger_id.as_deref().ok_or("missing ledger id")?)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("missing ledger")?;
+                ensure_equal(
+                    &ledger.status.as_str(),
+                    &"completed",
+                    "ledger remains usable",
+                )?;
+                ensure_equal(
+                    &(ledger.imported_session_count, ledger.imported_span_count),
+                    &(4, 4),
+                    "retry preserves cumulative counts",
+                )?;
+                db.close().map_err(|e| e.to_string())?;
+                Ok(())
+            },
+        );
+        result?;
+        ensure(
+            evictions > 0,
+            "real import must exercise screening cache eviction",
+        )?;
+        ensure(
+            peak_bytes > 0 && peak_bytes <= MEMO_BUDGET,
+            "retained memo allocation stays within its byte budget",
+        )
+    }
+
     #[cfg(unix)]
     fn history_import_fixture(
         prefix: &str,
