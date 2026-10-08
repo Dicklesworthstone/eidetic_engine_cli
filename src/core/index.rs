@@ -5737,6 +5737,9 @@ pub mod retention_gc;
 #[path = "index_delta.rs"]
 mod delta;
 
+#[path = "index_download_backoff.rs"]
+mod download_backoff;
+
 fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32> {
     retention_names::sequence(name, retained_prefix)
 }
@@ -8011,6 +8014,22 @@ impl EeLazyModel2VecEmbedder {
         }
         model_initialization_checkpoint(cx, "before model download")?;
 
+        // A recent automatic attempt failed (possibly in another process):
+        // skip the network and degrade at once instead of paying another
+        // doomed attempt on every command.
+        let staging_root = destination.parent().unwrap_or(&self.model_root);
+        if let Some(marker) = download_backoff::active_marker(staging_root, POTION_MODEL_NAME) {
+            return Err(SearchError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                format!(
+                    "automatic download of {POTION_MODEL_NAME} skipped after {} consecutive failed attempt(s) (last: {}); the next automatic attempt is after unix time {}. Run `ee model fetch` to retry now.",
+                    marker.consecutive_failures(),
+                    marker.error(),
+                    marker.retry_after_unix(),
+                ),
+            )));
+        }
+
         let manifest = ModelManifest::potion_128m();
         emit_embedding_download_notice(manifest.total_size_bytes());
         let reporter = EeModelDownloadReporter::new(POTION_MODEL_NAME);
@@ -8025,25 +8044,40 @@ impl EeLazyModel2VecEmbedder {
         // never park `block_on` forever: on timeout the download future is
         // dropped (closing the socket) and the embedder degrades to the hash
         // fallback in the caller instead of hanging the whole command.
-        let staged = match asupersync::time::TimeoutFuture::after(
+        let downloaded = match asupersync::time::TimeoutFuture::after(
             cx.now(),
             EMBEDDING_DOWNLOAD_TIMEOUT,
             download,
         )
         .await
         {
-            Ok(result) => result?,
-            Err(_elapsed) => {
-                return Err(SearchError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!(
-                        "bundled embedding model download exceeded its {}s time limit",
-                        EMBEDDING_DOWNLOAD_TIMEOUT.as_secs()
-                    ),
-                )));
+            Ok(result) => result
+                .and_then(|staged| manifest.promote_verified_installation(&staged, &destination)),
+            Err(_elapsed) => Err(SearchError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "bundled embedding model download exceeded its {}s time limit",
+                    EMBEDDING_DOWNLOAD_TIMEOUT.as_secs()
+                ),
+            ))),
+        };
+        let backup = match downloaded {
+            Ok(backup) => {
+                download_backoff::clear(staging_root, POTION_MODEL_NAME);
+                backup
+            }
+            Err(error) => {
+                if !matches!(error, SearchError::Cancelled { .. }) {
+                    download_backoff::record_failure(
+                        staging_root,
+                        POTION_MODEL_NAME,
+                        &error.to_string(),
+                    );
+                    download_backoff::remove_own_staging_dirs(staging_root, POTION_MODEL_NAME);
+                }
+                return Err(error);
             }
         };
-        let backup = manifest.promote_verified_installation(&staged, &destination)?;
         reporter.finish_success();
         tracing::info!(
             target: "ee::index::embedder",
