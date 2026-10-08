@@ -137,17 +137,27 @@ index admission revision 2 also rebuilds corpora created before support for
 Unicode-escaped JSONL windows. Clean windows retain their original JSON escapes
 and whitespace in storage; decoding is a derived reader operation.
 
-Existing indexes have an older corpus revision and must be rebuilt:
+Migration V130 persists the reader body, role-labelled text and egress-screen
+result as rebuildable derived state. Apply the migration to existing stores,
+then rebuild indexes that predate evidence projection revision 4:
 
 ```bash
+ee migrate run --workspace . --json
 ee index rebuild --workspace . --json
 ```
 
-This projection change does not add a database schema migration or rewrite
-stored evidence. The stored excerpt, content hash, evidence identity, and line
-locator continue to identify the original screened source. Answer citation
-byte ranges refer to the exact decoded reader text that supplied the quote;
-they must not be applied to the JSON envelope's bytes.
+The migration backfills existing evidence in bounded pages. Index rebuild and
+re-embedding also repair missing or stale projections without requiring another
+CASS import. Each projection binds the actual source bytes, security inputs and
+current interpretation version; damaged or stale cached content is ignored.
+Reads use bounded lookups and derive missing values only in memory, without
+repair writes. Backup recovery regenerates the cache from restored evidence.
+
+Persisting these projections does not change their rendered bytes or advance
+the pack hash contract. The stored excerpt, content hash, evidence identity,
+and line locator continue to identify the original screened source. Answer
+citation byte ranges refer to the exact decoded reader text that supplied the
+quote; they must not be applied to the JSON envelope's bytes.
 
 Bootstrap and linked-session learning require the stricter message projection.
 An otherwise readable summary or record containing reasoning does not supply a

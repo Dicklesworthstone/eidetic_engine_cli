@@ -1497,6 +1497,7 @@ impl BackupCassEvidenceRecord {
             end_byte: self.end_byte,
             role: self.role,
             excerpt: self.excerpt,
+            reader_projection: None,
             content_hash: self.content_hash,
             metadata_json: self.metadata_json,
             producer_kind: self.producer_kind,
@@ -1955,6 +1956,7 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
             )
         }
         "evidence_admission_verdicts"
+        | "evidence_reader_projections"
         | "memory_anchor_index"
         | "primer_cache"
         | "retrieval_affinity_accumulation"

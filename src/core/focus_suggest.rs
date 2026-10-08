@@ -1048,6 +1048,7 @@ mod tests {
             end_byte: None,
             role: None,
             excerpt: "snippet".to_owned(),
+            reader_projection: None,
             content_hash: "abc".to_owned(),
             metadata_json: None,
             producer_kind: "cass_import".to_owned(),

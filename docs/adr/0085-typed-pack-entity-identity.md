@@ -127,6 +127,36 @@ Admission rules are:
 An evidence span's linked memory and a rule's source memories are provenance,
 not replacement identities.
 
+### Persisted transcript reader projections (2026-10-08 amendment)
+
+V130 stores the existing CASS reader body and role-labelled text in a derived
+`evidence_reader_projections` table. The projection binds the actual source
+bytes, native evidence identity, producer and security inputs, admission
+revision, and transcript projection version. A separate integrity digest binds
+the rendered bytes and their egress-screen result. Neither digest replaces the
+live workspace/session admission check or the authoritative evidence revision.
+
+Evidence writes, recovery and explicit rebuilds materialize this result. Reads
+hydrate projections using bounded primary-key batches beside the admission
+verdict lookup. A current projection can supply both reader text and the
+previously computed egress result without decoding or screening the transcript
+again. Missing, outdated or inconsistent derived rows compute the same result
+in memory; reads never repair the database. Backfill uses bounded keyset pages
+and can resume after interruption. Portable backups rebuild the projection
+from restored evidence rather than accepting an exported cache as authority.
+
+Keeping only an in-process cache would repeat this work after every CLI
+invocation. Joining the derived table into evidence scans is also rejected:
+the current database engine's nested-loop joins have already caused a corpus
+scaling regression. The separate bounded lookup preserves the existing source
+scan. Cache presence does not participate in source-row equality, pack hashes,
+wire formats or provenance. Strict learning retains its separate projection
+policy; a permissive reader projection never authorizes a lesson.
+
+Verification lives in the mounted `db::tests::cass_reader_projection_` tests:
+file-backed reopen, cache invalidation, read-only fallback, idempotent backfill,
+recovery and warm reads that do not invoke the transcript projector.
+
 ### Pack model and algorithms
 
 `PackEntityRef` replaces `memory_id` in candidates, draft items, selected

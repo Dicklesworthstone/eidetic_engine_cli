@@ -1677,12 +1677,18 @@ impl From<DbError> for IndexRebuildError {
     }
 }
 
-/// A full rebuild is the repair path for evidence verdicts that are missing
-/// or recorded under an older admission revision
-/// (bd-reality-core-convergence-1azkt.47): decide them once here so the
-/// collection that follows and every later read reuse the decision. Verdicts
-/// only save work, so a failure leaves admission on full revalidation.
-fn backfill_evidence_admission_verdicts_for_rebuild(db: &DbConnection, workspace_id: &str) {
+/// A full rebuild repairs missing or stale reader projections before admission
+/// verdicts (bd-reality-core-convergence-1azkt.45/.47), so the source snapshot
+/// and later reads reuse the same interpretation. Both are derived caches:
+/// failure leaves reads on safe source projection and full revalidation.
+fn backfill_evidence_reader_state_for_rebuild(db: &DbConnection, workspace_id: &str) {
+    if let Err(error) = db.backfill_evidence_reader_projections(Some(workspace_id)) {
+        tracing::warn!(
+            target: "ee::index",
+            error = %error,
+            "evidence reader projection backfill failed; reads project source text"
+        );
+    }
     if let Err(error) = db.backfill_evidence_admission_verdicts(Some(workspace_id)) {
         tracing::warn!(
             target: "ee::index",
@@ -1723,7 +1729,7 @@ pub async fn rebuild_index_with_cx(
         Some(IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?)
     };
     if !options.dry_run {
-        backfill_evidence_admission_verdicts_for_rebuild(&db, &workspace_id);
+        backfill_evidence_reader_state_for_rebuild(&db, &workspace_id);
     }
     let WorkspaceIndexSourceSnapshot {
         generation: source_generation,
@@ -1900,7 +1906,7 @@ async fn reembed_index_with_cx_and_stack(
         Some(IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?)
     };
     if !options.dry_run {
-        backfill_evidence_admission_verdicts_for_rebuild(&db, &workspace_id);
+        backfill_evidence_reader_state_for_rebuild(&db, &workspace_id);
     }
     let WorkspaceIndexSourceSnapshot {
         generation: source_generation,

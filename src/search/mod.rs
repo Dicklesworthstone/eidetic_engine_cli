@@ -1090,16 +1090,19 @@ pub fn rule_to_document(projection: &RuleIndexProjection) -> CanonicalSearchDocu
 ///
 /// The caller must have positively admitted the live row through
 /// `StoredEvidenceSpan::is_search_admitted_for_session`. This projection
-/// still repeats the egress screen defensively and never includes a raw CASS
+/// reuses a bound reader projection's egress proof. Synthetic or changed rows
+/// without that proof receive a defensive screen. It never includes a raw CASS
 /// span id, source path, or upstream metadata.
 #[must_use]
 pub fn evidence_span_to_document(span: &crate::db::StoredEvidenceSpan) -> CanonicalSearchDocument {
-    let egress = crate::policy::screen_external_text_for_ingestion(&span.excerpt);
     let reader_text = span.reader_text();
-    let withheld = egress.redacted
-        || egress.instruction_like
-        || !matches!(egress.instruction_risk, "none" | "low")
-        || reader_text.trim().is_empty();
+    let egress_safe = span.cached_reader_egress_safe().unwrap_or_else(|| {
+        let egress = crate::policy::screen_external_text_for_ingestion(&span.excerpt);
+        !egress.redacted
+            && !egress.instruction_like
+            && matches!(egress.instruction_risk, "none" | "low")
+    });
+    let withheld = !egress_safe || reader_text.trim().is_empty();
     let safe_excerpt = if withheld {
         "[EVIDENCE_WITHHELD]".to_owned()
     } else {
@@ -4305,6 +4308,7 @@ mod tests {
             ),
             created_at: "2026-07-28T00:00:00Z".to_owned(),
             updated_at: "2026-07-28T00:00:00Z".to_owned(),
+            reader_projection: None,
         }
     }
 

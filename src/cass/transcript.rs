@@ -102,6 +102,36 @@ pub(crate) fn reader_text(excerpt: &str) -> Option<Cow<'_, str>> {
     join_projections(project_transcript(excerpt)?, true)
 }
 
+/// Materialize both reader representations with one decode/security pass.
+/// Rendering uses the same bounds and single-record behavior as live views.
+pub(crate) fn materialized_reader_views(excerpt: &str) -> Option<(String, String)> {
+    let mut projections = project_transcript(excerpt)?;
+    if projections.len() == 1 {
+        let projection = projections.pop()?;
+        let text = projection.reader_text().into_owned();
+        return Some((projection.text.into_owned(), text));
+    }
+    let mut body = String::new();
+    let mut text = String::new();
+    for projection in projections {
+        append_bounded(&mut body, &projection.text)?;
+        append_bounded(&mut text, &projection.reader_text())?;
+    }
+    (!body.is_empty()).then_some((body, text))
+}
+
+#[cfg(test)]
+thread_local! {
+    static PROJECTION_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Thread-local accounting keeps warm-cache regression assertions independent
+/// of unrelated transcript tests running concurrently.
+#[cfg(test)]
+pub(crate) fn projection_calls_for_test() -> u64 {
+    PROJECTION_CALLS.with(std::cell::Cell::get)
+}
+
 fn join_projections(
     mut projections: Vec<TranscriptProjection<'_>>,
     include_labels: bool,
@@ -131,6 +161,8 @@ fn project_with(
     excerpt: &str,
     purpose: ProjectionPurpose,
 ) -> Option<Vec<TranscriptProjection<'_>>> {
+    #[cfg(test)]
+    PROJECTION_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
     if excerpt.len() > MAX_SOURCE_BYTES || excerpt.trim().is_empty() {
         return None;
     }

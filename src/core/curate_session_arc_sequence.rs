@@ -362,6 +362,7 @@ mod tests {
             end_byte: None,
             role: Some("assistant".into()),
             excerpt: text.into(),
+            reader_projection: None,
             content_hash: hash.clone(),
             metadata_json: None,
             producer_kind: "cass_import".into(),

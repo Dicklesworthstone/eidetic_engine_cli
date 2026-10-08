@@ -84,6 +84,12 @@ future changelog pass expands those rows into full capability sections.
   text with each record's own role; transcript summaries are labeled explicitly.
   Reasoning blocks, explicit analysis-channel records, and JSON envelope
   metadata do not consume reader tokens.
+- Migration V130 persists reader projections and their egress-screen result,
+  avoiding repeated JSON decoding and instruction scans on normal evidence
+  reads. Evidence writes, recovery, migration and index rebuild materialize
+  current projections; bounded lookups validate exact source/version and
+  content bindings. Missing or stale values derive in memory without read-time
+  database writes. Source identity, reader bytes and pack hashes are unchanged.
 - Structured records without safe, readable text are excluded from retrieval
   instead of falling back to raw JSON. Evidence admission revision 3 invalidates
   older cached verdicts, including previously admitted unreadable records.

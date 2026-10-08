@@ -29175,6 +29175,7 @@ mod tests {
             end_byte: None,
             role: Some("user".to_owned()),
             excerpt: excerpt.to_owned(),
+            reader_projection: None,
             content_hash: format!("blake3:span-{id}"),
             metadata_json: None,
             producer_kind: "cass_import".to_owned(),

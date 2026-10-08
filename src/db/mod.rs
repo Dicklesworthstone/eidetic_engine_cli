@@ -45,10 +45,13 @@ use crate::models::{
 };
 use crate::models::{MemorySeal, validate_attestation_seal_fields};
 
+mod evidence_reader_projection;
 mod memory_temporal;
 pub mod migrate;
 pub mod read_pool;
 pub mod shard;
+
+pub use evidence_reader_projection::EvidenceReaderProjection;
 
 pub const SUBSYSTEM: &str = "db";
 pub const MIGRATION_TABLE_NAME: &str = "ee_schema_migrations";
@@ -364,6 +367,8 @@ pub struct DbConnection {
     /// Latched once V127's verdict table is seen. Tables are never dropped by
     /// a forward-only migration, so only the absent case is re-checked.
     admission_verdicts_present: std::sync::atomic::AtomicBool,
+    /// Latched once V130's derived reader table is available.
+    reader_projections_present: std::sync::atomic::AtomicBool,
 }
 
 /// One derived value cached for the lifetime of a single caller-held read
@@ -1248,6 +1253,7 @@ impl DbConnection {
             statement_epoch: std::sync::atomic::AtomicU64::new(0),
             snapshot_memo: Mutex::new(None),
             admission_verdicts_present: std::sync::atomic::AtomicBool::new(false),
+            reader_projections_present: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -11584,6 +11590,51 @@ END;
     "blake3:v129_pack_guard_triggers_without_joins_2026_10_08",
 );
 
+/// Materialize bounded reader text once per source and projection revision.
+///
+/// Source evidence remains authoritative. Every cached projection binds the
+/// exact source row and its own bytes; stale or missing entries are re-derived
+/// without query-side writes. Migration, recovery and index rebuild populate
+/// this table, and source changes invalidate it without touching provenance.
+pub const V130_EVIDENCE_READER_PROJECTIONS: Migration = Migration::new(
+    130,
+    "evidence_reader_projections",
+    r#"
+CREATE TABLE evidence_reader_projections (
+    evidence_span_id TEXT PRIMARY KEY NOT NULL,
+    projection_version INTEGER NOT NULL CHECK (projection_version > 0),
+    source_binding TEXT NOT NULL CHECK (
+        source_binding GLOB 'blake3:*' AND length(source_binding) = 71
+    ),
+    reader_body TEXT NOT NULL CHECK (length(reader_body) <= 1048576),
+    reader_text TEXT NOT NULL CHECK (length(reader_text) <= 1052672),
+    egress_safe INTEGER NOT NULL CHECK (egress_safe IN (0, 1)),
+    integrity_binding TEXT NOT NULL CHECK (
+        integrity_binding GLOB 'blake3:*' AND length(integrity_binding) = 71
+    ),
+    projected_at TEXT NOT NULL CHECK (length(trim(projected_at)) > 0)
+);
+
+CREATE TRIGGER trg_evidence_reader_projections_span_delete
+AFTER DELETE ON evidence_spans
+BEGIN
+    DELETE FROM evidence_reader_projections WHERE evidence_span_id = OLD.id;
+END;
+
+CREATE TRIGGER trg_evidence_reader_projections_source_update
+AFTER UPDATE OF id, workspace_id, session_id, cass_span_id, span_kind, role,
+    excerpt, content_hash, metadata_json, producer_kind, screening_version,
+    secret_redaction_status, redaction_classes_json, instruction_risk,
+    search_eligibility, pack_eligibility, canonical_provenance_revision,
+    canonical_excerpt_hash, security_policy_epoch, upstream_ref_hash
+ON evidence_spans
+BEGIN
+    DELETE FROM evidence_reader_projections WHERE evidence_span_id = OLD.id;
+END;
+"#,
+    "blake3:v130_evidence_reader_projections_2026_10_08",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -11715,6 +11766,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V127_EVIDENCE_ADMISSION_VERDICTS,
     V128_PACK_RULE_ITEMS,
     V129_PACK_GUARD_TRIGGERS_WITHOUT_JOINS,
+    V130_EVIDENCE_READER_PROJECTIONS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -11842,6 +11894,18 @@ impl DbConnection {
             match outcome {
                 ApplyOutcome::Applied => applied.push(migration.version),
                 ApplyOutcome::AlreadyApplied => skipped.push(migration.version),
+            }
+        }
+
+        // Warm projections before verdicts so admission does not parse the
+        // same transcript again while upgrading an existing store.
+        if applied.contains(&V130_EVIDENCE_READER_PROJECTIONS.version) {
+            if let Err(error) = self.backfill_evidence_reader_projections(None) {
+                tracing::warn!(
+                    target: "ee::db::migrate",
+                    error = %error,
+                    "evidence reader projection backfill failed; reads derive missing projections until `ee index rebuild`"
+                );
             }
         }
 
@@ -14635,7 +14699,7 @@ impl HydratedEvidenceSpan {
 }
 
 /// A stored evidence_spans row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct StoredEvidenceSpan {
     pub id: String,
     pub workspace_id: String,
@@ -14664,7 +14728,44 @@ pub struct StoredEvidenceSpan {
     pub upstream_ref_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Derived reader bytes. This never changes source-row identity, backup
+    /// content, or equality and is trusted only while its source binding holds.
+    pub reader_projection: Option<EvidenceReaderProjection>,
 }
+
+impl PartialEq for StoredEvidenceSpan {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.workspace_id == other.workspace_id
+            && self.session_id == other.session_id
+            && self.memory_id == other.memory_id
+            && self.cass_span_id == other.cass_span_id
+            && self.span_kind == other.span_kind
+            && self.start_line == other.start_line
+            && self.end_line == other.end_line
+            && self.start_byte == other.start_byte
+            && self.end_byte == other.end_byte
+            && self.role == other.role
+            && self.excerpt == other.excerpt
+            && self.content_hash == other.content_hash
+            && self.metadata_json == other.metadata_json
+            && self.producer_kind == other.producer_kind
+            && self.screening_version == other.screening_version
+            && self.secret_redaction_status == other.secret_redaction_status
+            && self.redaction_classes_json == other.redaction_classes_json
+            && self.instruction_risk == other.instruction_risk
+            && self.search_eligibility == other.search_eligibility
+            && self.pack_eligibility == other.pack_eligibility
+            && self.canonical_provenance_revision == other.canonical_provenance_revision
+            && self.canonical_excerpt_hash == other.canonical_excerpt_hash
+            && self.security_policy_epoch == other.security_policy_epoch
+            && self.upstream_ref_hash == other.upstream_ref_hash
+            && self.created_at == other.created_at
+            && self.updated_at == other.updated_at
+    }
+}
+
+impl Eq for StoredEvidenceSpan {}
 
 impl StoredEvidenceSpan {
     /// Canonical revision bound into direct-evidence pack items and replay.
@@ -14694,6 +14795,9 @@ impl StoredEvidenceSpan {
     /// exact bytes. The stored excerpt, hash and line locator remain unchanged.
     #[must_use]
     pub fn reader_text(&self) -> std::borrow::Cow<'_, str> {
+        if let Some(projection) = self.current_reader_projection() {
+            return std::borrow::Cow::Borrowed(projection.reader_text());
+        }
         let start = self.excerpt.trim_start();
         if EvidenceProducerKind::parse(&self.producer_kind)
             != Some(EvidenceProducerKind::CassImport)
@@ -14724,6 +14828,9 @@ impl StoredEvidenceSpan {
     /// sentences (learning, topic keys) rather than show a transcript turn.
     #[must_use]
     pub fn reader_body(&self) -> std::borrow::Cow<'_, str> {
+        if let Some(projection) = self.current_reader_projection() {
+            return std::borrow::Cow::Borrowed(projection.reader_body());
+        }
         let start = self.excerpt.trim_start();
         if EvidenceProducerKind::parse(&self.producer_kind)
             != Some(EvidenceProducerKind::CassImport)
@@ -14733,6 +14840,20 @@ impl StoredEvidenceSpan {
         }
         crate::cass::transcript::display_text(&self.excerpt)
             .unwrap_or(std::borrow::Cow::Borrowed(""))
+    }
+
+    fn current_reader_projection(&self) -> Option<&EvidenceReaderProjection> {
+        self.reader_projection
+            .as_ref()
+            .filter(|projection| projection.is_current_for(self))
+    }
+
+    /// Reuse the raw-source egress decision only while the private projection
+    /// still binds this exact source row and the current policy revision.
+    #[must_use]
+    pub(crate) fn cached_reader_egress_safe(&self) -> Option<bool> {
+        self.current_reader_projection()
+            .map(EvidenceReaderProjection::egress_safe)
     }
 
     /// Public provenance never contains an upstream path or upstream identifier.
@@ -14994,10 +15115,12 @@ impl StoredEvidenceSpan {
             return false;
         }
 
-        let rescreen = crate::policy::screen_external_text_for_ingestion(&self.excerpt);
-        !rescreen.redacted
-            && !rescreen.instruction_like
-            && matches!(rescreen.instruction_risk, "none" | "low")
+        self.cached_reader_egress_safe().unwrap_or_else(|| {
+            let rescreen = crate::policy::screen_external_text_for_ingestion(&self.excerpt);
+            !rescreen.redacted
+                && !rescreen.instruction_like
+                && matches!(rescreen.instruction_risk, "none" | "low")
+        })
     }
 
     fn security_metadata_matches(
@@ -15147,6 +15270,9 @@ const EVIDENCE_INSERT_BATCH_ROWS: usize = PACK_INSERT_MAX_BIND_PARAMS / EVIDENCE
 const EVIDENCE_VERDICT_INSERT_VALUE_COUNT: usize = 5;
 const EVIDENCE_VERDICT_INSERT_BATCH_ROWS: usize =
     PACK_INSERT_MAX_BIND_PARAMS / EVIDENCE_VERDICT_INSERT_VALUE_COUNT;
+const EVIDENCE_PROJECTION_INSERT_VALUE_COUNT: usize = 8;
+const EVIDENCE_PROJECTION_INSERT_BATCH_ROWS: usize =
+    PACK_INSERT_MAX_BIND_PARAMS / EVIDENCE_PROJECTION_INSERT_VALUE_COUNT;
 
 /// Bind values for one `evidence_spans` row, in column order.
 fn evidence_row_params(span: &StoredEvidenceSpan) -> [Value; EVIDENCE_INSERT_VALUE_COUNT] {
@@ -15736,7 +15862,7 @@ impl DbConnection {
             }
         }
         let now = Utc::now().to_rfc3339();
-        let span = StoredEvidenceSpan {
+        let mut span = StoredEvidenceSpan {
             id: id.to_owned(),
             workspace_id: input.workspace_id.clone(),
             session_id: input.session_id.clone(),
@@ -15764,7 +15890,9 @@ impl DbConnection {
             upstream_ref_hash: Some(prepared.upstream_ref_hash),
             created_at: now.clone(),
             updated_at: now,
+            reader_projection: None,
         };
+        span.reader_projection = Some(EvidenceReaderProjection::derive(&span));
         Ok(span)
     }
 
@@ -15796,7 +15924,9 @@ impl DbConnection {
             }
         }
 
-        self.insert_evidence_row(span)
+        let mut restored = span.clone();
+        restored.reader_projection = Some(EvidenceReaderProjection::derive(&restored));
+        self.insert_evidence_row(&restored)
     }
 
     /// The single INSERT every evidence write goes through. A search
@@ -15821,11 +15951,210 @@ impl DbConnection {
             }
             self.execute_for(DbOperation::Execute, &sql, &params)?;
         }
+        self.record_evidence_reader_projections(&spans.iter().collect::<Vec<_>>())?;
         let candidates = spans
             .iter()
             .filter(|span| span.is_search_admission_candidate())
             .collect::<Vec<_>>();
         self.record_evidence_admission_verdicts(&candidates)
+    }
+
+    /// Whether V130's derived projection table exists. Reads against older
+    /// schemas derive an in-memory projection without modifying the database.
+    fn reader_projections_available(&self) -> Result<bool> {
+        use std::sync::atomic::Ordering as AtomicOrdering;
+        if self
+            .reader_projections_present
+            .load(AtomicOrdering::Acquire)
+        {
+            return Ok(true);
+        }
+        let present = !self
+            .query_for(
+                DbOperation::Query,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'evidence_reader_projections'",
+                &[],
+            )?
+            .is_empty();
+        if present {
+            self.reader_projections_present
+                .store(true, AtomicOrdering::Release);
+        }
+        Ok(present)
+    }
+
+    /// Attach validated persisted projections with primary-key batch lookups.
+    /// Missing, corrupt or stale entries are computed once in memory. Return
+    /// their positions so write-side backfill can persist only the repairs.
+    fn hydrate_evidence_reader_projections(
+        &self,
+        spans: &mut [StoredEvidenceSpan],
+    ) -> Result<Vec<usize>> {
+        const CHUNK: usize = 128;
+        let available = !spans.is_empty() && self.reader_projections_available()?;
+        let mut missing = Vec::new();
+        for (chunk_number, chunk) in spans.chunks_mut(CHUNK).enumerate() {
+            let mut projections = std::collections::HashMap::with_capacity(chunk.len());
+            if available {
+                let placeholders = (1..=chunk.len())
+                    .map(|index| format!("?{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let params = chunk
+                    .iter()
+                    .map(|span| Value::Text(span.id.clone()))
+                    .collect::<Vec<_>>();
+                let rows = self.query_for(
+                    DbOperation::Query,
+                    &format!(
+                        "SELECT evidence_span_id, projection_version, source_binding, reader_body, reader_text, egress_safe, integrity_binding FROM evidence_reader_projections WHERE evidence_span_id IN ({placeholders})"
+                    ),
+                    &params,
+                )?;
+                for row in rows {
+                    if let Ok(id) = required_text(&row, 0, DbOperation::Query, "evidence_span_id") {
+                        projections.insert(id.to_owned(), row);
+                    }
+                }
+            }
+            for (index, span) in chunk.iter_mut().enumerate() {
+                let persisted = projections.remove(&span.id).and_then(|row| {
+                    let version =
+                        required_u32(&row, 1, DbOperation::Query, "projection_version").ok()?;
+                    let source_binding =
+                        required_text(&row, 2, DbOperation::Query, "source_binding").ok()?;
+                    let body = required_text(&row, 3, DbOperation::Query, "reader_body").ok()?;
+                    let text = required_text(&row, 4, DbOperation::Query, "reader_text").ok()?;
+                    let egress_safe =
+                        match required_i64(&row, 5, DbOperation::Query, "egress_safe").ok()? {
+                            0 => false,
+                            1 => true,
+                            _ => return None,
+                        };
+                    let integrity_binding =
+                        required_text(&row, 6, DbOperation::Query, "integrity_binding").ok()?;
+                    EvidenceReaderProjection::from_storage(
+                        span,
+                        version,
+                        source_binding.to_owned(),
+                        body.to_owned(),
+                        text.to_owned(),
+                        egress_safe,
+                        integrity_binding.to_owned(),
+                    )
+                });
+                span.reader_projection = Some(persisted.unwrap_or_else(|| {
+                    missing.push(chunk_number * CHUNK + index);
+                    EvidenceReaderProjection::derive(span)
+                }));
+            }
+        }
+        Ok(missing)
+    }
+
+    fn evidence_spans_from_rows(&self, rows: &[Row]) -> Result<Vec<StoredEvidenceSpan>> {
+        let mut spans = rows
+            .iter()
+            .map(stored_evidence_span_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        let _ = self.hydrate_evidence_reader_projections(&mut spans)?;
+        Ok(spans)
+    }
+
+    fn record_evidence_reader_projections(&self, spans: &[&StoredEvidenceSpan]) -> Result<()> {
+        if spans.is_empty() || !self.reader_projections_available()? {
+            return Ok(());
+        }
+        let projected_at = Utc::now().to_rfc3339();
+        for chunk in spans.chunks(EVIDENCE_PROJECTION_INSERT_BATCH_ROWS) {
+            let mut sql = String::from(
+                "INSERT INTO evidence_reader_projections (evidence_span_id, projection_version, source_binding, reader_body, reader_text, egress_safe, integrity_binding, projected_at) VALUES ",
+            );
+            append_multi_row_placeholders(
+                &mut sql,
+                chunk.len(),
+                EVIDENCE_PROJECTION_INSERT_VALUE_COUNT,
+            );
+            sql.push_str(" ON CONFLICT(evidence_span_id) DO UPDATE SET projection_version = excluded.projection_version, source_binding = excluded.source_binding, reader_body = excluded.reader_body, reader_text = excluded.reader_text, egress_safe = excluded.egress_safe, integrity_binding = excluded.integrity_binding, projected_at = excluded.projected_at");
+            let mut params =
+                Vec::with_capacity(chunk.len() * EVIDENCE_PROJECTION_INSERT_VALUE_COUNT);
+            for span in chunk {
+                let projection = span.current_reader_projection().map_or_else(
+                    || std::borrow::Cow::Owned(EvidenceReaderProjection::derive(span)),
+                    std::borrow::Cow::Borrowed,
+                );
+                params.extend([
+                    Value::Text(span.id.clone()),
+                    Value::BigInt(i64::from(projection.projection_version())),
+                    Value::Text(projection.source_binding().to_owned()),
+                    Value::Text(projection.reader_body().to_owned()),
+                    Value::Text(projection.reader_text().to_owned()),
+                    Value::BigInt(i64::from(projection.egress_safe())),
+                    Value::Text(projection.integrity_binding().to_owned()),
+                    Value::Text(projected_at.clone()),
+                ]);
+            }
+            self.execute_for(DbOperation::Execute, &sql, &params)?;
+        }
+        Ok(())
+    }
+
+    /// Repair missing or stale derived projections in bounded primary-key
+    /// pages. Each page commits independently, and an interrupted run resumes
+    /// without rewriting current projections or changing authoritative rows.
+    pub fn backfill_evidence_reader_projections(&self, workspace_id: Option<&str>) -> Result<u64> {
+        const PAGE_ROWS: usize = 128;
+        const EVIDENCE_COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at";
+        if !self.reader_projections_available()? {
+            return Ok(0);
+        }
+        let mut recorded_count = 0_u64;
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut params = Vec::with_capacity(3);
+            let mut clauses = Vec::with_capacity(2);
+            if let Some(workspace_id) = workspace_id {
+                params.push(Value::Text(workspace_id.to_owned()));
+                clauses.push(format!("e.workspace_id = ?{}", params.len()));
+            }
+            if let Some(cursor) = &cursor {
+                params.push(Value::Text(cursor.clone()));
+                clauses.push(format!("e.id > ?{}", params.len()));
+            }
+            let where_clause = if clauses.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", clauses.join(" AND "))
+            };
+            params.push(Value::BigInt(i64::try_from(PAGE_ROWS).unwrap_or(i64::MAX)));
+            let rows = self.query_for(
+                DbOperation::Query,
+                &format!("SELECT {EVIDENCE_COLUMNS} FROM evidence_spans e{where_clause} ORDER BY e.id ASC LIMIT ?{}", params.len()),
+                &params,
+            )?;
+            let mut spans = rows
+                .iter()
+                .map(stored_evidence_span_from_row)
+                .collect::<Result<Vec<_>>>()?;
+            let Some(last) = spans.last() else {
+                break;
+            };
+            cursor = Some(last.id.clone());
+            let missing = self.hydrate_evidence_reader_projections(&mut spans)?;
+            if !missing.is_empty() {
+                let repairs = missing
+                    .iter()
+                    .map(|index| &spans[*index])
+                    .collect::<Vec<_>>();
+                self.with_transaction(|| self.record_evidence_reader_projections(&repairs))?;
+                recorded_count =
+                    recorded_count.saturating_add(u64::try_from(repairs.len()).unwrap_or(u64::MAX));
+            }
+            if spans.len() < PAGE_ROWS {
+                break;
+            }
+        }
+        Ok(recorded_count)
     }
 
     /// Whether this database carries V127's verdict table. A connection on an
@@ -15959,11 +16288,8 @@ impl DbConnection {
                 clauses.join(" AND "),
                 params.len()
             );
-            let spans = self
-                .query_for(DbOperation::Query, &sql, &params)?
-                .iter()
-                .map(stored_evidence_span_from_row)
-                .collect::<Result<Vec<_>>>()?;
+            let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+            let spans = self.evidence_spans_from_rows(&rows)?;
             let Some(last) = spans.last() else {
                 break;
             };
@@ -16119,7 +16445,7 @@ impl DbConnection {
                 Value::BigInt(i64::from(limit)),
             ],
         )?;
-        rows.iter().map(stored_evidence_span_from_row).collect()
+        self.evidence_spans_from_rows(&rows)
     }
 
     fn rewrite_legacy_evidence_security_fields_in_place(
@@ -16270,6 +16596,10 @@ impl DbConnection {
             )));
         }
         let after_hash = stored_evidence_security_state_hash(&persisted);
+        self.record_evidence_reader_projections(&[&persisted])?;
+        if persisted.is_search_admission_candidate() {
+            self.record_evidence_admission_verdict(&persisted)?;
+        }
 
         let audit_id = generate_audit_id();
         let details = serde_json::json!({
@@ -16402,7 +16732,7 @@ impl DbConnection {
             &[Value::Text(id.to_string())],
         )?;
 
-        rows.first().map(stored_evidence_span_from_row).transpose()
+        Ok(self.evidence_spans_from_rows(&rows)?.into_iter().next())
     }
 
     /// Load evidence rows and their joined sessions for many ids with one
@@ -16434,11 +16764,8 @@ impl DbConnection {
             let sql = format!(
                 "SELECT {EVIDENCE_COLUMNS} FROM evidence_spans e WHERE e.id IN ({placeholders}) ORDER BY e.id ASC"
             );
-            let spans = self
-                .query_for(DbOperation::Query, &sql, &params)?
-                .iter()
-                .map(stored_evidence_span_from_row)
-                .collect::<Result<Vec<_>>>()?;
+            let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+            let spans = self.evidence_spans_from_rows(&rows)?;
             let session_ids = spans
                 .iter()
                 .map(|span| span.session_id.as_str())
@@ -16536,7 +16863,7 @@ impl DbConnection {
             &[Value::Text(session_id.to_string())],
         )?;
 
-        rows.iter().map(stored_evidence_span_from_row).collect()
+        self.evidence_spans_from_rows(&rows)
     }
 
     /// List evidence spans for a workspace in deterministic transcript order.
@@ -16550,7 +16877,7 @@ impl DbConnection {
             &[Value::Text(workspace_id.to_string())],
         )?;
 
-        rows.iter().map(stored_evidence_span_from_row).collect()
+        self.evidence_spans_from_rows(&rows)
     }
 
     /// Collect only positively screened evidence for derived search intake.
@@ -16748,11 +17075,8 @@ impl DbConnection {
         let sql = format!(
             "SELECT {EVIDENCE_COLUMNS} FROM evidence_spans e WHERE {where_clause} AND {EVIDENCE_SEARCH_CANDIDATE_PREDICATE} ORDER BY e.session_id ASC, e.start_line ASC, e.end_line ASC, e.id ASC LIMIT ?{limit_parameter}"
         );
-        let spans = self
-            .query_for(DbOperation::Query, &sql, &params)?
-            .iter()
-            .map(stored_evidence_span_from_row)
-            .collect::<Result<Vec<_>>>()?;
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        let spans = self.evidence_spans_from_rows(&rows)?;
         let missing_sessions = spans
             .iter()
             .map(|span| span.session_id.as_str())
@@ -16895,7 +17219,7 @@ impl DbConnection {
             &[Value::Text(memory_id.to_string())],
         )?;
 
-        rows.iter().map(stored_evidence_span_from_row).collect()
+        self.evidence_spans_from_rows(&rows)
     }
 
     /// Attach an unlinked evidence span to a memory only if its workspace,
@@ -17215,6 +17539,7 @@ fn stored_evidence_span_from_row(row: &Row) -> Result<StoredEvidenceSpan> {
         upstream_ref_hash: optional_text(row, 24)?.map(str::to_string),
         created_at: required_text(row, 25, DbOperation::Query, "created_at")?.to_string(),
         updated_at: required_text(row, 26, DbOperation::Query, "updated_at")?.to_string(),
+        reader_projection: None,
     })
 }
 
@@ -51438,6 +51763,7 @@ UPDATE memories
             upstream_ref_hash: Some(upstream_hash),
             created_at: "2026-01-01T00:00:00Z".to_owned(),
             updated_at: "2026-01-01T00:00:00Z".to_owned(),
+            reader_projection: None,
         }
     }
 
@@ -51556,6 +51882,522 @@ UPDATE memories
             "assistant: The repaired build passed all checks."
         );
         assert_eq!(span.excerpt, excerpt);
+    }
+
+    #[test]
+    fn cass_reader_projection_durable_cache_survives_reopen_without_decoding() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const SOURCE: &str = concat!(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Did the Caf\\u00e9 release pass?\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"Private intermediate reasoning.\"},{\"type\":\"text\",\"text\":\"The release passed.\\nThe golden fixture matched.\"}]}}"
+        );
+        const TEXT: &str = "user: Did the Café release pass?\nassistant: The release passed.\nThe golden fixture matched.";
+        let directory = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let path = directory.path().join("reader-projections.db");
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x1300_0001)).to_string();
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x1300_0002)).to_string();
+        let source;
+        {
+            let writer = DbConnection::open_file(&path)?;
+            writer.migrate()?;
+            setup_workspace(&writer)?;
+            writer.insert_session(&session_id, &session_input("reader-cache-session"))?;
+            let mut input = evidence_span_input(&session_id, "reader-cache-span", 17);
+            input.excerpt = SOURCE.to_owned();
+            input.content_hash = super::canonical_evidence_hash(SOURCE);
+            writer.insert_evidence_span(&evidence_id, &input)?;
+            source = writer
+                .get_evidence_span(&evidence_id)?
+                .ok_or_else(|| TestFailure::new("written reader source missing"))?;
+            ensure_equal(
+                &writer.count_table_rows("evidence_reader_projections")?,
+                &1_i64,
+                "write materializes one projection",
+            )?;
+            writer.close()?;
+        }
+
+        let reader = DbConnection::open_file_read_only(&path)?;
+        let calls_before = crate::cass::transcript::projection_calls_for_test();
+        let loaded = reader
+            .get_evidence_span(&evidence_id)?
+            .ok_or_else(|| TestFailure::new("reopened source missing"))?;
+        ensure_equal(
+            &loaded,
+            &source,
+            "reopening preserves every authoritative field",
+        )?;
+        ensure_equal(
+            &loaded.reader_text().as_ref(),
+            &TEXT,
+            "persisted projection decodes Unicode and labels every role",
+        )?;
+        ensure_equal(
+            &loaded.reader_body().as_ref(),
+            &"Did the Café release pass?\nThe release passed.\nThe golden fixture matched.",
+            "body omits labels and thinking",
+        )?;
+        ensure(
+            matches!(loaded.reader_text(), std::borrow::Cow::Borrowed(_)),
+            "warm reader borrows its materialized text",
+        )?;
+        ensure_equal(
+            &loaded.excerpt.as_str(),
+            &SOURCE,
+            "cache does not replace the source",
+        )?;
+        ensure_equal(
+            &loaded.pack_entity_revision(),
+            &source.pack_entity_revision(),
+            "cache does not change pack identity",
+        )?;
+        let mut unmaterialized = loaded.clone();
+        unmaterialized.reader_projection = None;
+        ensure_equal(
+            &loaded,
+            &unmaterialized,
+            "source equality ignores derived cache presence",
+        )?;
+
+        let hydrated = reader.get_evidence_spans_with_sessions(&[&evidence_id])?;
+        ensure(
+            hydrated
+                .first()
+                .is_some_and(|row| row.is_direct_pack_admitted(WORKSPACE)),
+            "cached evidence remains live-session admitted",
+        )?;
+        let (admitted, _) = reader.list_search_admitted_evidence_spans_for_workspace(WORKSPACE)?;
+        ensure_equal(
+            &admitted.len(),
+            &1_usize,
+            "warm scan retains the known positive source",
+        )?;
+        ensure_equal(
+            &reader
+                .list_search_admitted_evidence_spans_for_session(WORKSPACE, &session_id)?
+                .len(),
+            &1_usize,
+            "session scan uses the same cached admission",
+        )?;
+        ensure_equal(
+            &reader.list_evidence_spans_for_session(&session_id)?.len(),
+            &1_usize,
+            "raw session reader hydrates projections",
+        )?;
+        ensure_equal(
+            &reader.list_evidence_spans_for_workspace(WORKSPACE)?.len(),
+            &1_usize,
+            "workspace reader hydrates projections",
+        )?;
+        let document = crate::search::evidence_span_to_document(&loaded);
+        ensure_equal(
+            &document.content(),
+            &TEXT,
+            "search uses the same persisted reader bytes",
+        )?;
+        ensure_equal(
+            &crate::cass::transcript::projection_calls_for_test(),
+            &calls_before,
+            "warm DB, search, and pack-admission reads never invoke the transcript projector",
+        )?;
+        reader.close()?;
+
+        // An interrupted backfill is a read-only cache miss, not a reason to
+        // reject valid evidence or mutate a reader's database connection.
+        let writer = DbConnection::open_file(&path)?;
+        writer.execute_raw("DELETE FROM evidence_reader_projections")?;
+        writer.close()?;
+        let reader = DbConnection::open_file_read_only(&path)?;
+        let calls_before = crate::cass::transcript::projection_calls_for_test();
+        let uncached = reader
+            .get_evidence_span(&evidence_id)?
+            .ok_or_else(|| TestFailure::new("source missing during cache fallback"))?;
+        ensure_equal(
+            &uncached.reader_text().as_ref(),
+            &TEXT,
+            "missing cache projects the authoritative source",
+        )?;
+        ensure_equal(
+            &uncached.reader_body().as_ref(),
+            &loaded.reader_body().as_ref(),
+            "both fallback views share the same decode",
+        )?;
+        ensure_equal(
+            &crate::cass::transcript::projection_calls_for_test(),
+            &(calls_before + 1),
+            "one fallback decode is reused by both reader views",
+        )?;
+        ensure_equal(
+            &reader.count_table_rows("evidence_reader_projections")?,
+            &0_i64,
+            "read-only fallback writes no cache rows",
+        )?;
+        reader.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn cass_reader_projection_rejects_cache_drift_and_preserves_live_admission() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x1301_0001)).to_string();
+        let first_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x1301_0002)).to_string();
+        let second_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x1301_0003)).to_string();
+        connection.insert_session(&session_id, &session_input("cache-drift-session"))?;
+        for (id, body) in [
+            (&first_id, "The first release passed."),
+            (&second_id, "The second release passed."),
+        ] {
+            let mut input =
+                evidence_span_input(&session_id, id, if id == &first_id { 10 } else { 20 });
+            input.excerpt = serde_json::json!({"role": "assistant", "content": body}).to_string();
+            input.content_hash = super::canonical_evidence_hash(&input.excerpt);
+            connection.insert_evidence_span(id, &input)?;
+        }
+        let original = connection
+            .get_evidence_span(&first_id)?
+            .ok_or_else(|| TestFailure::new("cache drift source missing"))?;
+        let donor = connection
+            .get_evidence_span(&second_id)?
+            .ok_or_else(|| TestFailure::new("cache donor source missing"))?;
+        let donor_projection = donor
+            .reader_projection
+            .as_ref()
+            .ok_or_else(|| TestFailure::new("cache donor projection missing"))?;
+        connection.execute_for(DbOperation::Execute,
+            "UPDATE evidence_reader_projections SET source_binding = ?1, reader_body = ?2, reader_text = ?3, integrity_binding = ?4 WHERE evidence_span_id = ?5",
+            &[Value::Text(donor_projection.source_binding().to_owned()), Value::Text(donor_projection.reader_body().to_owned()), Value::Text(donor_projection.reader_text().to_owned()), Value::Text(donor_projection.integrity_binding().to_owned()), Value::Text(first_id.clone())])?;
+        let copied = connection
+            .get_evidence_span(&first_id)?
+            .ok_or_else(|| TestFailure::new("copied cache source missing"))?;
+        ensure_equal(
+            &copied.reader_text().as_ref(),
+            &"assistant: The first release passed.",
+            "a copied valid cache cannot substitute another source's content",
+        )?;
+        ensure_equal(
+            &connection.backfill_evidence_reader_projections(Some(WORKSPACE))?,
+            &1_u64,
+            "backfill repairs only the copied projection",
+        )?;
+
+        for mutation in [
+            "reader_text = 'CACHE_SENTINEL'",
+            "reader_body = 'CACHE_SENTINEL'",
+            "egress_safe = 0",
+            "projection_version = projection_version + 1",
+            "source_binding = 'blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+            "integrity_binding = 'blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",
+        ] {
+            connection.execute_for(
+                DbOperation::Execute,
+                &format!(
+                    "UPDATE evidence_reader_projections SET {mutation} WHERE evidence_span_id = ?1"
+                ),
+                &[Value::Text(first_id.clone())],
+            )?;
+            let cached_before = connection.query("SELECT projection_version, source_binding, reader_body, reader_text, egress_safe, integrity_binding FROM evidence_reader_projections WHERE evidence_span_id = ?1", &[Value::Text(first_id.clone())])?
+                .iter()
+                .map(|row| row.values().cloned().collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            let calls_before = crate::cass::transcript::projection_calls_for_test();
+            let loaded = connection
+                .get_evidence_span(&first_id)?
+                .ok_or_else(|| TestFailure::new("tampered cache source missing"))?;
+            ensure_equal(
+                &loaded.reader_text().as_ref(),
+                &"assistant: The first release passed.",
+                "cache corruption cannot change projected reader content",
+            )?;
+            ensure_equal(
+                &loaded.cached_reader_egress_safe(),
+                &Some(true),
+                "cache corruption cannot forge egress posture",
+            )?;
+            ensure_equal(
+                &crate::cass::transcript::projection_calls_for_test(),
+                &(calls_before + 1),
+                "a stale cache is projected only once during hydration",
+            )?;
+            let cached_after = connection.query("SELECT projection_version, source_binding, reader_body, reader_text, egress_safe, integrity_binding FROM evidence_reader_projections WHERE evidence_span_id = ?1", &[Value::Text(first_id.clone())])?
+                .iter()
+                .map(|row| row.values().cloned().collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            ensure_equal(
+                &cached_after,
+                &cached_before,
+                "query-side fallback does not repair persisted state",
+            )?;
+            ensure_equal(
+                &connection.backfill_evidence_reader_projections(Some(WORKSPACE))?,
+                &1_u64,
+                "write-side backfill repairs the damaged cache",
+            )?;
+        }
+
+        let mut changed = original.clone();
+        changed.excerpt =
+            r#"{"role":"assistant","content":"changed without a source hash update"}"#.to_owned();
+        ensure_equal(
+            &changed.cached_reader_egress_safe(),
+            &None,
+            "public excerpt mutation invalidates the in-memory proof",
+        )?;
+        ensure_equal(
+            &changed.reader_text().as_ref(),
+            &"assistant: changed without a source hash update",
+            "stale in-memory bytes are never returned",
+        )?;
+        let session = connection
+            .get_session(&session_id)?
+            .ok_or_else(|| TestFailure::new("cache session missing"))?;
+        ensure(
+            !changed.is_search_admitted_for_session(WORKSPACE, &session),
+            "a valid prior cache cannot authorize a changed source hash",
+        )?;
+        changed = original.clone();
+        changed.search_eligibility = "quarantined".to_owned();
+        ensure(
+            !changed.is_search_admitted_for_session(WORKSPACE, &session),
+            "cached reader text does not bypass quarantine",
+        )?;
+        let mut wrong_session = session.clone();
+        wrong_session.workspace_id = "wsp_another_workspace".to_owned();
+        ensure(
+            !original.is_search_admitted_for_session(WORKSPACE, &wrong_session),
+            "cached reader text does not bypass the live workspace join",
+        )?;
+        changed = original.clone();
+        changed.role = Some("system".to_owned());
+        ensure_equal(
+            &changed.cached_reader_egress_safe(),
+            &None,
+            "public role mutation invalidates the in-memory proof",
+        )?;
+        changed = original.clone();
+        changed.producer_kind = "docs_bootstrap".to_owned();
+        ensure_equal(
+            &changed.cached_reader_egress_safe(),
+            &None,
+            "public producer mutation invalidates the in-memory proof",
+        )?;
+        ensure_equal(
+            &changed.reader_text().as_ref(),
+            &changed.excerpt.as_str(),
+            "non-CASS fallback keeps its exact source interpretation",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE evidence_spans SET excerpt = ?1 WHERE id = ?2",
+            &[
+                Value::Text(r#"{"role":"assistant","content":"Changed source bytes."}"#.to_owned()),
+                Value::Text(first_id.clone()),
+            ],
+        )?;
+        ensure_equal(
+            &connection.count_table_rows("evidence_reader_projections")?,
+            &1_i64,
+            "source updates invalidate only that source's cache",
+        )?;
+        let updated = connection
+            .get_evidence_span(&first_id)?
+            .ok_or_else(|| TestFailure::new("updated source missing"))?;
+        ensure_equal(
+            &updated.reader_text().as_ref(),
+            &"assistant: Changed source bytes.",
+            "source mutation does not recover old cached text",
+        )?;
+        ensure(
+            connection
+                .get_search_admitted_evidence_span(&first_id, WORKSPACE)?
+                .is_none(),
+            "live hash drift remains denied after projection fallback",
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM evidence_spans WHERE id = ?1",
+            &[Value::Text(second_id)],
+        )?;
+        ensure_equal(
+            &connection.count_table_rows("evidence_reader_projections")?,
+            &0_i64,
+            "source deletion removes the derived projection",
+        )
+    }
+
+    #[test]
+    fn cass_reader_projection_migration_preserves_admission_and_refusals() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 129)?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x1302_0001)).to_string();
+        connection.insert_session(&session_id, &session_input("projection-migration-session"))?;
+        let sources = [
+            r#"{"role":"assistant","content":"The migrated release passed."}"#,
+            r#"{"type":"summary","summary":"The release repair was verified."}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Private intermediate reasoning."}]}}"#,
+        ];
+        for (index, source) in sources.iter().enumerate() {
+            let ordinal =
+                u32::try_from(index).map_err(|error| TestFailure::new(error.to_string()))?;
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x1302_0100 + u128::from(ordinal),
+            ))
+            .to_string();
+            let mut input = evidence_span_input(
+                &session_id,
+                &format!("migration-span-{index}"),
+                10 + ordinal,
+            );
+            input.excerpt = (*source).to_owned();
+            input.content_hash = super::canonical_evidence_hash(source);
+            connection.insert_evidence_span(&id, &input)?;
+        }
+        let before = connection.list_evidence_spans_for_workspace(WORKSPACE)?;
+        let admitted_before =
+            connection.list_search_admitted_evidence_spans_for_workspace(WORKSPACE)?;
+        ensure_equal(
+            &admitted_before.0.len(),
+            &2_usize,
+            "migration control includes both message and summary",
+        )?;
+        ensure_equal(
+            &connection.backfill_evidence_reader_projections(None)?,
+            &0_u64,
+            "older schema cannot persist derived projections",
+        )?;
+        let result = connection.migrate()?;
+        ensure(result.applied().contains(&130), "V130 was actually applied")?;
+        ensure_equal(
+            &connection.count_table_rows("evidence_reader_projections")?,
+            &3_i64,
+            "migration materializes positive and refused projections",
+        )?;
+        let calls_before = crate::cass::transcript::projection_calls_for_test();
+        let after = connection.list_evidence_spans_for_workspace(WORKSPACE)?;
+        ensure_equal(
+            &after,
+            &before,
+            "migration changes no authoritative source fields",
+        )?;
+        ensure_equal(
+            &connection.list_search_admitted_evidence_spans_for_workspace(WORKSPACE)?,
+            &admitted_before,
+            "migration preserves the exact admitted set and diagnostic counts",
+        )?;
+        for (index, span) in after.iter().enumerate() {
+            let expected = match index {
+                0 => "assistant: The migrated release passed.",
+                1 => "summary: The release repair was verified.",
+                _ => "",
+            };
+            ensure_equal(
+                &span.reader_text().as_ref(),
+                &expected,
+                "migration preserves reader labels and materializes empty refusal",
+            )?;
+        }
+        ensure_equal(
+            &crate::cass::transcript::projection_calls_for_test(),
+            &calls_before,
+            "migrated refusals and positive rows require no reader decoding",
+        )?;
+        ensure_equal(
+            &connection.backfill_evidence_reader_projections(None)?,
+            &0_u64,
+            "completed migration needs no repeat backfill",
+        )
+    }
+
+    #[test]
+    fn cass_reader_projection_backfill_and_hydration_cross_batch_boundaries() -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x1303_0001)).to_string();
+        connection.insert_session(&session_id, &session_input("projection-batch-session"))?;
+        let session = connection
+            .get_session(&session_id)?
+            .ok_or_else(|| TestFailure::new("batch session missing"))?;
+        let mut inputs = Vec::new();
+        for number in 0..129_u32 {
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x1303_0100 + u128::from(number),
+            ))
+            .to_string();
+            let mut input = evidence_span_input(
+                &session_id,
+                &format!("batch-projection-{number}"),
+                number + 1,
+            );
+            input.excerpt = serde_json::json!({"role": "assistant", "content": format!("Reader row {number} preserves the verified release result.")}).to_string();
+            input.content_hash = super::canonical_evidence_hash(&input.excerpt);
+            inputs.push((id, input));
+        }
+        let tally = connection
+            .with_transaction(|| connection.insert_evidence_spans_in_session(&inputs, &session))?;
+        ensure_equal(
+            &tally.admitted,
+            &129_u32,
+            "batch write retains all positive rows",
+        )?;
+        ensure_equal(
+            &connection.count_table_rows("evidence_reader_projections")?,
+            &129_i64,
+            "batch write persists projections beyond the bind limit",
+        )?;
+        connection.execute_raw("DELETE FROM evidence_reader_projections")?;
+        let source_generation = connection.get_workspace_generation(WORKSPACE)?;
+        ensure_equal(
+            &connection.backfill_evidence_reader_projections(Some(WORKSPACE))?,
+            &129_u64,
+            "backfill visits both bounded source pages",
+        )?;
+        ensure_equal(
+            &connection.get_workspace_generation(WORKSPACE)?,
+            &source_generation,
+            "derived cache backfill never changes source generation",
+        )?;
+        ensure_equal(
+            &connection.backfill_evidence_reader_projections(None)?,
+            &0_u64,
+            "backfill is idempotent across pages",
+        )?;
+        let calls_before = crate::cass::transcript::projection_calls_for_test();
+        let ids = inputs.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>();
+        let hydrated = connection.get_evidence_spans_with_sessions(&ids)?;
+        ensure_equal(
+            &hydrated.len(),
+            &129_usize,
+            "hydration crosses its 128-ID query boundary",
+        )?;
+        for row in &hydrated {
+            ensure(
+                row.is_search_admitted(WORKSPACE),
+                "every batched row retains its live admission",
+            )?;
+            ensure(
+                !row.span.reader_text().contains("\"content\""),
+                "cached read never returns envelope scaffolding",
+            )?;
+        }
+        ensure_equal(
+            &crate::cass::transcript::projection_calls_for_test(),
+            &calls_before,
+            "complete warm batch performs no transcript decoding",
+        )
     }
 
     #[test]
@@ -51885,6 +52727,7 @@ UPDATE memories
                 upstream_ref_hash: None,
                 created_at: "2026-01-01T00:00:00Z".to_owned(),
                 updated_at: "2026-01-01T00:00:00Z".to_owned(),
+                reader_projection: None,
             }
         }
 
