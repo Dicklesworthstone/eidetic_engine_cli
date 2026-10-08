@@ -103,17 +103,23 @@ fn docs_env_vars_table_matches_registry() -> TestResult {
         })
         .collect::<Vec<_>>();
 
-    // THIS IS CURRENTLY RED, AND HONESTLY SO: bd-hs1dj. With the table
-    // attribution above repaired, this comparison finally runs and reports real
-    // drift -- EE_EMBED_MODEL_FIXTURE_DIR and EE_RERANK_MODEL_FIXTURE_DIR are in
-    // EnvVar::all() and absent from docs/env_vars.md (128 documented vs 130
-    // registered, one-directional). Before the repair this test aborted at
-    // docs/env_vars.md:183 on the build-time table and pointed at nothing.
+    // THIS WAS RED, AND HONESTLY SO, UNTIL bd-hs1dj WAS FIXED. The drift it
+    // reported was real: EE_EMBED_MODEL_FIXTURE_DIR and EE_RERANK_MODEL_FIXTURE_DIR
+    // were in EnvVar::all() and absent from docs/env_vars.md (128 documented vs
+    // 130 registered, one-directional). Both are documented now, and the two
+    // sides correspond exactly -- 130 rows against 130 variants, same order, no
+    // set difference in either direction. Before the table-attribution repair
+    // above, this test aborted at docs/env_vars.md:183 on the build-time table
+    // and pointed at nothing.
     //
     // Do not silence it by relaxing this equality or by widening the skip
     // above: the skip is safe only because it cannot swallow a registry row,
-    // and THIS check is what proves that. Fix it by documenting the two
-    // variables in the registry table.
+    // and THIS check is what proves that. Fix drift by documenting the missing
+    // variables in the registry table, never by loosening the comparison.
+    //
+    // This equality is on ORDER as well as membership, which is the part that
+    // surprises: adding a variant to EnvVar::all() requires inserting its
+    // docs/env_vars.md row at the SAME index, not merely somewhere in the table.
     if documented == expected {
         Ok(())
     } else {

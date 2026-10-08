@@ -667,7 +667,7 @@ impl StorelessWorkspaceAssessment {
     fn inspect(database_path: &std::path::Path) -> Self {
         Self::inspect_with_discovery(
             database_path,
-            std::time::Duration::from_millis(crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS),
+            crate::core::orient::nearby_store_scan_budget(),
             None,
         )
     }

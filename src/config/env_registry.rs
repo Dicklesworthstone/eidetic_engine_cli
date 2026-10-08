@@ -227,6 +227,8 @@ pub enum EnvVar {
     MeshMode,
     /// `EE_MESH_TRANSPORT_DISABLED`
     MeshTransportDisabled,
+    /// `EE_NEARBY_STORE_SCAN_BUDGET_MS`
+    NearbyStoreScanBudgetMs,
     /// `EE_NO_COLOR`
     NoColor,
     /// `EE_OUTPUT_FORMAT`
@@ -413,6 +415,7 @@ impl EnvVar {
             Self::MeshHelloResponderDisabled,
             Self::MeshMode,
             Self::MeshTransportDisabled,
+            Self::NearbyStoreScanBudgetMs,
             Self::NoColor,
             Self::OutputFormat,
             Self::Profile,
@@ -552,6 +555,7 @@ impl EnvVar {
             Self::MeshHelloResponderDisabled => "EE_MESH_HELLO_RESPONDER_DISABLED",
             Self::MeshMode => "EE_MESH_MODE",
             Self::MeshTransportDisabled => "EE_MESH_TRANSPORT_DISABLED",
+            Self::NearbyStoreScanBudgetMs => "EE_NEARBY_STORE_SCAN_BUDGET_MS",
             Self::NoColor => "EE_NO_COLOR",
             Self::OutputFormat => "EE_OUTPUT_FORMAT",
             Self::Profile => "EE_PROFILE",
@@ -818,6 +822,9 @@ impl EnvVar {
             Self::MeshTransportDisabled => {
                 "Disable authenticated mesh TCP connect and accepted-session handling before network or authentication work."
             }
+            Self::NearbyStoreScanBudgetMs => {
+                "Override the wall-clock budget for one nearby-store discovery scan, in milliseconds."
+            }
             Self::NoColor => "Disable colored diagnostics.",
             Self::OutputFormat => "Select the default output renderer.",
             Self::Profile => "Override the default context pack profile.",
@@ -948,6 +955,7 @@ impl EnvVar {
             Self::MeshHelloPort => Some("41888"),
             Self::MeshHelloResponderDisabled => Some("false"),
             Self::MeshTransportDisabled => Some("false"),
+            Self::NearbyStoreScanBudgetMs => Some("200"),
             Self::TailscaleDiscoveryMode => Some("service_tag"),
             Self::TailscalePeerProbeTimeoutMs => Some("750"),
             Self::TailscaleDiscoveryBudgetMs => Some("5000"),
@@ -1038,7 +1046,9 @@ impl EnvVar {
             | Self::Workspace
             | Self::WorkspaceRegistry => "paths",
             Self::DaemonEnableEcho | Self::DiagForceCapabilityGap => "diagnostics",
-            Self::DaemonSearchTimeoutMs | Self::DaemonWarm => "performance",
+            Self::DaemonSearchTimeoutMs | Self::DaemonWarm | Self::NearbyStoreScanBudgetMs => {
+                "performance"
+            }
             Self::AgentMode
             | Self::AgentName
             | Self::DisableToon

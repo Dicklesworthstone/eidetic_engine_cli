@@ -51,7 +51,46 @@ pub const NEARBY_STORE_REPORT_LIMIT: usize = 5;
 /// keeping the recovery scan small and predictable.
 pub const NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD: u64 = 3;
 /// Default wall-clock budget for one discovery scan.
+///
+/// 200 ms keeps interactive orientation snappy on a quiet host, and that is the
+/// only host it was ever measured on. Under load -- a loaded CI worker, a cold
+/// network mount, a directory tree deep enough that the walk dominates -- the
+/// scan truncates, and a truncated scan reports `outcome: "truncated"` with an
+/// empty `nearbyStores` list. That answer is honest but useless: an empty list
+/// is explicitly NOT evidence that no populated store exists nearby, so a
+/// caller who needs a real answer has no way to ask for one.
+/// `EE_NEARBY_STORE_SCAN_BUDGET_MS` is that way. See
+/// [`nearby_store_scan_budget`].
 pub const NEARBY_STORE_SCAN_BUDGET_MS: u64 = 200;
+
+/// Resolve one discovery scan's budget from a raw environment value.
+///
+/// Pure, and takes the value rather than reading the environment itself, so the
+/// override's parsing can be tested without mutating process-global state --
+/// the same shape `tailscale_discovery_budget_ms_from_env_value` uses, and for
+/// the same reason: `set_var` is unsound under Rust 2024 and racy across
+/// parallel tests regardless.
+///
+/// A missing, unparseable, or zero value yields [`NEARBY_STORE_SCAN_BUDGET_MS`].
+/// Zero is rejected rather than honoured because a zero budget truncates every
+/// scan before it starts, which is indistinguishable from the bug this override
+/// exists to work around.
+#[must_use]
+pub fn nearby_store_scan_budget_ms_from_env_value(value: Option<&str>) -> u64 {
+    value
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|parsed| *parsed > 0)
+        .unwrap_or(NEARBY_STORE_SCAN_BUDGET_MS)
+}
+
+/// The wall-clock budget one nearby-store discovery scan should use, honouring
+/// `EE_NEARBY_STORE_SCAN_BUDGET_MS`.
+#[must_use]
+pub fn nearby_store_scan_budget() -> std::time::Duration {
+    std::time::Duration::from_millis(nearby_store_scan_budget_ms_from_env_value(
+        crate::config::read_env_var(crate::config::EnvVar::NearbyStoreScanBudgetMs).as_deref(),
+    ))
+}
 /// Blocking filesystem/database probes are soft-cancellable. Retain a hard
 /// process-local permit until each worker actually exits so repeated timeouts
 /// cannot accumulate an unbounded detached tail.
@@ -4463,6 +4502,74 @@ mod tests {
             &scan.stores.len(),
             &0_usize,
             "symlinked external stores are outside the discovery boundary",
+        )
+    }
+
+    // The override exists because `scan_budget()` right above is 10 seconds
+    // "so slow CI disks cannot flake the truncation-free assertions" -- a fix
+    // available only to callers that can INJECT a budget. The six storeless
+    // tests in tests/error_recovery_conformance_e2e.rs spawn the real binary,
+    // so they got the 200 ms default and flaked exactly as predicted (bd-idr8e).
+    #[test]
+    fn absent_or_unusable_scan_budget_env_values_fall_back_to_the_default() -> TestResult {
+        for value in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("abc"),
+            Some("-5"),
+            Some("1.5"),
+        ] {
+            ensure_equal(
+                &nearby_store_scan_budget_ms_from_env_value(value),
+                &NEARBY_STORE_SCAN_BUDGET_MS,
+                &format!("{value:?} must fall back to the default scan budget"),
+            )?;
+        }
+        // Zero is rejected, not honoured: a zero budget truncates every scan
+        // before it starts, which is the failure this override exists to cure.
+        ensure_equal(
+            &nearby_store_scan_budget_ms_from_env_value(Some("0")),
+            &NEARBY_STORE_SCAN_BUDGET_MS,
+            "a zero budget must not be honoured",
+        )
+    }
+
+    #[test]
+    fn a_raised_scan_budget_env_value_is_honoured_exactly() -> TestResult {
+        for (raw, expected) in [("30000", 30_000_u64), (" 30000 ", 30_000), ("1", 1)] {
+            ensure_equal(
+                &nearby_store_scan_budget_ms_from_env_value(Some(raw)),
+                &expected,
+                &format!("{raw:?} must parse to {expected} ms"),
+            )?;
+        }
+        // The polarity check: the override must differ from the default, or
+        // every assertion above would also pass against a function that
+        // ignored its argument entirely.
+        if nearby_store_scan_budget_ms_from_env_value(Some("30000")) == NEARBY_STORE_SCAN_BUDGET_MS
+        {
+            return Err(
+                "the raised budget equals the default, so this test cannot detect an ignored override"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    // Ties the published default to the constant. docs/env_vars.md renders
+    // `default_value()`, so a change to the constant that skipped the registry
+    // would publish a number the code never uses.
+    #[test]
+    fn the_registry_publishes_the_real_default_scan_budget() -> TestResult {
+        let published = crate::config::EnvVar::NearbyStoreScanBudgetMs
+            .default_value()
+            .ok_or_else(|| "the scan budget override must publish a default".to_owned())?;
+        let expected = NEARBY_STORE_SCAN_BUDGET_MS.to_string();
+        ensure_equal(
+            &published.to_owned(),
+            &expected,
+            "the registry default must equal the constant the code falls back to",
         )
     }
 }

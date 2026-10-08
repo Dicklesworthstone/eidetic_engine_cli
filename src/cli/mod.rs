@@ -42301,7 +42301,7 @@ fn orient_store_discovery(
     let mut scan = crate::core::orient::discover_nearby_stores_for_database(
         workspace,
         addressed_database,
-        std::time::Duration::from_millis(crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS),
+        crate::core::orient::nearby_store_scan_budget(),
     );
     // Empty stores admit every positive candidate. Thin stores retain only
     // candidates that are mechanically richer than the exact addressed count;
@@ -42595,9 +42595,13 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
             _ => {}
         }
         match discovery_outcome {
+            // Report the budget that was actually applied, not the default. With
+            // EE_NEARBY_STORE_SCAN_BUDGET_MS set, the constant names a limit this
+            // scan never ran under, and a truncation notice citing the wrong
+            // limit sends the reader to tune something that is already tuned.
             "truncated" => out.push_str(&format!(
                 "Nearby-store scan hit its {} ms time budget; the candidate list may be incomplete.\n",
-                crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS
+                crate::core::orient::nearby_store_scan_budget().as_millis()
             )),
             "truncated_registry_unavailable" => out.push_str(
                 "Nearby-store discovery is partial because the optional workspace registry was unavailable; locally proved child and parent candidates remain actionable.\n",

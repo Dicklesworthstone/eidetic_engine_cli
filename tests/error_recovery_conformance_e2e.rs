@@ -7,6 +7,27 @@ use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 
 type TestResult = Result<(), String>;
 
+/// Nearby-store discovery defaults to a 200 ms wall-clock budget. That is
+/// enough on a quiet laptop and not enough on a loaded CI worker: the scan
+/// truncates, `storeDiscovery.nearbyStores` comes back empty, and the
+/// storeless-discovery assertions below fail for a reason that has nothing to
+/// do with the error envelopes they exist to pin (bd-idr8e, measured on hz3:
+/// six failures, all with `{"outcome": "truncated", "nearbyStores": []}`).
+///
+/// These tests spawn the real binary, so they cannot inject a budget the way
+/// the in-process tests in `src/core/orient.rs` do -- `scan_budget()` there is
+/// 10 s, commented "so slow CI disks cannot flake the truncation-free
+/// assertions", a fix that was only ever available to callers holding a
+/// `Duration`. `EE_NEARBY_STORE_SCAN_BUDGET_MS` is how an out-of-process
+/// caller asks for the same thing.
+///
+/// 30 s is far above any honest scan of these fixtures -- a handful of
+/// directories, three levels deep -- so it cannot hide a slowdown large enough
+/// to matter to these assertions, and the truncation paths stay covered by the
+/// `truncated_registry_unavailable` cases here and the budget tests in
+/// `src/core/orient.rs`.
+const DISCOVERY_SCAN_BUDGET_MS: &str = "30000";
+
 #[derive(Clone, Debug)]
 struct ConformanceCase {
     id: &'static str,
@@ -23,6 +44,7 @@ fn run_ee(args: &[String]) -> Result<Output, String> {
             std::process::id()
         )),
     );
+    command.env("EE_NEARBY_STORE_SCAN_BUDGET_MS", DISCOVERY_SCAN_BUDGET_MS);
     command
         .args(args)
         .output()
@@ -32,6 +54,7 @@ fn run_ee(args: &[String]) -> Result<Output, String> {
 fn run_ee_with_registry(args: &[String], registry: &Path) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .env("EE_WORKSPACE_REGISTRY", registry)
+        .env("EE_NEARBY_STORE_SCAN_BUDGET_MS", DISCOVERY_SCAN_BUDGET_MS)
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
@@ -46,6 +69,7 @@ fn run_ee_with_stdin(args: &[String], input: &[u8]) -> Result<Output, String> {
                 std::process::id()
             )),
         )
+        .env("EE_NEARBY_STORE_SCAN_BUDGET_MS", DISCOVERY_SCAN_BUDGET_MS)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -475,8 +499,12 @@ fn orient_relative_missing_workspace_reports_normalized_absolute_address() -> Te
             command.env_remove(name);
         }
     }
+    // Set AFTER the EE_* strip loop above, which is there to isolate this case
+    // from an inherited environment; the budget is part of the harness, not
+    // part of the inherited state under test.
     let output = command
         .env("EE_WORKSPACE_REGISTRY", &registry)
+        .env("EE_NEARBY_STORE_SCAN_BUDGET_MS", DISCOVERY_SCAN_BUDGET_MS)
         .output()
         .map_err(|error| format!("run isolated orient miss: {error}"))?;
 
@@ -3481,6 +3509,7 @@ fn relocated_store_reports_identity_mismatch_and_executes_explicit_read_recovery
             .args(args)
             .arg("--json")
             .env("EE_EMBED_DOWNLOAD", "off")
+            .env("EE_NEARBY_STORE_SCAN_BUDGET_MS", DISCOVERY_SCAN_BUDGET_MS)
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
             .env("XDG_DATA_HOME", temp.path().join("data"))
             .env("XDG_CACHE_HOME", temp.path().join("cache"))
