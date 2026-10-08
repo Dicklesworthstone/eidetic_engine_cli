@@ -4763,3 +4763,237 @@ fn backup_restore_keeps_attestation_content_and_changes_only_custody() -> TestRe
         "the bundle must distinguish the recovered audit history",
     )
 }
+
+/// bd-cjt23: round-trip CONTENT identity, asserted on the records root.
+///
+/// THE BEAD'S ASSERTION COULD NEVER HAVE HELD. It compared `data.recordsHash`
+/// across backup -> restore -> re-backup. `recordsHash` covers the whole of
+/// records.jsonl, whose header and footer carry THIS backup's own export id and
+/// timestamps, so two backups of byte-identical content never share it.
+/// `scripts/e2e_backup_roundtrip.sh` says so in those terms and moved the
+/// assertion to the footer's `authentication.recordsRoot`, which covers only
+/// the emitted memory, tag and link lines. A red from an unsatisfiable
+/// assertion is an instrument defect, not a product defect.
+///
+/// THE BEAD'S SECOND HALF WAS TRUE, which is why this test exists: "the Rust
+/// target claimed to supersede this check does not contain it". Before this
+/// test, `recordsRoot` appeared ZERO times in this file. The property was
+/// checked only by the shell e2e -- which is itself an ORPHAN that nothing
+/// invokes (bd-udjrq) and cannot run on the `--clean-overlay` lane anyway,
+/// because `--job` and `--clean-overlay` are mutually exclusive. So round-trip
+/// identity had no pinned-revision proof anywhere.
+///
+/// BOTH POLARITIES, because an identity assertion with no negative control
+/// passes equally well against a root that is constant for every input -- which
+/// is the failure mode that produced the original bead:
+///     same content    -> same root       (the identity claim)
+///     changed content -> different root  (proves the root is content-bearing)
+#[test]
+fn re_backup_of_restored_state_reproduces_the_records_root() -> TestResult {
+    let _trace = test_tracing::init_test_tracing(
+        "bd-cjt23",
+        "re_backup_of_restored_state_reproduces_the_records_root",
+    );
+    let staging = tempfile::Builder::new()
+        .prefix("ee-cjt23-records-root-")
+        .tempdir()
+        .map_err(|error| format!("create temp dir: {error}"))?;
+
+    let workspace = staging.path().join("ws");
+    std::fs::create_dir_all(&workspace).map_err(|error| format!("mkdir ws: {error}"))?;
+    let ws = workspace.to_string_lossy().into_owned();
+    let first_dir = staging
+        .path()
+        .join("backup-1")
+        .to_string_lossy()
+        .into_owned();
+    let second_dir = staging
+        .path()
+        .join("backup-2")
+        .to_string_lossy()
+        .into_owned();
+    let third_dir = staging
+        .path()
+        .join("backup-3")
+        .to_string_lossy()
+        .into_owned();
+    let side_arg = staging
+        .path()
+        .join("restored")
+        .to_string_lossy()
+        .into_owned();
+
+    let init = run_ee(&["--workspace", &ws, "--json", "init"])?;
+    ensure_equal(
+        &init.pointer("/data/status").and_then(JsonValue::as_str),
+        &Some("created"),
+        "init status",
+    )?;
+
+    // Content spread across levels, kinds and tags, so the root covers memory,
+    // tag AND link lines rather than a single trivial record.
+    for (level, kind, content, tags) in [
+        (
+            "procedural",
+            "rule",
+            "Assert the records root, never the records hash",
+            "cjt23,roundtrip",
+        ),
+        (
+            "semantic",
+            "fact",
+            "recordsHash carries this backup's own export id",
+            "cjt23,instrument",
+        ),
+        (
+            "episodic",
+            "observation",
+            "The shell e2e named the cause in a comment",
+            "cjt23",
+        ),
+    ] {
+        run_ee(&[
+            "remember",
+            content,
+            "--level",
+            level,
+            "--kind",
+            kind,
+            "--tags",
+            tags,
+            "--workspace",
+            &ws,
+            "--json",
+        ])?;
+    }
+
+    let first = run_ee(&[
+        "backup",
+        "create",
+        "--output-dir",
+        &first_dir,
+        "--redaction",
+        "none",
+        "--include-graph-cache=false",
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let first_path = json_str(&first, "/data/backupPath", "first backup")?.to_owned();
+    let root_before = records_root(&first, "first backup")?;
+
+    let restore = run_ee(&[
+        "backup",
+        "restore",
+        &first_path,
+        "--side-path",
+        &side_arg,
+        "--workspace",
+        &ws,
+        "--json",
+    ])?;
+    let restored_db = restore
+        .pointer("/data/restoredDatabasePath")
+        .or_else(|| restore.pointer("/data/databasePath"))
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("restore reported no restored database path: {restore}"))?
+        .to_owned();
+    let imported = restore
+        .pointer("/data/counts/memoriesImported")
+        .and_then(JsonValue::as_u64)
+        .ok_or_else(|| format!("restore reported no numeric memoriesImported: {restore}"))?;
+    // Guard the guard: a restore that imported nothing would make the identity
+    // assertion below pass over an empty corpus, which proves nothing.
+    ensure(
+        imported >= 3,
+        format!("restore must import the seeded memories, imported {imported}"),
+    )?;
+
+    let second = run_ee(&[
+        "backup",
+        "create",
+        "--output-dir",
+        &second_dir,
+        "--redaction",
+        "none",
+        "--include-graph-cache=false",
+        "--workspace",
+        &ws,
+        "--database",
+        &restored_db,
+        "--json",
+    ])?;
+    let root_after = records_root(&second, "second backup")?;
+
+    ensure_equal(
+        &root_after,
+        &root_before,
+        "re-backup of restored state must reproduce the records root (round-trip identity)",
+    )?;
+
+    // NEGATIVE CONTROL, sharing the mechanism: same command, same store, one
+    // more memory. If this root also matched, the assertion above would be
+    // measuring a constant and the identity claim would be vacuous.
+    run_ee(&[
+        "remember",
+        "A fourth memory must move the records root",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--tags",
+        "cjt23,control",
+        "--workspace",
+        &ws,
+        "--database",
+        &restored_db,
+        "--json",
+    ])?;
+    let third = run_ee(&[
+        "backup",
+        "create",
+        "--output-dir",
+        &third_dir,
+        "--redaction",
+        "none",
+        "--include-graph-cache=false",
+        "--workspace",
+        &ws,
+        "--database",
+        &restored_db,
+        "--json",
+    ])?;
+    let root_changed = records_root(&third, "third backup")?;
+    ensure(
+        root_changed != root_before,
+        format!(
+            "adding a memory must move the records root, but it stayed {root_before}: the identity assertion above would be vacuous"
+        ),
+    )
+}
+
+/// The footer's content root for one backup report.
+///
+/// Fails when the footer carries no `authentication.recordsRoot`: this target is
+/// built from the tree under test, where `finalize_records_root` exists, so
+/// absence is a regression rather than an older-binary tolerance case. The
+/// shell e2e drops that case as "unmeasured" because it must tolerate an older
+/// installed binary; this target must not.
+fn records_root(report: &JsonValue, context: &str) -> Result<String, String> {
+    let records = records_path_from_report(report, context)?;
+    let parsed = read_jsonl_records(&records)?;
+    let footer = parsed
+        .last()
+        .ok_or_else(|| format!("{} is empty", records.display()))?;
+    footer
+        .pointer("/authentication/recordsRoot")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            format!(
+                "{} footer carries no authentication.recordsRoot: {}",
+                records.display(),
+                json_brief(footer)
+            )
+        })
+}
