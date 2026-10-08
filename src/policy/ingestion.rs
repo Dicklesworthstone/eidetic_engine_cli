@@ -87,10 +87,7 @@ fn screen_with_span_count_uncached(content: &str) -> (ExternalIngestionScreenRep
             Ok(Some(canonical)) => {
                 let decoded = screen_scanning_view(&canonical);
                 if decoded.0.redacted {
-                    if !encoded_json::is_unique_json(&decoded.0.content)
-                        || super::classify_transcript_record(&canonical)
-                            != super::classify_transcript_record(&decoded.0.content)
-                    {
+                    if !encoded_json::same_record_classes(&canonical, &decoded.0.content) {
                         return withhold_encoded_record(
                             content,
                             "external_ingestion_encoded_json_redaction_invalid",
@@ -108,7 +105,9 @@ fn screen_with_span_count_uncached(content: &str) -> (ExternalIngestionScreenRep
                         .iter()
                         .any(|code| !original.0.signal_codes.contains(code))
                 {
-                    return decoded;
+                    let (mut report, count) = decoded;
+                    report.content = original.0.content;
+                    return (report, count);
                 }
                 return original;
             }

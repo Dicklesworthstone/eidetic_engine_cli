@@ -116,6 +116,49 @@ silently writing. Retention is enforced only by the explicit
 configured window with audit rows; routine command execution never deletes
 journal evidence in the background.
 
+## CASS Transcript Reader Projection
+
+Evidence index projection revision 4 changes how structured CASS evidence is
+read by search, context packs, and `ee ask`. Claude and Codex message envelopes
+produce decoded text with the source record's role. A JSONL window preserves
+the order and individual roles of its readable records. Explicit transcript
+summaries produce a `summary:` view. Thinking, redacted thinking, explicit
+analysis-channel records, and envelope metadata are excluded from that reader
+text.
+
+A structured span that cannot produce safe, readable text remains stored but
+does not enter retrieval. Tool records, privileged roles, malformed or
+ambiguous envelopes, and unsupported blocks cannot fall back to raw JSON.
+Admission tallies use `record_projection:unavailable` when the record passes
+the existing classification checks but has no usable projection. Admission
+verdict revision 3 makes older cached verdicts stale so live readers revalidate
+them and the existing write-side backfill records the current verdict. Evidence
+index admission revision 2 also rebuilds corpora created before support for
+Unicode-escaped JSONL windows. Clean windows retain their original JSON escapes
+and whitespace in storage; decoding is a derived reader operation.
+
+Existing indexes have an older corpus revision and must be rebuilt:
+
+```bash
+ee index rebuild --workspace . --json
+```
+
+This projection change does not add a database schema migration or rewrite
+stored evidence. The stored excerpt, content hash, evidence identity, and line
+locator continue to identify the original screened source. Answer citation
+byte ranges refer to the exact decoded reader text that supplied the quote;
+they must not be applied to the JSON envelope's bytes.
+
+Bootstrap and linked-session learning require the stricter message projection.
+An otherwise readable summary or record containing reasoning does not supply a
+lesson or appear in a lesson's supporting provenance.
+
+The import excerpt limit remains 64 KiB. Supported single-record envelopes can
+be bounded within that limit. Larger structured windows that cannot be bounded
+without losing their record structure are withheld with
+`external_ingestion_oversized`; a truncated valid prefix cannot stand in for the
+complete window.
+
 ## Core Documents
 
 - [Mechanical Boundary Command Inventory](./mechanical-boundary-command-inventory.md) — full command matrix

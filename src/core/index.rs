@@ -38,7 +38,7 @@ use crate::models::{
 };
 use crate::search::{
     ARTIFACT_INDEX_PROJECTION_SCHEMA_V1, CanonicalSearchDocument,
-    EVIDENCE_INDEX_PROJECTION_SCHEMA_V3, EmbedderStack, HashEmbedder, IndexBuilder,
+    EVIDENCE_INDEX_PROJECTION_SCHEMA_V4, EmbedderStack, HashEmbedder, IndexBuilder,
     MEMORY_INDEX_PROJECTION_SCHEMA_V1, RULE_INDEX_PROJECTION_SCHEMA_V1, RuleIndexProjection,
     SESSION_INDEX_PROJECTION_SCHEMA_V1, artifact_to_document, evidence_span_to_document,
     memory_to_document_with_context_anchors_and_typed_fields, rule_to_document,
@@ -88,7 +88,9 @@ const MEMORY_INDEX_ELIGIBILITY_REVISION_V2: &str = "ee.memory_index_eligibility.
 const SESSION_INDEX_ELIGIBILITY_REVISION_V1: &str = "ee.session_index_eligibility.v1";
 const ARTIFACT_INDEX_ELIGIBILITY_REVISION_V1: &str = "ee.artifact_index_eligibility.v1";
 const RULE_INDEX_ELIGIBILITY_REVISION_V1: &str = "ee.rule_index_eligibility.v1";
-const EVIDENCE_INDEX_ADMISSION_REVISION_V1: &str = "ee.evidence_index_admission.v1";
+// Encoded JSONL windows are admitted record-by-record without changing source
+// bytes. Rebuild older corpora that withheld a whole safe window as unreadable.
+const EVIDENCE_INDEX_ADMISSION_REVISION_V2: &str = "ee.evidence_index_admission.v2";
 const INDEX_STAGING_PREFIX: &str = ".publish-";
 const INDEX_REJECTED_PREFIX: &str = ".rejected-";
 const INDEX_RETAINED_SUFFIX: &str = ".previous";
@@ -923,8 +925,8 @@ pub fn expected_index_corpus_revision() -> &'static CorpusRevision {
             ),
             (
                 "import",
-                EVIDENCE_INDEX_PROJECTION_SCHEMA_V3,
-                EVIDENCE_INDEX_ADMISSION_REVISION_V1,
+                EVIDENCE_INDEX_PROJECTION_SCHEMA_V4,
+                EVIDENCE_INDEX_ADMISSION_REVISION_V2,
             ),
         ] {
             hash_index_corpus_component(&mut hasher, &format!("{source}_projection"), projection);

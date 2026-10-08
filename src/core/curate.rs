@@ -4,6 +4,7 @@
 //! validating or applying candidates. Validation and durable mutation are
 //! separate explicit commands.
 
+use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,7 +43,7 @@ use crate::db::{
     CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
     CreateProceduralRuleInput, CreateProcedureEventInput, CreateProcedureInput,
     CreateReflectionRequestLedgerInput, CreateSearchIndexJobInput, CurationCandidateReviewUpdate,
-    DbConnection, DbError, DbOperation, EvidenceSpanMemoryAttachResult,
+    DbConnection, DbError, DbOperation, EvidenceProducerKind, EvidenceSpanMemoryAttachResult,
     MemoryLevelTransitionAuditInput, MemoryLinkRelation, MemoryLinkSource,
     ReflectionRequestCandidateConsumptionOutcome, ReflectionRequestLedgerIngestOutcome,
     ReflectionRequestReplayStatus, SearchIndexJobType, StoredCurationCandidate,
@@ -3270,6 +3271,17 @@ fn review_file_path_from_provenance_uri(raw: &str) -> Option<PathBuf> {
     }
 }
 
+/// Learning requires explicit conversation text. Reader projections can also
+/// show summaries and omit reasoning blocks, which must not supply lessons or
+/// supporting provenance. Other producers keep their existing body semantics.
+fn review_learning_text(span: &StoredEvidenceSpan) -> Option<Cow<'_, str>> {
+    if EvidenceProducerKind::parse(&span.producer_kind) == Some(EvidenceProducerKind::CassImport) {
+        crate::cass::transcript::message_text(&span.excerpt)
+    } else {
+        Some(span.reader_body())
+    }
+}
+
 fn build_review_session_candidates(
     workspace_id: &str,
     session: &StoredSession,
@@ -3282,9 +3294,12 @@ fn build_review_session_candidates(
         if span.memory_id.as_deref().is_none_or(str::is_empty) {
             continue;
         }
-        // Topic from the conversation's words, never envelope keys
+        let Some(text) = review_learning_text(span) else {
+            continue;
+        };
+        // Topic and source lineage use only text eligible to state a lesson
         // (bd-reality-core-convergence-1azkt.46).
-        let topic_key = review_topic_key(&span.reader_body());
+        let topic_key = review_topic_key(&text);
         if topic_key == "noise" {
             continue;
         }
@@ -3376,7 +3391,10 @@ fn build_bootstrap_session_candidates(
         if !span.memory_id.as_deref().is_none_or(str::is_empty) {
             continue;
         }
-        let topic_key = review_topic_key(&span.reader_body());
+        let Some(text) = review_learning_text(span) else {
+            continue;
+        };
+        let topic_key = review_topic_key(&text);
         if topic_key == "noise" {
             continue;
         }
@@ -4155,7 +4173,7 @@ fn review_stopword(token: &str) -> bool {
 fn review_candidate_kind(spans: &[&StoredEvidenceSpan]) -> String {
     let projected = spans
         .iter()
-        .map(|span| span.reader_body().into_owned())
+        .filter_map(|span| review_learning_text(span))
         .collect::<Vec<_>>();
     let joined = projected.join(" ").to_ascii_lowercase();
     // Count- and negation-aware: "21 passed, 0 failed" is a success, not a
@@ -4225,7 +4243,9 @@ impl ReviewLessons {
         let mut seen = BTreeSet::new();
         let mut supporting_spans = 0_usize;
         for span in spans {
-            let text = span.reader_body();
+            let Some(text) = review_learning_text(span) else {
+                continue;
+            };
             let mut supported = false;
             for sentence in review_lesson_sentences(&text) {
                 supported = true;

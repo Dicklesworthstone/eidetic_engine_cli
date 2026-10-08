@@ -4,6 +4,212 @@ use crate::core::curate::session_arc;
 const INLINE_ARC: &str = "Failure arc: storing silently would violate the no-loop-takeover policy.\nFix: require accept/reject commands and audit every accepted capture.";
 
 #[test]
+fn reader_only_cass_cannot_supply_bootstrap_or_linked_lessons_after_reopen() -> TestResult {
+    for linked in [false, true] {
+        let fixture = review_session_fixture()?;
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(60_000)).to_string();
+        let target_memory_id =
+            linked.then(|| MemoryId::from_uuid(uuid::Uuid::from_u128(60_010)).to_string());
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        connection
+            .insert_session(
+                &session,
+                &session_input(&fixture.workspace_id, "strict-learning-projection"),
+            )
+            .map_err(|error| error.to_string())?;
+        if let Some(memory_id) = target_memory_id.as_deref() {
+            insert_review_memory(
+                &connection,
+                &fixture.workspace_id,
+                memory_id,
+                "Run the formatter before publishing a release.",
+            )?;
+        }
+        let stored_session = connection
+            .get_session(&session)
+            .map_err(|error| error.to_string())?
+            .expect("learning source session");
+        let reader_only = [
+            (
+                evidence_id(60_001),
+                1,
+                "summary",
+                r#"{"type":"summary","summary":"Always run cargo fmt with summary-only-sentinel."}"#,
+                "Always run cargo fmt with summary-only-sentinel.",
+            ),
+            (
+                evidence_id(60_002),
+                3,
+                "message",
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"This is a speculative option."},{"type":"text","text":"Always run cargo fmt with reasoning-only-sentinel."}]}}"#,
+                "Always run cargo fmt with reasoning-only-sentinel.",
+            ),
+        ];
+        for (id, line, kind, excerpt, expected_body) in &reader_only {
+            let mut input = evidence_span_input(
+                &fixture.workspace_id,
+                &session,
+                target_memory_id.as_deref(),
+                id,
+                *line,
+                excerpt,
+            );
+            input.span_kind = (*kind).to_owned();
+            if *kind == "summary" {
+                input.role = None;
+            }
+            connection
+                .insert_evidence_span(id, &input)
+                .map_err(|error| error.to_string())?;
+            let stored = connection
+                .get_evidence_span(id)
+                .map_err(|error| error.to_string())?
+                .expect("reader-only source");
+            assert_eq!(stored.excerpt, *excerpt);
+            assert_eq!(stored.reader_body().as_ref(), *expected_body);
+            assert!(
+                stored.is_direct_pack_admitted_for_session(&fixture.workspace_id, &stored_session),
+                "reader-safe records must reach review so learning applies its stricter gate"
+            );
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let options = ReviewSessionOptions {
+            workspace_path: &fixture.workspace_path,
+            database_path: Some(&fixture.database_path),
+            session_id: Some(&session),
+            propose: true,
+            dry_run: false,
+            min_confidence: 0.0,
+            limit: 10,
+        };
+        let abstained = review_session_proposals(&options).map_err(|error| error.message())?;
+        assert_eq!(abstained.evidence_span_count, 2);
+        assert_eq!(abstained.candidate_count, 0, "linked={linked}");
+        assert!(!abstained.durable_mutation);
+
+        let safe_sources = [
+            (
+                evidence_id(60_003),
+                5,
+                "Always run cargo fmt --check before cutting a release tag.",
+                "Always run cargo fmt --check before cutting a release tag",
+            ),
+            (
+                evidence_id(60_004),
+                7,
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Run cargo fmt --check before publishing a release tag."}]}}"#,
+                "Run cargo fmt --check before publishing a release tag",
+            ),
+        ];
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .list_curation_candidates(&fixture.workspace_id, None, None, None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        for (id, line, excerpt, _) in &safe_sources {
+            connection
+                .insert_evidence_span(
+                    id,
+                    &evidence_span_input(
+                        &fixture.workspace_id,
+                        &session,
+                        target_memory_id.as_deref(),
+                        id,
+                        *line,
+                        excerpt,
+                    ),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = review_session_proposals(&options).map_err(|error| error.message())?;
+        assert_eq!(report.evidence_span_count, 4);
+        assert_eq!(report.candidate_count, 1, "linked={linked}");
+        assert!(report.durable_mutation);
+        let candidate = &report.candidates[0];
+        let source_ids = safe_sources
+            .iter()
+            .map(|(id, _, _, _)| id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(candidate.source_ids, source_ids);
+        assert_eq!(candidate.target_memory_id, target_memory_id);
+        assert_eq!(candidate.topic_key, "formatting");
+        assert_eq!(candidate.confidence, 0.5333);
+        assert!(candidate.persisted);
+        assert_eq!(
+            candidate.candidate_kind,
+            if linked {
+                "rule"
+            } else {
+                REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY
+            }
+        );
+        for (_, _, _, lesson) in &safe_sources {
+            assert!(candidate.proposed_content.contains(*lesson));
+        }
+        assert!(!candidate.proposed_content.contains("summary-only-sentinel"));
+        assert!(
+            !candidate
+                .proposed_content
+                .contains("reasoning-only-sentinel")
+        );
+
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_curation_candidate(&fixture.workspace_id, &candidate.candidate_id)
+            .map_err(|error| error.to_string())?
+            .expect("persisted lesson");
+        assert_eq!(stored.status, "pending");
+        assert_eq!(
+            stored.proposed_content.as_deref(),
+            Some(candidate.proposed_content.as_str())
+        );
+        assert_eq!(stored.source_id, Some(source_ids.join(",")));
+        if !linked {
+            let refs: serde_json::Value = serde_json::from_str(
+                stored
+                    .derivation_source_refs_json
+                    .as_deref()
+                    .expect("bootstrap lineage"),
+            )
+            .map_err(|error| error.to_string())?;
+            let refs = refs.as_array().expect("source reference array");
+            assert_eq!(refs.len(), 2);
+            for source_id in &source_ids {
+                assert!(
+                    refs.iter()
+                        .any(|source| source["id"].as_str() == Some(source_id.as_str()))
+                );
+            }
+        }
+        for (id, _, _, excerpt, _) in &reader_only {
+            assert_eq!(
+                connection
+                    .get_evidence_span(id)
+                    .map_err(|error| error.to_string())?
+                    .expect("unchanged reader source")
+                    .excerpt,
+                *excerpt
+            );
+        }
+        connection.close().map_err(|error| error.to_string())?;
+        let replay = review_session_proposals(&options).map_err(|error| error.message())?;
+        assert_eq!(replay.candidate_count, 1);
+        assert_eq!(replay.candidates[0].candidate_id, candidate.candidate_id);
+        assert_eq!(replay.candidates[0].source_ids, source_ids);
+        assert!(!replay.durable_mutation);
+    }
+    Ok(())
+}
+
+#[test]
 fn multi_episode_acceptance_keeps_first_owner_and_links_only_the_current_pair() -> TestResult {
     let fixture = review_session_fixture()?;
     let session = SessionId::from_uuid(uuid::Uuid::from_u128(9820)).to_string();

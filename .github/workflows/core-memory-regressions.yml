@@ -337,6 +337,9 @@ jobs:
           cass-reader-projection db::tests::cass_reader_projection_
           cass-reader-plain-identity db::tests::evidence_reader_projection_preserves_plain_and_non_cass_bytes
           cass-transcript-admission db::tests::transcript_admission_rechecks_raw_records_for_new_and_existing_rows
+          cass-encoded-json-screen policy::ingestion::encoded_json::tests::
+          cass-screened-store policy::ingestion::store_tests::
+          cass-import-bounding cass::ingestion::tests::
           cass-search-projection search::tests::evidence_document_projects_real_transcripts_without_envelope_or_reasoning_tokens
           cass-search-refusal search::tests::refused_transcript_documents_never_recover_raw_json_as_searchable_text
           resume-transcript-privacy core::resume::transcripts::privacy_tests::

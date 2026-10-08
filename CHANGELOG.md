@@ -75,6 +75,31 @@ Versions `0.4.0`–`0.12.0` are **real published releases** (or tags). Prefer th
 GitHub Release page for asset lists and the original generated notes until a
 future changelog pass expands those rows into full capability sections.
 
+## [Unreleased]
+
+### Readable CASS evidence
+
+- CASS readers share a bounded, typed projection for Claude and Codex transcript
+  records. Search, context packs, and extractive answers use decoded message
+  text with each record's own role; transcript summaries are labeled explicitly.
+  Reasoning blocks, explicit analysis-channel records, and JSON envelope
+  metadata do not consume reader tokens.
+- Structured records without safe, readable text are excluded from retrieval
+  instead of falling back to raw JSON. Evidence admission revision 3 invalidates
+  older cached verdicts, including previously admitted unreadable records.
+- Evidence index projection revision 4 marks existing indexes stale so a rebuild
+  applies the new reader text consistently. Stored source excerpts, hashes,
+  evidence identities, and line locators remain unchanged. See the
+  [transcript projection migration notes](docs/migration-guide.md#cass-transcript-reader-projection).
+- Escaped-Unicode JSONL windows are screened as complete ordered records. Clean
+  windows retain their original bytes, and secret redaction preserves the role
+  and kind of every record. Bootstrap and linked-session learning use the
+  stricter message projection, so summaries and records containing reasoning
+  cannot supply lessons or supporting provenance.
+- Oversized structured imports that cannot be bounded safely remain withheld.
+  Truncation cannot discard an unsafe neighboring record and admit the remaining
+  valid JSON prefix as conversation evidence.
+
 ## [0.17.0] - 2026-10-02
 
 Covers `v0.16.0..v0.17.0`: 258 commits before the release commit (208

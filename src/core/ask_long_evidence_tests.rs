@@ -5,6 +5,7 @@
 use super::{public_evidence_body, public_label, public_provenance};
 use crate::core::ask::{
     AskCorpus, AskRequest, ask_data_json, evaluate_ask, load_current_ask_corpus,
+    record_ask_retrieval_best_effort,
 };
 use crate::db::{
     CreateEvidenceSpanInput, CreateMemoryInput, CreateProceduralRuleInput, CreateSessionInput,
@@ -197,6 +198,10 @@ impl Fixture {
     }
 
     fn evidence(&self, body: &str) -> String {
+        self.evidence_with_admission(body, true)
+    }
+
+    fn evidence_with_admission(&self, body: &str, admitted: bool) -> String {
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(733)).to_string();
         self.db
             .insert_session(
@@ -244,7 +249,10 @@ impl Fixture {
             .unwrap();
         let stored = self.db.get_evidence_span(&id).unwrap().unwrap();
         let session = self.db.get_session(&session).unwrap().unwrap();
-        assert!(stored.is_direct_pack_admitted_for_session(&self.workspace, &session));
+        assert_eq!(
+            stored.is_direct_pack_admitted_for_session(&self.workspace, &session),
+            admitted
+        );
         assert_eq!(stored.excerpt, body);
         id
     }
@@ -338,4 +346,133 @@ fn long_cass_excerpt_answers_without_a_memory_alias_or_prefix_truncation() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn structured_cass_projection_preserves_exact_unicode_citations_after_reopen() {
+    let fixture = Fixture::new();
+    let tail = long_body(ANSWER);
+    // The stored envelope contains JSON escapes, metadata and reasoning that
+    // are not answer text. The decoded body includes multibyte UTF-8 before the
+    // answer and places it beyond the replay-label scan limit.
+    let excerpt = format!(
+        concat!(
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":["#,
+            r#"{{"type":"thinking","thinking":"thinking-only-canary"}},"#,
+            r#"{{"type":"text","text":"R\u00e9sum\u00e9 \u96ea \ud83c\udf31 notes."}},"#,
+            r#"{{"type":"text","text":{}}}]}},"debug":{{"text":"metadata-only-canary"}}}}"#,
+        ),
+        serde_json::to_string(&tail).unwrap()
+    );
+    let expected = format!("assistant: Résumé 雪 🌱 notes.\n{tail}");
+    let id = fixture.evidence(&excerpt);
+    let stored = fixture.db.get_evidence_span(&id).unwrap().unwrap();
+    assert_eq!(stored.reader_text(), expected);
+    assert_eq!(stored.excerpt, excerpt);
+    let corpus = fixture.corpus();
+    assert_answer(&corpus, &id, &expected, "evidence_span");
+    let answer = |corpus: &AskCorpus| {
+        evaluate_ask(
+            &AskRequest {
+                question: QUESTION.to_owned(),
+                native_sources: corpus.native_sources.clone(),
+                contradictions: corpus.contradictions.clone(),
+                ..AskRequest::default()
+            },
+            &corpus.candidates,
+        )
+    };
+    let report = answer(&corpus);
+    let citation = &report.citations[0];
+    assert_eq!(citation.byte_start, expected.find(ANSWER).unwrap());
+    assert_eq!(citation.byte_end, expected.len());
+    assert_eq!(
+        stored
+            .reader_text()
+            .get(citation.byte_start..citation.byte_end),
+        Some(ANSWER)
+    );
+    assert_ne!(
+        stored.excerpt.get(citation.byte_start..citation.byte_end),
+        Some(ANSWER),
+        "reader offsets must not be interpreted as envelope byte offsets"
+    );
+    let data = ask_data_json(&report);
+    for hidden in ["thinking-only-canary", "metadata-only-canary", "\\u00e9"] {
+        assert!(!data.to_string().contains(hidden));
+    }
+    record_ask_retrieval_best_effort(&fixture.db, &fixture.workspace, &report);
+
+    let reopened = DbConnection::open_file(&fixture._root.path().join("ask.db")).unwrap();
+    let reloaded =
+        load_current_ask_corpus(&reopened, &fixture.workspace, chrono::Utc::now()).unwrap();
+    assert_eq!(ask_data_json(&answer(&reloaded)), data);
+    assert_eq!(reloaded.native_sources, corpus.native_sources);
+    assert_eq!(reopened.get_evidence_span(&id).unwrap().unwrap(), stored);
+    let audits = reopened
+        .list_audit_by_target("evidence", &id, None)
+        .unwrap();
+    assert_eq!(audits.len(), 1);
+    let details: serde_json::Value =
+        serde_json::from_str(audits[0].details.as_deref().unwrap()).unwrap();
+    assert_eq!(details["entityId"], id);
+    assert_eq!(details["entityKind"], "evidence_span");
+    assert_eq!(details["entityRevision"], stored.pack_entity_revision());
+    assert!(details.get("memoryId").is_none());
+    assert!(
+        reopened
+            .list_memories(&fixture.workspace, None, true)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn unreadable_structured_cass_never_consumes_answer_or_native_source_slots() {
+    for excerpt in [
+        r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"thinking-only-canary"}]}}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"redacted_thinking","data":"opaque-reasoning-canary"}]}}"#,
+        r#"{"type":"response_item","payload":{"type":"message","role":"assistant","channel":"analysis","content":[{"type":"output_text","text":"analysis-only-canary"}]}}"#,
+        r#"{"type":"assistant","message":{"role":"assistant","debug":{"text":"metadata-only-canary"}}}"#,
+    ] {
+        let fixture = Fixture::new();
+        let hidden = fixture.evidence_with_admission(excerpt, false);
+        assert!(
+            fixture
+                .db
+                .get_evidence_span(&hidden)
+                .unwrap()
+                .unwrap()
+                .reader_text()
+                .is_empty()
+        );
+        let visible = fixture.memory(ANSWER);
+        let corpus = fixture.corpus();
+        assert_eq!(corpus.candidates.len(), 1);
+        assert_eq!(corpus.candidates[0].memory_id, visible);
+        assert!(corpus.native_sources.is_empty());
+        let report = evaluate_ask(
+            &AskRequest {
+                question: QUESTION.to_owned(),
+                ..AskRequest::default()
+            },
+            &corpus.candidates,
+        );
+        assert!(!report.abstained && !report.extractiveness_violated);
+        assert_eq!(report.citations.len(), 1);
+        assert_eq!(report.citations[0].memory_id, visible);
+        assert_eq!(report.citations[0].text, ANSWER);
+        assert_eq!(report.candidates_scanned, 1);
+        let data = ask_data_json(&report).to_string();
+        for withheld in [
+            hidden.as_str(),
+            "thinking-only-canary",
+            "metadata-only-canary",
+            "opaque-reasoning-canary",
+            "analysis-only-canary",
+        ] {
+            assert!(!data.contains(withheld));
+        }
+    }
 }

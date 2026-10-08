@@ -20,7 +20,7 @@ pub(crate) const MAX_TRANSCRIPT_RECORDS: usize = 256;
 pub(crate) const MAX_ENVELOPE_DEPTH: usize = 8;
 
 /// Interpretation version for projections derived from stored source bytes.
-pub const TRANSCRIPT_PROJECTION_VERSION: u32 = 1;
+pub const TRANSCRIPT_PROJECTION_VERSION: u32 = 2;
 
 /// Kinds currently admitted into a reader projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -182,6 +182,14 @@ fn project_with(
             None => None,
             _ => return None,
         };
+        let channel = message_channel(&value.0, 0)?;
+        if channel.is_some() && role != Some(CassRole::Assistant) {
+            return None;
+        }
+        let analysis_channel = channel == Some("analysis");
+        if analysis_channel && purpose == ProjectionPurpose::Learning {
+            return None;
+        }
         let mut bodies = Vec::new();
         let mut screening_bodies = Vec::new();
         let omitted_reasoning = collect_message(
@@ -192,13 +200,17 @@ fn project_with(
             &mut bodies,
             &mut screening_bodies,
         )?;
-        let body = bodies.join("\n");
+        let body = if analysis_channel {
+            String::new()
+        } else {
+            bodies.join("\n")
+        };
         let decoded = screening_bodies.join("\n");
         // Omitted reasoning still participates in the final decoded security
         // screen: hiding it must not launder an instruction-risk source record.
         append_bounded(&mut screening_text, &decoded)?;
         if body.trim().is_empty() {
-            if !omitted_reasoning {
+            if !omitted_reasoning && !analysis_channel {
                 return None;
             }
         } else {
@@ -256,6 +268,35 @@ fn safe_decoded_text(text: &str) -> bool {
         && !screened.instruction_like
         && matches!(screened.instruction_risk, "none" | "low")
         && screened.content == text
+}
+
+/// Older or external response envelopes may explicitly label an analysis
+/// channel. Only envelope fields carry that declaration; quoted body text,
+/// unrelated metadata and current harness `phase` fields do not set a channel.
+fn message_channel(value: &Value, depth: usize) -> Option<Option<&str>> {
+    if depth >= MAX_ENVELOPE_DEPTH || !value.is_object() {
+        return None;
+    }
+    let mut channel = match value.get("channel") {
+        None => None,
+        Some(Value::String(channel))
+            if matches!(channel.as_str(), "analysis" | "final" | "commentary") =>
+        {
+            Some(channel.as_str())
+        }
+        _ => return None,
+    };
+    for field in ["message", "payload"] {
+        if let Some(nested) = value.get(field).filter(|nested| nested.is_object())
+            && let Some(nested_channel) = message_channel(nested, depth + 1)?
+        {
+            if channel.is_some_and(|outer| outer != nested_channel) {
+                return None;
+            }
+            channel = Some(nested_channel);
+        }
+    }
+    Some(channel)
 }
 
 fn collect_message<'a>(

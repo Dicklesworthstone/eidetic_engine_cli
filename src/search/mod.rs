@@ -44,11 +44,11 @@ pub(crate) const MEMORY_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.memory_index_proj
 pub(crate) const SESSION_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.session_index_projection.v1";
 pub(crate) const ARTIFACT_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.artifact_index_projection.v1";
 pub(crate) const RULE_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.rule_index_projection.v1";
-/// v3 (bd-reality-core-convergence-1azkt.45): the shared typed projection
+/// v4 (bd-reality-core-convergence-1azkt.45): the shared typed projection
 /// excludes reasoning and unprojectable records, handles summaries, and labels
 /// each message with its actual role. Changing the corpus revision prevents
-/// reuse of indexes containing the previous raw-envelope fallback.
-pub(crate) const EVIDENCE_INDEX_PROJECTION_SCHEMA_V3: &str = "ee.evidence_index_projection.v3";
+/// reuse of indexes containing raw-envelope fallbacks or analysis-channel text.
+pub(crate) const EVIDENCE_INDEX_PROJECTION_SCHEMA_V4: &str = "ee.evidence_index_projection.v4";
 pub const MEMORY_ANCHOR_SCHEMA_METADATA_KEY: &str = "memory_anchor_schema";
 pub const MEMORY_ANCHOR_COUNT_METADATA_KEY: &str = "memory_anchor_count";
 pub const MEMORY_ANCHOR_KINDS_METADATA_KEY: &str = "memory_anchor_kinds";
@@ -4727,6 +4727,7 @@ mod tests {
     fn refused_transcript_documents_never_recover_raw_json_as_searchable_text() {
         for raw in [
             r#"{"type":"assistant","content":[{"type":"thinking","thinking":"unobserved repair canary"}]}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","channel":"analysis","content":[{"type":"output_text","text":"Unobserved repair analysis."}]}}"#,
             r#"{"type":"assistant","content":"first body","message":"ambiguous second body"}"#,
             r#"{"type":"assistant","content":"first body","content":"duplicate second body"}"#,
             r#"{"type":"assistant","content":[{"type":"unknown","text":"unknown block canary"}]}"#,

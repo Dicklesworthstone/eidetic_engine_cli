@@ -450,26 +450,13 @@ fn malformed_encoded_records_remain_quarantined_after_database_screening() -> Te
     assert!(!stored.is_direct_pack_admitted_for_session(&ws, &session));
     assert!(db.get_search_admitted_evidence_span(&id, &ws)?.is_none());
     let document = crate::search::evidence_span_to_document(&stored).into_indexable();
-    // bd-l9d5o: TWO withholding mechanisms exist and this case uses the other one.
-    //
-    // `evidence_span_to_document` substitutes "[EVIDENCE_WITHHELD]" only when the EGRESS
-    // screen withholds (src/search/mod.rs:1099-1102). Here the unreadable encoded record
-    // was already replaced AT INGESTION by a structured marker carrying only a type, a
-    // fixed reason and a digest (src/policy/ingestion.rs:135, whose comment states "only
-    // its digest and a fixed reason survive. No source text appears in diagnostics
-    // either"). That marker contains no secret, so the egress screen has nothing to
-    // withhold and passes it through unchanged.
-    //
-    // The sentinel assertion was therefore checking the wrong mechanism for this
-    // scenario. The sibling tests at the two other call sites in this file DO take the
-    // egress path and keep asserting the sentinel -- correctly, which is why they pass.
-    //
-    // What matters here is that the indexed document carries the reason and NOT the
-    // payload, so assert that directly rather than a spelling.
-    let withheld: serde_json::Value = serde_json::from_str(&document.content).map_err(|error| {
+    // The durable marker retains the refusal reason and source digest. It has
+    // no conversation projection, so derived search text must not recover the
+    // marker's JSON fields or claim its hash as searchable source content.
+    let withheld: serde_json::Value = serde_json::from_str(&stored.excerpt).map_err(|error| {
         format!(
-            "withheld marker must be JSON: {error}: {}",
-            document.content
+            "stored withheld marker must be JSON: {error}: {}",
+            stored.excerpt
         )
     })?;
     assert_eq!(withheld["type"], "external_ingestion_withheld");
@@ -477,6 +464,9 @@ fn malformed_encoded_records_remain_quarantined_after_database_screening() -> Te
         withheld["reason"],
         "external_ingestion_encoded_json_unreadable"
     );
+    assert_eq!(withheld["sourceDigest"], hash(&raw));
+    assert_eq!(document.content, "[EVIDENCE_WITHHELD]");
+    assert!(!document.metadata.contains_key("content_hash"));
     assert!(!document.content.contains(&token));
     assert!(!document.content.contains(&"Q".repeat(36)));
     db.close()?;
