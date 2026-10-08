@@ -41,6 +41,60 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # IDEMPOTENCY GUARD (bd-delivery-lanes-stuck-publish-to-main-hpgw8).
+          #
+          # This lane dies at `Expected one ask_tool_schema definition; no files changed`.
+          # The python below has its OWN idempotency check -- it skips a function whose body
+          # already equals the replacement -- but that check can never fire here, because
+          # there is no definition left to compare against: `ask_tool_schema` and
+          # `build_ask_tool_args` appear NOWHERE in src/mcp.rs, not even as non-top-level
+          # items. The regex finds zero matches and refuses before reaching the check.
+          #
+          # THE DELIVERY LANDED AND THEN THE WRAPPERS BECAME UNNECESSARY. This is not a
+          # rename. The McpToolEntry for "ee_ask" (src/mcp.rs:338) now registers the module's
+          # functions DIRECTLY, so the two delegating wrappers this patch wanted to create
+          # would be dead code:
+          #   src/mcp.rs      #[path = "mcp_ask.rs"] / mod ask;   (the patch's own `module`)
+          #   src/mcp.rs      input_schema: ask::schema,
+          #   src/mcp.rs      args_builder: ask::build_args,
+          #   src/mcp_ask.rs  pub(super) fn schema() -> Value {   (:33)
+          #   src/mcp_ask.rs  pub(super) fn build_args(           (:91)
+          # Each present exactly once. The last four are what make this conclusive rather
+          # than suggestive: a mounted module proves the file is COMPILED, while the two
+          # registrations prove production REACHES it. A mount alone would also be satisfied
+          # by a module nothing calls.
+          #
+          # ALL-OR-NOTHING. A partially delivered tree must still refuse, so a missing marker
+          # falls through to the python, which is already careful -- it raises
+          # 'changed concurrently' or 'already has constraint handling' rather than guessing.
+          #
+          # exit 0 per the operator decision of 2026-10-07, following 4372cef4a, and bounded:
+          # `integrate` is one job, so exiting this step skips none of the later ones. The
+          # production MCP/CLI compile, the published-path feature resolve, the strict
+          # argument-mapping tests, the real JSON-RPC dispatch and no-write store contracts,
+          # and the existing MCP unit regressions all still run against the delivered source.
+          # The publish step needs no change: it is already guarded by
+          # `if ! git diff --cached --quiet`, so an empty diff commits and pushes nothing.
+          delivered=1
+          for pin in \
+            'src/mcp.rs|#[path = "mcp_ask.rs"]' \
+            'src/mcp.rs|mod ask;' \
+            'src/mcp.rs|input_schema: ask::schema,' \
+            'src/mcp.rs|args_builder: ask::build_args,' \
+            'src/mcp_ask.rs|pub(super) fn schema() -> Value {' \
+            'src/mcp_ask.rs|pub(super) fn build_args(' \
+          ; do
+            pin_path=${pin%%|*}
+            pin_text=${pin#*|}
+            if ! test -f "$pin_path" || ! grep -Fq "$pin_text" "$pin_path"; then
+              echo "ATTRIBUTION: delivery marker ABSENT -- $pin_path does not contain '$pin_text', so this tree is not (or not fully) delivered and the adapter bind below must run."
+              delivered=0
+            fi
+          done
+          if test "$delivered" -eq 1; then
+            echo "ATTRIBUTION: delivery ALREADY PRESENT -- src/mcp.rs mounts mcp_ask.rs and the ee_ask tool entry registers ask::schema and ask::build_args directly, so the module is both compiled and reached and the delegating wrappers this step would add are unnecessary. Nothing to bind. Succeeding rather than refusing: every verification step in this job still runs against the delivered source. Skipped: the adapter bind only."
+            exit 0
+          fi
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -196,7 +250,14 @@ jobs:
               git fetch origin main
               git merge --no-edit origin/main
             done
-            test "$published" = true
+            # bd-aav0v: bare, this aborted the step with NO OUTPUT under `set -e`, so a
+            # lane that verified cleanly and merely lost three push races looked identical
+            # to a lane whose tests failed. The remedies are opposite -- re-run versus
+            # change the source -- so the distinction has to be in the log.
+            if test "$published" != true; then
+              echo "ATTRIBUTION: PUBLICATION failed, not verification -- all three pushes to main were rejected. Every check above this step passed; only the push lost its race. Re-run the lane; do not change the source on the strength of this red."
+              exit 1
+            fi
           fi
           git rev-parse HEAD | tee "$RUNNER_TEMP/mcp-ask-source.log"
       - uses: actions/upload-artifact@v4
