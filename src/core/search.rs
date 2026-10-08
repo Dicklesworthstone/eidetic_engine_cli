@@ -768,6 +768,119 @@ pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.05;
 /// value derived from a larger calibration set.
 pub const WEAK_SEMANTIC_EVIDENCE_THRESHOLD: f32 = 0.35;
 
+/// Drop lexical-only hits that matched nothing but common words.
+///
+/// BM25 over a transcript corpus scores "how do I bake sourdough bread"
+/// against any span containing "how", "do" or "I", and pool-relative
+/// normalization then presents the best of those as relevance 1.0 with no
+/// weak-recall signal (measured on the real-shape oracle,
+/// bd-reality-core-convergence-1azkt.11). A hit is dropped only when all of
+/// these hold: no semantic backend executed or the hit is lexical; the query
+/// has content words (ask's tokenizer: stopwords and interrogatives removed);
+/// the hit's complete, untruncated content contains none of them, compared
+/// after light suffix stemming. An explicit relevance floor of 0 keeps every
+/// hit, as it does for the floor itself.
+fn drop_stopword_only_lexical_hits(
+    query: &str,
+    hits: &mut Vec<SearchHit>,
+    embed_backend: EmbedBackend,
+    user_floor_override: Option<f32>,
+    read_connection: Option<&DbConnection>,
+    degraded: &mut Vec<SearchDegradation>,
+) {
+    if user_floor_override == Some(0.0) {
+        return;
+    }
+    let query_terms = crate::core::ask::tokenize_for_ask(query)
+        .iter()
+        .map(|token| light_stem(token).to_owned())
+        .collect::<BTreeSet<_>>();
+    if query_terms.is_empty() {
+        return;
+    }
+    let lexical_only = |hit: &SearchHit| {
+        embed_backend == EmbedBackend::HashFallback
+            || matches!(hit.source, ScoreSource::Lexical | ScoreSource::HashControl)
+    };
+    // Only a complete body can prove absence; unknown means keep.
+    let preview_truncated = |metadata: &serde_json::Value| match metadata.get("content_truncated") {
+        Some(serde_json::Value::Bool(flag)) => *flag,
+        Some(serde_json::Value::String(flag)) => flag != "false",
+        _ => true,
+    };
+    // A long evidence span's preview is cut at 240 characters; judge it on
+    // the exact text that was indexed for it, read in one batch. The text is
+    // only tokenized here, never returned.
+    let truncated_evidence = hits
+        .iter()
+        .filter(|hit| {
+            hit.doc_id.starts_with("ev_")
+                && lexical_only(hit)
+                && hit.metadata.as_ref().is_some_and(preview_truncated)
+        })
+        .map(|hit| hit.doc_id.as_str())
+        .collect::<Vec<_>>();
+    let indexed_evidence_text = match read_connection {
+        Some(connection) if !truncated_evidence.is_empty() => connection
+            .get_evidence_spans_with_sessions(&truncated_evidence)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| {
+                        let document = crate::search::evidence_span_to_document(&row.span);
+                        (row.span.id, document.content().to_owned())
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default(),
+        _ => BTreeMap::new(),
+    };
+    let before = hits.len();
+    hits.retain(|hit| {
+        if !lexical_only(hit) {
+            return true;
+        }
+        let Some(metadata) = hit.metadata.as_ref() else {
+            return true;
+        };
+        let content = if preview_truncated(metadata) {
+            indexed_evidence_text.get(&hit.doc_id).cloned()
+        } else {
+            search_hit_content_text(metadata)
+        };
+        let Some(content) = content else {
+            return true;
+        };
+        let mut text = content;
+        for key in ["title", "tags"] {
+            if let Some(extra) = metadata.get(key).and_then(serde_json::Value::as_str) {
+                text.push(' ');
+                text.push_str(extra);
+            }
+        }
+        crate::core::ask::tokenize_for_ask(&text)
+            .iter()
+            .any(|token| query_terms.contains(light_stem(token)))
+    });
+    let filtered = before - hits.len();
+    if filtered > 0 {
+        degraded.push(SearchDegradation::lexical_stopword_only_filtered(filtered));
+    }
+}
+
+/// Strip one common English inflection so "builds"/"building"/"built"-style
+/// variants of a query word still count as present. Deliberately crude: it
+/// only decides whether a hit shares *any* content word with the query.
+fn light_stem(token: &str) -> &str {
+    for suffix in ["ing", "ies", "es", "ed", "s"] {
+        if let Some(stem) = token.strip_suffix(suffix)
+            && stem.chars().count() >= 3
+        {
+            return stem;
+        }
+    }
+    token
+}
+
 /// The strongest semantic fast-tier score among `hits`, when it is below
 /// [`WEAK_SEMANTIC_EVIDENCE_THRESHOLD`] and `backend` is `neural_local`.
 ///
@@ -2872,6 +2985,20 @@ impl SearchDegradation {
             repair: Some(
                 "Rephrase with concrete words present in stored memories, or use --source-mode lexical_only.".to_string(),
             ),
+        }
+    }
+
+    /// Lexical hits whose content shares no content word with the query
+    /// were dropped (bd-reality-core-convergence-1azkt.11).
+    #[must_use]
+    fn lexical_stopword_only_filtered(filtered: usize) -> Self {
+        Self {
+            code: "lexical_stopword_only_filtered".to_string(),
+            severity: "low".to_string(),
+            message: format!(
+                "{filtered} lexical hit(s) matched only common query words (no content word of the query appears in them) and were dropped."
+            ),
+            repair: Some("Pass --relevance-floor 0 to keep every lexical match.".to_string()),
         }
     }
 
@@ -9841,6 +9968,14 @@ async fn run_search_inner_with_performance(
             // load-bearing: floor admission uses its lower bound. Uncalibrated
             // hits retain the historical point-score behavior.
             let mut raw_hits = raw_hits;
+            drop_stopword_only_lexical_hits(
+                &options.query,
+                &mut raw_hits,
+                embed_backend,
+                options.relevance_floor,
+                read_connection,
+                &mut degraded,
+            );
             let calibration_start = Instant::now();
             annotate_hits_with_score_calibration(
                 &options.workspace_path,
@@ -10488,6 +10623,14 @@ async fn run_diag_search_in_snapshot(
     // Mirror `run_search`'s calibration-aware relevance floor so
     // `ee diag search` cannot silently disagree with the live path.
     let mut raw_hits = raw_hits;
+    drop_stopword_only_lexical_hits(
+        &options.query,
+        &mut raw_hits,
+        embed_backend,
+        options.relevance_floor,
+        read_connection,
+        &mut degraded,
+    );
     annotate_hits_with_score_calibration(
         &options.workspace_path,
         options.database_path.as_deref(),
@@ -27474,6 +27617,109 @@ mod tests {
     // ========================================================================
     // Bead bd-17c65.2.5 (B5) — weak_query_recall signal
     // ========================================================================
+
+    fn stopword_probe_hit(
+        doc_id: &str,
+        source: ScoreSource,
+        content: &str,
+        truncated: bool,
+    ) -> SearchHit {
+        SearchHit {
+            doc_id: doc_id.to_owned(),
+            score: 1.0,
+            source,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(2.0),
+            rerank_score: None,
+            metadata: Some(serde_json::json!({
+                "content": content,
+                "content_truncated": truncated,
+            })),
+            explanation: None,
+        }
+    }
+
+    #[test]
+    fn stopword_only_lexical_hits_are_dropped_and_counted() {
+        let mut hits = vec![
+            stopword_probe_hit(
+                "ev_a",
+                ScoreSource::Lexical,
+                "user: How do I run the lint job?",
+                false,
+            ),
+            stopword_probe_hit(
+                "ev_b",
+                ScoreSource::Lexical,
+                "assistant: Baking bread needs a sourdough starter.",
+                false,
+            ),
+            stopword_probe_hit(
+                "ev_c",
+                ScoreSource::Lexical,
+                "assistant: How do I ...",
+                true,
+            ),
+            stopword_probe_hit("mem_d", ScoreSource::Hybrid, "How do I deploy?", false),
+        ];
+        let mut degraded = Vec::new();
+        drop_stopword_only_lexical_hits(
+            "how do I bake sourdough bread",
+            &mut hits,
+            EmbedBackend::NeuralLocal,
+            None,
+            None,
+            &mut degraded,
+        );
+        let kept = hits
+            .iter()
+            .map(|hit| hit.doc_id.as_str())
+            .collect::<Vec<_>>();
+        // ev_a matched only "how"/"do"/"I"; ev_b shares "sourdough" and
+        // "bread"; a truncated body cannot prove absence; a hybrid
+        // hit under a semantic backend is never judged lexically.
+        assert_eq!(kept, vec!["ev_b", "ev_c", "mem_d"]);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "lexical_stopword_only_filtered");
+
+        // Without a semantic backend every hit is judged on its words.
+        let mut hits = vec![stopword_probe_hit(
+            "mem_d",
+            ScoreSource::Hybrid,
+            "How do I deploy?",
+            false,
+        )];
+        let mut degraded = Vec::new();
+        drop_stopword_only_lexical_hits(
+            "how do I bake sourdough bread",
+            &mut hits,
+            EmbedBackend::HashFallback,
+            None,
+            None,
+            &mut degraded,
+        );
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn stopword_filter_respects_explicit_zero_floor_and_contentless_queries() {
+        let hit = stopword_probe_hit("ev_a", ScoreSource::Lexical, "How do I run it?", false);
+        for (query, floor) in [("bake sourdough bread", Some(0.0)), ("how do I", None)] {
+            let mut hits = vec![hit.clone()];
+            let mut degraded = Vec::new();
+            drop_stopword_only_lexical_hits(
+                query,
+                &mut hits,
+                EmbedBackend::HashFallback,
+                floor,
+                None,
+                &mut degraded,
+            );
+            assert_eq!(hits.len(), 1, "query {query:?} floor {floor:?}");
+            assert!(degraded.is_empty());
+        }
+    }
 
     #[test]
     fn weak_query_recall_degradation_carries_top_score_and_floor() {
