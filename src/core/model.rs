@@ -3169,9 +3169,12 @@ fn download_embedding_manifest(
         // Race the download against a bounded deadline. On timeout the inner
         // future is dropped, which synchronously closes the stalled socket, and
         // `block_on` returns the Elapsed branch instead of parking forever.
-        match asupersync::time::TimeoutFuture::after(cx.now(), EMBEDDING_DOWNLOAD_TIMEOUT, download)
-            .await
-        {
+        let outcome =
+            asupersync::time::TimeoutFuture::after(cx.now(), EMBEDDING_DOWNLOAD_TIMEOUT, download)
+                .await;
+        // The downloader empties but never removes its staging directory.
+        crate::core::index::reclaim_model_staging_dirs(&destination);
+        match outcome {
             Ok(result) => result.map_err(|error| DomainError::Configuration {
                 message: format!("Failed to download pinned embedding model {}: {error}", manifest.id),
                 repair: Some(

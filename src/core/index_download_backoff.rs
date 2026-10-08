@@ -149,6 +149,51 @@ pub(super) fn remove_own_staging_dirs(model_root: &Path, model: &str) -> usize {
     removed
 }
 
+/// Staging directories of other processes older than this are abandoned: a
+/// live download writes its first file within seconds of creating its dir.
+const ABANDONED_STAGING_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Remove EMPTY `.<model>-download-*` staging directories older than
+/// [`ABANDONED_STAGING_AGE`], whatever process made them (bd-4b3j2).
+///
+/// The downloader moves each verified file out of its staging directory and
+/// never removes the directory itself, so every acquisition -- successful or
+/// not -- left one empty directory behind (414 on one host). `remove_dir`
+/// refuses a non-empty directory, and the age guard spares a concurrent
+/// download that has just created its own.
+pub(super) fn sweep_abandoned_staging_dirs(model_root: &Path, model: &str) -> usize {
+    sweep_abandoned_staging_dirs_at(model_root, model, SystemTime::now())
+}
+
+fn sweep_abandoned_staging_dirs_at(model_root: &Path, model: &str, now: SystemTime) -> usize {
+    let prefix = format!(".{model}-download-");
+    let Ok(entries) = std::fs::read_dir(model_root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_str().is_some_and(|name| name.starts_with(&prefix)) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+        let abandoned = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= ABANDONED_STAGING_AGE);
+        if abandoned && std::fs::remove_dir(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +265,39 @@ mod tests {
         record_failure_at(root.path(), "m", &"x".repeat(10_000), 5);
         let marker = read_marker(root.path(), "m").ok_or("marker should exist")?;
         assert_eq!(marker.error().chars().count(), MAX_RECORDED_ERROR_CHARS);
+        Ok(())
+    }
+
+    #[test]
+    fn sweep_removes_only_empty_abandoned_staging_dirs() -> TestResult {
+        let root = temp_root("ee-download-sweep-")?;
+        let model = "potion-test";
+        let empty = root
+            .path()
+            .join(format!(".{model}-download-7-0000000000000001"));
+        let busy = root
+            .path()
+            .join(format!(".{model}-download-8-0000000000000002"));
+        let other = root.path().join(".other-model-download-9-0000000000000003");
+        for dir in [&empty, &busy, &other] {
+            std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(busy.join("model.safetensors.part"), b"x")
+            .map_err(|error| error.to_string())?;
+
+        // Fresh directories belong to downloads that may still be running.
+        assert_eq!(
+            sweep_abandoned_staging_dirs_at(root.path(), model, SystemTime::now()),
+            0
+        );
+        let later = SystemTime::now() + ABANDONED_STAGING_AGE + Duration::from_secs(1);
+        assert_eq!(
+            sweep_abandoned_staging_dirs_at(root.path(), model, later),
+            1
+        );
+        assert!(!empty.exists());
+        assert!(busy.exists(), "a staging dir with content is never removed");
+        assert!(other.exists(), "another model's staging dirs are untouched");
         Ok(())
     }
 

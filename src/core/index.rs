@@ -8061,6 +8061,9 @@ impl EeLazyModel2VecEmbedder {
                 ),
             ))),
         };
+        if !matches!(downloaded, Err(SearchError::Cancelled { .. })) {
+            reclaim_model_staging_dirs(&destination);
+        }
         let backup = match downloaded {
             Ok(backup) => {
                 download_backoff::clear(staging_root, POTION_MODEL_NAME);
@@ -8073,7 +8076,6 @@ impl EeLazyModel2VecEmbedder {
                         POTION_MODEL_NAME,
                         &error.to_string(),
                     );
-                    download_backoff::remove_own_staging_dirs(staging_root, POTION_MODEL_NAME);
                 }
                 return Err(error);
             }
@@ -8348,6 +8350,20 @@ impl crate::search::Embedder for EeLazyModel2VecEmbedder {
     fn supports_mrl(&self) -> bool {
         self.is_ready()
     }
+}
+
+/// Remove the download staging directories a finished model acquisition into
+/// `destination` leaves beside it: this process's own, and empty ones other
+/// processes abandoned (bd-4b3j2). Best effort; never fails the caller.
+pub(crate) fn reclaim_model_staging_dirs(destination: &Path) {
+    let (Some(parent), Some(name)) = (
+        destination.parent(),
+        destination.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return;
+    };
+    download_backoff::remove_own_staging_dirs(parent, name);
+    download_backoff::sweep_abandoned_staging_dirs(parent, name);
 }
 
 pub(crate) fn potion_model_destination_dir(model_root: &Path) -> PathBuf {
