@@ -885,6 +885,127 @@ fn warm_published_index(
     Ok(documents_total)
 }
 
+/// bd-64w73 experiment 1: is `ee index rebuild` DETERMINISTIC?
+///
+/// Two indexes built from three identical documents score lexical relevance 4.1e-5 apart.
+/// Five explanations are eliminated (embedding backend by measurement; workspace path,
+/// tags, insertion order and searchable body by reading), and the remaining question
+/// splits cleanly in half:
+///
+///   if two independent builds OF THE SAME STORE score identically, the nondeterminism is
+///     RESTORE-SPECIFIC and the search moves to what restore changes about a document;
+///   if they differ, index BUILDING is nondeterministic, restore is irrelevant to the
+///     delta, and the parent test could never have held that assertion.
+///
+/// This removes restore as a variable entirely: one workspace, one database, one set of
+/// rows, two index directories, two packs. Anything that differs is attributable to the
+/// build (or to scoring over it) and to nothing else.
+///
+/// Pinned to `lexical_only --strict-source-mode` for the same reason the round-trip packs
+/// are: `model_registry` is `rediscover_on_restore`, so the vector tier is a legitimately
+/// varying input, and strict makes an unavailable tier FAIL rather than silently fall back.
+#[test]
+fn two_index_builds_of_one_store_score_identically() -> TestResult {
+    let _trace = test_tracing::init_test_tracing("bd-64w73", "two_index_builds_of_one_store");
+    let staging = tempfile::Builder::new()
+        .prefix("ee-64w73-determinism-")
+        .tempdir()
+        .map_err(|error| format!("create temp dir: {error}"))?;
+    let workspace = staging.path().join("ws");
+    fs::create_dir_all(&workspace).map_err(|error| format!("mkdir ws: {error}"))?;
+    let workspace_arg = workspace.to_string_lossy().into_owned();
+
+    run_ee(&["--workspace", &workspace_arg, "--json", "init"])?;
+
+    // The same three seeds the round-trip test uses, so a difference here is comparable to
+    // the difference there. Seed 0's content IS the query, as it is there.
+    for (level, kind, content) in [
+        ("procedural", "rule", CONTEXT_QUERY),
+        (
+            "semantic",
+            "fact",
+            "The index lives under the workspace store.",
+        ),
+        (
+            "episodic",
+            "note",
+            "Checked the release gate before publishing.",
+        ),
+    ] {
+        run_ee(&[
+            "remember",
+            content,
+            "--level",
+            level,
+            "--kind",
+            kind,
+            "--workspace",
+            &workspace_arg,
+            "--json",
+        ])?;
+    }
+
+    let db = workspace.join(".ee").join("ee.db");
+    let db_arg = db.to_string_lossy().into_owned();
+    let mut packs = Vec::new();
+    let mut counts = Vec::new();
+    for round in ["first", "second"] {
+        let index_dir = staging.path().join(format!("{round}-index"));
+        let index_arg = index_dir.to_string_lossy().into_owned();
+        // A SEPARATE directory each time, so this is two independent publications of the
+        // same rows rather than one index read twice.
+        counts.push(warm_published_index(
+            &workspace_arg,
+            &db_arg,
+            &index_arg,
+            round,
+        )?);
+        let (pack, _raw) = run_ee_raw(&[
+            "--workspace",
+            &workspace_arg,
+            "--json",
+            "pack",
+            CONTEXT_QUERY,
+            "--database",
+            &db_arg,
+            "--index-dir",
+            &index_arg,
+            "--candidate-pool",
+            "1",
+            "--source-mode",
+            "lexical_only",
+            "--strict-source-mode",
+        ])?;
+        packs.push(pack);
+    }
+
+    ensure_equal(
+        &counts[1],
+        &counts[0],
+        "both builds of the same store indexed the same document count",
+    )?;
+    // EMPTY-WORLD GUARD. Two empty packs compare equal, so a query that retrieved nothing
+    // would make this whole test vacuous -- the same hole the round-trip test had.
+    let first_items = context_item_contents(&packs[0], "first pack")?;
+    ensure(
+        !first_items.is_empty(),
+        format!(
+            "first pack returned at least one item for {CONTEXT_QUERY:?} (it returned none, \
+             so both packs would be empty and this comparison would prove nothing)"
+        ),
+    )?;
+
+    let first = canonical_context_stdout(packs[0].clone())?;
+    let second = canonical_context_stdout(packs[1].clone())?;
+    ensure_context_json_bytes_equal(
+        &packs[1],
+        &packs[0],
+        &second,
+        &first,
+        "two independent index builds of ONE store produce byte-identical packs",
+    )
+}
+
 fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     if !ee::obs::normalize_pack_slo_measurements(&mut value)? {
         return Err("backup context output missing producer SLO measurements".to_owned());
