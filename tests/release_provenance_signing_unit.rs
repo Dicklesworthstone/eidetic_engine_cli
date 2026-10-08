@@ -61,7 +61,8 @@ fn release_workflow_signs_provenance_with_same_sigstore_trust_boundary() {
     for needle in [
         "permissions:",
         "id-token: write",
-        "uses: sigstore/cosign-installer@v3",
+        // The workflow pins the installer by commit, rather than a mutable tag.
+        "uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac",
         "cosign sign-blob --yes",
         "--tlog-upload=true",
         "--bundle ee-${{ matrix.target }}.provenance.json.sigstore.json",
