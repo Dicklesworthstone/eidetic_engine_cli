@@ -161,6 +161,72 @@ impl Fixture {
 }
 
 #[test]
+fn transcript_pack_candidates_spend_tokens_on_observed_text_and_keep_source_identity() {
+    let fixture = Fixture::new();
+    let session = fixture.session(0x45_0101);
+    let body = "Résumé: pin the clock in the replay fixture before hashing.";
+    let id = fixture.line(
+        &session,
+        17,
+        "message",
+        "assistant",
+        &json!({
+            "parentUuid": "fixture-parent", "isSidechain": false,
+            "promptId": "fixture-prompt", "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Private reasoning. ".repeat(200)},
+                {"type": "text", "text": body}
+            ]}
+        }),
+    );
+    let before = fixture.db.get_evidence_span(&id).unwrap().unwrap();
+    let candidate = fixture.candidate(&id, 0.9);
+    let expected = format!("assistant: {body}");
+    assert_eq!(candidate.item.content, expected);
+    assert_eq!(
+        candidate.item.estimated_tokens,
+        estimate_tokens_default(&expected)
+    );
+    assert!(candidate.item.estimated_tokens < estimate_tokens_default(&before.excerpt));
+    assert_eq!(candidate.item.evidence_id, id);
+    assert_eq!(candidate.item.session_id, session);
+    assert_eq!(
+        (candidate.item.start_line, candidate.item.end_line),
+        (17, 17)
+    );
+    assert_eq!(
+        candidate.item.entity_revision,
+        before.pack_entity_revision()
+    );
+    let after = fixture.db.get_evidence_span(&id).unwrap().unwrap();
+    assert_eq!(after.excerpt, before.excerpt);
+    assert_eq!(after.content_hash, before.content_hash);
+}
+
+#[test]
+fn transcript_pack_candidates_refuse_a_record_without_observed_text() {
+    let fixture = Fixture::new();
+    let session = fixture.session(0x45_0102);
+    for (index, record) in [
+        json!({"type": "assistant", "content": [
+            {"type": "thinking", "thinking": "Unobserved repair canary"}
+        ]}),
+        json!({"type": "assistant", "channel": "analysis", "content": "Unobserved analysis."}),
+        json!({"type": "assistant", "content": "first body", "message": "second body"}),
+        json!({"type": "assistant", "content": [
+            {"type": "unknown", "text": "Unknown block canary"}
+        ]}),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let id = fixture.line(&session, index as u32 + 1, "message", "assistant", record);
+        let span = fixture.db.get_evidence_span(&id).unwrap().unwrap();
+        assert!(direct_evidence_pack_candidate(span, 1.0, "lexical", "repair", None).is_none());
+    }
+}
+
+#[test]
 fn a_matched_turn_brings_its_card_and_one_card_speaks_for_its_error_class() {
     let fixture = Fixture::new();
     let (first_turn, first_card) = fixture.incident(

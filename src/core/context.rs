@@ -14430,6 +14430,9 @@ fn direct_evidence_pack_candidate(
     // (bd-reality-core-convergence-1azkt.45). Provenance still names the
     // exact stored lines.
     let content = span.reader_text().into_owned();
+    if content.trim().is_empty() {
+        return None;
+    }
     let estimated_tokens = estimate_tokens_default(&content).max(1);
     let provenance_uri = ProvenanceUri::from_str(&span.canonical_provenance_uri()).ok()?;
     let provenance = PackProvenance::new(

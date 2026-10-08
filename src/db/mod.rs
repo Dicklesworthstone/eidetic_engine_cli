@@ -14201,7 +14201,7 @@ pub const EVIDENCE_CANONICAL_PROVENANCE_REVISION: u32 = 1;
 /// classification, reader projection, ingestion screening or any admission
 /// clause changes meaning: every recorded verdict then stops matching, rows
 /// revalidate in full, and the next write-side backfill records fresh verdicts.
-pub const EVIDENCE_ADMISSION_VERDICT_REVISION: u32 = 2;
+pub const EVIDENCE_ADMISSION_VERDICT_REVISION: u32 = 3;
 
 /// Closed producer vocabulary for the shared evidence table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52222,6 +52222,11 @@ UPDATE memories
             "{\"type\":\"summary\",\"summary\":\"The cache key repair was verified.\"}\n",
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":\"The release build then passed.\"}}"
         );
+        const ESCAPED_SAFE_WINDOW: &str = concat!(
+            r#"{"type":"user","message":{"role":"user","content":"Why did the caf\u00e9 release fail?"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The caf\u00e9 release now uses stable cache keys."}]}}"#
+        );
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         setup_workspace(&connection)?;
@@ -52252,6 +52257,11 @@ UPDATE memories
             ),
             (SAFE_WINDOW, true),
             (SUMMARY_WINDOW, true),
+            (ESCAPED_SAFE_WINDOW, true),
+            (
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","channel":"analysis","content":[{"type":"output_text","text":"Unobserved internal analysis."}]}}"#,
+                false,
+            ),
             (
                 concat!(
                     "{\"role\":\"user\",\"content\":\"Why did the release fail?\"}\n",
@@ -52404,6 +52414,15 @@ UPDATE memories
                     &"user: Why did the Café release fail?\nassistant: The repaired cache key now uses stable identity bytes.",
                     "the admitted window keeps every observed role and body",
                 )?;
+            }
+            if excerpt == ESCAPED_SAFE_WINDOW {
+                ensure_equal(
+                    &stored.reader_text().as_ref(),
+                    &"user: Why did the café release fail?\nassistant: The café release now uses stable cache keys.",
+                    "escaped Unicode is decoded in every admitted window record",
+                )?;
+            }
+            if matches!(excerpt, SAFE_WINDOW | ESCAPED_SAFE_WINDOW) {
                 ensure_equal(
                     &stored.canonical_provenance_uri(),
                     &format!(
@@ -52439,34 +52458,47 @@ UPDATE memories
             let existing = connection
                 .get_evidence_span(&id)?
                 .ok_or_else(|| TestFailure::new("existing transcript evidence missing"))?;
-            // Bind a positive verdict exactly as revision 1 did, to this row
-            // rather than another row or a drifted hash. Only the code revision
-            // invalidates it, and the live predicate must decide again.
-            let old_binding =
-                super::admission_verdict_binding(existing.admission_verdict_hasher(1), true);
-            connection.execute_for(
-                super::DbOperation::Execute,
-                "UPDATE evidence_admission_verdicts SET verdict = 'admitted', verdict_binding = ?1, verdict_revision = 1 WHERE evidence_span_id = ?2",
-                &[
-                    sqlmodel_core::Value::Text(old_binding.clone()),
-                    sqlmodel_core::Value::Text(id.clone()),
-                ],
-            )?;
-            ensure(
-                existing
-                    .recorded_admission_verdict(Some(&old_binding))
-                    .is_none(),
-                "a pre-projection positive verdict is never authoritative",
-            )?;
-            ensure_equal(
-                &existing.is_search_admitted_with_recorded_verdict(
-                    workspace_id,
-                    &session,
-                    Some(&old_binding),
-                ),
-                &expected,
-                "stale cached verdict revalidates readable projection",
-            )?;
+            // Bind positive verdicts exactly as the prior revisions did, to
+            // this row rather than another row or a drifted hash. Revision 1
+            // predates projection and revision 2 predates encoded JSONL
+            // admission. Only the code revision invalidates each binding.
+            for old_revision in [1_u32, 2] {
+                let old_binding = super::admission_verdict_binding(
+                    existing.admission_verdict_hasher(old_revision),
+                    true,
+                );
+                connection.execute_for(
+                    super::DbOperation::Execute,
+                    "UPDATE evidence_admission_verdicts SET verdict = 'admitted', verdict_binding = ?1, verdict_revision = ?2 WHERE evidence_span_id = ?3",
+                    &[
+                        sqlmodel_core::Value::Text(old_binding.clone()),
+                        sqlmodel_core::Value::BigInt(i64::from(old_revision)),
+                        sqlmodel_core::Value::Text(id.clone()),
+                    ],
+                )?;
+                ensure(
+                    existing
+                        .recorded_admission_verdict(Some(&old_binding))
+                        .is_none(),
+                    "a prior-revision positive verdict is never authoritative",
+                )?;
+                ensure_equal(
+                    &existing.is_search_admitted_with_recorded_verdict(
+                        workspace_id,
+                        &session,
+                        Some(&old_binding),
+                    ),
+                    &expected,
+                    "stale cached verdict revalidates readable projection",
+                )?;
+                ensure_equal(
+                    &connection
+                        .get_search_admitted_evidence_span(&id, workspace_id)?
+                        .is_some(),
+                    &expected,
+                    "existing search admission rechecks both prior revisions",
+                )?;
+            }
             ensure_equal(
                 &existing.is_derivation_admitted_for_session(workspace_id, &session),
                 &expected,
@@ -52477,25 +52509,18 @@ UPDATE memories
                 &expected,
                 "existing pack admission",
             )?;
-            ensure_equal(
-                &connection
-                    .get_search_admitted_evidence_span(&id, workspace_id)?
-                    .is_some(),
-                &expected,
-                "existing search admission",
-            )?;
         }
         let (admitted, _) =
             connection.list_search_admitted_evidence_spans_for_workspace(workspace_id)?;
         ensure_equal(
             &admitted.len(),
-            &7,
+            &8,
             "ordinary messages, summaries and safe windows survive workspace scanning",
         )?;
         ensure_equal(
             &connection.backfill_evidence_admission_verdicts(Some(workspace_id))?,
             &(record_count as u64),
-            "rebuild backfill refreshes every pre-projection verdict",
+            "rebuild backfill refreshes every prior-revision verdict",
         )?;
         ensure_equal(
             &connection.backfill_evidence_admission_verdicts(Some(workspace_id))?,

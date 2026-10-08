@@ -94,6 +94,14 @@ pub(super) fn append_evidence(
             if span.pack_eligibility != "admitted" {
                 return Ok(());
             }
+            let content = span.reader_text();
+            // Structured CASS can have an admitted source row but no readable
+            // body. Do not let a refused projection consume a candidate slot
+            // or acquire native citation metadata. Screen the decoded bytes
+            // that will actually be quoted as well as the stored envelope.
+            if content.trim().is_empty() || !public_evidence_body(&content) {
+                return Ok(());
+            }
             let Some(provenance_uri) = public_provenance(&span.canonical_provenance_uri()) else {
                 return Ok(());
             };
@@ -118,8 +126,9 @@ pub(super) fn append_evidence(
             let candidate = AskCandidate {
                 memory_id: span.id.clone(),
                 // Answer from the projected message body, not the transcript
-                // envelope (bd-reality-core-convergence-1azkt.45).
-                content: span.reader_text().into_owned(),
+                // envelope. Citation byte offsets refer to this exact view;
+                // native revision and provenance still bind the stored source.
+                content: content.into_owned(),
                 // Imported excerpts have no calibrated memory confidence.
                 // Use a neutral prior without claiming human verification.
                 confidence: 0.5,
