@@ -129,6 +129,30 @@ static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::n
 static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximityTree>>> =
     OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
+/// Wall-clock budget for one pack-pipeline command.
+///
+/// RELEASE IS UNCHANGED at the interactive 60 seconds. Debug gets the same
+/// headroom `SEARCH_REQUEST_TIMEOUT` already grants itself (src/core/search.rs:142)
+/// for the reason stated there: Frankensearch's unoptimized CPU work "can exceed
+/// the release budget even for tiny fixtures".
+///
+/// Pack CALLS search, so a flat 60 s here was internally inconsistent with its own
+/// dependency's stated requirement: in a debug build pack was cancelled by its own
+/// wrapper while the search beneath it was still inside its sanctioned 300 s. The
+/// corpus size is not the lever -- the comment above says "even for tiny fixtures",
+/// and bd-bka39 measured it on a published index of THREE documents:
+///
+///     ee pack ... --candidate-pool 1   exit 130
+///     {"code":"cancelled","message":"Deadline exceeded.",
+///      "details":{"cancelKind":"deadline","cancelClass":"budget_exhausted"}}
+///
+/// Keeping release at 60 s deliberately: a genuine pack performance regression must
+/// still fail a release gate. This only stops a debug test binary from being killed
+/// by a budget its own retrieval layer does not accept.
+#[cfg(not(debug_assertions))]
+const PACK_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(debug_assertions)]
+const PACK_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 /// v9: bind the executed quality policy and scored candidates after retrieval,
 /// and miss responses written before pack-hash input v4 (ADR 0087 §8).
@@ -1552,7 +1576,7 @@ pub(crate) fn run_context_pack_with_embedder(
     options: &ContextPackOptions,
     embedder: Arc<dyn crate::search::Embedder>,
 ) -> Result<ContextResponse, ContextPackError> {
-    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+    crate::core::run_cli_with_cx(PACK_COMMAND_TIMEOUT, |cx| async move {
         run_context_pack_with_performance_inner(
             options,
             PACK_COMMAND,
@@ -2251,7 +2275,7 @@ pub fn run_context_pack_with_performance(
     options: &ContextPackOptions,
     command: &'static str,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
-    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+    crate::core::run_cli_with_cx(PACK_COMMAND_TIMEOUT, |cx| async move {
         run_context_pack_with_performance_with_cx(&cx, options, command).await
     })
     .map_err(|error| ContextPackError::Pack(format!("Failed to start pack runtime: {error}")))?
@@ -2275,7 +2299,7 @@ pub(crate) fn run_context_pack_with_search_provider(
     command: &'static str,
     provider: &ContextSearchProvider<'_>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
-    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+    crate::core::run_cli_with_cx(PACK_COMMAND_TIMEOUT, |cx| async move {
         run_context_pack_with_performance_inner(
             options,
             command,
@@ -2402,7 +2426,7 @@ pub fn run_context_pack_with_performance_seeded(
     command: &'static str,
     determinism: Deterministic<Seed>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
-    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+    crate::core::run_cli_with_cx(PACK_COMMAND_TIMEOUT, |cx| async move {
         run_context_pack_with_performance_inner(
             options,
             command,
