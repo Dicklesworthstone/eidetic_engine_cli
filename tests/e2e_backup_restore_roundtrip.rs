@@ -2386,6 +2386,41 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &source_context_index_arg,
         "--candidate-pool",
         "1",
+        // PIN THE RETRIEVAL TIER ON BOTH SIDES (bd-bka39). `ee pack` defaults to
+        // `hybrid` (src/cli/mod.rs:3267), so relevance blends a VECTOR contribution --
+        // and `model_registry` is one of the tables src/core/backup.rs marks
+        // `rediscover_on_restore`, so a restored store does NOT inherit the source's
+        // registered embedding model. The two stores can therefore resolve different
+        // embedding backends, which is already why `/data/embed_backend` sits in the
+        // canonicalizer's exclusion list.
+        //
+        // That is the surviving explanation for the 5.2e-5 relevance delta measured on
+        // 2026-10-08 (relevance 0.474920 vs 0.474868, propagating into averageRelevance,
+        // marginalGain, objectiveValue and totalObjectiveValue). Three alternatives were
+        // eliminated by reading rather than guessing:
+        //   workspace path in the document -- the rebuild passes `None`
+        //                                     (src/core/index.rs memory_documents_with_anchors)
+        //   tags in the document           -- the rebuild passes `&[]`
+        //   insertion order / segment layout -- the rebuild fetches
+        //                                     `ORDER BY m.id ASC` and restore preserves ids
+        //
+        // So the fix removes the legitimately-varying INPUT instead of tolerating its
+        // OUTPUT. Excluding the five score pointers would blind this comparison to real
+        // relevance regressions, which is the opposite of what it is for; pinning
+        // lexical_only makes both sides deterministic over provably identical corpora.
+        // The embedding tier's own equivalence across restore is a different property and
+        // needs its own test, because restore is DESIGNED not to carry the registry.
+        //
+        // STRICT, because `--source-mode` alone is a PREFERENCE: its help says strict
+        // "fail[s] instead of falling back when the requested retrieval source is
+        // unavailable" (src/cli/mod.rs:3270). Without strict, a side that could not open
+        // its lexical tier would quietly retrieve some other way and the comparison would
+        // stop being apples-to-apples without saying so -- the exact silent-divergence
+        // this pin exists to prevent. The sibling test at :452 already pairs the two flags
+        // for the same reason.
+        "--source-mode",
+        "lexical_only",
+        "--strict-source-mode",
     ])?;
     let source_pack_elapsed = source_pack_started.elapsed();
     eprintln!(
@@ -2630,6 +2665,12 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &restored_context_index_arg,
         "--candidate-pool",
         "1",
+        // Must match the source pack's tier exactly; see the reasoning there. If these two
+        // ever diverge the comparison silently stops being apples-to-apples, which is the
+        // failure mode this flag exists to remove.
+        "--source-mode",
+        "lexical_only",
+        "--strict-source-mode",
     ])?;
     // The ratio is the number that settles it. Both sides hold an identical 3-document
     // index, so a restored/source ratio near 1 means the pack is simply expensive in a
