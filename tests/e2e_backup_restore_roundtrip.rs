@@ -772,6 +772,61 @@ fn json_differs_only_by_float_tolerance(
 }
 
 #[test]
+fn why_normalization_drops_the_numbers_and_keeps_the_retrieval_path() {
+    // POSITIVE CONTROL for the why normalization (bd-64w73). It exists to tolerate two
+    // unstable digits; if it also erased the prose it would be silently retiring the one
+    // assertion that distinguishes a lexical match from a semantic one.
+    let pack = |why: &str| {
+        serde_json::json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {"pack": {
+                "schema": "ee.pack.v2",
+                "slo": slo_fixture(),
+                "items": [{"content": "c", "why": why}],
+                "snapshotIdentity": {"components": {
+                    "request": "blake3:a", "referenceTime": "blake3:b",
+                    "qualityScoring": "blake3:c", "items": "blake3:d",
+                    "omitted": "blake3:e", "degraded": "blake3:f",
+                    "coordination": "blake3:g", "renderedText": "blake3:h"
+                }, "digest": "blake3:i"}
+            }}
+        })
+    };
+    let rendered = |why: &str| {
+        String::from_utf8(canonical_context_stdout(pack(why)).expect("canonicalizes"))
+            .expect("utf-8")
+    };
+
+    // The two sides that differ ONLY in the rounded numbers must come out equal.
+    let high = rendered("matched 'x' via lexical (relevance 0.4000, utility 0.5000)");
+    let low = rendered("matched 'x' via lexical (relevance 0.3999, utility 0.5000)");
+    assert_eq!(high, low, "a flipped fourth decimal must normalize away");
+    assert!(
+        high.contains("matched 'x' via lexical"),
+        "the prose and the retrieval path must survive: {high}"
+    );
+    assert!(
+        !high.contains("0.4000") && !high.contains("0.3999"),
+        "the rendered relevance must not survive: {high}"
+    );
+
+    // A changed retrieval PATH must still differ. This is the hole the normalization could
+    // have opened, and the reason it replaces only the parenthetical.
+    let semantic = rendered("matched 'x' via semantic (relevance 0.4000, utility 0.5000)");
+    assert_ne!(
+        high, semantic,
+        "lexical vs semantic must remain a difference"
+    );
+    // So must a changed matched CONTENT.
+    let other = rendered("matched 'y' via lexical (relevance 0.4000, utility 0.5000)");
+    assert_ne!(
+        high, other,
+        "a different matched content must remain a difference"
+    );
+}
+
+#[test]
 fn float_tolerance_accepts_only_bounded_numeric_drift() {
     // POSITIVE CONTROL for the tolerance above (bd-64w73). A tolerance that accepted more
     // than it claims would silently retire this file's strongest assertion, so each way it
@@ -1218,6 +1273,22 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     for pointer in [
         "/data/pack/snapshotIdentity/components/request",
         "/data/pack/snapshotIdentity/digest",
+        // DIGESTS OVER A TOLERATED VALUE (bd-64w73). These two hash score-bearing content
+        // -- `items` covers the item scores, `renderedText` covers the why text, which
+        // embeds relevance rounded to four decimals. Index rebuild is nondeterministic at
+        // 1.9e-5 (measured: two builds of ONE store, same rows, no restore involved), and
+        // once the underlying number is tolerated within 1e-6, a DIGEST of it cannot be
+        // asserted: a hash has no tolerance, so it converts a permitted wobble into a hard
+        // failure.
+        //
+        // WHAT IS LOST, and where it is still covered: the `items` digest also covered item
+        // CONTENT, which `context_item_contents` compares directly and exactly a few lines
+        // below -- so content changes are still caught, by a check that reports WHICH item
+        // changed instead of only that some hash moved. The `renderedText` digest covered
+        // the why text, which is normalized and compared below rather than dropped.
+        // The other five components stay under full byte comparison and are guarded.
+        "/data/pack/snapshotIdentity/components/items",
+        "/data/pack/snapshotIdentity/components/renderedText",
         "/data/degraded",
         "/degraded",
         "/data/pack/advisoryBanner",
@@ -1226,6 +1297,29 @@ fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
         "/data/pack/text",
     ] {
         remove_json_pointer(&mut value, pointer);
+    }
+    // NORMALIZE `why`, DO NOT DROP IT (bd-64w73). Each item's why text reads
+    //     matched '<content>' via lexical (relevance 0.4000, utility 0.5000)
+    // and that parenthetical renders relevance to four decimals -- which the measured
+    // 1.9e-5 rebuild wobble is enough to flip (0.4000 vs 0.3999). Asserting a four-decimal
+    // rendering of a number tolerated at 1e-6 is incoherent, so the numbers go.
+    //
+    // The PROSE stays compared, and it is the valuable half: it names the matched content
+    // and the retrieval path. "via lexical" vs "via semantic" is exactly the kind of
+    // divergence this test exists to catch, and dropping the whole field to escape two
+    // digits would have discarded it. Only the parenthetical is replaced.
+    if let Some(items) = value
+        .pointer_mut("/data/pack/items")
+        .and_then(JsonValue::as_array_mut)
+    {
+        for item in items {
+            if let Some(why) = item.get_mut("why")
+                && let Some(text) = why.as_str()
+                && let Some(open) = text.rfind(" (relevance ")
+            {
+                *why = JsonValue::String(format!("{} (scores normalized)", &text[..open]));
+            }
+        }
     }
     // THE SURVIVING COMPONENTS MUST STILL BE THERE. Removing `components/request` and
     // `digest` is only safe while the other six components remain under comparison; if a
