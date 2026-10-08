@@ -100,7 +100,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo test --locked --lib cass::import:: -- --test-threads=1 \
+          # The complete refresh namespace already ran with an execution floor above.
+          cargo test --locked --lib cass::import:: -- --skip cass::import::refresh:: --test-threads=1 \
             2>&1 | tee "$RUNNER_TEMP/cass-refresh-import.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/cass-refresh-import.log"
       - name: Verify ingestion and durable source commitments

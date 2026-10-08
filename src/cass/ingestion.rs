@@ -547,38 +547,75 @@ mod tests {
         let redacted_body = format!("{clean} label-{token}");
         let records = [
             (
+                "assistant text",
                 json!({"type": "assistant", "message": {"role": "assistant", "content": clean}, "metadata": {"finish": "complete", "counts": [1, 2], "cached": false}}),
                 false,
+                true,
             ),
             (
+                "assistant text with credential",
                 json!({"type": "assistant", "message": {"role": "assistant", "content": redacted_body}}),
                 true,
-            ),
-            (
-                json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": clean}, {"type": "text", "text": "Final repair verified."}]}}),
-                false,
-            ),
-            (
-                json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "Private reasoning sentinel.", "signature": "source-signature"}, {"type": "text", "text": clean}, {"type": "redacted_thinking", "data": "opaque-redacted-reasoning"}]}}),
-                false,
-            ),
-            (
-                json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": clean}]}}),
-                false,
-            ),
-            (
-                json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": redacted_body}]}}),
                 true,
             ),
             (
-                json!({"type": "event_msg", "payload": {"type": "agent_message", "message": clean}}),
+                "assistant text blocks",
+                json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": clean}, {"type": "text", "text": "Final repair verified."}]}}),
+                false,
+                true,
+            ),
+            (
+                "assistant text with reasoning",
+                json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "Private reasoning sentinel.", "signature": "source-signature"}, {"type": "text", "text": clean}, {"type": "redacted_thinking", "data": "opaque-redacted-reasoning"}]}}),
+                false,
                 false,
             ),
+            (
+                "response user input",
+                json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": clean}]}}),
+                false,
+                true,
+            ),
+            (
+                "response assistant output with credential",
+                json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": redacted_body}]}}),
+                true,
+                true,
+            ),
+            (
+                "agent message",
+                json!({"type": "event_msg", "payload": {"type": "agent_message", "message": clean}}),
+                false,
+                true,
+            ),
         ];
-        for (index, (original, redacted)) in records.into_iter().enumerate() {
+        for (index, (fixture, original, redacted, learning_admitted)) in
+            records.into_iter().enumerate()
+        {
             let id = EvidenceId::from_uuid(Uuid::from_u128(603 + index as u128)).to_string();
             let line = 7 + index as u32;
             let raw = original.to_string();
+            // Compare bounding against the complete screened source. A raw
+            // credential intentionally fails projection until screening removes
+            // it; that removal must not be mistaken for widened learning rules.
+            let complete_screen = screen_external_text_for_ingestion(&raw);
+            assert_eq!(complete_screen.redacted, redacted, "{fixture}");
+            assert!(
+                complete_screen.content.len() > MAX_EXCERPT_BYTES,
+                "{fixture}"
+            );
+            let complete_learning_admitted =
+                crate::cass::transcript::message_text(&complete_screen.content).is_some();
+            assert_eq!(
+                complete_learning_admitted, learning_admitted,
+                "{fixture}: complete screened source keeps strict learning admission"
+            );
+            if redacted {
+                assert!(
+                    crate::cass::transcript::message_text(&raw).is_none(),
+                    "{fixture}: raw credentials must still be refused"
+                );
+            }
             let old = super::super::truncate_excerpt(&raw, MAX_EXCERPT_BYTES);
             assert!(serde_json::from_str::<serde_json::Value>(&old).is_err());
             let input_line = json!({"line": line, "content": raw});
@@ -614,8 +651,8 @@ mod tests {
             assert_eq!(decoded, original, "only text bodies may change");
             assert_eq!(
                 crate::cass::transcript::message_text(&row.excerpt).is_some(),
-                crate::cass::transcript::message_text(&raw).is_some(),
-                "retaining readable text must not widen strict learning admission"
+                complete_learning_admitted,
+                "{fixture}: retaining readable text must not widen strict learning admission"
             );
             assert!(!row.excerpt.contains(&token));
             assert_eq!(
