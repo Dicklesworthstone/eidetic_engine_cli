@@ -53,6 +53,7 @@ pub(super) fn failed(output: &ToolOutput) -> bool {
     output.is_error == Some(true)
         || output.exit_code.is_some_and(|code| code != 0)
         || exit_report(bounded(&output.text)) == ExitReport::Rejected
+        || super::structured_error_reports_failure(&output.text)
         || bounded(&output.text).lines().any(|line| {
             let line = line.trim().to_ascii_lowercase();
             line.starts_with("error:")
@@ -73,7 +74,10 @@ pub(super) fn failed(output: &ToolOutput) -> bool {
 pub(super) fn succeeded(output: &ToolOutput) -> bool {
     // Diagnostic extraction may inspect a prefix, but that prefix can never
     // certify success when a failure or final status could follow the bound.
-    if output.text.len() > MAX_SCANNED_OUTPUT_BYTES || output.failed() {
+    if output.text.len() > MAX_SCANNED_OUTPUT_BYTES
+        || output.failed()
+        || !super::structured_output_allows_completion(&output.text)
+    {
         return false;
     }
     let lower = output.text.to_ascii_lowercase();
@@ -192,6 +196,77 @@ mod tests {
             exit_code: Some(0),
             ..output("")
         }));
+    }
+
+    #[test]
+    fn native_error_envelopes_veto_optimistic_process_completion() {
+        for text in [
+            r#"{"schema":"ee.error.v2","error":{"code":"migration_required","message":"migrate first"}}"#,
+            r#"{"schema":"ee.error.v2","error":{"code":false}}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":false,"degraded_codes":["rch_verify_topology_blocked"]}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":false,"degraded_codes":[]}"#,
+        ] {
+            let result = ToolOutput {
+                is_error: Some(false),
+                exit_code: Some(0),
+                ..output(text)
+            };
+            assert!(failed(&result), "{text}");
+            assert!(!succeeded(&result), "{text}");
+        }
+        assert!(succeeded(&ToolOutput {
+            is_error: Some(false),
+            exit_code: Some(0),
+            ..output(r#"{"schema":"ee.response.v2","success":true,"data":{}}"#)
+        }));
+    }
+
+    #[test]
+    fn native_abstentions_and_ambiguous_status_never_certify_a_repair() {
+        for text in [
+            r#"{"schema":"ee.rch.verify.v1","success":null,"exit_code":null,"verdict":"abstained","abstention_reason":"no_execution_attempted"}"#,
+            r#"{"schema":"ee.rch.verify.v1","exit_code":0}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":"true","exit_code":0}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":false,"success":true,"exit_code":0}"#,
+            r#"{"schema":"ee.rch.verify.v1","schema":"example","success":true,"exit_code":0}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"verdict":"abstained"}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"abstention_reason":"no_execution_attempted"}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"timed_out":true}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":null}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":1}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"degraded_codes":["rch_verify_topology_blocked"]}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"degraded_codes":["rch_verify_remote_marker_missing"]}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"known_blocker":{"schema":"ee.rch.known_blocker.v1","blocker_kind":"capacity_or_timeout"}}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"verdict":"passed","degraded_codes":["rch_verify_proof_broker_reuse_existing"]}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"status":"proof_broker_reuse"}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"verification_attribution":"not_run_proof_broker_reuse"}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"degraded_codes":["rch_verify_proof_broker_wait_for_inflight"]}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0"#,
+            r#"{"schema":"ee.response.v2","success":false,"data":{}}"#,
+        ] {
+            assert!(
+                !succeeded(&ToolOutput {
+                    is_error: Some(false),
+                    exit_code: Some(0),
+                    ..output(text)
+                }),
+                "{text}"
+            );
+        }
+        for text in [
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"verdict":"passed","timed_out":false,"abstention_reason":null,"known_blocker":null}"#,
+            r#"{"example":{"schema":"ee.rch.verify.v1","success":false}}"#,
+        ] {
+            assert!(
+                succeeded(&ToolOutput {
+                    is_error: Some(false),
+                    exit_code: Some(0),
+                    ..output(text)
+                }),
+                "{text}"
+            );
+        }
     }
 
     #[test]

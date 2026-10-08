@@ -30,6 +30,351 @@ use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
+/// Public consumers of CASS-derived native error classes. The fixture uses the
+/// real database and the production arc/card derivation, then closes that
+/// connection before invoking the real CLI in separate isolated processes.
+mod structured {
+    use super::super::isolated_ee::isolated_ee_command;
+    use ee::db::{CreateEvidenceSpanInput, CreateSessionInput, DbConnection, EvidenceProducerKind};
+    use serde_json::{Value, json};
+    use std::path::PathBuf;
+
+    type TestResult<T = ()> = Result<T, String>;
+
+    struct Fixture {
+        root: tempfile::TempDir,
+        workspace: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> TestResult<Self> {
+            let root = tempfile::Builder::new()
+                .prefix("ee-structured-error-recall-")
+                .tempdir()
+                .map_err(|error| error.to_string())?;
+            let workspace = root.path().join("workspace");
+            std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+            let workspace = workspace
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let fixture = Self { root, workspace };
+            fixture.run(&["init"])?;
+            Ok(fixture)
+        }
+
+        fn run(&self, arguments: &[&str]) -> TestResult<Value> {
+            let output = isolated_ee_command(&self.root.path().join("isolation"))?
+                .arg("--workspace")
+                .arg(&self.workspace)
+                .arg("--json")
+                .args(arguments)
+                .current_dir(&self.workspace)
+                .output()
+                .map_err(|error| error.to_string())?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !output.status.success() {
+                return Err(format!(
+                    "ee {arguments:?} failed: {}\nstdout={stdout}\nstderr={}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            let value: Value = serde_json::from_str(&stdout)
+                .map_err(|error| format!("ee {arguments:?}: {error}\n{stdout}"))?;
+            if value["schema"] != "ee.response.v2" || value["success"] != true {
+                return Err(format!("unexpected command envelope: {value}"));
+            }
+            Ok(value)
+        }
+
+        fn seed_arc(
+            &self,
+            seed: u128,
+            command: &str,
+            diagnostic: &Value,
+            repair: &str,
+            success: &Value,
+        ) -> TestResult<String> {
+            let connection = DbConnection::open_file(self.workspace.join(".ee/ee.db"))
+                .map_err(|error| error.to_string())?;
+            let workspace = connection
+                .get_workspace_by_path(&self.workspace.to_string_lossy())
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "initialized workspace row is missing".to_owned())?;
+            let session_id =
+                ee::models::SessionId::from_uuid(uuid::Uuid::from_u128(seed)).to_string();
+            connection
+                .insert_session(
+                    &session_id,
+                    &CreateSessionInput {
+                        workspace_id: workspace.id.clone(),
+                        cass_session_id: format!("/sessions/structured-{seed}.jsonl"),
+                        source_path: None,
+                        agent_name: Some("claude_code".to_owned()),
+                        model: None,
+                        started_at: None,
+                        ended_at: None,
+                        message_count: 5,
+                        token_count: None,
+                        content_hash: format!(
+                            "blake3:{}",
+                            blake3::hash(&seed.to_le_bytes()).to_hex()
+                        ),
+                        metadata_json: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            let records = [
+                (
+                    "tool_call",
+                    "assistant",
+                    json!({"type":"assistant","message":{"role":"assistant","content":[
+                        {"type":"tool_use","id":"failed","name":"Bash","input":{"command":command}}
+                    ]}}),
+                ),
+                (
+                    "tool_result",
+                    "user",
+                    json!({"type":"user","message":{"role":"user","content":[
+                        {"type":"tool_result","tool_use_id":"failed","is_error":true,"content":diagnostic.to_string()}
+                    ]}}),
+                ),
+                (
+                    "message",
+                    "assistant",
+                    json!({"type":"assistant","message":{"role":"assistant","content":[
+                        {"type":"text","text":repair}
+                    ]}}),
+                ),
+                (
+                    "tool_call",
+                    "assistant",
+                    json!({"type":"assistant","message":{"role":"assistant","content":[
+                        {"type":"tool_use","id":"verified","name":"Bash","input":{"command":command}}
+                    ]}}),
+                ),
+                (
+                    "tool_result",
+                    "user",
+                    json!({"type":"user","message":{"role":"user","content":[
+                        {"type":"tool_result","tool_use_id":"verified","is_error":false,"content":success.to_string()}
+                    ]}}),
+                ),
+            ];
+            let mut failure_id = None;
+            for (index, (kind, role, record)) in records.into_iter().enumerate() {
+                let number = u32::try_from(index + 1).map_err(|error| error.to_string())?;
+                let id = ee::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                    (seed << 8) + u128::from(number),
+                ))
+                .to_string();
+                let excerpt = record.to_string();
+                connection
+                    .insert_evidence_span(
+                        &id,
+                        &CreateEvidenceSpanInput {
+                            workspace_id: workspace.id.clone(),
+                            session_id: session_id.clone(),
+                            memory_id: None,
+                            producer_kind: EvidenceProducerKind::CassImport,
+                            cass_span_id: format!("{session_id}:{number}"),
+                            span_kind: kind.to_owned(),
+                            start_line: number,
+                            end_line: number,
+                            start_byte: None,
+                            end_byte: None,
+                            role: Some(role.to_owned()),
+                            content_hash: format!(
+                                "blake3:{}",
+                                blake3::hash(excerpt.as_bytes()).to_hex()
+                            ),
+                            excerpt,
+                            metadata_json: None,
+                            inherited_redaction_classes: Vec::new(),
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                if number == 2 {
+                    failure_id = Some(id);
+                }
+            }
+            let derived = ee::core::cass_error_recall::record_session_error_recall(
+                &connection,
+                &workspace.id,
+                &session_id,
+            )
+            .map_err(|error| error.to_string())?;
+            if derived.resolved_failures != 1 || derived.incident_cards_recorded != 1 {
+                return Err(format!(
+                    "fixture did not derive one resolved card: {derived:?}"
+                ));
+            }
+            let failure_id = failure_id.ok_or_else(|| "fixture failure missing".to_owned())?;
+            Ok(ee::core::incident_card::incident_card_id(
+                &workspace.id,
+                &failure_id,
+            ))
+        }
+    }
+
+    fn data(envelope: &Value) -> TestResult<&Value> {
+        envelope
+            .get("data")
+            .ok_or_else(|| format!("missing data: {envelope}"))
+    }
+
+    #[test]
+    fn native_structured_repairs_reach_diagnose_and_pack_from_separate_processes() -> TestResult {
+        let fixture = Fixture::new()?;
+        let ee_error = json!({"schema":"ee.error.v2","error":{
+            "code":"migration_required","message":"The workspace schema requires migration"
+        }});
+        let rch_error = json!({"schema":"ee.rch.verify.v1","success":false,"exit_code":1,
+            "known_blocker":{"schema":"ee.rch.known_blocker.v1","blocker_kind":"topology_blocked"},
+            "stderr_tail":"The path dependency could not be resolved in the remote checkout"
+        });
+        let ee_card = fixture.seed_arc(
+            0x60_2000,
+            "ee search release --json",
+            &ee_error,
+            "Updated the quasar workspace schema by applying pending migrations, which fixes opening the evidence tables during history search.",
+            &json!({"schema":"ee.response.v2","success":true,"data":{"results":[]}}),
+        )?;
+        let rch_card = fixture.seed_arc(
+            0x60_2001,
+            "scripts/rch_verify.sh -- cargo check --locked",
+            &rch_error,
+            "Updated the heliotrope dependency manifest to use the registered sibling path, which fixes remote checkout resolution before compilation.",
+            &json!({"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"verdict":"passed","status":"remote_pass"}),
+        )?;
+        fixture.run(&["index", "rebuild"])?;
+        for (tool, error, key, card, repaired_term) in [
+            ("ee", &ee_error, "ee:migration_required", &ee_card, "quasar"),
+            (
+                "rch",
+                &rch_error,
+                "rch:topology_blocked",
+                &rch_card,
+                "heliotrope",
+            ),
+        ] {
+            let diagnostic = error.to_string();
+            let recalled = fixture.run(&["diagnose-error", "--tool", tool, &diagnostic])?;
+            let recalled = data(&recalled)?;
+            assert_eq!(recalled["schema"], "ee.diagnose_error.v1");
+            assert_eq!(recalled["tool"], tool);
+            assert_eq!(recalled["fingerprintKey"], key);
+            assert_eq!(recalled["isKnown"], true);
+            assert_eq!(recalled["recorded"], false);
+            assert_eq!(recalled["repairEvidence"][0]["role"], "incident_card");
+            assert_eq!(recalled["repairEvidence"][0]["evidenceId"], card.as_str());
+
+            // The query itself does not name the repair. Only error recall
+            // supplies the previously observed fix to the real pack path.
+            let packed = fixture.run(&[
+                "pack",
+                "zqstructuredprobe",
+                "--error-log",
+                &diagnostic,
+                "--source-mode",
+                "lexical_only",
+                "--read-only",
+                "--max-tokens",
+                "2000",
+            ])?;
+            let items = packed
+                .pointer("/data/pack/items")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("pack items missing: {packed}"))?;
+            assert!(
+                items.iter().any(|item| {
+                    item["evidenceSpanId"] == card.as_str()
+                        && item["content"]
+                            .as_str()
+                            .is_some_and(|text| text.contains(repaired_term))
+                }),
+                "native error recall did not select its actual repair card: {packed}"
+            );
+            assert!(
+                packed["degraded"]
+                    .as_array()
+                    .is_some_and(|entries| entries.iter().all(|entry| {
+                        entry["code"] != "context_pack_persist_failed"
+                            && entry["code"] != "context_evidence_hit_unhydrated"
+                    })),
+                "native pack was degraded by an unresolved entity: {packed}"
+            );
+        }
+
+        // No log means the nonce query has no way to retrieve either repair.
+        let control = fixture.run(&[
+            "pack",
+            "zqstructuredprobe",
+            "--source-mode",
+            "lexical_only",
+            "--read-only",
+            "--max-tokens",
+            "2000",
+        ])?;
+        let items = control
+            .pointer("/data/pack/items")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("control pack items missing: {control}"))?;
+        assert!(
+            !items
+                .iter()
+                .any(|item| item["evidenceSpanId"] == ee_card.as_str()
+                    || item["evidenceSpanId"] == rch_card.as_str()),
+            "nonce control recalled a repair without its error class: {control}"
+        );
+
+        // Explicit --code takes precedence over inferred structured identity.
+        let error_text = ee_error.to_string();
+        let overridden = fixture.run(&[
+            "diagnose-error",
+            "--tool",
+            "ee",
+            "--code",
+            "operator_override",
+            &error_text,
+        ])?;
+        assert_eq!(overridden["data"]["fingerprintKey"], "ee:operator_override");
+        assert_eq!(overridden["data"]["isKnown"], false);
+        let rch_text = rch_error.to_string();
+        let forced = fixture.run(&[
+            "diagnose-error",
+            "--tool",
+            "ee",
+            "--code",
+            "migration_required",
+            &rch_text,
+        ])?;
+        assert_eq!(forced["data"]["fingerprintKey"], "ee:migration_required");
+        assert_eq!(forced["data"]["isKnown"], true);
+
+        // Mismatched/unknown schemas use the chosen tool's existing template
+        // fallback; native auto-detection never overrides --tool authority.
+        let unknown = json!({"schema":"ee.error.v1","error":{
+            "code":"migration_required","message":"old fixture schema"
+        }})
+        .to_string();
+        for diagnostic in [&rch_text, &unknown] {
+            let fallback = fixture.run(&["diagnose-error", "--tool", "ee", diagnostic])?;
+            assert_eq!(fallback["data"]["tool"], "ee");
+            assert!(
+                fallback["data"]["fingerprintKey"]
+                    .as_str()
+                    .is_some_and(|key| key.starts_with("ee:tmpl:"))
+            );
+            assert_eq!(fallback["data"]["isKnown"], false);
+        }
+        let default_tool = fixture.run(&["diagnose-error", &error_text])?;
+        assert_eq!(default_tool["data"]["tool"], "rustc");
+        assert_eq!(default_tool["data"]["isKnown"], false);
+        Ok(())
+    }
+}
+
 fn ee_binary() -> &'static str {
     env!("CARGO_BIN_EXE_ee")
 }

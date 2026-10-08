@@ -159,7 +159,7 @@ fn command_family_looks_through_wrappers_to_program_and_subcommand() {
 }
 
 #[test]
-fn diagnostics_are_rustc_codes_or_failing_tests_never_bare_exits() {
+fn text_diagnostics_are_rustc_codes_or_failing_tests_never_bare_exits() {
     let output = |text: &str| ToolOutput {
         text: text.to_owned(),
         is_error: Some(true),
@@ -542,4 +542,289 @@ fn incident_cards_never_carry_secrets_or_unadmitted_fix_text() {
             .expect("lookup")
             .is_none()
     );
+}
+
+#[test]
+fn structured_errors_use_native_codes_and_real_rch_blocker_shapes() {
+    let error = json!({
+        "schema": "ee.error.v2",
+        "error": {"code": "migration_required", "message": "Schema migration required for /private/store.db at version 129"}
+    });
+    let canonical = structured_error_diagnostics(&error.to_string());
+    assert_eq!(canonical.len(), 1);
+    assert_eq!(canonical[0].layered_key().key, "ee:migration_required");
+    assert!(canonical[0].message_template.contains("<path>"));
+    assert!(!canonical[0].message_template.contains("private"));
+    let query_error = json!({"schema":"ee.error.v2","error":{
+        "code":"ERR_QUERY_FILE_NOT_FOUND","message":"The query file does not exist"
+    }});
+    let canonical = structured_error_diagnostics(&query_error.to_string());
+    assert_eq!(canonical.len(), 1);
+    assert_eq!(
+        canonical[0].layered_key().key,
+        "ee:ERR_QUERY_FILE_NOT_FOUND"
+    );
+
+    // The actual checked-in verifier fixtures predate typed blocker records.
+    for (text, key) in [
+        (
+            include_str!("../../tests/fixtures/verify_ledger/rch_no_worker_capacity.json"),
+            "rch:no_worker_capacity",
+        ),
+        (
+            include_str!("../../tests/fixtures/verify_ledger/rch_e327_topology_blocked.json"),
+            "rch:topology_blocked",
+        ),
+    ] {
+        let canonical = structured_error_diagnostics(text);
+        assert_eq!(canonical.len(), 1, "{text}");
+        assert_eq!(canonical[0].layered_key().key, key);
+    }
+
+    let current = json!({
+        "schema": "ee.rch.verify.v1", "success": false,
+        "known_blocker": {
+            "schema": "ee.rch.known_blocker.v1", "blocker_kind": "capacity_or_timeout"
+        },
+        "command_kind": "cargo_test", "stderr_tail": "Worker unavailable after 17 seconds"
+    });
+    let canonical = structured_error_diagnostics(&current.to_string());
+    assert_eq!(canonical.len(), 1);
+    assert_eq!(canonical[0].layered_key().key, "rch:capacity_or_timeout");
+    assert_eq!(
+        canonical[0].message_template,
+        "worker unavailable after <num> seconds"
+    );
+}
+
+#[test]
+fn structured_errors_require_complete_unambiguous_failure_documents() {
+    for text in [
+        r#"{"schema":"ee.response.v2","success":true,"data":{"error":{"code":"migration_required","message":"a fixture"}}}"#,
+        r#"{"schema":"ee.error.v1","error":{"code":"migration_required","message":"old schema"}}"#,
+        r#"{"schema":"ee.error.v2","success":true,"error":{"code":"migration_required","message":"conflicting status"}}"#,
+        r#"{"schema":"ee.error.v2","error":{"code":"","message":"empty code"}}"#,
+        r#"{"schema":"ee.error.v2","error":{"code":"/private/token","message":"not a stable code"}}"#,
+        r#"{"schema":"ee.error.v2","error":{"code":"migration_required","code":"other_failure","message":"duplicate code"}}"#,
+        r#"{"schema":"ee.error.v2","error":{"code":"migration_required","message":"unterminated"}"#,
+        r#"[{"schema":"ee.error.v2","error":{"code":"migration_required","message":"an example list"}}]"#,
+        r#"{"schema":"ee.rch.verify.v1","success":true,"degraded_codes":["rch_verify_topology_blocked"]}"#,
+        r#"{"schema":"ee.rch.verify.v1","success":"false","degraded_codes":["rch_verify_topology_blocked"]}"#,
+        r#"{"schema":"ee.rch.verify.v1","success":false,"success":true,"degraded_codes":["rch_verify_topology_blocked"]}"#,
+        r#"{"schema":"ee.rch.verify.v1","success":false,"degraded_codes":["rch_verify_remote_command_failed"]}"#,
+        r#"{"message":"example error[E0277]: a string inside unrelated JSON"}"#,
+        "The docs show this error: {\"schema\":\"ee.error.v2\",\"error\":{\"code\":\"migration_required\",\"message\":\"example\"}}",
+    ] {
+        let output = ToolOutput {
+            text: text.to_owned(),
+            is_error: Some(true),
+            exit_code: Some(1),
+        };
+        assert!(structured_error_diagnostics(text).is_empty(), "{text}");
+        assert!(failure_diagnostics(&output).is_empty(), "{text}");
+    }
+    let prefix =
+        r#"{"schema":"ee.error.v2","error":{"code":"migration_required","message":"required"}}"#;
+    let oversized = format!("{prefix}{}", " ".repeat(MAX_SCANNED_OUTPUT_BYTES));
+    assert!(structured_error_diagnostics(&oversized).is_empty());
+
+    // The raw diagnostic contains a secret; only the native code and masked
+    // message are exposed to the fingerprint and card layers.
+    let secret = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+    let value = json!({"schema":"ee.error.v2","error":{
+        "code":"credential_missing","message":format!("Credential {secret} is unavailable")
+    }});
+    let diagnostics = structured_error_diagnostics(&value.to_string());
+    assert_eq!(diagnostics.len(), 1);
+    assert!(!format!("{diagnostics:?}").contains(secret));
+}
+
+#[test]
+fn structured_ee_errors_recall_independent_session_repairs_and_cards()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let connection = store();
+    let mut expected_repairs = Vec::new();
+    let mut expected_proofs = Vec::new();
+    for seed in 0x60_1000..0x60_1003 {
+        let session_id = session(&connection, seed);
+        let command = "ee search release --json";
+        bash_call(&connection, &session_id, 1, "failed", command);
+        let failure = bash_result(
+            &connection,
+            &session_id,
+            2,
+            "failed",
+            &json!({"schema":"ee.error.v2","error":{
+                "code":"migration_required",
+                "message":format!("Schema migration required for /private/workspace-{seed}/store.db")
+            }})
+            .to_string(),
+            true,
+        );
+        let repair = assistant_text(
+            &connection,
+            &session_id,
+            3,
+            "Updated the workspace schema by applying the pending migrations, which fixes opening the evidence tables during search.",
+        );
+        bash_call(&connection, &session_id, 4, "verified", command);
+        let proof = bash_result(
+            &connection,
+            &session_id,
+            5,
+            "verified",
+            r#"{"schema":"ee.response.v2","success":true,"data":{"results":[]}}"#,
+            false,
+        );
+        let report = record_session_error_recall(&connection, WS, &session_id)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.resolved_failures, 1);
+        assert_eq!(report.incident_cards_recorded, 1);
+        let card_id = crate::core::incident_card::incident_card_id(WS, &failure);
+        let card = connection
+            .get_search_admitted_evidence_span(&card_id, WS)?
+            .ok_or("derived native-error card was not admitted")?;
+        assert!(
+            card.excerpt.contains("ee:migration_required"),
+            "{}",
+            card.excerpt
+        );
+        assert!(
+            card.excerpt.contains("Updated the workspace schema"),
+            "{}",
+            card.excerpt
+        );
+        assert!(!card.excerpt.contains("/private/"));
+        assert!(crate::pack::estimate_tokens_default(&card.excerpt) <= 120);
+        expected_repairs.extend([repair, card_id]);
+        expected_proofs.push(proof);
+        let rerun = record_session_error_recall(&connection, WS, &session_id)?;
+        assert_eq!(rerun.incident_cards_recorded, 0);
+    }
+    expected_repairs.sort();
+    expected_proofs.sort();
+    // This is the same native canonicalizer the public diagnose command uses
+    // for --tool ee --code migration_required, with an unrelated later path.
+    let canonical = from_ee_error("migration_required", "Schema migration required elsewhere");
+    let diagnosis = crate::core::error_diagnosis::diagnose_error(&connection, WS, &canonical)?;
+    assert!(diagnosis.matched.is_some());
+    let recall = error_recall_report(&connection, WS, &canonical)?;
+    assert!(recall.exact);
+    assert_eq!(recall.helpful_repairs, expected_repairs);
+    assert_eq!(recall.proof_links, expected_proofs);
+    let evidence = recalled_repair_evidence(&connection, WS, &recall)?;
+    assert_eq!(
+        evidence
+            .iter()
+            .filter(|row| row.role == "incident_card")
+            .count(),
+        3
+    );
+    assert_eq!(
+        evidence.iter().filter(|row| row.role == "repair").count(),
+        3
+    );
+    assert_eq!(
+        evidence
+            .iter()
+            .filter(|row| row.role == "proof" && row.text.is_none())
+            .count(),
+        3
+    );
+    assert_eq!(connection.count_table_rows("error_fingerprints")?, 1);
+    assert_eq!(connection.count_table_rows("memories")?, 0);
+    Ok(())
+}
+
+#[test]
+fn structured_rch_blockers_need_a_completed_exact_retry_for_repair_credit()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let connection = store();
+    let session_id = session(&connection, 0x60_1010);
+    let command = "scripts/rch_verify.sh -- cargo check --locked";
+    bash_call(&connection, &session_id, 1, "failed", command);
+    let output = json!({
+        "schema":"ee.rch.verify.v1", "success":false,
+        "known_blocker":{
+            "schema":"ee.rch.known_blocker.v1", "blocker_kind":"topology_blocked"
+        },
+        "stderr_tail":"The path dependency could not be resolved in the remote checkout"
+    })
+    .to_string();
+    let failure = bash_result(&connection, &session_id, 2, "failed", &output, true);
+    assistant_text(
+        &connection,
+        &session_id,
+        3,
+        "Updated the dependency manifest to use the registered sibling path, which fixes remote checkout resolution before compilation.",
+    );
+    // A different successful command is not evidence about the blocked check.
+    bash_call(
+        &connection,
+        &session_id,
+        4,
+        "unrelated",
+        "scripts/rch_verify.sh -- cargo test --locked",
+    );
+    bash_result(&connection, &session_id, 5, "unrelated", "", false);
+    // An error envelope also vetoes contradictory tool-level success.
+    bash_call(&connection, &session_id, 6, "still_blocked", command);
+    bash_result(&connection, &session_id, 7, "still_blocked", &output, false);
+    bash_call(&connection, &session_id, 8, "abstained", command);
+    bash_result(
+        &connection,
+        &session_id,
+        9,
+        "abstained",
+        r#"{"schema":"ee.rch.verify.v1","success":null,"exit_code":null,"verdict":"abstained","abstention_reason":"no_execution_attempted"}"#,
+        false,
+    );
+    bash_call(&connection, &session_id, 10, "ambiguous", command);
+    bash_result(
+        &connection,
+        &session_id,
+        11,
+        "ambiguous",
+        r#"{"schema":"ee.rch.verify.v1","success":false,"success":true,"exit_code":0}"#,
+        false,
+    );
+    let pending = record_session_error_recall(&connection, WS, &session_id)?;
+    assert_eq!(pending.failures_seen, 2);
+    assert_eq!(pending.resolved_failures, 0);
+    assert_eq!(pending.incident_cards_recorded, 0);
+    assert!(
+        connection
+            .list_error_repair_links(WS, "rch:topology_blocked")?
+            .is_empty()
+    );
+
+    bash_call(&connection, &session_id, 12, "verified", command);
+    let proof = bash_result(
+        &connection,
+        &session_id,
+        13,
+        "verified",
+        r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"degraded_codes":[]}"#,
+        false,
+    );
+    let report = record_session_error_recall(&connection, WS, &session_id)?;
+    assert_eq!(report.resolved_failures, 2);
+    assert_eq!(
+        report.incident_cards_recorded, 1,
+        "only the first failure has an intervening repair explanation"
+    );
+    let card_id = crate::core::incident_card::incident_card_id(WS, &failure);
+    let card = connection
+        .get_evidence_span(&card_id)?
+        .ok_or("RCH card missing")?;
+    assert!(card.excerpt.contains("rch:topology_blocked"));
+    assert!(card.excerpt.contains("registered sibling path"));
+    let recall = error_recall_report(
+        &connection,
+        WS,
+        &from_rch_blocker("topology_blocked", "", "A later topology failure"),
+    )?;
+    assert!(recall.helpful_repairs.contains(&card_id));
+    assert_eq!(recall.proof_links, vec![proof]);
+    Ok(())
 }

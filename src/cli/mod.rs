@@ -1772,6 +1772,7 @@ pub struct AskArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct DiagnoseErrorArgs {
     /// The tool that produced the failure: rustc | cargo | ee | rch | shell.
+    /// EE and RCH structured logs infer their code when --code is omitted.
     #[arg(long, value_name = "TOOL", default_value = "rustc")]
     pub tool: String,
     /// Structured error code when one exists (e.g. rustc `E0277`, an ee error code).
@@ -46633,9 +46634,16 @@ fn error_recall_query_seed(
         return Ok(None);
     };
     let error_log = error_log_text(error_log)?;
-    let redacted_message = crate::policy::redact_secret_like_content(&error_log).content;
-    let code = rustc_code_from_message(&error_log);
-    let canonical = crate::core::error_recall::from_rustc(code.as_deref(), &redacted_message);
+    // Native logs must use the same key as the CASS failure-arc extractor.
+    // Otherwise an imported EE/RCH repair can never match this public reader.
+    let canonical = crate::core::cass_error_recall::structured_error_diagnostics(&error_log)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            let redacted_message = crate::policy::redact_secret_like_content(&error_log).content;
+            let code = rustc_code_from_message(&error_log);
+            crate::core::error_recall::from_rustc(code.as_deref(), &redacted_message)
+        });
     let connection = open_attest_database_for_workspace(workspace, database)?;
     let workspace_id = bound_cli_workspace_id(&connection, workspace)?;
     let report =
@@ -54406,6 +54414,17 @@ where
                 stderr,
             );
         }
+    };
+
+    // A complete native envelope supplies its actual code and masked message.
+    // Explicit --tool and --code retain authority over automatic extraction.
+    let canonical = if args.code.is_none() {
+        crate::core::cass_error_recall::structured_error_diagnostics(&raw_message)
+            .into_iter()
+            .find(|diagnostic| diagnostic.tool.as_str() == args.tool)
+            .unwrap_or(canonical)
+    } else {
+        canonical
     };
 
     // Both recording branches below take THIS connection, so the mode has to be

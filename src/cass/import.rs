@@ -2659,6 +2659,8 @@ fn derive_session_error_recall(
                             "incidentCardsRecorded": report.incident_cards_recorded,
                             "incidentCardDerivation":
                                 crate::core::incident_card::INCIDENT_CARD_DERIVATION,
+                            "errorRecallDerivation":
+                                crate::core::cass_error_recall::CASS_ERROR_RECALL_DERIVATION,
                         })
                         .to_string(),
                     ),
@@ -2677,12 +2679,14 @@ fn derive_session_error_recall(
     }
 }
 
-/// The marker names the card extractor version too, so a store derived before
-/// incident cards existed (or under an older extractor) is derived once more.
+/// Recall extraction and card rendering evolve independently. A session
+/// imported under either older version is derived once more on its next import,
+/// even when its source transcript has not changed.
 fn stable_cass_error_recall_audit_id(session_id: &str) -> String {
     AuditId::from_uuid(stable_uuid(&format!(
-        "audit:{}:{}:{session_id}",
+        "audit:{}:{}:{}:{session_id}",
         crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE,
+        crate::core::cass_error_recall::CASS_ERROR_RECALL_DERIVATION,
         crate::core::incident_card::INCIDENT_CARD_DERIVATION
     )))
     .to_string()
@@ -2819,6 +2823,108 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[test]
+    fn unchanged_import_rederives_structured_errors_after_extractor_upgrade() -> TestResult {
+        let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        db.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = ensure_workspace(&db, Path::new("/tmp/cass-recall-upgrade"))
+            .map_err(|error| error.to_string())?;
+        let source = "/sessions/structured-recall-upgrade.jsonl";
+        let session_id = stable_session_id(&workspace_id, source);
+        db.insert_session(
+            &session_id,
+            &CreateSessionInput {
+                workspace_id: workspace_id.clone(),
+                cass_session_id: source.to_owned(),
+                source_path: None,
+                agent_name: Some("claude_code".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 2,
+                token_count: None,
+                content_hash: blake3_hex(source),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let failure = json!({
+            "schema": "ee.error.v2",
+            "error": {"code": "migration_required", "message": "Run the migration first"},
+        });
+        for (index, record) in [
+            json!({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_upgrade", "name": "Bash",
+                 "input": {"command": "ee search widget --json"}}
+            ]}}),
+            json!({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_upgrade",
+                 "is_error": true, "content": failure.to_string()}
+            ]}}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let span = parse_view_line_value(
+                &json!({"line": index + 1, "content": record.to_string()}),
+                source,
+            )
+            .map_err(|error| error.to_string())?;
+            db.insert_evidence_span(
+                &stable_evidence_id(&session_id, &span.cass_span_id),
+                &evidence_input(&workspace_id, &session_id, &span),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        // The previous importer already marked this exact, unchanged session.
+        // Its card version has not changed; only recall extraction has.
+        let old_marker = AuditId::from_uuid(stable_uuid(&format!(
+            "audit:{}:{}:{session_id}",
+            crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE,
+            crate::core::incident_card::INCIDENT_CARD_DERIVATION,
+        )))
+        .to_string();
+        db.insert_audit(
+            &old_marker,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.clone()),
+                actor: Some(crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR.to_owned()),
+                action: crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE.to_owned(),
+                target_type: Some("session".to_owned()),
+                target_id: Some(session_id.clone()),
+                details: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        derive_session_error_recall(&db, &workspace_id, &session_id, false);
+        ensure(
+            db.get_error_fingerprint(&workspace_id, "ee:migration_required")
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            "unchanged source must acquire newly supported error classes",
+        )?;
+        let marker_id = stable_cass_error_recall_audit_id(&session_id);
+        let marker = db
+            .get_audit(&marker_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("upgraded derivation marker missing")?;
+        derive_session_error_recall(&db, &workspace_id, &session_id, false);
+        ensure_equal(
+            &db.get_audit(&marker_id)
+                .map_err(|error| error.to_string())?,
+            &Some(marker),
+            "repeated unchanged import preserves its derivation marker",
+        )?;
+        ensure(
+            db.get_audit(&old_marker)
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            "upgrade preserves historical derivation audit",
+        )
     }
 
     fn collect_view_fixture(

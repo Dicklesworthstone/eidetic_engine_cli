@@ -52,7 +52,7 @@ Facet labels are fixed; nothing else is generated.
 | Facet | Source | Policy class |
 |---|---|---|
 | header | failing command reduced to program + subcommand | A, reduced |
-| `Symptom:` | first rustc error line (+ `-->` location) or failing test line | A, redacted, screened; falls back to the masked template, then the error class |
+| `Symptom:` | first rustc error line (+ `-->` location), failing test line, or typed EE/RCH error code with its masked message | A, redacted, screened; falls back to the masked template, then the error class |
 | `Fix:` | sentences of the admitted assistant turns between failure and proof, chosen greedily by fix/anchor score under the remaining token budget, shown in transcript order | admitted turns only |
 | `Verified:` | verifying command reduced to program + subcommand | A, reduced |
 
@@ -89,6 +89,17 @@ next import. CASS refresh and backfill reconcile only transcript lines and skip
 cards; curation, session review and focus suggestions read transcript turns
 only. Cards are never memories: they become durable knowledge only through the
 existing review → curate path.
+
+The `cass_error_recall.v2` extractor also recognizes complete `ee.error.v2`
+errors and failed `ee.rch.verify.v1` reports with a typed known blocker or a
+recognized blocker code. It shares canonicalization with `pack --error-log`
+and `diagnose-error --tool ee|rch`, so subsequent errors recall the same
+imported repair. Schema, code, and status fields must be unambiguous; nested
+examples and truncated or duplicate-field documents do not create error
+classes. RCH abstention and contradictory completion statuses cannot verify a
+repair. Recall extraction has its own version in the per-session derivation
+marker, independent of the card renderer, so unchanged older imports acquire
+the additional error classes on their next import.
 
 ## Rejected alternatives
 

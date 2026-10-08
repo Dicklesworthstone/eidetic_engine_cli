@@ -28,7 +28,9 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use crate::core::error_diagnosis::{ErrorRepairLinkRecording, record_error_repair_links};
-use crate::core::error_recall::{CanonicalDiagnostic, from_cargo, from_rustc};
+use crate::core::error_recall::{
+    CanonicalDiagnostic, from_cargo, from_ee_error, from_rch_blocker, from_rustc,
+};
 use crate::db::{DbConnection, Result, StoredEvidenceSpan, StoredSession};
 
 #[path = "cass_error_recall_outcome.rs"]
@@ -36,6 +38,8 @@ mod outcome;
 
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
+/// Version of failure extraction, independent of the incident-card renderer.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v2";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -1016,12 +1020,17 @@ fn content_text(value: &Value) -> Option<String> {
     }
 }
 
-/// Structured diagnostics in a failing tool result: every distinct rustc
-/// error code with its message line, else the first failing test. Generic
+/// Structured diagnostics in a failing tool result: native error envelopes,
+/// every distinct rustc error code, or the first failing test. Generic
 /// non-zero exits (a `grep` that matched nothing) carry no reusable error
-/// class and record nothing. Message lines are secret-redacted before they
-/// are canonicalized, and only masked signatures are ever stored.
+/// class and record nothing. Messages are secret-redacted before they are
+/// canonicalized, and only masked signatures are ever stored.
 pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnostic> {
+    if output.text.trim_start().starts_with(['{', '[']) {
+        // A diagnostic-looking string inside arbitrary JSON is data, not a
+        // compiler failure. Structured output must match its complete schema.
+        return structured_error_diagnostics(&output.text);
+    }
     let text = bounded(&output.text);
     let mut seen = BTreeSet::new();
     let mut diagnostics = Vec::new();
@@ -1051,10 +1060,250 @@ pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnosti
     diagnostics
 }
 
+#[derive(serde::Deserialize)]
+struct StructuredErrorEnvelope {
+    schema: String,
+    success: Option<bool>,
+    exit_code: Option<i64>,
+    verdict: Option<String>,
+    status: Option<String>,
+    verification_attribution: Option<String>,
+    abstention_reason: Option<Value>,
+    timed_out: Option<bool>,
+    error: Option<StructuredEeError>,
+    known_blocker: Option<StructuredRchBlocker>,
+    #[serde(default)]
+    degraded_codes: Vec<String>,
+    stderr_tail: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct StructuredEeError {
+    code: String,
+    message: String,
+}
+
+#[derive(serde::Deserialize)]
+struct StructuredRchBlocker {
+    schema: Option<String>,
+    blocker_kind: Option<String>,
+}
+
+/// Read one complete error document. Typed deserialization rejects duplicate
+/// schema, success, code and blocker fields rather than choosing the last one.
+/// Neither a nested example nor a valid prefix of truncated JSON is evidence.
+fn structured_error_envelope(text: &str) -> Option<StructuredErrorEnvelope> {
+    if text.len() > MAX_SCANNED_OUTPUT_BYTES || !text.trim_start().starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(text).ok()
+}
+
+fn stable_error_code(code: &str) -> bool {
+    (1..=128).contains(&code.len())
+        && code.as_bytes()[0].is_ascii_alphabetic()
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// Infer the same native fingerprint from a command's complete structured
+/// diagnostic that CASS import records. Public readers can reuse this before
+/// their free-text fallback, so imported errors and later logs share a key.
+pub(crate) fn structured_error_diagnostics(text: &str) -> Vec<CanonicalDiagnostic> {
+    let Some(envelope) = structured_error_envelope(text) else {
+        return Vec::new();
+    };
+    match envelope.schema.as_str() {
+        "ee.error.v2" if envelope.success != Some(true) => envelope
+            .error
+            .filter(|error| stable_error_code(&error.code) && !error.message.trim().is_empty())
+            .map(|error| {
+                let message = crate::policy::redact_secret_like_content(&error.message).content;
+                vec![from_ee_error(&error.code, &message)]
+            })
+            .unwrap_or_default(),
+        "ee.rch.verify.v1" if envelope.success == Some(false) => {
+            let kind = envelope
+                .known_blocker
+                .as_ref()
+                .filter(|blocker| blocker.schema.as_deref() == Some("ee.rch.known_blocker.v1"))
+                .and_then(|blocker| blocker.blocker_kind.as_deref())
+                .filter(|kind| stable_error_code(kind))
+                .or_else(|| rch_blocker_kind(&envelope.degraded_codes));
+            let Some(kind) = kind else {
+                return Vec::new();
+            };
+            let message = envelope
+                .stderr_tail
+                .as_deref()
+                .and_then(|tail| tail.lines().map(str::trim).find(|line| !line.is_empty()))
+                .unwrap_or(kind);
+            let message = crate::policy::redact_secret_like_content(message).content;
+            // These verifier envelopes identify a blocker kind, but do not
+            // declare a diagnostic stage. Do not invent one from command_kind.
+            vec![from_rch_blocker(kind, "", &message)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Older verifier reports predate typed known_blocker records. Recognize only
+/// the explicit blocker codes emitted by scripts/rch_verify.sh, in that
+/// producer's priority order; generic remote-command failure is not a class.
+fn rch_blocker_kind(codes: &[String]) -> Option<&'static str> {
+    [
+        (
+            "rch_verify_cargo_workspace_inheritance_blocked",
+            "cargo_workspace_inheritance",
+        ),
+        (
+            "rch_verify_cargo_path_dependency_version_blocked",
+            "cargo_path_dependency_version",
+        ),
+        (
+            "rch_verify_client_daemon_version_skew",
+            "client_daemon_version_skew",
+        ),
+        (
+            "rch_verify_remote_checkout_incomplete",
+            "remote_checkout_incomplete",
+        ),
+        ("rch_verify_worker_disk_full", "worker_disk_full"),
+        (
+            "rch_verify_all_workers_preflight_failed",
+            "all_workers_preflight_failed",
+        ),
+        (
+            "rch_verify_worker_health_threshold_blocked",
+            "worker_health_threshold",
+        ),
+        (
+            "rch_verify_remote_transport_timeout",
+            "remote_transport_timeout",
+        ),
+        ("rch_verify_capacity_or_timeout", "capacity_or_timeout"),
+        ("rch_verify_no_worker_capacity", "no_worker_capacity"),
+        ("rch_verify_topology_blocked", "topology_blocked"),
+        (
+            "rch_verify_local_fallback_refused",
+            "local_fallback_refused",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(code, kind)| {
+        codes
+            .iter()
+            .any(|observed| observed == code)
+            .then_some(kind)
+    })
+}
+
+/// The native envelope itself can contradict an optimistic tool exit. Even a
+/// failure with no supported diagnostic code must never certify another fix.
+fn structured_error_reports_failure(text: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Status {
+        schema: String,
+        success: Option<bool>,
+    }
+    if text.len() > MAX_SCANNED_OUTPUT_BYTES || !text.trim_start().starts_with('{') {
+        return false;
+    }
+    serde_json::from_str::<Status>(text).is_ok_and(|status| {
+        status.schema == "ee.error.v2"
+            || (status.schema == "ee.rch.verify.v1" && status.success == Some(false))
+    })
+}
+
+/// A successful wrapper can print a refusal or an abstention. Inspect native
+/// completion at the end of an invocation without latching an incomplete JSON
+/// chunk as failure while more bytes are still arriving.
+fn structured_output_allows_completion(text: &str) -> bool {
+    let start = text.trim_start();
+    if !start.starts_with(['{', '[']) {
+        return true;
+    }
+    if text.len() > MAX_SCANNED_OUTPUT_BYTES {
+        return false;
+    }
+    if start.starts_with('[') {
+        // Arrays may contain example diagnostics; they do not declare a
+        // native command status. Still require complete JSON for proof.
+        return serde_json::from_str::<Value>(text).is_ok();
+    }
+    #[derive(serde::Deserialize)]
+    struct Schema {
+        schema: Option<String>,
+    }
+    let Ok(schema) = serde_json::from_str::<Schema>(text) else {
+        // This also rejects duplicate schema fields before any map parser can
+        // hide a native failure behind a second, unrelated schema value.
+        return false;
+    };
+    match schema.schema.as_deref() {
+        Some("ee.error.v2") => false,
+        Some("ee.rch.verify.v1") => structured_error_envelope(text).is_some_and(|envelope| {
+            envelope.success == Some(true)
+                && envelope.exit_code == Some(0)
+                && envelope
+                    .verdict
+                    .as_deref()
+                    .is_none_or(|verdict| verdict == "passed")
+                && envelope
+                    .status
+                    .as_deref()
+                    .is_none_or(|status| status == "remote_pass")
+                && envelope
+                    .verification_attribution
+                    .as_deref()
+                    .is_none_or(|attribution| !attribution.starts_with("not_run"))
+                && envelope.abstention_reason.is_none()
+                && envelope.timed_out != Some(true)
+                && envelope.known_blocker.is_none()
+                && rch_blocker_kind(&envelope.degraded_codes).is_none()
+                && !envelope.degraded_codes.iter().any(|code| {
+                    matches!(
+                        code.as_str(),
+                        "rch_verify_remote_command_failed"
+                            | "rch_verify_local_fallback_detected"
+                            | "rch_verify_remote_marker_missing"
+                            | "rch_verify_not_offloaded"
+                            | "rch_verify_build_admission_denied"
+                            | "rch_verify_known_blocker_active"
+                            | "rch_verify_proof_broker_reuse_existing"
+                    ) || (code.starts_with("rch_verify_proof_broker_")
+                        && !matches!(
+                            code.as_str(),
+                            "rch_verify_proof_broker_bypassed"
+                                | "rch_verify_proof_broker_source_state_mismatch"
+                        ))
+                })
+        }),
+        Some("ee.response.v2") => structured_error_envelope(text)
+            .is_some_and(|envelope| envelope.success == Some(true) && envelope.error.is_none()),
+        _ => true,
+    }
+}
+
 /// The line an agent would read first in a failing output: the first rustc
 /// error (with the `-->` location that follows it), else the first failing
 /// test or panic. Secret-redacted; never the whole log.
 fn symptom_line(output: &ToolOutput) -> Option<String> {
+    if output.text.trim_start().starts_with(['{', '[']) {
+        // Native structured errors have a useful masked description even when
+        // their raw envelope is not admissible reader content. Cards show that
+        // description, never the schema, private verifier paths or raw tails.
+        return structured_error_diagnostics(&output.text)
+            .first()
+            .map(|diagnostic| {
+                format!(
+                    "{}: {}",
+                    diagnostic.layered_key().key,
+                    diagnostic.message_template
+                )
+            });
+    }
     let text = bounded(&output.text);
     let lines = text.lines().map(str::trim).collect::<Vec<_>>();
     let line = if let Some(index) = lines

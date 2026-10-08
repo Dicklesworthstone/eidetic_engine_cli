@@ -1385,6 +1385,7 @@ and [`docs/agent-ux/team.md`](docs/agent-ux/team.md).
 |---|---|
 | `ee import cass --workspace . [--limit N] [--dry-run]` | Pull session evidence from `coding_agent_session_search`. Failed builds and tests that a later run in the same session fixed are recorded as error fingerprints with links to the repair turn, plus an extractive incident card (symptom, fix, verifying command; at most 120 tokens) that search and packs use in place of the raw turns (ADR 0091) |
 | `ee diagnose-error --tool rustc "error[E0277]: ..." --json` | Recall an error class seen before; `data.repairEvidence` shows how an imported session fixed it. `ee pack "<task>" --error-log "<text>"` folds the recalled fix into retrieval |
+| `ee diagnose-error --tool ee --error-log error.json --json` | Recall an imported `ee.error.v2` failure by its structured code; use `--tool rch` for failed `ee.rch.verify.v1` reports. `pack --error-log` recognizes both automatically |
 | `ee import jsonl --source <file>` | Restore from a JSONL records file, including backup record exports |
 | `ee import eidetic-legacy --source <path> --dry-run` | One-time migration of legacy Eidetic Engine artifacts (read-only) |
 
