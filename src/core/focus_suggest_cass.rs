@@ -23,8 +23,14 @@ pub(super) fn topic(span: &StoredEvidenceSpan) -> Option<CassTopic> {
         || span.search_eligibility != "admitted"
         || span.pack_eligibility != "admitted"
         || !EvidenceId::from_str(&span.id).is_ok_and(|id| id.to_string() == span.id)
-        || !public_excerpt(&span.excerpt)
     {
+        return None;
+    }
+    // Screen the complete projected body the topic is derived from. The
+    // stored envelope is never shown, and every Claude Code record's absolute
+    // `cwd` made the old envelope screen drop all of them.
+    let body = span.reader_body();
+    if !public_excerpt(&body) {
         return None;
     }
     let created_at = DateTime::parse_from_rfc3339(&span.created_at)
@@ -32,7 +38,7 @@ pub(super) fn topic(span: &StoredEvidenceSpan) -> Option<CassTopic> {
         .with_timezone(&Utc);
     // Suggest topics in the conversation's words, not envelope keys
     // (bd-reality-core-convergence-1azkt.45).
-    let preview = super::content_preview_tokens(&span.reader_body(), super::TOPIC_PREVIEW_CHARS);
+    let preview = super::content_preview_tokens(&body, super::TOPIC_PREVIEW_CHARS);
     if preview.is_empty() {
         return None;
     }
@@ -189,6 +195,32 @@ mod tests {
             })
             .collect()
         }
+    }
+
+    #[test]
+    fn claude_code_records_suggest_topics_from_their_message() {
+        let fixture = Fixture::new();
+        let record = serde_json::json!({
+            "parentUuid": null, "isSidechain": false, "userType": "external",
+            "cwd": "/home/dev/ledger", "sessionId": "5f0c", "version": "2.0.14",
+            "gitBranch": "main", "type": "assistant", "uuid": "9a1e",
+            "timestamp": "2026-09-01T09:00:00.000Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": BODY}]}
+        })
+        .to_string();
+        let id = fixture.evidence(0x8f3a_c91d_44e2_7b6a_0d15_e8c2_9a71_53bf, &record, None);
+        let span = fixture
+            .admitted()
+            .into_iter()
+            .find(|span| span.id == id)
+            .expect("the Claude Code record is admitted");
+        let topic = topic(&span).expect("its absolute cwd does not withhold the message");
+        assert!(!topic.label.contains("home"), "{}", topic.label);
+        assert!(
+            topic.label.to_lowercase().contains("release"),
+            "{}",
+            topic.label
+        );
     }
 
     #[test]
