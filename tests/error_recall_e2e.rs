@@ -72,10 +72,22 @@ mod structured {
                 .output()
                 .map_err(|error| error.to_string())?;
             let stdout = String::from_utf8_lossy(&output.stdout);
+            // bd-mv9j7: `output.status` already carries the code (Display
+            // renders "exit status: 7"), but the drift guard credits it only on
+            // a literal `.code()` (verification_drift_guard.rs:2782). Spelled
+            // BESIDE the status, not instead of it: `.code()` is None for a
+            // signal death while Display still says "signal: 9".
+            //
+            // THIS COMMENT LIVES ABOVE THE `if`, DELIBERATELY. assertion_window
+            // (verification_drift_guard.rs:2652) caps a site at 14 lines from
+            // the condition, so a comment inside the block pushes `.code()` out
+            // of the window and the guard keeps reporting `[code]` missing.
+            // Measured: it did exactly that on the first attempt.
             if !output.status.success() {
                 return Err(format!(
-                    "ee {arguments:?} failed: {}\nstdout={stdout}\nstderr={}",
+                    "ee {arguments:?} failed: {} (code {:?})\nstdout={stdout}\nstderr={}",
                     output.status,
+                    output.status.code(),
                     String::from_utf8_lossy(&output.stderr)
                 ));
             }
