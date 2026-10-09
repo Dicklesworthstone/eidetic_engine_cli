@@ -78,15 +78,38 @@ def parse(lines: list[str]) -> tuple[list[dict], list[str]]:
     """Return (pairs, problems). Each pair is one announcement and its summary."""
     pairs: list[dict] = []
     problems: list[str] = []
-    target = "<unknown target>"
+    # Targets are consumed IN ORDER, not "whichever Running line was most
+    # recent". Cargo may print every `Running` line up front when one invocation
+    # names several targets (see BUFFERED_TARGETS), in which case "most recent"
+    # labels every summary with the LAST target -- which silently misattributes
+    # the results and defeats --expect-target, because it then matches more than
+    # one pair. Cargo runs targets in the order it lists them, so the Nth
+    # announcement belongs to the Nth target.
+    #
+    # The queue is a FIFO with a STICKY TAIL: once it is exhausted, further
+    # announcements keep the last target. That preserves the nested-child case,
+    # where one target emits two announcements and the second is not a new
+    # target at all.
+    announced_targets: list[str] = []
+    consumed = 0
     pending: dict | None = None
+
+    def current_target() -> str:
+        nonlocal consumed
+        if not announced_targets:
+            return "<unknown target>"
+        index = min(consumed, len(announced_targets) - 1)
+        consumed = index + 1
+        return announced_targets[index]
 
     for number, raw in enumerate(lines, start=1):
         line = strip_ansi(raw.rstrip("\n"))
 
         found_target = RUNNING_TARGET.match(line) or DOCTEST_TARGET.match(line)
         if found_target:
-            target = found_target.groupdict().get("bin") or found_target.group("what")
+            announced_targets.append(
+                found_target.groupdict().get("bin") or found_target.group("what")
+            )
             continue
 
         announced = ANNOUNCE.match(line)
@@ -99,7 +122,7 @@ def parse(lines: list[str]) -> tuple[list[dict], list[str]]:
                 )
             pending = {
                 "announced": int(announced.group(1)),
-                "target": target,
+                "target": current_target(),
                 "line": number,
             }
             continue
@@ -114,7 +137,9 @@ def parse(lines: list[str]) -> tuple[list[dict], list[str]]:
             if pending is None:
                 problems.append(
                     f"line {number}: summary with no preceding announcement "
-                    f"({counted} test(s), target {target}) -- cannot be attributed"
+                    f"({counted} test(s), target "
+                    f"{announced_targets[-1] if announced_targets else '<unknown target>'})"
+                    f" -- cannot be attributed"
                 )
                 continue
             pairs.append(
@@ -342,6 +367,33 @@ running 7 tests
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 """
 
+# REAL CARGO OUTPUT THAT NO FIXTURE ABOVE REPRODUCES. When one `cargo test`
+# invocation names several `--test` targets, cargo can print EVERY `Running`
+# line up front, before any test binary has produced output -- not interleaved
+# with it the way SEQUENTIAL and ONE_EMPTY_ONE_REAL assume. Taken verbatim in
+# shape from .ntm/logs/b9_premise.log (`--test integration_a_d --test
+# harness_hook_install_audit`), where this cost a correct verdict: 7 of 7 tests
+# passed and the log was refused.
+#
+# Note the `filtered out` counts, which are what prove the attribution: 9 belong
+# to the target with no matching tests, 756 to the one that ran the 7. Under a
+# "most recent Running line" rule BOTH summaries are labelled with the LAST
+# target, so --expect-target matches two pairs and cannot disambiguate -- the
+# grader's own documented escape hatch stops working for the case its refusal
+# message tells you to use it on.
+BUFFERED_TARGETS = """     Running tests/harness_hook_install_audit.rs (target/debug/deps/harness_hook_install_audit-aaa)
+     Running tests/suites/integration_a_d.rs (target/debug/deps/integration_a_d-bbb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out
+
+
+running 7 tests
+test daemon_start_lifecycle::one ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 756 filtered out
+"""
+
 
 def self_test() -> int:
     cases = [
@@ -356,6 +408,19 @@ def self_test() -> int:
         # is refused above must grade green once a target is named. Without this
         # arm, "refuses everything" would pass every other arm.
         ("sequential, disambiguated by target", SEQUENTIAL, "contracts-bbb", 0),
+        # THE TWIN OF THE ARM ABOVE, on the shape real cargo emits when several
+        # --test targets are named at once. --expect-target must select ONE pair
+        # here exactly as it does for interleaved output; if both summaries carry
+        # the last target's name it selects two and refuses, which is the defect
+        # this arm pins. Named the empty target deliberately: it must grade exit
+        # 1 for announcing ZERO tests, not because it was ambiguous.
+        ("buffered targets, disambiguated to the real one", BUFFERED_TARGETS, "integration_a_d-bbb", 0),
+        (
+            "buffered targets, the empty one is refused for announcing nothing",
+            BUFFERED_TARGETS,
+            "harness_hook_install_audit-aaa",
+            1,
+        ),
     ]
     # AGGREGATE MODE (1azkt.5 bullet 4). Same fixtures, graded together.
     aggregate_cases = [
