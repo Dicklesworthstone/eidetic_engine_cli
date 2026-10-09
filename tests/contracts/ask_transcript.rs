@@ -147,10 +147,38 @@ fn public_transcript_answers_and_hints_keep_native_identity_without_mutation() -
         weak["data"]["queryAssist"]["didYouMean"][0]["entityKind"],
         "evidence_span"
     );
-    assert_eq!(
-        weak["data"]["queryAssist"]["reformulations"][0]["matchedEvidenceId"],
-        row.id
-    );
+    // bd-834wq: this assertion used to be a bare
+    //   assert_eq!(weak[..]["reformulations"][0]["matchedEvidenceId"], row.id)
+    // which reported `left: Null` and could not say WHY. Through serde_json indexing,
+    // an ABSENT ARRAY ELEMENT and a PRESENT OBJECT MISSING A KEY are the same value —
+    // one value for two states — so the original red was undiagnosable from its own
+    // message and bd-834wq had to reason about src/core/ask.rs to guess which it was.
+    // Separate the states so the failure names itself.
+    let reformulations = weak["data"]["queryAssist"]["reformulations"]
+        .as_array()
+        .ok_or_else(|| {
+            format!(
+                "queryAssist.reformulations must be an array, got {:?}; whole queryAssist = {:?}",
+                weak["data"]["queryAssist"]["reformulations"], weak["data"]["queryAssist"]
+            )
+        })?;
+    let first = reformulations.first().ok_or_else(|| {
+        format!(
+            "queryAssist.reformulations is EMPTY, so there is no [0] to carry \
+             matchedEvidenceId. ask_query_assist_reformulations returns an empty vec when \
+             every term of the nearest evidence span already appears in the question; with \
+             TEXT={TEXT:?} and QUESTION={QUESTION:?} that would mean no term survived \
+             stopword and length filtering. Whole queryAssist = {:?}",
+            weak["data"]["queryAssist"]
+        )
+    })?;
+    if first["matchedEvidenceId"] != row.id {
+        return Err(format!(
+            "reformulations[0] exists but its matchedEvidenceId is {:?}, expected {:?}; \
+             the entry is {first:?}",
+            first["matchedEvidenceId"], row.id
+        ));
+    }
     for value in [answer, weak] {
         for forbidden in [
             "private-source",

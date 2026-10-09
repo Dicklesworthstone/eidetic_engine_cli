@@ -196,3 +196,13 @@ mod read_only;
 
 #[path = "ask_native.rs"]
 mod native;
+
+// bd-834wq / bd-l6h3g item 2 / bd-unreachable-contract-test-files-npyqw.
+// tests/contracts/ask_transcript.rs was added 2026-09-18 with four #[test] fns and
+// nothing declared it, so it had NEVER COMPILED on main — it was carried in
+// scripts/mod-reachability-allowlist.txt as "LIVE, declaration owed". It opens with
+// `use super::*` and takes Value/DbConnection from this module's scope exactly as
+// ask_native.rs above does, which is why it belongs here and not in the registered
+// contracts.rs list: a different `super` would not resolve its imports.
+#[path = "ask_transcript.rs"]
+mod transcript;
