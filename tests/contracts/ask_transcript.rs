@@ -6,7 +6,34 @@ use ee::db::{
 use ee::models::{EvidenceId, SessionId};
 use std::path::{Path, PathBuf};
 
-const TEXT: &str = "Café release notes. Run cargo fmt before release.";
+// bd-834wq: "tagging" IS LOAD-BEARING. DO NOT SIMPLIFY THIS SENTENCE.
+//
+// TEXT is split into spans and the nearest one to QUESTION is its second
+// sentence. ask_query_assist_reformulations (src/core/ask.rs:1637) builds its
+// one entry from the terms of THAT span MINUS the question's terms, and
+// returns an EMPTY vec when nothing survives:
+//
+//     let evidence_terms = ask_query_assist_terms(&first.text)
+//         .filter(|term| !question_terms.contains(term)).take(4)...
+//     if evidence_terms.is_empty() { return Vec::new(); }
+//
+// Without "tagging" the two term sets are IDENTICAL -- ask_query_assist_terms
+// lowercases, drops tokens under 3 chars and drops stopwords, and "before" is
+// NOT in the stopword list (src/core/ask.rs:1718), so "Run cargo fmt before
+// release" and "Run cargo fmt before release." reduce to the same five terms.
+// reformulations was therefore `[]`, and the test's
+// `reformulations[0]["matchedEvidenceId"]` read Null -- indistinguishable
+// through serde_json indexing from a present object missing the key, which is
+// why this looked like a product gap for three weeks.
+//
+// "tagging" is 7 chars and not a stopword, so exactly one term survives the
+// subtraction. It is appended rather than substituted so the span still
+// contains every question term and stays the nearest by a wide margin (span 1,
+// "Café release notes.", shares only "release"), which keeps the non-weak run
+// un-abstained and keeps the conflict fixture in
+// opposing_transcript_excerpts_keep_both_cited_sides_without_human_trust
+// pointed at the same claim.
+const TEXT: &str = "Café release notes. Run cargo fmt before release tagging.";
 const QUESTION: &str = "Run cargo fmt before release";
 
 fn run(workspace: &Path, flags: &[&str]) -> Result<Value, String> {
@@ -177,6 +204,27 @@ fn public_transcript_answers_and_hints_keep_native_identity_without_mutation() -
             "reformulations[0] exists but its matchedEvidenceId is {:?}, expected {:?}; \
              the entry is {first:?}",
             first["matchedEvidenceId"], row.id
+        ));
+    }
+    // bd-834wq: ASSERT THE CAUSE BESIDE THE LABEL.
+    //
+    // The check above is satisfied by a non-empty array for ANY reason, so on its
+    // own it cannot tell "the fixture supplies a term the question lacks" from
+    // "something unrelated started populating this array". Pin the mechanism: the
+    // suggested query must actually carry the term that TEXT adds, which is the
+    // single reason this array is non-empty at all. Deleting "tagging" from TEXT
+    // now fails HERE with the term named, instead of reverting the array to `[]`
+    // and failing above with a message about stopword filtering.
+    let query = first["query"].as_str().ok_or_else(|| {
+        format!("reformulations[0].query must be a string; the entry is {first:?}")
+    })?;
+    if !query.contains("tagging") {
+        return Err(format!(
+            "reformulations[0].query is {query:?}, which does not contain the term \
+             \"tagging\" that TEXT adds and QUESTION lacks. That term surviving the \
+             question-term subtraction is the ONLY reason this array is non-empty, so \
+             its absence means the array is populated by some other path and this \
+             assertion is no longer testing what it names. TEXT={TEXT:?} QUESTION={QUESTION:?}"
         ));
     }
     for value in [answer, weak] {
