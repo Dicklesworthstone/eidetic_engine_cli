@@ -87,6 +87,9 @@ const LOCAL_API_MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_RECENT_BROKER_AUDIT_EVENTS: usize = 128;
 const MIN_OWNER_REVALIDATE_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_OWNER_REVALIDATE_INTERVAL: Duration = Duration::from_secs(60);
+const BROKER_CANCEL_CHECK_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(unix)]
+const CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub type TailscaleLocalApiFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ResponderBrokerError>> + 'a>>;
@@ -1633,24 +1636,45 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
         &self,
         cx: &Cx,
     ) -> Result<AuthenticatedTransportSession, ResponderBrokerError> {
-        checkpoint(cx, "responder accept")?;
+        let (stream, kernel_source) = self.accept_connection(cx).await?;
+        self.authenticate_connection(cx, stream, kernel_source)
+            .await
+    }
+
+    /// Wait for a peer without relying on socket readiness to wake cancellation.
+    /// Asupersync 0.5's parked listener does not register a cancellation waker.
+    /// Short timer slices keep the caller's one-shot wait interruptible; an idle
+    /// slice is not an admission attempt or a rejected connection.
+    async fn accept_connection(
+        &self,
+        cx: &Cx,
+    ) -> Result<(TcpStream, SocketAddr), ResponderBrokerError> {
         let listener = self
             .listener
             .as_ref()
             .ok_or(ResponderBrokerError::TransportUnavailable)?;
-        let _ambient = Cx::set_current(Some(cx.clone()));
-        let (stream, kernel_source) = match listener.accept().await {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                let broker_error = if error.kind() == io::ErrorKind::Interrupted {
+        let error = match await_cancellable(cx, listener.accept()).await {
+            Ok(Ok(accepted)) => return Ok(accepted),
+            Ok(Err(error)) => {
+                if error.kind() == io::ErrorKind::Interrupted {
                     ResponderBrokerError::Cancelled
                 } else {
                     ResponderBrokerError::TransportUnavailable
-                };
-                self.record_error(&broker_error, false, false);
-                return Err(broker_error);
+                }
             }
+            Err(error) => error,
         };
+        self.record_error(&error, false, false);
+        Err(error)
+    }
+
+    async fn authenticate_connection(
+        &self,
+        cx: &Cx,
+        stream: TcpStream,
+        kernel_source: SocketAddr,
+    ) -> Result<AuthenticatedTransportSession, ResponderBrokerError> {
+        let _ambient = Cx::set_current(Some(cx.clone()));
         {
             let mut runtime = self
                 .runtime
@@ -1777,7 +1801,20 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
         &self,
         cx: &Cx,
     ) -> Result<(), ResponderBrokerError> {
-        let mut session = self.accept_authenticated(cx).await?;
+        let (stream, kernel_source) = self.accept_connection(cx).await?;
+        self.authenticate_and_serve_connection(cx, stream, kernel_source)
+            .await
+    }
+
+    async fn authenticate_and_serve_connection(
+        &self,
+        cx: &Cx,
+        stream: TcpStream,
+        kernel_source: SocketAddr,
+    ) -> Result<(), ResponderBrokerError> {
+        let mut session = self
+            .authenticate_connection(cx, stream, kernel_source)
+            .await?;
         let result =
             serve_authenticated_sync_round(cx, &mut session, &self.routes, &self.admission).await;
         session.close();
@@ -2084,7 +2121,10 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
     pub async fn serve_until_cancelled(&mut self, cx: &Cx) -> Result<(), ResponderBrokerError> {
         let mut listener_index = 0_usize;
         loop {
-            checkpoint(cx, "responder owner")?;
+            if let Err(error) = checkpoint(cx, "responder owner") {
+                self.shutdown();
+                return Err(error);
+            }
             if self.brokers.is_empty() {
                 match self.reconcile(cx).await {
                     Ok(()) => {}
@@ -2093,7 +2133,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
                         return Err(ResponderBrokerError::Cancelled);
                     }
                     Err(_) => {
-                        asupersync_sleep(cx.now(), self.revalidate_interval).await;
+                        self.wait_to_revalidate(cx).await?;
                         continue;
                     }
                 }
@@ -2101,7 +2141,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             #[cfg(any(unix, windows))]
             self.poll_control(cx).await;
             if self.brokers.is_empty() {
-                asupersync_sleep(cx.now(), self.revalidate_interval).await;
+                self.wait_to_revalidate(cx).await?;
                 continue;
             }
             listener_index %= self.brokers.len();
@@ -2117,32 +2157,47 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             };
             #[cfg(not(any(unix, windows)))]
             let accept_budget = self.revalidate_interval;
-            let accept_timed_out = match timeout(
-                now,
-                accept_budget,
-                broker.accept_authenticated_and_serve(cx),
-            )
-            .await
-            {
-                Ok(Ok(())) => false,
-                Ok(Err(ResponderBrokerError::Cancelled)) => {
-                    self.shutdown();
-                    return Err(ResponderBrokerError::Cancelled);
+            // Only idle acceptance shares the control/revalidation poll budget.
+            // Once a socket is accepted, its handshake and application I/O use
+            // their actual session budgets. Dropping that work at the next 50 ms
+            // control tick loses valid slow handshakes and partial responses.
+            let accepted = timeout(now, accept_budget, broker.accept_connection(cx)).await;
+            let accept_timed_out = accepted.is_err();
+            let result = match accepted {
+                Ok(Ok((stream, kernel_source))) => {
+                    broker
+                        .authenticate_and_serve_connection(cx, stream, kernel_source)
+                        .await
                 }
-                Ok(Err(_rejected)) => false,
-                Err(_) => true,
+                Ok(Err(error)) => Err(error),
+                Err(_) => Ok(()),
             };
+            if matches!(result, Err(ResponderBrokerError::Cancelled)) {
+                self.shutdown();
+                return Err(ResponderBrokerError::Cancelled);
+            }
             if (accept_timed_out || self.last_revalidated_at.elapsed() >= self.revalidate_interval)
                 && let Err(error) = self.reconcile(cx).await
             {
-                self.shutdown();
                 if matches!(error, ResponderBrokerError::Cancelled) {
+                    self.shutdown();
                     return Err(error);
                 }
-                asupersync_sleep(cx.now(), self.revalidate_interval).await;
+                self.shutdown_listeners();
+                self.wait_to_revalidate(cx).await?;
             }
             listener_index = listener_index.saturating_add(1);
         }
+    }
+
+    async fn wait_to_revalidate(&mut self, cx: &Cx) -> Result<(), ResponderBrokerError> {
+        if let Err(error) =
+            await_cancellable(cx, asupersync_sleep(cx.now(), self.revalidate_interval)).await
+        {
+            self.shutdown();
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub async fn reconcile(&mut self, cx: &Cx) -> Result<(), ResponderBrokerError> {
@@ -2253,6 +2308,8 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
 
     pub fn shutdown(&mut self) {
         self.shutdown_listeners();
+        #[cfg(any(unix, windows))]
+        self.control.take();
     }
 
     fn shutdown_listeners(&mut self) {
@@ -2278,12 +2335,15 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             Ok(Ok((stream, _))) => stream,
             Ok(Err(_)) | Err(_) => return,
         };
-        let (mut stream, request) = match read_control_request(cx, accepted).await {
-            Ok(read) => read,
-            Err(_) => return,
+        // An accepted local client may stop before sending a complete frame or
+        // stop reading its response. Preserve partial I/O across cancellation
+        // ticks, but bound the entire operation by the control client's budget.
+        let operation = async {
+            let (mut stream, request) = read_control_request(cx, accepted).await?;
+            let response = self.dispatch_control(cx, request).await;
+            write_control_response(&mut stream, &response).await
         };
-        let response = self.dispatch_control(cx, request).await;
-        let _ = write_control_response(&mut stream, &response).await;
+        let _ = await_cancellable(cx, timeout(cx.now(), CONTROL_IO_TIMEOUT, operation)).await;
     }
 
     #[cfg(windows)]
@@ -3324,6 +3384,36 @@ fn decode_local_api_chunked_body(body: &[u8]) -> Result<Vec<u8>, ResponderBroker
             return Err(ResponderBrokerError::WhoIsUnverified);
         }
         cursor = chunk_end + 2;
+    }
+}
+
+/// Poll one owned future across bounded cancellation checks. Only the temporary
+/// borrow is dropped when a timer slice expires, so partial frame reads/writes
+/// and other in-flight work survive until completion, cancellation, or the
+/// caller's deadline. The pinned dependency's I/O futures cannot be relied on
+/// to wake a parked request when its Cx is cancelled.
+async fn await_cancellable<T, F>(cx: &Cx, future: F) -> Result<T, ResponderBrokerError>
+where
+    F: Future<Output = T>,
+{
+    let _ambient = Cx::set_current(Some(cx.clone()));
+    let mut future = std::pin::pin!(future);
+    loop {
+        checkpoint(cx, "responder wait")?;
+        let now = cx.now();
+        let wait = cx
+            .budget()
+            .remaining_duration(now)
+            .map_or(BROKER_CANCEL_CHECK_INTERVAL, |remaining| {
+                remaining.min(BROKER_CANCEL_CHECK_INTERVAL)
+            });
+        if wait.is_zero() {
+            return Err(ResponderBrokerError::Cancelled);
+        }
+        if let Ok(value) = timeout(now, wait, future.as_mut()).await {
+            checkpoint(cx, "responder wait")?;
+            return Ok(value);
+        }
     }
 }
 

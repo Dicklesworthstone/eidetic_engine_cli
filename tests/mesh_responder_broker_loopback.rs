@@ -10,17 +10,18 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asupersync::{CancelKind, Cx};
 use ee::config::MeshLane;
@@ -45,11 +46,12 @@ use ee::mesh::peer::{
     build_peer_origin_node_id, enroll_peer,
 };
 use ee::mesh::responder_broker::{
-    DurableResponderRegistration, MESH_KEY_STORE_UNAVAILABLE_CODE, PreAuthAdmissionLimits,
-    RegisteredResponderRoute, ResponderBroker, ResponderBrokerError, ResponderBrokerOwner,
-    ResponderBrokerState, ResponderControlOp, ResponderControlRequest, ResponderRouteRegistry,
-    TailscaleLocalApi, TailscaleLocalApiClient, default_responder_control_socket_path,
-    submit_responder_control_request,
+    DurableResponderRegistration, LocalTailscaleIdentity, LocalTailscaleStatus,
+    MESH_KEY_STORE_UNAVAILABLE_CODE, PreAuthAdmissionLimits, RegisteredResponderRoute,
+    ResponderBroker, ResponderBrokerError, ResponderBrokerOwner, ResponderBrokerState,
+    ResponderControlOp, ResponderControlRequest, ResponderRouteRegistry, TailscaleLocalApi,
+    TailscaleLocalApiClient, TailscaleLocalApiFuture, WhoIsIdentity,
+    default_responder_control_socket_path, submit_responder_control_request,
 };
 use ee::mesh::transport_session::{
     HandshakeObservations, InitiatorSessionConfig, ResponderExpectations, SessionBinding,
@@ -174,15 +176,145 @@ where
         .map_err(|error| format!("asupersync runtime failed: {error}"))?
 }
 
+/// Keep the regression watchdog outside the runtime under test. An async
+/// timeout around the old broken accept would itself re-poll the socket and
+/// accidentally deliver the cancellation that the product failed to observe.
+fn lifecycle_test_child(test_name: &str) -> TestResult<bool> {
+    const CHILD_MARKER: &str = "EE_MESH_RESPONDER_LIFECYCLE_TEST_CHILD";
+    if std::env::var(CHILD_MARKER).as_deref() == Ok(test_name) {
+        return Ok(true);
+    }
+    let mut child = Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(CHILD_MARKER, test_name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("start lifecycle regression {test_name}: {error}"))?;
+    let started = Instant::now();
+    let watchdog = Duration::from_secs(45);
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| format!("poll lifecycle regression {test_name}: {error}"))?
+            .is_some()
+        {
+            let output = child
+                .wait_with_output()
+                .map_err(|error| format!("join lifecycle regression {test_name}: {error}"))?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !output.status.success()
+                || !stdout.contains(&format!("test {test_name} ... ok"))
+                || !stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;")
+            {
+                return Err(format!(
+                    "lifecycle regression {test_name} did not pass exactly one test: {}\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
+                    stdout,
+                    String::from_utf8_lossy(&output.stderr),
+                ));
+            }
+            return Ok(false);
+        }
+        if started.elapsed() >= watchdog {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .map_err(|error| format!("reap timed-out lifecycle regression: {error}"))?;
+            return Err(format!(
+                "lifecycle regression {test_name} did not complete within {watchdog:?}; \
+                 stdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+async fn notify_first_pending<F: Future>(future: F, ready: mpsc::SyncSender<()>) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut ready = Some(ready);
+    poll_fn(|cx| {
+        let result = future.as_mut().poll(cx);
+        if result.is_pending()
+            && let Some(ready) = ready.take()
+        {
+            let _ = ready.send(());
+        }
+        result
+    })
+    .await
+}
+
+/// The owner normally refuses loopback Tailscale addresses. This documented
+/// LocalAPI seam permits the wire-real fixture without weakening production
+/// address validation. WhoIs may be delayed and a status failure explicitly
+/// injected; successful authority reads still use the real API client.
+struct LoopbackLocalApi {
+    client: TailscaleLocalApiClient,
+    who_is_delay: Duration,
+    status_failure: Option<Arc<LocalApiStatusFailure>>,
+}
+
+#[derive(Default)]
+struct LocalApiStatusFailure {
+    requested: AtomicBool,
+    observed: AtomicBool,
+}
+
+impl TailscaleLocalApi for LoopbackLocalApi {
+    fn local_status<'a>(&'a self, cx: &'a Cx) -> TailscaleLocalApiFuture<'a, LocalTailscaleStatus> {
+        if let Some(failure) = &self.status_failure
+            && failure.requested.load(Ordering::Acquire)
+        {
+            failure.observed.store(true, Ordering::Release);
+            return Box::pin(async { Err(ResponderBrokerError::WhoIsUnavailable) });
+        }
+        self.client.local_status(cx)
+    }
+
+    fn verify_local_address<'a>(
+        &'a self,
+        cx: &'a Cx,
+        address: SocketAddr,
+    ) -> TailscaleLocalApiFuture<'a, LocalTailscaleIdentity> {
+        self.client.verify_local_address(cx, address)
+    }
+
+    fn who_is<'a>(
+        &'a self,
+        cx: &'a Cx,
+        source: SocketAddr,
+    ) -> TailscaleLocalApiFuture<'a, WhoIsIdentity> {
+        Box::pin(async move {
+            if !self.who_is_delay.is_zero() {
+                asupersync::time::sleep(cx.now(), self.who_is_delay).await;
+            }
+            self.client.who_is(cx, source).await
+        })
+    }
+
+    fn allows_loopback_bind(&self) -> bool {
+        true
+    }
+}
+
 struct FakeLocalApi {
     socket_path: PathBuf,
     requests: Arc<Mutex<Vec<String>>>,
     join: thread::JoinHandle<TestResult>,
+    stop: Option<Arc<AtomicBool>>,
 }
 
 impl FakeLocalApi {
     fn spawn(dir: &Path, expected_requests: usize) -> TestResult<Self> {
         Self::spawn_with_tailnets(dir, expected_requests, None, Some("tailnet-loopback"))
+    }
+
+    fn spawn_until_stopped(dir: &Path) -> TestResult<Self> {
+        Self::spawn_wire(dir, None, None, Some("tailnet-loopback"))
     }
 
     fn spawn_with_tailnets(
@@ -191,18 +323,50 @@ impl FakeLocalApi {
         self_tailnet: Option<&str>,
         current_tailnet: Option<&str>,
     ) -> TestResult<Self> {
+        Self::spawn_wire(dir, Some(expected_requests), self_tailnet, current_tailnet)
+    }
+
+    fn spawn_wire(
+        dir: &Path,
+        expected_requests: Option<usize>,
+        self_tailnet: Option<&str>,
+        current_tailnet: Option<&str>,
+    ) -> TestResult<Self> {
         let socket_path = dir.join("tailscaled.sock");
         let listener = UnixListener::bind(&socket_path)
             .map_err(|error| format!("bind fake localapi: {error}"))?;
+        listener
+            .set_nonblocking(expected_requests.is_none())
+            .map_err(|error| format!("set fake localapi accept mode: {error}"))?;
+        let stop = expected_requests
+            .is_none()
+            .then(|| Arc::new(AtomicBool::new(false)));
+        let server_stop = stop.clone();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&requests);
         let self_tailnet = self_tailnet.map(str::to_owned);
         let current_tailnet = current_tailnet.map(str::to_owned);
         let join = thread::spawn(move || {
-            for _ in 0..expected_requests {
-                let (mut stream, _) = listener
-                    .accept()
-                    .map_err(|error| format!("accept fake localapi: {error}"))?;
+            let mut served = 0;
+            while expected_requests.is_none_or(|expected| served < expected)
+                && !server_stop
+                    .as_ref()
+                    .is_some_and(|stop| stop.load(Ordering::Acquire))
+            {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(accepted) => accepted,
+                    Err(error)
+                        if expected_requests.is_none()
+                            && error.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => return Err(format!("accept fake localapi: {error}")),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| format!("set fake localapi stream mode: {error}"))?;
                 let request = read_http_request(&mut stream)?;
                 observed
                     .lock()
@@ -242,6 +406,7 @@ impl FakeLocalApi {
                     &mut stream,
                     &serde_json::to_vec(&body).map_err(|e| e.to_string())?,
                 )?;
+                served += 1;
             }
             Ok(())
         });
@@ -249,10 +414,14 @@ impl FakeLocalApi {
             socket_path,
             requests,
             join,
+            stop,
         })
     }
 
     fn finish(self) -> TestResult<Vec<String>> {
+        if let Some(stop) = &self.stop {
+            stop.store(true, Ordering::Release);
+        }
         self.join
             .join()
             .map_err(|_| "fake localapi thread panicked".to_owned())??;
@@ -769,6 +938,11 @@ fn production_broker_rejects_status_tailnet_mismatch_before_listen_or_pair_auth(
 
 #[test]
 fn production_broker_path_attests_exact_source_and_authenticates_preexisting_key() -> TestResult {
+    if !lifecycle_test_child(
+        "production_broker_path_attests_exact_source_and_authenticates_preexisting_key",
+    )? {
+        return Ok(());
+    }
     let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
     let store = MeshKeyStore::open_or_create(workspace.path())
         .map_err(|error| format!("preprovision key store: {error}"))?;
@@ -792,6 +966,7 @@ fn production_broker_path_attests_exact_source_and_authenticates_preexisting_key
     let registry = ResponderRouteRegistry::new([route(workspace.path().to_path_buf(), port)])
         .map_err(|error| error.to_string())?;
     let (address_tx, address_rx) = mpsc::sync_channel(1);
+    let (pending_tx, pending_rx) = mpsc::sync_channel(1);
     let server = thread::spawn(move || {
         run_runtime(|cx| async move {
             let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
@@ -807,8 +982,7 @@ fn production_broker_path_attests_exact_source_and_authenticates_preexisting_key
             address_tx
                 .send(broker.local_addr())
                 .map_err(|error| format!("publish broker address: {error}"))?;
-            let mut session = broker
-                .accept_authenticated(&cx)
+            let mut session = notify_first_pending(broker.accept_authenticated(&cx), pending_tx)
                 .await
                 .map_err(|error| error.to_string())?;
             if session.binding().responder_workspace_id != "workspace-responder" {
@@ -816,7 +990,10 @@ fn production_broker_path_attests_exact_source_and_authenticates_preexisting_key
             }
             session.close();
             let listening = broker.status();
-            if listening.authenticated_sessions != 1
+            if listening.accepted_connections != 1
+                || listening.authenticated_sessions != 1
+                || listening.rejected_connections != 0
+                || listening.preauth_inflight != 0
                 || listening.application_hello_performed
                 || listening.anti_entropy_performed
                 || listening.synchronized
@@ -841,6 +1018,12 @@ fn production_broker_path_attests_exact_source_and_authenticates_preexisting_key
     let address = address_rx
         .recv_timeout(Duration::from_secs(3))
         .map_err(|error| format!("wait for broker bind: {error}"))?;
+    pending_rx
+        .recv_timeout(Duration::from_secs(3))
+        .map_err(|error| format!("wait for the idle broker accept: {error}"))?;
+    // Cross several cancellation-check slices before a peer exists. The
+    // one-shot API must keep waiting, without admitting or rejecting anything.
+    thread::sleep(Duration::from_millis(250));
     run_runtime(|cx| async move {
         let mut session = connect_authenticated_session(&cx, address, initiator_config())
             .await
@@ -943,6 +1126,9 @@ fn inbound_missing_store_is_noncreating_and_rate_limited_fail_closed() -> TestRe
 
 #[test]
 fn blocked_accept_observes_cancellation_then_shutdown() -> TestResult {
+    if !lifecycle_test_child("blocked_accept_observes_cancellation_then_shutdown")? {
+        return Ok(());
+    }
     let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
     let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
     let fake = FakeLocalApi::spawn(local_api_dir.path(), 1)?;
@@ -964,17 +1150,27 @@ fn blocked_accept_observes_cancellation_then_shutdown() -> TestResult {
         .await
         .map_err(|error| error.to_string())?;
         let cancel = cx.clone();
+        let (pending_tx, pending_rx) = mpsc::sync_channel(1);
         let canceller = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
+            pending_rx
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(|error| format!("accept never became pending: {error}"))?;
+            let cancelled_at = Instant::now();
             cancel.cancel_with(CancelKind::Shutdown, Some("stop mesh responder"));
+            Ok::<_, String>(cancelled_at)
         });
-        let error = broker
-            .accept_authenticated(&cx)
+        let error = notify_first_pending(broker.accept_authenticated(&cx), pending_tx)
             .await
             .expect_err("cancelled accept must stop");
-        canceller
+        let cancelled_at = canceller
             .join()
-            .map_err(|_| "accept canceller panicked".to_owned())?;
+            .map_err(|_| "accept canceller panicked".to_owned())??;
+        if cancelled_at.elapsed() >= Duration::from_secs(1) {
+            return Err(format!(
+                "idle accept did not observe cancellation promptly: {:?}",
+                cancelled_at.elapsed()
+            ));
+        }
         if !matches!(error, ResponderBrokerError::Cancelled) {
             return Err(format!("unexpected cancelled-accept error: {error:?}"));
         }
@@ -982,6 +1178,7 @@ fn blocked_accept_observes_cancellation_then_shutdown() -> TestResult {
         let audit = broker.recent_audit_events();
         if status.accepted_connections != 0
             || status.rejected_connections != 0
+            || status.preauth_inflight != 0
             || audit.len() != 1
             || audit[0].outcome != "cancelled"
             || audit[0].route_selected
@@ -992,6 +1189,534 @@ fn blocked_accept_observes_cancellation_then_shutdown() -> TestResult {
             ));
         }
         broker.shutdown();
+        let rebound = StdTcpListener::bind(bind_address)
+            .map_err(|error| format!("cancelled broker retained its listener: {error}"))?;
+        drop(rebound);
+        fake.finish()?;
+        Ok(())
+    })
+}
+
+#[test]
+fn blocked_accept_observes_request_deadline_without_a_peer() -> TestResult {
+    if !lifecycle_test_child("blocked_accept_observes_request_deadline_without_a_peer")? {
+        return Ok(());
+    }
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn(local_api_dir.path(), 1)?;
+    let port = available_nonprivileged_port()?;
+    let bind_address = SocketAddr::from(([127, 0, 0, 1], port));
+    let registry = ResponderRouteRegistry::new([route(workspace.path().to_path_buf(), port)])
+        .map_err(|error| error.to_string())?;
+    let runtime = ee::core::build_cli_runtime()
+        .map_err(|error| format!("build deadline regression runtime: {error}"))?;
+    let setup_cx = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    runtime.block_on(async {
+        let _ambient = Cx::set_current(Some(setup_cx.clone()));
+        let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
+        let mut broker = ResponderBroker::bind(
+            &setup_cx,
+            bind_address,
+            client,
+            registry,
+            PreAuthAdmissionLimits::default(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        // Mint the bounded context after setup, using the same production
+        // runtime drivers. A test-only Cx without a reactor would hide the bug.
+        let cx =
+            runtime.request_cx_with_budget(setup_cx.budget_for_timeout(Duration::from_millis(175)));
+        let started = Instant::now();
+        let error = broker
+            .accept_authenticated(&cx)
+            .await
+            .expect_err("idle accept must respect the request deadline");
+        let elapsed = started.elapsed();
+        if !matches!(error, ResponderBrokerError::Cancelled)
+            || elapsed < Duration::from_millis(100)
+            || elapsed >= Duration::from_secs(1)
+            || cx.checkpoint().is_ok()
+            || !cx.cancelled_by(CancelKind::Deadline)
+        {
+            return Err(format!(
+                "idle deadline result was not bounded cancellation: {error:?}, {elapsed:?}"
+            ));
+        }
+        let status = broker.status();
+        let audit = broker.recent_audit_events();
+        if status.accepted_connections != 0
+            || status.rejected_connections != 0
+            || status.preauth_inflight != 0
+            || audit.len() != 1
+            || audit[0].outcome != "cancelled"
+            || audit[0].authenticated
+            || audit[0].route_selected
+        {
+            return Err(format!(
+                "deadline fabricated connection work: {status:?} {audit:?}"
+            ));
+        }
+        broker.shutdown();
+        let rebound = StdTcpListener::bind(bind_address)
+            .map_err(|error| format!("deadline left the listener bound: {error}"))?;
+        drop(rebound);
+        fake.finish()?;
+        Ok(())
+    })
+}
+
+#[test]
+fn cancelled_owner_releases_tcp_and_control_before_drop() -> TestResult {
+    if !lifecycle_test_child("cancelled_owner_releases_tcp_and_control_before_drop")? {
+        return Ok(());
+    }
+    for cancel_after_pending in [false, true] {
+        let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+        let local_api_dir =
+            tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+        let fake = FakeLocalApi::spawn_until_stopped(local_api_dir.path())?;
+        let control_path = local_api_dir.path().join("responder.sock");
+        let port = available_nonprivileged_port()?;
+        let bind_address = SocketAddr::from(([127, 0, 0, 1], port));
+        let registry = ResponderRouteRegistry::new([route(workspace.path().to_path_buf(), port)])
+            .map_err(|error| error.to_string())?;
+        run_runtime(|cx| async move {
+            let mut owner = ResponderBrokerOwner::start(
+                &cx,
+                LoopbackLocalApi {
+                    client: TailscaleLocalApiClient::new(
+                        fake.socket_path.clone(),
+                        LOCAL_API_TIMEOUT,
+                    ),
+                    who_is_delay: Duration::ZERO,
+                    status_failure: None,
+                },
+                registry,
+                PreAuthAdmissionLimits::default(),
+                Duration::from_secs(60),
+            )
+            .await
+            .map_err(|error| format!("start loopback owner: {error}"))?;
+            owner
+                .listen_control(&control_path)
+                .map_err(|error| error.to_string())?;
+            let (result, cancelled_at) = if cancel_after_pending {
+                let cancel = cx.clone();
+                let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+                let canceller = thread::spawn(move || {
+                    pending_rx
+                        .recv_timeout(Duration::from_secs(3))
+                        .map_err(|error| format!("owner never became pending: {error}"))?;
+                    let cancelled_at = Instant::now();
+                    cancel.cancel_with(CancelKind::Shutdown, Some("stop idle owner"));
+                    Ok::<_, String>(cancelled_at)
+                });
+                let result =
+                    notify_first_pending(owner.serve_until_cancelled(&cx), pending_tx).await;
+                let cancelled_at = canceller
+                    .join()
+                    .map_err(|_| "owner canceller panicked".to_owned())??;
+                (result, cancelled_at)
+            } else {
+                let cancelled_at = Instant::now();
+                cx.cancel_with(CancelKind::Shutdown, Some("stop owner before serving"));
+                (owner.serve_until_cancelled(&cx).await, cancelled_at)
+            };
+            if !matches!(result, Err(ResponderBrokerError::Cancelled))
+                || cancelled_at.elapsed() >= Duration::from_secs(1)
+                || !owner.bound_addresses().is_empty()
+                || owner.control_socket_path().is_some()
+            {
+                return Err(format!(
+                    "retained owner did not stop (after_pending={cancel_after_pending}): \
+                     {result:?}, {:?}, {:?}, {:?}",
+                    cancelled_at.elapsed(),
+                    owner.bound_addresses(),
+                    owner.control_socket_path()
+                ));
+            }
+            let tcp = StdTcpListener::bind(bind_address)
+                .map_err(|error| format!("stopped owner retained TCP listener: {error}"))?;
+            let control = UnixListener::bind(&control_path)
+                .map_err(|error| format!("stopped owner retained control publication: {error}"))?;
+            // Both rebinds happened while owner is still alive.
+            drop(tcp);
+            drop(control);
+            let requests = fake.finish()?;
+            if requests.len() < 2 || requests.iter().any(|request| request.contains("/whois?")) {
+                return Err(format!(
+                    "idle owner unexpectedly performed peer work: {requests:?}"
+                ));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn owner_retains_control_during_localapi_failure_and_cancels_retry_sleep() -> TestResult {
+    if !lifecycle_test_child(
+        "owner_retains_control_during_localapi_failure_and_cancels_retry_sleep",
+    )? {
+        return Ok(());
+    }
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn_until_stopped(local_api_dir.path())?;
+    let control_path = local_api_dir.path().join("responder.sock");
+    let port = available_nonprivileged_port()?;
+    let registry = ResponderRouteRegistry::new([route(workspace.path().to_path_buf(), port)])
+        .map_err(|error| error.to_string())?;
+    let failure = Arc::new(LocalApiStatusFailure::default());
+    run_runtime(|cx| async move {
+        let mut owner = ResponderBrokerOwner::start(
+            &cx,
+            LoopbackLocalApi {
+                client: TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT),
+                who_is_delay: Duration::ZERO,
+                status_failure: Some(Arc::clone(&failure)),
+            },
+            registry,
+            PreAuthAdmissionLimits::default(),
+            Duration::from_secs(60),
+        )
+        .await
+        .map_err(|error| format!("start revalidation owner: {error}"))?;
+        owner
+            .listen_control(&control_path)
+            .map_err(|error| error.to_string())?;
+        failure.requested.store(true, Ordering::Release);
+        let cancel = cx.clone();
+        let control_at_failure = control_path.clone();
+        let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+        let canceller = thread::spawn(move || {
+            pending_rx
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(|error| format!("owner never entered the failed-status retry: {error}"))?;
+            // A filesystem check cannot wake the parked network future. In
+            // particular, do not connect a peer to make cancellation progress.
+            let control_retained = control_at_failure.exists();
+            let cancelled_at = Instant::now();
+            cancel.cancel_with(CancelKind::Shutdown, Some("stop LocalAPI retry"));
+            Ok::<_, String>((control_retained, cancelled_at))
+        });
+        let result = {
+            let mut work = std::pin::pin!(owner.serve_until_cancelled(&cx));
+            let mut pending_tx = Some(pending_tx);
+            poll_fn(|task_cx| {
+                let result = work.as_mut().poll(task_cx);
+                if result.is_pending()
+                    && failure.observed.load(Ordering::Acquire)
+                    && let Some(pending_tx) = pending_tx.take()
+                {
+                    let _ = pending_tx.send(());
+                }
+                result
+            })
+            .await
+        };
+        let (control_retained, cancelled_at) = canceller
+            .join()
+            .map_err(|_| "retry canceller panicked".to_owned())??;
+        if !control_retained
+            || !matches!(result, Err(ResponderBrokerError::Cancelled))
+            || cancelled_at.elapsed() >= Duration::from_secs(1)
+            || !owner.bound_addresses().is_empty()
+            || owner.control_socket_path().is_some()
+        {
+            return Err(format!(
+                "failed-status retry lost control or did not stop promptly: \
+                 control_retained={control_retained}, {result:?}, {:?}",
+                cancelled_at.elapsed()
+            ));
+        }
+        let tcp = StdTcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)))
+            .map_err(|error| format!("failed-status owner retained TCP listener: {error}"))?;
+        let control = UnixListener::bind(&control_path)
+            .map_err(|error| format!("failed-status owner retained control endpoint: {error}"))?;
+        drop(tcp);
+        drop(control);
+        fake.finish()?;
+        Ok(())
+    })
+}
+
+#[test]
+fn abandoned_control_frame_does_not_block_owner_cancellation() -> TestResult {
+    if !lifecycle_test_child("abandoned_control_frame_does_not_block_owner_cancellation")? {
+        return Ok(());
+    }
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn_until_stopped(local_api_dir.path())?;
+    let control_path = local_api_dir.path().join("responder.sock");
+    let port = available_nonprivileged_port()?;
+    let registry = ResponderRouteRegistry::new([route(workspace.path().to_path_buf(), port)])
+        .map_err(|error| error.to_string())?;
+    run_runtime(|cx| async move {
+        let mut owner = ResponderBrokerOwner::start(
+            &cx,
+            LoopbackLocalApi {
+                client: TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT),
+                who_is_delay: Duration::ZERO,
+                status_failure: None,
+            },
+            registry,
+            PreAuthAdmissionLimits::default(),
+            Duration::from_secs(60),
+        )
+        .await
+        .map_err(|error| format!("start control owner: {error}"))?;
+        owner
+            .listen_control(&control_path)
+            .map_err(|error| error.to_string())?;
+        let mut abandoned = std::os::unix::net::UnixStream::connect(&control_path)
+            .map_err(|error| format!("connect abandoned control client: {error}"))?;
+        abandoned
+            .write_all(&[32, 0])
+            .map_err(|error| format!("write partial control prefix: {error}"))?;
+        let cancel = cx.clone();
+        let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+        let canceller = thread::spawn(move || {
+            pending_rx
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(|error| format!("partial control read never became pending: {error}"))?;
+            let cancelled_at = Instant::now();
+            cancel.cancel_with(CancelKind::Shutdown, Some("stop abandoned control client"));
+            Ok::<_, String>(cancelled_at)
+        });
+        let result = notify_first_pending(owner.serve_until_cancelled(&cx), pending_tx).await;
+        let cancelled_at = canceller
+            .join()
+            .map_err(|_| "control canceller panicked".to_owned())??;
+        if !matches!(result, Err(ResponderBrokerError::Cancelled))
+            || cancelled_at.elapsed() >= Duration::from_secs(1)
+            || !owner.bound_addresses().is_empty()
+            || owner.control_socket_path().is_some()
+        {
+            return Err(format!(
+                "abandoned control client blocked shutdown: {result:?}"
+            ));
+        }
+        abandoned
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .map_err(|error| format!("bound abandoned control read: {error}"))?;
+        let mut byte = [0_u8; 1];
+        let read = abandoned.read(&mut byte).map_err(|error| {
+            format!("cancelled owner did not close the control client: {error}")
+        })?;
+        if read != 0 {
+            return Err("cancelled owner fabricated a response to a partial request".to_owned());
+        }
+        let tcp = StdTcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)))
+            .map_err(|error| format!("cancelled control owner retained TCP listener: {error}"))?;
+        let control = UnixListener::bind(&control_path)
+            .map_err(|error| format!("cancelled control owner retained its endpoint: {error}"))?;
+        drop(tcp);
+        drop(control);
+        fake.finish()?;
+        Ok(())
+    })
+}
+
+#[test]
+fn owner_control_preserves_partial_frames_across_cancellation_ticks() -> TestResult {
+    if !lifecycle_test_child("owner_control_preserves_partial_frames_across_cancellation_ticks")? {
+        return Ok(());
+    }
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn_until_stopped(local_api_dir.path())?;
+    let control_path = local_api_dir.path().join("responder.sock");
+    let port = available_nonprivileged_port()?;
+    let registry = ResponderRouteRegistry::new([route(workspace.path().to_path_buf(), port)])
+        .map_err(|error| error.to_string())?;
+    run_runtime(|cx| async move {
+        let mut owner = ResponderBrokerOwner::start(
+            &cx,
+            LoopbackLocalApi {
+                client: TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT),
+                who_is_delay: Duration::ZERO,
+                status_failure: None,
+            },
+            registry,
+            PreAuthAdmissionLimits::default(),
+            Duration::from_secs(60),
+        )
+        .await
+        .map_err(|error| format!("start partial-frame owner: {error}"))?;
+        owner
+            .listen_control(&control_path)
+            .map_err(|error| error.to_string())?;
+        let request = ee::mesh::responder_broker::responder_control_status_request();
+        let bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+        let prefix = u32::try_from(bytes.len())
+            .map_err(|error| error.to_string())?
+            .to_le_bytes();
+        let mut stream = std::os::unix::net::UnixStream::connect(&control_path)
+            .map_err(|error| format!("connect partial-frame client: {error}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .map_err(|error| format!("bound partial-frame response: {error}"))?;
+        stream
+            .write_all(&prefix[..2])
+            .map_err(|error| error.to_string())?;
+        let cancel = cx.clone();
+        let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+        let client = thread::spawn(move || {
+            let result = (|| {
+                pending_rx
+                    .recv_timeout(Duration::from_secs(3))
+                    .map_err(|error| format!("partial prefix never became pending: {error}"))?;
+                thread::sleep(Duration::from_millis(150));
+                stream
+                    .write_all(&prefix[2..])
+                    .map_err(|error| error.to_string())?;
+                let split = bytes.len() / 2;
+                stream
+                    .write_all(&bytes[..split])
+                    .map_err(|error| error.to_string())?;
+                thread::sleep(Duration::from_millis(150));
+                stream
+                    .write_all(&bytes[split..])
+                    .map_err(|error| error.to_string())?;
+                let mut length = [0_u8; 4];
+                stream
+                    .read_exact(&mut length)
+                    .map_err(|error| error.to_string())?;
+                let length = usize::try_from(u32::from_le_bytes(length))
+                    .map_err(|error| error.to_string())?;
+                if length == 0 || length > ee::mesh::responder_broker::RESPONDER_CONTROL_MAX_BYTES {
+                    return Err(format!(
+                        "partial-frame response has invalid length: {length}"
+                    ));
+                }
+                let mut reply = vec![0_u8; length];
+                stream
+                    .read_exact(&mut reply)
+                    .map_err(|error| error.to_string())?;
+                let reply: serde_json::Value =
+                    serde_json::from_slice(&reply).map_err(|error| error.to_string())?;
+                if reply["ok"] != true
+                    || reply["nonce"] != request.nonce
+                    || reply["registeredRoutes"] != 1
+                {
+                    return Err(format!(
+                        "partial control frame lost state across timer slices: {reply}"
+                    ));
+                }
+                Ok(())
+            })();
+            cancel.cancel_with(
+                CancelKind::Shutdown,
+                Some("partial control response complete"),
+            );
+            result
+        });
+        let result = notify_first_pending(owner.serve_until_cancelled(&cx), pending_tx).await;
+        let client = client
+            .join()
+            .map_err(|_| "partial-frame client panicked".to_owned())?;
+        if !matches!(result, Err(ResponderBrokerError::Cancelled)) {
+            return Err(format!("partial-frame owner did not stop: {result:?}"));
+        }
+        client?;
+        fake.finish()?;
+        Ok(())
+    })
+}
+
+#[test]
+fn expired_control_operation_allows_the_next_status_request() -> TestResult {
+    if !lifecycle_test_child("expired_control_operation_allows_the_next_status_request")? {
+        return Ok(());
+    }
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn_until_stopped(local_api_dir.path())?;
+    let control_path = local_api_dir.path().join("responder.sock");
+    let port = available_nonprivileged_port()?;
+    let registry = ResponderRouteRegistry::new([route(workspace.path().to_path_buf(), port)])
+        .map_err(|error| error.to_string())?;
+    run_runtime(|cx| async move {
+        let mut owner = ResponderBrokerOwner::start(
+            &cx,
+            LoopbackLocalApi {
+                client: TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT),
+                who_is_delay: Duration::ZERO,
+                status_failure: None,
+            },
+            registry,
+            PreAuthAdmissionLimits::default(),
+            Duration::from_secs(60),
+        )
+        .await
+        .map_err(|error| format!("start control-expiry owner: {error}"))?;
+        owner
+            .listen_control(&control_path)
+            .map_err(|error| error.to_string())?;
+        let mut abandoned = std::os::unix::net::UnixStream::connect(&control_path)
+            .map_err(|error| format!("connect expiring control client: {error}"))?;
+        abandoned
+            .set_read_timeout(Some(Duration::from_secs(7)))
+            .map_err(|error| format!("bound expired control read: {error}"))?;
+        abandoned
+            .write_all(&[32, 0])
+            .map_err(|error| format!("write abandoned control prefix: {error}"))?;
+        let cancel = cx.clone();
+        let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+        let client = thread::spawn(move || {
+            let result = (|| {
+                pending_rx
+                    .recv_timeout(Duration::from_secs(3))
+                    .map_err(|error| format!("abandoned request never became pending: {error}"))?;
+                let started = Instant::now();
+                let mut byte = [0_u8; 1];
+                let read = abandoned.read(&mut byte).map_err(|error| {
+                    format!("owner did not expire abandoned control I/O: {error}")
+                })?;
+                if read != 0 || started.elapsed() < Duration::from_secs(4) {
+                    return Err(format!(
+                        "control request did not reach its own operation deadline: \
+                         read={read}, elapsed={:?}",
+                        started.elapsed()
+                    ));
+                }
+                let request = ee::mesh::responder_broker::responder_control_status_request();
+                let response = submit_responder_control_request(&control_path, &request)
+                    .map_err(|error| format!("following status request failed: {error}"))?;
+                if !response.ok
+                    || response.nonce != request.nonce
+                    || response.registered_routes != 1
+                {
+                    return Err(format!(
+                        "owner did not serve the following status request: {response:?}"
+                    ));
+                }
+                Ok(())
+            })();
+            cancel.cancel_with(
+                CancelKind::Shutdown,
+                Some("control expiry regression complete"),
+            );
+            result
+        });
+        let result = notify_first_pending(owner.serve_until_cancelled(&cx), pending_tx).await;
+        let client = client
+            .join()
+            .map_err(|_| "control-expiry client panicked".to_owned())?;
+        if !matches!(result, Err(ResponderBrokerError::Cancelled))
+            || !owner.bound_addresses().is_empty()
+            || owner.control_socket_path().is_some()
+        {
+            return Err(format!(
+                "control-expiry owner did not stop cleanly: {result:?}"
+            ));
+        }
+        client?;
         fake.finish()?;
         Ok(())
     })
@@ -1384,6 +2109,11 @@ fn production_broker_returns_origin_event_batch_after_unsigned_hello() -> TestRe
 
 #[test]
 fn production_broker_serves_authenticated_event_fetch_from_origin_store() -> TestResult {
+    if !lifecycle_test_child(
+        "production_broker_serves_authenticated_event_fetch_from_origin_store",
+    )? {
+        return Ok(());
+    }
     let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
     let store = MeshKeyStore::open_or_create(workspace.path())
         .map_err(|error| format!("preprovision key store: {error}"))?;
@@ -1402,7 +2132,8 @@ fn production_broker_serves_authenticated_event_fetch_from_origin_store() -> Tes
     seed_loopback_route_authority(&database_path)?;
 
     let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
-    let fake = FakeLocalApi::spawn(local_api_dir.path(), 2)?;
+    let fake = FakeLocalApi::spawn_until_stopped(local_api_dir.path())?;
+    let control_path = local_api_dir.path().join("responder.sock");
     let port = available_nonprivileged_port()?;
     let bind_address: SocketAddr = format!("127.0.0.1:{port}")
         .parse()
@@ -1416,31 +2147,57 @@ fn production_broker_serves_authenticated_event_fetch_from_origin_store() -> Tes
     let (address_tx, address_rx) = mpsc::sync_channel(1);
     let server = thread::spawn(move || {
         let result = run_runtime_with(Duration::from_secs(30), |cx| async move {
-            let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
-            let broker = ResponderBroker::bind(
+            let mut owner = ResponderBrokerOwner::start(
                 &cx,
-                bind_address,
-                client,
+                LoopbackLocalApi {
+                    client: TailscaleLocalApiClient::new(
+                        fake.socket_path.clone(),
+                        LOCAL_API_TIMEOUT,
+                    ),
+                    // This delay happens after TCP accept, while real
+                    // authentication is waiting for its WhoIs authority. A
+                    // control-poll timeout must not discard the handshake.
+                    who_is_delay: Duration::from_millis(250),
+                    status_failure: None,
+                },
                 registry,
                 PreAuthAdmissionLimits::default(),
+                Duration::from_secs(60),
             )
             .await
             .map_err(|error| error.to_string())?;
+            owner
+                .listen_control(&control_path)
+                .map_err(|error| error.to_string())?;
             address_tx
-                .send(broker.local_addr())
+                .send((bind_address, cx.clone()))
                 .map_err(|error| format!("publish broker address: {error}"))?;
-            broker
-                .accept_authenticated_and_serve(&cx)
-                .await
-                .map_err(|error| format!("authenticated serve: {error}"))?;
-            fake.finish()?;
+            let result = owner.serve_until_cancelled(&cx).await;
+            if !matches!(result, Err(ResponderBrokerError::Cancelled))
+                || !owner.bound_addresses().is_empty()
+                || owner.control_socket_path().is_some()
+            {
+                return Err(format!("authenticated owner did not shut down: {result:?}"));
+            }
+            let requests = fake.finish()?;
+            if requests
+                .iter()
+                .filter(|request| request.contains("/whois?"))
+                .count()
+                != 1
+            {
+                return Err(format!(
+                    "slow session did not verify exactly one real peer: {requests:?}"
+                ));
+            }
             Ok(())
         });
         result
     });
-    let address = address_rx
+    let (address, cancel) = address_rx
         .recv_timeout(Duration::from_secs(30))
         .map_err(|error| format!("wait for broker bind: {error}"))?;
+    let started = Instant::now();
     let client = run_runtime_with(Duration::from_secs(30), |cx| async move {
         contact_authenticated_mesh_peer(
             &cx,
@@ -1451,6 +2208,10 @@ fn production_broker_serves_authenticated_event_fetch_from_origin_store() -> Tes
         .await
         .map_err(|error| format!("authenticated EventFetch client: {error}"))
     });
+    cancel.cancel_with(
+        CancelKind::Shutdown,
+        Some("authenticated EventFetch complete"),
+    );
     let server = server
         .join()
         .map_err(|_| "authenticated serve thread panicked".to_owned())?;
@@ -1462,6 +2223,9 @@ fn production_broker_serves_authenticated_event_fetch_from_origin_store() -> Tes
             ));
         }
     };
+    if started.elapsed() < Duration::from_millis(200) {
+        return Err("slow-handshake fixture did not cross the 50 ms owner poll budget".to_owned());
+    }
     if sync.events.len() != 1 || sync.events[0].event_hash != LOOPBACK_ORIGIN_EVENT_HASH {
         return Err(format!(
             "authenticated EventFetch did not return origin batch: {sync:?}"
