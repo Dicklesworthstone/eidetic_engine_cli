@@ -935,17 +935,18 @@ fn verify_candidate(
     expected: &ReviewSessionCandidate,
     session: &StoredSession,
 ) -> Result<(), CurateValidationIssue> {
+    let expected = corroboration::expected_for_recorded(connection, stored, expected)?;
     let (refs, metadata) = review_bootstrap_derivation_package(
         connection,
         &stored.workspace_id,
-        expected,
+        &expected,
         Some(session),
     )
     .map_err(|error| pair_issue(error.message()))?;
     if stored.workspace_id != session.workspace_id
         || stored.candidate_type != CandidateType::CreateDerivedMemory.as_str()
         || stored.target_memory_id.is_some()
-        || stored.source_type != persisted_review_candidate_source_type(expected)
+        || stored.source_type != persisted_review_candidate_source_type(&expected)
         || stored.source_id.as_deref() != Some(expected.source_ids.join(",").as_str())
         || stored.proposed_content.as_deref() != Some(expected.proposed_content.as_str())
         || stored.derivation_source_refs_json.as_deref() != Some(refs.as_str())

@@ -1,6 +1,10 @@
 use super::*;
 use crate::core::curate::session_arc;
 
+mod corroboration_tests {
+    include!("curate_corroboration_tests.rs");
+}
+
 const INLINE_ARC: &str = "Failure arc: storing silently would violate the no-loop-takeover policy.\nFix: require accept/reject commands and audit every accepted capture.";
 
 #[test]
@@ -140,7 +144,7 @@ fn reader_only_cass_cannot_supply_bootstrap_or_linked_lessons_after_reopen() -> 
         assert_eq!(candidate.source_ids, source_ids);
         assert_eq!(candidate.target_memory_id, target_memory_id);
         assert_eq!(candidate.topic_key, "formatting");
-        assert_eq!(candidate.confidence, 0.5333);
+        assert_eq!(candidate.confidence, 0.6);
         assert!(candidate.persisted);
         assert_eq!(
             candidate.candidate_kind,
@@ -243,7 +247,7 @@ fn multi_episode_acceptance_keeps_first_owner_and_links_only_the_current_pair() 
         session_id: Some(&session),
         propose: true,
         dry_run: false,
-        min_confidence: 0.8,
+        min_confidence: 0.5,
         limit: 4,
     })
     .map_err(|error| error.message())?;
@@ -678,7 +682,7 @@ fn arc_fixture(
         session_id: Some(&session),
         propose: true,
         dry_run: false,
-        min_confidence: 0.8,
+        min_confidence: 0.5,
         limit: 2,
     })
     .map_err(|error| error.message())?;
@@ -1299,7 +1303,7 @@ fn later_inline_pair_persists_reconstructs_and_applies_without_accepting_earlier
         session_id: Some(&session),
         propose: true,
         dry_run: false,
-        min_confidence: 0.8,
+        min_confidence: 0.5,
         limit: 4,
     })
     .map_err(|error| error.message())?;

@@ -62,6 +62,8 @@ use crate::models::{
 };
 use crate::search::HashEmbedder;
 
+#[path = "curate_corroboration.rs"]
+mod corroboration;
 #[path = "curate_session_arc.rs"]
 pub(crate) mod session_arc;
 
@@ -708,6 +710,11 @@ pub struct ReviewSessionCandidate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_arc: Option<ReviewSessionArcMetadata>,
     pub persisted: bool,
+    /// Request-local evidence for the confidence heuristic. The public wire
+    /// contract remains unchanged; persisted proposals retain this proof in
+    /// their existing producer payload.
+    #[serde(skip)]
+    pub(crate) corroboration: Option<corroboration::ReviewCorroboration>,
 }
 
 /// Linked failed-to-fixed arc metadata attached to session-arc review candidates.
@@ -2758,9 +2765,17 @@ pub fn review_session_proposals(
         &prepared.workspace_id,
         &session,
         &evidence_spans,
+        0.0,
+        u32::MAX,
+    );
+    corroboration::score_candidates(
+        &connection,
+        &prepared.workspace_id,
+        &session,
+        &mut candidates,
         options.min_confidence,
         options.limit,
-    );
+    )?;
 
     let mut durable_mutation = false;
     if options.propose && !options.dry_run {
@@ -2859,13 +2874,21 @@ pub fn capture_suggestions(
     // Only surface suggestions that the public review command can reproduce.
     // Otherwise a one-tap accept command can point at a candidate that a
     // subsequent `ee review session --propose` is unable to persist.
-    let review_candidates = build_review_session_candidates(
+    let mut review_candidates = build_review_session_candidates(
         &prepared.workspace_id,
         &session,
         &evidence_spans,
+        0.0,
+        u32::MAX,
+    );
+    corroboration::score_candidates(
+        &connection,
+        &prepared.workspace_id,
+        &session,
+        &mut review_candidates,
         options.min_confidence,
         MAX_REVIEW_SESSION_LIMIT,
-    );
+    )?;
     let limit = usize::try_from(options.limit).unwrap_or(usize::MAX);
     let mut suggestions = Vec::new();
     let mut suppressed = Vec::new();
@@ -3181,9 +3204,17 @@ fn workspace_cass_review_candidates(
     let mut by_id = BTreeMap::<String, ReviewSessionCandidate>::new();
     for session in sessions {
         let evidence_spans = spans_by_session.remove(&session.id).unwrap_or_default();
-        for candidate in
-            build_review_session_candidates(workspace_id, &session, &evidence_spans, 0.0, u32::MAX)
-        {
+        let mut reviewed =
+            build_review_session_candidates(workspace_id, &session, &evidence_spans, 0.0, u32::MAX);
+        corroboration::score_candidates(
+            connection,
+            workspace_id,
+            &session,
+            &mut reviewed,
+            0.0,
+            u32::MAX,
+        )?;
+        for candidate in reviewed {
             by_id
                 .entry(candidate.candidate_id.clone())
                 .or_insert(candidate);
@@ -3195,6 +3226,7 @@ fn workspace_cass_review_candidates(
         right
             .confidence
             .total_cmp(&left.confidence)
+            .then_with(|| right.session_arc.is_some().cmp(&left.session_arc.is_some()))
             .then_with(|| left.topic_key.cmp(&right.topic_key))
             .then_with(|| left.candidate_id.cmp(&right.candidate_id))
     });
@@ -3347,6 +3379,7 @@ fn build_review_session_candidates(
         right
             .confidence
             .total_cmp(&left.confidence)
+            .then_with(|| right.session_arc.is_some().cmp(&left.session_arc.is_some()))
             .then_with(|| left.topic_key.cmp(&right.topic_key))
             .then_with(|| left.candidate_id.cmp(&right.candidate_id))
     });
@@ -3364,7 +3397,7 @@ fn build_review_session_candidates(
 pub const REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY: &str = "propose_new_memory";
 pub const REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN: &str = "session_arc_anti_pattern";
 pub const REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE: &str = "session_arc_rule";
-const SESSION_ARC_CANDIDATE_CONFIDENCE: f32 = 0.82;
+const SESSION_ARC_CANDIDATE_CONFIDENCE: f32 = 0.6;
 
 /// Build review candidates from evidence spans that the linker rejected
 /// because they carry no `memory_id` (typical for fresh `ee import cass`
@@ -3378,8 +3411,8 @@ const SESSION_ARC_CANDIDATE_CONFIDENCE: f32 = 0.82;
 ///   candidate is a brand-new rule, not a link to an existing memory.
 /// * **Single-span clusters allowed** — first-window cass imports often
 ///   produce one span per session, so requiring `evidence_ids.len() >= 2`
-///   would defeat the bootstrap path. Confidence still scales with span
-///   count so a 1-span proposal stays at the low end of the band.
+///   would defeat the bootstrap path. Every session starts at the same
+///   conservative confidence; repeated windows are not independent support.
 fn build_bootstrap_session_candidates(
     workspace_id: &str,
     session: &StoredSession,
@@ -3471,6 +3504,7 @@ fn build_bootstrap_candidate(
         content_hash,
         session_arc: None,
         persisted: false,
+        corroboration: Some(corroboration::ReviewCorroboration::lesson()),
     })
 }
 
@@ -3511,7 +3545,7 @@ fn build_review_candidate(
         content_hash.as_str(),
     ]);
     let reason = format!(
-        "Session review clustered {} evidence span(s) for topic `{topic_key}` from CASS session `{}`; {} state the lesson; {}.",
+        "Session review clustered {} evidence span(s) for topic `{topic_key}` from CASS session `{}`; {} state the lesson; {}. Linked rule proposals retain the single-session tier; no independent-support increment is persisted for a target-mutating candidate.",
         evidence_ids.len(),
         session.id,
         lessons.supporting_spans,
@@ -3533,6 +3567,7 @@ fn build_review_candidate(
         content_hash,
         session_arc: None,
         persisted: false,
+        corroboration: None,
     })
 }
 
@@ -3666,6 +3701,10 @@ fn build_session_arc_candidate_pair(
             content_hash: anti_pattern_hash,
             session_arc: Some(anti_metadata),
             persisted: false,
+            corroboration: Some(corroboration::ReviewCorroboration::arc(
+                &failure_span.excerpt,
+                &resolution_span.excerpt,
+            )),
         },
         ReviewSessionCandidate {
             candidate_id: rule_id,
@@ -3682,6 +3721,10 @@ fn build_session_arc_candidate_pair(
             content_hash: rule_hash,
             session_arc: Some(rule_metadata),
             persisted: false,
+            corroboration: Some(corroboration::ReviewCorroboration::arc(
+                &failure_span.excerpt,
+                &resolution_span.excerpt,
+            )),
         },
     ]
 }
@@ -4293,10 +4336,6 @@ fn review_candidate_content(
     }
 }
 
-/// Intra-session correlation for the design effect. Spans of one session are
-/// not independent observations, so `m` agreeing spans count as
-/// `m / (1 + (m - 1) * rho)` effective observations (at most `1 / rho`).
-const REVIEW_SESSION_DESIGN_EFFECT_RHO: f32 = 0.5;
 const REVIEW_LESSON_MIN_CHARS: usize = 12;
 const REVIEW_LESSON_MAX_CHARS: usize = 240;
 const REVIEW_LESSON_MAX_SENTENCES: usize = 2;
@@ -4343,23 +4382,16 @@ impl ReviewLessons {
         })
     }
 
-    fn effective_observations(&self) -> f32 {
-        let m = self.supporting_spans.max(1) as f32;
-        m / (1.0 + (m - 1.0) * REVIEW_SESSION_DESIGN_EFFECT_RHO)
-    }
-
-    /// Corroboration, not span count: one session can never exceed 0.6, and
-    /// confidence rises monotonically with agreeing spans toward that bound.
+    /// Repeating a statement within one session does not create independent
+    /// support. This is an explicit heuristic tier, not a probability.
     fn confidence(&self) -> f32 {
-        let confidence = 0.5 + 0.1 * (self.effective_observations() - 1.0);
-        (confidence.clamp(0.5, 0.6) * 10_000.0).round() / 10_000.0
+        SESSION_ARC_CANDIDATE_CONFIDENCE
     }
 
     fn confidence_explanation(&self) -> String {
         format!(
-            "confidence {:.4} from {:.2} effective observation(s) (design effect rho {REVIEW_SESSION_DESIGN_EFFECT_RHO}; one session is capped at 0.6)",
-            self.confidence(),
-            self.effective_observations()
+            "heuristic confidence {:.4} from one session; repeated spans are not independent support and this is not a calibrated probability",
+            self.confidence()
         )
     }
 }
@@ -8016,6 +8048,7 @@ pub fn run_review_workspace(
                 content_hash,
                 session_arc: None,
                 persisted: false,
+                corroboration: None,
             };
             if !options.dry_run {
                 candidate.persisted = persist_workspace_review_candidate(
@@ -10057,6 +10090,9 @@ fn persist_review_candidate(
         return Ok(false);
     }
 
+    corroboration::validate_draft(connection, workspace_id, candidate)
+        .map_err(session_arc::pair_domain_error)?;
+
     let (derivation_source_refs_json, derivation_metadata_json) = if candidate
         .target_memory_id
         .as_deref()
@@ -10224,6 +10260,14 @@ fn review_bootstrap_derivation_package(
         && let Some(object) = producer_payload.as_object_mut()
     {
         object.insert("sessionArc".to_owned(), serde_json::json!(session_arc));
+    }
+    if let Some(proof) = candidate
+        .corroboration
+        .as_ref()
+        .filter(|proof| proof.recorded())
+        && let Some(object) = producer_payload.as_object_mut()
+    {
+        object.insert("corroboration".to_owned(), serde_json::json!(proof));
     }
     let metadata = DerivationMetadata {
         memory_spec: DerivationMemorySpec {
@@ -10675,6 +10719,10 @@ fn validate_derivation_source_refs(
     source_refs: &[DerivationSourceRef],
     errors: &mut Vec<CurateValidationIssue>,
 ) {
+    if let Err(issue) = corroboration::validate_recorded(connection, stored) {
+        errors.push(issue);
+        return;
+    }
     if let Err(issue) = session_arc::applied_peer(connection, stored) {
         errors.push(issue);
         return;
@@ -14417,6 +14465,10 @@ fn persist_candidate_validation_inner(
     reviewed_by: &str,
     decision: &ValidationDecision,
 ) -> Result<String, DomainError> {
+    if to_status == CandidateStatus::Approved.as_str() {
+        corroboration::validate_recorded(connection, stored)
+            .map_err(session_arc::pair_domain_error)?;
+    }
     let updated = connection
         .update_curation_candidate_review(
             workspace_id,
@@ -20887,6 +20939,7 @@ mod tests {
                 content_hash: "blake3:review-golden-hash".to_owned(),
                 session_arc: None,
                 persisted: false,
+                corroboration: None,
             }],
             degraded: Vec::new(),
             next_action:
@@ -20937,6 +20990,7 @@ mod tests {
                 content_hash: "blake3:review-bootstrap-golden-hash".to_owned(),
                 session_arc: None,
                 persisted: false,
+                corroboration: None,
             }],
             degraded: Vec::new(),
             next_action:
@@ -29313,9 +29367,8 @@ mod tests {
     }
 
     #[test]
-    fn review_confidence_is_corroboration_bounded_and_monotone() {
+    fn repeated_spans_never_inflate_single_session_confidence() {
         let session = synthetic_stored_session();
-        let mut previous = 0.0_f32;
         for count in 1..=6_u32 {
             let spans = (0..count)
                 .map(|index| {
@@ -29336,14 +29389,8 @@ mod tests {
                 .first()
                 .map(|candidate| candidate.confidence)
                 .expect("candidate");
-            assert!(confidence <= 0.6, "{count} spans: {confidence}");
-            assert!(
-                confidence >= previous,
-                "{count} spans: {confidence} < {previous}"
-            );
-            previous = confidence;
+            assert_eq!(confidence, 0.6, "{count} spans are still one session");
         }
-        assert!(previous > 0.5, "corroboration must raise confidence");
     }
 
     #[test]
@@ -29422,11 +29469,22 @@ mod tests {
         resolution.start_line = 20;
         resolution.end_line = 21;
 
+        assert!(
+            build_review_session_candidates(
+                "wsp_test00000000000000000000000",
+                &session,
+                &[failure.clone(), resolution.clone()],
+                0.80,
+                10,
+            )
+            .is_empty(),
+            "a single-session arc must abstain at a high confidence floor"
+        );
         let candidates = build_review_session_candidates(
             "wsp_test00000000000000000000000",
             &session,
             &[failure.clone(), resolution.clone()],
-            0.80,
+            0.60,
             10,
         );
 

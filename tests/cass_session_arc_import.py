@@ -81,11 +81,14 @@ def exercise(binary: Path) -> None:
         assert imported["sessionsImported"] == 1 and imported["spansImported"] == 4, imported
         session_id = imported["sessions"][0]["sessionId"]
         assert not memories(), "import may create evidence, not implicit lessons"
-        preview = run("review", "session", session_id, "--dry-run", "--limit", "8", "--min-confidence", "0.8")
+        unsupported = run("review", "session", session_id, "--dry-run", "--limit", "8", "--min-confidence", "0.8")
+        assert unsupported["candidateCount"] == 0 and unsupported["durableMutation"] is False, unsupported
+        preview = run("review", "session", session_id, "--dry-run", "--limit", "8", "--min-confidence", "0.5")
         assert preview["durableMutation"] is False, preview
-        proposed = run("review", "session", session_id, "--propose", "--limit", "8", "--min-confidence", "0.8")
+        proposed = run("review", "session", session_id, "--propose", "--limit", "8", "--min-confidence", "0.5")
         arcs = [row for row in proposed["candidates"] if row["candidateKind"].startswith("session_arc_")]
         assert len(arcs) == 4, proposed
+        assert all(row["confidence"] == 0.6 and row["proposedConfidence"] == 0.6 for row in arcs), arcs
         assert {row["candidateId"] for row in arcs} == {
             row["candidateId"] for row in preview["candidates"] if row["candidateKind"].startswith("session_arc_")}, (preview, proposed)
         assert not memories(), "proposing must not implicitly accept either episode"

@@ -804,7 +804,7 @@ mod store_tests {
                 session_id: Some(&session.id),
                 propose: true,
                 dry_run: false,
-                min_confidence: 0.8,
+                min_confidence: 0.5,
                 limit: 2,
             })
             .map_err(|error| error.message())?;

@@ -14372,6 +14372,15 @@ pub struct StoredSession {
     pub updated_at: String,
 }
 
+/// Bounds on an optional exact-corroboration scan. These are enforced against
+/// source row counts and UTF-8 byte lengths before their bodies are loaded.
+#[derive(Clone, Copy)]
+pub(crate) struct ReviewCorroborationLimits {
+    pub sessions: u32,
+    pub spans_per_session: u32,
+    pub total_bytes: u64,
+}
+
 impl DbConnection {
     /// Insert a new CASS session row.
     pub fn insert_session(&self, id: &str, input: &CreateSessionInput) -> Result<()> {
@@ -14511,6 +14520,147 @@ impl DbConnection {
         )?;
 
         rows.iter().map(stored_session_from_row).collect()
+    }
+
+    /// Read bounded complete sessions for exact curation corroboration.
+    ///
+    /// The caller holds a read snapshot or its existing write transaction.
+    /// Empty `requested` selects other sessions; a nonempty list revalidates
+    /// exactly the named historical proof. Over-budget sessions are omitted,
+    /// never partially interpreted. No reader cache is loaded: learning needs
+    /// the original screened rows, including non-reader structural barriers.
+    pub(crate) fn review_corroboration_sessions(
+        &self,
+        workspace_id: &str,
+        anchor_session_id: &str,
+        requested: &[&str],
+        limits: ReviewCorroborationLimits,
+    ) -> Result<Vec<(StoredSession, Vec<StoredEvidenceSpan>, u64)>> {
+        if limits.sessions == 0 || limits.spans_per_session == 0 || limits.total_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let ids = if requested.is_empty() {
+            self.query_for(
+                DbOperation::Query,
+                "SELECT id FROM sessions WHERE workspace_id = ?1 AND id <> ?2 AND length(CAST(id AS BLOB)) <= 128 ORDER BY cass_session_id ASC, id ASC LIMIT ?3",
+                &[
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(anchor_session_id.to_owned()),
+                    Value::BigInt(i64::from(limits.sessions)),
+                ],
+            )?
+            .iter()
+            .map(|row| {
+                required_text(row, 0, DbOperation::Query, "session_id").map(str::to_owned)
+            })
+            .collect::<Result<Vec<_>>>()?
+        } else {
+            requested
+                .iter()
+                .copied()
+                .filter(|id| id.len() <= 128)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .take(usize::try_from(limits.sessions).unwrap_or(usize::MAX))
+                .map(str::to_owned)
+                .collect()
+        };
+        let session_fields = [
+            "id",
+            "workspace_id",
+            "cass_session_id",
+            "source_path",
+            "agent_name",
+            "model",
+            "started_at",
+            "ended_at",
+            "content_hash",
+            "metadata_json",
+            "imported_at",
+            "updated_at",
+        ];
+        let evidence_fields = [
+            "id",
+            "workspace_id",
+            "session_id",
+            "memory_id",
+            "cass_span_id",
+            "span_kind",
+            "role",
+            "excerpt",
+            "content_hash",
+            "metadata_json",
+            "producer_kind",
+            "secret_redaction_status",
+            "redaction_classes_json",
+            "instruction_risk",
+            "search_eligibility",
+            "pack_eligibility",
+            "canonical_excerpt_hash",
+            "upstream_ref_hash",
+            "created_at",
+            "updated_at",
+        ];
+        let byte_sum = |fields: &[&str]| {
+            fields
+                .iter()
+                .map(|field| format!("length(CAST(COALESCE({field}, '') AS BLOB))"))
+                .collect::<Vec<_>>()
+                .join(" + ")
+        };
+        let session_bytes_sql = format!(
+            "SELECT {} FROM sessions WHERE workspace_id = ?1 AND id = ?2",
+            byte_sum(&session_fields),
+        );
+        let evidence_bytes_sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM({}), 0) FROM evidence_spans WHERE workspace_id = ?1 AND session_id = ?2 AND producer_kind = 'cass_import'",
+            byte_sum(&evidence_fields),
+        );
+        let mut remaining = limits.total_bytes;
+        let mut selected = Vec::new();
+        for id in ids {
+            let params = [Value::Text(workspace_id.to_owned()), Value::Text(id)];
+            let session_sizes = self.query_for(DbOperation::Query, &session_bytes_sql, &params)?;
+            let Some(session_size) = session_sizes.first() else {
+                continue;
+            };
+            let session_bytes = required_u64(session_size, 0, DbOperation::Query, "session_bytes")?;
+            let sizes = self.query_for(DbOperation::Query, &evidence_bytes_sql, &params)?;
+            let Some(size) = sizes.first() else {
+                continue;
+            };
+            let count = required_u64(size, 0, DbOperation::Query, "evidence_count")?;
+            let evidence_bytes = required_u64(size, 1, DbOperation::Query, "evidence_bytes")?;
+            // Account conservatively for row values and their owned model
+            // strings coexisting during decoding, plus per-row allocations.
+            let bytes = session_bytes
+                .saturating_add(evidence_bytes)
+                .saturating_mul(2)
+                .saturating_add(count.saturating_add(1).saturating_mul(1024));
+            if count == 0 || count > u64::from(limits.spans_per_session) || bytes > remaining {
+                continue;
+            }
+            let sessions = self.query_for(
+                DbOperation::Query,
+                "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE workspace_id = ?1 AND id = ?2",
+                &params,
+            )?;
+            let Some(session) = sessions.first().map(stored_session_from_row).transpose()? else {
+                continue;
+            };
+            let rows = self.query_for(
+                DbOperation::Query,
+                "SELECT id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, producer_kind, screening_version, secret_redaction_status, redaction_classes_json, instruction_risk, search_eligibility, pack_eligibility, canonical_provenance_revision, canonical_excerpt_hash, security_policy_epoch, upstream_ref_hash, created_at, updated_at FROM evidence_spans WHERE workspace_id = ?1 AND session_id = ?2 AND producer_kind = 'cass_import' ORDER BY start_line ASC, end_line ASC, id ASC",
+                &params,
+            )?;
+            let spans = rows
+                .iter()
+                .map(stored_evidence_span_from_row)
+                .collect::<Result<Vec<_>>>()?;
+            remaining = remaining.saturating_sub(bytes);
+            selected.push((session, spans, bytes));
+        }
+        Ok(selected)
     }
 
     /// Count CASS session source rows without materializing workspace metadata.

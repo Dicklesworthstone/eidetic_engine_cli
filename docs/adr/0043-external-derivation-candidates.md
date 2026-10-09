@@ -337,6 +337,71 @@ Reflection ingest (separate ADR / slice) becomes the second consumer,
 populating `derivation_metadata_json` with `reflection_kind`, `producer`,
 `request_id`, and `prompt_template_hash`.
 
+### CASS proposal confidence amendment — 2026-10-08
+
+New session-derived memories use bounded, exact source corroboration instead
+of assigning every failure-to-repair pair confidence 0.82. One source session
+contributes at most one observation. The producer uses explicit heuristic
+tiers: 0.6 for one session, 0.7 for two, and 0.8 for three independent source
+groups. These scores are not calibrated probabilities, confidence intervals,
+or a claim to have searched every session. The statistical calibration work
+in `CLOSE_THE_GAP_PLAN.md` remains separate.
+
+Corroboration requires matching complete projected source text, with ordered
+failure and repair records for an arc. Display shortening is never a proof of
+equivalence: numeric values, command arguments, case, negation, and trailing
+qualifications remain significant. Known truncated source records cannot
+supply an increment. Repeated windows and aliases of the same conversation
+do not create independent support. Instruction-risk records and rejected or
+explicitly refuted proposals cannot corroborate a lesson. Safe non-reader
+tool and metadata records remain structural barriers when reconstructing an
+arc; their text is not promoted into a lesson.
+
+The optional proof is stored at
+`producer.producerPayload.corroboration`, with schema
+`ee.review.corroboration.v1`. It binds the exact proposal to its supporting
+session and evidence identities, line ranges, content hashes, and complete
+lesson signature. Source-path and upstream identities are represented by
+digests. The proof does not duplicate raw transcripts. The producer considers
+at most 32 other sessions, at most 256 source rows per session, and an 8 MiB
+combined source-allocation charge. Counts and byte sizes are checked before
+loading bodies; an over-budget session contributes no partial lesson.
+
+The anchor candidate retains its original typed source refs. Corroborating
+evidence stays owned by its source session; applying a candidate does not
+attach another session's spans to the new memory. Verification checks source
+facts independently of later memory links, so accepting one corroborating
+proposal does not invalidate an unchanged proposal from another session.
+The proof is checked before persistence and again within the normal apply
+transaction. Changed source content, missing support, or a modified proposal
+cannot retain the recorded increment.
+
+Each proof identifies the source prefix observed when the proposal was made.
+Ordinary append-only growth beyond that prefix does not rewrite the proof or
+invalidate its unchanged evidence. Edits, deletions, or inserted records inside
+the captured prefix still refuse, and later explicit refutation remains
+significant. Revalidation retains the same admission and resource bounds.
+
+Existing proposals remain frozen. Review returns their recorded confidence
+and provenance, and the legacy verifier recognizes the exact historical 0.82
+arc package. It does not assign that score to new proposals, rewrite existing
+rows, or replace their audits. Increasing an already persisted proposal's
+confidence requires a separate explicit reinforcement operation.
+
+This amendment applies to `create_derived_memory` bootstrap and arc
+candidates. Target-mutating `rule` candidates retain the existing prohibition
+on derivation JSON. Their new proposals remain at the conservative
+single-session tier; this change does not claim a persisted corroboration
+increment for that candidate shape. The public review response schema and
+the curation table constraints remain unchanged.
+
+Verification is owned by `src/core/curate_corroboration_tests.rs`, included in
+the existing `session_arc` library selection,
+`tests/session_arc_learning_cli.rs`, and the actual import-to-learning fixture
+`tests/cass_session_arc_import.py`. These exercise source independence,
+changed qualifications, proof integrity, historical packages, sequential
+acceptance, repeated review/apply, and the persisted memory confidence.
+
 ## Alternatives considered
 
 **Per-reflection-kind candidate variants (`reflection_summary`,

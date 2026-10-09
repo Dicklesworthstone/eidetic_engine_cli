@@ -126,7 +126,7 @@ fn exercise(single_window: bool, messages: [&str; 2]) -> TestResult {
         evidence_ids.push(id);
     }
     connection.close()?;
-    let preview = run(
+    let unsupported = run(
         &workspace,
         &[
             "review",
@@ -137,6 +137,24 @@ fn exercise(single_window: bool, messages: [&str; 2]) -> TestResult {
             "2",
             "--min-confidence",
             "0.8",
+        ],
+    )?;
+    assert_eq!(
+        unsupported["candidateCount"], 0,
+        "one session cannot justify high-confidence advice: {unsupported}"
+    );
+    assert_eq!(unsupported["durableMutation"], false);
+    let preview = run(
+        &workspace,
+        &[
+            "review",
+            "session",
+            &session_id,
+            "--dry-run",
+            "--limit",
+            "2",
+            "--min-confidence",
+            "0.5",
         ],
     )?;
     assert_eq!(preview["candidateCount"], 2, "{preview}");
@@ -151,12 +169,18 @@ fn exercise(single_window: bool, messages: [&str; 2]) -> TestResult {
             "--limit",
             "1",
             "--min-confidence",
-            "0.8",
+            "0.5",
         ],
     )?;
-    assert_eq!(
-        too_small["candidateCount"], 0,
-        "do not split a learning pair: {too_small}"
+    let limited_candidates = too_small["candidates"]
+        .as_array()
+        .ok_or("limited candidates missing")?;
+    assert!(limited_candidates.len() <= 1);
+    assert!(
+        limited_candidates
+            .iter()
+            .all(|candidate| candidate.get("sessionArc").is_none_or(Value::is_null)),
+        "an ordinary lesson may fit, but a learning pair must not be split: {too_small}"
     );
     let proposed = run(
         &workspace,
@@ -168,7 +192,7 @@ fn exercise(single_window: bool, messages: [&str; 2]) -> TestResult {
             "--limit",
             "2",
             "--min-confidence",
-            "0.8",
+            "0.5",
         ],
     )?;
     let candidates = proposed["candidates"]
@@ -176,6 +200,40 @@ fn exercise(single_window: bool, messages: [&str; 2]) -> TestResult {
         .ok_or("candidates missing")?;
     assert_eq!(candidates.len(), 2);
     assert_eq!(proposed["durableMutation"], true);
+    for candidate in candidates {
+        assert_eq!(candidate["confidence"], json!(0.6));
+        assert_eq!(candidate["proposedConfidence"], json!(0.6));
+    }
+    let repeated = run(
+        &workspace,
+        &[
+            "review",
+            "session",
+            &session_id,
+            "--propose",
+            "--limit",
+            "2",
+            "--min-confidence",
+            "0.5",
+        ],
+    )?;
+    assert_eq!(repeated["durableMutation"], false);
+    let repeated_candidates = repeated["candidates"]
+        .as_array()
+        .ok_or("repeated candidates missing")?;
+    assert_eq!(repeated_candidates.len(), candidates.len());
+    for (original, again) in candidates.iter().zip(repeated_candidates) {
+        for field in [
+            "candidateId",
+            "sourceIds",
+            "confidence",
+            "proposedConfidence",
+            "sessionArc",
+        ] {
+            assert_eq!(original[field], again[field], "repeated review: {field}");
+        }
+        assert_eq!(again["persisted"], false);
+    }
     let anti = candidates
         .iter()
         .find(|c| c["candidateKind"] == "session_arc_anti_pattern")
@@ -252,6 +310,35 @@ fn exercise(single_window: bool, messages: [&str; 2]) -> TestResult {
     assert_eq!(audits.len(), 1);
     assert_eq!(audits[0].action, audit_actions::MEMORY_LINK_CREATE);
     assert_eq!(audits[0].actor.as_deref(), Some("ArcCli"));
+    for (candidate, memory_id) in [rule, anti].into_iter().zip(&memories) {
+        let stored = connection
+            .get_curation_candidate(
+                &workspace_id,
+                candidate["candidateId"]
+                    .as_str()
+                    .ok_or("candidate ID missing")?,
+            )?
+            .ok_or("applied proposal missing")?;
+        assert_eq!(stored.confidence, 0.6);
+        assert_eq!(stored.proposed_confidence, Some(0.6));
+        let metadata: Value = serde_json::from_str(
+            stored
+                .derivation_metadata_json
+                .as_deref()
+                .ok_or("derivation metadata missing")?,
+        )?;
+        let proof = &metadata["producer"]["producerPayload"]["corroboration"];
+        assert_eq!(proof["schema"], "ee.review.corroboration.v1");
+        assert_eq!(proof["sessions"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            connection
+                .get_memory(memory_id)?
+                .ok_or("learned memory missing")?
+                .confidence,
+            0.6,
+            "applied confidence must match the recorded source support"
+        );
+    }
     for (id, excerpt) in evidence_ids.iter().zip(&excerpts) {
         let evidence = connection
             .get_evidence_span(id)?
@@ -383,7 +470,7 @@ impl MultiEpisodeFixture {
                 "--limit",
                 "4",
                 "--min-confidence",
-                "0.8",
+                "0.5",
             ],
         )?;
         let proposed = proposed["candidates"]
@@ -1056,7 +1143,7 @@ fn public_cli_learns_all_structured_cross_window_episodes_and_applies_them_indep
             "--limit",
             "8",
             "--min-confidence",
-            "0.8",
+            "0.5",
         ],
     )?;
     let candidates: Vec<&Value> = proposed["candidates"]
