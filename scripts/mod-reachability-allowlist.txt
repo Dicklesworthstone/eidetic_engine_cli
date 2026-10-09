@@ -33,7 +33,7 @@ tests/fixtures/closeout_audit/srr6_blocked/tests/mesh_off_no_network.rs	Closeout
 
 # =========================================================================
 # @SECTION-2-BEGIN
-# @SECTION-2-BUDGET: 7
+# @SECTION-2-BUDGET: 6
 #
 # THE BUDGET ABOVE IS THE RATCHET, and it is why "may only shrink" is not just a
 # sentence here. The gate fails in BOTH directions: more entries than the budget
@@ -92,4 +92,3 @@ tests/fixtures/closure_lint/test_assertion_cases/empty_test.rs	bd-l6h3g item 5. 
 tests/fixtures/closure_lint/test_assertion_cases/glob_match.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/glob_match.rs; byte-identical, unreferenced.
 tests/fixtures/closure_lint/test_assertion_cases/ignored_test.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/ignored_test.rs; byte-identical, unreferenced.
 tests/fixtures/closure_lint/test_assertion_cases/real_test_exists.rs	bd-l6h3g item 5. ORPHANED DUPLICATE of tests/closure_lint_test_files_fixtures/real_test_exists.rs; byte-identical, unreferenced.
-src/core/backup_workflow_recovery_tests.rs	bd-l6h3g. DOES NOT COMPILE. Shipped by dec5235e1 (2026-09-20) "fix(workflow): deliver atomic completion and full recovery lifecycle". I declared it and ran `cargo check --profile test --lib`: CHECK_RC=101. It asserts `expected.workflow_id` on jsonl::ExportMemoryRecord, a field that does not exist. The declaration is NOT the fix -- the feature the commit says it delivered is absent, and declaring this file only moves a red from invisible to main. Workflow lane owns it. REMOVE THIS LINE WHEN workflow_id EXISTS AND THE FILE COMPILES DECLARED.
