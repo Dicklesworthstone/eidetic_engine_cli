@@ -1963,4 +1963,113 @@ mod tests {
             TailnetOwnerDisposition::Missing
         );
     }
+
+    /// bd-mesh-no-stable-node-identity-pt7k5: the first fixture in this tree
+    /// where the stable device id and the node key are DIFFERENT STRINGS.
+    ///
+    /// Four plumbing hops already carry Tailscale's `StableNodeID` from this
+    /// probe through to `MeshPeerEndpoint`, and nothing exercised them, because
+    /// nothing in the repo could: every pre-existing fixture puts a node key in
+    /// the `ID` field. With `ID == PublicKey` a test that claims "the anchor
+    /// survives key rotation" compares a value with itself and passes for the
+    /// wrong reason — which is worse than failing, since it reports coverage of
+    /// a capability it never touched. Real Tailscale never produces that shape:
+    /// `PeerStatus.ID` is a `tailcfg.StableNodeID`, a different identifier space
+    /// from `PublicKey`.
+    ///
+    /// The spelling of the stable id below is NOT asserted and nothing here
+    /// depends on it; the real textual format is unverified (recorded on the
+    /// bead). All that matters is that it is not a node key, which is the whole
+    /// basis of the capability.
+    #[test]
+    fn a_rotated_node_key_keeps_the_same_stable_device_id() {
+        // One device, two authentications. Tailscale's `Peer` map is keyed by
+        // node public key, and re-authentication rotates that key; the stable
+        // device id is what does not move. Neither peer object carries
+        // `PublicKey`, so the node key resolves through the map-key fallback —
+        // the shape the deterministic-order test above already relies on.
+        let before = classify(
+            r#"{
+              "BackendState": "Running",
+              "Self": {"ID":"nodekey:self","Authenticated":true,"Platform":"linux"},
+              "Peer": {
+                "nodekey:rot-before": {
+                  "ID": "n7F3aK9CNTRL",
+                  "HostName": "returning",
+                  "Online": true
+                }
+              }
+            }"#,
+        );
+        let after = classify(
+            r#"{
+              "BackendState": "Running",
+              "Self": {"ID":"nodekey:self","Authenticated":true,"Platform":"linux"},
+              "Peer": {
+                "nodekey:rot-after": {
+                  "ID": "n7F3aK9CNTRL",
+                  "HostName": "returning",
+                  "Online": true
+                }
+              }
+            }"#,
+        );
+
+        assert_eq!(before.peers.len(), 1, "fixture must yield exactly one peer");
+        assert_eq!(after.peers.len(), 1, "fixture must yield exactly one peer");
+        let before_peer = &before.peers[0];
+        let after_peer = &after.peers[0];
+
+        // PREMISE. If the node key did not actually move, this fixture does not
+        // model a rotation and everything below is vacuous.
+        assert_ne!(
+            before_peer.node_key, after_peer.node_key,
+            "the fixture must rotate the node key, or it models nothing"
+        );
+
+        // THE ANTI-VACUITY GUARD, and the reason this test exists. Every fixture
+        // that predates it would fail right here, which is precisely why none of
+        // them could demonstrate the capability.
+        assert_ne!(
+            before_peer.stable_node_id.as_deref(),
+            Some(before_peer.node_key.as_str()),
+            "stable id must not equal the node key, or the identity check below \
+             passes by comparing a value with itself"
+        );
+        assert_ne!(
+            after_peer.stable_node_id.as_deref(),
+            Some(after_peer.node_key.as_str()),
+            "stable id must not equal the node key after rotation either"
+        );
+
+        // THE CAPABILITY. The anchor survives the rotation that moved the key.
+        assert_eq!(
+            before_peer.stable_node_id.as_deref(),
+            Some("n7F3aK9CNTRL"),
+            "the stable device id must be read verbatim from `ID`"
+        );
+        assert_eq!(
+            after_peer.stable_node_id, before_peer.stable_node_id,
+            "the stable device id must survive node-key rotation — this is the \
+             whole point of capturing it"
+        );
+
+        // THE CATEGORY ERROR THAT CAUSED THE BUG MUST STAY FIXED. `node_key_value`
+        // filters every branch through `normalize_node_key`, so a genuine stable
+        // id can never be adopted as a node key. If that filter is ever relaxed,
+        // the two identifier spaces merge and the guard above goes vacuous.
+        assert!(
+            before_peer.node_key.starts_with("nodekey:"),
+            "node key must stay in the nodekey: space, got {}",
+            before_peer.node_key
+        );
+        assert_eq!(
+            node_key_value(
+                &serde_json::json!({"ID": "n7F3aK9CNTRL"}),
+                Some("not-a-node-key")
+            ),
+            None,
+            "a genuine StableNodeID must never be accepted as a node key"
+        );
+    }
 }
