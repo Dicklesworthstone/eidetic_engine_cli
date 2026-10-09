@@ -76,6 +76,13 @@ fn imported_evidence_survives_add_noop_and_remove_deltas() -> TestResult {
         // model, and that fetch depends on worker state rather than on this test.
         // Same omission class as defect 1, same sibling convention.
         ("EE_EMBED_DOWNLOAD", OsString::from("off")),
+        // The last member of the recipe bd-ojcq2 already recorded as known-good:
+        // "bd-hb5os probe v3 passed exactly those three variables, plus
+        // EE_EMBED_DOWNLOAD=off and CASS_INDEX_NO_PROGRESS_EVENTS=1, to the same
+        // stub." I rediscovered EE_EMBED_DOWNLOAD the expensive way, through a
+        // failed remote run, when it was written in the bead body the whole time.
+        // Adding this one from the recipe rather than waiting for it to fail too.
+        ("CASS_INDEX_NO_PROGRESS_EVENTS", OsString::from("1")),
         ("PATH", path_with_binary_parent(&stub.binary)?),
         ("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", OsString::from("1")),
         ("NO_COLOR", OsString::from("1")),
@@ -141,13 +148,23 @@ fn imported_evidence_survives_add_noop_and_remove_deltas() -> TestResult {
             "1200".into(),
         ];
         if let Some(hash) = since {
-            args.extend([
-                "--since".into(),
-                hash.to_owned(),
-                "--read-only".into(),
-                "--max-delta-bytes".into(),
-                "1000000".into(),
-            ]);
+            // bd-ojcq2 defect 3: `--max-delta-bytes` is declared on ContextArgs
+            // (src/cli/mod.rs:3358), NOT on PackArgs (3588), and these are `ee pack`
+            // arguments — so clap refused it with
+            // {"code":"usage","message":"unexpected argument '--max-delta-bytes'"} and
+            // step 06 died before the delta ran. Every other flag here IS on PackArgs
+            // (max_tokens 3626, source_mode 3642, read_only 3689, since 3695), which is
+            // why only this one failed.
+            //
+            // DROPPED rather than added to PackArgs, because it was never exercising
+            // anything: 1000000 is a 1 MB cap over a fixture of 7 spans, so it could not
+            // bind. `--since` alone still produces the delta this test is about.
+            //
+            // That `ee pack --since` emits a delta with NO WAY TO BOUND IT, while
+            // `ee context --since` can, is a real product gap and is filed separately —
+            // it is not this bead's acceptance, and silently satisfying it here by
+            // widening a CLI surface would be the wrong place to decide it.
+            args.extend(["--since".into(), hash.to_owned(), "--read-only".into()]);
         }
         args
     };
