@@ -791,7 +791,6 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
         "actual_selected_ids",
         "actual_tokens_used",
         "provenance_density",
-        "actual_degradation_codes",
         "actual_redaction_leaks",
     ] {
         ensure_equal(
@@ -800,6 +799,50 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
             &format!("expected answers cannot affect {field}"),
         )?;
     }
+    // bd-rnb60: `actual_degradation_codes` is compared with the WALL-CLOCK entries
+    // removed, because one of these two packs can emit
+    // `pack_assembly_elapsed_over_budget` on a loaded worker and the other not. That
+    // code is load-dependent BY DESIGN — the product calls it non-reproducible in its
+    // own words and the v2 pack hash drops it by construction (ADR 0087 §5) — so
+    // comparing it asserts worker timing, not the property this test is about.
+    //
+    // The filter reads `ee::pack::is_non_canonical_telemetry_degradation_code`, which is
+    // backed by the product's own `NON_CANONICAL_TELEMETRY_DEGRADATION_CODES`
+    // (src/pack/mod.rs:3881) — deliberately NOT a hand-written list here, so a future
+    // timing code is excluded automatically instead of reintroducing this flake.
+    let non_volatile_codes = |value: &Value| -> Vec<String> {
+        value
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|code| !ee::pack::is_non_canonical_telemetry_degradation_code(code))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let baseline_codes = non_volatile_codes(&baseline["actual_degradation_codes"]);
+    let wrong_codes = non_volatile_codes(&wrong["actual_degradation_codes"]);
+    // EMPTY-WORLD GUARD. If the filter ever removed everything, the equality below
+    // would hold for any pair and this assertion would read as coverage while checking
+    // nothing. The measured run carried `context_invalid_provenance` and
+    // `embed_model_unavailable`, both deterministic, so a non-empty set is the correct
+    // expectation rather than a convenient one.
+    ensure_equal(
+        &baseline_codes.is_empty(),
+        &false,
+        &format!(
+            "non-volatile degradation comparison must not be vacuous; baseline codes were {:?}",
+            &baseline["actual_degradation_codes"]
+        ),
+    )?;
+    ensure_equal(
+        &baseline_codes,
+        &wrong_codes,
+        "expected answers cannot affect the NON-VOLATILE actual_degradation_codes",
+    )?;
     ensure_equal(
         &wrong["unexpected_ids"],
         &json!(["mem_00000000000000000000000102"]),
