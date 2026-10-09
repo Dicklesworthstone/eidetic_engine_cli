@@ -544,9 +544,44 @@ stub_candidate_records() {
         jq -cs 'sort_by(.constant)'
 }
 
+# DELIBERATELY NOT WIDENED, and this split is the point of bd-szxzy rather than
+# an omission in it.
+#
+# Two different questions share one grep, and conflating them is what made the
+# first attempt at this fail:
+#
+#   stub_detector.*  -- "what is the POPULATION this detector can see?"  That is
+#                       the question the bead asked, and its honest answer is
+#                       the whole tree: 42 constants in 27 files.
+#   stubbed_surfaces -- "which SURFACES does the gate report as stubbed?"  That
+#                       feeds `stubbed`, one of the two terms in
+#                       gap_percentage, and it is a published verdict about
+#                       surfaces, not an inventory of constants.
+#
+# Feeding the widened scan into the second one is wrong on both the measurement
+# and the policy:
+#
+#   MEASUREMENT: zero of the 42 resolve to a DOCUMENTED surface, so every record
+#   added here describes a surface the gate does not document. They cannot move
+#   gap_percentage and would only add noise to a verdict field.
+#
+#   POLICY: `vision_coverage_report_has_required_shape` requires that if
+#   stubbed_surfaces is non-empty then `surfaces.with_open_implements_bead > 0`
+#   -- a reported stub must be TRACKED WORK, not merely a constant that exists.
+#   Widening this function made that assertion fail, which is the gate correctly
+#   refusing to publish 42 untracked "stubs". Observed, not predicted: 16
+#   passed, 1 failed on exactly that message.
+#
+# So the detector's population widened and the verdict's vocabulary did not. The
+# report makes the two reconcilable instead of merely different:
+# documented_candidate_constants is 0, which states that nothing in the wider
+# population is eligible to become a stubbed surface today.
 stub_surfaces() {
     open_json=$(open_implement_surfaces_json)
-    stub_constant_names |
+    read_source "$CLI_MOD" |
+        { grep -o "$STUB_CONSTANT_PATTERN" || true; } |
+        awk '{print $2}' |
+        sort -u |
         while IFS= read -r constant; do
             surface=$(constant_surface "$constant")
             implements_bead=$(
