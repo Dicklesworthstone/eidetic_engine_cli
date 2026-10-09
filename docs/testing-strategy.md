@@ -382,6 +382,41 @@ temporary workspace/artifacts. The script proves:
   probe with redacted path posture; derived budget deltas are asserted through
   full doctor host calibration.
 
+### Retrieval-Truth Cross-Surface E2E
+
+`scripts/e2e_retrieval_truth.sh` is the `bd-1et0v.20` real-binary, no-Cargo
+retrieval-posture harness. It emits `ee.test_event.v1` JSONL and retains its
+temporary workspace/artifacts. Unlike the sibling scripts above it is also
+EXECUTED FROM A TEST: `tests/e2e_retrieval_truth_script.rs` runs it with
+`EE_BIN` bound to `CARGO_BIN_EXE_ee`, so it grades the tree's own binary rather
+than whatever `ee` is on PATH, and it is mounted in the `integration_e_f`
+target. The script proves:
+
+- One workspace, initialized and indexed through public `ee` JSON, reports the
+  SAME `ee.embedding_posture.v1` block from `ee index status`,
+  `ee capabilities`, `ee model status`, and `ee index reembed --dry-run`. Both
+  the compacted posture JSON and a semantic/source/fast-model-id signature are
+  compared against index status, so a surface cannot agree by omission.
+- `ee doctor --json --full` agrees by a different mechanism, asserted
+  separately: its `embedding_posture` check message must report the current
+  retrieval mode, the fast model id, and the embedding dimension already read
+  from index status. Doctor's agreement is therefore pinned on message content,
+  not on a posture-JSON comparison — worth knowing before citing "five surfaces
+  agree" as one assertion.
+- `ee index status --json` ALONE answers "what retrieval mode am I in?", which
+  is the analyst reproduction: learning the mode must not require a mutation.
+- With `EMBEDDING_MODEL` and `OPENAI_API_KEY` set, doctor DISCLOSES the trap —
+  naming both variables, saying ee "does not consume" them, and reporting the
+  current mode — while the whole response is asserted to contain no
+  `api.openai.com` hint. The disclosure is advisory and does not flip the
+  top-line posture.
+- No repair or hint presents `EE_EMBED_MODEL_PATH` as a real enable switch
+  (the retired no-op trap).
+- `ee search` results carry an interpretable relevance signal rather than a
+  bare score: `scoreKind`, a `relevanceScore` in `[0, 1]`, a two-element
+  `scoreInterval`, a boolean `calibrated`, and both `score` and
+  `relevanceScore` present together.
+
 ### RCH Stranded-Result Recovery
 
 Remote verification can produce useful RCH artifacts even when the local wrapper
