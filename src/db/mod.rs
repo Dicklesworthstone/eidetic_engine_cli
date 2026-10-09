@@ -26561,7 +26561,7 @@ impl DbConnection {
             &[
                 Value::Text(workspace_id.to_owned()),
                 Value::Text(fingerprint_key.to_owned()),
-                Value::Integer(i64::from(limit)),
+                Value::from_u64_clamped(u64::from(limit)),
             ],
         )?;
         rows.iter()
