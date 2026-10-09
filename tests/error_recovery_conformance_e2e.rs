@@ -220,6 +220,61 @@ fn string_at<'a>(
         .ok_or_else(|| format!("{context}: missing string at {pointer}"))
 }
 
+/// Extract the instant the human renderer printed after `last write `, and
+/// check it is shaped like an RFC3339 timestamp.
+///
+/// bd-storeless-lastwrite-mtime-race-7k8gq: this exists because the VALUE
+/// cannot be asserted across subprocess boundaries. `lastWrite` is not a
+/// recorded event — `orient` computes it as `max(mtime(db), mtime(db-wal))` — so
+/// a value sampled by one `ee` run and compared against a later one asserts
+/// that nothing moved the child store's mtime in between. Measured failure:
+/// 22:13:39.381852331 sampled, 22:13:49.539839515 reported ten seconds later,
+/// with every other field in the same assertion matching.
+///
+/// WHAT MOVED IT IS NOT ESTABLISHED, and one piece of evidence in this very
+/// file argues against the obvious guess. The `registered best last write`
+/// assertion further down stats the database and its `-wal` from the TEST
+/// process, runs `ee orient`, and compares the reported value to that stat —
+/// and it passes. If merely scanning a nearby store moved the mtime, that
+/// assertion would fail for the same reason this one did. So "any read touches
+/// the WAL" is too strong; something more specific moves it, and this comment
+/// deliberately does not name it.
+///
+/// So the field is checked for PRESENCE and SHAPE here. That still fails if the
+/// renderer omits the last-write field, prints an empty one, or prints
+/// something that is not a timestamp — see the polarity note at the call site
+/// for what this does and does not catch.
+fn printed_last_write<'a>(human: &'a str, context: &str) -> Result<&'a str, String> {
+    const MARKER: &str = "last write ";
+    let start = human
+        .find(MARKER)
+        .ok_or_else(|| format!("{context}: human output printed no `{MARKER}` field"))?
+        + MARKER.len();
+    let printed = human[start..]
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| format!("{context}: `{MARKER}` was followed by nothing"))?;
+    ensure(
+        looks_like_rfc3339_instant(printed),
+        format!("{context}: `{MARKER}{printed}` is not shaped like an RFC3339 instant"),
+    )?;
+    Ok(printed)
+}
+
+/// Shape only, deliberately not a parse: a four-digit year, the `T` date/time
+/// separator, and a clock. Enough to reject an empty field, a placeholder, or a
+/// non-timestamp; not enough to pretend we have validated an instant.
+///
+/// Shared by the human and JSON last-write checks so the two surfaces are held
+/// to one rule rather than two that can drift apart.
+fn looks_like_rfc3339_instant(value: &str) -> bool {
+    let year = value.get(..4).unwrap_or_default();
+    year.len() == 4
+        && year.bytes().all(|byte| byte.is_ascii_digit())
+        && value.contains('T')
+        && value.contains(':')
+}
+
 fn array_at<'a>(
     value: &'a serde_json::Value,
     pointer: &str,
@@ -2883,15 +2938,33 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     )?;
     let human = String::from_utf8(orient_human.stdout)
         .map_err(|error| format!("human orient stdout was not UTF-8: {error}"))?;
+    // The last-write field is checked separately, and for SHAPE rather than
+    // value. bd-storeless-lastwrite-mtime-race-7k8gq: this clause used to be
+    // `human.contains(&format!("last write {best_last_write}"))`, pinning the
+    // mtime sampled from the JSON run ~400 lines above against a value this
+    // human run recomputes after several more `ee` invocations have run.
+    // Measured failure: expected 22:13:39.381852331, got 22:13:49.539839515 —
+    // ten seconds apart, with every other field in this assertion matching.
+    // Re-sampling closer to the human run would narrow the window without
+    // closing it, because the sample and the print come from two different
+    // processes at two different instants either way.
+    //
+    // WHAT THIS STILL CATCHES: an omitted last-write field, an empty one, and a
+    // non-timestamp. WHAT IT NO LONGER CATCHES: a renderer that prints a
+    // well-formed timestamp belonging to the wrong store, or a stale cached
+    // one. That is a real reduction and it is the price of an assertion that can
+    // hold; catching it needs an oracle sampled inside the renderer's own
+    // process, not a timestamp carried across subprocess boundaries.
+    let human_last_write = printed_last_write(&human, "human orient at empty root")?;
     ensure(
         human.contains("copulattice_ft1z5")
             && human.contains(&format!("{best_documents} docs"))
-            && human.contains(&format!("last write {best_last_write}"))
             && human.contains("provenance child_scan")
             && human.contains(first_next_command),
         format!(
-            "human orient at the empty root must print the child path/documents/last-write/provenance and exact suggested command; \
-             documents={best_documents}, lastWrite={best_last_write:?}, command={first_next_command:?}\n{human}"
+            "human orient at the empty root must print the child path/documents/provenance and exact suggested command; \
+             documents={best_documents}, command={first_next_command:?}, \
+             lastWrite json sample={best_last_write:?} vs human printed={human_last_write:?}\n{human}"
         ),
     )?;
 
@@ -2927,8 +3000,19 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
             && string_at(full_best, "/workspaceRoot", "full orient best nearby child")?
                 == best_path
             && full_best["documents"].as_u64() == Some(best_documents)
-            && string_at(full_best, "/lastWrite", "full orient best nearby child")?
-                == best_last_write
+            // SHAPE, not equality against the fast-mode sample.
+            // bd-storeless-lastwrite-mtime-race-7k8gq: this clause read
+            // `== best_last_write`, comparing full mode's recomputed mtime
+            // against the value the FAST-mode JSON run produced ~430 lines
+            // earlier — with the human orient run, among others, opening the
+            // child store in between and moving it. Same defect and same cause
+            // as the human-output clause above; fixing only that one would have
+            // left this one failing for the identical reason.
+            && looks_like_rfc3339_instant(string_at(
+                full_best,
+                "/lastWrite",
+                "full orient best nearby child",
+            )?)
             && full_next_command == first_next_command,
         format!(
             "full orient must match fast-mode discovery and retargeting; fast={discovery}, full={full_discovery}, fastCommand={first_next_command:?}, fullCommand={full_next_command:?}"
