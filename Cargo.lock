@@ -1532,19 +1532,17 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "fnx-algorithms"
-version = "0.3.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c40efe6ed7e9c4a74f594bfee42323491bc51abfe51bf0f0ee91a5009f817050"
+checksum = "1e69a71602f1c31774043e7aecbb5d78bd7de946faa463b4f5dcec7e38445ded"
 dependencies = [
  "fnx-cgse",
  "fnx-classes",
  "fnx-runtime",
- "indexmap",
  "mt19937",
  "mwmatching",
  "rand_core 0.10.1",
  "rayon",
- "rustc-hash",
  "serde",
 ]
 
@@ -1562,9 +1560,9 @@ dependencies = [
 
 [[package]]
 name = "fnx-classes"
-version = "0.3.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e677d566aafea954b2336a45f8f33d80adf5aa2f9e7657fede021ce6019ef5f"
+checksum = "13f9b31039ff228b89f7fca07fbca5eb9bdc93f4a26704677ed001db339fb87a"
 dependencies = [
  "fnx-runtime",
  "indexmap",
@@ -1574,12 +1572,11 @@ dependencies = [
 
 [[package]]
 name = "fnx-runtime"
-version = "0.3.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8afaf83eb89ba866da539d8e1c753c54e05ee2664c08b534dab576fff2f77233"
+checksum = "ee559f4c159dd8bb2017f3d41318e38cb9432f893ccfaafc0c89ed486061e034"
 dependencies = [
  "asupersync",
- "rustc-hash",
  "serde",
  "serde_json",
  "sha2 0.10.9",
