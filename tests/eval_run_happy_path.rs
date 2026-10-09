@@ -265,6 +265,89 @@ fn command_json_with_exit(args: &[&str], expected_exit: ProcessExitCode) -> Resu
         .map_err(|error| format!("failed to parse JSON from ee {}: {error}", args.join(" ")))
 }
 
+/// Degradation codes with the WALL-CLOCK entries removed.
+///
+/// bd-rnb60. `pack_assembly_elapsed_over_budget` is emitted or not depending on how
+/// loaded the worker is — the product calls it non-reproducible in its own words and the
+/// v2 pack hash drops it by construction (ADR 0087 §5) — so any comparison that includes
+/// it asserts worker timing rather than pack behaviour.
+///
+/// The exclusion reads the PRODUCT'S OWN list through
+/// `ee::pack::is_non_canonical_telemetry_degradation_code`
+/// (`NON_CANONICAL_TELEMETRY_DEGRADATION_CODES`, src/pack/mod.rs:3881), which
+/// src/obs/volatile_fields.rs already names as "the single source". Deliberately not a
+/// hand-written list here: a future timing code is then excluded automatically instead of
+/// reintroducing the flake, and two lists cannot drift apart.
+///
+/// A file-level fn rather than a closure so its own control
+/// (`non_volatile_degradation_filter_keeps_real_differences_visible`) exercises the SAME
+/// code path the comparison uses. A control that re-implements the thing it is checking
+/// proves nothing about it.
+fn non_volatile_degradation_codes(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|code| !ee::pack::is_non_canonical_telemetry_degradation_code(code))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// bd-rnb60 acceptance item 2, the PLANTED CONTROL, exercised rather than argued.
+///
+/// The fix above weakens an equality by removing volatile entries before comparing, and
+/// the obvious way for that to go wrong is to remove too much — then the comparison holds
+/// for any pair and reads as coverage while checking nothing. This plants a difference in
+/// a NON-volatile code and requires the filter to keep it visible.
+///
+/// Both arms matter. The first pins that a wall-clock-only difference is erased (which is
+/// what unflaked the test); the second pins that a real difference SURVIVES. Without the
+/// second, a filter that returned an empty vec would pass the first and be useless.
+#[test]
+fn non_volatile_degradation_filter_keeps_real_differences_visible() -> TestResult {
+    let timing = ee::pack::NON_CANONICAL_TELEMETRY_DEGRADATION_CODES
+        .first()
+        .ok_or("the product must declare at least one non-canonical telemetry code")?;
+
+    // ARM 1: differing ONLY by the volatile timing code -> indistinguishable after filtering.
+    let fast = json!(["context_invalid_provenance", "embed_model_unavailable"]);
+    let slow = json!([
+        "context_invalid_provenance",
+        "embed_model_unavailable",
+        timing
+    ]);
+    ensure_equal(
+        &non_volatile_degradation_codes(&fast),
+        &non_volatile_degradation_codes(&slow),
+        "a wall-clock-only difference must be erased by the filter",
+    )?;
+
+    // ARM 2: a NON-volatile difference must survive. This is the arm that proves the
+    // filter is not simply emptying the list.
+    let diverged = json!(["context_invalid_provenance", "search_index_stale", timing]);
+    let slow_codes = non_volatile_degradation_codes(&slow);
+    let diverged_codes = non_volatile_degradation_codes(&diverged);
+    ensure_equal(
+        &(slow_codes == diverged_codes),
+        &false,
+        "a non-volatile difference must remain visible after filtering",
+    )?;
+    // And it must survive as CONTENT, not merely as inequality of empty vectors.
+    let expected_non_volatile: Vec<String> = ["context_invalid_provenance", "search_index_stale"]
+        .iter()
+        .map(|code| (*code).to_owned())
+        .collect();
+    ensure_equal(
+        &diverged_codes,
+        &expected_non_volatile,
+        "the filter must keep every non-volatile code verbatim",
+    )
+}
+
 fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
 where
     T: std::fmt::Debug + PartialEq,
@@ -810,21 +893,8 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
     // backed by the product's own `NON_CANONICAL_TELEMETRY_DEGRADATION_CODES`
     // (src/pack/mod.rs:3881) — deliberately NOT a hand-written list here, so a future
     // timing code is excluded automatically instead of reintroducing this flake.
-    let non_volatile_codes = |value: &Value| -> Vec<String> {
-        value
-            .as_array()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .filter(|code| !ee::pack::is_non_canonical_telemetry_degradation_code(code))
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let baseline_codes = non_volatile_codes(&baseline["actual_degradation_codes"]);
-    let wrong_codes = non_volatile_codes(&wrong["actual_degradation_codes"]);
+    let baseline_codes = non_volatile_degradation_codes(&baseline["actual_degradation_codes"]);
+    let wrong_codes = non_volatile_degradation_codes(&wrong["actual_degradation_codes"]);
     // EMPTY-WORLD GUARD. If the filter ever removed everything, the equality below
     // would hold for any pair and this assertion would read as coverage while checking
     // nothing. The measured run carried `context_invalid_provenance` and
