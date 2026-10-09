@@ -14552,6 +14552,9 @@ fn push_direct_rule_result_limit_degradation(
 struct DirectEvidencePackCandidate {
     item: PackEvidenceItem,
     linked_memory_id: Option<String>,
+    /// Plain historical reader text does not embed its source role or kind.
+    source_role: Option<String>,
+    span_kind: String,
     /// A derived incident card (ADR 0091) rather than a transcript line.
     incident_card: bool,
     /// Retrieval source of the hit that selected it.
@@ -14708,7 +14711,7 @@ fn collect_direct_evidence_pack_candidates(
     if relevance_floor.is_none() {
         apply_direct_evidence_query_relative_floor(&mut candidates, degraded);
     }
-    // Preference and error-class collapse discard alternatives. Apply the
+    // Card preference can discard source turns. Apply the
     // caller's final-score floor first so a weak directly matched card cannot
     // hide an eligible source turn that would bring the card at a higher score.
     let _ = filter_context_pack_candidates_by_relevance_floor(
@@ -14725,7 +14728,7 @@ fn collect_direct_evidence_pack_candidates(
         &request.query,
         candidates,
     );
-    collapse_near_duplicate_evidence(&mut candidates, degraded);
+    collapse_duplicate_evidence(&mut candidates, degraded);
     if rejected_live_admission > 0 {
         push_degradation(
             degraded,
@@ -14794,74 +14797,133 @@ fn apply_direct_evidence_query_relative_floor(
     }
 }
 
-/// Token-set Jaccard similarity at or above which two evidence candidates say
-/// the same thing.
-const EVIDENCE_NEAR_DUPLICATE_JACCARD: f32 = 0.8;
-
-/// Keep one copy of evidence that recurs across sessions.
+/// Identify repeated complete reader texts without discarding their meaning.
 ///
-/// Agents repeat themselves: the same lesson, prompt or tool summary appears
-/// in many transcripts with only a crate name or version changed. Each copy
-/// matched with the same relevance, so on the real-shape oracle at 5k spans a
-/// 3,000-token pack spent its whole budget on 48 restatements of one lesson.
-/// A candidate whose content tokens overlap an earlier (better-ranked) one by
-/// [`EVIDENCE_NEAR_DUPLICATE_JACCARD`] or more is dropped; very short texts
-/// must match exactly. The degradation counts what was collapsed.
-fn collapse_near_duplicate_evidence(
+/// Equality includes source kind and role, role labels, numbers, case,
+/// punctuation, whitespace and order. Token overlap cannot prove equivalence: one changed operand, version
+/// or negation can be the correction this pack needs to retain. Borrow the
+/// already-bounded candidate text so deduplication does not clone transcripts.
+fn duplicate_evidence_positions<'a>(
+    contents: impl IntoIterator<Item = (&'a str, Option<&'a str>, &'a str)>,
+) -> std::collections::BTreeSet<usize> {
+    let mut seen = std::collections::BTreeSet::new();
+    contents
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, content)| (!seen.insert(content)).then_some(index))
+        .collect()
+}
+
+/// Keep the first ranked representative of identical complete projected text.
+/// Its source identity and provenance remain unchanged; distinct observations
+/// continue through the ordinary ranking and token-budget selection.
+fn collapse_duplicate_evidence(
     candidates: &mut Vec<DirectEvidencePackCandidate>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) {
-    // Numbers (versions, line counts, timestamps) do not change what a span
-    // says, so restatements that differ only in them still collapse.
-    fn tokens(text: &str) -> BTreeSet<String> {
-        text.split(|ch: char| !ch.is_alphanumeric())
-            .filter(|token| !token.is_empty() && !token.chars().all(|ch| ch.is_ascii_digit()))
-            .map(str::to_lowercase)
-            .collect()
-    }
-    fn near_duplicate(left: &BTreeSet<String>, right: &BTreeSet<String>) -> bool {
-        let (small, large) = if left.len() <= right.len() {
-            (left, right)
-        } else {
-            (right, left)
-        };
-        if small.len() < 4 {
-            return small == large;
-        }
-        // |A ∩ B| / |A ∪ B| can reach the threshold only if |A| / |B| does.
-        if (small.len() as f32) < (large.len() as f32) * EVIDENCE_NEAR_DUPLICATE_JACCARD {
-            return false;
-        }
-        let shared = small.intersection(large).count();
-        let union = left.len() + right.len() - shared;
-        union > 0 && shared as f32 >= union as f32 * EVIDENCE_NEAR_DUPLICATE_JACCARD
-    }
-
-    let mut kept: Vec<BTreeSet<String>> = Vec::new();
-    let before = candidates.len();
-    candidates.retain(|candidate| {
-        let current = tokens(&candidate.item.content);
-        if kept
-            .iter()
-            .any(|previous| near_duplicate(previous, &current))
-        {
-            return false;
-        }
-        kept.push(current);
-        true
+    let duplicates = duplicate_evidence_positions(candidates.iter().map(|candidate| {
+        (
+            candidate.span_kind.as_str(),
+            candidate.source_role.as_deref(),
+            candidate.item.content.as_str(),
+        )
+    }));
+    let mut position = 0;
+    candidates.retain(|_| {
+        let keep = !duplicates.contains(&position);
+        position += 1;
+        keep
     });
-    let collapsed = before - candidates.len();
+    let collapsed = duplicates.len();
     if collapsed > 0 {
         push_degradation(
             degraded,
             "context_evidence_near_duplicates_collapsed",
             ContextResponseSeverity::Low,
             format!(
-                "{collapsed} imported evidence candidate(s) restated an earlier selected span (token overlap at least {:.0}%) and were collapsed into it.",
-                EVIDENCE_NEAR_DUPLICATE_JACCARD * 100.0
+                "{collapsed} imported evidence candidate(s) repeated the complete projected text of an earlier ranked span and were collapsed into it."
             ),
             None,
         );
+    }
+}
+
+#[cfg(test)]
+mod exact_evidence_duplicate_tests {
+    use super::duplicate_evidence_positions;
+
+    #[test]
+    fn preserves_meaningful_differences_in_complete_reader_text() {
+        for (left, right) in [
+            ("assistant: Use protocol 17.", "assistant: Use protocol 18."),
+            (
+                "assistant: The release must include checksum verification before publishing the artifact.",
+                "assistant: The release must not include checksum verification before publishing the artifact.",
+            ),
+            (
+                "assistant: Run cp source.txt destination.txt.",
+                "assistant: Run cp destination.txt source.txt.",
+            ),
+            ("assistant: Export PATH.", "assistant: Export path."),
+            ("assistant: Use -r.", "assistant: Use -R."),
+            ("user: The test passed.", "assistant: The test passed."),
+            ("assistant: Print 'a  b'.", "assistant: Print 'a b'."),
+            ("assistant: -1", "assistant: 1"),
+        ] {
+            assert!(
+                duplicate_evidence_positions([left, right].map(|text| (
+                    "message",
+                    Some("assistant"),
+                    text
+                )))
+                .is_empty(),
+                "distinct evidence was collapsed: {left:?}, {right:?}",
+            );
+        }
+        let text = "The compatibility test passed.";
+        assert!(
+            duplicate_evidence_positions([
+                ("message", Some("user"), text),
+                ("message", Some("assistant"), text),
+                ("message", None, text),
+                ("summary", None, text),
+            ])
+            .is_empty(),
+            "plain reader bodies retain their declared source roles and kinds"
+        );
+    }
+
+    #[test]
+    fn compares_qualifications_beyond_a_long_shared_prefix() {
+        let shared = "Observed the complete migration and replay verification. ".repeat(400);
+        let left = format!("assistant: {shared}Only apply this to protocol 17.");
+        let right = format!("assistant: {shared}Never apply this to protocol 17.");
+        assert!(
+            duplicate_evidence_positions([left.as_str(), right.as_str()].map(|text| (
+                "message",
+                Some("assistant"),
+                text
+            )))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn exact_duplicates_keep_the_first_ranked_representative() {
+        let content = "assistant: Résumé: keep the source evidence immutable.";
+        let different = "assistant: Résumé: keep the derived reader cache rebuildable.";
+        assert_eq!(
+            duplicate_evidence_positions(
+                [content, different, content, different, content].map(|text| (
+                    "message",
+                    Some("assistant"),
+                    text
+                ))
+            ),
+            std::collections::BTreeSet::from([2, 3, 4]),
+        );
+        assert!(duplicate_evidence_positions(std::iter::empty()).is_empty());
+        assert!(duplicate_evidence_positions([("message", Some("assistant"), content)]).is_empty());
     }
 }
 
@@ -14924,6 +14986,8 @@ fn direct_evidence_pack_candidate(
     );
     Some(DirectEvidencePackCandidate {
         linked_memory_id: span.memory_id,
+        source_role: span.role,
+        span_kind: span.span_kind,
         incident_card,
         source: source.to_owned(),
         item: PackEvidenceItem {
@@ -14958,9 +15022,9 @@ fn direct_evidence_pack_candidate(
 /// Incident cards (ADR 0091) replace the transcript turns they summarize: a
 /// matched turn inside an admitted card's line range brings the card instead,
 /// at the turn's rank, and a turn is dropped when its card is already a
-/// candidate. Cards of one error class collapse to the best-ranked one, which
-/// says how many incidents of that class the workspace holds. Order is the
-/// search order throughout, so the result is deterministic.
+/// candidate. Error classes add occurrence context, without suppressing cards
+/// containing different repairs. Order is the search order throughout, so the
+/// result is deterministic.
 fn prefer_incident_cards(
     connection: &DbConnection,
     workspace_ids: &[String],
@@ -15041,10 +15105,10 @@ fn prefer_incident_cards(
             }
         }
     }
-    collapse_incident_cards_by_error_class(connection, preferred)
+    annotate_incident_card_error_counts(connection, preferred)
 }
 
-fn collapse_incident_cards_by_error_class(
+fn annotate_incident_card_error_counts(
     connection: &DbConnection,
     candidates: Vec<DirectEvidencePackCandidate>,
 ) -> Vec<DirectEvidencePackCandidate> {
@@ -15064,21 +15128,16 @@ fn collapse_incident_cards_by_error_class(
     let Ok((classes, counts)) = connection.incident_card_error_classes(&workspace_id, &refs) else {
         return candidates;
     };
-    let mut represented = BTreeSet::new();
-    let mut collapsed = Vec::with_capacity(candidates.len());
+    let mut annotated = Vec::with_capacity(candidates.len());
     for mut candidate in candidates {
         if !candidate.incident_card {
-            collapsed.push(candidate);
+            annotated.push(candidate);
             continue;
         }
         let Some(card_classes) = classes.get(&candidate.item.evidence_id) else {
-            collapsed.push(candidate);
+            annotated.push(candidate);
             continue;
         };
-        if card_classes.iter().any(|class| represented.contains(class)) {
-            continue;
-        }
-        represented.extend(card_classes.iter().cloned());
         if let Some((class, count)) = card_classes
             .iter()
             .filter_map(|class| counts.get(class).map(|count| (class, *count)))
@@ -15086,13 +15145,13 @@ fn collapse_incident_cards_by_error_class(
             .filter(|(_, count)| *count > 1)
         {
             candidate.item.why.push_str(&format!(
-                "; error class {} was seen in {count} incidents in this workspace, this is the best-ranked",
+                "; error class {} was seen in {count} incidents in this workspace",
                 crate::core::incident_card::error_class_label(class)
             ));
         }
-        collapsed.push(candidate);
+        annotated.push(candidate);
     }
-    collapsed
+    annotated
 }
 
 fn push_direct_evidence_result_limit_degradation(
@@ -15768,6 +15827,8 @@ mod relevance_floor_tests {
             });
             candidates.evidence.push(DirectEvidencePackCandidate {
                 linked_memory_id: None,
+                source_role: None,
+                span_kind: "message".to_owned(),
                 incident_card: index < 2,
                 source: "lexical".to_owned(),
                 item: PackEvidenceItem {

@@ -3369,7 +3369,7 @@ ee pack "<unique transcript phrase from the imported session>" --workspace . --j
 
 **Introduced by:** bd-reality-core-convergence-1azkt.11 (epic RC)
 
-**Trigger.** Several imported evidence spans restate the same content (token-set overlap of at least 80%), typically one lesson or prompt repeated across sessions with only a name or version changed. The best-ranked copy is packed and the rest are collapsed into it instead of spending the token budget on restatements.
+**Trigger.** Several imported evidence spans have identical complete projected text and the same source role and kind, including role labels, numbers, case, punctuation, whitespace and order. The first ranked representative remains eligible for packing with its original identity and provenance. Changed facts, command operands, negation or qualifications remain distinct; sharing an error class does not collapse different repair cards. The historical diagnostic code is retained, but token overlap no longer proves equivalence.
 
 **Setup.**
 
@@ -3385,7 +3385,7 @@ ee index rebuild --workspace .
 ee pack "cargo publish fails version already uploaded" --workspace . --json
 ```
 
-**Expected emission.** Message contains: `restated an earlier selected span`
+**Expected emission.** Message contains: `repeated the complete projected text of an earlier ranked span`
 
 **Repair hint.** Not provided — this code is informational; no operator action is required.
 

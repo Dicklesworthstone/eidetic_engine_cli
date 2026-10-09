@@ -77,8 +77,17 @@ In the direct evidence lane:
 - a matched transcript turn inside an admitted card's line range is replaced
   by the narrowest such card, at the turn's rank; a turn whose card is already
   a candidate is dropped;
-- cards that share an error class collapse to the best-ranked one, whose `why`
-  states how many incident cards of that class the workspace holds.
+- each card's `why` states how many incident cards of its error class the
+  workspace holds; sharing an error class does not establish that repairs are
+  equivalent, so distinct cards remain eligible for ranking and budgeting;
+- duplicate compression retains the first ranked representative only when
+  complete projected text, source role and source kind match exactly. Numbers,
+  command operand order, case, negation and qualifications remain significant.
+
+The 2026-10-09 amendment replaces the original rule that kept only one card per
+error class. Different failures with the same code can require different fixes.
+The amendment changes candidate selection without rewriting cards, their source
+identities, recorded derivations, or historical pack ledgers.
 
 ### Lifecycle
 
@@ -122,6 +131,12 @@ the additional error classes on their next import.
 - `core::cass_error_recall::tests` — one bounded, admitted card per resolved
   arc; facets; idempotence; no secrets or unadmitted fix text; no memory rows.
 - `core::context::incident_card_tests` — card substitution, direct matches,
-  and collapse by error class in the pack lane.
+  distinct repairs for one error class, preservation of qualified facts and
+  plain source roles, and exact duplicate compression in the pack lane.
+- `core::context::exact_evidence_duplicate_tests` — complete-text equality
+  preserving numbers, command order, case, negation, roles and long-tail
+  qualifications.
+- `incident_card_cli` in the `integration_g_m` suite — real import, packing,
+  persisted ledger verification, replay and repeated-import source preservation.
 - `cass::refresh::canonical_reference_tests::derived_incident_cards_neither_block_nor_join_transcript_refresh`.
 - `core::incident_card::tests` — extraction and recognition.

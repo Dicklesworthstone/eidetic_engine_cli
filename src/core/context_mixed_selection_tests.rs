@@ -53,6 +53,8 @@ fn evidence(seed: u128, relevance: f32, tokens: u32) -> TestResult<DirectEvidenc
     let session_id = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(9)).to_string();
     Ok(DirectEvidencePackCandidate {
         linked_memory_id: None,
+        source_role: Some("assistant".to_owned()),
+        span_kind: "message".to_owned(),
         incident_card: false,
         source: "import".to_owned(),
         item: PackEvidenceItem {

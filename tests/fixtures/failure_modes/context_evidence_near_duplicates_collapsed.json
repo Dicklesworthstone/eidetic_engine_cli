@@ -12,7 +12,7 @@
   "severity": "low",
   "repair_present": false,
   "trigger": {
-    "description": "Several imported evidence spans restate the same content (token-set overlap of at least 80%), typically one lesson or prompt repeated across sessions with only a name or version changed. The best-ranked copy is packed and the rest are collapsed into it instead of spending the token budget on restatements.",
+    "description": "Several imported evidence spans have identical complete projected text and the same source role and kind, including role labels, numbers, case, punctuation, whitespace and order. The first ranked representative remains eligible for packing with its original identity and provenance. Changed facts, command operands, negation or qualifications remain distinct; sharing an error class does not collapse different repair cards.",
     "setup_commands": [
       "ee init --workspace .",
       "ee import cass --workspace . --limit 500",
@@ -23,6 +23,6 @@
   "expected_emission": {
     "code": "context_evidence_near_duplicates_collapsed",
     "severity": "low",
-    "message_contains": ["restated an earlier selected span"]
+    "message_contains": ["repeated the complete projected text of an earlier ranked span"]
   }
 }

@@ -1,5 +1,5 @@
 //! Pack-lane coverage for derived incident cards (ADR 0091): a matched turn
-//! brings its covering card, and cards of one error class collapse.
+//! brings its covering card, while distinct facts and repairs remain eligible.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
@@ -59,7 +59,23 @@ impl Fixture {
         role: &str,
         record: &serde_json::Value,
     ) -> String {
-        let excerpt = record.to_string();
+        self.excerpt(
+            session_id,
+            number,
+            span_kind,
+            Some(role),
+            &record.to_string(),
+        )
+    }
+
+    fn excerpt(
+        &self,
+        session_id: &str,
+        number: u32,
+        span_kind: &str,
+        role: Option<&str>,
+        excerpt: &str,
+    ) -> String {
         let digest = blake3::hash(format!("{session_id}:{number}").as_bytes());
         let mut seed = [0_u8; 16];
         seed.copy_from_slice(&digest.as_bytes()[..16]);
@@ -78,9 +94,9 @@ impl Fixture {
                     end_line: number,
                     start_byte: None,
                     end_byte: None,
-                    role: Some(role.to_owned()),
+                    role: role.map(str::to_owned),
                     content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
-                    excerpt,
+                    excerpt: excerpt.to_owned(),
                     metadata_json: None,
                     inherited_redaction_classes: Vec::new(),
                 },
@@ -227,7 +243,7 @@ fn transcript_pack_candidates_refuse_a_record_without_observed_text() {
 }
 
 #[test]
-fn a_matched_turn_brings_its_card_and_one_card_speaks_for_its_error_class() {
+fn matched_turns_keep_distinct_repairs_for_the_same_error_class() {
     let fixture = Fixture::new();
     let (first_turn, first_card) = fixture.incident(
         0x59_0101,
@@ -235,7 +251,7 @@ fn a_matched_turn_brings_its_card_and_one_card_speaks_for_its_error_class() {
     );
     let (second_turn, second_card) = fixture.incident(
         0x59_0102,
-        "The Widget type was missing its Serialize derive, so I added it and the bound is satisfied.",
+        "Widget was accidentally passed to the audit serializer, so I changed src/audit.rs to serialize WidgetSummary instead.",
     );
     assert_ne!(first_card, second_card);
 
@@ -263,7 +279,14 @@ fn a_matched_turn_brings_its_card_and_one_card_speaks_for_its_error_class() {
         .iter()
         .map(|candidate| candidate.item.evidence_id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, vec![first_card.as_str(), unrelated.as_str()]);
+    assert_eq!(
+        ids,
+        vec![
+            first_card.as_str(),
+            unrelated.as_str(),
+            second_card.as_str()
+        ],
+    );
 
     let card = &preferred[0];
     assert!(card.incident_card);
@@ -297,6 +320,17 @@ fn a_matched_turn_brings_its_card_and_one_card_speaks_for_its_error_class() {
         card.item.why
     );
     assert!(!preferred[1].incident_card);
+    assert!(preferred[2].incident_card);
+    assert_eq!(preferred[2].item.relevance.into_inner(), 0.6);
+    assert!(preferred[2].item.content.contains("WidgetSummary"));
+    assert!(
+        preferred[2]
+            .item
+            .why
+            .contains(&format!("through its source turn {second_turn}")),
+    );
+    assert!(preferred[2].item.why.contains("seen in 2 incidents"));
+    assert_ne!(preferred[0].item.content, preferred[2].item.content);
 
     // A card that matched directly keeps its own rank; its turn adds nothing.
     let direct = prefer_incident_cards(
@@ -479,7 +513,7 @@ fn evidence_far_below_the_best_match_stays_out_of_the_pack() {
 }
 
 #[test]
-fn evidence_restated_across_sessions_is_packed_once() {
+fn identical_projected_evidence_is_packed_once_without_merging_distinct_facts() {
     let fixture = Fixture::new();
     let mut ids = Vec::new();
     for (seed, text) in [
@@ -494,6 +528,10 @@ fn evidence_restated_across_sessions_is_packed_once() {
         (
             0x59_0303,
             "Clippy runs with -D warnings in CI, so fix needless_borrow before pushing.",
+        ),
+        (
+            0x59_0304,
+            "Published tally 1.2.0. Lesson for next time: bump the version in Cargo.toml and commit it before running cargo publish.",
         ),
     ] {
         let session = fixture.session(seed);
@@ -510,17 +548,160 @@ fn evidence_restated_across_sessions_is_packed_once() {
         fixture.candidate(&ids[0], 0.56),
         fixture.candidate(&ids[1], 0.56),
         fixture.candidate(&ids[2], 0.40),
+        fixture.candidate(&ids[3], 0.30),
     ];
+    let before = ids
+        .iter()
+        .map(|id| fixture.db.get_evidence_span(id).unwrap().unwrap())
+        .collect::<Vec<_>>();
     let mut degraded = Vec::new();
-    collapse_near_duplicate_evidence(&mut candidates, &mut degraded);
+    collapse_duplicate_evidence(&mut candidates, &mut degraded);
     let kept = candidates
         .iter()
         .map(|candidate| candidate.item.evidence_id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(kept, vec![ids[0].as_str(), ids[2].as_str()]);
+    assert_eq!(
+        kept,
+        vec![ids[0].as_str(), ids[1].as_str(), ids[2].as_str()],
+    );
+    assert_eq!(candidates[0].item.relevance.into_inner(), 0.56);
     assert_eq!(degraded.len(), 1);
     assert_eq!(
         degraded[0].code,
         "context_evidence_near_duplicates_collapsed"
+    );
+    assert!(
+        degraded[0]
+            .message
+            .starts_with("1 imported evidence candidate(s)")
+    );
+    let mut repeated_degraded = Vec::new();
+    collapse_duplicate_evidence(&mut candidates, &mut repeated_degraded);
+    assert!(repeated_degraded.is_empty());
+    for span in before {
+        assert_eq!(fixture.db.get_evidence_span(&span.id).unwrap(), Some(span));
+    }
+}
+
+#[test]
+fn stored_evidence_keeps_numbers_negation_command_order_and_late_qualifications() {
+    let fixture = Fixture::new();
+    let session_id = fixture.session(0x45_0401);
+    let shared = "The complete migration was checked against the persisted replay. ".repeat(20);
+    let texts = [
+        "Use protocol 17 after the compatibility tests pass.".to_owned(),
+        "Use protocol 18 after the compatibility tests pass.".to_owned(),
+        "The release must include checksum verification before publishing the final artifact."
+            .to_owned(),
+        "The release must not include checksum verification before publishing the final artifact."
+            .to_owned(),
+        "Use cp source.txt destination.txt for the inspected output.".to_owned(),
+        "Use cp destination.txt source.txt for the inspected output.".to_owned(),
+        format!("{shared}Only use protocol 17 in this case."),
+        format!("{shared}Never use protocol 17 in this case."),
+    ];
+    let mut ids = Vec::new();
+    for (index, text) in texts.iter().enumerate() {
+        ids.push(fixture.line(
+            &session_id,
+            index as u32 + 1,
+            "message",
+            "assistant",
+            &json!({"type": "assistant", "message": {"role": "assistant", "content": text}}),
+        ));
+    }
+    let session = fixture.db.get_session(&session_id).unwrap().unwrap();
+    for id in &ids {
+        assert!(
+            fixture
+                .db
+                .get_evidence_span(id)
+                .unwrap()
+                .unwrap()
+                .is_search_admitted_for_session(&fixture.workspace_id, &session)
+        );
+    }
+    let mut candidates = ids
+        .iter()
+        .map(|id| fixture.candidate(id, 0.8))
+        .collect::<Vec<_>>();
+    let before = candidates
+        .iter()
+        .map(|candidate| candidate.item.clone())
+        .collect::<Vec<_>>();
+    let mut degraded = Vec::new();
+    collapse_duplicate_evidence(&mut candidates, &mut degraded);
+    assert!(degraded.is_empty());
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| &candidate.item)
+            .collect::<Vec<_>>(),
+        before.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(candidates.len(), texts.len());
+    for (index, candidate) in candidates.iter().enumerate() {
+        assert_eq!(
+            candidate.item.content,
+            format!("assistant: {}", texts[index])
+        );
+        assert_eq!(candidate.item.evidence_id, ids[index]);
+        assert_eq!(
+            (candidate.item.start_line, candidate.item.end_line),
+            (index as u32 + 1, index as u32 + 1)
+        );
+    }
+}
+
+#[test]
+fn plain_reader_bodies_retain_their_original_source_roles_and_kinds() {
+    let fixture = Fixture::new();
+    let session_id = fixture.session(0x45_0402);
+    let text = "The compatibility test passed after pinning the protocol version.";
+    let mut ids = Vec::new();
+    for (index, (kind, role)) in [
+        ("message", Some("user")),
+        ("message", Some("assistant")),
+        ("message", None),
+        ("summary", None),
+        ("message", Some("assistant")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ids.push(fixture.excerpt(&session_id, index as u32 + 1, kind, role, text));
+    }
+    let session = fixture.db.get_session(&session_id).unwrap().unwrap();
+    for id in &ids {
+        let row = fixture.db.get_evidence_span(id).unwrap().unwrap();
+        assert!(row.is_search_admitted_for_session(&fixture.workspace_id, &session));
+        assert_eq!(
+            row.reader_text(),
+            text,
+            "historical plain text has no embedded role label"
+        );
+    }
+    let mut candidates = ids
+        .iter()
+        .map(|id| fixture.candidate(id, 0.8))
+        .collect::<Vec<_>>();
+    let mut degraded = Vec::new();
+    collapse_duplicate_evidence(&mut candidates, &mut degraded);
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.item.evidence_id.as_str())
+            .collect::<Vec<_>>(),
+        ids[..4].iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert_eq!(candidates[0].source_role.as_deref(), Some("user"));
+    assert_eq!(candidates[1].source_role.as_deref(), Some("assistant"));
+    assert_eq!(candidates[2].source_role, None);
+    assert_eq!(candidates[3].span_kind, "summary");
+    assert_eq!(degraded.len(), 1);
+    assert!(
+        degraded[0]
+            .message
+            .starts_with("1 imported evidence candidate(s)")
     );
 }

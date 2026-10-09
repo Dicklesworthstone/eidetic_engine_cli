@@ -1184,6 +1184,8 @@ fn linked_selection_fixture() -> (
     let evidence =
         |seed, relevance, linked_memory_id: Option<MemoryId>| DirectEvidencePackCandidate {
             linked_memory_id: linked_memory_id.map(|id| id.to_string()),
+            source_role: Some("assistant".to_owned()),
+            span_kind: "message".to_owned(),
             incident_card: false,
             source: "lexical".to_owned(),
             item: PackEvidenceItem {
