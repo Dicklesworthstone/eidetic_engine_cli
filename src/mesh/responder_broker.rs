@@ -2201,6 +2201,18 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
     }
 
     pub async fn reconcile(&mut self, cx: &Cx) -> Result<(), ResponderBrokerError> {
+        self.reconcile_with_routes(cx, None).await
+    }
+
+    /// Compare a preflight-resolved control update with the currently installed
+    /// authority. Keeping the candidate separate prevents the unchanged-address
+    /// fast path from comparing the new registry with itself while live brokers
+    /// still hold the previous routes.
+    async fn reconcile_with_routes(
+        &mut self,
+        cx: &Cx,
+        resolved_routes: Option<ResponderRouteRegistry>,
+    ) -> Result<(), ResponderBrokerError> {
         let status = match self.local_api.local_status(cx).await {
             Ok(status) => status,
             Err(error) => {
@@ -2218,28 +2230,25 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
                 );
             }
         };
-        let refreshed_routes = if let Some(registrations) = &self.durable_registrations {
+        let mut routes = if let Some(routes) = resolved_routes {
+            routes
+        } else if let Some(registrations) = &self.durable_registrations {
             match resolve_durable_route_registry(cx, self.local_api.as_ref(), registrations).await {
-                Ok(routes) => Some(routes),
+                Ok(routes) => routes,
                 Err(error) => {
                     self.shutdown_listeners();
                     return Err(error);
                 }
             }
         } else {
-            None
+            self.routes.clone()
         };
-        let routes_changed = refreshed_routes
-            .as_ref()
-            .is_some_and(|routes| !same_route_authority(&self.routes, routes));
-        if let Some(routes) = refreshed_routes {
-            self.routes = routes;
-        }
+        let routes_changed = !same_route_authority(&self.routes, &routes);
         if !crate::mesh::team::team_join_stable_id_matches(
-            &self.routes.responder_stable_id,
+            &routes.responder_stable_id,
             &status.identity.stable_id,
         ) || !crate::mesh::team::team_join_tailnet_matches(
-            &self.routes.tailnet_id,
+            &routes.tailnet_id,
             &status.identity.tailnet_id,
         ) {
             self.shutdown_listeners();
@@ -2249,7 +2258,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             .addresses
             .iter()
             .copied()
-            .map(|ip| SocketAddr::new(ip, self.routes.committed_port))
+            .map(|ip| SocketAddr::new(ip, routes.committed_port))
             .collect::<Vec<_>>();
         desired.sort();
         desired.dedup();
@@ -2262,14 +2271,13 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             self.shutdown_listeners();
             return Err(ResponderBrokerError::TransportUnavailable);
         }
-        let key_changed = status.identity.current_node_pubkey != self.routes.responder_node_pubkey;
+        let key_changed = status.identity.current_node_pubkey != routes.responder_node_pubkey;
         if desired == self.bound_addresses && !key_changed && !routes_changed {
             self.last_revalidated_at = Instant::now();
             return Ok(());
         }
 
         self.shutdown_listeners();
-        let mut routes = self.routes.clone();
         if key_changed {
             routes.responder_node_pubkey = status.identity.current_node_pubkey.clone();
             for route in routes.routes.values_mut() {
@@ -2437,8 +2445,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         }
         let routes = resolve_durable_route_registry(cx, self.local_api.as_ref(), &next).await?;
         self.durable_registrations = Some(next);
-        self.routes = routes;
-        self.reconcile(cx).await
+        self.reconcile_with_routes(cx, Some(routes)).await
     }
 
     #[cfg(any(unix, windows))]
@@ -2466,8 +2473,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         }
         let routes = resolve_durable_route_registry(cx, self.local_api.as_ref(), &next).await?;
         self.durable_registrations = Some(next);
-        self.routes = routes;
-        self.reconcile(cx).await
+        self.reconcile_with_routes(cx, Some(routes)).await
     }
 }
 

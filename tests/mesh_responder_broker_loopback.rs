@@ -27,8 +27,8 @@ use asupersync::{CancelKind, Cx};
 use ee::config::MeshLane;
 use ee::db::{
     CreateMeshOriginEventInput, CreateWorkspaceInput, DbConnection, InsertTeamMemberInput,
-    MeshLaneGrantMutationInput, MeshLaneGrantTargetAdapter, UpsertMeshBodyCacheMetadataInput,
-    UpsertMeshPeerInput,
+    MeshLaneGrantMutationInput, MeshLaneGrantTargetAdapter, ObserveMeshPeerTransportIdentityInput,
+    UpsertMeshBodyCacheMetadataInput, UpsertMeshPeerInput,
 };
 use ee::mesh::bootstrap_envelope::{
     BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, SyncRoundRequest,
@@ -55,7 +55,7 @@ use ee::mesh::responder_broker::{
 };
 use ee::mesh::transport_session::{
     HandshakeObservations, InitiatorSessionConfig, ResponderExpectations, SessionBinding,
-    SessionCapabilities, SessionChannelLimits, connect_authenticated_session,
+    SessionCapabilities, SessionChannelError, SessionChannelLimits, connect_authenticated_session,
 };
 use serde_json::json;
 
@@ -2026,6 +2026,336 @@ fn route_with_database(
     registered.expectations = origin_capable_expectations();
     registered.limits = origin_capable_session_limits();
     registered
+}
+
+struct ControlRouteFixture {
+    workspace_path: PathBuf,
+    database_path: PathBuf,
+    workspace_id: String,
+    responder_node_id: String,
+    initiator_node_id: String,
+    peer_handle: String,
+    event_hash: String,
+}
+
+impl ControlRouteFixture {
+    fn seed(path: &Path, label: &str) -> TestResult<Self> {
+        let workspace_path = path.canonicalize().map_err(|error| error.to_string())?;
+        let state_path = workspace_path.join(".ee");
+        std::fs::create_dir_all(&state_path).map_err(|error| error.to_string())?;
+        let database_path = state_path.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let database_path = database_path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = format!("wsp_controlroute{label}000000000001");
+        let responder_node_id = format!("node_{}", label.repeat(32));
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some(format!("control route {label}")),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let report = enroll_peer(MeshPeerEnrollInput {
+            workspace_id: workspace_id.clone(),
+            alias: format!("control-route-{label}"),
+            endpoint: MeshPeerEndpoint {
+                stable_node_id: Some("stable-initiator".to_owned()),
+                tailscale_node_key: "nodekey:initiator-current".to_owned(),
+                tailnet_id: "tailnet-loopback".to_owned(),
+                tailnet_display_name: None,
+                endpoint: "127.0.0.2".to_owned(),
+                magic_dns_name: None,
+            },
+            capability_profile: MeshPeerCapabilityProfile::MetadataOnly,
+            handshake: MeshPeerHandshake::granted(
+                format!("control-route-{label}"),
+                "1.0",
+                "nodekey:initiator-current",
+                vec!["mesh:metadata".to_owned()],
+            ),
+            public_key_fingerprint: format!("blake3:{}", label.repeat(64)),
+            now: CREATED_AT.to_owned(),
+            explicit_human_consent: true,
+        });
+        let peer = report
+            .peer
+            .ok_or_else(|| format!("enroll control route: {}", report.message))?;
+        connection
+            .upsert_mesh_peer(&UpsertMeshPeerInput {
+                workspace_id: workspace_id.clone(),
+                peer_id: peer.peer_id.clone(),
+                origin_node_id: expectations().initiator_node_id,
+                display_name: Some(peer.alias.clone()),
+                policy_summary_json: Some(
+                    serde_json::to_string(&peer).map_err(|error| error.to_string())?,
+                ),
+                enabled: true,
+                last_seen_at: Some(CREATED_AT.to_owned()),
+            })
+            .map_err(|error| error.to_string())?;
+        let observed = connection
+            .observe_mesh_peer_transport_identity(&ObserveMeshPeerTransportIdentityInput {
+                workspace_id: workspace_id.clone(),
+                peer_id: peer.peer_id.clone(),
+                tailnet_id: "tailnet-loopback".to_owned(),
+                stable_node_id: "stable-initiator".to_owned(),
+                current_node_pubkey: "nodekey:initiator-current".to_owned(),
+                observed_at: Some(CREATED_AT.to_owned()),
+            })
+            .map_err(|error| error.to_string())?;
+        connection
+            .apply_mesh_lane_grant_with_effect(
+                &MeshLaneGrantMutationInput {
+                    workspace_id: workspace_id.clone(),
+                    peer_id: peer.peer_id.clone(),
+                    target_adapter: MeshLaneGrantTargetAdapter::new(
+                        &peer.peer_id,
+                        &observed.origin_node_id,
+                    ),
+                    material_lane: MeshLane::Metadata,
+                    expected_generation: 0,
+                    approval_config_digest: Some(format!("blake3:{}", label.repeat(64))),
+                    updated_at: Some(CREATED_AT.to_owned()),
+                },
+                |_| Ok::<(), String>(()),
+            )
+            .map_err(|error| error.to_string())?;
+        let store =
+            MeshKeyStore::open_or_create(&workspace_path).map_err(|error| error.to_string())?;
+        store
+            .store_pair_key(
+                &peer.peer_id,
+                PairKeyClass::Current,
+                NonZeroU64::new(7).expect("nonzero generation"),
+                &pair_key(),
+                CREATED_AT,
+                false,
+            )
+            .map_err(|error| error.to_string())?;
+        let event_hash = format!("blake3:{}", label.repeat(64));
+        connection
+            .append_mesh_origin_event(&CreateMeshOriginEventInput {
+                event_id: format!("mesh_oevt_{}", label.repeat(26)),
+                team_id: "team_loopback".to_owned(),
+                origin_node_id: responder_node_id.clone(),
+                signing_key_generation: 1,
+                seq: 0,
+                prev_event_hash: None,
+                event_hash: event_hash.clone(),
+                signature: format!("sig-control-route-{label}"),
+                payload_schema: "ee.mesh.memory_event.v1".to_owned(),
+                payload_json: format!(
+                    r#"{{"operation":"create","logicalMemoryId":"mem_controlroute{label}0001"}}"#
+                ),
+                required_features_json: "[]".to_owned(),
+                produced_at: CREATED_AT.to_owned(),
+                body_nonce_hex: None,
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            workspace_path,
+            database_path,
+            workspace_id,
+            responder_node_id,
+            initiator_node_id: observed.origin_node_id,
+            peer_handle: peer.peer_id,
+            event_hash,
+        })
+    }
+
+    fn registration(&self, port: u16) -> DurableResponderRegistration {
+        DurableResponderRegistration {
+            workspace_path: self.workspace_path.clone(),
+            database_path: self.database_path.clone(),
+            workspace_id: self.workspace_id.clone(),
+            team_id: "team_loopback".to_owned(),
+            responder_node_id: self.responder_node_id.clone(),
+            peer_handle: self.peer_handle.clone(),
+            committed_port: port,
+            capabilities: SessionCapabilities::base(),
+            limits: SessionChannelLimits::default(),
+        }
+    }
+
+    fn control(&self, op: ResponderControlOp, port: u16) -> ResponderControlRequest {
+        ResponderControlRequest {
+            schema: ee::mesh::responder_broker::RESPONDER_CONTROL_SCHEMA_V1.to_owned(),
+            op,
+            nonce: "0123456789abcdef".to_owned(),
+            workspace_id: self.workspace_id.clone(),
+            team_id: "team_loopback".to_owned(),
+            responder_node_id: self.responder_node_id.clone(),
+            workspace_path: self.workspace_path.clone(),
+            database_path: self.database_path.clone(),
+            peer_handles: vec![self.peer_handle.clone()],
+            committed_port: port,
+        }
+    }
+
+    fn initiator(&self) -> InitiatorSessionConfig {
+        let mut config = origin_capable_initiator_config();
+        config.binding.responder_workspace_id = self.workspace_id.clone();
+        config.binding.responder_node_id = self.responder_node_id.clone();
+        config.binding.initiator_node_id = self.initiator_node_id.clone();
+        config.limits = SessionChannelLimits::default();
+        config
+    }
+
+    fn fetch(&self, address: SocketAddr) -> TestResult {
+        let config = self.initiator();
+        let sync = run_runtime(|cx| async move {
+            contact_authenticated_mesh_peer(
+                &cx,
+                address,
+                config,
+                &SyncRoundRequest::new(Vec::new(), 0, 8),
+            )
+            .await
+        })?;
+        if sync.events.len() != 1
+            || sync.events[0].event_hash != self.event_hash
+            || sync.events[0].origin_node_id != self.responder_node_id
+        {
+            return Err(format!(
+                "live route {} returned the wrong origin data: {sync:?}",
+                self.workspace_id
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn control_registration_rebinds_live_routes_on_the_same_listener_address() -> TestResult {
+    if !lifecycle_test_child(
+        "control_registration_rebinds_live_routes_on_the_same_listener_address",
+    )? {
+        return Ok(());
+    }
+    let workspace_a = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_b = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let route_a = ControlRouteFixture::seed(workspace_a.path(), "a")?;
+    let route_b = ControlRouteFixture::seed(workspace_b.path(), "b")?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let fake = FakeLocalApi::spawn_until_stopped(local_api_dir.path())?;
+    let control_path = local_api_dir.path().join("responder.sock");
+    let owner_control_path = control_path.clone();
+    let port = available_nonprivileged_port()?;
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let registration = route_a.registration(port);
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        run_runtime_with(Duration::from_secs(30), |cx| async move {
+            let mut owner = ResponderBrokerOwner::start_durable(
+                &cx,
+                LoopbackLocalApi {
+                    client: TailscaleLocalApiClient::new(
+                        fake.socket_path.clone(),
+                        LOCAL_API_TIMEOUT,
+                    ),
+                    who_is_delay: Duration::ZERO,
+                    status_failure: None,
+                },
+                vec![registration],
+                PreAuthAdmissionLimits::default(),
+                Duration::from_secs(60),
+            )
+            .await
+            .map_err(|error| format!("start durable route owner: {error}"))?;
+            owner
+                .listen_control(&owner_control_path)
+                .map_err(|error| error.to_string())?;
+            started_tx
+                .send(cx.clone())
+                .map_err(|error| error.to_string())?;
+            let result = owner.serve_until_cancelled(&cx).await;
+            if !matches!(result, Err(ResponderBrokerError::Cancelled))
+                || !owner.bound_addresses().is_empty()
+                || owner.control_socket_path().is_some()
+            {
+                return Err(format!("route owner did not stop cleanly: {result:?}"));
+            }
+            fake.finish()?;
+            Ok(())
+        })
+    });
+    let cancel = started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|error| format!("durable route owner did not start: {error}"))?;
+    let client = (|| {
+        route_a.fetch(address)?;
+        let added = submit_responder_control_request(
+            &control_path,
+            &route_b.control(ResponderControlOp::Register, port),
+        )
+        .map_err(|error| format!("register second route: {error}"))?;
+        if !added.ok
+            || added.registered_routes != 2
+            || added.bound_addresses != vec![address.to_string()]
+        {
+            return Err(format!(
+                "second route was not registered on the original address: {added:?}"
+            ));
+        }
+        // Owner metadata alone passed with the old bug. These two handshakes
+        // and origin reads require the actual listener's registry to change.
+        route_b.fetch(address)?;
+        route_a.fetch(address)?;
+        let removed = submit_responder_control_request(
+            &control_path,
+            &route_a.control(ResponderControlOp::Unregister, port),
+        )
+        .map_err(|error| format!("unregister first route: {error}"))?;
+        if !removed.ok
+            || removed.registered_routes != 1
+            || removed.bound_addresses != vec![address.to_string()]
+        {
+            return Err(format!(
+                "first route was not removed while preserving the listener: {removed:?}"
+            ));
+        }
+        let config = route_a.initiator();
+        let refused = run_runtime(|cx| async move {
+            Ok(connect_authenticated_session(&cx, address, config).await)
+        })?;
+        let refusal = match refused {
+            Ok(_) => return Err("unregistered route still authenticated".to_owned()),
+            Err(error) => error,
+        };
+        if !matches!(
+            refusal,
+            SessionChannelError::UnexpectedHalfClose
+                | SessionChannelError::Io {
+                    phase: "session_confirm read",
+                    ..
+                }
+        ) {
+            return Err(format!(
+                "removed route did not reach a live handshake refusal: {refusal:?}"
+            ));
+        }
+        route_b.fetch(address)?;
+        Ok(())
+    })();
+    cancel.cancel_with(
+        CancelKind::Shutdown,
+        Some("live route replacement regression complete"),
+    );
+    let server = server
+        .join()
+        .map_err(|_| "route owner thread panicked".to_owned())?;
+    match (client, server) {
+        (Ok(()), Ok(())) => Ok(()),
+        (client, server) => Err(format!(
+            "live route replacement failed: client={client:?}, server={server:?}"
+        )),
+    }
 }
 
 #[test]
