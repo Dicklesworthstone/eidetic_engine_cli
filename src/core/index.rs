@@ -1678,9 +1678,9 @@ impl From<DbError> for IndexRebuildError {
 }
 
 /// A full rebuild repairs missing or stale reader projections before admission
-/// verdicts (bd-reality-core-convergence-1azkt.45/.47), so the source snapshot
-/// and later reads reuse the same interpretation. Both are derived caches:
-/// failure leaves reads on safe source projection and full revalidation.
+/// verdicts (bd-reality-core-convergence-1azkt.45/.47), then repairs the bounded
+/// admission counters. These are derived caches: failure leaves reads on safe
+/// source projection, full revalidation and authoritative count scans.
 fn backfill_evidence_reader_state_for_rebuild(db: &DbConnection, workspace_id: &str) {
     if let Err(error) = db.backfill_evidence_reader_projections(Some(workspace_id)) {
         tracing::warn!(
@@ -1694,6 +1694,13 @@ fn backfill_evidence_reader_state_for_rebuild(db: &DbConnection, workspace_id: &
             target: "ee::index",
             error = %error,
             "evidence admission verdict backfill failed; admission revalidates in full"
+        );
+    }
+    if let Err(error) = db.rebuild_evidence_admission_counts(Some(workspace_id)) {
+        tracing::warn!(
+            target: "ee::index",
+            error = %error,
+            "evidence admission counter rebuild failed; current-index probes scan the corpus"
         );
     }
 }
@@ -10679,9 +10686,11 @@ fn get_db_stats(
 /// imported spans on the real-shape oracle. Every source write bumps the
 /// workspace generation (trigger-maintained), so when the published metadata
 /// names the current generation the corpus is the one it counted. Evidence
-/// admission buckets come from two grouped COUNT queries; the candidate rows
-/// that did not validate are the candidates the index did not take.
-/// `None` means "count the slow way": no, foreign, corrupt or older metadata.
+/// admission buckets come from transactionally maintained V131 counters, with
+/// at most one bucket per producer and eligibility; rejected candidates are
+/// the candidates the index did not take. Neither source rows nor excerpts
+/// are scanned on this path. `None` means "count the slow way": absent,
+/// foreign, corrupt or older metadata, or unavailable/inconsistent counters.
 /// Standalone `ee index status` never takes this path.
 fn published_corpus_counts_at_current_generation(
     db: &DbConnection,

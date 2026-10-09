@@ -1859,6 +1859,8 @@ mod tests {
         "ee_wal_holds",
         "error_fingerprints",
         "error_repair_links",
+        "evidence_admission_count_state",
+        "evidence_admission_counts",
         "evidence_admission_verdicts",
         "evidence_reader_projections",
         "evidence_spans",

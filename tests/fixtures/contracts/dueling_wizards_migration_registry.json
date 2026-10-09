@@ -4,8 +4,8 @@
   "gateBead": "bd-1n0np.23.1",
   "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
   "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
-  "currentLastCompiledMigration": 130,
-  "nextPlannedMigration": 131,
+  "currentLastCompiledMigration": 131,
+  "nextPlannedMigration": 132,
   "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
   "backupCoverageBead": "bd-1n0np.23.2",
   "policy": {
@@ -73,7 +73,8 @@
         "V127": "V127_EVIDENCE_ADMISSION_VERDICTS (bd-reality-core-convergence-1azkt.47; shipped into a slot the registry had reserved for attestation_bundles; write-time evidence admission verdicts bound to the exact row and admission revision; derived, rebuilt by backfill)",
         "V128": "V128_PACK_RULE_ITEMS (bd-vp087 procedural rules packed under their native RuleId; shipped into a slot the registry had reserved for attestation_bundles)",
         "V129": "V129_PACK_GUARD_TRIGGERS_WITHOUT_JOINS (forward-only pack workspace guard repair without nested-loop joins)",
-        "V130": "V130_EVIDENCE_READER_PROJECTIONS (bd-reality-core-convergence-1azkt.45; bounded durable reader projections bound to source bytes and projection revision; derived and rebuilt on migration, recovery, and index rebuild)"
+        "V130": "V130_EVIDENCE_READER_PROJECTIONS (bd-reality-core-convergence-1azkt.45; bounded durable reader projections bound to source bytes and projection revision; derived and rebuilt on migration, recovery, and index rebuild)",
+        "V131": "V131_EVIDENCE_ADMISSION_COUNTS (bd-reality-core-convergence-1azkt.47; transactionally maintained workspace admission buckets and versioned readiness; derived, backfilled on migration and repaired by recovery/index rebuild)"
       }
     }
   },
@@ -160,16 +161,6 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 131,
-      "status": "planned",
-      "runtimeRule": "planned_allocation_only",
-      "migrationConstant": "required_before_implemented",
-      "boundaryMigrationEvidence": "required_before_implemented",
-      "backupCoverageEvidence": "required_before_implemented",
-      "proofPosture": "rch_only_no_local_fallback"
-    },
-    {
-      "id": "query_miss_ledger",
       "version": 132,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
@@ -179,8 +170,18 @@
       "proofPosture": "rch_only_no_local_fallback"
     },
     {
-      "id": "source_write_stats",
+      "id": "query_miss_ledger",
       "version": 133,
+      "status": "planned",
+      "runtimeRule": "planned_allocation_only",
+      "migrationConstant": "required_before_implemented",
+      "boundaryMigrationEvidence": "required_before_implemented",
+      "backupCoverageEvidence": "required_before_implemented",
+      "proofPosture": "rch_only_no_local_fallback"
+    },
+    {
+      "id": "source_write_stats",
+      "version": 134,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -313,8 +314,8 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 131,
-      "migrationName": "V131_ATTESTATION_BUNDLES",
+      "version": 132,
+      "migrationName": "V132_ATTESTATION_BUNDLES",
       "ownerBead": "bd-1n0np.22.1",
       "ownerSurface": "attestation_bundles",
       "status": "planned",
@@ -325,8 +326,8 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 132,
-      "migrationName": "V132_QUERY_MISS_LEDGER",
+      "version": 133,
+      "migrationName": "V133_QUERY_MISS_LEDGER",
       "ownerBead": "bd-1n0np.6.3",
       "ownerSurface": "gap_honesty",
       "status": "planned",
@@ -337,8 +338,8 @@
     },
     {
       "id": "source_write_stats",
-      "version": 133,
-      "migrationName": "V133_SOURCE_WRITE_STATS",
+      "version": 134,
+      "migrationName": "V134_SOURCE_WRITE_STATS",
       "ownerBead": "bd-1n0np.8.5",
       "ownerSurface": "read_fence",
       "status": "planned",

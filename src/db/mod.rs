@@ -45,6 +45,7 @@ use crate::models::{
 };
 use crate::models::{MemorySeal, validate_attestation_seal_fields};
 
+mod evidence_admission_counts;
 mod evidence_reader_projection;
 mod memory_temporal;
 pub mod migrate;
@@ -11635,6 +11636,192 @@ END;
     "blake3:v130_evidence_reader_projections_2026_10_08",
 );
 
+/// Bound current-index admission accounting by the closed producer and
+/// eligibility vocabularies, rather than the number of source evidence rows.
+/// The readiness row distinguishes a materialized empty workspace from a
+/// missing or invalid counter set. Source writes maintain both partitions in
+/// their own transaction; damaged derived counts invalidate readiness without
+/// blocking the authoritative write. Only an explicit rebuild restores it.
+pub const V131_EVIDENCE_ADMISSION_COUNTS: Migration = Migration::new(
+    131,
+    "evidence_admission_counts",
+    r#"
+CREATE TABLE evidence_admission_counts (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    producer_kind TEXT NOT NULL CHECK (producer_kind IN (
+        'cass_import', 'agentsmd_import', 'docs_bootstrap', 'journal_distill',
+        'remember_reinforcement', 'legacy_unknown'
+    )),
+    search_eligibility TEXT NOT NULL CHECK (
+        search_eligibility IN ('admitted', 'quarantined', 'denied')
+    ),
+    is_candidate INTEGER NOT NULL CHECK (
+        is_candidate IN (0, 1)
+        AND is_candidate = (producer_kind = 'cass_import' AND search_eligibility = 'admitted')
+    ),
+    row_count INTEGER NOT NULL CHECK (typeof(row_count) = 'integer' AND row_count >= 0),
+    PRIMARY KEY (workspace_id, producer_kind, search_eligibility, is_candidate)
+);
+
+CREATE TABLE evidence_admission_count_state (
+    workspace_id TEXT PRIMARY KEY NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    policy_version INTEGER NOT NULL CHECK (policy_version >= 0),
+    candidate_predicate TEXT NOT NULL,
+    ready INTEGER NOT NULL CHECK (ready IN (0, 1)),
+    source_rows INTEGER NOT NULL CHECK (typeof(source_rows) = 'integer' AND source_rows >= 0)
+);
+
+INSERT INTO evidence_admission_counts
+    (workspace_id, producer_kind, search_eligibility, is_candidate, row_count)
+SELECT workspace_id, producer_kind, search_eligibility,
+       producer_kind = 'cass_import' AND search_eligibility = 'admitted', COUNT(*)
+FROM evidence_spans
+GROUP BY workspace_id, producer_kind, search_eligibility;
+
+INSERT INTO evidence_admission_count_state
+    (workspace_id, policy_version, candidate_predicate, ready, source_rows)
+SELECT workspace_id, 1,
+       'e.producer_kind = ''cass_import'' AND e.search_eligibility = ''admitted''',
+       1, SUM(row_count)
+FROM evidence_admission_counts
+GROUP BY workspace_id;
+
+INSERT OR IGNORE INTO evidence_admission_count_state
+    (workspace_id, policy_version, candidate_predicate, ready, source_rows)
+SELECT id, 1,
+       'e.producer_kind = ''cass_import'' AND e.search_eligibility = ''admitted''', 1, 0
+FROM workspaces;
+
+CREATE TRIGGER trg_evidence_admission_counts_workspace_insert
+AFTER INSERT ON workspaces
+BEGIN
+    INSERT OR IGNORE INTO evidence_admission_count_state
+        (workspace_id, policy_version, candidate_predicate, ready, source_rows)
+    VALUES (NEW.id, 1,
+        'e.producer_kind = ''cass_import'' AND e.search_eligibility = ''admitted''', 1, 0);
+END;
+
+-- REPLACE may delete conflict victims without firing their DELETE triggers.
+-- Probe both source unique keys before insertion and leave every affected
+-- workspace unready. A rejected plain INSERT rolls this change back with its
+-- statement. Successful IGNORE or UPSERT can conservatively require rebuild;
+-- ordinary append-only inserts never enter this guard.
+CREATE TRIGGER trg_evidence_admission_counts_insert_conflict
+BEFORE INSERT ON evidence_spans
+WHEN EXISTS (SELECT 1 FROM evidence_spans WHERE id = NEW.id)
+  OR EXISTS (
+      SELECT 1 FROM evidence_spans
+       WHERE session_id = NEW.session_id AND cass_span_id = NEW.cass_span_id
+  )
+BEGIN
+    UPDATE evidence_admission_count_state SET ready = 0
+     WHERE workspace_id = NEW.workspace_id;
+    UPDATE evidence_admission_count_state SET ready = 0
+     WHERE workspace_id IN (
+         SELECT workspace_id FROM evidence_spans WHERE id = NEW.id
+     );
+    UPDATE evidence_admission_count_state SET ready = 0
+     WHERE workspace_id IN (
+         SELECT workspace_id FROM evidence_spans
+          WHERE session_id = NEW.session_id AND cass_span_id = NEW.cass_span_id
+     );
+END;
+
+CREATE TRIGGER trg_evidence_admission_counts_span_insert
+AFTER INSERT ON evidence_spans
+BEGIN
+    UPDATE evidence_admission_count_state
+       SET ready = CASE WHEN source_rows = 9223372036854775807 OR EXISTS (
+            SELECT 1 FROM evidence_admission_counts
+             WHERE workspace_id = NEW.workspace_id
+               AND producer_kind = NEW.producer_kind
+               AND search_eligibility = NEW.search_eligibility
+               AND is_candidate = (NEW.producer_kind = 'cass_import' AND NEW.search_eligibility = 'admitted')
+               AND row_count = 9223372036854775807
+           ) THEN 0 ELSE ready END,
+           source_rows = CASE WHEN source_rows < 9223372036854775807
+                THEN source_rows + 1 ELSE source_rows END
+     WHERE workspace_id = NEW.workspace_id;
+    INSERT INTO evidence_admission_counts
+        (workspace_id, producer_kind, search_eligibility, is_candidate, row_count)
+    VALUES (NEW.workspace_id, NEW.producer_kind, NEW.search_eligibility,
+        NEW.producer_kind = 'cass_import' AND NEW.search_eligibility = 'admitted', 1)
+    ON CONFLICT(workspace_id, producer_kind, search_eligibility, is_candidate)
+    DO UPDATE SET row_count = evidence_admission_counts.row_count + 1
+        WHERE evidence_admission_counts.row_count < 9223372036854775807;
+END;
+
+CREATE TRIGGER trg_evidence_admission_counts_span_delete
+AFTER DELETE ON evidence_spans
+BEGIN
+    UPDATE evidence_admission_count_state
+       SET ready = CASE WHEN source_rows = 0 OR NOT EXISTS (
+            SELECT 1 FROM evidence_admission_counts
+             WHERE workspace_id = OLD.workspace_id
+               AND producer_kind = OLD.producer_kind
+               AND search_eligibility = OLD.search_eligibility
+               AND is_candidate = (OLD.producer_kind = 'cass_import' AND OLD.search_eligibility = 'admitted')
+               AND row_count > 0
+           ) THEN 0 ELSE ready END,
+           source_rows = CASE WHEN source_rows > 0 THEN source_rows - 1 ELSE 0 END
+     WHERE workspace_id = OLD.workspace_id;
+    UPDATE evidence_admission_counts
+       SET row_count = row_count - 1
+     WHERE workspace_id = OLD.workspace_id
+       AND producer_kind = OLD.producer_kind
+       AND search_eligibility = OLD.search_eligibility
+       AND is_candidate = (OLD.producer_kind = 'cass_import' AND OLD.search_eligibility = 'admitted')
+       AND row_count > 0;
+END;
+
+CREATE TRIGGER trg_evidence_admission_counts_span_update
+AFTER UPDATE OF workspace_id, producer_kind, search_eligibility ON evidence_spans
+WHEN OLD.workspace_id <> NEW.workspace_id
+  OR OLD.producer_kind <> NEW.producer_kind
+  OR OLD.search_eligibility <> NEW.search_eligibility
+BEGIN
+    UPDATE evidence_admission_count_state
+       SET ready = CASE WHEN source_rows = 0 OR NOT EXISTS (
+            SELECT 1 FROM evidence_admission_counts
+             WHERE workspace_id = OLD.workspace_id
+               AND producer_kind = OLD.producer_kind
+               AND search_eligibility = OLD.search_eligibility
+               AND is_candidate = (OLD.producer_kind = 'cass_import' AND OLD.search_eligibility = 'admitted')
+               AND row_count > 0
+           ) THEN 0 ELSE ready END,
+           source_rows = CASE WHEN source_rows > 0 THEN source_rows - 1 ELSE 0 END
+     WHERE workspace_id = OLD.workspace_id;
+    UPDATE evidence_admission_counts
+       SET row_count = row_count - 1
+     WHERE workspace_id = OLD.workspace_id
+       AND producer_kind = OLD.producer_kind
+       AND search_eligibility = OLD.search_eligibility
+       AND is_candidate = (OLD.producer_kind = 'cass_import' AND OLD.search_eligibility = 'admitted')
+       AND row_count > 0;
+    UPDATE evidence_admission_count_state
+       SET ready = CASE WHEN source_rows = 9223372036854775807 OR EXISTS (
+            SELECT 1 FROM evidence_admission_counts
+             WHERE workspace_id = NEW.workspace_id
+               AND producer_kind = NEW.producer_kind
+               AND search_eligibility = NEW.search_eligibility
+               AND is_candidate = (NEW.producer_kind = 'cass_import' AND NEW.search_eligibility = 'admitted')
+               AND row_count = 9223372036854775807
+           ) THEN 0 ELSE ready END,
+           source_rows = CASE WHEN source_rows < 9223372036854775807
+                THEN source_rows + 1 ELSE source_rows END
+     WHERE workspace_id = NEW.workspace_id;
+    INSERT INTO evidence_admission_counts
+        (workspace_id, producer_kind, search_eligibility, is_candidate, row_count)
+    VALUES (NEW.workspace_id, NEW.producer_kind, NEW.search_eligibility,
+        NEW.producer_kind = 'cass_import' AND NEW.search_eligibility = 'admitted', 1)
+    ON CONFLICT(workspace_id, producer_kind, search_eligibility, is_candidate)
+    DO UPDATE SET row_count = evidence_admission_counts.row_count + 1
+        WHERE evidence_admission_counts.row_count < 9223372036854775807;
+END;
+"#,
+    "blake3:v131_evidence_admission_counts_2026_10_08",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -11767,6 +11954,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V128_PACK_RULE_ITEMS,
     V129_PACK_GUARD_TRIGGERS_WITHOUT_JOINS,
     V130_EVIDENCE_READER_PROJECTIONS,
+    V131_EVIDENCE_ADMISSION_COUNTS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -17240,50 +17428,15 @@ impl DbConnection {
 
     /// The admission report a full scan would produce, given how many search
     /// candidates an index generation published at the current workspace
-    /// generation accepted. `None` when the counts cannot be reconciled (more
-    /// accepted than candidates), so the caller falls back to the scan.
+    /// generation accepted. Current V131 counters make this independent of
+    /// corpus size. Missing, stale or inconsistent counters return `None`, so
+    /// the caller retains the authoritative scan without repairing on reads.
     pub(crate) fn evidence_admission_report_for_indexed_count(
         &self,
         workspace_id: &str,
         indexed_admitted: u32,
     ) -> Result<Option<EvidenceAdmissionReport>> {
-        let mut report = EvidenceAdmissionReport::default();
-        for (producer, eligibility, count) in
-            self.count_non_candidate_evidence(workspace_id, None)?
-        {
-            report.record_many(&producer, &eligibility, false, count);
-        }
-        let sql = format!(
-            "SELECT COUNT(*) FROM evidence_spans e WHERE e.workspace_id = ?1 AND {EVIDENCE_SEARCH_CANDIDATE_PREDICATE}"
-        );
-        let rows = self.query_for(
-            DbOperation::Query,
-            &sql,
-            &[Value::Text(workspace_id.to_owned())],
-        )?;
-        let candidates = rows.first().map_or(Ok(0_i64), |row| {
-            required_i64(row, 0, DbOperation::Query, "candidate_count")
-        })?;
-        let Ok(candidates) = u32::try_from(candidates) else {
-            return Ok(None);
-        };
-        if indexed_admitted > candidates {
-            return Ok(None);
-        }
-        // EVIDENCE_SEARCH_CANDIDATE_PREDICATE fixes producer and eligibility.
-        report.record_many(
-            EvidenceProducerKind::CassImport.as_str(),
-            "admitted",
-            true,
-            indexed_admitted,
-        );
-        report.record_many(
-            EvidenceProducerKind::CassImport.as_str(),
-            "admitted",
-            false,
-            candidates - indexed_admitted,
-        );
-        Ok(Some(report))
+        self.materialized_evidence_admission_report(workspace_id, indexed_admitted)
     }
 
     /// Count evidence spans for a workspace.

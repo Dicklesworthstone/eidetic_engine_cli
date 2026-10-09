@@ -1955,7 +1955,9 @@ fn backup_table_policy(table: &str) -> BackupTablePolicy {
                 "derived_artifact_optional",
             )
         }
-        "evidence_admission_verdicts"
+        "evidence_admission_counts"
+        | "evidence_admission_count_state"
+        | "evidence_admission_verdicts"
         | "evidence_reader_projections"
         | "memory_anchor_index"
         | "primer_cache"
