@@ -49,6 +49,33 @@ fn imported_evidence_survives_add_noop_and_remove_deltas() -> TestResult {
         ("CASS_DATA_DIR", cass_data.as_os_str().to_owned()),
         ("CASS_IGNORE_SOURCES_CONFIG", OsString::from("1")),
         ("EE_CASS_BINARY", stub.binary.as_os_str().to_owned()),
+        // bd-ojcq2, DEFECT 1. The stub resolves its payloads from these three
+        // variables and this file set only the binary and PATH, so the stub ran
+        // `cat ''`, exited 1, and `02_import` failed the no-mocks contract with
+        // exit 5. Every delta assertion below was unreachable: the failure was
+        // never about deltas, it was a fixture that received no evidence to
+        // delta. The sibling supports driving the same stub already set all
+        // three (import_cass_store_preflight.rs, import_cass_effect_declaration.rs).
+        (
+            "CASS_STUB_SESSIONS_JSON",
+            stub.sessions_json.as_os_str().to_owned(),
+        ),
+        (
+            "CASS_STUB_VIEW_JSONL",
+            stub.view_jsonl.as_os_str().to_owned(),
+        ),
+        (
+            "CASS_STUB_INVOCATION_LOG",
+            stub.invocation_log.as_os_str().to_owned(),
+        ),
+        // bd-ojcq2, DEFECT 2, found by fixing defect 1 and re-running. With the
+        // stub working, `02_import` imported 7 spans and then failed on
+        // "stderr was not empty" — the stderr being ee's one-time notice that it
+        // is downloading potion-multilingual-128M (506.4 MB). A no-mocks contract
+        // that requires clean stderr cannot hold while the embedder may fetch a
+        // model, and that fetch depends on worker state rather than on this test.
+        // Same omission class as defect 1, same sibling convention.
+        ("EE_EMBED_DOWNLOAD", OsString::from("off")),
         ("PATH", path_with_binary_parent(&stub.binary)?),
         ("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", OsString::from("1")),
         ("NO_COLOR", OsString::from("1")),
