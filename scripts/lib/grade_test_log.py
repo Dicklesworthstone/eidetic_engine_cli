@@ -150,6 +150,11 @@ def parse(lines: list[str]) -> tuple[list[dict], list[str]]:
                     "verdict": summarised.group("verdict"),
                     "passed": int(summarised.group("passed")),
                     "failed": int(summarised.group("failed")),
+                    # `counted` deliberately includes IGNORED, because that is what
+                    # reconciles against libtest's announcement. Kept separately so a
+                    # reader can tell announced-and-EXECUTED from announced-and-SKIPPED:
+                    # an ignored test reconciles perfectly and proves nothing.
+                    "ignored": int(summarised.group("ignored")),
                     "line": number,
                     "announce_line": pending["line"],
                 }
@@ -183,9 +188,13 @@ def grade(path: pathlib.Path, expect_target: str | None, all_targets: bool = Fal
     for pair in pairs:
         reconciles = pair["announced"] == pair["counted"]
         mark = "OK " if reconciles else "MISMATCH"
+        # Surface IGNORED in the denominator line. It reconciles against the
+        # announcement exactly like a pass, so a reader scanning for "OK" cannot
+        # otherwise tell that some of those tests never ran.
+        skipped = f" IGNORED={pair['ignored']}" if pair.get("ignored") else ""
         print(
             f"  {mark} target={pair['target']} announced={pair['announced']} "
-            f"counted={pair['counted']} verdict={pair['verdict']} "
+            f"counted={pair['counted']}{skipped} verdict={pair['verdict']} "
             f"(announce line {pair['announce_line']}, summary line {pair['line']})"
         )
     for problem in problems:
@@ -244,9 +253,23 @@ def grade(path: pathlib.Path, expect_target: str | None, all_targets: bool = Fal
                 "calls that `ok` and exits 0; it is not a pass."
             )
             return 1
+        # AGGREGATE FORM OF THE IGNORED VACUITY. Checked on the TOTAL, like the zero
+        # rule above: one target whose tests are all ignored beside a target that really
+        # ran is normal and must stay green, while an invocation that ignored everything
+        # it announced executed nothing at all.
+        total_executed = sum(p["passed"] + p["failed"] for p in chosen)
+        total_ignored = sum(p["ignored"] for p in chosen)
+        if total_executed == 0 and total_ignored > 0:
+            print(
+                f"[grade-test-log] NOT GREEN: {total_announced} test(s) announced and "
+                f"ALL {total_ignored} IGNORED across {len(chosen)} target(s). Ignored "
+                "tests reconcile against their announcements and prove nothing."
+            )
+            return 1
+        skipped = f", {total_ignored} IGNORED" if total_ignored else ""
         print(
             f"[grade-test-log] GREEN: {len(chosen)} target(s), "
-            f"{total_announced} tests announced, all reconciled."
+            f"{total_announced} tests announced{skipped}, all reconciled."
         )
         return 0
 
@@ -272,6 +295,20 @@ def grade(path: pathlib.Path, expect_target: str | None, all_targets: bool = Fal
             f"[grade-test-log] NOT GREEN: target={only['target']} announced ZERO tests. "
             "The run executed nothing -- a filter that matched no test, or a target "
             "that was skipped. libtest calls this `ok` and exits 0; it is not a pass."
+        )
+        return 1
+    # THE SAME VACUITY, ONE STEP LATER. `counted` includes IGNORED, so a target whose
+    # every announced test is `#[ignore]`d reconciles perfectly and reads `ok`, exactly
+    # like the zero-announced case above. Measured on a real log: a bead's PRIMARY
+    # acceptance arm was `#[ignore]`d "requires the real potion-multilingual-128M
+    # fixture" while the verdict line said GREEN, and only the per-test rows showed it.
+    # Announcing tests and running none of them is not a pass.
+    if only["passed"] == 0 and only["failed"] == 0 and only["ignored"] > 0:
+        print(
+            f"[grade-test-log] NOT GREEN: target={only['target']} announced "
+            f"{only['announced']} test(s) and IGNORED all {only['ignored']} of them. "
+            "Nothing executed; an ignored test reconciles against its announcement and "
+            "proves nothing. Provide the fixture it needs, or cite a different target."
         )
         return 1
     if only["verdict"] != "ok" or only["failed"] != 0:
@@ -394,6 +431,34 @@ test daemon_start_lifecycle::one ... ok
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 756 filtered out
 """
 
+# ANNOUNCED AND IGNORED IS NOT A PASS, and it is harder to see than announcing zero.
+# `counted` must include IGNORED to reconcile against libtest's announcement, so a
+# target whose every test is `#[ignore]`d reconciles PERFECTLY and prints `ok`.
+#
+# Taken from a real log: bd-lgp7z's PRIMARY acceptance arm reported
+# "ignored, requires the real potion-multilingual-128M fixture" while the verdict line
+# said GREEN, and only the per-test rows revealed it. The zero-announced rule below
+# could not catch it, because one test WAS announced.
+ALL_IGNORED = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
+running 1 test
+test needs_a_506mb_model ... ignored, requires the real fixture
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 8 filtered out
+"""
+
+# NEGATIVE CONTROL for the rule above, and the reason it is checked on the TOTAL in
+# aggregate mode. One target skipping everything beside a target that really ran is
+# normal -- a fixture-gated suite next to a live one -- and must stay GREEN, or the
+# rule is unusable on any repo that has an `#[ignore]` anywhere.
+ONE_IGNORED_ONE_REAL = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
+running 1 test
+test needs_a_506mb_model ... ignored, requires the real fixture
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 8 filtered out
+     Running tests/contracts.rs (target/debug/deps/contracts-bbb)
+running 4 tests
+test really_ran ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+
 
 def self_test() -> int:
     cases = [
@@ -421,6 +486,9 @@ def self_test() -> int:
             "harness_hook_install_audit-aaa",
             1,
         ),
+        # A target that announced a test and IGNORED it executed nothing. Reconciles
+        # perfectly and prints `ok`, which is exactly why it needs its own arm.
+        ("announced but all ignored is not a pass", ALL_IGNORED, None, 1),
     ]
     # AGGREGATE MODE (1azkt.5 bullet 4). Same fixtures, graded together.
     aggregate_cases = [
@@ -438,6 +506,15 @@ def self_test() -> int:
         # widens WHICH targets are judged, never the fails-closed rule. I first
         # wrote this arm expecting 0 and the harness caught the expectation.
         ("all-targets: nested child is still refused, not attributed", NESTED_CHILD, 1),
+        # The ignored rule, aggregated: everything announced was skipped -> not a pass.
+        ("all-targets: every announced test ignored is NOT a pass", ALL_IGNORED, 1),
+        # NEGATIVE CONTROL. A fixture-gated target beside a live one must stay GREEN, or
+        # the rule above is unusable on any repo containing a single #[ignore].
+        (
+            "all-targets: one fully-ignored target beside a real one is green",
+            ONE_IGNORED_ONE_REAL,
+            0,
+        ),
     ]
     failures = 0
     with tempfile.TemporaryDirectory() as directory:
