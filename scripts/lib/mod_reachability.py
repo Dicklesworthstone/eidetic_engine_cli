@@ -312,16 +312,43 @@ def tracked_in_scope() -> list[str]:
     proc = subprocess.run(
         ["git", "ls-files", "*.rs"], cwd=REPO, capture_output=True, text=True
     )
-    if proc.returncode != 0:
+    return population_from_ls_files(proc.returncode, proc.stdout, proc.stderr, REPO)
+
+
+def population_from_ls_files(
+    returncode: int, stdout: str, stderr: str, where: pathlib.Path
+) -> list[str]:
+    """The population decision, as a PREDICATE OVER PLANTED INPUTS (bd-c4r8z).
+
+    The refusal this implements was already correct and was already measured:
+    in a `git archive` export with 1396 .rs files and no .git, the gate exits
+    nonzero naming `git ls-files failed ... (exit 128)` instead of auditing an
+    empty set and reporting clean. What it did NOT have was an arm, so every
+    one of the nine self-test arms passed with the refusal present AND would
+    have passed with it deleted. A guard nobody has watched fail is
+    decoration, and this one guards the gate's entire population.
+
+    It is split out for the same reason `bench_orphans_of` below is split out,
+    and that reason is worth repeating because it is what makes the arm
+    trustworthy rather than merely present: the arm must be able to exercise
+    inputs THIS REPO CANNOT PRODUCE. Driving the failure through the real
+    subprocess would mean running it somewhere `git ls-files` fails, and the
+    only handy such place is a temp directory -- which under RCH is
+    TMPDIR=/data/projects/eidetic_engine_cli/.rch-tmp, INSIDE the checkout,
+    where `git ls-files` SUCCEEDS. That arm would pass on this Mac and go
+    quietly vacuous on a worker, which is the exact failure class this file
+    exists to catch. A predicate over (returncode, stdout, stderr) has no
+    filesystem to be wrong about.
+
+    Raised, not returned, so no caller can mistake an unusable population for
+    an empty-but-valid answer.
+    """
+    if returncode != 0:
         raise RuntimeError(
-            f"git ls-files failed in {REPO} (exit {proc.returncode}): "
-            f"{proc.stderr.strip()[:200]}"
+            f"git ls-files failed in {where} (exit {returncode}): "
+            f"{stderr.strip()[:200]}"
         )
-    return sorted(
-        line
-        for line in proc.stdout.split()
-        if line.startswith(IN_SCOPE)
-    )
+    return sorted(line for line in stdout.split() if line.startswith(IN_SCOPE))
 
 
 SECTION2_MARK = "# @SECTION-2-BEGIN"
@@ -742,6 +769,45 @@ def self_test() -> int:
             (bench_orphans_of(set(), {"benches/remember.rs"}), len(set()) == 0),
             ([], True),
         )
+
+    # POPULATION REFUSAL, BOTH POLARITIES (bd-c4r8z). This gate derives its
+    # ENTIRE population from one `git ls-files` call, so a run where that call
+    # fails has nothing to audit -- and before the refusal existed it audited
+    # the empty set and printed a clean report. Measured in a `git archive`
+    # export (1396 .rs files, no .git): exit 128, empty stdout, population 0.
+    #
+    # The refusal was already in the code and already correct. It had no arm,
+    # so all nine arms above passed with it present and would have passed with
+    # it deleted. These two are driven through population_from_ls_files as a
+    # predicate rather than through a real subprocess, because the only handy
+    # directory where `git ls-files` fails is a temp dir, and under RCH TMPDIR
+    # points INSIDE this checkout, where it succeeds -- an arm that passes here
+    # and goes vacuous on a worker is the failure class this file exists to
+    # catch.
+    try:
+        population_from_ls_files(128, "", "fatal: not a git repository", REPO)
+        refusal = "RETURNED -- an unusable population was reported as an answer"
+    except RuntimeError:
+        refusal = "RAISED RuntimeError"
+    arm(
+        "an UNUSABLE population (git ls-files exit 128) REFUSES, never reports clean",
+        refusal,
+        "RAISED RuntimeError",
+    )
+    # THE POLARITY CONTROL. Without it, an arm that always raised -- a function
+    # broken for every input -- would satisfy the arm above and look like a
+    # working guard.
+    arm(
+        "a USABLE population still parses, filters to the four surfaces, and sorts",
+        population_from_ls_files(
+            0,
+            "tests/contracts/ask_native.rs\nsrc/core/ask.rs\n"
+            "docs/not_rust_surface.rs\nbuild.rs\n",
+            "",
+            REPO,
+        ),
+        ["build.rs", "src/core/ask.rs", "tests/contracts/ask_native.rs"],
+    )
 
     INCLUDE_ONLY.clear()
     if failures:
