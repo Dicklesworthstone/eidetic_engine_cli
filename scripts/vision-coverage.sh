@@ -23,6 +23,12 @@ set -eu
 README_FILE="README.md"
 PLAN_FILE="COMPREHENSIVE_PLAN.md"
 CLI_MOD="src/cli/mod.rs"
+# bd-szxzy: the stub population is EVERY `const *_UNAVAILABLE_CODE` under src/,
+# not the single file the detector used to grep. $CLI_MOD declares ZERO of them
+# and 42 live in 27 other files, so scanning one file pinned the population at
+# empty. Widening it is MEASURED SAFE for gap_percentage -- see
+# stub_constant_sites() for the measurement and why the gap does not move.
+STUB_SCAN_ROOT="src"
 BEADS_FILE=".beads/issues.jsonl"
 REPORT_FILE=".vision-coverage-report.json"
 COMPARE_REF="${VISION_COVERAGE_COMPARE_REF:-}"
@@ -464,23 +470,83 @@ open_implement_surfaces_json() {
 # surface. So this term has been structurally pinned at 0, and the gap has been
 # carried entirely by `missing`, with nothing in the report saying so.
 #
-# This does NOT fix the detector -- widening its grep to all of src/ was
-# measured to change nothing, because the vocabulary it was written to find
-# (the 20-case table in constant_surface) has left the codebase. What it fixes
-# is the silence: a zero over an empty population now says it is one.
+# WIDENED TO ALL OF src/ UNDER bd-szxzy, and the earlier note that this "was
+# measured to change nothing" needs its scope stated, because it was true about
+# the GAP and read as true about the POPULATION.
+#
+# Re-measured 2026-10-09 at current main, independently, using this script's own
+# constant_surface() and command_surface() rules rather than a hand-rolled
+# comparison:
+#
+#     constants under src/ outside $CLI_MOD        42, in 27 files
+#     constants in $CLI_MOD                         0
+#     of those 42, surfaces that are a DOCUMENTED
+#     surface (the only ones that can move the gap)  0
+#     => gap_percentage stays 0 against a max of 5
+#
+# So widening is SAFE for the published gap and for the CI Static step, and the
+# prior conclusion holds for `stubbed`. What it changes is the thing the bead
+# actually asked for: `candidate_constants` stops being a structural 0 and
+# becomes a real count with a classified list, so the report says "42 exist and
+# none maps to a documented surface" -- a MEASUREMENT -- instead of "the
+# population is empty", which was a disclaimer.
+#
+# THE ZERO ABOVE WAS VALIDATED WITH A POSITIVE CONTROL, because a clean zero
+# from an unvalidated comparison is the least trustworthy reading there is. The
+# first attempt compared constant slugs ("lab-replay") against documented
+# COMMAND strings ("lab swarm") and returned 0 by construction -- the two
+# vocabularies cannot match. Redone through command_surface(), the control found
+# a genuine overlap, CERTIFICATE_STORE_UNAVAILABLE_CODE -> "certificate", which
+# then fails only because no documented command starts with "certificate". The
+# zero is therefore explained, not accidental.
+STUB_CONSTANT_PATTERN='const [A-Z0-9_]*_UNAVAILABLE_CODE'
+
+# Every declaration site, as `CONSTANT<TAB>file`, sorted and unique.
+#
+# Honours $SOURCE_REF so --compare-ref still measures the ref rather than the
+# working tree; read_source() reads ONE path and cannot serve a tree scan, so
+# the ref arm uses `git grep` against the rev in a single call instead of one
+# `git show` per file.
+stub_constant_sites() {
+    if [ -n "$SOURCE_REF" ]; then
+        git grep -o "$STUB_CONSTANT_PATTERN" "$SOURCE_REF" -- "$STUB_SCAN_ROOT" 2>/dev/null |
+            sed "s|^$SOURCE_REF:||" || true
+    else
+        grep -rHo "$STUB_CONSTANT_PATTERN" "$STUB_SCAN_ROOT" --include='*.rs' 2>/dev/null || true
+    fi |
+        sed 's/:const /	/' |
+        awk -F'	' 'NF == 2 { print $2 "	" $1 }' |
+        sort -u
+}
+
+stub_constant_names() {
+    stub_constant_sites | awk -F'	' '{ print $1 }' | sort -u
+}
+
 stub_detector_candidate_count() {
-    read_source "$CLI_MOD" |
-        { grep -c 'const [A-Z0-9_]*_UNAVAILABLE_CODE' || true; } |
-        head -1 |
-        tr -d '[:space:]'
+    stub_constant_names | { grep -c . || true; } | head -1 | tr -d '[:space:]'
+}
+
+# The classified list bd-szxzy asks for: one record per constant, carrying the
+# surface constant_surface() derives and the file that declares it. jq adds
+# whether that surface is a DOCUMENTED one, which is the field that explains why
+# `stubbed` stays 0 while the population is non-empty.
+stub_candidate_records() {
+    stub_constant_sites |
+        while IFS="	" read -r constant file; do
+            [ -n "$constant" ] || continue
+            jq -cn \
+                --arg constant "$constant" \
+                --arg file "$file" \
+                --arg surface "$(constant_surface "$constant")" \
+                '{constant: $constant, file: $file, surface: $surface}'
+        done |
+        jq -cs 'sort_by(.constant)'
 }
 
 stub_surfaces() {
     open_json=$(open_implement_surfaces_json)
-    read_source "$CLI_MOD" |
-        { grep -o 'const [A-Z0-9_]*_UNAVAILABLE_CODE' || true; } |
-        awk '{print $2}' |
-        sort -u |
+    stub_constant_names |
         while IFS= read -r constant; do
             surface=$(constant_surface "$constant")
             implements_bead=$(
@@ -759,8 +825,9 @@ build_report() {
         --argjson documented "$(documented_commands | json_array_from_lines)" \
         --argjson implemented "$(implemented_commands | json_array_from_lines)" \
         --argjson stubs "$(stub_surfaces)" \
-        --arg stub_detector_file "$CLI_MOD" \
+        --arg stub_detector_scope "$STUB_SCAN_ROOT/**/*.rs" \
         --argjson stub_detector_candidates "$(stub_detector_candidate_count)" \
+        --argjson stub_detector_records "$(stub_candidate_records)" \
         --argjson release_tag "$RELEASE_TAG" \
         --argjson max_gap "$MAX_GAP_PERCENT" '
         def command_surface($cmd):
@@ -791,6 +858,21 @@ build_report() {
         def implemented($cmd): any($implemented[]; . == $cmd);
         $documented as $doc
         | [ $doc[] | {command: ., surface: command_surface(.)} ] as $documented_surfaces
+        # bd-szxzy. Classify each candidate constant against the DOCUMENTED
+        # surfaces. Bound as its own step because the output object needs both
+        # the list and a count derived from it, and because `any(gen; cond)`
+        # rebinds `.` to the generated element -- an inline
+        # `any($documented_surfaces[]; .surface == .surface)` is trivially TRUE
+        # and would mark every row documented, so the surface on each record
+        # has to be captured first.
+        | [
+            $stub_detector_records[]
+            | . as $candidate
+            | $candidate + {
+                documented_surface:
+                  any($documented_surfaces[]; .surface == $candidate.surface)
+              }
+          ] as $stub_candidates_classified
         | [ $documented_surfaces[] | select(has_stub(.surface)) | .command ] | unique as $stubbed
         | [ $documented_surfaces[] | select((has_stub(.surface) | not) and (implemented(.command) | not)) | .command ] | unique as $missing
         | [ $documented_surfaces[] | select((has_stub(.surface) | not) and implemented(.command)) | .command ] | unique as $implemented_doc
@@ -832,9 +914,26 @@ build_report() {
             # over an empty population. Both publish 0; only one of them means
             # "no surfaces are stubbed" (bd-wn8xh).
             stub_detector: {
-              scanned_file: $stub_detector_file,
+              scanned_scope: $stub_detector_scope,
               candidate_constants: $stub_detector_candidates,
-              population_empty: ($stub_detector_candidates == 0)
+              population_empty: ($stub_detector_candidates == 0),
+              # bd-szxzy: the classified list. `documented_surface` is what
+              # explains a non-empty population sitting beside `stubbed: 0` --
+              # a constant whose surface no documented command maps to cannot
+              # move gap_percentage, so the two facts are consistent rather
+              # than contradictory, and a reader can audit that per row
+              # instead of taking it on trust.
+              candidates: $stub_candidates_classified,
+              # TWO DIFFERENT DENOMINATORS, BOTH PUBLISHED, because they differ
+              # and a reader who assumes one number would call the report
+              # inconsistent: candidate_constants counts unique constant NAMES,
+              # candidate_sites counts DECLARATION SITES. They are 42 and 44
+              # here, because two constants are each declared in two files.
+              candidate_sites: ($stub_candidates_classified | length),
+              # COUNTED, never written as a literal: this is the number that
+              # would start moving gap_percentage if it ever left zero.
+              documented_candidate_constants:
+                ($stub_candidates_classified | map(select(.documented_surface)) | length)
             },
             implemented_surfaces: $implemented_doc,
             missing_surfaces: $missing,
@@ -1012,7 +1111,7 @@ if [ "$JSON_OUTPUT" = true ]; then
         # for exactly this reading and was suppressed in the only invocation
         # CI uses; moving it here costs nothing and is the difference between
         # a structural zero and a clean bill of health (bd-wn8xh).
-        echo "  Stubbed: 0 — NOT A MEASUREMENT: $(printf "%s\n" "$REPORT_JSON" | jq -r '.stub_detector.scanned_file') declares no *_UNAVAILABLE_CODE constants,"
+        echo "  Stubbed: 0 — NOT A MEASUREMENT: $(printf "%s\n" "$REPORT_JSON" | jq -r '.stub_detector.scanned_scope') declares no *_UNAVAILABLE_CODE constants,"
         echo "         so the stub half of the gap is reporting on an empty population, not on an absence of stubs."
     fi
 else
@@ -1024,7 +1123,7 @@ else
     if [ "$(printf "%s\n" "$REPORT_JSON" | jq -r '.stub_detector.population_empty')" = "true" ]; then
         # Say it out loud rather than letting a structural zero read as a clean
         # bill of health. `stubbed` is half of gap_percentage (bd-wn8xh).
-        echo "Stubbed: 0 — NOT A MEASUREMENT: $(printf "%s\n" "$REPORT_JSON" | jq -r '.stub_detector.scanned_file') declares no *_UNAVAILABLE_CODE constants,"
+        echo "Stubbed: 0 — NOT A MEASUREMENT: $(printf "%s\n" "$REPORT_JSON" | jq -r '.stub_detector.scanned_scope') declares no *_UNAVAILABLE_CODE constants,"
         echo "         so the stub half of the gap is reporting on an empty population, not on an absence of stubs."
     fi
     if [ "$EVIDENCE_CORPUS_PRESENT" = true ]; then

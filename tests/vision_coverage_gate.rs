@@ -684,6 +684,90 @@ fn vision_coverage_reports_a_non_empty_stub_population_when_constants_exist() ->
     )
 }
 
+/// bd-szxzy: the stub population is the WHOLE `src/` tree, and the
+/// `documented_surface` classification must be able to fire.
+///
+/// WHY THE TWO ARMS ABOVE CANNOT COVER THIS. Both plant their constant in
+/// `src/cli/mod.rs` — the single file the detector used to grep — so they pass
+/// identically whether the scan reads one file or the whole tree, and neither
+/// can tell those two apart. bd-szxzy is precisely the case they miss: 42
+/// `*_UNAVAILABLE_CODE` constants live in 27 files under `src/` while
+/// `src/cli/mod.rs` declares ZERO, so the detector reported
+/// `population_empty: true` on every run of this repo. This arm plants the
+/// constant OUTSIDE that file, which is the only way to observe the widening.
+///
+/// AND IT IS THE POSITIVE CONTROL FOR `documented_candidate_constants`. In this
+/// repo that field is 0, because no documented command maps to any declared
+/// constant's surface — and a field that only ever reads 0 is indistinguishable
+/// from one hardcoded to 0, which is the same defect `population_empty` exists
+/// to remove one level up. Here the documented command `demo run` and the
+/// planted `DEMO_EXECUTION_UNAVAILABLE_CODE` both resolve to the surface
+/// `demo`, so the flag MUST fire.
+#[test]
+fn vision_coverage_scans_the_whole_src_tree_for_stub_constants() -> TestResult {
+    let fixture_root = unique_fixture_root("stub-outside-cli")?;
+    write_minimal_vision_fixture(&fixture_root, "demo run")?;
+    let planted_dir = fixture_root.join("src").join("core");
+    fs::create_dir_all(&planted_dir)
+        .map_err(|error| format!("create fixture src/core: {error}"))?;
+    fs::write(
+        planted_dir.join("demo.rs"),
+        "pub const DEMO_EXECUTION_UNAVAILABLE_CODE: &str = \"demo_execution_unavailable\";\n",
+    )
+    .map_err(|error| format!("write planted constant: {error}"))?;
+
+    let report_path = fixture_root.join("report.json");
+    // As in the arms above, the gate's own verdict is deliberately unasserted:
+    // this fixture documents a surface it does not implement and now also
+    // reports it stubbed, so it exits nonzero. The REPORT is what is under test.
+    let _ = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+
+    let report = read_report(&report_path)?;
+    let candidates = report
+        .pointer("/stub_detector/candidate_constants")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "stub_detector.candidate_constants is not a number".to_owned())?;
+    ensure(
+        candidates >= 1,
+        &format!("a constant declared OUTSIDE src/cli/mod.rs must be counted, got {candidates}"),
+    )?;
+    ensure(
+        report
+            .pointer("/stub_detector/population_empty")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false),
+        "population_empty must be false once ANY file under src/ declares a constant",
+    )?;
+    // NAME THE FILE THE SCAN REACHED, rather than settling for "some constant
+    // was counted": without this the arm would also pass if the detector had
+    // found a constant somewhere else entirely, which is the wrong fact.
+    ensure(
+        report
+            .pointer("/stub_detector/candidates")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("file").and_then(serde_json::Value::as_str) == Some("src/core/demo.rs")
+                        && row.get("surface").and_then(serde_json::Value::as_str) == Some("demo")
+                })
+            }),
+        "the classified list must name src/core/demo.rs with surface `demo`",
+    )?;
+    let documented = report
+        .pointer("/stub_detector/documented_candidate_constants")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "documented_candidate_constants is not a number".to_owned())?;
+    ensure(
+        documented >= 1,
+        &format!(
+            "`demo run` is documented and the planted constant resolves to the same surface \
+             `demo`, so documented_candidate_constants must fire; got {documented}. This repo \
+             reports 0 for that field, and a field that only ever reads 0 cannot be told from \
+             a hardcoded one."
+        ),
+    )
+}
+
 /// Build a fixture whose documented surfaces are split into ones an e2e script
 /// actually INVOKES and ones nothing invokes, so the behavioral gap is
 /// constructed rather than inherited from this repo.
