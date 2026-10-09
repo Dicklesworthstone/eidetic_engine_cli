@@ -7,7 +7,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -14981,7 +14981,7 @@ pub(crate) struct SessionReadScan {
 /// SQL form of [`StoredEvidenceSpan::is_search_admission_candidate`]. Both
 /// columns carry CHECK-constrained vocabularies, so string equality here is
 /// exactly the Rust predicate.
-const EVIDENCE_SEARCH_CANDIDATE_PREDICATE: &str =
+pub(crate) const EVIDENCE_SEARCH_CANDIDATE_PREDICATE: &str =
     "e.producer_kind = 'cass_import' AND e.search_eligibility = 'admitted'";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14994,7 +14994,7 @@ struct EvidenceSearchReadCursor {
 
 struct EvidenceSearchReadRow {
     span: StoredEvidenceSpan,
-    session: Option<StoredSession>,
+    session: Option<Arc<StoredSession>>,
     recorded_verdict: Option<String>,
 }
 
@@ -17460,7 +17460,7 @@ impl DbConnection {
         workspace_id: &str,
         session_id: Option<&str>,
         cursor: Option<&EvidenceSearchReadCursor>,
-        session_cache: &mut std::collections::HashMap<String, Option<StoredSession>>,
+        session_cache: &mut std::collections::HashMap<String, Option<Arc<StoredSession>>>,
     ) -> Result<Vec<EvidenceSearchReadRow>> {
         const EVIDENCE_COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at";
 
@@ -17518,7 +17518,10 @@ impl DbConnection {
             .collect::<Vec<_>>();
         let mut loaded_sessions = self.sessions_by_ids(&missing_sessions)?;
         for id in missing_sessions {
-            session_cache.insert(id.to_owned(), loaded_sessions.remove(id));
+            // One transcript can occupy the whole page. Share its immutable
+            // source row instead of cloning a potentially large metadata JSON
+            // string once per evidence span inside this read snapshot.
+            session_cache.insert(id.to_owned(), loaded_sessions.remove(id).map(Arc::new));
         }
         let ids = spans
             .iter()

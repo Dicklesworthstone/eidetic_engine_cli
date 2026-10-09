@@ -11470,7 +11470,7 @@ async fn stale_index_live_snapshot_retrieval(
             Ok(Some(documents)) => documents,
             Ok(None) => {
                 degraded.push(unavailable(&format!(
-                    "the complete corpus exceeds {SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS} source rows or {SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES} bytes"
+                    "the complete corpus exceeds {SEARCH_LIVE_SNAPSHOT_MAX_DOCUMENTS} source rows or the {SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES}-byte source allocation/projection budget"
                 )));
                 return Ok(None);
             }
@@ -16545,6 +16545,8 @@ mod tests {
         const RULE: &str = "rule_00000000000000000000000871";
         const REMOVED_RULE: &str = "rule_00000000000000000000000872";
         const FRESH_RULE: &str = "rule_00000000000000000000000873";
+        const SESSION: &str = "sess_00000000000000000000000871";
+        const FRESH_EVIDENCE: &str = "ev_00000000000000000000000871";
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let root = temp
             .path()
@@ -16634,6 +16636,97 @@ mod tests {
                 .any(|entry| entry.code == "search_live_snapshot_lexical")
         );
         let reference_before_update = Utc::now();
+        connection
+            .insert_session(
+                SESSION,
+                &CreateSessionInput {
+                    workspace_id: WORKSPACE.to_owned(),
+                    cass_session_id: "stale-source-quarantined-history".to_owned(),
+                    source_path: None,
+                    agent_name: Some("codex".to_owned()),
+                    model: None,
+                    started_at: None,
+                    ended_at: None,
+                    message_count: 258,
+                    token_count: None,
+                    content_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"stale-source-quarantined-history")
+                    ),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let source_session = connection
+            .get_session(SESSION)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "source session missing".to_owned())?;
+        let source_input = |ordinal: u32, text: &str, quarantined: bool| CreateEvidenceSpanInput {
+            workspace_id: WORKSPACE.to_owned(),
+            session_id: SESSION.to_owned(),
+            memory_id: None,
+            producer_kind: EvidenceProducerKind::CassImport,
+            cass_span_id: format!("stale-source-record-{ordinal}"),
+            span_kind: if quarantined {
+                "tool_result"
+            } else {
+                "message"
+            }
+            .to_owned(),
+            start_line: ordinal,
+            end_line: ordinal,
+            start_byte: None,
+            end_byte: None,
+            role: Some(if quarantined { "tool" } else { "assistant" }.to_owned()),
+            excerpt: text.to_owned(),
+            content_hash: format!("blake3:{}", blake3::hash(text.as_bytes())),
+            metadata_json: None,
+            inherited_redaction_classes: if quarantined {
+                vec!["history".to_owned()]
+            } else {
+                Vec::new()
+            },
+        };
+        // The ignored archive alone exceeds the production byte ceiling. Its
+        // payload is not part of the candidate corpus and must not deny fresh
+        // memory, rule or native evidence retrieval after index publication.
+        let mut archived = "[REDACTED:history] quarantinedhistorycanary ".to_owned();
+        archived.push_str(&"z".repeat(65_536 - archived.len()));
+        assert!(archived.len() as u64 * 257 > SEARCH_LIVE_SNAPSHOT_MAX_BODY_BYTES);
+        let mut batch = Vec::new();
+        for ordinal in 1..=257 {
+            let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(0x10_000 + u128::from(ordinal)))
+                .to_string();
+            batch.push((id, source_input(ordinal, &archived, true)));
+            if batch.len() == 16 || ordinal == 257 {
+                let admission = connection
+                    .with_transaction(|| {
+                        connection.insert_evidence_spans_in_session(&batch, &source_session)
+                    })
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(admission.admitted, 0);
+                assert_eq!(admission.quarantined as usize, batch.len());
+                batch.clear();
+            }
+        }
+        connection
+            .insert_evidence_span(
+                FRESH_EVIDENCE,
+                &source_input(
+                    258,
+                    "freshevidencecanary documents a successful repair.",
+                    false,
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            connection
+                .get_evidence_span(FRESH_EVIDENCE)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "fresh evidence missing".to_owned())?
+                .search_eligibility,
+            "admitted"
+        );
         connection
             .insert_memory(
                 FRESH,
@@ -16730,6 +16823,8 @@ mod tests {
             ("revisedmemorycanary", Some(REVISION)),
             ("updatedrulecanary", Some(RULE)),
             ("freshnativecanary", Some(FRESH_RULE)),
+            ("freshevidencecanary", Some(FRESH_EVIDENCE)),
+            ("quarantinedhistorycanary", None),
             ("oldmemorycanary", None),
             ("removedmemorycanary", None),
             ("oldrulecanary", None),
@@ -16762,6 +16857,13 @@ mod tests {
                     .degraded
                     .iter()
                     .any(|entry| entry.code == "search_live_snapshot_lexical")
+            );
+            assert!(
+                !handoff
+                    .report
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "search_live_snapshot_unavailable")
             );
             assert!(!handoff.report.rerank_runtime_available);
             assert!(handoff.can_reuse_for_pack());
