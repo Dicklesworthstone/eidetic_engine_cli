@@ -70,24 +70,35 @@ ALLOWLIST = pathlib.Path(
 # the rest does not read as partial, it reads as clean -- which is why the
 # denominator is written down here rather than left implicit in the tuple.
 #
-# TRACKED RUST SURFACES IN THE ROOT WORKSPACE -- 4, this gate's whole reach:
+# TRACKED RUST SURFACES IN THE ROOT WORKSPACE -- 4 of this gate's 6:
 #     src/       444 files   IN SCOPE
 #     tests/     771 files   IN SCOPE
 #     benches/    40 files   IN SCOPE as of this change
 #     build.rs     1 file    IN SCOPE as of this change
 #
-# TRACKED RUST SURFACES THIS GATE STRUCTURALLY CANNOT SEE -- 2:
-#     fuzz/                27 files, its own Cargo.toml, `exclude`d from the
-#                          root workspace, so this gate's single cargo
-#                          invocation never walks it.
-#     crates/determinism/   1 file, likewise a separate manifest.
-#   Covering these needs a cargo invocation PER MANIFEST, not a wider tuple.
-#   Tracked as bd-ik4wg. That bead records what is MEASURED (28 tracked .rs that
-#   no root-workspace target root reaches) and what is NOT (whether any of them
-#   is unreachable inside its own manifest -- nobody has run that pass). Do not
-#   file a second bead off this comment; the first draft of it said "no bead
-#   exists", which stopped being true minutes later and nearly caused exactly
-#   that duplicate.
+# TRACKED RUST SURFACES OUTSIDE THE ROOT WORKSPACE -- 2, NOW COVERED, each by
+# its own cargo invocation (bd-ik4wg, see EXTRA_MANIFESTS below):
+#     fuzz/                its own Cargo.toml, `exclude`d from the root
+#                          workspace, so the ROOT invocation never walks it.
+#     crates/determinism/   likewise a separate manifest.
+#   The obstacle was a MANIFEST BOUNDARY, not a path filter, which is why a
+#   wider IN_SCOPE tuple was the wrong fix: it would have measured these files
+#   against root-workspace roots that never mention them and reported every one
+#   as unreachable. One cargo invocation per manifest, same reachability
+#   predicate, folded into one report with its own line per surface.
+#
+#   WHAT bd-ik4wg LEFT OPEN AND WHAT THIS ANSWERS. That bead was careful to
+#   record that it had MEASURED only "28 tracked .rs that no root-workspace
+#   target root reaches", and explicitly NOT whether any of them is unreachable
+#   inside its own manifest, because nobody had run that pass. It has now been
+#   run: 27/27 under fuzz/ and 1/1 under crates/determinism/ are reachable from
+#   their own manifests' target roots. So the bead's caveat is discharged by
+#   measurement rather than inherited, and the zeros this gate now prints for
+#   them are an answer instead of an absence of one.
+#
+#   Do not file a second bead off this comment; an earlier draft of it said "no
+#   bead exists", which stopped being true minutes later and nearly caused
+#   exactly that duplicate.
 #
 # NOT A SURFACE FOR THIS PREDICATE AT ALL:
 #     scripts/**.sh -- shell scripts have no module graph. Their reachability
@@ -103,6 +114,29 @@ ALLOWLIST = pathlib.Path(
 # this gate only answers the first. Expecting this change to clear k0le8 would
 # be the same mistake as reading a green here as "everything is covered".
 IN_SCOPE = ("src/", "tests/", "benches/", "build.rs")
+
+# bd-ik4wg. The surfaces the ROOT workspace cannot reach, each with the manifest
+# that CAN. These are `exclude`d from the root workspace, so the root
+# `cargo fmt --verbose --check` never walks them -- a manifest boundary, not a
+# path filter, which is why widening IN_SCOPE was the wrong fix and would have
+# reported all 28 of their files as unreachable against roots that never
+# mentioned them.
+#
+# Each is checked by its OWN cargo invocation against its OWN roots, and
+# reported on its OWN line, so a surface that silently stops matching shows up
+# as a zero rather than vanishing into an aggregate.
+EXTRA_MANIFESTS: tuple[tuple[str, str], ...] = (
+    ("fuzz/Cargo.toml", "fuzz/"),
+    ("crates/determinism/Cargo.toml", "crates/determinism/"),
+)
+
+# COMPUTED, not hardcoded, so the root-surface and per-manifest report blocks
+# cannot drift out of alignment when a surface is added to either tuple. The
+# previous literal width of 10 silently broke the columns the moment
+# "crates/determinism/" (19 chars) appeared.
+SURFACE_LABEL_WIDTH = max(
+    len(label) for label in IN_SCOPE + tuple(prefix for _, prefix in EXTRA_MANIFESTS)
+)
 
 # Controls, from observed cargo behaviour. See the module docstring.
 #
@@ -129,11 +163,23 @@ PATH_MOD = re.compile(
 PLAIN_MOD = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.M)
 
 
-def target_roots() -> list[pathlib.Path] | None:
-    """Every target root cargo walks, straight from cargo itself."""
+def target_roots(manifest: str | None = None) -> list[pathlib.Path] | None:
+    """Every target root cargo walks, straight from cargo itself.
+
+    `manifest` selects WHICH manifest to ask (bd-ik4wg). One cargo invocation
+    cannot cross a manifest boundary, so fuzz/ and crates/determinism/ -- both
+    `exclude`d from the root workspace -- are invisible to the default call and
+    need their own. This is the whole reason the gate could not see them: a
+    wider IN_SCOPE tuple would not have helped, and would in fact have reported
+    all 28 of their files as unreachable, because the ROOT invocation never
+    walks them.
+    """
+    command = ["cargo", "fmt", "--verbose", "--check"]
+    if manifest is not None:
+        command += ["--manifest-path", manifest]
     try:
         proc = subprocess.run(
-            ["cargo", "fmt", "--verbose", "--check"],
+            command,
             cwd=REPO,
             capture_output=True,
             text=True,
@@ -284,8 +330,14 @@ def host_cfg_label() -> str:
     return f"target_family={family}, target_os={system}"
 
 
-def tracked_in_scope() -> list[str]:
+def tracked_in_scope(prefixes: tuple[str, ...] = IN_SCOPE) -> list[str]:
     """Population = files GIT TRACKS. An UNTRACKED .rs is invisible to this gate.
+
+    `prefixes` defaults to the root workspace's four surfaces. The per-manifest
+    pass (bd-ik4wg) passes its own single prefix so fuzz/ and
+    crates/determinism/ are counted against THEIR manifest's roots and never
+    against the root workspace's, which would report every one of them as
+    unreachable.
 
     bd-l6h3g. Found by planting a probe: an undeclared file that had not been
     `git add`ed did NOT trip the gate, and every self-test arm still passed.
@@ -312,11 +364,17 @@ def tracked_in_scope() -> list[str]:
     proc = subprocess.run(
         ["git", "ls-files", "*.rs"], cwd=REPO, capture_output=True, text=True
     )
-    return population_from_ls_files(proc.returncode, proc.stdout, proc.stderr, REPO)
+    return population_from_ls_files(
+        proc.returncode, proc.stdout, proc.stderr, REPO, prefixes
+    )
 
 
 def population_from_ls_files(
-    returncode: int, stdout: str, stderr: str, where: pathlib.Path
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    where: pathlib.Path,
+    prefixes: tuple[str, ...] = IN_SCOPE,
 ) -> list[str]:
     """The population decision, as a PREDICATE OVER PLANTED INPUTS (bd-c4r8z).
 
@@ -348,7 +406,7 @@ def population_from_ls_files(
             f"git ls-files failed in {where} (exit {returncode}): "
             f"{stderr.strip()[:200]}"
         )
-    return sorted(line for line in stdout.split() if line.startswith(IN_SCOPE))
+    return sorted(line for line in stdout.split() if line.startswith(prefixes))
 
 
 SECTION2_MARK = "# @SECTION-2-BEGIN"
@@ -584,6 +642,51 @@ def main() -> int:
             print(f"    {p}")
         print("  Every exemption states why, or it cannot be reviewed.")
 
+    # --- 5. PER-MANIFEST SURFACES (bd-ik4wg) ------------------------------
+    # Until this existed, fuzz/ (27 files) and crates/determinism/ (1) were
+    # checked by NOTHING: the root pass cannot walk them and no IN_SCOPE entry
+    # could make it, because the obstacle is a manifest boundary. Each gets its
+    # own cargo invocation, its own roots, and its own reported line.
+    #
+    # MEASURED BEFORE BEING WIRED IN, so this is not a ratchet introduced at a
+    # flattering number: 27/27 and 1/1 are reachable inside their own manifests.
+    # bd-ik4wg's standing caveat was that nobody had ever run this pass and so
+    # the bead must NOT be read as reporting orphans in fuzz/. It does not; the
+    # zeros below are now a measurement rather than an absence of one.
+    extra_reports: list[tuple[str, int, int]] = []
+    for manifest, prefix in EXTRA_MANIFESTS:
+        extra_tracked = tracked_in_scope((prefix,))
+        extra_roots = target_roots(manifest)
+        if extra_roots is None:
+            # INCONCLUSIVE IS NOT CLEAN, matching the root pass's own stance at
+            # the top of main(): cargo unavailable means NO ANSWER, and a
+            # no-answer printed as a zero is this gate's own failure mode.
+            print(
+                f"[mod-reachability] {prefix}: cargo unavailable or timed out for "
+                f"{manifest} -- INCONCLUSIVE, not reported as covered",
+                file=sys.stderr,
+            )
+            extra_reports.append((prefix, len(extra_tracked), -1))
+            continue
+        extra_reachable, _ = reachable_set(extra_roots)
+        orphans = [
+            t
+            for t in extra_tracked
+            if (REPO / t).resolve() not in extra_reachable and t not in allow_paths
+        ]
+        extra_reports.append(
+            (prefix, len(extra_tracked), len(extra_tracked) - len(orphans))
+        )
+        if orphans:
+            findings += len(orphans)
+            print(f"TRACKED BUT UNREACHABLE INSIDE {manifest}:")
+            for o in orphans:
+                print(f"    {o}")
+            print(
+                f"  No target root of {manifest} declares them. Declare them "
+                f"there, or allowlist them with a reason."
+            )
+
     if findings:
         print(f"\n[mod-reachability] {findings} finding(s) above. Each is printed by name.")
         return 1
@@ -612,16 +715,44 @@ def main() -> int:
         s_unreachable = [u for u in unreachable if str(u).startswith(surface)]
         note = "  <-- EMPTY SCAN: this surface matched no tracked file" if not s_tracked else ""
         print(
-            f"[mod-reachability]   {surface:<10} {len(s_tracked):>4} tracked, "
+            f"[mod-reachability]   {surface:<{SURFACE_LABEL_WIDTH}} {len(s_tracked):>4} tracked, "
             f"{len(s_tracked) - len(s_unreachable):>4} reachable, "
             f"{len(s_unreachable):>3} allowlisted{note}"
         )
+    # The two surfaces the ROOT invocation cannot reach, each answered by its
+    # own manifest (bd-ik4wg). Printed in the same shape as the root surfaces
+    # above and NOT folded into their total, because the number that matters
+    # about them is which manifest answered for them.
+    for prefix, n_tracked, n_reachable in extra_reports:
+        if n_reachable < 0:
+            note = "  <-- INCONCLUSIVE: cargo did not answer for this manifest"
+            reach_col = "   ?"
+        else:
+            note = (
+                "  <-- EMPTY SCAN: this surface matched no tracked file"
+                if not n_tracked
+                else ""
+            )
+            reach_col = f"{n_reachable:>4}"
+        print(
+            f"[mod-reachability]   {prefix:<{SURFACE_LABEL_WIDTH}} {n_tracked:>4} tracked, "
+            f"{reach_col} reachable, via its own manifest{note}"
+        )
+    # COUNTED, NOT HARDCODED -- the same rule the self-test's arm tally follows.
+    # This line used to read a literal "4 of 6" and would have gone on reading
+    # "6 of 6" if EXTRA_MANIFESTS were emptied or a manifest stopped answering,
+    # claiming a population it no longer had. An INCONCLUSIVE manifest lowers
+    # the numerator, because a surface cargo would not answer for is not covered.
+    answered = len(IN_SCOPE) + sum(1 for _, _, reach in extra_reports if reach >= 0)
+    total = len(IN_SCOPE) + len(EXTRA_MANIFESTS)
     print(
-        "[mod-reachability]   NOT COVERED by this gate: fuzz/ (27) and "
-        "crates/determinism/ (1) are separate manifests excluded from the root "
-        "workspace, so one cargo invocation cannot reach them; scripts/**.sh "
-        "have no module graph and are a different predicate (bd-unreachable-"
-        "e2e-scripts-u14sr). 4 of 6 tracked Rust surfaces are in scope here."
+        f"[mod-reachability]   {answered} of {total} tracked Rust surfaces are in "
+        f"scope: {len(IN_SCOPE)} against the root workspace, plus "
+        f"{', '.join(prefix for _, prefix in EXTRA_MANIFESTS)} against their own "
+        "manifests, because one cargo invocation cannot cross a manifest "
+        "boundary. scripts/**.sh are NOT in that total and are not a shortfall "
+        "-- shell scripts have no module graph, so their reachability is a "
+        "different predicate measured by bd-unreachable-e2e-scripts-u14sr."
     )
     in_scope_cfg_only = sorted(
         (path, gates)
