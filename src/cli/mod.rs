@@ -46646,29 +46646,15 @@ fn error_recall_query_seed(
         });
     let connection = open_attest_database_for_workspace(workspace, database)?;
     let workspace_id = bound_cli_workspace_id(&connection, workspace)?;
-    let report =
-        crate::core::error_diagnosis::error_recall_report(&connection, &workspace_id, &canonical)
-            .map_err(|error| DomainError::Storage {
-            message: format!("Failed to build error recall report: {error}"),
-            repair: Some("ee diagnose-error --help".to_owned()),
-        })?;
-    // A prior fix recalled from an imported session joins the query as its own
-    // words, so retrieval can surface that turn in the pack
-    // (bd-reality-core-convergence-1azkt.60). Ids alone match nothing.
-    let mut seed = report.query_seed();
-    let recalled =
-        crate::core::error_diagnosis::recalled_repair_evidence(&connection, &workspace_id, &report)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to resolve recalled repair evidence: {error}"),
-                repair: Some("ee diagnose-error --help".to_owned()),
-            })?;
-    for text in recalled
-        .iter()
-        .filter_map(|evidence| evidence.text.as_deref())
-    {
-        seed.push_str("\nprior fix: ");
-        seed.push_str(text);
-    }
+    let seed = crate::core::error_diagnosis::pack_error_recall_query_seed(
+        &connection,
+        &workspace_id,
+        &canonical,
+    )
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to recall repair evidence for the pack: {error}"),
+        repair: Some("ee diagnose-error --help".to_owned()),
+    })?;
     Ok(Some(seed))
 }
 

@@ -16,6 +16,8 @@
 //! stored, never the raw log. No tool execution — both functions diagnose text
 //! they are handed. The `ee diagnose-error` CLI consumes [`diagnose_error`].
 
+use std::collections::BTreeSet;
+
 use chrono::Utc;
 
 use crate::core::error_recall::{CanonicalDiagnostic, ErrorFingerprint, ErrorRepairLinkKind};
@@ -314,6 +316,122 @@ pub fn error_recall_report(
     ))
 }
 
+/// Maximum linked targets considered by one interactive error-recall query.
+const PACK_RECALL_TARGET_LIMIT: u32 = 32;
+/// Maximum admitted repair excerpts included in the retrieval query.
+const PACK_RECALL_EXCERPT_LIMIT: usize = 4;
+const PACK_RECALL_EXCERPT_BYTES: usize = 768;
+const PACK_RECALL_METADATA_BYTES: usize = 512;
+/// The expansion is bounded before retrieval and its separate token budget.
+const PACK_RECALL_QUERY_BYTES: usize = 4096;
+
+/// Build the bounded error-recall expansion used by `ee pack --error-log`.
+///
+/// A common fingerprint can have repairs from thousands of imported sessions.
+/// Interactive packing reads at most 32 helpful targets through the existing
+/// fingerprint index, then hydrates only that window. Within it, admitted
+/// incident cards precede raw repair turns, with canonical id order breaking
+/// ties. This is a deterministic bounded sample, not a history-wide recency
+/// ranking. The complete diagnostic report remains available separately via
+/// [`error_recall_report`].
+///
+/// Evidence text crosses the normal live direct-pack admission boundary.
+/// Canonical memory ids remain query hints without granting their target any
+/// additional admission authority. Proof locators and arbitrary link metadata
+/// do not become retrieval text. The final expansion is at most 4096 UTF-8
+/// bytes, including at most four distinct repair excerpts.
+///
+/// # Errors
+///
+/// Propagates database errors from fingerprint, target, and evidence reads.
+pub fn pack_error_recall_query_seed(
+    connection: &DbConnection,
+    workspace_id: &str,
+    canonical: &CanonicalDiagnostic,
+) -> Result<String> {
+    let fingerprint = ErrorFingerprint::from_canonical(canonical);
+    let outcome = diagnose_error(connection, workspace_id, canonical)?;
+    let metadata = ErrorRecallReport::from_outcome(&fingerprint, &outcome).query_seed();
+    let mut seed = bounded_pack_recall_text(&metadata, PACK_RECALL_METADATA_BYTES);
+    let targets = connection.list_helpful_error_repair_target_ids(
+        workspace_id,
+        &outcome.fingerprint_key,
+        PACK_RECALL_TARGET_LIMIT,
+    )?;
+    let mut evidence_ids = Vec::new();
+    let mut memory_ids = Vec::new();
+    for target in &targets {
+        if target
+            .parse::<crate::models::EvidenceId>()
+            .is_ok_and(|id| id.to_string() == *target)
+        {
+            evidence_ids.push(target.as_str());
+        } else if target
+            .parse::<crate::models::MemoryId>()
+            .is_ok_and(|id| id.to_string() == *target)
+        {
+            memory_ids.push(target.as_str());
+        }
+    }
+    let mut evidence = connection.get_evidence_spans_with_sessions(&evidence_ids)?;
+    evidence.retain(|row| row.is_direct_pack_admitted(workspace_id));
+    evidence.sort_by(|left, right| {
+        right
+            .span
+            .is_derived_incident_card()
+            .cmp(&left.span.is_derived_incident_card())
+            .then_with(|| left.span.id.cmp(&right.span.id))
+    });
+    let mut excerpts = BTreeSet::new();
+    for row in evidence {
+        if excerpts.len() == PACK_RECALL_EXCERPT_LIMIT {
+            break;
+        }
+        let text = row.span.reader_text();
+        let text = bounded_pack_recall_text(text.trim(), PACK_RECALL_EXCERPT_BYTES);
+        if text.is_empty() || !excerpts.insert(text.clone()) {
+            continue;
+        }
+        append_pack_recall_fragment(&mut seed, " helpful_repair:", &row.span.id);
+        append_pack_recall_fragment(&mut seed, "\nprior fix: ", &text);
+    }
+    for memory_id in memory_ids.into_iter().take(PACK_RECALL_EXCERPT_LIMIT) {
+        append_pack_recall_fragment(&mut seed, " helpful_repair:", memory_id);
+    }
+    Ok(seed)
+}
+
+fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn bounded_pack_recall_text(text: &str, max_bytes: usize) -> String {
+    const MARKER: &str = " [truncated]";
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let Some(content_bytes) = max_bytes.checked_sub(MARKER.len()) else {
+        return String::new();
+    };
+    let mut bounded = utf8_prefix(text, content_bytes).trim_end().to_owned();
+    bounded.push_str(MARKER);
+    bounded
+}
+
+fn append_pack_recall_fragment(seed: &mut String, prefix: &str, text: &str) {
+    let remaining = PACK_RECALL_QUERY_BYTES.saturating_sub(seed.len());
+    // Metadata and excerpts are already bounded and visibly marked above.
+    // Append whole fragments so an id hint can never become another id.
+    if !text.is_empty() && prefix.len().saturating_add(text.len()) <= remaining {
+        seed.push_str(prefix);
+        seed.push_str(text);
+    }
+}
+
 /// Imported transcript evidence behind a recall report
 /// (bd-reality-core-convergence-1azkt.60): the admitted turns that repaired
 /// this error class in earlier sessions, and the spans that verified them.
@@ -484,13 +602,18 @@ fn stored_from_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::{
-        ErrorRepairLinkRecording, diagnose_error, error_recall_report, record_error_fingerprint,
-        record_error_repair_links,
+        ErrorRepairLinkRecording, PACK_RECALL_EXCERPT_LIMIT, PACK_RECALL_QUERY_BYTES,
+        PACK_RECALL_TARGET_LIMIT, diagnose_error, error_recall_report,
+        pack_error_recall_query_seed, record_error_fingerprint, record_error_repair_links,
     };
     use crate::core::error_recall::from_rustc;
-    use crate::db::{CreateWorkspaceInput, DbConnection};
+    use crate::db::{
+        CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
+        EvidenceProducerKind,
+    };
 
     const WS: &str = "wsp_01234567890123456789012345";
+    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
     fn migrated_db_with_workspace() -> DbConnection {
         let connection = DbConnection::open_memory().expect("open in-memory db");
@@ -592,5 +715,314 @@ mod tests {
                 .query_seed()
                 .contains("stale_version_warning:rustc 1.95 repair may be stale")
         );
+    }
+
+    fn recall_evidence_id(number: u32) -> String {
+        crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(u128::from(number))).to_string()
+    }
+
+    fn recall_session(
+        connection: &DbConnection,
+        workspace_id: &str,
+        seed: u128,
+    ) -> TestResult<String> {
+        let id = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(seed)).to_string();
+        connection.insert_session(
+            &id,
+            &CreateSessionInput {
+                workspace_id: workspace_id.to_owned(),
+                cass_session_id: format!("/sessions/bounded-recall-{seed}.jsonl"),
+                source_path: None,
+                agent_name: Some("claude_code".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 0,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(&seed.to_le_bytes()).to_hex()),
+                metadata_json: None,
+            },
+        )?;
+        Ok(id)
+    }
+
+    fn recall_span(
+        connection: &DbConnection,
+        workspace_id: &str,
+        session_id: &str,
+        number: u32,
+        text: &str,
+        is_card: bool,
+    ) -> TestResult<String> {
+        let id = recall_evidence_id(number);
+        let excerpt = if is_card {
+            text.to_owned()
+        } else {
+            serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[
+                {"type":"text","text":text}
+            ]}})
+            .to_string()
+        };
+        connection.insert_evidence_span(
+            &id,
+            &CreateEvidenceSpanInput {
+                workspace_id: workspace_id.to_owned(),
+                session_id: session_id.to_owned(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: format!("{session_id}:{number}"),
+                span_kind: if is_card { "summary" } else { "message" }.to_owned(),
+                start_line: number,
+                end_line: number,
+                start_byte: None,
+                end_byte: None,
+                role: (!is_card).then(|| "assistant".to_owned()),
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                excerpt,
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )?;
+        Ok(id)
+    }
+
+    #[test]
+    fn pack_recall_bounds_link_history_and_utf8_text_without_truncating_diagnose() -> TestResult {
+        let connection = migrated_db_with_workspace();
+        let canonical = from_rustc(Some("E0277"), "trait bound is not satisfied");
+        let session = recall_session(&connection, WS, 901)?;
+        for number in 1..=8 {
+            let is_card = matches!(number, 6 | 8);
+            let text = if is_card {
+                format!(
+                    "{}1-5): `cargo test` failed, then passed after a fix.\nSymptom: trait bound not satisfied.\nFix: Card repair {number} updated the cache trait implementation and verified the release test.\nVerified: `cargo test` succeeded afterwards.",
+                    crate::core::incident_card::INCIDENT_CARD_PREFIX
+                )
+            } else {
+                format!(
+                    "Unicode repair {number} updated the cache configuration: {}",
+                    "🦀".repeat(800)
+                )
+            };
+            recall_span(&connection, WS, &session, number, &text, is_card)?;
+        }
+        let mut targets = (1..=96).map(recall_evidence_id).collect::<Vec<_>>();
+        // An arbitrary oversized target must not become query prose. It sorts
+        // first, so this also verifies bounded target projection before Rust
+        // rejects it as an invalid typed id.
+        let untrusted_target = format!("!UNTRUSTED_LINK_TEXT {}", "x".repeat(16_384));
+        targets.push(untrusted_target.clone());
+        record_error_repair_links(
+            &connection,
+            WS,
+            &canonical,
+            &ErrorRepairLinkRecording {
+                helpful_repairs: targets,
+                harmful_repairs: vec!["UNTRUSTED_HARMFUL_TEXT".to_owned()],
+                proof_links: (1000..1096).map(recall_evidence_id).collect(),
+                stale_version_warnings: vec!["UNTRUSTED_WARNING_TEXT".repeat(512)],
+                ..ErrorRepairLinkRecording::default()
+            },
+        )?;
+
+        let targets = connection.list_helpful_error_repair_target_ids(
+            WS,
+            "rustc:E0277",
+            PACK_RECALL_TARGET_LIMIT,
+        )?;
+        assert_eq!(targets.len(), usize::try_from(PACK_RECALL_TARGET_LIMIT)?);
+        assert!(targets[0].is_empty());
+        assert!(targets.contains(&recall_evidence_id(31)));
+        assert!(!targets.contains(&recall_evidence_id(32)));
+        assert!(
+            connection
+                .list_helpful_error_repair_target_ids(WS, "rustc:E0277", 0)?
+                .is_empty()
+        );
+
+        let seed = pack_error_recall_query_seed(&connection, WS, &canonical)?;
+        assert_eq!(
+            seed,
+            pack_error_recall_query_seed(&connection, WS, &canonical)?
+        );
+        assert!(seed.starts_with("error recall known fingerprint:rustc:E0277"));
+        assert!(
+            seed.len() <= PACK_RECALL_QUERY_BYTES,
+            "{} bytes",
+            seed.len()
+        );
+        assert_eq!(
+            seed.matches("\nprior fix: ").count(),
+            PACK_RECALL_EXCERPT_LIMIT
+        );
+        let card_position = seed.find("Card repair 6").ok_or("first card missing")?;
+        let next_card_position = seed.find("Card repair 8").ok_or("second card missing")?;
+        let turn_position = seed.find("Unicode repair 1").ok_or("repair turn missing")?;
+        assert!(card_position < next_card_position && next_card_position < turn_position);
+        assert!(seed.contains("Unicode repair 2"));
+        assert!(!seed.contains("Unicode repair 3"));
+        assert!(seed.contains('🦀'));
+        assert!(
+            !seed.contains(&"🦀".repeat(200)),
+            "excerpt bytes were not bounded"
+        );
+        assert_eq!(seed.matches(" [truncated]").count(), 2);
+        for forbidden in [
+            "UNTRUSTED_LINK_TEXT",
+            "UNTRUSTED_HARMFUL_TEXT",
+            "UNTRUSTED_WARNING_TEXT",
+            &recall_evidence_id(96),
+            &recall_evidence_id(1000),
+        ] {
+            assert!(
+                !seed.contains(forbidden),
+                "unbounded metadata entered the seed"
+            );
+        }
+
+        // The interactive bound must not weaken the complete diagnostic API.
+        let report = error_recall_report(&connection, WS, &canonical)?;
+        assert_eq!(report.helpful_repairs.len(), 97);
+        assert!(report.helpful_repairs.contains(&untrusted_target));
+        assert_eq!(report.harmful_repairs, ["UNTRUSTED_HARMFUL_TEXT"]);
+        assert_eq!(report.proof_links.len(), 96);
+        assert_eq!(report.stale_version_warnings.len(), 1);
+        let oversized_code = crate::core::error_recall::from_ee_error(
+            &"unusually_long_code".repeat(100),
+            "Code supplied by a direct library caller.",
+        );
+        let metadata = pack_error_recall_query_seed(&connection, WS, &oversized_code)?;
+        assert!(metadata.len() <= super::PACK_RECALL_METADATA_BYTES);
+        assert!(metadata.ends_with(" [truncated]"));
+        let mut almost_full = "x".repeat(PACK_RECALL_QUERY_BYTES - 8);
+        let before = almost_full.clone();
+        super::append_pack_recall_fragment(
+            &mut almost_full,
+            " helpful_repair:",
+            &recall_evidence_id(1),
+        );
+        assert_eq!(
+            almost_full, before,
+            "canonical ids must never be sliced to fit"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pack_recall_hydrates_only_live_admitted_repairs_and_preserves_typed_memory_hints()
+    -> TestResult {
+        let connection = migrated_db_with_workspace();
+        let canonical = from_rustc(Some("E0308"), "mismatched types");
+        let session = recall_session(&connection, WS, 902)?;
+        let live_text = format!(
+            "LIVE_REPAIR_TEXT adjusted the return type and verified the compiler result. {}",
+            "🦀".repeat(800)
+        );
+        let admitted = recall_span(&connection, WS, &session, 1, &live_text, false)?;
+        let poisoned = recall_span(
+            &connection,
+            WS,
+            &session,
+            2,
+            "POISONED_REPAIR_TEXT originally described an admitted compiler fix.",
+            false,
+        )?;
+        connection.execute_raw(&format!(
+            "UPDATE evidence_spans SET excerpt = 'UNSCREENED_REPLACEMENT_TEXT' WHERE id = '{poisoned}'"
+        ))?;
+        let denied = recall_span(
+            &connection,
+            WS,
+            &session,
+            3,
+            "PACK_DENIED_TEXT describes a repair that policy excludes from packs.",
+            false,
+        )?;
+        connection.execute_raw(&format!(
+            "UPDATE evidence_spans SET pack_eligibility = 'denied' WHERE id = '{denied}'"
+        ))?;
+        const OTHER_WS: &str = "wsp_01234567890123456789012346";
+        connection.insert_workspace(
+            OTHER_WS,
+            &CreateWorkspaceInput {
+                path: "/tmp/other-error-recall-test".to_owned(),
+                name: None,
+            },
+        )?;
+        let other_session = recall_session(&connection, OTHER_WS, 903)?;
+        let foreign = recall_span(
+            &connection,
+            OTHER_WS,
+            &other_session,
+            4,
+            "FOREIGN_REPAIR_TEXT belongs to a separate workspace.",
+            false,
+        )?;
+        let duplicate = recall_span(&connection, WS, &session, 5, &live_text, false)?;
+        let unlinked = recall_span(
+            &connection,
+            WS,
+            &session,
+            6,
+            "NUL_ALIASED_REPAIR_TEXT must not be reached through a different target id.",
+            false,
+        )?;
+        let nul_alias = format!("{unlinked}\0suffix");
+        let manual_memory =
+            crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(904)).to_string();
+        record_error_repair_links(
+            &connection,
+            WS,
+            &canonical,
+            &ErrorRepairLinkRecording {
+                helpful_repairs: vec![
+                    admitted.clone(),
+                    poisoned.clone(),
+                    denied.clone(),
+                    foreign.clone(),
+                    duplicate,
+                    nul_alias.clone(),
+                    manual_memory.clone(),
+                    "mem_NOT_AN_ID arbitrary instructions".to_owned(),
+                ],
+                ..ErrorRepairLinkRecording::default()
+            },
+        )?;
+        let seed = pack_error_recall_query_seed(&connection, WS, &canonical)?;
+        assert!(seed.contains("LIVE_REPAIR_TEXT"));
+        assert!(seed.contains(&format!("helpful_repair:{admitted}")));
+        assert!(seed.contains(&format!("helpful_repair:{manual_memory}")));
+        assert_eq!(
+            seed.matches("\nprior fix: ").count(),
+            1,
+            "duplicate text was repeated"
+        );
+        assert_eq!(seed.matches(" [truncated]").count(), 1);
+        assert!(
+            connection
+                .list_helpful_error_repair_target_ids(WS, "rustc:E0308", PACK_RECALL_TARGET_LIMIT)?
+                .contains(&nul_alias),
+            "bounded target projection must preserve embedded NUL for strict parsing"
+        );
+        for forbidden in [
+            "POISONED_REPAIR_TEXT",
+            "UNSCREENED_REPLACEMENT_TEXT",
+            "PACK_DENIED_TEXT",
+            "FOREIGN_REPAIR_TEXT",
+            "arbitrary instructions",
+            "NUL_ALIASED_REPAIR_TEXT",
+            poisoned.as_str(),
+            denied.as_str(),
+            foreign.as_str(),
+            unlinked.as_str(),
+        ] {
+            assert!(
+                !seed.contains(forbidden),
+                "unadmitted target entered the seed: {forbidden}"
+            );
+        }
+        let report = error_recall_report(&connection, WS, &canonical)?;
+        assert_eq!(report.helpful_repairs.len(), 8);
+        Ok(())
     }
 }

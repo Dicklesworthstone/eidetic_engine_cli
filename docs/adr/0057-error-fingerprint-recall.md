@@ -44,6 +44,26 @@ This is mutually reinforcing with the Evidence Harvester (ADR 0055): an error-fi
 is the least-ambiguous outcome label in the system, since the cited error
 literally disappears on the next build.
 
+### Bounded interactive pack recall
+
+`pack --error-log` uses a dedicated bounded query seed. A common error class
+can have thousands of historical repairs; enumerating its complete report and
+loading every repair before packing would make interactive work grow with that
+history. The pack reader considers at most 32 helpful repair targets in stable
+target-ID order through the existing fingerprint index, and hydrates at most
+that many native evidence rows. It prefers admitted incident cards within that
+window, deduplicates text, and includes at most four repair excerpts. Each
+excerpt is bounded to 768 UTF-8 bytes and the complete seed to 4096 bytes.
+Truncation preserves UTF-8 boundaries and is explicit. These are bounded query
+hints; ordinary retrieval and packing still decide which source items fit.
+
+Only live evidence admitted for direct packing contributes text. Valid native
+memory IDs can remain bounded query hints without exposing unvalidated memory
+bodies. The pack path does not load proof rows whose text cannot be displayed,
+nor enumerate the full warning and outcome history. `diagnose-error` retains
+the complete report for explicit inspection. The bounded window is
+deterministic; it does not claim to identify the latest or globally best repair.
+
 ## Consequences
 
 - **Easier**: agents recall the exact repair that held for a recurring failure

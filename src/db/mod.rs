@@ -26387,6 +26387,38 @@ impl DbConnection {
         rows.iter().map(stored_error_repair_link_from_row).collect()
     }
 
+    /// Read a bounded window of helpful repair targets for interactive recall.
+    ///
+    /// The equality prefix and ordering match
+    /// `idx_error_repair_links_fingerprint` exactly, so the limit applies to an
+    /// ordered index range without sorting the fingerprint's full history.
+    /// Fetch no proof bodies, warning strings, or other unbounded metadata.
+    /// Targets over 128 bytes become empty invalid hints. Smaller targets are
+    /// preserved exactly, including embedded NUL, so projection cannot turn a
+    /// malformed target into an unrelated canonical evidence or memory id.
+    pub(crate) fn list_helpful_error_repair_target_ids(
+        &self,
+        workspace_id: &str,
+        fingerprint_key: &str,
+        limit: u32,
+    ) -> Result<Vec<String>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT CASE WHEN length(CAST(target_id AS BLOB)) <= 128 THEN target_id ELSE '' END FROM error_repair_links WHERE workspace_id = ?1 AND fingerprint_key = ?2 AND link_kind = 'repair' AND outcome = 'helpful' ORDER BY target_id ASC LIMIT ?3",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(fingerprint_key.to_owned()),
+                Value::Integer(i64::from(limit)),
+            ],
+        )?;
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "target_id").map(str::to_owned))
+            .collect()
+    }
+
     /// Insert one journal entry (bd-1pi9m.2 / V074). The single INSERT is
     /// its own implicit transaction, which is what gives the JSONL batch
     /// surface per-line independent persistence (ADR 0062 §4).
