@@ -1893,6 +1893,105 @@ fn classify_unfiltered_push_to_main(dir: &Path) -> Vec<(String, bool)> {
     out
 }
 
+/// Does ci.yml run a `--lib` shard that names this module? (bd-sod2q)
+///
+/// THIS USED TO BE `ci_workflow.contains("--lib --jobs 1 {module}::")`, which
+/// asks where the filter SITS rather than whether the module is COVERED, and
+/// it was wrong about the single most important module in the tree.
+///
+/// `core` is sharded six ways in ci.yml, by first letter, and every one of them
+/// looks like this:
+///
+///     cargo test --workspace --lib --jobs 1 -- --test-threads=1 --nocapture core::a core::i
+///
+/// The filter is passed to libtest AFTER `--`, so `--lib --jobs 1 core::` never
+/// appears and the old check reported `core` as running in no job -- 144
+/// submodules, every one of them actually covered. The 26 sibling modules
+/// matched only because their shards happen to put the filter in the position
+/// the literal expected. A guard keyed on argument ORDER reports a spelling
+/// change as a coverage loss.
+///
+/// The replacement asks the question the surrounding comment always claimed:
+/// is there a `--lib` invocation that names `<module>::`?
+///
+/// IT IS DELIBERATELY NOT A BARE `contains`. Two narrowings keep the original
+/// intent -- "a new module cannot be added to lib.rs and silently miss CI":
+///
+///   - the match must be on a line that actually runs `--lib`, so a module
+///     named in prose or in an unrelated step does not count;
+///   - the `run_test` LABEL is stripped first. Every shard line carries its own
+///     command echoed inside quotes, so without this a label could name a
+///     module the command never runs -- which would turn the guard into
+///     something satisfiable by editing a string.
+fn module_has_lib_shard(ci_workflow: &str, module: &str) -> bool {
+    let needle = format!("{module}::");
+    ci_workflow.lines().any(|line| {
+        // Drop the first quoted segment: `run_test "…label…" cargo test …`.
+        let command = match (line.find('"'), line.rfind('"')) {
+            (Some(open), Some(close)) if close > open => {
+                format!("{}{}", &line[..open], &line[close + 1..])
+            }
+            _ => line.to_owned(),
+        };
+        command.contains("--lib") && command.contains(&needle)
+    })
+}
+
+/// `module_has_lib_shard` as a PREDICATE OVER PLANTED INPUTS (bd-sod2q).
+///
+/// A matcher change inside a gate is the exact shape that gets ratified
+/// silently: the gate goes green and nobody can tell whether it got correct or
+/// got blind. These arms pin both, against lines this repo does and does not
+/// contain, so a later "simplification" to a bare `contains` fails HERE rather
+/// than by quietly accepting everything.
+#[test]
+fn lib_shard_detection_reads_coverage_not_argument_order() {
+    // The form ci.yml actually uses for `core`: filter after `--`. This is the
+    // case the old literal missed, and the whole reason bd-sod2q was filed.
+    let after_separator = r#"              run_test "cargo test --lib core::a core::i" cargo test --workspace --lib --jobs 1 -- --test-threads=1 --nocapture core::a core::i"#;
+    assert!(
+        module_has_lib_shard(after_separator, "core"),
+        "a filter passed after `--` still shards the module"
+    );
+
+    // The form the 26 other modules use. Backward compatibility is not
+    // optional here: breaking it would silently unshard every sibling.
+    let before_separator =
+        "              run_test cargo test --workspace --lib --jobs 1 search:: -- --test-threads=1";
+    assert!(
+        module_has_lib_shard(before_separator, "search"),
+        "a filter immediately after `--lib --jobs 1` still shards the module"
+    );
+
+    // THE ANTI-WEAKENING CONTROL. The label is stripped, so naming a module in
+    // the quoted description does NOT satisfy the guard. Without this the check
+    // would be satisfiable by editing a string, which is worse than the bug it
+    // replaced.
+    let label_only = r#"              run_test "cargo test --lib graph:: (disabled)" cargo test --workspace --lib --jobs 1 -- --test-threads=1 search::"#;
+    assert!(
+        !module_has_lib_shard(label_only, "graph"),
+        "a module named only inside the run_test label must NOT count as sharded"
+    );
+    // ...and the same line still credits the module the command really runs,
+    // so the stripping is not just deleting the line.
+    assert!(
+        module_has_lib_shard(label_only, "search"),
+        "stripping the label must not discard the command beside it"
+    );
+
+    // A mention with no `--lib` is not a shard.
+    assert!(
+        !module_has_lib_shard("          # core:: is covered elsewhere", "core"),
+        "a prose mention is not a shard"
+    );
+
+    // Polarity: absent means absent.
+    assert!(
+        !module_has_lib_shard(before_separator, "mesh"),
+        "a module no line names is not sharded"
+    );
+}
+
 #[test]
 fn ci_workflow_uses_normal_non_benchmark_test_gate() {
     let ci_workflow =
@@ -1920,7 +2019,7 @@ fn ci_workflow_uses_normal_non_benchmark_test_gate() {
     //    added to lib.rs and silently miss CI.
     let mut unsharded = Vec::new();
     for (module, cfg_gated) in lib_modules() {
-        if ci_workflow.contains(&format!("--lib --jobs 1 {module}::")) {
+        if module_has_lib_shard(&ci_workflow, &module) {
             continue;
         }
         match LIB_SHARD_EXEMPT
