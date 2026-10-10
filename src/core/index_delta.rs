@@ -427,9 +427,57 @@ pub(super) fn copy_generation(
     Ok(())
 }
 
-/// Apply a planned delta to a staged copy: removals, then upserts, one
-/// compaction per vector tier and one lexical commit. Only the staging copy is
-/// opened for writing; the live generation is never mutated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VectorFinalization {
+    Unchanged,
+    Compacted,
+    Vacuumed,
+}
+
+/// Finish the complete delta once, not once for deletions and again for
+/// upserts. Frankensearch compaction already omits every tombstoned main
+/// record while merging the WAL. Vacuuming first would rewrite the same
+/// corpus twice. A deletion-only delta still needs vacuum because compact()
+/// is a no-op when the WAL is empty. Published generations remain fully
+/// compacted; this does not introduce WAL-bearing reader or recovery state.
+async fn apply_vector_delta(
+    cx: &asupersync::Cx,
+    index: &mut frankensearch::VectorIndex,
+    embedder: &dyn crate::search::Embedder,
+    delta: &Delta,
+    expected_identity: &str,
+    tier: &str,
+) -> Result<VectorFinalization, IncrementalFallback> {
+    batch::checkpoint(cx, tier)?;
+    let removals: Vec<_> = delta.removals.iter().map(String::as_str).collect();
+    let removed = if removals.is_empty() {
+        0
+    } else {
+        index.soft_delete_batch(&removals).map_err(|error| {
+            incremental_fallback(
+                IncrementalFallbackReason::TierUnavailable,
+                format!("{tier}-tier vector delete failed: {error}"),
+            )
+        })?
+    };
+    batch::upsert(cx, index, embedder, &delta.upserts, expected_identity, tier).await?;
+    batch::checkpoint(cx, tier)?;
+    let finalization = if index.wal_record_count() > 0 {
+        super::compact_incremental_vector_index(index, tier)?;
+        VectorFinalization::Compacted
+    } else if removed > 0 {
+        super::vacuum_incremental_vector_index(index, tier)?;
+        VectorFinalization::Vacuumed
+    } else {
+        VectorFinalization::Unchanged
+    };
+    batch::checkpoint(cx, tier)?;
+    Ok(finalization)
+}
+
+/// Apply a planned delta to a staged copy: removals, then upserts, at most one
+/// corpus rewrite per vector tier and one lexical commit. Only the staging
+/// copy is opened for writing; the live generation is never mutated.
 pub(super) async fn apply(
     cx: &asupersync::Cx,
     staging_dir: &Path,
@@ -452,28 +500,9 @@ pub(super) async fn apply(
         })
         .transpose()?;
 
-    let removals: Vec<_> = delta.removals.iter().map(String::as_str).collect();
     batch::checkpoint(cx, "fast")?;
     let mut fast = super::open_fast_vector_index(staging_dir)?;
-    if !removals.is_empty()
-        && fast
-            .soft_delete_batch(&removals)
-            .map_err(|error| tier_error(format!("fast-tier vector delete failed: {error}")))?
-            > 0
-    {
-        super::vacuum_incremental_vector_index(&mut fast, "fast")?;
-    }
-    batch::upsert(
-        cx,
-        &mut fast,
-        stack.fast(),
-        &delta.upserts,
-        &fast_identity,
-        "fast",
-    )
-    .await?;
-    batch::checkpoint(cx, "fast")?;
-    super::compact_incremental_vector_index(&mut fast, "fast")?;
+    apply_vector_delta(cx, &mut fast, stack.fast(), delta, &fast_identity, "fast").await?;
     drop(fast);
 
     if let Some(quality_embedder) = stack.quality_arc() {
@@ -486,24 +515,15 @@ pub(super) async fn apply(
                 "quality-tier vector index is absent for a two-tier embedder stack".to_owned(),
             )
         })?;
-        if !removals.is_empty()
-            && quality.soft_delete_batch(&removals).map_err(|error| {
-                tier_error(format!("quality-tier vector delete failed: {error}"))
-            })? > 0
-        {
-            super::vacuum_incremental_vector_index(&mut quality, "quality")?;
-        }
-        batch::upsert(
+        apply_vector_delta(
             cx,
             &mut quality,
             quality_embedder.as_ref(),
-            &delta.upserts,
+            delta,
             expected_identity,
             "quality",
         )
         .await?;
-        batch::checkpoint(cx, "quality")?;
-        super::compact_incremental_vector_index(&mut quality, "quality")?;
     }
 
     #[cfg(feature = "lexical-bm25")]
@@ -1069,5 +1089,108 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert!(copy_generation(live.path(), staging.path()).is_err());
         Ok(())
+    }
+
+    fn read_finalized_vectors(path: &Path) -> Result<BTreeMap<String, Vec<f32>>, String> {
+        let index = super::super::open_fast_vector_index_read_only(path)
+            .map_err(|error| error.detail)?;
+        assert_eq!(index.wal_record_count(), 0);
+        assert_eq!(index.tombstone_count(), 0);
+        (0..index.record_count())
+            .map(|position| {
+                Ok((
+                    index.doc_id_at(position).map_err(|error| error.to_string())?.to_owned(),
+                    index.vector_at_f32(position).map_err(|error| error.to_string())?,
+                ))
+            })
+            .collect()
+    }
+
+    fn vector_finalization_case(
+        updates: &[usize],
+        removals: &[usize],
+        expected_finalization: VectorFinalization,
+    ) -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(120), |cx| async move {
+            let live = parent.join("live");
+            let staged = parent.join("staged");
+            let rebuilt = parent.join("rebuilt");
+            let stack = super::super::hash_fallback_embedder_stack();
+            let original: Vec<_> = (0..8)
+                .map(|number| doc(&format!("mem_{number}"), &format!("original lesson {number}")))
+                .collect();
+            super::super::IndexBuilder::new(&live)
+                .with_embedder_stack(stack.clone())
+                .add_documents(original.clone())
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            let before = std::fs::read(live.join("vector.fast.idx"))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(read_finalized_vectors(&live)?.len(), original.len());
+            std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
+            copy_generation(&live, &staged).map_err(|error| error.to_string())?;
+            let delta = Delta {
+                upserts: updates.iter().map(|&number| {
+                    doc(&original[number].id, &format!("revised lesson {number}"))
+                }).collect(),
+                removals: removals.iter().map(|&number| original[number].id.clone()).collect(),
+            };
+            let expected: Vec<_> = original.iter().filter_map(|document| {
+                delta.upserts.iter().find(|update| update.id == document.id).cloned()
+                    .or_else(|| (!delta.removals.contains(&document.id)).then(|| document.clone()))
+            }).collect();
+            let identity = verified_embedder_identity(stack.fast()).ok_or("verified identity")?;
+            let mut index = super::super::open_fast_vector_index(&staged)
+                .map_err(|error| error.detail)?;
+            let finalization = apply_vector_delta(
+                &cx, &mut index, stack.fast(), &delta, &identity, "fast",
+            ).await.map_err(|error| error.detail)?;
+            assert_eq!(finalization, expected_finalization);
+            drop(index);
+            let actual = read_finalized_vectors(&staged)?;
+            assert_eq!(actual.len(), expected.len());
+            if expected.is_empty() {
+                assert!(actual.is_empty());
+            } else {
+                super::super::IndexBuilder::new(&rebuilt)
+                    .with_embedder_stack(stack)
+                    .add_documents(expected)
+                    .build(&cx)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(actual, read_finalized_vectors(&rebuilt)?);
+            }
+            assert_eq!(std::fs::read(live.join("vector.fast.idx")).map_err(|error| error.to_string())?, before);
+            assert_eq!(read_finalized_vectors(&live)?.len(), original.len());
+            Ok(())
+        }).map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn mixed_vector_delta_compacts_once_without_a_preceding_vacuum() -> TestResult {
+        vector_finalization_case(&[0, 1], &[6, 7], VectorFinalization::Compacted)
+    }
+
+    #[test]
+    fn update_only_vector_delta_finishes_without_live_tombstones() -> TestResult {
+        vector_finalization_case(&[0, 1], &[], VectorFinalization::Compacted)
+    }
+
+    #[test]
+    fn deletion_only_vector_delta_vacuums_without_leaving_old_records() -> TestResult {
+        vector_finalization_case(&[], &[6, 7], VectorFinalization::Vacuumed)
+    }
+
+    #[test]
+    fn unchanged_vector_delta_needs_no_corpus_rewrite() -> TestResult {
+        vector_finalization_case(&[], &[], VectorFinalization::Unchanged)
+    }
+
+    #[test]
+    fn removing_every_vector_still_publishes_an_empty_physical_tier() -> TestResult {
+        vector_finalization_case(&[], &[0, 1, 2, 3, 4, 5, 6, 7], VectorFinalization::Vacuumed)
     }
 }
