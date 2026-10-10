@@ -75721,6 +75721,128 @@ mod tests {
         )
     }
 
+    /// The 1 ms-budget arm, restored as a SECOND test (bd-5tl24).
+    ///
+    /// Deliberately not called a "timeout arm": the measurement below shows the
+    /// budget never terminates this command.
+    ///
+    /// The test above used to pass `--command-timeout-ms 1` and expect
+    /// `Storage`. Commit 04e0cd0df changed BOTH its input (1 -> 300000) and its
+    /// expectation (`Storage` -> `SearchIndex`) together, inside a commit about
+    /// something else, which retired bd-5tl24's red without answering its
+    /// stated question: Storage or SearchIndex?
+    ///
+    /// MEASURED 2026-10-10, both arms in one run, `--test-threads=1`:
+    ///
+    ///     --command-timeout-ms 300000  ->  SearchIndex / "search_index"
+    ///     --command-timeout-ms 1       ->  SearchIndex / "search_index"
+    ///
+    /// So the budget is NOT the terminator here, at either extreme. Same
+    /// fixture in both -- `.ee/ee.db` is created as a DIRECTORY, so the store
+    /// underneath is unopenable, and that storage fault is what ends the
+    /// command however much time it is given.
+    ///
+    /// TWO CONSEQUENCES, both of which correct something previously written
+    /// here:
+    ///
+    /// 1. Of the two halves of commit 04e0cd0df, only the EXPECTATION change
+    ///    was load-bearing. `Storage` was simply wrong for this input, which is
+    ///    why the test was red. Moving the budget 1 -> 300000 changed nothing
+    ///    observable; it only made the red look like a timeout concern.
+    ///
+    /// 2. This arm is therefore NOT "the tree's only executing assertion that
+    ///    an exhausted command budget surfaces as an error", which is what the
+    ///    comment here used to claim and what bd-5tl24 was told. At 1 ms the
+    ///    terminator is still the storage fault, so no timeout-shaped coverage
+    ///    ever existed at this call site and none was lost. Execution-path
+    ///    budget exhaustion remains uncovered, and needs a fixture whose store
+    ///    is HEALTHY so the budget is the only thing that can end the command.
+    ///
+    /// WHAT THIS PAIR PINS, then, is the budget-independence itself: the same
+    /// classification at a 1 ms and a 300 s budget. That is worth an executing
+    /// test because it is the evidence for the misattribution -- a storage
+    /// fault reported as `search_index` (exit 4, not 3) sends a reader chasing
+    /// a rebuildable index when the actual defect is a path that is a
+    /// directory. Filed separately; this test pins the behaviour as it IS, so
+    /// that whichever way that bead is resolved, the change is visible here.
+    ///
+    /// It also reds if someone makes the budget start mattering at 1 ms, which
+    /// would be a real behaviour change at this call site and is exactly the
+    /// kind of thing the previous single-arm version could not notice.
+    #[test]
+    fn orient_full_pack_failure_classification_does_not_depend_on_the_command_budget() -> TestResult
+    {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(&database_path).map_err(|error| error.to_string())?;
+
+        let workspace_arg = temp.path().display().to_string();
+        let database_arg = database_path.display().to_string();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            [
+                "ee",
+                "orient",
+                "schema-conformant full failure",
+                "--workspace",
+                workspace_arg.as_str(),
+                "--database",
+                database_arg.as_str(),
+                "--command-timeout-ms",
+                "1",
+                "--json",
+            ]
+            .iter()
+            .map(OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+
+        let output = String::from_utf8(stdout).map_err(|error| error.to_string())?;
+        let envelope: serde_json::Value =
+            serde_json::from_str(&output).map_err(|error| error.to_string())?;
+
+        // THE HONESTY PROPERTIES FIRST, because they hold whichever subsystem
+        // is named: the failure must surface as an ERROR envelope with no data
+        // payload, never as a schema-invalid success. All three passed on the
+        // run that disproved the classification expectation, so they are
+        // measured, not assumed.
+        ensure(
+            stderr.is_empty(),
+            "JSON 1 ms-budget orient failure must not write human stderr",
+        )?;
+        ensure_equal(
+            &envelope["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "1 ms-budget orient failure schema",
+        )?;
+        ensure(
+            envelope.get("data").is_none(),
+            "1 ms-budget orient failure must not emit a successful data payload",
+        )?;
+
+        // THEN the classification, as ONE value carrying both halves.
+        //
+        // Asserting the exit code first and the envelope code second is what
+        // the previous version of this test did, and it cost a 108-minute
+        // dispatch its most informative datum: `ensure_equal` short-circuits,
+        // so the run that disproved the `Storage` expectation reported the exit
+        // code and never reached the envelope code at all. A pair compared in
+        // one step reports both sides of both halves in a single message.
+        let classification = (exit, envelope["error"]["code"].clone());
+        ensure_equal(
+            &classification,
+            &(
+                ProcessExitCode::SearchIndex,
+                serde_json::json!("search_index"),
+            ),
+            "1 ms classification must EQUAL the 300 s classification above \
+             (bd-5tl24: measured identical at both budgets; a red here means \
+             the budget started mattering, or the misattribution was fixed)",
+        )
+    }
+
     #[test]
     fn orient_fast_renders_live_content_in_json_and_human_output() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
