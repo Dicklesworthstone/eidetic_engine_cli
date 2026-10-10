@@ -28,6 +28,9 @@ use crate::db::{
 #[path = "error_recall_near.rs"]
 mod near;
 
+#[path = "error_recall_evidence.rs"]
+mod evidence;
+
 /// Persist (or refresh) the error fingerprint for a canonicalized diagnostic,
 /// linking the failing error class into the truth store so recall can later find
 /// it (ADR-0057 writer). Returns the stored row. Redaction-safe: stores the
@@ -458,10 +461,11 @@ pub struct RecalledRepairEvidence {
 /// Longest repair excerpt surfaced by recall, in characters.
 const RECALLED_REPAIR_TEXT_CHARS: usize = 400;
 
-/// Resolve the imported-evidence targets of a recall report against live
-/// storage. Targets that are not evidence ids (memories, proof run ids) are
-/// left to their own readers; evidence that no longer exists or is no longer
-/// admitted is silently dropped, exactly as retrieval would drop it.
+/// Resolve imported-evidence targets against live storage in deduplicated
+/// 128-ID batches. Repairs cross normal search admission; proof locators
+/// require a live session in the same workspace, without exposing proof text.
+/// Targets that are not canonical evidence ids remain with their own readers.
+/// The complete report is preserved rather than cut to the pack limit.
 ///
 /// # Errors
 ///
@@ -471,55 +475,7 @@ pub fn recalled_repair_evidence(
     workspace_id: &str,
     report: &ErrorRecallReport,
 ) -> Result<Vec<RecalledRepairEvidence>> {
-    let mut cards = Vec::new();
-    let mut evidence = Vec::new();
-    for target in report
-        .helpful_repairs
-        .iter()
-        .filter(|id| id.starts_with("ev_"))
-    {
-        if let Some(span) = connection.get_search_admitted_evidence_span(target, workspace_id)? {
-            // A derived incident card (ADR 0091) is already the compact
-            // symptom/fix/verification summary of a repair, bounded by its own
-            // token budget; show it whole and ahead of the raw turns.
-            if span.is_derived_incident_card() {
-                cards.push(RecalledRepairEvidence {
-                    evidence_id: span.id.clone(),
-                    role: "incident_card",
-                    provenance_uri: span.canonical_provenance_uri(),
-                    text: Some(span.reader_text().into_owned()),
-                });
-                continue;
-            }
-            let text = span
-                .reader_text()
-                .chars()
-                .take(RECALLED_REPAIR_TEXT_CHARS)
-                .collect::<String>();
-            evidence.push(RecalledRepairEvidence {
-                evidence_id: span.id.clone(),
-                role: "repair",
-                provenance_uri: span.canonical_provenance_uri(),
-                text: Some(text),
-            });
-        }
-    }
-    cards.append(&mut evidence);
-    let mut evidence = cards;
-    for target in report.proof_links.iter().filter(|id| id.starts_with("ev_")) {
-        if let Some(span) = connection
-            .get_evidence_span(target)?
-            .filter(|span| span.workspace_id == workspace_id)
-        {
-            evidence.push(RecalledRepairEvidence {
-                evidence_id: span.id.clone(),
-                role: "proof",
-                provenance_uri: span.canonical_provenance_uri(),
-                text: None,
-            });
-        }
-    }
-    Ok(evidence)
+    evidence::read(connection, workspace_id, report)
 }
 
 fn stable_error_repair_link_id(
