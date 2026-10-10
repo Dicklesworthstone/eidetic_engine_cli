@@ -3,10 +3,11 @@
 //!
 //! Since cancellation-safe staged publication landed, every write rebuilt and
 //! re-embedded the whole corpus, so write cost grew with the store. This module
-//! restores O(delta) intake without giving up any publication property: the
-//! staged generation is a private copy of the live one with only the changed
-//! documents applied, and it is validated and published through exactly the
-//! same masked, fenced, atomic path as a full build.
+//! limits inference to changed inputs while preserving publication properties:
+//! the staged generation is a private copy of the live one with only changed
+//! documents applied, validated and published through the same masked, fenced,
+//! atomic path as a full build. Source reconciliation and generation copies
+//! still scale with the corpus; total write cost is not O(delta).
 //!
 //! The delta is not taken from job bookkeeping. Every generation records a
 //! digest of each document it indexed (`doc_digests.json`). The publisher
@@ -18,10 +19,12 @@
 //! failure also fall back to the full rebuild, which remains the compaction
 //! step.
 //!
-//! Digest schema v2 binds both tiers to Frankensearch's complete immutable
-//! embedding identities. V1's model-name/dimension strings are insufficient
-//! proof and force a full rebuild once, rather than silently mixing spaces.
+//! V2 binds both tiers to complete immutable embedding identities. V3 also
+//! records exact embedding inputs, allowing metadata-only changes to update
+//! lexical documents without recomputing unchanged vectors. V2 remains usable
+//! with conservative inference; V1 cannot prove compatible embedding spaces.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -45,7 +48,9 @@ mod batch;
 /// Per-document digests of the documents a generation indexed.
 pub(super) const DOC_DIGESTS_FILE: &str = "doc_digests.json";
 const DOC_DIGESTS_SCHEMA_V2: &str = "ee.index.doc_digests.v2";
+const DOC_DIGESTS_SCHEMA_V3: &str = "ee.index.doc_digests.v3";
 const DOC_DIGEST_DOMAIN: &[u8] = b"ee.index.doc_digest.v1\0";
+const EMBEDDING_INPUT_DOMAIN: &[u8] = b"ee.index.embedding_input.v1\0";
 
 /// Above this many changed documents a full rebuild is the simpler and
 /// comparably priced path.
@@ -68,6 +73,16 @@ pub(super) struct DocDigests {
     // attest its identity, but never authorizes incremental reuse.
     embedder: Option<String>,
     documents: BTreeMap<String, String>,
+    // Absent only in v2. Never infer input equality from a metadata-only
+    // heuristic or let an incomplete v3 map silently authorize reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    embedding_inputs: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug)]
+struct EmbeddingReuse {
+    identity: String,
+    inputs: BTreeMap<String, String>,
 }
 
 /// The documents to apply to a copy of the live generation.
@@ -75,6 +90,7 @@ pub(super) struct DocDigests {
 pub(super) struct Delta {
     pub upserts: Vec<crate::search::IndexableDocument>,
     pub removals: Vec<String>,
+    reuse: Option<EmbeddingReuse>,
 }
 
 impl Delta {
@@ -97,6 +113,38 @@ impl Delta {
     )]
     pub(super) fn len(&self) -> usize {
         self.upserts.len().saturating_add(self.removals.len())
+    }
+
+    /// Recheck the plan's commitments at use, before either tier is mutated.
+    /// Public upsert/removal lists may have changed after planning; a changed
+    /// body, changed ID, or remove-then-upsert must receive a new vector.
+    /// The complete lexical upserts remain unchanged and are always applied.
+    fn vector_upserts(
+        &self,
+        identity: &str,
+    ) -> Result<Cow<'_, [crate::search::IndexableDocument]>, IncrementalFallback> {
+        let Some(reuse) = &self.reuse else {
+            return Ok(Cow::Borrowed(&self.upserts));
+        };
+        if reuse.identity != identity {
+            return Err(incremental_fallback(
+                IncrementalFallbackReason::CorpusRevisionMismatch,
+                "embedding producer changed after delta planning",
+            ));
+        }
+        if reuse.inputs.is_empty() {
+            return Ok(Cow::Borrowed(&self.upserts));
+        }
+        Ok(Cow::Owned(
+            self.upserts
+                .iter()
+                .filter(|document| {
+                    self.removals.contains(&document.id)
+                        || reuse.inputs.get(&document.id) != Some(&embedding_input_digest(document))
+                })
+                .cloned()
+                .collect(),
+        ))
     }
 }
 
@@ -152,6 +200,17 @@ fn update_field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+/// Both IndexBuilder and delta inference embed exactly document.content.
+/// Bind the document ID too: identical text under a new ID still needs its own
+/// vector record. No normalization may erase case, whitespace or Unicode.
+fn embedding_input_digest(document: &crate::search::IndexableDocument) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(EMBEDDING_INPUT_DOMAIN);
+    update_field(&mut hasher, document.id.as_bytes());
+    update_field(&mut hasher, document.content.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
 /// Length-delimited digest over every field the index stores for a document.
 pub(super) fn document_digest(document: &crate::search::IndexableDocument) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -194,9 +253,15 @@ impl DocDigests {
         documents: &[crate::search::IndexableDocument],
     ) -> Self {
         Self {
-            schema: DOC_DIGESTS_SCHEMA_V2.to_owned(),
+            schema: DOC_DIGESTS_SCHEMA_V3.to_owned(),
             embedder: embedder_identity(stack),
             documents: digest_map(documents),
+            embedding_inputs: Some(
+                documents
+                    .iter()
+                    .map(|document| (document.id.clone(), embedding_input_digest(document)))
+                    .collect(),
+            ),
         }
     }
 
@@ -240,10 +305,23 @@ fn read_digests(generation_dir: &Path) -> Result<DocDigests, IncrementalFallback
             format!("live document digests are malformed: {error}"),
         )
     })?;
-    if digests.schema != DOC_DIGESTS_SCHEMA_V2 {
+    let valid_schema = match digests.schema.as_str() {
+        DOC_DIGESTS_SCHEMA_V2 => digests.embedding_inputs.is_none(),
+        DOC_DIGESTS_SCHEMA_V3 => digests.embedding_inputs.as_ref().is_some_and(|inputs| {
+            inputs.keys().eq(digests.documents.keys())
+                && inputs.values().all(|digest| {
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+        }),
+        _ => false,
+    };
+    if !valid_schema {
         return Err(incremental_fallback(
             IncrementalFallbackReason::CorpusRevisionMismatch,
-            format!("unsupported document digest schema {}", digests.schema),
+            format!("unsupported or incomplete document digest schema {}", digests.schema),
         ));
     }
     Ok(digests)
@@ -280,7 +358,23 @@ pub(super) fn plan(
             ),
         ));
     }
-    diff_documents(&live.documents, documents, document_digest)
+    let mut delta = diff_documents(&live.documents, documents, document_digest)?;
+    if let Some(inputs) = live.embedding_inputs {
+        let reusable = delta
+            .upserts
+            .iter()
+            .filter_map(|document| {
+                let digest = embedding_input_digest(document);
+                (inputs.get(&document.id) == Some(&digest))
+                    .then(|| (document.id.clone(), digest))
+            })
+            .collect();
+        delta.reuse = Some(EmbeddingReuse {
+            identity,
+            inputs: reusable,
+        });
+    }
+    Ok(delta)
 }
 
 /// Decide eligibility before taking ownership of any changed document body.
@@ -334,6 +428,7 @@ fn diff_documents(
     Ok(Delta {
         upserts: upserts.into_iter().cloned().collect(),
         removals,
+        ..Delta::default()
     })
 }
 
@@ -445,6 +540,7 @@ async fn apply_vector_delta(
     index: &mut frankensearch::VectorIndex,
     embedder: &dyn crate::search::Embedder,
     delta: &Delta,
+    vector_upserts: &[crate::search::IndexableDocument],
     expected_identity: &str,
     tier: &str,
 ) -> Result<VectorFinalization, IncrementalFallback> {
@@ -460,7 +556,7 @@ async fn apply_vector_delta(
             )
         })?
     };
-    batch::upsert(cx, index, embedder, &delta.upserts, expected_identity, tier).await?;
+    batch::upsert(cx, index, embedder, vector_upserts, expected_identity, tier).await?;
     batch::checkpoint(cx, tier)?;
     let finalization = if index.wal_record_count() > 0 {
         super::compact_incremental_vector_index(index, tier)?;
@@ -499,10 +595,30 @@ pub(super) async fn apply(
             })
         })
         .transpose()?;
+    let identity = format!(
+        "fast={fast_identity};quality={}",
+        quality_identity.as_deref().unwrap_or("")
+    );
+    let vector_upserts = delta.vector_upserts(&identity)?;
+    tracing::debug!(
+        target: "ee::index",
+        lexical_upserts = delta.upserts.len(),
+        vector_upserts = vector_upserts.len(),
+        "selected identity-bound delta embedding inputs"
+    );
 
     batch::checkpoint(cx, "fast")?;
     let mut fast = super::open_fast_vector_index(staging_dir)?;
-    apply_vector_delta(cx, &mut fast, stack.fast(), delta, &fast_identity, "fast").await?;
+    apply_vector_delta(
+        cx,
+        &mut fast,
+        stack.fast(),
+        delta,
+        &vector_upserts,
+        &fast_identity,
+        "fast",
+    )
+    .await?;
     drop(fast);
 
     if let Some(quality_embedder) = stack.quality_arc() {
@@ -520,6 +636,7 @@ pub(super) async fn apply(
             &mut quality,
             quality_embedder.as_ref(),
             delta,
+            &vector_upserts,
             expected_identity,
             "quality",
         )
@@ -1099,8 +1216,13 @@ mod tests {
         (0..index.record_count())
             .map(|position| {
                 Ok((
-                    index.doc_id_at(position).map_err(|error| error.to_string())?.to_owned(),
-                    index.vector_at_f32(position).map_err(|error| error.to_string())?,
+                    index
+                        .doc_id_at(position)
+                        .map_err(|error| error.to_string())?
+                        .to_owned(),
+                    index
+                        .vector_at_f32(position)
+                        .map_err(|error| error.to_string())?,
                 ))
             })
             .collect()
@@ -1112,7 +1234,12 @@ mod tests {
         expected_finalization: VectorFinalization,
     ) -> TestResult {
         let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let updates = updates.to_vec();
+        let removals = removals.to_vec();
         crate::core::run_cli_with_cx(std::time::Duration::from_secs(120), |cx| async move {
             let live = parent.join("live");
             let staged = parent.join("staged");
@@ -1133,21 +1260,45 @@ mod tests {
             std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
             copy_generation(&live, &staged).map_err(|error| error.to_string())?;
             let delta = Delta {
-                upserts: updates.iter().map(|&number| {
-                    doc(&original[number].id, &format!("revised lesson {number}"))
-                }).collect(),
-                removals: removals.iter().map(|&number| original[number].id.clone()).collect(),
+                upserts: updates
+                    .iter()
+                    .map(|&number| {
+                        doc(&original[number].id, &format!("revised lesson {number}"))
+                    })
+                    .collect(),
+                removals: removals
+                    .iter()
+                    .map(|&number| original[number].id.clone())
+                    .collect(),
+                ..Delta::default()
             };
-            let expected: Vec<_> = original.iter().filter_map(|document| {
-                delta.upserts.iter().find(|update| update.id == document.id).cloned()
-                    .or_else(|| (!delta.removals.contains(&document.id)).then(|| document.clone()))
-            }).collect();
+            let expected: Vec<_> = original
+                .iter()
+                .filter_map(|document| {
+                    delta
+                        .upserts
+                        .iter()
+                        .find(|update| update.id == document.id)
+                        .cloned()
+                        .or_else(|| {
+                            (!delta.removals.contains(&document.id)).then(|| document.clone())
+                        })
+                })
+                .collect();
             let identity = verified_embedder_identity(stack.fast()).ok_or("verified identity")?;
             let mut index = super::super::open_fast_vector_index(&staged)
                 .map_err(|error| error.detail)?;
             let finalization = apply_vector_delta(
-                &cx, &mut index, stack.fast(), &delta, &identity, "fast",
-            ).await.map_err(|error| error.detail)?;
+                &cx,
+                &mut index,
+                stack.fast(),
+                &delta,
+                &delta.upserts,
+                &identity,
+                "fast",
+            )
+            .await
+            .map_err(|error| error.detail)?;
             assert_eq!(finalization, expected_finalization);
             drop(index);
             let actual = read_finalized_vectors(&staged)?;
@@ -1163,10 +1314,14 @@ mod tests {
                     .map_err(|error| error.to_string())?;
                 assert_eq!(actual, read_finalized_vectors(&rebuilt)?);
             }
-            assert_eq!(std::fs::read(live.join("vector.fast.idx")).map_err(|error| error.to_string())?, before);
+            assert_eq!(
+                std::fs::read(live.join("vector.fast.idx")).map_err(|error| error.to_string())?,
+                before
+            );
             assert_eq!(read_finalized_vectors(&live)?.len(), original.len());
             Ok(())
-        }).map_err(|error| error.to_string())?
+        })
+        .map_err(|error| error.to_string())?
     }
 
     #[test]
@@ -1192,5 +1347,207 @@ mod tests {
     #[test]
     fn removing_every_vector_still_publishes_an_empty_physical_tier() -> TestResult {
         vector_finalization_case(&[], &[0, 1, 2, 3, 4, 5, 6, 7], VectorFinalization::Vacuumed)
+    }
+
+    #[test]
+    fn embedding_inputs_ignore_metadata_but_preserve_exact_text_and_identity() {
+        let original = doc("mem_a", "Exact input 資料\n");
+        let mut metadata = original.clone().with_title("New title");
+        metadata.metadata.insert("confidence".to_owned(), "0.8".to_owned());
+        assert_ne!(document_digest(&original), document_digest(&metadata));
+        assert_eq!(embedding_input_digest(&original), embedding_input_digest(&metadata));
+        for changed in [
+            doc("mem_b", &original.content),
+            doc("mem_a", "Exact input 資料"),
+            doc("mem_a", "exact input 資料\n"),
+            doc("mem_a", "Exact input 資料\r\n"),
+        ] {
+            assert_ne!(embedding_input_digest(&original), embedding_input_digest(&changed));
+        }
+        assert_ne!(embedding_input_digest(&doc("ab", "c")), embedding_input_digest(&doc("a", "bc")));
+    }
+
+    #[test]
+    fn metadata_upserts_stay_in_the_lexical_delta_without_embedding_again() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        let original: Vec<_> = (0..20)
+            .map(|number| doc(&format!("mem_{number:02}"), &format!("lesson {number}")))
+            .collect();
+        let live = generation_with_digests("split-inputs", &stack, &original)?;
+        let mut current = original.clone();
+        current[0].title = Some("Updated title".to_owned());
+        current[1].metadata.insert("tags".to_owned(), "new-tag".to_owned());
+        current[2].content.push_str(" repaired");
+        current.pop();
+        current.push(doc("mem_new", &original[0].content));
+        let delta = plan(live.path(), &stack, &current).map_err(|error| error.detail)?;
+        assert_eq!(delta.upserts.len(), 4);
+        assert_eq!(delta.removals, ["mem_19"]);
+        let identity = embedder_identity(&stack).ok_or("identity")?;
+        let vectors = delta.vector_upserts(&identity).map_err(|error| error.detail)?;
+        assert_eq!(vectors.iter().map(|document| document.id.as_str()).collect::<Vec<_>>(), ["mem_02", "mem_new"]);
+        assert_eq!(delta.upserts[0].title, current[0].title);
+        assert_eq!(delta.upserts[1].metadata, current[1].metadata);
+        Ok(())
+    }
+
+    #[test]
+    fn v2_generations_reembed_conservatively_then_upgrade_to_input_reuse() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        let original = [doc("mem_one", "unchanged embedding input")];
+        let live = generation_with_digests("v2-upgrade", &stack, &original)?;
+        let mut old = DocDigests::new(&stack, &original);
+        old.schema = DOC_DIGESTS_SCHEMA_V2.to_owned();
+        old.embedding_inputs = None;
+        old.write(live.path()).map_err(|error| error.to_string())?;
+        let changed = [original[0].clone().with_title("Metadata changed")];
+        let identity = embedder_identity(&stack).ok_or("identity")?;
+        let legacy = plan(live.path(), &stack, &changed).map_err(|error| error.detail)?;
+        assert_eq!(legacy.vector_upserts(&identity).map_err(|error| error.detail)?.len(), 1);
+        DocDigests::new(&stack, &changed).write(live.path()).map_err(|error| error.to_string())?;
+        let next = [changed[0].clone().with_title("Metadata changed again")];
+        let upgraded = plan(live.path(), &stack, &next).map_err(|error| error.detail)?;
+        assert_eq!(upgraded.upserts.len(), 1);
+        assert!(upgraded.vector_upserts(&identity).map_err(|error| error.detail)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_or_malformed_v3_input_maps_never_authorize_reuse() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        let original = [doc("mem_one", "source text")];
+        let live = generation_with_digests("bad-inputs", &stack, &original)?;
+        for case in 0..5 {
+            let mut broken = DocDigests::new(&stack, &original);
+            match case {
+                0 => broken.embedding_inputs = None,
+                1 => { broken.embedding_inputs.as_mut().unwrap().clear(); }
+                2 => { broken.embedding_inputs.as_mut().unwrap().insert("extra".to_owned(), "0".repeat(64)); }
+                3 => { broken.embedding_inputs.as_mut().unwrap().insert("mem_one".to_owned(), "not-a-digest".to_owned()); }
+                _ => broken.schema = DOC_DIGESTS_SCHEMA_V2.to_owned(),
+            }
+            broken.write(live.path()).map_err(|error| error.to_string())?;
+            assert_eq!(plan(live.path(), &stack, &original).expect_err("invalid input proof").reason, IncrementalFallbackReason::CorpusRevisionMismatch);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn input_reuse_is_rechecked_after_plan_mutation_or_producer_drift() -> TestResult {
+        let stack = jl_stack(11);
+        let original = [doc("mem_one", "stable input")];
+        let changed = [original[0].clone().with_title("new metadata")];
+        let live = generation_with_digests("recheck-inputs", &stack, &original)?;
+        let identity = embedder_identity(&stack).ok_or("identity")?;
+        for case in 0..3 {
+            let mut delta = plan(live.path(), &stack, &changed).map_err(|error| error.detail)?;
+            assert!(delta.vector_upserts(&identity).map_err(|error| error.detail)?.is_empty());
+            match case {
+                0 => delta.upserts[0].content.push_str(" actually changed"),
+                1 => delta.upserts[0].id = "mem_new".to_owned(),
+                _ => delta.removals.push(original[0].id.clone()),
+            }
+            assert_eq!(delta.vector_upserts(&identity).map_err(|error| error.detail)?.len(), 1);
+        }
+        let delta = plan(live.path(), &stack, &changed).map_err(|error| error.detail)?;
+        let other = embedder_identity(&jl_stack(29)).ok_or("other identity")?;
+        assert_eq!(delta.vector_upserts(&other).expect_err("changed producer").reason, IncrementalFallbackReason::CorpusRevisionMismatch);
+        Ok(())
+    }
+
+    struct CountingHash {
+        inner: HashEmbedder,
+        inputs: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::search::Embedder for CountingHash {
+        fn embed<'a>(&'a self, cx: &'a asupersync::Cx, text: &'a str) -> frankensearch::core::traits::SearchFuture<'a, Vec<f32>> {
+            self.inputs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.embed(cx, text)
+        }
+
+        fn embed_batch<'a>(&'a self, cx: &'a asupersync::Cx, texts: &'a [&'a str]) -> frankensearch::core::traits::SearchFuture<'a, Vec<Vec<f32>>> {
+            self.inputs.fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            self.inner.embed_batch(cx, texts)
+        }
+
+        fn identity(&self) -> frankensearch::SearchResult<&frankensearch::core::generation::EmbeddingIdentityBundleV1> {
+            self.inner.identity()
+        }
+
+        fn dimension(&self) -> usize { self.inner.dimension() }
+        fn id(&self) -> &str { self.inner.id() }
+        fn model_name(&self) -> &str { self.inner.model_name() }
+        fn is_semantic(&self) -> bool { self.inner.is_semantic() }
+        fn category(&self) -> frankensearch::core::traits::ModelCategory { self.inner.category() }
+    }
+
+    fn native_input_reuse_case(change_body: bool) -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(120), |cx| async move {
+            let live = parent.join("live");
+            let staged = parent.join("staged");
+            let rebuilt = parent.join("rebuilt");
+            let observed = Arc::new(CountingHash {
+                inner: HashEmbedder::default_256(),
+                inputs: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let stack = EmbedderStack::from_parts(observed.clone(), None);
+            let original: Vec<_> = (0..20)
+                .map(|number| doc(&format!("mem_{number:02}"), &format!("original lesson {number}")))
+                .collect();
+            super::super::IndexBuilder::new(&live)
+                .with_embedder_stack(stack.clone())
+                .add_documents(original.clone())
+                .build(&cx).await.map_err(|error| error.to_string())?;
+            DocDigests::new(&stack, &original).write(&live).map_err(|error| error.to_string())?;
+            assert_eq!(read_finalized_vectors(&live)?.len(), 20);
+            assert!(observed.inputs.load(std::sync::atomic::Ordering::SeqCst) >= 20);
+            let before = std::fs::read(live.join("vector.fast.idx")).map_err(|error| error.to_string())?;
+            let mut current = original.clone();
+            for document in &mut current[..3] {
+                document.title = Some("Updated title".to_owned());
+                document.metadata.insert("confidence".to_owned(), "0.8".to_owned());
+            }
+            if change_body { current[7].content.push_str(" changed"); }
+            let delta = plan(&live, &stack, &current).map_err(|error| error.detail)?;
+            assert_eq!(delta.upserts.len(), 3 + usize::from(change_body));
+            let identity = embedder_identity(&stack).ok_or("complete identity")?;
+            let vectors = delta.vector_upserts(&identity).map_err(|error| error.detail)?;
+            assert_eq!(vectors.len(), usize::from(change_body));
+            std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
+            copy_generation(&live, &staged).map_err(|error| error.to_string())?;
+            let mut index = super::super::open_fast_vector_index(&staged).map_err(|error| error.detail)?;
+            let fast_identity = verified_embedder_identity(stack.fast()).ok_or("fast identity")?;
+            observed.inputs.store(0, std::sync::atomic::Ordering::SeqCst);
+            let finish = apply_vector_delta(&cx, &mut index, stack.fast(), &delta, &vectors, &fast_identity, "fast")
+                .await.map_err(|error| error.detail)?;
+            assert_eq!(observed.inputs.load(std::sync::atomic::Ordering::SeqCst), usize::from(change_body));
+            assert_eq!(finish, if change_body { VectorFinalization::Compacted } else { VectorFinalization::Unchanged });
+            drop(index);
+            if !change_body {
+                assert_eq!(std::fs::read(staged.join("vector.fast.idx")).map_err(|error| error.to_string())?, before);
+            }
+            super::super::IndexBuilder::new(&rebuilt)
+                .with_embedder_stack(stack.clone())
+                .add_documents(current.clone())
+                .build(&cx).await.map_err(|error| error.to_string())?;
+            assert_eq!(read_finalized_vectors(&staged)?, read_finalized_vectors(&rebuilt)?);
+            assert_eq!(std::fs::read(live.join("vector.fast.idx")).map_err(|error| error.to_string())?, before);
+            DocDigests::new(&stack, &current).write(&staged).map_err(|error| error.to_string())?;
+            assert_eq!(plan(&staged, &stack, &current).map_err(|error| error.detail)?.len(), 0);
+            Ok(())
+        }).map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn metadata_only_intake_calls_no_embedder_and_preserves_vector_bytes() -> TestResult {
+        native_input_reuse_case(false)
+    }
+
+    #[test]
+    fn mixed_metadata_and_body_intake_embeds_only_the_changed_body() -> TestResult {
+        native_input_reuse_case(true)
     }
 }
