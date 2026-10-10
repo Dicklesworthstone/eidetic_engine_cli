@@ -45,6 +45,9 @@ use super::LEXICAL_INDEX_SUBDIR;
 #[path = "index_delta_batch.rs"]
 mod batch;
 
+#[path = "index_staging_copy.rs"]
+mod staging_copy;
+
 /// Per-document digests of the documents a generation indexed.
 pub(super) const DOC_DIGESTS_FILE: &str = "doc_digests.json";
 const DOC_DIGESTS_SCHEMA_V2: &str = "ee.index.doc_digests.v2";
@@ -456,16 +459,17 @@ fn lexical_segment_count(_generation_dir: &Path) -> usize {
 }
 
 /// Copy the live generation's tier files into an empty private staging
-/// directory. Copies, not links: tier writers mutate files in place, and the
-/// vector index refuses multiply linked files by design. Admission state
-/// (`meta.json`, digests, retired manifests) and writer locks are not copied;
-/// the staged generation earns its own.
+/// directory. Prefer copy-on-write clones, falling back to independent byte
+/// copies when the filesystem refuses cloning. Never use hard links: tier
+/// writers mutate files in place. Admission state (`meta.json`, digests,
+/// retired manifests) and writer locks are not copied; staging earns its own.
 pub(super) fn copy_generation(
     live_dir: &Path,
     staging_dir: &Path,
 ) -> Result<(), IndexRebuildError> {
     ensure_index_path_has_no_symlinks(live_dir, "copy live index generation")?;
     ensure_index_path_has_no_symlinks(staging_dir, "copy live index generation")?;
+    let mut copier = staging_copy::StagingCopier::default();
     let mut pending = vec![(live_dir.to_path_buf(), staging_dir.to_path_buf(), true)];
     while let Some((source, destination, top_level)) = pending.pop() {
         let entries = std::fs::read_dir(&source).map_err(|error| {
@@ -509,7 +513,7 @@ pub(super) fn copy_generation(
                 })?;
                 pending.push((entry.path(), target, false));
             } else if kind.is_file() {
-                std::fs::copy(entry.path(), &target).map_err(|error| {
+                copier.copy_file(&entry.path(), &target).map_err(|error| {
                     IndexRebuildError::Index(format!("Failed to copy live index file: {error}"))
                 })?;
             } else {
@@ -520,6 +524,16 @@ pub(super) fn copy_generation(
             }
         }
     }
+    let stats = copier.stats();
+    tracing::debug!(
+        target: "ee::index",
+        copied_files = stats.copied_files,
+        copied_bytes = stats.copied_bytes,
+        cloned_files = stats.cloned_files,
+        cloned_bytes = stats.cloned_bytes,
+        clone_refusals = stats.clone_refusals,
+        "staged independent index files"
+    );
     Ok(())
 }
 
