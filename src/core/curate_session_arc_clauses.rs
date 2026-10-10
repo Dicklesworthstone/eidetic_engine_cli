@@ -25,7 +25,14 @@ pub(super) fn split(excerpt: &str) -> impl Iterator<Item = &str> {
                     width += 1;
                 }
                 let at_fence_position = fence_indent(&excerpt[line_start..position]);
-                let rest = line_tail(excerpt, position + width);
+                // A line has at most one possible fence position. Inspecting
+                // its tail for every inline delimiter makes a long transcript
+                // quadratic; short-circuit before any tail scan instead.
+                let rest = if at_fence_position && width >= 3 {
+                    line_tail(excerpt, position + width)
+                } else {
+                    ""
+                };
                 if let Some((marker, minimum_width)) = fence {
                     // Code may itself contain backticks, quotes, or apparent
                     // failure/repair markers. Only a fence on its own line can
@@ -80,8 +87,17 @@ fn fence_indent(prefix: &str) -> bool {
     prefix.len() <= 3 && prefix.bytes().all(|byte| byte == b' ')
 }
 
+#[cfg(test)]
+std::thread_local! {
+    // Measure actual tail inspections, not elapsed time or a replica parser.
+    static FENCE_TAIL_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn line_tail(text: &str, start: usize) -> &str {
-    text[start..].split('\n').next().unwrap_or("")
+    let tail = text[start..].split('\n').next().unwrap_or("");
+    #[cfg(test)]
+    FENCE_TAIL_BYTES.with(|bytes| bytes.set(bytes.get().saturating_add(tail.len())));
+    tail
 }
 
 fn escaped(text: &str, position: usize) -> bool {
@@ -239,7 +255,10 @@ mod tests {
     fn session_arc_tilde_fences_keep_diagnostic_clauses_together() {
         let code = "~~~text\nFailure arc: cargo test failed;\nFix: a quoted example passed.\n~~~";
         let text = format!("{code}\n{REPAIR}");
-        assert_eq!(split(&text).map(str::trim).collect::<Vec<_>>(), [code, REPAIR]);
+        assert_eq!(
+            split(&text).map(str::trim).collect::<Vec<_>>(),
+            [code, REPAIR]
+        );
         assert_eq!(split(&text).collect::<String>(), text);
     }
 
@@ -247,7 +266,10 @@ mod tests {
     fn session_arc_backticks_inside_a_fence_do_not_close_the_diagnostic_block() {
         let code = "```rust\nlet quoted = \"```\";\nFailure arc: quoted example failed.\nFix: quoted example passed.\n```";
         let text = format!("{code}\n{REPAIR}");
-        assert_eq!(split(&text).map(str::trim).collect::<Vec<_>>(), [code, REPAIR]);
+        assert_eq!(
+            split(&text).map(str::trim).collect::<Vec<_>>(),
+            [code, REPAIR]
+        );
         assert_eq!(split(&text).collect::<String>(), text);
     }
 
@@ -304,5 +326,37 @@ mod tests {
         );
         assert_eq!(split("ordinary ~~~ prose; next clause.").count(), 2);
         assert_eq!(split("~~~text\nunclosed fence; still one record.").count(), 1);
+    }
+
+    #[test]
+    fn session_arc_inline_delimiters_do_not_rescan_the_remaining_transcript() {
+        for repetitions in [1, 100, 10_000] {
+            let line = "`token` ~ ``quoted`` ~~ ".repeat(repetitions);
+            let text = format!("{line}\n{FAILURE}\n{REPAIR}");
+            FENCE_TAIL_BYTES.with(|bytes| bytes.set(0));
+            let parts: Vec<_> = split(&text).collect();
+            assert_eq!(parts.len(), 3);
+            assert_eq!(parts.concat(), text);
+            assert_eq!(parts[1].trim(), FAILURE);
+            assert_eq!(parts[2], REPAIR);
+            FENCE_TAIL_BYTES.with(|bytes| assert_eq!(bytes.get(), 0));
+        }
+    }
+
+    #[test]
+    fn session_arc_fence_tail_inspection_is_bounded_by_source_bytes() {
+        let body = "quoted ``` and ~~~ data; version 2.4.1 ".repeat(10_000);
+        let code = format!("```text\n{body}\n``` not a closer\n~~~\n````");
+        let text = format!("{code}\n{REPAIR}");
+        FENCE_TAIL_BYTES.with(|bytes| bytes.set(0));
+        let parts: Vec<_> = split(&text).collect();
+        assert_eq!(parts.concat(), text);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].trim(), code);
+        assert_eq!(parts[1], REPAIR);
+        FENCE_TAIL_BYTES.with(|bytes| {
+            assert!(bytes.get() > 0, "real fence tails must have been inspected");
+            assert!(bytes.get() <= text.len());
+        });
     }
 }

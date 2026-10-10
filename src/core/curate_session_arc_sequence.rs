@@ -297,7 +297,13 @@ pub(super) fn resource_keys(message: &str) -> BTreeSet<String> {
 /// validates the entire remaining path, including Windows drive syntax. Never
 /// resolve paths, fold case, or promote a basename to a workspace-relative path.
 fn diagnostic_resource_path(token: &str) -> &str {
-    if let Some((path, position)) = token.strip_suffix(')').and_then(|value| value.rsplit_once('(')) {
+    // MSVC diagnostics put a colon after the closing location parenthesis.
+    // Remove that punctuation only for recognition, not from malformed input.
+    let decorated = token.strip_suffix(':').unwrap_or(token);
+    if let Some((path, position)) = decorated
+        .strip_suffix(')')
+        .and_then(|value| value.rsplit_once('('))
+    {
         let valid = match position.split_once(',') {
             Some((line, column)) => source_position(line, false) && source_position(column, true),
             None => source_position(position, false),
@@ -329,7 +335,9 @@ fn diagnostic_resource_path(token: &str) -> &str {
 fn source_position(value: &str, allow_zero: bool) -> bool {
     !value.is_empty()
         && value.bytes().all(|byte| byte.is_ascii_digit())
-        && value.parse::<u32>().is_ok_and(|position| allow_zero || position > 0)
+        && value
+            .parse::<u32>()
+            .is_ok_and(|position| allow_zero || position > 0)
 }
 
 fn precedes(failure: &StoredEvidenceSpan, repair: &StoredEvidenceSpan) -> bool {
@@ -981,36 +989,62 @@ mod tests {
             (r"C:\repo\src\api.rs(12,9)", r"C:\repo\src\api.rs"),
             ("Cargo.lock:00012", "Cargo.lock"),
         ] {
-            assert_eq!(resource_keys(location), BTreeSet::from([path.to_owned()]), "{location}");
+            assert_eq!(
+                resource_keys(location),
+                BTreeSet::from([path.to_owned()]),
+                "{location}"
+            );
         }
-        assert_eq!(resource_keys("Store::open()"), BTreeSet::from(["Store::open".to_owned()]));
+        assert_eq!(
+            resource_keys("Store::open()"),
+            BTreeSet::from(["Store::open".to_owned()])
+        );
     }
 
     #[test]
     fn session_arc_malformed_diagnostic_locations_never_become_file_aliases() {
         for location in [
-            "src/api.rs:unknown", "src/api.rs:0", "src/api.rs:0:9",
-            "src/api.rs:12:-9", "src/api.rs:12:+9", "src/api.rs:12:9:4",
-            "src/api.rs:4294967296", "src/api.rs:12:4294967296",
-            "src/api.rs(0,9)", "src/api.rs(12,-9)", "src/api.rs(12,9,4)",
-            "src/api.rs(12,9", "src/api.rs:12/9", "src/*.rs:12:9",
-            "https://host/src/api.rs:12:9", "${ROOT}/src/api.rs:12:9",
+            "src/api.rs:unknown",
+            "src/api.rs:0",
+            "src/api.rs:0:9",
+            "src/api.rs:12:-9",
+            "src/api.rs:12:+9",
+            "src/api.rs:12:9:4",
+            "src/api.rs:4294967296",
+            "src/api.rs:12:4294967296",
+            "src/api.rs(0,9)",
+            "src/api.rs(12,-9)",
+            "src/api.rs(12,9,4)",
+            "src/api.rs(12,9",
+            "src/api.rs:12/9",
+            "src/*.rs:12:9",
+            "https://host/src/api.rs:12:9",
+            "${ROOT}/src/api.rs:12:9",
         ] {
             assert!(resource_keys(location).is_empty(), "{location}");
         }
         assert_ne!(resource_keys("src/api.rs:12"), resource_keys("api.rs:12"));
-        assert_ne!(resource_keys("src/Api.rs:12"), resource_keys("src/api.rs:12"));
+        assert_ne!(
+            resource_keys("src/Api.rs:12"),
+            resource_keys("src/api.rs:12")
+        );
     }
 
     #[test]
     fn session_arc_diagnostic_repairs_keep_original_positions_and_hashes() {
         for (failure, repair) in [
-            ("The build failed in src/cache.rs:42:9.",
-             "Fixed src/cache.rs by replacing the unstable key."),
-            ("The database migration failed in migrations/0085.sql:17.",
-             "Guarding null inputs in migrations/0085.sql:23 resolved the issue."),
-            (r"The build failed in C:\repo\src\cache.rs(42,9).",
-             r"Fixed C:\repo\src\cache.rs(46,2) by replacing the unstable key."),
+            (
+                "The build failed in src/cache.rs:42:9.",
+                "Fixed src/cache.rs by replacing the unstable key.",
+            ),
+            (
+                "The database migration failed in migrations/0085.sql:17.",
+                "Guarding null inputs in migrations/0085.sql:23 resolved the issue.",
+            ),
+            (
+                r"The build failed in C:\repo\src\cache.rs(42,9).",
+                r"Fixed C:\repo\src\cache.rs(46,2) by replacing the unstable key.",
+            ),
         ] {
             let sources = [span("failure", 10, failure), span("repair", 11, repair)];
             let rows = mine(&sources);
@@ -1046,10 +1080,21 @@ mod tests {
         ] {
             let failure = format!("cargo test {failed} failed.");
             let repair = format!("cargo test {repaired} passed.");
-            assert!(mine(&[span("failure", 1, &failure), span("repair", 2, &repair)]).is_empty());
-            assert!(mine(&[span("combined", 1, &format!("{failure}\n{repair}"))]).is_empty());
+            assert!(
+                mine(&[span("failure", 1, &failure), span("repair", 2, &repair)]).is_empty()
+            );
+            assert!(
+                mine(&[span("combined", 1, &format!("{failure}\n{repair}"))]).is_empty()
+            );
             let actual_repair = format!("cargo test {failed} passed.");
-            assert_eq!(mine(&[span("failure", 1, &failure), span("repair", 2, &actual_repair)]).len(), 2);
+            assert_eq!(
+                mine(&[
+                    span("failure", 1, &failure),
+                    span("repair", 2, &actual_repair)
+                ])
+                .len(),
+                2
+            );
         }
     }
 
@@ -1058,17 +1103,32 @@ mod tests {
         let sources = [
             span("failure-a", 1, "cargo test src/api.rs:12:9 failed."),
             span("failure-b", 2, "cargo test src/ui.rs:23:4 failed."),
-            span("repair-a", 3, "Fixed src/api.rs:16:2 by restoring the guard."),
-            span("repair-b", 4, "Fixed src/ui.rs:28:0 by preserving the state."),
+            span(
+                "repair-a",
+                3,
+                "Fixed src/api.rs:16:2 by restoring the guard.",
+            ),
+            span(
+                "repair-b",
+                4,
+                "Fixed src/ui.rs:28:0 by preserving the state.",
+            ),
         ];
         let rows = mine(&sources);
         assert_eq!(rows.len(), 4);
-        assert_eq!(endpoints(&rows), [("failure-a", "repair-a"), ("failure-b", "repair-b")]);
+        assert_eq!(
+            endpoints(&rows),
+            [("failure-a", "repair-a"), ("failure-b", "repair-b")]
+        );
         let mut reversed = sources.to_vec();
         reversed.reverse();
         assert_eq!(mine(&reversed), rows);
         for row in &rows {
-            let pair: Vec<_> = sources.iter().filter(|source| row.source_ids.contains(&source.id)).cloned().collect();
+            let pair: Vec<_> = sources
+                .iter()
+                .filter(|source| row.source_ids.contains(&source.id))
+                .cloned()
+                .collect();
             assert!(mine(&pair).contains(row));
         }
     }
@@ -1079,10 +1139,12 @@ mod tests {
         let repair_text = "Fixed src/cache.rs:46:2 by replacing the unstable key.";
         let failure = serde_json::json!({"type":"assistant","message":{
             "role":"assistant","content":[{"type":"text","text":failure_text}]
-        },"metadata":{"file":"src/unrelated.rs:1:1"}}).to_string();
+        },"metadata":{"file":"src/unrelated.rs:1:1"}})
+        .to_string();
         let repair = serde_json::json!({"type":"assistant","message":{
             "role":"assistant","content":[{"type":"text","text":repair_text}]
-        }}).to_string();
+        }})
+        .to_string();
         let sources = [span("failure", 1, &failure), span("repair", 2, &repair)];
         let before = sources.clone();
         let rows = mine(&sources);
@@ -1095,6 +1157,52 @@ mod tests {
             assert_eq!(arc.resolution_span.excerpt, repair_text);
             assert_eq!(arc.failure_span.content_hash, sources[0].content_hash);
             assert_eq!(arc.resolution_span.content_hash, sources[1].content_hash);
+        }
+    }
+
+    #[test]
+    fn session_arc_msvc_diagnostic_punctuation_keeps_the_named_file() {
+        for (location, path) in [
+            ("src/api.rs(12):", "src/api.rs"),
+            ("src/api.rs(12,0):", "src/api.rs"),
+            ("`src/api.rs(12,9):`", "src/api.rs"),
+            (r"C:\repo\src\api.rs(12,9):", r"C:\repo\src\api.rs"),
+        ] {
+            assert_eq!(
+                resource_keys(location),
+                BTreeSet::from([path.to_owned()]),
+                "{location}"
+            );
+        }
+        for location in [
+            "src/api.rs(0,9):",
+            "src/api.rs(12,unknown):",
+            "src/api.rs(12,9,4):",
+            "src/api.rs(12,9)::",
+            "https://host/src/api.rs(12,9):",
+        ] {
+            assert!(resource_keys(location).is_empty(), "{location}");
+        }
+        let failure = "cargo test src/api.rs(12,9): failed.";
+        let wrong_repair = "cargo test src/ui.rs(16,2): passed.";
+        let right_repair = "cargo test src/api.rs(16,2): passed.";
+        assert!(
+            mine(&[
+                span("failure", 1, failure),
+                span("wrong", 2, wrong_repair)
+            ])
+            .is_empty()
+        );
+        let rows = mine(&[
+            span("failure", 1, failure),
+            span("repair", 2, right_repair),
+        ]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(endpoints(&rows), [("failure", "repair")]);
+        for row in rows {
+            let arc = row.session_arc.unwrap();
+            assert_eq!(arc.failure_span.excerpt, failure);
+            assert_eq!(arc.resolution_span.excerpt, right_repair);
         }
     }
 }
