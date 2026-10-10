@@ -212,8 +212,9 @@ pub(super) fn refers_to_previous_failure(message: &str) -> bool {
 
 /// Keep exact, case-sensitive file paths and qualified Rust symbols. Never
 /// turn a basename, wildcard, URL, shell expression, or generic prose noun into
-/// an alias for another resource. Quoting and sentence punctuation are wrappers;
-/// the spelling inside the resource is the identity used for comparison.
+/// an alias for another resource. Diagnostic line/column suffixes identify a
+/// position within the same file, not another resource. This classification
+/// never changes the spelling or location recorded in the source evidence.
 pub(super) fn resource_keys(message: &str) -> BTreeSet<String> {
     message
         .split_whitespace()
@@ -232,7 +233,7 @@ pub(super) fn resource_keys(message: &str) -> BTreeSet<String> {
             if symbol.contains("::") && symbol.split("::").all(identifier) {
                 return Some(symbol.to_owned());
             }
-            let path = token.trim_end_matches(')');
+            let path = diagnostic_resource_path(token);
             if path.is_empty()
                 || path.contains("://")
                 || !path.chars().all(|ch| {
@@ -290,6 +291,45 @@ pub(super) fn resource_keys(message: &str) -> BTreeSet<String> {
             (named_file || absolute_file).then(|| path.to_owned())
         })
         .collect()
+}
+
+/// Strip only a complete, recognized source-position suffix. The caller still
+/// validates the entire remaining path, including Windows drive syntax. Never
+/// resolve paths, fold case, or promote a basename to a workspace-relative path.
+fn diagnostic_resource_path(token: &str) -> &str {
+    if let Some((path, position)) = token.strip_suffix(')').and_then(|value| value.rsplit_once('(')) {
+        let valid = match position.split_once(',') {
+            Some((line, column)) => source_position(line, false) && source_position(column, true),
+            None => source_position(position, false),
+        };
+        if valid {
+            return path;
+        }
+    }
+    let token = token.trim_end_matches(')');
+    let position = token.strip_suffix(':').unwrap_or(token);
+    let Some((prefix, last)) = position.rsplit_once(':') else {
+        return token;
+    };
+    if !source_position(last, true) {
+        return token;
+    }
+    if let Some((path, line)) = prefix.rsplit_once(':')
+        && source_position(line, false)
+    {
+        return path;
+    }
+    if source_position(last, false) {
+        prefix
+    } else {
+        token
+    }
+}
+
+fn source_position(value: &str, allow_zero: bool) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<u32>().is_ok_and(|position| allow_zero || position > 0)
 }
 
 fn precedes(failure: &StoredEvidenceSpan, repair: &StoredEvidenceSpan) -> bool {
@@ -925,6 +965,136 @@ mod tests {
                 row.content_hash,
                 format!("blake3:{}", blake3::hash(expected.as_bytes()).to_hex())
             );
+        }
+    }
+
+    #[test]
+    fn session_arc_diagnostic_locations_keep_exact_file_identity() {
+        for (location, path) in [
+            ("src/api.rs:12", "src/api.rs"),
+            ("`src/api.rs:12:9`", "src/api.rs"),
+            ("(src/api.rs:12:0).", "src/api.rs"),
+            ("src/api.rs:12:9:", "src/api.rs"),
+            ("src/api.rs(12,9)", "src/api.rs"),
+            ("src/api.rs(12)", "src/api.rs"),
+            (r"C:\repo\src\api.rs:12:9", r"C:\repo\src\api.rs"),
+            (r"C:\repo\src\api.rs(12,9)", r"C:\repo\src\api.rs"),
+            ("Cargo.lock:00012", "Cargo.lock"),
+        ] {
+            assert_eq!(resource_keys(location), BTreeSet::from([path.to_owned()]), "{location}");
+        }
+        assert_eq!(resource_keys("Store::open()"), BTreeSet::from(["Store::open".to_owned()]));
+    }
+
+    #[test]
+    fn session_arc_malformed_diagnostic_locations_never_become_file_aliases() {
+        for location in [
+            "src/api.rs:unknown", "src/api.rs:0", "src/api.rs:0:9",
+            "src/api.rs:12:-9", "src/api.rs:12:+9", "src/api.rs:12:9:4",
+            "src/api.rs:4294967296", "src/api.rs:12:4294967296",
+            "src/api.rs(0,9)", "src/api.rs(12,-9)", "src/api.rs(12,9,4)",
+            "src/api.rs(12,9", "src/api.rs:12/9", "src/*.rs:12:9",
+            "https://host/src/api.rs:12:9", "${ROOT}/src/api.rs:12:9",
+        ] {
+            assert!(resource_keys(location).is_empty(), "{location}");
+        }
+        assert_ne!(resource_keys("src/api.rs:12"), resource_keys("api.rs:12"));
+        assert_ne!(resource_keys("src/Api.rs:12"), resource_keys("src/api.rs:12"));
+    }
+
+    #[test]
+    fn session_arc_diagnostic_repairs_keep_original_positions_and_hashes() {
+        for (failure, repair) in [
+            ("The build failed in src/cache.rs:42:9.",
+             "Fixed src/cache.rs by replacing the unstable key."),
+            ("The database migration failed in migrations/0085.sql:17.",
+             "Guarding null inputs in migrations/0085.sql:23 resolved the issue."),
+            (r"The build failed in C:\repo\src\cache.rs(42,9).",
+             r"Fixed C:\repo\src\cache.rs(46,2) by replacing the unstable key."),
+        ] {
+            let sources = [span("failure", 10, failure), span("repair", 11, repair)];
+            let rows = mine(&sources);
+            assert_eq!(rows.len(), 2, "{failure} / {repair}");
+            assert_eq!(endpoints(&rows), [("failure", "repair")]);
+            for row in &rows {
+                let arc = row.session_arc.as_ref().unwrap();
+                assert_eq!(arc.failure_span.excerpt, failure);
+                assert_eq!(arc.resolution_span.excerpt, repair);
+                assert_eq!(arc.failure_span.content_hash, sources[0].content_hash);
+                assert_eq!(arc.resolution_span.content_hash, sources[1].content_hash);
+            }
+            let combined = span("combined", 10, &format!("{failure}\n{repair}"));
+            let inline = mine(std::slice::from_ref(&combined));
+            assert_eq!(inline.len(), 2);
+            for row in inline {
+                let arc = row.session_arc.unwrap();
+                assert_eq!(arc.failure_span.excerpt, failure);
+                assert_eq!(arc.resolution_span.excerpt, repair);
+                assert_eq!(arc.failure_span.content_hash, combined.content_hash);
+                assert_eq!(arc.resolution_span.content_hash, combined.content_hash);
+            }
+        }
+    }
+
+    #[test]
+    fn session_arc_diagnostic_subjects_cannot_collapse_to_one_testing_topic() {
+        for (failed, repaired) in [
+            ("src/api.rs:12:9", "src/ui.rs:12:9"),
+            ("src/Api.rs:12", "src/api.rs:14"),
+            ("src/api.rs(12,9)", "api.rs(14,2)"),
+            (r"C:\one\api.rs:12:9", r"C:\two\api.rs:14:2"),
+        ] {
+            let failure = format!("cargo test {failed} failed.");
+            let repair = format!("cargo test {repaired} passed.");
+            assert!(mine(&[span("failure", 1, &failure), span("repair", 2, &repair)]).is_empty());
+            assert!(mine(&[span("combined", 1, &format!("{failure}\n{repair}"))]).is_empty());
+            let actual_repair = format!("cargo test {failed} passed.");
+            assert_eq!(mine(&[span("failure", 1, &failure), span("repair", 2, &actual_repair)]).len(), 2);
+        }
+    }
+
+    #[test]
+    fn session_arc_interleaved_diagnostic_failures_keep_their_own_repairs() {
+        let sources = [
+            span("failure-a", 1, "cargo test src/api.rs:12:9 failed."),
+            span("failure-b", 2, "cargo test src/ui.rs:23:4 failed."),
+            span("repair-a", 3, "Fixed src/api.rs:16:2 by restoring the guard."),
+            span("repair-b", 4, "Fixed src/ui.rs:28:0 by preserving the state."),
+        ];
+        let rows = mine(&sources);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(endpoints(&rows), [("failure-a", "repair-a"), ("failure-b", "repair-b")]);
+        let mut reversed = sources.to_vec();
+        reversed.reverse();
+        assert_eq!(mine(&reversed), rows);
+        for row in &rows {
+            let pair: Vec<_> = sources.iter().filter(|source| row.source_ids.contains(&source.id)).cloned().collect();
+            assert!(mine(&pair).contains(row));
+        }
+    }
+
+    #[test]
+    fn session_arc_decoded_diagnostic_locations_do_not_rewrite_cass_evidence() {
+        let failure_text = "The build failed in src/cache.rs:42:9.";
+        let repair_text = "Fixed src/cache.rs:46:2 by replacing the unstable key.";
+        let failure = serde_json::json!({"type":"assistant","message":{
+            "role":"assistant","content":[{"type":"text","text":failure_text}]
+        },"metadata":{"file":"src/unrelated.rs:1:1"}}).to_string();
+        let repair = serde_json::json!({"type":"assistant","message":{
+            "role":"assistant","content":[{"type":"text","text":repair_text}]
+        }}).to_string();
+        let sources = [span("failure", 1, &failure), span("repair", 2, &repair)];
+        let before = sources.clone();
+        let rows = mine(&sources);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(sources, before);
+        for row in rows {
+            assert!(!row.proposed_content.contains("src/unrelated.rs"));
+            let arc = row.session_arc.unwrap();
+            assert_eq!(arc.failure_span.excerpt, failure_text);
+            assert_eq!(arc.resolution_span.excerpt, repair_text);
+            assert_eq!(arc.failure_span.content_hash, sources[0].content_hash);
+            assert_eq!(arc.resolution_span.content_hash, sources[1].content_hash);
         }
     }
 }
