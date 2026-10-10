@@ -1,33 +1,64 @@
 //! Borrowed clause boundaries for technical failure/repair evidence.
 //!
 //! A period inside a version, filename or configuration key is not a sentence
-//! boundary. Delimiters inside a Markdown code span are source text, not prose
-//! ordering. Preserve all bytes; this splitter never rewrites quoted commands
-//! or fabricates transcript line offsets.
+//! boundary. Delimiters inside Markdown code are source text, not prose
+//! ordering. Fenced blocks and inline spans have different closing rules.
+//! Preserve all bytes; this splitter never rewrites quoted commands or
+//! fabricates transcript line offsets.
 
 pub(super) fn split(excerpt: &str) -> impl Iterator<Item = &str> {
     let mut characters = excerpt.char_indices().peekable();
     let mut start = 0;
+    let mut line_start = 0;
     let mut code_delimiter = 0;
+    let mut fence: Option<(char, usize)> = None;
     std::iter::from_fn(move || {
         while let Some((position, ch)) = characters.next() {
-            if ch == '`' && !escaped(excerpt, position) {
+            let end = position + ch.len_utf8();
+            if ch == '\n' {
+                line_start = end;
+            }
+            if matches!(ch, '`' | '~') && !escaped(excerpt, position) {
                 let mut width = 1;
-                while characters.peek().is_some_and(|(_, next)| *next == '`') {
+                while characters.peek().is_some_and(|(_, next)| *next == ch) {
                     let _ = characters.next();
                     width += 1;
                 }
-                if code_delimiter == 0 {
-                    code_delimiter = width;
-                } else if width == code_delimiter {
-                    code_delimiter = 0;
+                let at_fence_position = fence_indent(&excerpt[line_start..position]);
+                let rest = line_tail(excerpt, position + width);
+                if let Some((marker, minimum_width)) = fence {
+                    // Code may itself contain backticks, quotes, or apparent
+                    // failure/repair markers. Only a fence on its own line can
+                    // restore prose boundaries; a longer closer is valid.
+                    if ch == marker
+                        && width >= minimum_width
+                        && at_fence_position
+                        && rest.trim_matches([' ', '\t', '\r']).is_empty()
+                    {
+                        fence = None;
+                    }
+                    continue;
                 }
+                if code_delimiter == 0
+                    && width >= 3
+                    && at_fence_position
+                    && (ch == '~' || !rest.contains('`'))
+                {
+                    fence = Some((ch, width));
+                    continue;
+                }
+                if ch == '`' {
+                    if code_delimiter == 0 {
+                        code_delimiter = width;
+                    } else if width == code_delimiter {
+                        code_delimiter = 0;
+                    }
+                    continue;
+                }
+            }
+            if fence.is_some() || code_delimiter != 0 {
                 continue;
             }
-            if code_delimiter != 0 {
-                continue;
-            }
-            let end = position + ch.len_utf8();
             let boundary = matches!(ch, '\n' | ';') || (ch == '.' && sentence_period(excerpt, end));
             if boundary {
                 let part = &excerpt[start..end];
@@ -43,6 +74,14 @@ pub(super) fn split(excerpt: &str) -> impl Iterator<Item = &str> {
             None
         }
     })
+}
+
+fn fence_indent(prefix: &str) -> bool {
+    prefix.len() <= 3 && prefix.bytes().all(|byte| byte == b' ')
+}
+
+fn line_tail(text: &str, start: usize) -> &str {
+    text[start..].split('\n').next().unwrap_or("")
 }
 
 fn escaped(text: &str, position: usize) -> bool {
@@ -194,5 +233,76 @@ mod tests {
         let text = format!("{FAILURE} Failure arc: M7 cache patch failed. {REPAIR}");
         let pair = super::super::inline_pair(&text).expect("later observed repair");
         assert_eq!(pair.1, REPAIR);
+    }
+
+    #[test]
+    fn session_arc_tilde_fences_keep_diagnostic_clauses_together() {
+        let code = "~~~text\nFailure arc: cargo test failed;\nFix: a quoted example passed.\n~~~";
+        let text = format!("{code}\n{REPAIR}");
+        assert_eq!(split(&text).map(str::trim).collect::<Vec<_>>(), [code, REPAIR]);
+        assert_eq!(split(&text).collect::<String>(), text);
+    }
+
+    #[test]
+    fn session_arc_backticks_inside_a_fence_do_not_close_the_diagnostic_block() {
+        let code = "```rust\nlet quoted = \"```\";\nFailure arc: quoted example failed.\nFix: quoted example passed.\n```";
+        let text = format!("{code}\n{REPAIR}");
+        assert_eq!(split(&text).map(str::trim).collect::<Vec<_>>(), [code, REPAIR]);
+        assert_eq!(split(&text).collect::<String>(), text);
+    }
+
+    #[test]
+    fn session_arc_longer_closing_fences_restore_later_prose_boundaries() {
+        for marker in ['`', '~'] {
+            for opening_width in 3..=6 {
+                for closing_width in opening_width..=7 {
+                    let opening = marker.to_string().repeat(opening_width);
+                    let closing = marker.to_string().repeat(closing_width);
+                    let code = format!("{opening}text\nraw diagnostic; version 2.4.1\n{closing}");
+                    let text = format!("{code}\n{FAILURE} {REPAIR}");
+                    assert_eq!(
+                        split(&text).map(str::trim).collect::<Vec<_>>(),
+                        [code.as_str(), FAILURE, REPAIR]
+                    );
+                    assert_eq!(super::super::inline_pair(&text), Some((FAILURE, REPAIR)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn session_arc_wrong_or_nonterminal_fences_do_not_expose_inner_clauses() {
+        for false_closer in ["``", "~~~", "prefix ```", "``` trailing text", "    ```"] {
+            let code = format!("```text\n{false_closer}\nraw diagnostic; still code.\n```");
+            let text = format!("{code}\n{REPAIR}");
+            assert_eq!(
+                split(&text).map(str::trim).collect::<Vec<_>>(),
+                [code.as_str(), REPAIR],
+                "{false_closer}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_arc_indented_crlf_fences_preserve_every_original_byte() {
+        for indentation in ["", " ", "  ", "   "] {
+            let code = format!("{indentation}~~~text\r\n資料; 🦀.\r\n{indentation}~~~~ \t\r\n");
+            let text = format!("{code}{REPAIR}");
+            let parts: Vec<_> = split(&text).collect();
+            assert_eq!(parts, [code.as_str(), REPAIR]);
+            assert_eq!(parts.concat(), text);
+        }
+    }
+
+    #[test]
+    fn session_arc_fences_never_override_an_existing_inline_span() {
+        let quoted = "`multiline example\n~~~text\nnot a fence; still inline.\n~~~\n`";
+        let text = format!("{quoted}\n{REPAIR}");
+        assert_eq!(
+            split(&text).map(str::trim).collect::<Vec<_>>(),
+            [quoted, REPAIR]
+        );
+        assert_eq!(split("ordinary ~~~ prose; next clause.").count(), 2);
+        assert_eq!(split("~~~text\nunclosed fence; still one record.").count(), 1);
     }
 }
