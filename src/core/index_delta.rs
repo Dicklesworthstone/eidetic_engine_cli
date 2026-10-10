@@ -1609,7 +1609,7 @@ mod tests {
     ) -> TestResult {
         use crate::search::LexicalRead;
 
-        let lexical = crate::search::TantivyIndex::open_read_only(directory.join("lexical"))
+        let lexical = crate::search::TantivyIndex::open_read_only(&directory.join("lexical"))
             .map_err(|error| error.to_string())?;
         assert_eq!(lexical.doc_count().map_err(|error| error.to_string())?, 20);
         let (present, absent) = if updated {
