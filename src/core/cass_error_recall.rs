@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::core::error_diagnosis::{ErrorRepairLinkRecording, record_error_repair_links};
+use crate::core::error_diagnosis::{ErrorRepairLinkRecording, persist_error_repair_links};
 use crate::core::error_recall::{
     CanonicalDiagnostic, from_cargo, from_ee_error, from_rch_blocker, from_rustc,
 };
@@ -56,6 +56,9 @@ pub struct CassErrorRecallReport {
     pub failures_seen: u32,
     pub fingerprints_recorded: u32,
     pub resolved_failures: u32,
+    /// Distinct repair/proof upserts submitted per failure diagnostic in this
+    /// run, excluding incident-card associations. Not newly inserted rows or
+    /// total class history; unchanged retries report the same submissions.
     pub repair_links_recorded: u32,
     /// Derived incident cards written by this run (ADR 0091).
     pub incident_cards_recorded: u32,
@@ -96,16 +99,14 @@ pub fn record_session_error_recall(
             }
             let recording = arc.recording();
             for diagnostic in &arc.diagnostics {
-                let links =
-                    record_error_repair_links(connection, workspace_id, diagnostic, &recording)?;
+                // Acknowledgement is proportional to this observation, never
+                // to all previous sessions containing the same error class.
+                let receipt =
+                    persist_error_repair_links(connection, workspace_id, diagnostic, &recording)?;
                 report.fingerprints_recorded = report.fingerprints_recorded.saturating_add(1);
-                let recorded_here = links
-                    .iter()
-                    .filter(|link| link.evidence_ref.as_deref() == Some(arc.failure_id.as_str()))
-                    .count();
                 report.repair_links_recorded = report
                     .repair_links_recorded
-                    .saturating_add(u32::try_from(recorded_here).unwrap_or(u32::MAX));
+                    .saturating_add(u32::try_from(receipt.links_submitted).unwrap_or(u32::MAX));
             }
             let Some(card) = crate::core::incident_card::draft_incident_card(
                 workspace_id,
@@ -128,7 +129,7 @@ pub fn record_session_error_recall(
                 ..ErrorRepairLinkRecording::default()
             };
             for diagnostic in &arc.diagnostics {
-                record_error_repair_links(connection, workspace_id, diagnostic, &card_recording)?;
+                persist_error_repair_links(connection, workspace_id, diagnostic, &card_recording)?;
             }
         }
         Ok(())
@@ -1357,3 +1358,7 @@ mod tests;
 #[cfg(test)]
 #[path = "cass_error_recall_proof_tests.rs"]
 mod proof_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_write_tests.rs"]
+mod write_tests;

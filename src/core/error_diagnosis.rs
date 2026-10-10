@@ -74,16 +74,42 @@ impl ErrorRepairLinkRecording {
     }
 }
 
-/// Persist repair/proof/outcome links for a canonicalized diagnostic. The
-/// fingerprint row is upserted first so the link table's foreign key is always
-/// satisfied. Link IDs are deterministic over workspace, fingerprint, kind,
-/// target, and outcome, making repeat observations idempotent.
+/// Persist repair/proof/outcome links for a canonicalized diagnostic and
+/// return the complete stored history for that class. Importers that only
+/// need write acknowledgement use the receipt-only path below instead.
+/// Link IDs remain deterministic over workspace, fingerprint, kind, target,
+/// and outcome, making repeat observations idempotent.
 pub fn record_error_repair_links(
     connection: &DbConnection,
     workspace_id: &str,
     canonical: &CanonicalDiagnostic,
     recording: &ErrorRepairLinkRecording,
 ) -> Result<Vec<StoredErrorRepairLink>> {
+    let receipt = persist_error_repair_links(connection, workspace_id, canonical, recording)?;
+    connection.list_error_repair_links(workspace_id, &receipt.fingerprint_key)
+}
+
+/// Acknowledgement of this batch, independent of prior repair history.
+/// Submission counts are not insert counts: an idempotent retry submits the
+/// same distinct links without creating new rows. The caller's transaction
+/// still owns commit/rollback; receiving a receipt does not commit it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ErrorRepairWriteReceipt {
+    pub fingerprint_key: String,
+    pub links_submitted: usize,
+}
+
+/// Persist only this observation; never reload the fingerprint's history.
+/// Repeated occurrences of a common compiler error must not read all earlier
+/// sessions' repair/proof links after every upsert. Fingerprint refresh, link
+/// normalization, deterministic IDs and storage errors are identical to the
+/// complete-history API. Atomic import remains owned by the caller.
+pub(crate) fn persist_error_repair_links(
+    connection: &DbConnection,
+    workspace_id: &str,
+    canonical: &CanonicalDiagnostic,
+    recording: &ErrorRepairLinkRecording,
+) -> Result<ErrorRepairWriteReceipt> {
     let stored = record_error_fingerprint(connection, workspace_id, canonical)?;
     let mut links = Vec::new();
 
@@ -170,7 +196,10 @@ pub fn record_error_repair_links(
         })
         .collect::<Vec<_>>();
     connection.upsert_error_repair_links(&inputs)?;
-    connection.list_error_repair_links(workspace_id, &stored.fingerprint_key)
+    Ok(ErrorRepairWriteReceipt {
+        fingerprint_key: stored.fingerprint_key,
+        links_submitted: inputs.len(),
+    })
 }
 
 /// Outcome of diagnosing an error against the fingerprint store (ADR-0057 reader).
@@ -566,7 +595,8 @@ mod tests {
     use super::{
         ErrorRepairLinkRecording, PACK_RECALL_EXCERPT_LIMIT, PACK_RECALL_QUERY_BYTES,
         PACK_RECALL_TARGET_LIMIT, diagnose_error, error_recall_report,
-        pack_error_recall_query_seed, record_error_fingerprint, record_error_repair_links,
+        pack_error_recall_query_seed, persist_error_repair_links, record_error_fingerprint,
+        record_error_repair_links,
     };
     use crate::core::error_recall::from_rustc;
     use crate::db::{
@@ -985,6 +1015,85 @@ mod tests {
         }
         let report = error_recall_report(&connection, WS, &canonical)?;
         assert_eq!(report.helpful_repairs.len(), 8);
+        Ok(())
+    }
+
+    #[test]
+    fn write_receipt_counts_this_batch_without_truncating_the_public_history() -> TestResult {
+        let connection = migrated_db_with_workspace();
+        let canonical = from_rustc(Some("E0308"), "mismatched types");
+        let previous = ErrorRepairLinkRecording {
+            helpful_repairs: (0..256).map(|number| format!("mem_prior_{number:04}")).collect(),
+            evidence_ref: Some("ev_prior_observation".to_owned()),
+            ..ErrorRepairLinkRecording::default()
+        };
+        let seeded = persist_error_repair_links(&connection, WS, &canonical, &previous)?;
+        assert_eq!(seeded.links_submitted, 256);
+        let observation = ErrorRepairLinkRecording {
+            helpful_repairs: vec![" mem_new ".to_owned(), "mem_new".to_owned(), " ".to_owned()],
+            harmful_repairs: vec!["mem_new".to_owned()],
+            proof_links: vec!["proof_new".to_owned(), "proof_new".to_owned()],
+            stale_version_warnings: vec!["version warning".to_owned()],
+            evidence_ref: Some("ev_new_observation".to_owned()),
+            created_by: Some("receipt-test".to_owned()),
+        };
+        for _ in 0..2 {
+            let receipt = persist_error_repair_links(&connection, WS, &canonical, &observation)?;
+            assert_eq!(receipt.fingerprint_key, "rustc:E0308");
+            assert_eq!(receipt.links_submitted, 4);
+        }
+        let complete = record_error_repair_links(&connection, WS, &canonical, &observation)?;
+        assert_eq!(complete.len(), 260);
+        assert_eq!(
+            complete.iter().filter(|link| link.evidence_ref.as_deref() == Some("ev_prior_observation")).count(),
+            256
+        );
+        assert_eq!(
+            complete.iter().filter(|link| link.evidence_ref.as_deref() == Some("ev_new_observation")).count(),
+            4
+        );
+        let report = error_recall_report(&connection, WS, &canonical)?;
+        assert_eq!(report.helpful_repairs.len(), 257);
+        assert_eq!(report.harmful_repairs, ["mem_new"]);
+        assert_eq!(report.proof_links, ["proof_new"]);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_write_receipt_still_records_the_failure_class() -> TestResult {
+        let connection = migrated_db_with_workspace();
+        let canonical = from_rustc(Some("E0599"), "no method named missing");
+        let receipt = persist_error_repair_links(
+            &connection,
+            WS,
+            &canonical,
+            &ErrorRepairLinkRecording::default(),
+        )?;
+        assert_eq!(receipt.links_submitted, 0);
+        assert!(diagnose_error(&connection, WS, &canonical)?.is_known());
+        assert!(connection.list_error_repair_links(WS, &receipt.fingerprint_key)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn write_receipt_does_not_commit_its_callers_transaction() -> TestResult {
+        let connection = migrated_db_with_workspace();
+        let canonical = from_rustc(Some("E0277"), "missing trait implementation");
+        let recording = ErrorRepairLinkRecording {
+            helpful_repairs: vec!["mem_uncommitted".to_owned()],
+            ..ErrorRepairLinkRecording::default()
+        };
+        let result: crate::db::Result<()> = connection.with_transaction(|| {
+            let receipt = persist_error_repair_links(&connection, WS, &canonical, &recording)?;
+            assert_eq!(receipt.links_submitted, 1);
+            // An actual storage error must roll back both the fingerprint and
+            // the links, even though the inner writer already acknowledged them.
+            connection.execute_raw("INSERT INTO ee_missing_receipt_test_table VALUES (1)")?;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!diagnose_error(&connection, WS, &canonical)?.is_known());
+        assert!(connection.list_error_repair_links(WS, "rustc:E0277")?.is_empty());
         Ok(())
     }
 }
