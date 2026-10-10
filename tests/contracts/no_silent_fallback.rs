@@ -4144,6 +4144,21 @@ fn ignored_test_module_lines(source: &str) -> Vec<bool> {
             continue;
         }
 
+        // bd-eoqlf: this literal is WRONG -- it recognises a `#[cfg(test)]`
+        // module only when it is named exactly `tests`, so 43 differently-named
+        // inline test modules under src/ are scanned as production code.
+        //
+        // DO NOT "FIX" IT BY BROADENING THE NAME CHECK ALONE. Measured
+        // 2026-10-09: `brace_delta` below counts braces in STRING LITERALS, so
+        // it already mis-tracks the end of 15 of the 387 modules it does
+        // recognise -- `src/cli/mod.rs:71402` closes at 73890 and the naive
+        // count runs to EOF, over-ignoring 26509 lines. Broadening the name
+        // check admits more such modules: `mod error_render_routing_tests`
+        // (src/cli/mod.rs:56943) truly closes at 57073, but naive counting is
+        // +2 open there and would keep ignoring for thousands of lines.
+        //
+        // So the name check and the brace tracking have to be fixed together.
+        // See bd-eoqlf for the measurement and the population.
         if pending_cfg_test && trimmed.starts_with("mod tests") && trimmed.contains('{') {
             ignored[index] = true;
             in_test_module = true;
