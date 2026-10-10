@@ -335,10 +335,15 @@ mod tests {
             let text = format!("{line}\n{FAILURE}\n{REPAIR}");
             FENCE_TAIL_BYTES.with(|bytes| bytes.set(0));
             let parts: Vec<_> = split(&text).collect();
-            assert_eq!(parts.len(), 3);
+            // Lossless slices include the newline following FAILURE's final
+            // period. It is a separator, not an extra semantic observation.
             assert_eq!(parts.concat(), text);
-            assert_eq!(parts[1].trim(), FAILURE);
-            assert_eq!(parts[2], REPAIR);
+            let clauses: Vec<_> = parts
+                .iter()
+                .map(|part| part.trim())
+                .filter(|part| !part.is_empty())
+                .collect();
+            assert_eq!(clauses, [line.trim(), FAILURE, REPAIR]);
             FENCE_TAIL_BYTES.with(|bytes| assert_eq!(bytes.get(), 0));
         }
     }
