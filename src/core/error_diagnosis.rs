@@ -25,6 +25,9 @@ use crate::db::{
     CreateErrorRepairLinkInput, DbConnection, Result, StoredErrorFingerprint, StoredErrorRepairLink,
 };
 
+#[path = "error_recall_near.rs"]
+mod near;
+
 /// Persist (or refresh) the error fingerprint for a canonicalized diagnostic,
 /// linking the failing error class into the truth store so recall can later find
 /// it (ADR-0057 writer). Returns the stored row. Redaction-safe: stores the
@@ -187,9 +190,10 @@ impl ErrorRecallOutcome {
 }
 
 /// Agent-facing recall summary for one diagnostic class (ADR 0057 / bd-uafu0).
-/// The current implementation supports exact layered-key recall, plus
-/// persisted repair/proof/outcome links for the exact fingerprint. `near`
-/// remains empty until graph-backed sibling traversal lands.
+/// Repair/proof/outcome links describe the exact fingerprint only. On an
+/// informative code-less exact miss, `near` lists at most five same-tool,
+/// same-workspace signature neighbors, ordered by distance then key. These
+/// advisory neighbors never become exact matches or verified repair evidence.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorRecallReport {
@@ -300,7 +304,11 @@ pub fn diagnose_error(
     })
 }
 
-/// Build the structured recall report for a diagnostic without mutating state.
+/// Build the complete structured recall report without mutating state.
+/// Code-less exact misses with sufficient diagnostic content scan stored
+/// workspace fingerprint metadata for advisory near matches. That scan is
+/// linear in fingerprint history; interactive packing deliberately uses
+/// [`pack_error_recall_query_seed`] instead and does not pay for it.
 pub fn error_recall_report(
     connection: &DbConnection,
     workspace_id: &str,
@@ -309,11 +317,9 @@ pub fn error_recall_report(
     let fingerprint = ErrorFingerprint::from_canonical(canonical);
     let outcome = diagnose_error(connection, workspace_id, canonical)?;
     let links = connection.list_error_repair_links(workspace_id, &outcome.fingerprint_key)?;
-    Ok(ErrorRecallReport::from_outcome_with_links(
-        &fingerprint,
-        &outcome,
-        &links,
-    ))
+    let mut report = ErrorRecallReport::from_outcome_with_links(&fingerprint, &outcome, &links);
+    near::populate(connection, workspace_id, canonical, &fingerprint, &mut report)?;
+    Ok(report)
 }
 
 /// Maximum linked targets considered by one interactive error-recall query.
