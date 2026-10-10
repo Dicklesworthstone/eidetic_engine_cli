@@ -45,6 +45,9 @@ use super::LEXICAL_INDEX_SUBDIR;
 #[path = "index_delta_batch.rs"]
 mod batch;
 
+#[path = "index_delta_metadata.rs"]
+mod metadata;
+
 #[path = "index_staging_copy.rs"]
 mod staging_copy;
 
@@ -55,10 +58,10 @@ const DOC_DIGESTS_SCHEMA_V3: &str = "ee.index.doc_digests.v3";
 const DOC_DIGEST_DOMAIN: &[u8] = b"ee.index.doc_digest.v1\0";
 const EMBEDDING_INPUT_DOMAIN: &[u8] = b"ee.index.embedding_input.v1\0";
 
-/// Above this many changed documents a full rebuild is the simpler and
-/// comparably priced path.
+/// Bound changed vector inputs plus removals. V2 cannot prove input reuse and
+/// charges every change; v3 metadata-only updates have separate lexical limits.
 const MAX_DELTA_DOCUMENTS: usize = 256;
-/// Above this share of the corpus (percent) a full rebuild is preferred.
+/// Above this share of the corpus (percent) a vector rebuild is preferred.
 const MAX_DELTA_PERCENT: usize = 25;
 /// Each delta commit adds a lexical segment; past this many the next write
 /// takes a full rebuild, which compacts them.
@@ -364,21 +367,11 @@ pub(super) fn plan(
             ),
         ));
     }
-    let mut delta = diff_documents(&live.documents, documents, document_digest)?;
-    if let Some(inputs) = live.embedding_inputs {
-        let mut reusable = BTreeMap::new();
-        for document in &delta.upserts {
-            let digest = embedding_input_digest(document);
-            if inputs.get(&document.id) == Some(&digest) {
-                reusable.insert(document.id.clone(), digest);
-            }
-        }
-        delta.reuse = Some(EmbeddingReuse {
-            identity,
-            inputs: reusable,
-        });
+    if let Some(inputs) = live.embedding_inputs.as_ref() {
+        metadata::diff(&live.documents, inputs, documents, identity)
+    } else {
+        diff_documents(&live.documents, documents, document_digest)
     }
-    Ok(delta)
 }
 
 /// Decide eligibility before taking ownership of any changed document body.
@@ -669,21 +662,25 @@ pub(super) async fn apply(
         batch::checkpoint(cx, "lexical")?;
         let lexical = super::open_lexical_index(staging_dir)?;
         for id in &delta.removals {
+            batch::checkpoint(cx, "lexical")?;
             lexical
                 .delete_document(cx, id)
                 .await
                 .map_err(|error| tier_error(format!("lexical delete failed: {error}")))?;
         }
         for document in &delta.upserts {
+            batch::checkpoint(cx, "lexical")?;
             lexical
                 .index_document(cx, document)
                 .await
                 .map_err(|error| tier_error(format!("lexical upsert failed: {error}")))?;
         }
+        batch::checkpoint(cx, "lexical")?;
         lexical
             .commit(cx)
             .await
             .map_err(|error| tier_error(format!("lexical commit failed: {error}")))?;
+        batch::checkpoint(cx, "lexical")?;
     }
     Ok(())
 }
