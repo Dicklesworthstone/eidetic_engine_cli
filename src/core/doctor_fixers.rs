@@ -556,7 +556,10 @@ pub fn fix_finding_for_check(
     }
     if store_unreadable
         && (check_name == "search_index"
-            || matches!(error_code, Some("EE-E300" | "EE-E301" | "EE-E700")))
+            || matches!(
+                error_code,
+                Some("EE-E300" | "EE-E301" | "EE-E700" | "EE-E205")
+            ))
     {
         return None;
     }
@@ -579,6 +582,31 @@ pub fn fix_finding_for_check(
         // it silently. Whoever adds a shard fixer removes this guard.
         Some("EE-E700") if check_name != "shard_fanout" => Some("schema_migration_pending"),
         Some("EE-E507") => Some("cass_integration_drift"),
+        // bd-223vl: EE-E205 is WAL_EXCEEDS_DATABASE, emitted by the
+        // `wal_pressure` check at src/core/doctor.rs:3591, and
+        // `fix_wal_checkpoint_pending` was written for exactly it -- same
+        // "warning" severity, the same `--mode truncate` checkpoint the error
+        // code carries as its own `default_repair`, and a `path` of
+        // `.ee/ee.db-wal`, the artifact the check measures. The detector and
+        // its repair were both finished and simply never joined, so
+        // `ee doctor --fix` reported Manual and withheld a repair the error
+        // code already names.
+        //
+        // The op is ADVISORY (`Op::RunWalCheckpoint` is in `is_advisory`), so
+        // this dispatches AutoGuidance, not AutoRepair: nothing is mutated,
+        // there is no undo to contract, and `unresolved_core_checks` keeps
+        // listing the check -- now with a finding and steps instead of
+        // nothing. That matches the check's own doc ("Advisory: retrieval
+        // still returns correct results, it just pays for the replay").
+        //
+        // Guarded above on `store_unreadable` as well. `check_wal_pressure`
+        // already refuses to inspect a damaged store and returns `ok` there,
+        // so that arm is belt-and-braces for a divergence between its own
+        // `database_unreadable` probe and the aggregate posture -- offering a
+        // checkpoint for a store another check calls unreadable would be the
+        // bd-tgz18 failure again: authoritative-looking guidance for a problem
+        // it does not address.
+        Some("EE-E205") => Some("wal_checkpoint_pending"),
         _ if check_name == "search_index" => Some("search_index_stale"),
         _ => None,
     }
@@ -601,6 +629,11 @@ pub fn fix_dispatch_for_finding(workspace_root: &Path, finding: &str) -> Option<
             Some(fix_schema_migration_pending(workspace_root, "V_LATEST"))
         }
         "cass_integration_drift" => Some(fix_cass_integration_drift(workspace_root)),
+        // bd-223vl. Takes only `workspace_root`, which is why this one of the
+        // nine unwired fixers fits the table as it stands; the others need
+        // check-derived arguments (a row count, a summary, a label, a path)
+        // that this signature cannot carry.
+        "wal_checkpoint_pending" => Some(fix_wal_checkpoint_pending(workspace_root)),
         _ => None,
     }
 }
@@ -930,6 +963,68 @@ mod tests {
             fix_mode_for_check(Some("EE-E102"), "shard_fanout", false),
             (FixMode::Manual, None)
         );
+    }
+
+    /// bd-223vl: the `wal_pressure` check and `fix_wal_checkpoint_pending` were
+    /// both finished and never joined, so `ee doctor --fix` reported Manual for
+    /// a WAL-bloated store and withheld a repair that
+    /// `WAL_EXCEEDS_DATABASE.default_repair` already names.
+    ///
+    /// This test IS the regression guard for that wiring: before the two match
+    /// arms it covers, the first assertion returned `(Manual, None)`.
+    #[test]
+    fn wal_pressure_dispatches_the_checkpoint_fixer_written_for_it() {
+        use crate::models::error_codes::WAL_EXCEEDS_DATABASE;
+
+        // POSITIVE. AutoGuidance and not AutoRepair, because RunWalCheckpoint
+        // is advisory -- nothing is mutated and there is no undo to contract.
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E205"), "wal_pressure", false),
+            (FixMode::AutoGuidance, Some("wal_checkpoint_pending"))
+        );
+
+        // CONTROL sharing the mechanism: an unreadable store must get NO
+        // checkpoint guidance. `check_wal_pressure` already returns `ok` in
+        // that case, so this pins the belt-and-braces guard against a
+        // divergence between its own probe and the aggregate posture. Offering
+        // a checkpoint for a store another check calls unreadable is the
+        // bd-tgz18 failure: authoritative guidance for a problem it does not
+        // address.
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E205"), "wal_pressure", true),
+            (FixMode::Manual, None)
+        );
+
+        // ANTI-WEAKENING: the dispatch must stay advisory. If it ever becomes a
+        // real mutation, AutoRepair here would ship a fixer with no undo, so
+        // this is the assertion that forces that change to be deliberate.
+        let dispatch = fix_dispatch_for_finding(Path::new("/tmp/ws"), "wal_checkpoint_pending")
+            .expect("wal_checkpoint_pending must dispatch");
+        assert!(dispatch.op.is_advisory());
+        assert_eq!(dispatch.finding_code, "wal_checkpoint_pending");
+        assert_eq!(dispatch.severity, "warning");
+        assert_eq!(dispatch.path, Path::new("/tmp/ws").join(".ee/ee.db-wal"));
+
+        // The fixer's command must still agree with the code's advertised
+        // repair. Compared by CONTENT, not by spelling: the two differ in
+        // argument order and the fixer adds --json, so an equality assertion
+        // here would red on a harmless reordering and teach the next reader to
+        // delete it.
+        let advertised = WAL_EXCEEDS_DATABASE
+            .default_repair
+            .expect("EE-E205 must advertise a repair");
+        assert!(advertised.contains("wal-checkpoint"));
+        assert!(advertised.contains("--mode truncate"));
+        match &dispatch.op {
+            Op::RunWalCheckpoint { mode, steps } => {
+                assert_eq!(mode, "truncate");
+                assert!(
+                    steps.iter().any(|step| step.contains("wal-checkpoint")),
+                    "the checkpoint command must appear in the recorded steps: {steps:?}"
+                );
+            }
+            other => panic!("expected RunWalCheckpoint, got {other:?}"),
+        }
     }
 
     /// bd-rnqxs: `ee init` only when nothing shows the workspace ever held
