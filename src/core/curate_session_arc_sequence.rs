@@ -1080,12 +1080,8 @@ mod tests {
         ] {
             let failure = format!("cargo test {failed} failed.");
             let repair = format!("cargo test {repaired} passed.");
-            assert!(
-                mine(&[span("failure", 1, &failure), span("repair", 2, &repair)]).is_empty()
-            );
-            assert!(
-                mine(&[span("combined", 1, &format!("{failure}\n{repair}"))]).is_empty()
-            );
+            assert!(mine(&[span("failure", 1, &failure), span("repair", 2, &repair)]).is_empty());
+            assert!(mine(&[span("combined", 1, &format!("{failure}\n{repair}"))]).is_empty());
             let actual_repair = format!("cargo test {failed} passed.");
             assert_eq!(
                 mine(&[
@@ -1186,17 +1182,8 @@ mod tests {
         let failure = "cargo test src/api.rs(12,9): failed.";
         let wrong_repair = "cargo test src/ui.rs(16,2): passed.";
         let right_repair = "cargo test src/api.rs(16,2): passed.";
-        assert!(
-            mine(&[
-                span("failure", 1, failure),
-                span("wrong", 2, wrong_repair)
-            ])
-            .is_empty()
-        );
-        let rows = mine(&[
-            span("failure", 1, failure),
-            span("repair", 2, right_repair),
-        ]);
+        assert!(mine(&[span("failure", 1, failure), span("wrong", 2, wrong_repair)]).is_empty());
+        let rows = mine(&[span("failure", 1, failure), span("repair", 2, right_repair)]);
         assert_eq!(rows.len(), 2);
         assert_eq!(endpoints(&rows), [("failure", "repair")]);
         for row in rows {

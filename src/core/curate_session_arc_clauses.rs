@@ -325,7 +325,10 @@ mod tests {
             [quoted, REPAIR]
         );
         assert_eq!(split("ordinary ~~~ prose; next clause.").count(), 2);
-        assert_eq!(split("~~~text\nunclosed fence; still one record.").count(), 1);
+        assert_eq!(
+            split("~~~text\nunclosed fence; still one record.").count(),
+            1
+        );
     }
 
     #[test]
