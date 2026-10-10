@@ -36,10 +36,15 @@ use crate::db::{DbConnection, Result, StoredEvidenceSpan, StoredSession};
 #[path = "cass_error_recall_outcome.rs"]
 mod outcome;
 
+#[path = "cass_error_recall_compiler.rs"]
+mod compiler;
+
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v2";
+/// V3 adds typed Cargo JSONL/rustc JSON errors so unchanged older sessions can
+/// acquire the newly supported fingerprints on their next import derivation.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v3";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -1112,6 +1117,11 @@ fn stable_error_code(code: &str) -> bool {
 /// diagnostic that CASS import records. Public readers can reuse this before
 /// their free-text fallback, so imported errors and later logs share a key.
 pub(crate) fn structured_error_diagnostics(text: &str) -> Vec<CanonicalDiagnostic> {
+    match compiler::inspect(text) {
+        Ok(Some(output)) => return output.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     let Some(envelope) = structured_error_envelope(text) else {
         return Vec::new();
     };
@@ -1203,6 +1213,9 @@ fn rch_blocker_kind(codes: &[String]) -> Option<&'static str> {
 /// The native envelope itself can contradict an optimistic tool exit. Even a
 /// failure with no supported diagnostic code must never certify another fix.
 fn structured_error_reports_failure(text: &str) -> bool {
+    if let Ok(Some(output)) = compiler::inspect(text) {
+        return output.failed;
+    }
     #[derive(serde::Deserialize)]
     struct Status {
         schema: String,
@@ -1232,6 +1245,11 @@ fn structured_output_allows_completion(text: &str) -> bool {
         // Arrays may contain example diagnostics; they do not declare a
         // native command status. Still require complete JSON for proof.
         return serde_json::from_str::<Value>(text).is_ok();
+    }
+    match compiler::inspect(text) {
+        Ok(Some(output)) => return output.allows_completion,
+        Err(()) => return false,
+        Ok(None) => {}
     }
     #[derive(serde::Deserialize)]
     struct Schema {
