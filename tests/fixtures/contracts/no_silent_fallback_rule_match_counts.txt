@@ -48,7 +48,14 @@
 1	NSF-OUTPUT-SHADOW-INCUMBENT
 2	NSF-CLI-CERTIFICATE-ERROR
 0	NSF-MODELS-JSONL-BUILDERS
-3	NSF-CURATE-CERTIFICATE-BUILDER
+# bd-amhns 2026-10-11: CERTIFICATE-BUILDER declared 3 and owned 4. It is a
+# MustFix row, file-scoped, fragment `unwrap_or_default()`, so it had adopted
+# two later optional-field reads as if they were defects awaiting bd-sos5.4.
+# Corrected to the two builder sites its reason actually describes; the other
+# two are judged benign in their own right as the two rows below.
+2	NSF-CURATE-CERTIFICATE-BUILDER
+1	NSF-CURATE-REFLECTION-GAP-TEXT
+1	NSF-CURATE-LINK-PAYLOAD-FIELD
 1	NSF-MODELS-DECISION-BUILDER
 3	NSF-MODELS-MUTATION-JSON
 2	NSF-MODELS-PROGRESS-BUILDER
@@ -79,7 +86,13 @@
 1	NSF-CLI-QUERY-FILTERS
 2	NSF-CORE-BUDGET-SATURATION
 4	NSF-CORE-CAUSAL-OPTIONAL-FILTERS
-3	NSF-CORE-CONTEXT-TAGS
+# bd-amhns 2026-10-11: lowered 3 -> 2 to the measured value. The fragment
+# `tags_map.get` still occurs three times in the file, but only two of them
+# sit in a high-risk finding's window now. The third site is not orphaned --
+# the ratchet reports zero unclassified findings in this file -- so it is gone
+# rather than hiding. Lowering is the direction the gate itself prescribes
+# here: a stale count overstates the rule's reach.
+2	NSF-CORE-CONTEXT-TAGS
 1	NSF-CORE-CURATE-PROPOSED-CONTENT-TAGS
 1	NSF-CORE-CLAIMS-NO-EVIDENCE
 1	NSF-CORE-CLAIMS-NULL-EVIDENCE
@@ -140,16 +153,52 @@
 1	NSF-MODELS-QUERY-REDACTION-FILTERS
 1	NSF-DB-FEEDBACK-SIGNAL
 1	NSF-DB-LATEST-SCHEMA-EMPTY
-5	NSF-DB-PACK-LEDGER-NO-DEGRADATIONS
+# bd-amhns 2026-10-11: NSF-DB-PACK-LEDGER-NO-DEGRADATIONS was 5, owned 7, and
+# was FILE-scoped on a 36,000-line file with the fragment
+# `return Ok(Vec::new());`. It had silently become the justification for six
+# empty-Ok returns in unrelated functions, and would have adopted every future
+# one in the DB layer. Split into seven function-scoped rules, each owning its
+# own guard. The ledger is what caught this -- owned 7 against declared 5 --
+# so the both-directions check is load-bearing, not bookkeeping.
+# All seven are the same benign class: an ARGUMENT precondition (zero limit or
+# empty id/filter list) checked BEFORE any database access, so no query has run
+# and no error can be hidden.
+1	NSF-DB-PACK-LEDGER-NO-DEGRADATIONS
+1	NSF-DB-CORROBORATION-REVIEW-ZERO-LIMITS
+1	NSF-DB-ANCHOR-PATH-EMPTY-FILTER
+1	NSF-DB-ANCHOR-SYMBOL-EMPTY-FILTER
+1	NSF-DB-ERROR-REPAIR-TARGETS-ZERO-LIMIT
+1	NSF-DB-SIMHASH-CANDIDATES-ZERO-LIMIT
+1	NSF-DB-MEMORY-LINKS-EMPTY-IDS
 1	NSF-DB-PACK-LEDGER-DEGRADATION-ARRAY
 2	NSF-DB-PACK-LEDGER-DEGRADATION-SORT
 1	NSF-DB-PACK-LEDGER-DEGRADATION-MESSAGE-SORT
 1	NSF-GRAPH-PPR-NO-NEIGHBORS
 1	NSF-GRAPH-PACK-DNA-NO-PPR-SEEDS
-1	NSF-GRAPH-CAUSAL-CLOSURE-NO-SUCCESSORS
+# bd-amhns 2026-10-11: one peer refactor (543601123 + efcce6a12) produced SIX
+# symptoms across both halves of this gate -- 3 newly unclassified sites and 3
+# drifted rows. Fixed as one unit, because it is one cause.
+#   CLOSURE  1 -> 0. Its site is GONE: `closure.successors(..)` now occurs zero
+#            times. The failure-node check collapsed onto the line that
+#            NSF-CAUSAL-FAILURE-SUCCESSORS already owns, so repairing the
+#            fragment would have given one site two rules. Retired to zero
+#            rather than removed, so the reasoning stays readable.
+#   TERMINAL stays 1: the line became single-line and the binding was renamed,
+#            so the old multi-line fragment matched nothing. Key repaired, and
+#            function-scoped while I was there.
+#   BFS      stays 1 but was owning 3. It was FILE-scoped, and the refactor
+#            added an identical successors line to reachable_causal_subgraph;
+#            the node-attrs copy four lines above it also pulled that line into
+#            its window. Function scope removes the reach. The two absorbed
+#            sites are now justified on their own terms below, which is the
+#            point -- "widen the reason or split the rule", and splitting is
+#            right because they are a different operation.
+0	NSF-GRAPH-CAUSAL-CLOSURE-NO-SUCCESSORS
 1	NSF-GRAPH-CAUSAL-TERMINAL-NO-SUCCESSORS
 1	NSF-GRAPH-CAUSAL-NO-NODE-ATTRS
 1	NSF-GRAPH-CAUSAL-BFS-NO-SUCCESSORS
+3	NSF-GRAPH-CAUSAL-SCOPED-SUBGRAPH-COPY
+1	NSF-GRAPH-CAUSAL-SEED-WALK-SUCCESSORS
 1	NSF-OUTPUT-FIELD-SELECTOR-COMMAND
 1	NSF-PACK-COORDINATION-SCHEMA
 1	NSF-PACK-COORDINATION-ENTRIES
@@ -319,8 +368,24 @@
 1	NSF-JOURNAL-DEDUP-SIMILARITY
 1	NSF-RECALL-ANCHOR-DISPLAY
 1	NSF-RECALL-ANCHOR-PREFERENCE
-1	NSF-RECALL-TAGS-ABSENT
-1	NSF-RECALL-PROVENANCE-ABSENT
+# bd-amhns 2026-10-11, RETIREMENT BATCH (these two plus five more below).
+# Seven rules declared 1 and owned 0. None of them left an orphaned site: the
+# ratchet reports unclassified findings ONLY in the two graph/causal files, so
+# every remaining high-risk line in these files is owned by some rule. Their
+# sites are gone, which was verified per rule rather than assumed:
+#   RECALL-TAGS-ABSENT, RECALL-PROVENANCE-ABSENT -- src/core/recall.rs now
+#     holds 2 high-risk lines against 4 rules scoped to it; the other 2 rules
+#     own those 2 lines, so these two have nothing left to own.
+#   RETRIEVAL-AFFINITY-AS-OF-UNREACHABLE -- 0 high-risk lines remain inside
+#     materialize_retrieval_affinity_snapshot.
+#   RESUME-STALENESS-UNTAGGED -- 0 high-risk lines remain inside apply_staleness.
+#   CORE-MEMORY-GIT-COMMIT-REF, CORE-MEMORY-GIT-ROOT -- their functions no
+#     longer exist anywhere in src/; 86a612df5 removed them (0 added, 2 removed).
+#   CORE-MODEL-CONTENT-HASH-PREFIX -- fetch_bundled_embedding_model is gone too.
+# Retired to zero rather than deleted so the reasoning stays readable, matching
+# how NSF-GRAPH-CAUSAL-CLOSURE-NO-SUCCESSORS was handled in the same pass.
+0	NSF-RECALL-TAGS-ABSENT
+0	NSF-RECALL-PROVENANCE-ABSENT
 1	NSF-SEARCH-DEGRADED-REPAIR
 1	NSF-SEARCH-CALIBRATION-METADATA
 # NSF-SEARCH-CALIBRATION-HASH-COMMENT owned 1 and is RETIRED (bd-hz7nu): the
@@ -379,7 +444,7 @@
 1	NSF-CORE-HEALTH-DEBT-COUNTS-DECLARED-DEGRADED
 1	NSF-CORE-MEMORY-DRIFT-ROLLBACK-DETAIL
 1	NSF-CORE-ORIENT-UNTAGGED-MEMORY
-1	NSF-CORE-RETRIEVAL-AFFINITY-AS-OF-UNREACHABLE
+0	NSF-CORE-RETRIEVAL-AFFINITY-AS-OF-UNREACHABLE
 1	NSF-CORE-SESSION-BUDGET-MISSING-LEDGER
 1	NSF-CORE-TAG-BACKFILL-UNTAGGED-MEMORY
 1	NSF-CORE-UNSAFE-CLAIM-NO-CANDIDATES
@@ -433,7 +498,7 @@
 1	NSF-MESH-TEAM-INVITE-AUTH-FLOOR-ABSENT
 1	NSF-MESH-TEAM-JOIN-ATTEMPT-NONCE-BOOKKEEPING
 2	NSF-CORE-RESUME-SESSION-BOUNDS
-1	NSF-CORE-RESUME-STALENESS-UNTAGGED
+0	NSF-CORE-RESUME-STALENESS-UNTAGGED
 
 # bd-apvhh burn-down tranche 4: the 25 findings in the 7 no-rule files left
 # after tranche 3. This is the EASY REMAINDER by construction -- tranche 3 took
@@ -534,8 +599,8 @@
 # `audited_source_memory_ids_for_rule` out of a TRUNCATED console display. A
 # truncated field used as a key is the same class as piping an existence check
 # through `head`.
-1	NSF-CORE-MEMORY-GIT-COMMIT-REF
-1	NSF-CORE-MEMORY-GIT-ROOT
+0	NSF-CORE-MEMORY-GIT-COMMIT-REF
+0	NSF-CORE-MEMORY-GIT-ROOT
 1	NSF-CORE-MEMORY-GIT-SYMBOL
 1	NSF-CORE-MEMORY-GLOBAL-SCOPE-TAGS
 2	NSF-CORE-MEMORY-BATCH-NO-TYPED-FIELDS
@@ -593,7 +658,7 @@
 1	NSF-CORE-DOCTOR-ERROR-REPAIR-TEXT
 1	NSF-CORE-MODEL-DEGRADATION-REPAIR
 1	NSF-CORE-MODEL-INDEX-PROBE-METADATA
-1	NSF-CORE-MODEL-CONTENT-HASH-PREFIX
+0	NSF-CORE-MODEL-CONTENT-HASH-PREFIX
 1	NSF-CORE-SEARCH-ATTRIBUTION-SUFFIX
 1	NSF-CORE-SEARCH-PACK-SECTION-DEFAULT
 

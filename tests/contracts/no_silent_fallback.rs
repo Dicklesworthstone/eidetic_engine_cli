@@ -632,12 +632,43 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "ExportRecordBuildError",
         "JSONL export builders reject missing required IDs, timestamps, content, and schema fields with ExportRecordBuildError.",
     ),
+    // ----------------------------------------------------------------------
+    // bd-amhns 2026-10-11. The must_fix rule below is FILE-scoped on
+    // src/curate/mod.rs with the broadest fragment there is, bare
+    // `unwrap_or_default()`, and it had grown from 3 findings to 4. Its reason
+    // describes certificate BUILDERS defaulting machine-facing ids and
+    // timestamps, which is true of exactly two sites in `build`. The other two
+    // are ordinary optional-field reads added later by 5e7d4837b and
+    // ad7b0f686, and because this is a MustFix row they were being reported as
+    // known defects awaiting bd-sos5.4 -- overstating that bead's scope with
+    // code nobody had judged.
+    //
+    // These two allowed_in entries are placed BEFORE it deliberately:
+    // classify_finding is first-match-wins, so they claim their own sites and
+    // leave the must_fix owning only the two builder defects it names.
+    // must_fix has no function-scoped form, which is why ordering rather than
+    // scoping is the lever here.
+    // ----------------------------------------------------------------------
+    allowed_in(
+        "NSF-CURATE-REFLECTION-GAP-TEXT",
+        "src/curate/mod.rs",
+        "validate_reflection_gap_kind_fields",
+        ".or_else(|| object.get(\"question\"))",
+        "An optional `topic`, falling back to an optional `question`, read off a JSON gap item. Absence is an expected input shape, not a failure, and the empty string is this function's uniform answer for it -- the sibling `else` branch four lines below produces the same `String::new()` explicitly for an item that is neither a string nor an object. The value then only decides whether a specific gap was seen; nothing downstream treats the empty string as a real topic.",
+    ),
+    allowed_in(
+        "NSF-CURATE-LINK-PAYLOAD-FIELD",
+        "src/curate/mod.rs",
+        "is_structured_link_payload",
+        "let (memory_a, memory_b) = (field(\"memoryA\"), field(\"memoryB\"));",
+        "A predicate, and the empty string is TESTED rather than trusted: the very next lines check `!memory_a.is_empty()`, so a missing field makes the payload fail the shape check. The parse failure is handled separately and explicitly above -- `let Ok(serde_json::Value::Object(payload)) = .. else { return false; }` -- so malformed JSON and a well-formed payload missing a field both return false by different routes. This is the shape the contract asks for, not an exception to it.",
+    ),
     must_fix(
         "NSF-CURATE-CERTIFICATE-BUILDER",
         "src/curate/mod.rs",
         "unwrap_or_default()",
         "bd-sos5.4",
-        "Curation risk certificate builders default machine-facing IDs/timestamps to empty values.",
+        "Curation risk certificate builders default machine-facing IDs/timestamps to empty values. Count corrected 3 -> 2 by bd-amhns: it reads `target_memory_id` and `generated_at` in `build`, and only those two. The two sites it had additionally absorbed are judged on their own terms immediately above; they are not part of bd-sos5.4.",
     ),
     must_fix(
         "NSF-MODELS-DECISION-BUILDER",
@@ -1206,11 +1237,74 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "MIGRATIONS\n.last()",
         "A build with no compiled migrations would report schema version zero rather than hiding a database operation failure.",
     ),
-    allowed(
+    // ----------------------------------------------------------------------
+    // bd-amhns 2026-10-11: this was ONE file-scoped rule whose fragment is
+    // `return Ok(Vec::new());` and whose reason speaks only about the pack
+    // ledger. In a 36,000-line file that fragment reached SEVEN sites in seven
+    // unrelated functions -- corroboration review, two anchor-index lookups,
+    // error-repair targets, simhash candidates, and memory links -- so six
+    // empty-Ok returns nobody had reviewed were being justified by a sentence
+    // about degraded pack JSON, and any FUTURE empty-Ok return anywhere in the
+    // DB layer would have inherited that justification automatically.
+    //
+    // The match-count ledger is what caught it (owned 7, declared 5), which is
+    // the ledger working as designed rather than a surprise. Even so, splitting
+    // into function-scoped rules is the better shape: each blast radius is now
+    // something a reviewer can see, per this file's own guidance on allowed_in.
+    //
+    // All seven are the SAME class and all are benign for the same structural
+    // reason: each is an ARGUMENT PRECONDITION checked before any database
+    // access, so there is no query, no error, and nothing to mask. They are
+    // kept as seven entries rather than one because the reach is the hazard.
+    // ----------------------------------------------------------------------
+    allowed_in(
         "NSF-DB-PACK-LEDGER-NO-DEGRADATIONS",
         "src/db/mod.rs",
+        "pack_ledger_degradations",
         "return Ok(Vec::new());",
-        "A pack ledger with no degraded JSON has an explicit empty degradation list.",
+        "A pack ledger with no degraded JSON has an explicit empty degradation list. Scope narrowed from the whole file to this function by bd-amhns; the reason was always about this function alone.",
+    ),
+    allowed_in(
+        "NSF-DB-CORROBORATION-REVIEW-ZERO-LIMITS",
+        "src/db/mod.rs",
+        "review_corroboration_sessions",
+        "return Ok(Vec::new());",
+        "Zero is an explicit request for nothing: the guard fires when sessions, spans_per_session, or total_bytes is 0, before any row is screened. Checked on caller-supplied limits, so no read has happened and no failure can hide here.",
+    ),
+    allowed_in(
+        "NSF-DB-ANCHOR-PATH-EMPTY-FILTER",
+        "src/db/mod.rs",
+        "query_anchor_index_path_candidates",
+        "return Ok(Vec::new());",
+        "An explicitly supplied EMPTY path filter matches nothing, and that is distinct from supplying no filter at all -- the guard sits inside `if let Some(paths)`, so `None` means \"no path restriction\" and takes the unrestricted branch while `Some([])` means \"restrict to none of them\". Collapsing those two would be the bug; keeping them apart is why this returns empty rather than everything. No query has run at this point.",
+    ),
+    allowed_in(
+        "NSF-DB-ANCHOR-SYMBOL-EMPTY-FILTER",
+        "src/db/mod.rs",
+        "query_anchor_index_symbol_candidates",
+        "return Ok(Vec::new());",
+        "An empty symbol list is an empty SQL IN-list, which matches nothing by definition. Guarded before the placeholder list is built, so this also prevents emitting `IN ()`, which is a syntax error rather than a silent fallback.",
+    ),
+    allowed_in(
+        "NSF-DB-ERROR-REPAIR-TARGETS-ZERO-LIMIT",
+        "src/db/mod.rs",
+        "list_helpful_error_repair_target_ids",
+        "return Ok(Vec::new());",
+        "limit == 0 is a request for no rows, answered before the query. The function's doc comment above it is about preserving malformed target bytes exactly, a separate concern that this guard does not touch.",
+    ),
+    allowed_in(
+        "NSF-DB-SIMHASH-CANDIDATES-ZERO-LIMIT",
+        "src/db/mod.rs",
+        "list_memory_simhash_candidates",
+        "return Ok(Vec::new());",
+        "limit == 0 is a request for no candidates, answered before any Hamming-radius scan. The radius itself is NOT short-circuited here -- a zero radius still runs the query and can legitimately match exact duplicates -- so this guard cannot swallow a real radius search.",
+    ),
+    allowed_in(
+        "NSF-DB-MEMORY-LINKS-EMPTY-IDS",
+        "src/db/mod.rs",
+        "list_memory_links_for_memories",
+        "return Ok(Vec::new());",
+        "No memory ids means no incident links, as an empty IN-list. Same structural reason as the anchor-index guards: checked on the argument before the query is built, so it also avoids emitting `IN ()`.",
     ),
     allowed(
         "NSF-DB-PACK-LEDGER-DEGRADATION-ARRAY",
@@ -1246,25 +1340,54 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-GRAPH-CAUSAL-CLOSURE-NO-SUCCESSORS",
         "src/graph/causal.rs",
         "closure\n.successors(failure_id)\n.unwrap_or_default()",
-        "A failure node with no transitive causal successors intentionally has an empty ancestor list.",
+        "RETIRED TO ZERO 2026-10-11, not deleted, so the reasoning stays on the record. The site this rule was written for no longer exists: `closure.successors(..)` occurs ZERO times in this file after 543601123 scoped causal analysis to the reachable subgraph, and the only remaining `closure` mentions are a comment and a test. The surviving failure-node check collapsed onto `graph.successors(failure_id)` at causal_degradations, which NSF-CAUSAL-FAILURE-SUCCESSORS already owns with the same argument -- so repairing this fragment would create two rules for one site. Original reason, still true of that site: a failure node with no transitive causal successors intentionally has an empty ancestor list.",
     ),
-    allowed(
+    allowed_in(
         "NSF-GRAPH-CAUSAL-TERMINAL-NO-SUCCESSORS",
         "src/graph/causal.rs",
-        "graph\n.successors(&ancestor.memory_id)\n.unwrap_or_default()",
-        "A reachable ancestor with no outgoing causal successors is intentionally treated as terminal.",
+        // Key repair 2026-10-11 (bd-amhns). 543601123 collapsed the three-line
+        // builder into one line and renamed the binding, so the old multi-line
+        // fragment `graph\n.successors(&ancestor.memory_id)\n..` matches
+        // nothing. Scoped to the function as well, because file scope is what
+        // let the sibling BFS rule absorb unrelated sites below.
+        "terminal_ancestors",
+        ".filter(|ancestor| graph.successors(ancestor).unwrap_or_default().is_empty())",
+        "A reachable ancestor with no outgoing causal successors is intentionally treated as terminal. The empty successor list is READ here, not returned: it is the predicate's own definition of terminal, so an absent adjacency entry and a genuinely childless node are the same fact for this filter.",
     ),
     allowed(
         "NSF-GRAPH-CAUSAL-NO-NODE-ATTRS",
         "src/graph/causal.rs",
         "graph.node_attrs(node).cloned().unwrap_or_default()",
-        "Causal flow projection permits nodes without optional attributes while adding required demand metadata explicitly.",
+        "Causal flow projection permits nodes without optional attributes while adding required demand metadata explicitly. Left file-scoped and unchanged by bd-amhns: the `(node)` spelling in the fragment pins it to build_unit_flow_graph, and the two sibling sites in reachable_causal_subgraph spell it `(source)` and `(successor)`, so this rule cannot reach them.",
     ),
-    allowed(
+    allowed_in(
         "NSF-GRAPH-CAUSAL-BFS-NO-SUCCESSORS",
         "src/graph/causal.rs",
+        // bd-amhns: this rule was FILE-scoped and owned 3 findings against a
+        // declared 1, because 543601123 added an identical
+        // `graph.successors(&current).unwrap_or_default()` line to
+        // reachable_causal_subgraph and the +/-4 window around the node-attrs
+        // copy above it reaches that line too. Measured both before deciding.
+        // Adding the function scope is the fix: the absorbed sites belong to a
+        // different operation and are justified separately below, rather than
+        // being swept under a reason written about shortest-path traversal.
+        "shortest_path_lengths",
         "graph.successors(&current).unwrap_or_default()",
         "Causal shortest-path traversal uses an empty successor list as the explicit leaf-node case.",
+    ),
+    allowed_in(
+        "NSF-GRAPH-CAUSAL-SCOPED-SUBGRAPH-COPY",
+        "src/graph/causal.rs",
+        "reachable_causal_subgraph",
+        "graph.node_attrs(",
+        "Three sites, multiplicity 3, added by bd-amhns for the reachable-subgraph copy introduced in 543601123: the source node's attrs, the successor walk, and each successor's attrs. All three COPY what the source graph holds, so an absent entry means the graph genuinely has no attributes for that node or no outgoing edges from it -- there is no read to fail. Node existence is not assumed either: `if !graph.has_node(source)` returns the empty scoped graph before any of this. One fragment carries all three because the two node_attrs lines straddle the successor line, so each site's window contains one of them; no single LINE is inside all three windows, which is why the fragment names the call and not a statement.",
+    ),
+    allowed_in(
+        "NSF-GRAPH-CAUSAL-SEED-WALK-SUCCESSORS",
+        "src/graph/causal_seed_walk.rs",
+        "nearest_ancestors",
+        "walk(source, limit, |id| graph.successors(id).unwrap_or_default())",
+        "New file, added by efcce6a12 for bounded nearest-ancestor pre-warming; classified by bd-amhns. The empty successor list is the traversal's leaf case, identical in kind to NSF-GRAPH-CAUSAL-BFS-NO-SUCCESSORS, and it is supplied as a CLOSURE to walk rather than returned, so an absent adjacency entry simply ends that branch. The two cases that are NOT this one are refused explicitly on the line above: `if limit == 0 || !graph.has_node(source) { return Vec::new(); }`, so an unknown source node and a zero budget are separated from a known node with no parents. The sibling site at :177 is inside the `#[cfg(test)]` module opened at :72 and is correctly out of this gate's scope.",
     ),
     allowed(
         "NSF-OUTPUT-FIELD-SELECTOR-COMMAND",
