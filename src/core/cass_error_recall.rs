@@ -39,6 +39,9 @@ mod outcome;
 #[path = "cass_error_recall_compiler.rs"]
 mod compiler;
 
+#[path = "cass_error_recall_test_coverage.rs"]
+mod test_coverage;
+
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
@@ -194,6 +197,7 @@ struct PendingFailure {
     family: CommandFamily,
     symptom: Option<String>,
     diagnostics: Vec<CanonicalDiagnostic>,
+    test_requirement: test_coverage::Requirement,
 }
 
 impl PendingFailure {
@@ -220,12 +224,14 @@ struct InFlightInvocation {
     process_id: Option<i32>,
     output: ToolOutput,
     failure_recorded: bool,
+    output_truncated: bool,
 }
 
 impl InFlightInvocation {
     fn append(&mut self, chunk: ToolOutput) {
         let overflow =
             self.output.text.len().saturating_add(chunk.text.len()) > MAX_SCANNED_OUTPUT_BYTES;
+        self.output_truncated |= overflow;
         let veto = self.output.failed() || chunk.failed() || overflow;
         let mut end = chunk
             .text
@@ -247,6 +253,7 @@ struct InvocationObservation {
     call_index: usize,
     output: ToolOutput,
     new_failure: bool,
+    /// The process finished and its entire output fit the derivation buffer.
     complete: bool,
 }
 
@@ -302,6 +309,7 @@ impl InvocationLedger {
                             process_id: None,
                             output: ToolOutput::default(),
                             failure_recorded: false,
+                            output_truncated: false,
                         },
                     );
                 }
@@ -404,7 +412,7 @@ impl InvocationLedger {
             call_index: call.call_index,
             output: call.output.clone(),
             new_failure: !call.failure_recorded,
-            complete: running.is_none(),
+            complete: running.is_none() && !call.output_truncated,
         };
         call.failure_recorded |= !failure_diagnostics(&call.output).is_empty();
         if let Some(process_id) = running {
@@ -530,6 +538,19 @@ pub(crate) fn session_failure_arcs(
             ) else {
                 continue;
             };
+            // A running failure can reveal more failed tests on later polls.
+            // Refresh coverage even after its first diagnostics were recorded;
+            // the final output, not the four-diagnostic cap, defines the proof.
+            for failure in pending.iter_mut().filter(|failure| {
+                failure.attempt_id == spans[observed.call_index].id
+            }) {
+                failure.test_requirement.refresh(&observed.output, observed.complete);
+                if failure.test_requirement.is_guarded() {
+                    // Do not credit a retry launched before the failed test
+                    // invocation's final observation, or narration before it.
+                    failure.index = index;
+                }
+            }
             let diagnostics = if observed.new_failure {
                 failure_diagnostics(&observed.output)
             } else {
@@ -544,6 +565,7 @@ pub(crate) fn session_failure_arcs(
                         observed.call_index,
                         index,
                         span,
+                        &observed.output,
                         spans,
                         workspace_id,
                         session,
@@ -561,6 +583,10 @@ pub(crate) fn session_failure_arcs(
                 symptom: symptom_line(&observed.output),
                 family: observed.family,
                 diagnostics,
+                test_requirement: test_coverage::Requirement::capture(
+                    &observed.output,
+                    observed.complete,
+                ),
             });
         }
     }
@@ -577,13 +603,21 @@ fn resolve_pending(
     success_call_index: usize,
     success_index: usize,
     success: &StoredEvidenceSpan,
+    success_output: &ToolOutput,
     spans: &[StoredEvidenceSpan],
     workspace_id: &str,
     session: &StoredSession,
 ) {
+    let test_proof = if pending.iter().any(|failure| failure.test_requirement.is_guarded()) {
+        test_coverage::Proof::capture(success_output)
+    } else {
+        test_coverage::Proof::default()
+    };
     let mut still_pending = Vec::with_capacity(pending.len());
     for failure in pending.drain(..) {
-        if !family.verifies(&failure.family) {
+        if !family.verifies(&failure.family)
+            || !failure.test_requirement.is_verified_by(&test_proof)
+        {
             still_pending.push(failure);
             continue;
         }
