@@ -8,18 +8,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build Commands
 
+**Cargo does not run locally in this repo.**
+`scripts/check-local-cargo-tripwire.sh` forbids the subcommands `build`,
+`check`, `test`, `bench`, `clippy`, `doc`, `run`, `install`, `rustc` and `fix`.
+`fmt` is the one exception, so it is also the only local syntax check you have.
+
 ```bash
-cargo check --all-targets           # Fast type check
-cargo clippy --all-targets -- -D warnings  # Lint (warnings = errors)
-cargo fmt --check                   # Format check
-cargo test --workspace --all-targets  # Run all tests
-./scripts/verify.sh                 # Full verification (forbidden deps, tests, E2E)
+cargo fmt --check                   # The ONLY cargo subcommand allowed locally
+./scripts/verify.sh                 # Full verification; dispatches its own cargo stages
 ```
 
-For a single test:
+Everything else is dispatched to the pinned RCH lane:
+
 ```bash
-cargo test test_name -- --exact
+RCH="scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --"
+
+$RCH cargo check --all-targets                 # Type check
+$RCH cargo clippy --all-targets -- -D warnings # Lint (warnings = errors)
+$RCH cargo test --workspace --all-targets      # Run all tests
+$RCH cargo test test_name -- --exact           # A single test
 ```
+
+Budget the wait: a cold worker compiles this tree in roughly 2.5 hours, and a
+worker is only warm if it already holds a target dir for the same profile.
 
 ## Architecture
 
@@ -83,4 +94,7 @@ The closure-lint script requires these for implements-surface beads.
 - Property tests: `proptest` in `tests/property_*.rs`
 - Forbidden deps: `tests/forbidden_deps.rs`
 
-Run `./scripts/verify.sh` before pushing — it gates all CI checks.
+Run `./scripts/verify.sh` before pushing. It is the broadest check available
+here, but nothing enforces it and it is **not** congruent with the hosted CI
+gates — several of those are disabled, so a green run is necessary, not
+sufficient. It does gate rustfmt (Rustfmt Conformance, added in `453291c25`).
