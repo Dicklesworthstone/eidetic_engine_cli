@@ -126,15 +126,18 @@ fn matching_failure(
     let subjects: Vec<_> = eligible.iter().map(|(key, _)| *key).collect();
     let anchored = subjects.iter().any(|key| !resources.is_disjoint(&key.1));
     if !anchored && message.to_ascii_lowercase().contains("fix:") {
-        // Explicit ordering may bridge a change in a different subsystem only
-        // when the repair does not name an existing failure's concrete subject.
-        // In particular, an ambiguous anchor cannot fall back to recency.
+        // Markers may bridge subsystem wording, not contradictory concrete
+        // subjects. An ambiguous anchor must still abstain rather than fall
+        // back to recency.
         if let Some((key, _)) = pending
             .iter()
             .filter(|(_, failure)| failure.explicitly_marked && precedes(failure.source, repair))
             .max_by(|(_, left), (_, right)| session_arc_span_order(left.source, right.source))
         {
-            return Some(key.clone());
+            // No eligible failure shares a resource in this branch. Reject a
+            // contradictory latest marker before topic/pronoun fallback; do
+            // not skip it to an older failure with an unspecified subject.
+            return (resources.is_empty() || key.1.is_empty()).then(|| key.clone());
         }
     }
     if let Some(key) = matching_subject(&subjects, topic, resources) {
@@ -1190,6 +1193,155 @@ mod tests {
             let arc = row.session_arc.unwrap();
             assert_eq!(arc.failure_span.excerpt, failure);
             assert_eq!(arc.resolution_span.excerpt, right_repair);
+        }
+    }
+
+    fn marked_span(id: &str, line: u32, body: &str, structured: bool) -> StoredEvidenceSpan {
+        let excerpt = if structured {
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": body}]
+                },
+                // A coincidentally matching metadata path is not a subject.
+                "metadata": {"file": "src/api.rs"}
+            })
+            .to_string()
+        } else {
+            body.to_owned()
+        };
+        span(id, line, &excerpt)
+    }
+
+    #[test]
+    fn session_arc_explicit_markers_cannot_bridge_disjoint_sources() {
+        for (failed, repaired) in [
+            ("src/api.rs", "src/ui.rs"),
+            ("src/Api.rs", "src/api.rs"),
+            ("src/api.rs", "api.rs"),
+            ("Store::open()", "OtherStore::open()"),
+            ("src/api.rs:12:9", "src/ui.rs:14:2"),
+            (r"C:\one\api.rs(12,9):", r"C:\two\api.rs(14,2):"),
+        ] {
+            let failure = format!("Failure arc: cargo test {failed} failed.");
+            let repair =
+                format!("Fix: cargo test {repaired} passed after restoring the guard.");
+            assert!(failure_signal(&failure));
+            assert!(resolution_signal(&repair));
+            let left = resource_keys(&failure);
+            let right = resource_keys(&repair);
+            assert!(!left.is_empty() && !right.is_empty());
+            assert!(left.is_disjoint(&right));
+            for structured in [false, true] {
+                let sources = [
+                    marked_span("failure", 10, &failure, structured),
+                    marked_span("wrong", 11, &repair, structured),
+                ];
+                let before = sources.clone();
+                assert!(mine(&sources).is_empty(), "{failure} / {repair}");
+                assert_eq!(sources, before);
+                assert!(mine(&[sources[1].clone(), sources[0].clone()]).is_empty());
+                let combined = marked_span(
+                    "combined",
+                    10,
+                    &format!("{failure}\n{repair}"),
+                    structured,
+                );
+                assert!(mine(&[combined]).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn session_arc_rejected_marked_repair_keeps_exact_later_pair() {
+        let failure = "Failure arc: cargo test src/api.rs failed.";
+        let wrong = "Fix: cargo test src/ui.rs passed after restoring the guard.";
+        let right = "Fix: cargo test src/api.rs passed after restoring the guard.";
+        for structured in [false, true] {
+            let sources = [
+                marked_span("failure", 10, failure, structured),
+                marked_span("wrong", 11, wrong, structured),
+                marked_span("right", 12, right, structured),
+            ];
+            let before = sources.clone();
+            assert!(mine(&sources[..2]).is_empty());
+            let rows = mine(&sources);
+            assert_eq!(rows.len(), 2);
+            assert_eq!(endpoints(&rows), [("failure", "right")]);
+            assert_eq!(sources, before);
+            let mut reversed = sources.clone();
+            reversed.reverse();
+            assert_eq!(mine(&reversed), rows);
+            let exact_pair = [sources[0].clone(), sources[2].clone()];
+            assert_eq!(mine(&exact_pair), rows);
+            for row in &rows {
+                assert!(!row.source_ids.contains(&sources[1].id));
+                let arc = row.session_arc.as_ref().unwrap();
+                assert_eq!(arc.failure_span.excerpt, failure);
+                assert_eq!(arc.resolution_span.excerpt, right);
+                assert_eq!(arc.failure_span.content_hash, sources[0].content_hash);
+                assert_eq!(arc.resolution_span.content_hash, sources[2].content_hash);
+            }
+        }
+    }
+
+    #[test]
+    fn session_arc_contradictory_marker_cannot_choose_older_unanchored_failure() {
+        let older = "Failure arc: cargo test failed.";
+        let current = "Failure arc: cargo test src/api.rs failed.";
+        let wrong = "Fix: cargo test src/ui.rs passed after restoring the guard.";
+        let right = "Fix: cargo test src/api.rs passed after restoring the guard.";
+        for structured in [false, true] {
+            let mut sources = vec![
+                marked_span("older", 1, older, structured),
+                marked_span("current", 2, current, structured),
+                marked_span("wrong", 3, wrong, structured),
+            ];
+            assert!(mine(&sources).is_empty());
+            sources.push(marked_span("right", 4, right, structured));
+            let rows = mine(&sources);
+            assert_eq!(rows.len(), 2);
+            assert_eq!(endpoints(&rows), [("current", "right")]);
+            for row in rows {
+                assert!(!row.source_ids.contains(&sources[0].id));
+                assert!(!row.source_ids.contains(&sources[2].id));
+            }
+        }
+    }
+
+    #[test]
+    fn session_arc_markers_preserve_valid_partial_and_matching_subjects() {
+        for (failure, repair) in [
+            (
+                "Failure arc: cargo test src/api.rs:12:9 failed.",
+                "Fix: cargo test src/api.rs:14:2 passed after restoring the guard.",
+            ),
+            (
+                "Failure arc: cargo test src/api.rs failed.",
+                "Fix: cargo test passed after restoring the guard.",
+            ),
+            (
+                "Failure arc: cargo test failed.",
+                "Fix: cargo test src/api.rs passed after restoring the guard.",
+            ),
+        ] {
+            for structured in [false, true] {
+                let sources = [
+                    marked_span("failure", 1, failure, structured),
+                    marked_span("repair", 2, repair, structured),
+                ];
+                let rows = mine(&sources);
+                assert_eq!(rows.len(), 2, "{failure} / {repair}");
+                assert_eq!(endpoints(&rows), [("failure", "repair")]);
+                for row in rows {
+                    let arc = row.session_arc.unwrap();
+                    assert_eq!(arc.failure_span.content_hash, sources[0].content_hash);
+                    assert_eq!(arc.resolution_span.content_hash, sources[1].content_hash);
+                    assert_eq!(arc.failure_span.excerpt, failure);
+                    assert_eq!(arc.resolution_span.excerpt, repair);
+                }
+            }
         }
     }
 }
