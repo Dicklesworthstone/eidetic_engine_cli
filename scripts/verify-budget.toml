@@ -99,7 +99,24 @@
 # tests/verification_drift_guard.rs, so introducing one is a deliberate,
 # reviewable act rather than a default anybody can drift into — and removing one
 # is equally deliberate, because the count has to move in the same commit.
-total_expected_seconds = 601
+# 601 -> 608 on 2026-10-11 (bd-g3obb). The added 7s is the MEASURED cost of the
+# new "Rustfmt Conformance" stage -- 7.17s, 7.32s, 7.06s on three consecutive
+# local runs -- and nothing else moved.
+#
+# This raises the ceiling rather than retuning another stage's p50, which is the
+# distinction the guard in tests/verification_drift_guard.rs cares about: its
+# failure text says "reduce a real stage cost -- do not retune a p50 to fit,
+# because that turns this file into fiction". Retuning would hide a cost;
+# raising the ceiling records one. The 601 itself was "600 plus the one stage
+# added since", so this follows the pattern already established here.
+#
+# THE TRADE, stated so it is reviewable: verify.sh now costs 10m08s instead of
+# 10m01s against a 10-minute readiness target. The 7s buys the only gate in the
+# tree for a class that produced a red every working day it went unchecked --
+# `cargo fmt --check` drifted 3 -> 10 -> 56 -> 74 diffs in a single day while
+# gated solely in a disabled CI workflow. A cheaper placement does not exist:
+# this is the least expensive check in the set.
+total_expected_seconds = 608
 total_regression_factor = 1.5
 
 # CANDIDATE BINARY (bd-reality-core-convergence-1azkt.5, bullet 1). The manifest
@@ -244,6 +261,20 @@ regression_factor = 1.5
 [[stage]]
 name = "Plan Doc Smoke (bd-3usjw.23)"
 expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+# bd-g3obb. MEASURED, not estimated: three consecutive local runs on this
+# checkout took 7.17s, 7.32s and 7.06s, so p50 = 7. `cargo fmt` does no
+# compilation, which is why this is a real number from this host rather than a
+# borrowed one -- the p50 PROVENANCE note above applies only to cargo-invoking
+# stages that must run remotely.
+#
+# Declared with a measured p50 rather than expected_seconds_p50_unmeasured, so
+# it does not consume the UNMEASURED_STAGE_ALLOWANCE ratchet in
+# tests/verification_drift_guard.rs, which only moves down.
+name = "Rustfmt Conformance (bd-g3obb)"
+expected_seconds_p50 = 7
 regression_factor = 1.5
 
 [[stage]]

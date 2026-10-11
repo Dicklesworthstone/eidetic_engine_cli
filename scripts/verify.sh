@@ -1740,6 +1740,27 @@ else
     record_gated_off "Plan Doc Smoke (bd-3usjw.23)" "--plan-doc-smoke not set"
 fi
 
+# Gate 0.835: rustfmt conformance (bd-g3obb). ~7s, no compilation.
+#
+# This was gated ONLY in .github/workflows/ci.yml:309, and hosted Actions are
+# disabled at the repo switch, so it had run zero times. The drift that bought:
+# `cargo fmt --check` went from 3 diffs to 10 to 56 to 74 over a single working
+# day, across cass, error-recall, index-delta and staging files -- not one
+# lane's habit, everyone's, because nothing in the push path said no. Two
+# separate commits that day declared "rustfmt, Clippy and crate tests remain
+# unrun in this environment": the authors were candid and the tree had nowhere
+# for the disclosure to land.
+#
+# `cargo fmt` is NOT a compile command and does not trip
+# scripts/check-local-cargo-tripwire.sh, whose forbidden list is
+# "build check test bench clippy doc run install rustc fix". So this needs no
+# RCH wrapper and stays cheap enough to run before anything expensive.
+#
+# Deliberately placed before the compile-bearing gates: it is the cheapest
+# check in the set and the one most likely to be stale, so failing here costs
+# seconds instead of a remote build.
+run_stage "Rustfmt Conformance (bd-g3obb)" "cargo fmt -- --check"
+
 # Gate 0.84: e2e invocation audit (bd-smxdr follow-on). No-Cargo. Asserts no
 # scripts/e2e_*.sh is invoked by nothing. Six pieces of test machinery were
 # found this session that existed and ran nowhere; the Rust side already had
