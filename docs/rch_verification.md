@@ -108,7 +108,7 @@ pass alone, so the retry always exonerates them:
    fleet is precisely the evidence a load-induced failure does not leave.
 
 **Worked example.** `walking_skeleton_acceptance_gate` was red with exit 130 on
-both hosts. After repairing its diagnostics it ran green on hz3 in 261.92 s.
+both hosts. After repairing its diagnostics it ran green on one in 261.92 s.
 That did **not** close the row: 261.92 s is itself a plausible timeout subject,
 and its sibling `walking_skeleton_durability_scenario` has been measured at
 740 s against a 60 s budget. The green established that the test can pass, which

@@ -116,8 +116,8 @@ recent_commits.txt
 #
 # With them included, transfer estimation exceeded its threshold and rch refused
 # every job dispatch with exit 103 ("Transfer estimation indicates skip …
-# Estimated transfer time (353933 ms) exceeds") — on vmi1293453 three times and
-# on hz4 once, so it was the ESTIMATE, not one unlucky worker. Job mode is the
+# Estimated transfer time (353933 ms) exceeds") — on one worker three times and
+# on a second once, so it was the ESTIMATE, not one unlucky worker. Job mode is the
 # only admitted path for a non-cargo command (plain `rch exec` refuses with
 # RCH-E301), so while this persisted NO shell e2e script could run on the fleet,
 # blocking bd-unreachable-e2e-scripts-u14sr Step 1 and bd-q726t site execution.

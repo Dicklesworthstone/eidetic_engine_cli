@@ -2130,7 +2130,7 @@ run_stage "MCP Lib Unit Tests (bd-up1hk)" "./scripts/mcp_lib_tests.sh"
 # them here.
 #
 # Both arms run the binary Gate 5 just built rather than re-entering cargo.
-# Measured on RCH hz4 at 82926d4c5: the pins themselves take 0.00s while the
+# Measured on an RCH fleet worker at 82926d4c5: the pins take 0.00s while the
 # cargo wrapper around them took 74s re-walking freshness across ~350 crates
 # that Gate 5 had walked moments earlier. Paying for that scan twice is waste in
 # the gate independent of anything being added to it.

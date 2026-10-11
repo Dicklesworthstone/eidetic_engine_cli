@@ -39,7 +39,7 @@
 # toolchain re-walking freshness across every crate in Cargo.lock (573 today).
 # That walk is paid in full on EVERY entry into cargo and does not amortise
 # between invocations: one WARM single-target `cargo test --locked --test
-# lexical_relevance_contract -- --ignored` on RCH worker hz4 at 82926d4c5 cost
+# lexical_relevance_contract -- --ignored` on an RCH worker at 82926d4c5 cost
 # 74s with zero Compiling lines and 0.00s of actual test execution.
 #
 # Every stage that reaches cargo therefore carries a machine-checked record:
@@ -541,13 +541,13 @@ name = "Unit, Contract, and Golden Tests"
 #
 # 2. THE FRESHNESS WALK, WHICH THIS STAGE PAYS ONCE FOR ALL 522 TARGETS. A
 #    WARM single-target `cargo test --locked --test lexical_relevance_contract
-#    -- --ignored` on RCH worker hz4 at 82926d4c5 took 74s with ZERO Compiling
+#    -- --ignored` on an RCH worker at 82926d4c5 took 74s with ZERO Compiling
 #    lines and 0.00s of test execution. That 74s is cargo re-walking freshness
 #    across the lock file, and this stage's walk covers every target rather
 #    than one.
 #
 # 3. A DIRECT OBSERVATION, WITH ITS CONTAMINATION STATED. On 2026-09-22 on RCH
-#    worker hz4 (64 cores, load 7.71) the BUILD PHASE ALONE of this stage --
+#    that worker (64 cores, load 7.71) the BUILD PHASE ALONE of this stage --
 #    the same command with --no-run, so not a single test executed -- ran for
 #    639s and then failed to link. 639s is 5.3x the declared p50 for the whole
 #    stage. It is NOT offered as the p50: the working tree had just been synced,
@@ -588,7 +588,7 @@ regression_factor = 1.5
 [[stage]]
 name = "Lexical Relevance Contract Harness Guard"
 # TRACKED RED AGAINST bd-iqg34, NOT against the pin bead. Measured on RCH
-# worker hz4 (job 30025237340881842): this arm exits 1 because the test binary
+# one worker (job 30025237340881842): this arm exits 1 because the test binary
 # is written to `<target>/debug/build/eidetic-engine/<hash>/out/` rather than
 # `<target>/debug/deps/`, so the harness cannot locate the artifact Gate 5 just
 # built. That is a worker/rch layout defect, filed as bd-iqg34; it is not a
@@ -629,7 +629,7 @@ name = "Lexical Relevance Contract (tracked red)"
 # regenerated golden set could never demonstrate.
 #
 # 1s because this arm executes the binary Gate 5 already built; the pins run in
-# 0.00s. It deliberately does NOT re-enter cargo, which measured 74s on RCH hz4
+# 0.00s. It deliberately does NOT re-enter cargo, which measured 74s remotely
 # at 82926d4c5 purely re-walking freshness over ~350 crates Gate 5 had just
 # walked. That double charge was a real cost in the gate, not a budgeting
 # obstacle -- removing it is why these two stages fit in 2s where one cargo
@@ -892,7 +892,7 @@ name = "Advanced E2E Scripts"
 # pays the freshness walk over the whole lock file in full -- that walk does not
 # amortise across invocations, which is the entire finding bd-vihzq rests on.
 # The one hard datum in hand: a WARM single-target `cargo test --locked --test
-# lexical_relevance_contract -- --ignored` on RCH worker hz4 at 82926d4c5 took
+# lexical_relevance_contract -- --ignored` on an RCH worker at 82926d4c5 took
 # 74s with zero Compiling lines and 0.00s of test execution.
 #
 # Three warm re-entries is therefore ~220s of freshness walking BEFORE any of
@@ -926,7 +926,7 @@ name = "ee doctor Safety Harness (bd-21joy)"
 # stage reported success having run nothing. Each sub-harness now exits 3
 # SKIPPED without a binary, so the stage is red for that true reason, and it
 # fails in ~0s before any work. bd-5l8yh owns wiring the verified binary in
-# and the budget question it raises (a real run measured ~400s on hz3 against
+# and the budget question it raises (a real run measured ~400s remotely against
 # the 8s below, with the p50 total at its 600s ceiling). When the stage is
 # green for real, delete `requirement`/`tracked_red_bead` in the SAME commit
 # and drop the count in `no_stage_is_declared_non_required_without_a_bead`.

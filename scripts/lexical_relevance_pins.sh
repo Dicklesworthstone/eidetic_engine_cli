@@ -5,7 +5,7 @@
 #
 # WHY NOT `cargo test --test lexical_relevance_contract`
 #
-# Measured on RCH worker hz4, base 82926d4c5: the two pins execute in 0.00s,
+# Measured on an RCH fleet worker, base 82926d4c5: the two pins execute in 0.00s,
 # but the cargo invocation around them took 74s — `Finished test profile in
 # 1m 14s` with zero `Compiling` lines. That is cargo re-walking freshness across
 # ~350 crates. Gate 5 (`cargo test --workspace --lib --bins --tests
@@ -211,8 +211,8 @@ NOT THE TRACKED RED. THE HARNESS COULD NOT RUN THE PINS AT ALL.
   found    : nothing
 
 This is bd-iqg34, NOT bd-reality-core-convergence-1azkt.11. The pins are not
-being reported as failing here -- they were never executed. Measured on RCH
-worker hz4 (job 30025237340881842), cargo writes this target's executable to
+being reported as failing here -- they were never executed. Measured on an RCH
+fleet worker (job 30025237340881842), cargo writes this target's executable to
   <target>/debug/build/eidetic-engine/<hash>/out/
 instead of <target>/debug/deps/, so the artifact Gate 5 built is not where the
 standard layout says it is.

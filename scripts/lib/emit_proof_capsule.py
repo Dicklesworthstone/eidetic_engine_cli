@@ -281,13 +281,13 @@ def self_test() -> int:
         zero = pathlib.Path(directory) / "zero.log"
         zero.write_text(ZERO_LOG)
 
-        capsule = build_capsule(green, "abc123", 0, "hz4", 0, "rch exec ...")
+        capsule = build_capsule(green, "abc123", 0, "worker-a", 0, "rch exec ...")
         check("a green run validates against the committed schema", not validate(capsule))
         check("populated is never true", capsule["completeness"]["populated"] is False)
         check("unestablished is non-empty", bool(capsule["completeness"]["unestablished"]))
-        check("host is recorded", capsule["results"][0]["workerHost"] == "hz4")
+        check("host is recorded", capsule["results"][0]["workerHost"] == "worker-a")
         check("announced is recorded", capsule["results"][0]["announced"] == 4)
-        # capsule above was built with host="hz4", i.e. a REMOTE run.
+        # capsule above was built with host="worker-a", i.e. a REMOTE run.
         check(
             "a REMOTE run does NOT claim this machine's cfg",
             capsule["toolchain"]["evaluatedUnderCfg"] is None,
@@ -304,7 +304,7 @@ def self_test() -> int:
         check("hostedCi is null, not invented", capsule["runIdentifiers"]["hostedCi"] is None)
         check("a green run reports PASS", capsule["results"][0]["status"] == "PASS")
 
-        vacuous = build_capsule(zero, "abc123", 0, "hz4", 0, "rch exec ...")
+        vacuous = build_capsule(zero, "abc123", 0, "worker-a", 0, "rch exec ...")
         check(
             "a ZERO-test run is NOT recorded as PASS",
             vacuous["results"][0]["status"] != "PASS",
@@ -321,12 +321,12 @@ def self_test() -> int:
             "capsuleHash is identity-only: a different host does not change it",
             capsule["capsuleHash"] == other_host["capsuleHash"],
         )
-        moved = build_capsule(green, "def456", 0, "hz4", 0, "rch exec ...")
+        moved = build_capsule(green, "def456", 0, "worker-a", 0, "rch exec ...")
         check(
             "capsuleHash DOES change when the source changes",
             capsule["capsuleHash"] != moved["capsuleHash"],
         )
-        dirty = build_capsule(green, "abc123", 3, "hz4", 0, "rch exec ...")
+        dirty = build_capsule(green, "abc123", 3, "worker-a", 0, "rch exec ...")
         check(
             "a dirty tree is named in unestablished",
             any("uncommitted" in u for u in dirty["completeness"]["unestablished"]),

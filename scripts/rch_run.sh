@@ -200,7 +200,7 @@ emit_verdict_block() {
     # "IS IT --no-run". The first version of this fix matched `--no-run`, which
     # named a SITUATION; the property is that libtest never starts, and that is
     # equally true of `cargo clippy`, `cargo check`, `cargo build`, `cargo fmt`
-    # and any `--job` shell command. Three probes on hz4 were graded RED that
+    # and any `--job` shell command. Three probes on worker-a were graded RED that
     # way in one sitting -- each exited 0 and did exactly what was asked -- and
     # a grader that reds three valid runs will red the next ten.
     #
@@ -414,7 +414,7 @@ self_test() {
     printf 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out\n' > "$tmp/zero.log"
     printf 'running 9 tests\nrunning 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 50 filtered out\ntest result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$tmp/nested.log"
     printf '     Running unittests src/lib.rs (target/debug/deps/ee-a)\nrunning 2 tests\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n     Running tests/contracts.rs (target/debug/deps/contracts-b)\nrunning 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$tmp/multi.log"
-    printf 'rsync: connection unexpectedly closed\n[RCH] remote hz4 failed [RCH-E104] SSH command timed out\n' > "$tmp/ungradeable.log"
+    printf 'rsync: connection unexpectedly closed\n[RCH] remote worker-a failed [RCH-E104] SSH command timed out\n' > "$tmp/ungradeable.log"
 
     # Compile-only fixtures. A `--no-run` log has no announcement by
     # construction, so these are graded on build evidence instead.
@@ -422,12 +422,12 @@ self_test() {
     printf '   Compiling eidetic-engine v0.14.4 (/data/rch/eidetic_engine_cli)\nerror[E0425]: cannot find function `ensure_command_success` in this scope\nerror: could not compile `eidetic-engine` (test "integration_s_z") due to 1 previous error\n' > "$tmp/norun_fail.log"
     printf '   Compiling eidetic-engine v0.14.4 (/data/rch/eidetic_engine_cli)\n' > "$tmp/norun_nofinish.log"
     # A --job shell body: no cargo lines, no announcements, nothing to grade
-    # but the exit status. This is what the hz4 probes looked like.
-    printf 'PROBE host=hz4\n  holder ready=yes\n  REAL SCRIPT -> exit=75\nPROBE done\n' > "$tmp/shelljob.log"
+    # but the exit status. This is what the worker-a probes looked like.
+    printf 'PROBE host=worker-a\n  holder ready=yes\n  REAL SCRIPT -> exit=75\nPROBE done\n' > "$tmp/shelljob.log"
     # COLOURISED, as cargo actually emits it. Without this arm the anchored
     # match passes on clean fixtures and fails on every real log.
     printf '\033[1m\033[32m   Compiling\033[0m eidetic-engine v0.14.4\n\033[1m\033[32m    Finished\033[0m `test` profile [unoptimized + debuginfo] target(s) in 11m 34s\n\033[1m\033[32m  Executable\033[0m tests/suites/integration_s_z.rs (target/debug/deps/integration_s_z-abc)\n' > "$tmp/norun_ansi.log"
-    # bd-k67bp, transcribed from the real hz3 log that this wrapper graded
+    # bd-k67bp, transcribed from a real worker log that this wrapper graded
     # GREEN: a build that Finished, then a payload that refused to run, whose
     # status survives only as a sentinel because a trailing echo ate the exit.
     # Colourised, because the real one was.
@@ -457,7 +457,7 @@ self_test() {
         "--no-run, COLOURISED as cargo really emits|$tmp/norun_ansi.log|0||0|cargo test --test x --no-run"
         # THE CLASS, not the situation. Every command below produces no test
         # announcements for the same reason --no-run does: libtest never runs.
-        # Each was graded RED before this widened (three hz4 probes in one
+        # Each was graded RED before this widened (three worker-a probes in one
         # sitting), which is why they are arms and not assumptions.
         "clippy that BUILT is green|$tmp/norun_ok.log|0||0|cargo clippy --all-targets -- -D warnings"
         "cargo check that BUILT is green|$tmp/norun_ok.log|0||0|cargo check --locked --all-targets"
