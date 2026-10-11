@@ -102,7 +102,10 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         .and_then(Value::as_str)
         .is_some_and(cargo_reason)
         && family.message_type.as_ref().and_then(Value::as_str) != Some("diagnostic")
-        && !matches!(family.kind.as_ref().and_then(Value::as_str), Some("suite" | "test"))
+        && !matches!(
+            family.kind.as_ref().and_then(Value::as_str),
+            Some("suite" | "test")
+        )
     {
         return Ok(None);
     }
@@ -228,13 +231,15 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
                     // Preserve the E#### class used by plain rustc output.
                     // Named lints and other codes use the redacted message
                     // signature instead of persisting arbitrary code text.
-                    let code = diagnostic.code.as_ref().map(|code| code.code.as_str()).filter(
-                        |code| {
+                    let code = diagnostic
+                        .code
+                        .as_ref()
+                        .map(|code| code.code.as_str())
+                        .filter(|code| {
                             code.len() == 5
                                 && code.starts_with('E')
                                 && code.as_bytes()[1..].iter().all(u8::is_ascii_digit)
-                        },
-                    );
+                        });
                     let message =
                         crate::policy::redact_secret_like_content(&diagnostic.message).content;
                     let canonical = super::from_rustc(code, &message);
@@ -444,8 +449,17 @@ mod tests {
             assert!(!result.allows_completion);
             assert_eq!(result.diagnostics.len(), 1);
             assert_eq!(result.diagnostics[0].canonical_code, None);
-            assert!(result.diagnostics[0].layered_key().key.starts_with("rustc:tmpl:blake3:"));
+            assert!(
+                result.diagnostics[0]
+                    .layered_key()
+                    .key
+                    .starts_with("rustc:tmpl:blake3:")
+            );
         }
-        assert!(parsed(&diagnostic("unused_variables", "warning").to_string()).diagnostics.is_empty());
+        assert!(
+            parsed(&diagnostic("unused_variables", "warning").to_string())
+                .diagnostics
+                .is_empty()
+        );
     }
 }

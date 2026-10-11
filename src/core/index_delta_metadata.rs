@@ -28,7 +28,9 @@ impl LexicalBudget {
             return Err(over_limit("lexical delta exceeds the document budget"));
         }
         if bytes > MAX_LEXICAL_DELTA_BYTES.saturating_sub(self.bytes) {
-            return Err(over_limit("lexical delta exceeds the document-payload byte budget"));
+            return Err(over_limit(
+                "lexical delta exceeds the document-payload byte budget",
+            ));
         }
         self.documents += 1;
         self.bytes += bytes;
@@ -97,7 +99,9 @@ fn diff_with_digest(
             reusable.insert(document.id.clone(), input);
         } else {
             if vector_changes == vector_limit {
-                return Err(over_limit("vector delta exceeds the inference/removal budget"));
+                return Err(over_limit(
+                    "vector delta exceeds the inference/removal budget",
+                ));
             }
             vector_changes += 1;
         }
@@ -106,7 +110,9 @@ fn diff_with_digest(
     let mut removals = Vec::new();
     for id in live.keys().filter(|id| !current.contains(id.as_str())) {
         if vector_changes == vector_limit {
-            return Err(over_limit("vector delta exceeds the inference/removal budget"));
+            return Err(over_limit(
+                "vector delta exceeds the inference/removal budget",
+            ));
         }
         lexical.admit(id.len())?;
         vector_changes += 1;
@@ -124,8 +130,8 @@ fn diff_with_digest(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{DocDigests, embedder_identity, plan};
+    use super::*;
 
     type TestResult = Result<(), String>;
     const IDENTITY: &str = "planner-fixture-identity";
@@ -315,7 +321,8 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_source_ids_and_new_ids_with_identical_text_cannot_bypass_admission() -> TestResult {
+    fn duplicate_source_ids_and_new_ids_with_identical_text_cannot_bypass_admission() -> TestResult
+    {
         let original = documents(8);
         let mut changed = original.clone();
         retitle(&mut changed);

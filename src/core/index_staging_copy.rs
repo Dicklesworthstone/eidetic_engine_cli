@@ -138,7 +138,9 @@ fn changed(message: &'static str) -> io::Error {
 
 fn require_regular(metadata: &Metadata) -> io::Result<()> {
     if !metadata.file_type().is_file() {
-        return Err(changed("index staging source or destination is not a regular file"));
+        return Err(changed(
+            "index staging source or destination is not a regular file",
+        ));
     }
     #[cfg(unix)]
     {
@@ -219,7 +221,12 @@ fn clone_file(source: &File, target: &Path) -> io::Result<CloneAttempt> {
 
 #[cfg(target_vendor = "apple")]
 fn clone_file(source: &File, target: &Path) -> io::Result<CloneAttempt> {
-    match rustix::fs::fclonefileat(source, rustix::fs::CWD, target, rustix::fs::CloneFlags::empty()) {
+    match rustix::fs::fclonefileat(
+        source,
+        rustix::fs::CWD,
+        target,
+        rustix::fs::CloneFlags::empty(),
+    ) {
         Ok(()) => {
             // clonefile creates exclusively but carries source permissions.
             // The staged generation is private and must remain writable even

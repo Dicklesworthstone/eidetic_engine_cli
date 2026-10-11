@@ -70,17 +70,33 @@ fn episode(failure_output: &str, proof_output: &str, proof_command: &str) -> Tes
         },
     )?;
     let rows = [
-        ("tool_call", "assistant", json!({"type":"tool_use","id":"fail","name":"Bash",
-            "input":{"command":COMMAND}})),
-        ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"fail",
-            "content":failure_output,"is_error":true})),
+        (
+            "tool_call",
+            "assistant",
+            json!({"type":"tool_use","id":"fail","name":"Bash",
+            "input":{"command":COMMAND}}),
+        ),
+        (
+            "tool_result",
+            "user",
+            json!({"type":"tool_result","tool_use_id":"fail",
+            "content":failure_output,"is_error":true}),
+        ),
         ("message", "assistant", json!({"type":"text","text":REPAIR})),
-        ("tool_call", "assistant", json!({"type":"tool_use","id":"verify","name":"Bash",
-            "input":{"command":proof_command}})),
+        (
+            "tool_call",
+            "assistant",
+            json!({"type":"tool_use","id":"verify","name":"Bash",
+            "input":{"command":proof_command}}),
+        ),
         // Deliberately optimistic wrapper: malformed/empty/ignored test
         // histories must still be rejected by the production completion path.
-        ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"verify",
-            "content":proof_output,"is_error":false})),
+        (
+            "tool_result",
+            "user",
+            json!({"type":"tool_result","tool_use_id":"verify",
+            "content":proof_output,"is_error":false}),
+        ),
     ];
     let id = |number: u32| {
         crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(4200 + u128::from(number)))
@@ -110,7 +126,13 @@ fn episode(failure_output: &str, proof_output: &str, proof_command: &str) -> Tes
             },
         )?;
     }
-    Ok(Episode { connection, session, failure: id(2), repair: id(3), proof: id(5) })
+    Ok(Episode {
+        connection,
+        session,
+        failure: id(2),
+        repair: id(3),
+        proof: id(5),
+    })
 }
 
 fn canonical() -> CanonicalDiagnostic {
@@ -138,7 +160,11 @@ fn libtest_failure_produces_exact_repair_card_proof_and_pack_context_without_cha
     assert_eq!(recall.proof_links, [episode.proof.clone()]);
     let links = db.list_error_repair_links(WS, &canonical().layered_key().key)?;
     assert_eq!(links.len(), 3);
-    assert!(links.iter().all(|link| link.evidence_ref.as_deref() == Some(episode.failure.as_str())));
+    assert!(
+        links
+            .iter()
+            .all(|link| link.evidence_ref.as_deref() == Some(episode.failure.as_str()))
+    );
     let evidence = recalled_repair_evidence(db, WS, &recall)?;
     assert_eq!(evidence.len(), 3);
     assert_eq!(evidence[0].evidence_id, card);
@@ -146,21 +172,35 @@ fn libtest_failure_produces_exact_repair_card_proof_and_pack_context_without_cha
     assert_eq!(evidence[1].evidence_id, episode.repair);
     assert_eq!(evidence[2].evidence_id, episode.proof);
     assert_eq!(evidence[2].text, None);
-    assert!(evidence[0].text.as_deref().is_some_and(|text| text.contains("Fix:")));
+    assert!(
+        evidence[0]
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("Fix:"))
+    );
     let seed = pack_error_recall_query_seed(db, WS, &canonical())?;
     assert!(seed.contains("prior fix:"));
     assert!(seed.contains("flushing"));
     assert!(!seed.contains("CAPTURED_STDOUT_SENTINEL"));
     for source in before {
-        let after = db.get_evidence_span(&source.id)?.ok_or("source disappeared")?;
+        let after = db
+            .get_evidence_span(&source.id)?
+            .ok_or("source disappeared")?;
         assert_eq!(after.excerpt, source.excerpt);
         assert_eq!(after.content_hash, source.content_hash);
-        assert_eq!(after.canonical_provenance_uri(), source.canonical_provenance_uri());
+        assert_eq!(
+            after.canonical_provenance_uri(),
+            source.canonical_provenance_uri()
+        );
     }
     let rerun = record_session_error_recall(db, WS, &episode.session)?;
     assert_eq!(rerun.incident_cards_recorded, 0);
     assert_eq!(rerun.repair_links_recorded, 2);
-    assert_eq!(db.list_error_repair_links(WS, &canonical().layered_key().key)?.len(), 3);
+    assert_eq!(
+        db.list_error_repair_links(WS, &canonical().layered_key().key)?
+            .len(),
+        3
+    );
     Ok(())
 }
 
@@ -171,12 +211,26 @@ fn optimistic_wrappers_do_not_turn_filtered_partial_or_contradictory_runs_into_r
         json!({"type":"suite","event":"started","test_count":0}),
         json!({"type":"suite","event":"ok","passed":0,"failed":0,
             "ignored":0,"measured":0,"filtered_out":20}),
-    ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
-    let partial = test_output("ok").lines().take(4).collect::<Vec<_>>().join("\n");
-    let mut contradictory: Vec<Value> = test_output("ok").lines()
-        .map(serde_json::from_str).collect::<std::result::Result<_,_>>()?;
+    ]
+    .iter()
+    .map(Value::to_string)
+    .collect::<Vec<_>>()
+    .join("\n");
+    let partial = test_output("ok")
+        .lines()
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut contradictory: Vec<Value> = test_output("ok")
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
     contradictory[5]["passed"] = json!(2);
-    let contradictory = contradictory.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+    let contradictory = contradictory
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
     for proof in [zero, partial, contradictory, test_output("ignored")] {
         let episode = episode(&test_output("failed"), &proof, COMMAND)?;
         let report = record_session_error_recall(&episode.connection, WS, &episode.session)?;

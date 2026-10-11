@@ -108,12 +108,11 @@ fn insert_episode_with_outputs(
         ),
     ];
     let id = |number: u32| {
-        crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
-            seed * 10 + u128::from(number),
-        ))
-        .to_string()
+        crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(seed * 10 + u128::from(number)))
+            .to_string()
     };
-    for (offset, (kind, role, block)) in rows.iter().enumerate().take(if resolved { 5 } else { 2 }) {
+    for (offset, (kind, role, block)) in rows.iter().enumerate().take(if resolved { 5 } else { 2 })
+    {
         let number = u32::try_from(offset + 1)?;
         let excerpt = json!({
             "type": role,
@@ -187,10 +186,16 @@ fn repeated_error_imports_keep_complete_history_and_stable_per_run_counts() -> T
     let evidence = recalled_repair_evidence(&connection, WS, &report)?;
     assert_eq!(evidence.len(), 9);
     assert_eq!(
-        evidence.iter().filter(|item| item.role == "incident_card").count(),
+        evidence
+            .iter()
+            .filter(|item| item.role == "incident_card")
+            .count(),
         3
     );
-    assert_eq!(evidence.iter().filter(|item| item.role == "repair").count(), 3);
+    assert_eq!(
+        evidence.iter().filter(|item| item.role == "repair").count(),
+        3
+    );
     assert_eq!(
         evidence
             .iter()
@@ -283,12 +288,22 @@ fn imported_compiler_json_failure_reaches_repair_card_and_exact_recall() -> Test
     let evidence = recalled_repair_evidence(&connection, WS, &recall)?;
     assert_eq!(evidence.len(), 3);
     assert_eq!(evidence[0].role, "incident_card");
-    assert!(evidence[0].text.as_deref().is_some_and(|text| text.contains("derive Serialize")));
+    assert!(
+        evidence[0]
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("derive Serialize"))
+    );
     assert!(!format!("{recall:?}{evidence:?}").contains("UNUSED_RENDERED_COMPILER_SENTINEL"));
-    let source_after = connection.get_evidence_span(&failure)?.ok_or("source after")?;
+    let source_after = connection
+        .get_evidence_span(&failure)?
+        .ok_or("source after")?;
     assert_eq!(source_after.excerpt, source_before.excerpt);
     assert_eq!(source_after.content_hash, source_before.content_hash);
-    assert_eq!(source_after.canonical_provenance_uri(), source_before.canonical_provenance_uri());
+    assert_eq!(
+        source_after.canonical_provenance_uri(),
+        source_before.canonical_provenance_uri()
+    );
     assert_eq!(
         record_session_error_recall(&connection, WS, &session)?.incident_cards_recorded,
         0
@@ -322,7 +337,15 @@ fn ambiguous_compiler_completion_never_persists_helpful_repair_or_card() -> Test
         assert_eq!(report.repair_links_recorded, 0, "{success}");
         assert_eq!(report.incident_cards_recorded, 0, "{success}");
     }
-    assert!(connection.get_error_fingerprint(WS, "rustc:E0277")?.is_some());
-    assert!(connection.list_error_repair_links(WS, "rustc:E0277")?.is_empty());
+    assert!(
+        connection
+            .get_error_fingerprint(WS, "rustc:E0277")?
+            .is_some()
+    );
+    assert!(
+        connection
+            .list_error_repair_links(WS, "rustc:E0277")?
+            .is_empty()
+    );
     Ok(())
 }

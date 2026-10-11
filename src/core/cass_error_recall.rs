@@ -541,10 +541,13 @@ pub(crate) fn session_failure_arcs(
             // A running failure can reveal more failed tests on later polls.
             // Refresh coverage even after its first diagnostics were recorded;
             // the final output, not the four-diagnostic cap, defines the proof.
-            for failure in pending.iter_mut().filter(|failure| {
-                failure.attempt_id == spans[observed.call_index].id
-            }) {
-                failure.test_requirement.refresh(&observed.output, observed.complete);
+            for failure in pending
+                .iter_mut()
+                .filter(|failure| failure.attempt_id == spans[observed.call_index].id)
+            {
+                failure
+                    .test_requirement
+                    .refresh(&observed.output, observed.complete);
                 if failure.test_requirement.is_guarded() {
                     // Do not credit a retry launched before the failed test
                     // invocation's final observation, or narration before it.
@@ -608,7 +611,10 @@ fn resolve_pending(
     workspace_id: &str,
     session: &StoredSession,
 ) {
-    let test_proof = if pending.iter().any(|failure| failure.test_requirement.is_guarded()) {
+    let test_proof = if pending
+        .iter()
+        .any(|failure| failure.test_requirement.is_guarded())
+    {
         test_coverage::Proof::capture(success_output)
     } else {
         test_coverage::Proof::default()

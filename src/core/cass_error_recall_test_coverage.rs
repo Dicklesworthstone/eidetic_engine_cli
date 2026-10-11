@@ -58,7 +58,9 @@ impl Requirement {
                     .filter_map(|(inventory, outcomes)| {
                         let failed: Vec<_> = outcomes
                             .into_iter()
-                            .filter_map(|(name, result)| (result == Outcome::Failed).then_some(name))
+                            .filter_map(|(name, result)| {
+                                (result == Outcome::Failed).then_some(name)
+                            })
                             .collect();
                         (!failed.is_empty()).then_some(RequiredSuite { inventory, failed })
                     })
@@ -95,9 +97,15 @@ impl Requirement {
             Self::Unproven => false,
             Self::Libtest(required) => proof.execution.as_ref().is_some_and(|execution| {
                 required.iter().all(|suite| {
-                    execution.suites.get(&suite.inventory).is_some_and(|outcomes| {
-                        suite.failed.iter().all(|name| outcomes.get(name) == Some(&Outcome::Passed))
-                    })
+                    execution
+                        .suites
+                        .get(&suite.inventory)
+                        .is_some_and(|outcomes| {
+                            suite
+                                .failed
+                                .iter()
+                                .all(|name| outcomes.get(name) == Some(&Outcome::Passed))
+                        })
                 })
             }),
         }
@@ -116,9 +124,10 @@ impl Proof {
             return Self::default();
         }
         Self {
-            execution: execution(&output.text).ok().flatten().filter(|execution| {
-                execution.complete && execution.allows_completion
-            }),
+            execution: execution(&output.text)
+                .ok()
+                .flatten()
+                .filter(|execution| execution.complete && execution.allows_completion),
         }
     }
 }
@@ -171,7 +180,13 @@ fn execution(text: &str) -> Result<Option<Execution>, ()> {
                     "failed" => Outcome::Failed,
                     _ => Outcome::Ignored,
                 };
-                if active.as_mut().ok_or(())?.outcomes.insert(name, outcome).is_some() {
+                if active
+                    .as_mut()
+                    .ok_or(())?
+                    .outcomes
+                    .insert(name, outcome)
+                    .is_some()
+                {
                     return Err(());
                 }
             }
@@ -211,15 +226,30 @@ mod tests {
         for (name, event) in results.iter().rev() {
             events.push(json!({"type":"test","event":event,"name":name}));
         }
-        let count = |event| results.iter().filter(|(_, observed)| *observed == event).count();
-        events.push(json!({"type":"suite","event":if count("failed") == 0 {"ok"} else {"failed"},
+        let count = |event| {
+            results
+                .iter()
+                .filter(|(_, observed)| *observed == event)
+                .count()
+        };
+        events.push(
+            json!({"type":"suite","event":if count("failed") == 0 {"ok"} else {"failed"},
             "passed":count("ok"),"failed":count("failed"),"ignored":count("ignored"),
-            "measured":0,"filtered_out":0}));
-        events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")
+            "measured":0,"filtered_out":0}),
+        );
+        events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn output(text: String) -> ToolOutput {
-        ToolOutput { text, is_error: Some(false), exit_code: Some(0) }
+        ToolOutput {
+            text,
+            is_error: Some(false),
+            exit_code: Some(0),
+        }
     }
 
     fn requirement(results: &[(&str, &str)]) -> Requirement {
@@ -236,23 +266,39 @@ mod tests {
             vec![("cache::round_trip", "ok"), ("replacement", "ok")],
         ] {
             let passed = output(suite(&results));
-            assert!(passed.succeeded(), "the command-level gate alone would accept this");
+            assert!(
+                passed.succeeded(),
+                "the command-level gate alone would accept this"
+            );
             assert!(!failed.is_verified_by(&Proof::capture(&passed)));
         }
         assert!(failed.is_verified_by(&Proof::capture(&output(suite(&[
-            ("other", "ok"), ("cache::round_trip", "ok")
+            ("other", "ok"),
+            ("cache::round_trip", "ok")
         ])))));
     }
 
     #[test]
     fn suite_inventories_not_suite_order_resolve_unique_test_binaries() {
-        let failed = output(format!("{}\n{}", suite(&[("a", "failed")]), suite(&[("b", "failed")])));
+        let failed = output(format!(
+            "{}\n{}",
+            suite(&[("a", "failed")]),
+            suite(&[("b", "failed")])
+        ));
         let requirement = Requirement::capture(&failed, true);
-        let passed = output(format!("{}\n{}", suite(&[("b", "ok")]), suite(&[("a", "ok")])));
+        let passed = output(format!(
+            "{}\n{}",
+            suite(&[("b", "ok")]),
+            suite(&[("a", "ok")])
+        ));
         assert!(requirement.is_verified_by(&Proof::capture(&passed)));
         let missing = output(suite(&[("a", "ok")]));
         assert!(!requirement.is_verified_by(&Proof::capture(&missing)));
-        let duplicate = output(format!("{}\n{}", suite(&[("a", "ok")]), suite(&[("a", "ok")])));
+        let duplicate = output(format!(
+            "{}\n{}",
+            suite(&[("a", "ok")]),
+            suite(&[("a", "ok")])
+        ));
         assert!(!requirement.is_verified_by(&Proof::capture(&duplicate)));
         assert!(!Requirement::capture(&duplicate, true).is_verified_by(&Proof::capture(&passed)));
     }

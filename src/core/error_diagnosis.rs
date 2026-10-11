@@ -350,7 +350,13 @@ pub fn error_recall_report(
     let outcome = diagnose_error(connection, workspace_id, canonical)?;
     let links = connection.list_error_repair_links(workspace_id, &outcome.fingerprint_key)?;
     let mut report = ErrorRecallReport::from_outcome_with_links(&fingerprint, &outcome, &links);
-    near::populate(connection, workspace_id, canonical, &fingerprint, &mut report)?;
+    near::populate(
+        connection,
+        workspace_id,
+        canonical,
+        &fingerprint,
+        &mut report,
+    )?;
     Ok(report)
 }
 
@@ -1023,7 +1029,9 @@ mod tests {
         let connection = migrated_db_with_workspace();
         let canonical = from_rustc(Some("E0308"), "mismatched types");
         let previous = ErrorRepairLinkRecording {
-            helpful_repairs: (0..256).map(|number| format!("mem_prior_{number:04}")).collect(),
+            helpful_repairs: (0..256)
+                .map(|number| format!("mem_prior_{number:04}"))
+                .collect(),
             evidence_ref: Some("ev_prior_observation".to_owned()),
             ..ErrorRepairLinkRecording::default()
         };
@@ -1045,11 +1053,17 @@ mod tests {
         let complete = record_error_repair_links(&connection, WS, &canonical, &observation)?;
         assert_eq!(complete.len(), 260);
         assert_eq!(
-            complete.iter().filter(|link| link.evidence_ref.as_deref() == Some("ev_prior_observation")).count(),
+            complete
+                .iter()
+                .filter(|link| link.evidence_ref.as_deref() == Some("ev_prior_observation"))
+                .count(),
             256
         );
         assert_eq!(
-            complete.iter().filter(|link| link.evidence_ref.as_deref() == Some("ev_new_observation")).count(),
+            complete
+                .iter()
+                .filter(|link| link.evidence_ref.as_deref() == Some("ev_new_observation"))
+                .count(),
             4
         );
         let report = error_recall_report(&connection, WS, &canonical)?;
@@ -1071,7 +1085,11 @@ mod tests {
         )?;
         assert_eq!(receipt.links_submitted, 0);
         assert!(diagnose_error(&connection, WS, &canonical)?.is_known());
-        assert!(connection.list_error_repair_links(WS, &receipt.fingerprint_key)?.is_empty());
+        assert!(
+            connection
+                .list_error_repair_links(WS, &receipt.fingerprint_key)?
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -1093,7 +1111,11 @@ mod tests {
         });
         assert!(result.is_err());
         assert!(!diagnose_error(&connection, WS, &canonical)?.is_known());
-        assert!(connection.list_error_repair_links(WS, "rustc:E0277")?.is_empty());
+        assert!(
+            connection
+                .list_error_repair_links(WS, "rustc:E0277")?
+                .is_empty()
+        );
         Ok(())
     }
 }

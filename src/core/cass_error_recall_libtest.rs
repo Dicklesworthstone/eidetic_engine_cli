@@ -81,7 +81,10 @@ impl Harness {
     /// completion. A malformed or contradictory event refuses the whole input.
     pub(super) fn observe(&mut self, raw: &str) -> Result<Option<CanonicalDiagnostic>, ()> {
         let event: Event = serde_json::from_str(raw).map_err(|_| ())?;
-        if event.exec_time.is_some_and(|time| !time.is_finite() || time < 0.0) {
+        if event
+            .exec_time
+            .is_some_and(|time| !time.is_finite() || time < 0.0)
+        {
             return Err(());
         }
         match event.kind.as_str() {
@@ -124,9 +127,14 @@ impl Harness {
                 let failed = event.failed.ok_or(())?;
                 let ignored = event.ignored.ok_or(())?;
                 let _filtered = event.filtered_out.ok_or(())?;
-                let completed = passed.checked_add(failed).and_then(|n| n.checked_add(ignored));
+                let completed = passed
+                    .checked_add(failed)
+                    .and_then(|n| n.checked_add(ignored));
                 if (passed, failed, ignored) != (suite.passed, suite.failed, suite.ignored)
-                    || suite.tests.values().any(|state| *state == TestState::Running)
+                    || suite
+                        .tests
+                        .values()
+                        .any(|state| *state == TestState::Running)
                     || completed != Some(suite.tests.len() as u64)
                     || completed.is_none_or(|count| count > suite.expected)
                     || (event.event == "ok" && (failed != 0 || completed != Some(suite.expected)))
@@ -226,21 +234,34 @@ mod tests {
     }
 
     fn stream(events: &[Value]) -> String {
-        events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")
+        events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn inspect(events: &[Value]) -> super::super::CompilerOutput {
-        super::super::inspect(&stream(events)).expect("valid stream").expect("libtest family")
+        super::super::inspect(&stream(events))
+            .expect("valid stream")
+            .expect("libtest family")
     }
 
     #[test]
     fn failed_json_test_matches_plaintext_fingerprint_and_never_uses_stdout() {
         let mut failed = test("store::round_trip", "failed");
         failed["stdout"] = json!("PRIVATE_STDOUT_SENTINEL error[E0308]: printed example");
-        let output = inspect(&[start(1), test("store::round_trip", "started"), failed, end(0,1,0)]);
+        let output = inspect(&[
+            start(1),
+            test("store::round_trip", "started"),
+            failed,
+            end(0, 1, 0),
+        ]);
         let plain = failure_diagnostics(&ToolOutput {
-            text: "test store::round_trip ... FAILED\ntest result: FAILED. 0 passed; 1 failed".into(),
-            is_error: Some(true), exit_code: Some(101),
+            text: "test store::round_trip ... FAILED\ntest result: FAILED. 0 passed; 1 failed"
+                .into(),
+            is_error: Some(true),
+            exit_code: Some(101),
         });
         assert_eq!(output.diagnostics, plain);
         assert!(output.failed);
@@ -251,10 +272,18 @@ mod tests {
     #[test]
     fn interleaved_tests_and_multiple_suite_binaries_reconcile_by_name() {
         let output = inspect(&[
-            start(3), test("a", "started"), test("b", "started"),
-            test("b", "ok"), test("a", "timeout"), test("a", "ok"),
-            test("ignored", "ignored"), end(2,0,1),
-            start(1), test("a", "started"), test("a", "ok"), end(1,0,0),
+            start(3),
+            test("a", "started"),
+            test("b", "started"),
+            test("b", "ok"),
+            test("a", "timeout"),
+            test("a", "ok"),
+            test("ignored", "ignored"),
+            end(2, 0, 1),
+            start(1),
+            test("a", "started"),
+            test("a", "ok"),
+            end(1, 0, 0),
         ]);
         assert!(output.allows_completion);
         assert!(!output.failed);
@@ -263,18 +292,30 @@ mod tests {
 
     #[test]
     fn compile_success_is_followed_by_checked_test_execution_not_an_early_success() {
-        let events = [json!({"reason":"compiler-artifact","fresh":true}),
+        let events = [
+            json!({"reason":"compiler-artifact","fresh":true}),
             json!({"reason":"build-finished","success":true}),
-            start(1), test("a", "started"), test("a", "ok"), end(1,0,0)];
+            start(1),
+            test("a", "started"),
+            test("a", "ok"),
+            end(1, 0, 0),
+        ];
         let output = inspect(&events);
         assert!(output.allows_completion);
-        let mut wrapper = ToolOutput { text: stream(&events), is_error: None, exit_code: None };
-        assert!(!wrapper.succeeded(), "suite completion is not process completion");
+        let mut wrapper = ToolOutput {
+            text: stream(&events),
+            is_error: None,
+            exit_code: None,
+        };
+        assert!(
+            !wrapper.succeeded(),
+            "suite completion is not process completion"
+        );
         wrapper.exit_code = Some(0);
         assert!(wrapper.succeeded());
         let mut failed = events;
         failed[4] = test("a", "failed");
-        failed[5] = end(0,1,0);
+        failed[5] = end(0, 1, 0);
         wrapper.text = stream(&failed);
         assert!(wrapper.failed());
         assert!(!wrapper.succeeded());
@@ -283,54 +324,106 @@ mod tests {
     #[test]
     fn missing_duplicate_or_contradictory_events_never_certify_a_repair() {
         let cases = [
-            vec![test("a","ok")],
-            vec![start(1),test("a","ok"),end(1,0,0)],
-            vec![start(1),test("a","started"),test("a","started")],
-            vec![start(1),test("a","started"),test("a","ok"),test("a","ok")],
-            vec![start(1),test("a","started"),test("b","ok")],
-            vec![start(1),test("a","started"),test("a","failed"),end(1,0,0)],
-            vec![start(2),test("a","started"),test("a","ok"),end(1,0,0)],
-            vec![start(0),start(0)],
-            vec![start(1),test("a","started"),test("a","ok"),end(u64::MAX,1,0)],
+            vec![test("a", "ok")],
+            vec![start(1), test("a", "ok"), end(1, 0, 0)],
+            vec![start(1), test("a", "started"), test("a", "started")],
+            vec![
+                start(1),
+                test("a", "started"),
+                test("a", "ok"),
+                test("a", "ok"),
+            ],
+            vec![start(1), test("a", "started"), test("b", "ok")],
+            vec![
+                start(1),
+                test("a", "started"),
+                test("a", "failed"),
+                end(1, 0, 0),
+            ],
+            vec![
+                start(2),
+                test("a", "started"),
+                test("a", "ok"),
+                end(1, 0, 0),
+            ],
+            vec![start(0), start(0)],
+            vec![
+                start(1),
+                test("a", "started"),
+                test("a", "ok"),
+                end(u64::MAX, 1, 0),
+            ],
             vec![json!({"type":"suite","event":"discovery"})],
-            vec![json!({"reason":"build-finished","success":false}),start(0)],
-            vec![json!({"reason":"compiler-artifact"}),start(0)],
+            vec![json!({"reason":"build-finished","success":false}), start(0)],
+            vec![json!({"reason":"compiler-artifact"}), start(0)],
         ];
         for events in cases {
-            assert!(super::super::inspect(&stream(&events)).is_err(), "{events:?}");
-            assert!(!ToolOutput {text:stream(&events),is_error:Some(false),exit_code:Some(0)}.succeeded());
+            assert!(
+                super::super::inspect(&stream(&events)).is_err(),
+                "{events:?}"
+            );
+            assert!(
+                !ToolOutput {
+                    text: stream(&events),
+                    is_error: Some(false),
+                    exit_code: Some(0)
+                }
+                .succeeded()
+            );
         }
     }
 
     #[test]
     fn partial_failed_and_empty_runs_remain_distinct_from_successful_execution() {
-        for events in [vec![start(1)], vec![start(1),test("a","started")],
-            vec![start(0),end(0,0,0)],
-            vec![start(1),test("a","ignored"),end(0,0,1)]] {
+        for events in [
+            vec![start(1)],
+            vec![start(1), test("a", "started")],
+            vec![start(0), end(0, 0, 0)],
+            vec![start(1), test("a", "ignored"), end(0, 0, 1)],
+        ] {
             assert!(!inspect(&events).allows_completion);
         }
-        let partial = inspect(&[start(2),test("a","started"),test("a","failed")]);
+        let partial = inspect(&[start(2), test("a", "started"), test("a", "failed")]);
         assert!(partial.failed);
-        assert_eq!(partial.diagnostics.len(),1);
+        assert_eq!(partial.diagnostics.len(), 1);
         assert!(!partial.allows_completion);
-        let fail_fast = inspect(&[start(20),test("a","started"),test("a","failed"),end(0,1,0)]);
+        let fail_fast = inspect(&[
+            start(20),
+            test("a", "started"),
+            test("a", "failed"),
+            end(0, 1, 0),
+        ]);
         assert!(fail_fast.failed);
         assert!(!fail_fast.allows_completion);
     }
 
     #[test]
     fn a_later_good_suite_never_erases_failure_or_an_unfinished_suite() {
-        let failed = [start(1),test("a","started"),test("a","failed"),end(0,1,0),
-            start(1),test("a","started"),test("a","ok"),end(1,0,0)];
+        let failed = [
+            start(1),
+            test("a", "started"),
+            test("a", "failed"),
+            end(0, 1, 0),
+            start(1),
+            test("a", "started"),
+            test("a", "ok"),
+            end(1, 0, 0),
+        ];
         assert!(inspect(&failed).failed);
         assert!(!inspect(&failed).allows_completion);
-        let unfinished = [start(1),test("a","started"),test("a","ok"),end(1,0,0),start(1)];
+        let unfinished = [
+            start(1),
+            test("a", "started"),
+            test("a", "ok"),
+            end(1, 0, 0),
+            start(1),
+        ];
         assert!(!inspect(&unfinished).allows_completion);
     }
 
     #[test]
     fn status_duplicates_conflicting_families_and_trailing_data_refuse_the_whole_stream() {
-        let prefix = stream(&[start(1),test("a","started")]);
+        let prefix = stream(&[start(1), test("a", "started")]);
         for tail in [
             r#"{"type":"test","event":"failed","event":"ok","name":"a"}"#,
             r#"{"type":"test","event":"ok","name":"a","name":"b"}"#,
@@ -340,13 +433,27 @@ mod tests {
             r#"{"type":"test","event":"ok","name":"a","exec_time":-1}"#,
             r#"{"type":"suite","event":"ok","passed":1,"failed":0,"ignored":0,"measured":0,"filtered_out":0,"failed":1}"#,
             r#"{"reason":"build-finished","success":true}"#,
-            "not JSON", "{",
+            "not JSON",
+            "{",
         ] {
-            assert!(super::super::inspect(&format!("{prefix}\n{tail}")).is_err(), "{tail}");
+            assert!(
+                super::super::inspect(&format!("{prefix}\n{tail}")).is_err(),
+                "{tail}"
+            );
         }
-        let valid = stream(&[start(1),test("a","started"),test("a","ok"),end(1,0,0)]);
+        let valid = stream(&[
+            start(1),
+            test("a", "started"),
+            test("a", "ok"),
+            end(1, 0, 0),
+        ]);
         assert!(super::super::inspect(&format!("{valid}\n{{\"example\":true}}")).is_err());
-        assert!(super::super::inspect(&format!("{valid}{{\"type\":\"suite\",\"event\":\"started\",\"test_count\":0}}")).is_err());
+        assert!(
+            super::super::inspect(&format!(
+                "{valid}{{\"type\":\"suite\",\"event\":\"started\",\"test_count\":0}}"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -359,15 +466,26 @@ mod tests {
         }
         events.push(end(0, 8, 0));
         let result = inspect(&events);
-        assert_eq!(result.diagnostics.len(), super::super::MAX_DIAGNOSTICS_PER_FAILURE);
+        assert_eq!(
+            result.diagnostics.len(),
+            super::super::MAX_DIAGNOSTICS_PER_FAILURE
+        );
         assert!(result.failed);
         events.push(json!({"type":"suite","event":"unknown"}));
         assert!(super::super::inspect(&stream(&events)).is_err());
 
         let name = "suite::auth api_key=sk-proj-ABCDEF1234567890ABCDEF1234567890";
-        let result = inspect(&[start(1), test(name, "started"), test(name, "failed"), end(0, 1, 0)]);
+        let result = inspect(&[
+            start(1),
+            test(name, "started"),
+            test(name, "failed"),
+            end(0, 1, 0),
+        ]);
         assert_eq!(result.diagnostics.len(), 1);
-        assert!(!result.diagnostics[0].message_template.contains("abcdef1234567890"));
+        assert!(
+            !result.diagnostics[0]
+                .message_template
+                .contains("abcdef1234567890")
+        );
     }
-
 }

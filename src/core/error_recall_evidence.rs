@@ -210,7 +210,8 @@ mod tests {
     }
 
     #[test]
-    fn real_hydration_batches_across_128_ids_without_dropping_or_reordering_evidence() -> TestResult {
+    fn real_hydration_batches_across_128_ids_without_dropping_or_reordering_evidence() -> TestResult
+    {
         let connection = db()?;
         let session = session(&connection, WS, 900)?;
         let mut report = report();

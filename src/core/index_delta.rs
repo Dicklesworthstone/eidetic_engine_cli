@@ -1230,8 +1230,8 @@ mod tests {
     }
 
     fn read_finalized_vectors(path: &Path) -> Result<BTreeMap<String, Vec<f32>>, String> {
-        let index = super::super::open_fast_vector_index_read_only(path)
-            .map_err(|error| error.detail)?;
+        let index =
+            super::super::open_fast_vector_index_read_only(path).map_err(|error| error.detail)?;
         assert_eq!(index.wal_record_count(), 0);
         assert_eq!(index.tombstone_count(), 0);
         (0..index.record_count())
@@ -1267,7 +1267,12 @@ mod tests {
             let rebuilt = parent.join("rebuilt");
             let stack = super::super::hash_fallback_embedder_stack();
             let original: Vec<_> = (0..8)
-                .map(|number| doc(&format!("mem_{number}"), &format!("original lesson {number}")))
+                .map(|number| {
+                    doc(
+                        &format!("mem_{number}"),
+                        &format!("original lesson {number}"),
+                    )
+                })
                 .collect();
             super::super::IndexBuilder::new(&live)
                 .with_embedder_stack(stack.clone())
@@ -1275,17 +1280,15 @@ mod tests {
                 .build(&cx)
                 .await
                 .map_err(|error| error.to_string())?;
-            let before = std::fs::read(live.join("vector.fast.idx"))
-                .map_err(|error| error.to_string())?;
+            let before =
+                std::fs::read(live.join("vector.fast.idx")).map_err(|error| error.to_string())?;
             assert_eq!(read_finalized_vectors(&live)?.len(), original.len());
             std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
             copy_generation(&live, &staged).map_err(|error| error.to_string())?;
             let delta = Delta {
                 upserts: updates
                     .iter()
-                    .map(|&number| {
-                        doc(&original[number].id, &format!("revised lesson {number}"))
-                    })
+                    .map(|&number| doc(&original[number].id, &format!("revised lesson {number}")))
                     .collect(),
                 removals: removals
                     .iter()
@@ -1307,8 +1310,8 @@ mod tests {
                 })
                 .collect();
             let identity = verified_embedder_identity(stack.fast()).ok_or("verified identity")?;
-            let mut index = super::super::open_fast_vector_index(&staged)
-                .map_err(|error| error.detail)?;
+            let mut index =
+                super::super::open_fast_vector_index(&staged).map_err(|error| error.detail)?;
             let finalization = apply_vector_delta(
                 &cx,
                 &mut index,
@@ -1441,8 +1444,7 @@ mod tests {
         let mut old = DocDigests::new(&stack, &original);
         old.schema = DOC_DIGESTS_SCHEMA_V2.to_owned();
         old.embedding_inputs = None;
-        old.write(live.path())
-            .map_err(|error| error.to_string())?;
+        old.write(live.path()).map_err(|error| error.to_string())?;
         let changed = [original[0].clone().with_title("Metadata changed")];
         let identity = embedder_identity(&stack).ok_or("identity")?;
         let legacy = plan(live.path(), &stack, &changed).map_err(|error| error.detail)?;
@@ -1674,8 +1676,7 @@ mod tests {
                     }
                 })
                 .collect();
-            let builder = super::super::IndexBuilder::new(&live)
-                .with_embedder_stack(stack.clone());
+            let builder = super::super::IndexBuilder::new(&live).with_embedder_stack(stack.clone());
             #[cfg(feature = "lexical-bm25")]
             let builder = builder.with_tantivy_lexical();
             builder
@@ -1690,8 +1691,8 @@ mod tests {
             assert!(observed.inputs.load(Ordering::SeqCst) >= 20);
             #[cfg(feature = "lexical-bm25")]
             assert_reuse_lexical_projection(&cx, &live, false).await?;
-            let before = std::fs::read(live.join("vector.fast.idx"))
-                .map_err(|error| error.to_string())?;
+            let before =
+                std::fs::read(live.join("vector.fast.idx")).map_err(|error| error.to_string())?;
             let mut current = original.clone();
             for document in &mut current[..3] {
                 document.title = Some("updatedquartzmarker".to_owned());
@@ -1731,8 +1732,8 @@ mod tests {
                 assert_reuse_lexical_projection(&cx, &staged, true).await?;
                 assert_reuse_lexical_projection(&cx, &live, false).await?;
             }
-            let builder = super::super::IndexBuilder::new(&rebuilt)
-                .with_embedder_stack(stack.clone());
+            let builder =
+                super::super::IndexBuilder::new(&rebuilt).with_embedder_stack(stack.clone());
             #[cfg(feature = "lexical-bm25")]
             let builder = builder.with_tantivy_lexical();
             builder
@@ -1747,8 +1748,7 @@ mod tests {
             #[cfg(feature = "lexical-bm25")]
             assert_reuse_lexical_projection(&cx, &rebuilt, true).await?;
             assert_eq!(
-                std::fs::read(live.join("vector.fast.idx"))
-                    .map_err(|error| error.to_string())?,
+                std::fs::read(live.join("vector.fast.idx")).map_err(|error| error.to_string())?,
                 before
             );
             DocDigests::new(&stack, &current)

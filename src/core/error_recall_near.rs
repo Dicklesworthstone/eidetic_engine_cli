@@ -94,10 +94,15 @@ fn candidate_distance(
     {
         return None;
     }
-    let signature = candidate.message_template_signature.strip_prefix("blake3:")?;
+    let signature = candidate
+        .message_template_signature
+        .strip_prefix("blake3:")?;
     if !hex_field(signature, 64)
         || candidate.fingerprint_key
-            != format!("{}:tmpl:{}", candidate.tool, candidate.message_template_signature)
+            != format!(
+                "{}:tmpl:{}",
+                candidate.tool, candidate.message_template_signature
+            )
         || !hex_field(&candidate.stderr_simhash, 32)
     {
         return None;
@@ -214,7 +219,12 @@ mod tests {
         coded.canonical_code = Some("E0277".to_owned());
         let exact = stored_from_fingerprint(&query(), WS, "2026-10-10T00:00:00Z");
         assert!(
-            select(&query(), WS, [foreign_workspace, foreign_tool, coded, exact]).is_empty()
+            select(
+                &query(),
+                WS,
+                [foreign_workspace, foreign_tool, coded, exact]
+            )
+            .is_empty()
         );
         let mut coded_query = query();
         coded_query.canonical_code = Some("E0308".to_owned());
@@ -238,9 +248,7 @@ mod tests {
         signature.message_template_signature = "blake3:invalid".to_owned();
         let mut key = row(2, HASH);
         key.fingerprint_key.push_str("\0different");
-        assert!(
-            select(&query(), WS, [signature, key, row(3, 0), row(4, u128::MAX)]).is_empty()
-        );
+        assert!(select(&query(), WS, [signature, key, row(3, 0), row(4, u128::MAX)]).is_empty());
     }
 
     #[test]
@@ -285,8 +293,14 @@ mod tests {
 
     fn messages() -> (CanonicalDiagnostic, CanonicalDiagnostic) {
         (
-            from_cargo(None, "connection refused while opening deployment transport socket"),
-            from_cargo(None, "deployment transport socket opening while refused connection"),
+            from_cargo(
+                None,
+                "connection refused while opening deployment transport socket",
+            ),
+            from_cargo(
+                None,
+                "deployment transport socket opening while refused connection",
+            ),
         )
     }
 
@@ -318,7 +332,10 @@ mod tests {
         assert!(!report.query_seed().contains("NEAR_REPAIR"));
         let seed = pack_error_recall_query_seed(&connection, WS, &current)?;
         assert!(!seed.contains("helpful_repair:"));
-        assert_eq!(connection.list_error_fingerprints_for_recovery(WS)?.len(), before);
+        assert_eq!(
+            connection.list_error_fingerprints_for_recovery(WS)?.len(),
+            before
+        );
         record_error_fingerprint(&connection, WS, &current)?;
         let exact = error_recall_report(&connection, WS, &current)?;
         assert!(exact.exact);
@@ -331,15 +348,27 @@ mod tests {
         let connection = db()?;
         let (previous, current) = messages();
         record_error_fingerprint(&connection, OTHER_WS, &previous)?;
-        assert!(error_recall_report(&connection, WS, &current)?.near.is_empty());
+        assert!(
+            error_recall_report(&connection, WS, &current)?
+                .near
+                .is_empty()
+        );
         let mut coded = previous.clone();
         coded.canonical_code = Some("E0277".to_owned());
         record_error_fingerprint(&connection, WS, &coded)?;
-        assert!(error_recall_report(&connection, WS, &current)?.near.is_empty());
+        assert!(
+            error_recall_report(&connection, WS, &current)?
+                .near
+                .is_empty()
+        );
         let mut foreign_tool = previous;
         foreign_tool.tool = DiagnosticTool::Rustc;
         record_error_fingerprint(&connection, WS, &foreign_tool)?;
-        assert!(error_recall_report(&connection, WS, &current)?.near.is_empty());
+        assert!(
+            error_recall_report(&connection, WS, &current)?
+                .near
+                .is_empty()
+        );
         Ok(())
     }
 }
