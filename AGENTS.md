@@ -1065,7 +1065,7 @@ These two labels are **mutually exclusive** and govern what "closing a bead" mea
 
 7. **Complete and release:**
    ```bash
-   br close 123 --reason "Completed"
+   br close 123 --reason "Completed: <specific proof>"
    br sync --flush-only  # Export to JSONL (no git operations)
    ```
    ```
@@ -1487,7 +1487,7 @@ br list --status=open # All open issues
 br show <id>          # Full issue details with dependencies
 br create --title="..." --type=task --priority=2
 br update <id> --status=in_progress
-br close <id> --reason "Completed"
+br close <id> --reason "Completed: <specific proof>"  # cite a RUN, never a compile
 br close <id1> <id2>  # Close multiple issues at once
 br sync --flush-only  # Export to JSONL (NO git operations)
 ```
@@ -1501,7 +1501,13 @@ br sync --flush-only  # Export to JSONL (NO git operations)
 3. **Reserve**: Reserve the intended edit paths through Agent Mail.
 4. **Claim**: Use `br update <id> --status=in_progress --json` only after the gate and reservation are safe.
 5. **Work**: Implement the task.
-6. **Complete**: Use `br close <id> --reason "Completed"`.
+6. **Complete**: Use `br close <id> --reason "Completed: <specific proof>"`. The
+   proof must be an EXECUTION, not a compile: a green `cargo check` cannot
+   observe that an arc was mined, a secret redacted or a field emitted, so a
+   behavioural criterion closed on a build is closed on the wrong question
+   (bd-lkizl measured 451 closures citing a compile). Cite the command, the
+   counts and the base. `scripts/closeout_audit.sh --bead <id> --json` will
+   pre-check the evidence for you.
 7. **Sync**: Run `br sync --flush-only` then manually commit.
 
 ### Key Concepts
