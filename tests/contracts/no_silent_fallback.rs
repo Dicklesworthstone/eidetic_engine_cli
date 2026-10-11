@@ -4014,6 +4014,79 @@ fn code_only_lines_keeps_an_ordinary_string_open_across_a_line_break() -> TestRe
     }
 }
 
+/// bd-nar12: the BYTE raw-string forms `br"` and `br#"` must open a raw string.
+///
+/// The boundary check rejected them because the `b` sits where an identifier
+/// tail would, so `br#"…"#` was scanned as ordinary code plus a plain string.
+/// Found on src/cass/import.rs:3618 and :3665 (`let input = br#"{`), which are
+/// multi-line JSON fixtures.
+#[test]
+fn code_only_lines_treats_byte_raw_strings_as_raw() -> TestResult {
+    let mut problems = Vec::new();
+
+    // THE DECISIVE ARM, and it REDS without the fix.
+    //
+    // The literal carries an ODD number of quotes (`a "b`), so a scanner that
+    // misses the `br#"` opener desynchronises: it closes a plain string at the
+    // inner quote, reopens at the next, and is therefore still "inside a
+    // string" when it reaches the `//`. The comment is then PRESERVED instead of
+    // truncating the line, and `.unwrap_or_default()` quoted inside that comment
+    // becomes a FABRICATED finding -- bd-hz7nu's defect, reintroduced by a
+    // lexing bug rather than by a missing comment check.
+    let fixture = "let input = br#\"a \"b\"#; let ok = 1; // .unwrap_or_default() in prose\n";
+    let code = code_only_lines(fixture);
+    if is_high_risk_line(&code[0]) {
+        problems.push(format!(
+            "BYTE RAW STRING NOT RECOGNISED: the trailing comment survived stripping, so prose became a finding. Got {:?}",
+            code[0]
+        ));
+    }
+
+    // ANTI-WEAKENING: the boundary check must still do its job. `b` is allowed
+    // immediately before the `r` only when the `b` is itself at a token
+    // boundary, so an identifier ENDING in `br` must not open a literal.
+    for (label, line) in [
+        (
+            "identifier ending in br",
+            "let numbr = 1; // .unwrap_or_default() in prose\n",
+        ),
+        (
+            "the word for",
+            "for x in y { } // .unwrap_or_default() in prose\n",
+        ),
+        (
+            "identifier ending in r",
+            "let char = 1; // .unwrap_or_default() in prose\n",
+        ),
+    ] {
+        let code = code_only_lines(line);
+        if is_high_risk_line(&code[0]) {
+            problems.push(format!(
+                "ANTI-WEAKENING FAILED ({label}): a non-opener was treated as a raw string, so the comment survived: {:?}",
+                code[0]
+            ));
+        }
+    }
+
+    // POSITIVE CONTROL: plain raw strings must keep working, and real code after
+    // one must still be detectable -- otherwise "never open a raw string" passes
+    // the arms above.
+    let plain = "let q = r#\"a \"b\"#; let x = y.unwrap_or_default();\n";
+    let code = code_only_lines(plain);
+    if !is_high_risk_line(&code[0]) {
+        problems.push(format!(
+            "POSITIVE CONTROL FAILED: a real finding after a plain raw string was lost: {:?}",
+            code[0]
+        ));
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
 fn classify_finding(finding: &SourceFinding) -> Option<&'static InventoryRule> {
     INVENTORY_RULES.iter().find(|rule| {
         rule.file == finding.file && rule.scopes(finding) && finding.context.contains(rule.fragment)
@@ -4293,6 +4366,29 @@ fn ignored_test_module_lines(source: &str) -> Vec<bool> {
     ignored
 }
 
+/// Whether the `r` at `index` begins a raw-string literal rather than ending an
+/// identifier (bd-nar12).
+///
+/// Plain forms (`r"`, `r#"`) require the character before the `r` to be a token
+/// boundary, so `for` and `char` do not open literals. The BYTE forms (`br"`,
+/// `br#"`) put a `b` there, and `b` is alphanumeric, so a naive boundary check
+/// rejects them -- which is the bug this function exists to fix. A `b` is
+/// therefore permitted, but only when the `b` is ITSELF at a token boundary;
+/// otherwise `abr#"` or `numbr#"` would open a raw string.
+fn raw_opener_at_token_boundary(chars: &[char], index: usize) -> bool {
+    let boundary = |character: Option<&char>| -> bool {
+        character.is_none_or(|value| !value.is_alphanumeric() && *value != '_' && *value != '\'')
+    };
+    match index
+        .checked_sub(1)
+        .and_then(|previous| chars.get(previous))
+    {
+        None => true,
+        Some('b') => boundary(index.checked_sub(2).and_then(|before| chars.get(before))),
+        previous => boundary(previous),
+    }
+}
+
 fn brace_delta(line: &str) -> i32 {
     line.chars().fold(0_i32, |depth, ch| match ch {
         '{' => depth + 1,
@@ -4403,18 +4499,26 @@ fn code_only_lines(source: &str) -> Vec<String> {
                 continue;
             }
 
-            // A raw-string opener: `r"`, `r#"`, `r##"` … and the `br#"` byte
-            // form, whose `b` falls through as ordinary code first. The `r`
-            // must not be the tail of an identifier (`for`, `char`), so the
-            // preceding character is checked.
-            if current == 'r'
-                && index
-                    .checked_sub(1)
-                    .and_then(|previous| chars.get(previous))
-                    .is_none_or(|previous| {
-                        !previous.is_alphanumeric() && *previous != '_' && *previous != '\''
-                    })
-            {
+            // A raw-string opener: `r"`, `r#"`, `r##"` … and the BYTE forms
+            // `br"` and `br#"`. The `r` must not be the tail of an identifier
+            // (`for`, `char`), which is what the boundary check is for.
+            //
+            // bd-nar12: this comment used to claim the `br#"` form worked
+            // because "the `b` falls through as ordinary code first". That is
+            // exactly BACKWARDS -- the `b` then becomes the preceding character
+            // for the `r`, and `b` is alphanumeric, so the boundary check
+            // REJECTED every `br#"` opener and the literal was scanned as
+            // ordinary code.
+            //
+            // Measured on src/cass/import.rs:3618 and :3665, both
+            // `let input = br#"{`, where the brace INSIDE the byte raw string
+            // was counted as a code brace. Those are multi-line JSON fixtures,
+            // so once `in_string` correctly persists across lines the body's own
+            // quotes desynchronise the scanner for the rest of the literal.
+            //
+            // A stated assumption in a comment is not a test, and this one was
+            // false for as long as it has been written down.
+            if current == 'r' && raw_opener_at_token_boundary(&chars, index) {
                 let mut hashes = 0;
                 while chars.get(index + 1 + hashes) == Some(&'#') {
                     hashes += 1;
