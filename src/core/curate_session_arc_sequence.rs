@@ -19,6 +19,42 @@ struct PendingFailure<'a> {
     explicitly_marked: bool,
 }
 
+/// Read each projected window once and hold at most one lookahead body. Bare
+/// result windows qualify the preceding physically contiguous observation;
+/// they are not independent repairs. A later clean report cannot erase an
+/// earlier failure in the same run. Never concatenate or relabel source spans.
+fn observation_groups<'a>(
+    spans: impl Iterator<Item = &'a StoredEvidenceSpan>,
+) -> impl Iterator<Item = (&'a StoredEvidenceSpan, Option<Cow<'a, str>>, bool)> {
+    let mut projected = spans
+        .map(|span| (span, text::message_text(&span.excerpt)))
+        .peekable();
+    std::iter::from_fn(move || {
+        let (span, message) = projected.next()?;
+        if message.is_none() {
+            return Some((span, message, false));
+        }
+        let mut tail = span;
+        let mut veto = false;
+        while let Some((next, Some(next_message))) = projected.peek() {
+            // Missing, overlapping, inverted or overflowed positions cannot
+            // prove that an otherwise bare report belongs to this operation.
+            if !precedes(tail, next)
+                || tail.end_line.checked_add(1) != Some(next.start_line)
+            {
+                break;
+            }
+            let Some(failed) = super::clauses::report_window_veto(next_message) else {
+                break;
+            };
+            veto |= failed;
+            tail = *next;
+            let _ = projected.next();
+        }
+        Some((span, message, veto))
+    })
+}
+
 /// Retain complete reciprocal pairs. A repair consumes one preceding failure;
 /// neither endpoint can be reused for another cross-window episode. Independent
 /// topics can interleave, while another failure on the same subject replaces the
@@ -42,8 +78,8 @@ pub(super) fn candidates(
     let mut output = Vec::new();
     let mut emitted = BTreeSet::new();
     let mut pending = BTreeMap::<FailureKey, PendingFailure<'_>>::new();
-    for span in ordered {
-        let Some(message) = text::message_text(&span.excerpt) else {
+    for (span, message, trailer_veto) in observation_groups(ordered.into_iter()) {
+        let Some(message) = message else {
             // Do not establish a causal link across a record whose conversation
             // body cannot be safely interpreted. In particular, rejecting an
             // escaped instruction must not splice its neighboring text together.
@@ -52,7 +88,12 @@ pub(super) fn candidates(
         };
         let inline = inline_candidates(workspace_id, session, std::slice::from_ref(span));
         if !inline.is_empty() {
-            append_pairs(&mut output, &mut emitted, inline);
+            // A contradicted window cannot supply a verified inline lesson
+            // either. Keep its bytes intact and abstain, rather than assign a
+            // later report to one of several possible repairs inside it.
+            if !trailer_veto {
+                append_pairs(&mut output, &mut emitted, inline);
+            }
             // This window already owns a complete episode (possibly several).
             // Do not reuse it as a cross-window endpoint or bridge an unresolved
             // older failure across its independent failure/repair sequence.
@@ -62,6 +103,12 @@ pub(super) fn candidates(
         let topic = review_topic_key(message.as_ref());
         let resources = resource_keys(message.as_ref());
         if resolution_signal(message.as_ref()) {
+            if trailer_veto {
+                // Do not consume the real failure or invent a failed excerpt
+                // from this optimistic claim. A later actual repair can still
+                // resolve the original source-backed observation.
+                continue;
+            }
             let key = matching_failure(&pending, &topic, message.as_ref(), span, &resources);
             if let Some(key) = key
                 && let Some(failure) = pending.remove(&key)
@@ -1343,5 +1390,188 @@ mod tests {
                 }
             }
         }
+    }
+
+    const WINDOW_FAILURE: &str = "cargo test src/api.rs failed.";
+    const WINDOW_REPAIR: &str = "Fixed src/api.rs by restoring the guard.";
+
+    #[test]
+    fn session_arc_next_window_results_veto_optimistic_repairs() {
+        for report in [
+            "1 failed.",
+            "errors: unknown.",
+            "test result: FAILED.\n21 passed; 1 failed.",
+            "Process exited with code 101.",
+            "Process exited with code -9.",
+            "Process exited with code 0.5.",
+            "exit_code=unknown",
+        ] {
+            for structured in [false, true] {
+                let sources = [
+                    marked_span("failure", 1, WINDOW_FAILURE, structured),
+                    marked_span("claim", 2, WINDOW_REPAIR, structured),
+                    marked_span("report", 3, report, structured),
+                ];
+                assert_eq!(mine(&sources[..2]).len(), 2, "nonvacuous positive control");
+                assert!(mine(&sources).is_empty(), "{report}");
+                let mut reversed = sources.clone();
+                reversed.reverse();
+                assert!(mine(&reversed).is_empty(), "source order, not caller order");
+            }
+        }
+    }
+
+    #[test]
+    fn session_arc_result_runs_propagate_failure_across_successful_windows() {
+        for structured in [false, true] {
+            let sources = [
+                marked_span("failure", 1, WINDOW_FAILURE, structured),
+                marked_span("claim", 2, WINDOW_REPAIR, structured),
+                marked_span("counts", 3, "21 passed; 0 failed.", structured),
+                marked_span("elapsed", 4, "finished in 0.03s.", structured),
+                marked_span("exit", 5, "Process exited with code 101.", structured),
+                marked_span("clean", 6, "Process exited with code 0.", structured),
+            ];
+            let original = sources.clone();
+            assert!(mine(&sources).is_empty());
+            assert_eq!(sources, original);
+            let grouped: Vec<_> = observation_groups(sources.iter()).collect();
+            assert_eq!(grouped.len(), 2);
+            assert_eq!(grouped[1].0.id, "claim");
+            assert!(grouped[1].2);
+            assert_eq!(grouped[1].1.as_deref(), Some(WINDOW_REPAIR));
+        }
+    }
+
+    #[test]
+    fn session_arc_clean_result_windows_keep_exact_candidates_and_sources() {
+        for structured in [false, true] {
+            let original = [
+                marked_span("failure", 1, WINDOW_FAILURE, structured),
+                marked_span("repair", 2, WINDOW_REPAIR, structured),
+            ];
+            let expected = mine(&original);
+            assert_eq!(expected.len(), 2);
+            let mut sources = original.to_vec();
+            sources.push(marked_span("counts", 3, "21 passed; 0 failed.", structured));
+            sources.push(marked_span("exit", 4, "Process exited with code 0.", structured));
+            assert_eq!(mine(&sources), expected);
+            for row in &expected {
+                let arc = row.session_arc.as_ref().unwrap();
+                assert_eq!(arc.failure_span.content_hash, original[0].content_hash);
+                assert_eq!(arc.resolution_span.content_hash, original[1].content_hash);
+                assert_eq!(arc.failure_span.excerpt, WINDOW_FAILURE);
+                assert_eq!(arc.resolution_span.excerpt, WINDOW_REPAIR);
+                assert!(!row.source_ids.contains(&sources[2].id));
+                assert!(!row.source_ids.contains(&sources[3].id));
+            }
+        }
+    }
+
+    #[test]
+    fn session_arc_failed_report_does_not_consume_the_original_failure() {
+        let sources = [
+            span("failure", 1, WINDOW_FAILURE),
+            span("claim", 2, WINDOW_REPAIR),
+            span("report", 3, "1 failed."),
+            span("actual-repair", 4, WINDOW_REPAIR),
+        ];
+        let rows = mine(&sources);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(endpoints(&rows), [("failure", "actual-repair")]);
+        assert_eq!(rows, mine(&[sources[0].clone(), sources[3].clone()]));
+    }
+
+    #[test]
+    fn session_arc_report_windows_do_not_cross_independent_or_unreadable_bodies() {
+        for barrier in [
+            "The independent command for src/ui.rs started.",
+            "1 failed. Another independent command started.",
+            "`1 failed`",
+            "Example: 1 failed.",
+            r#"{"type":"tool_result","content":"1 failed"}"#,
+            r#"{"type":"assistant","content":"unfinished"#,
+        ] {
+            let sources = [
+                span("failure", 1, WINDOW_FAILURE),
+                span("repair", 2, WINDOW_REPAIR),
+                span("barrier", 3, barrier),
+                span("report", 4, "1 failed."),
+            ];
+            assert_eq!(mine(&sources), mine(&sources[..2]), "{barrier}");
+        }
+        let sources = [
+            span("failure", 1, WINDOW_FAILURE),
+            span("barrier", 2, r#"{"type":"tool_result","content":"ignored"}"#),
+            span("repair", 3, WINDOW_REPAIR),
+        ];
+        assert!(mine(&sources).is_empty(), "projection denial remains a causal barrier");
+    }
+
+    #[test]
+    fn session_arc_result_windows_require_complete_adjacent_positions() {
+        let prefix = [span("failure", 1, WINDOW_FAILURE), span("repair", 2, WINDOW_REPAIR)];
+        let expected = mine(&prefix);
+        assert_eq!(expected.len(), 2);
+        for (start, end) in [(4, 4), (2, 2), (3, 2)] {
+            let mut report = span("report", start, "1 failed.");
+            report.end_line = end;
+            let sources = [prefix[0].clone(), prefix[1].clone(), report];
+            assert_eq!(mine(&sources), expected, "{start}..{end}");
+        }
+        let sources = [
+            span("maximum", u32::MAX, WINDOW_REPAIR),
+            span("zero", 0, "1 failed."),
+        ];
+        let grouped: Vec<_> = observation_groups(sources.iter()).collect();
+        assert_eq!(grouped.len(), 2);
+        assert!(!grouped[0].2);
+    }
+
+    #[test]
+    fn session_arc_later_result_window_also_withholds_a_complete_inline_claim() {
+        let body = format!("{WINDOW_FAILURE}\n{WINDOW_REPAIR}");
+        for structured in [false, true] {
+            let sources = [
+                marked_span("combined", 10, &body, structured),
+                marked_span("report", 11, "1 failed.", structured),
+            ];
+            assert_eq!(mine(&sources[..1]).len(), 2);
+            assert!(mine(&sources).is_empty());
+            let clean = [sources[0].clone(), marked_span("clean", 11, "0 failed.", structured)];
+            assert_eq!(mine(&clean), mine(&sources[..1]));
+
+            // An earlier complete window stays independent; a later report
+            // does not retrospectively invalidate every lesson in the session.
+            let earlier = [
+                span("earlier-failure", 1, "cargo test src/ui.rs failed."),
+                span("earlier-repair", 2, "Fixed src/ui.rs by restoring the guard."),
+            ];
+            let expected = mine(&earlier);
+            assert_eq!(expected.len(), 2);
+            let all = [earlier[0].clone(), earlier[1].clone(), sources[0].clone(), sources[1].clone()];
+            assert_eq!(mine(&all), expected);
+        }
+    }
+
+    #[test]
+    fn session_arc_long_result_runs_decode_each_window_once() {
+        let mut sources = vec![span("claim", 1, WINDOW_REPAIR)];
+        for index in 0..2_048_u32 {
+            sources.push(marked_span(
+                &format!("report-{index}"),
+                index + 2,
+                "21 passed; 0 failed; finished in 0.03s.",
+                true,
+            ));
+        }
+        sources.push(span("exit", 2_050, "Process exited with code 101."));
+        let before = crate::cass::transcript::projection_calls_for_test();
+        let grouped: Vec<_> = observation_groups(sources.iter()).collect();
+        let after = crate::cass::transcript::projection_calls_for_test();
+        assert_eq!(after - before, sources.len() as u64);
+        assert_eq!(grouped.len(), 1);
+        assert!(grouped[0].2);
+        assert_eq!(grouped[0].1.as_deref(), Some(WINDOW_REPAIR));
     }
 }

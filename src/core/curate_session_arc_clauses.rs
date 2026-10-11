@@ -45,6 +45,21 @@ pub(super) fn split(excerpt: &str) -> impl Iterator<Item = &str> {
     grouped.into_iter()
 }
 
+/// A separate CASS window can continue a result report, but only when every
+/// nonempty clause is a report. Inspect the complete window even after a veto:
+/// a failed prefix must not conceal a later independent command or observation.
+/// Callers still establish source admission and physical adjacency themselves.
+pub(super) fn report_window_veto(excerpt: &str) -> Option<bool> {
+    let mut parts = split_raw(excerpt)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .peekable();
+    parts.peek()?;
+    parts.try_fold(false, |veto, part| {
+        outcome_report_veto(part).map(|failed| veto || failed)
+    })
+}
+
 /// Only bare reports extend an observation. A command, named resource,
 /// qualification or quoted example is a new clause, never a result trailer.
 /// This recognizes framing; the existing outcome classifier owns the verdict.
@@ -619,5 +634,53 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn complete_result_windows_share_the_clause_outcome_policy() {
+        for (source, expected) in [
+            ("21 passed; 0 failed; finished in 0.03s.", Some(false)),
+            ("1 failed.\n0 failed.\nProcess exited with code 0.", Some(true)),
+            ("test result: ok.\nProcess exited with code 101.", Some(true)),
+            ("errors: unknown.\nfinished in 12ms.", Some(true)),
+            ("Process exited with code 0.5.", Some(true)),
+            ("finished in 3s.", Some(false)),
+            ("\n \t\r\n", None),
+        ] {
+            assert_eq!(report_window_veto(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn a_failed_prefix_cannot_hide_an_independent_window_tail() {
+        for independent in [
+            "Another command started for src/ui.rs.",
+            "Example: 1 failed.",
+            "`1 failed`",
+            "```text\n1 failed\n```",
+            "資料 café 🦀 was recorded.",
+        ] {
+            for source in [
+                format!("1 failed.\n{independent}"),
+                format!("{independent}\n1 failed."),
+                format!("21 passed.\n{independent}\nProcess exited with code 1."),
+            ] {
+                let hash = blake3::hash(source.as_bytes());
+                assert!(report_window_veto(&source).is_none(), "{source}");
+                assert_eq!(blake3::hash(source.as_bytes()), hash);
+            }
+        }
+    }
+
+    #[test]
+    fn complete_report_window_scanning_does_not_stop_at_the_first_failure() {
+        let reports = "21 passed; 0 failed;\n".repeat(10_000);
+        let source = format!("1 failed.\n{reports}Another command started.");
+        OUTCOME_TRAILER_BYTES.with(|bytes| bytes.set(0));
+        assert_eq!(report_window_veto(&source), None);
+        OUTCOME_TRAILER_BYTES.with(|bytes| {
+            assert!(bytes.get() >= reports.len() / 2);
+            assert!(bytes.get() <= source.len());
+        });
     }
 }
