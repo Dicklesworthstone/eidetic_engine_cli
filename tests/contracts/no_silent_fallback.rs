@@ -3608,10 +3608,30 @@ fn no_silent_fallback_unclassified_findings_only_shrink() -> TestResult {
     for (file, count) in &observed {
         let allowed = baseline.get(file).copied().unwrap_or(0);
         if *count > allowed {
+            // bd-amhns: NAME THE SITES, do not merely count them. A per-file
+            // count tells a reader how much work there is and nothing about
+            // where, so burning this down meant re-deriving the sites by hand
+            // from the inventory -- across 26 files, with the rules keyed on
+            // (file, function, fragment-in-context) rather than on lines. Each
+            // site needs a FIX or a written justification, and both start by
+            // reading the line, so the line belongs in the failure.
+            let sites = findings
+                .iter()
+                .filter(|finding| &finding.file == file && classify_finding(finding).is_none())
+                .map(|finding| {
+                    format!(
+                        "\n    {}:{} in {} -- {}",
+                        finding.file,
+                        finding.line,
+                        finding.function.as_deref().unwrap_or("<module scope>"),
+                        finding.text
+                    )
+                })
+                .collect::<String>();
             problems.push(format!(
                 "{file}: {count} unclassified fallback(s), baseline allows {allowed}. \
                  Return a contextual error or degradation, or add a justified \
-                 inventory entry with a follow-up bead."
+                 inventory entry with a follow-up bead.{sites}"
             ));
         }
     }
