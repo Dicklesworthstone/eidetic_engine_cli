@@ -1346,7 +1346,10 @@ mod tests {
 
         let ancestry = compute_causal_ancestry(&graph, "failure");
         assert!(
-            !ancestry.ancestors.iter().any(|ancestor| ancestor.memory_id == "failure")
+            !ancestry
+                .ancestors
+                .iter()
+                .any(|ancestor| ancestor.memory_id == "failure")
         );
         assert_eq!(
             ancestry
@@ -1356,7 +1359,12 @@ mod tests {
                 .map(|ancestor| ancestor.path_length),
             Some(2)
         );
-        assert!(ancestry.degraded.iter().any(|entry| entry.code == "graph.causal_cycle"));
+        assert!(
+            ancestry
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "graph.causal_cycle")
+        );
         assert!(compute_min_cost_explanation(&graph, "failure").is_none());
     }
 
