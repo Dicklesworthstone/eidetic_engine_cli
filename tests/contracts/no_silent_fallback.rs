@@ -294,10 +294,24 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     ),
     allowed_in(
         "NSF-CORE-DECIDE-NO-STORE",
-        "src/core/decide.rs",
-        "load_decisions",
+        // bd-amhns key repair. The reader was split into its own module:
+        // load_decisions still EXISTS at src/core/decide.rs:481 but is now a
+        // one-line wrapper around `read::load(..)`, and the fragment occurs 0
+        // times in decide.rs against 2 in decide_read.rs. So the old key still
+        // resolved to a real function that no longer owned the site, which is
+        // exactly why this row declared 1 against 2 findings. The second site
+        // is a genuinely new call path and gets its own rule below.
+        "src/core/decide_read.rs",
+        "load",
         "if !scope.database_path.exists() {",
-        "A workspace with no decision store has recorded no decisions. Existence is checked before opening, and once the file exists every open or query failure propagates through open_decide_database_read_only(..)? -- so an unreadable store is never reported as a workspace with no decisions.",
+        "A workspace with no decision store has recorded no decisions. Existence is checked before opening, and once the file exists every open or query failure propagates through open_decide_database_read_only(..)? -- so an unreadable store is never reported as a workspace with no decisions. The module's own error constructor states the same contract: read_error() reads \"Could not read a coherent decision snapshot; no partial result returned\".",
+    ),
+    allowed_in(
+        "NSF-CORE-DECIDE-NO-STORE-RECORD-HEADS",
+        "src/core/decide_read.rs",
+        "load_record_heads",
+        "if !scope.database_path.exists() {",
+        "The record-heads half of NSF-CORE-DECIDE-NO-STORE, added by bd-amhns when the module split revealed a second copy of the check on a different call path. Same justification and it holds just as strongly here: existence is checked before opening, and this path then propagates through FIVE `?` points -- open, snapshot begin, scope bind, the head query, and snapshot finish -- so an unreadable store cannot be reported as a workspace with no record heads. Separate rule rather than a multiplicity-2 group because function scoping is what keeps each one's blast radius visible, and the two live in different functions.",
     ),
     allowed_in(
         "NSF-MCP-OPTIONAL-LIST-ABSENT",
@@ -323,16 +337,23 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CORE-GLOBAL-STORE-NO-DATABASE",
         "src/core/global_store.rs",
-        "read_global_store_memories",
-        "if !paths.database_path.exists() {",
-        "No user-global store file means no user-global memories. Checked before opening; once the file exists, open_file_read_only failures become an Err with the reason.",
+        // bd-amhns key repair, BOTH halves of the key. The function gained an
+        // `_at` as-of parameter, and the existence check moved from `.exists()`
+        // to `.try_exists().map_err(global_read_error)?`, so neither the old
+        // function name nor the old fragment survives at the site.
+        "read_global_store_memories_at",
+        ".try_exists()",
+        "No user-global store file means no user-global memories. Checked before opening; once the file exists, open_file_read_only failures become an Err with the reason. The refactor STRENGTHENED this justification rather than weakening it: `.exists()` returned false on an IO error, collapsing \"cannot tell\" into \"absent\", whereas `try_exists` now propagates that error with `?`.",
     ),
     allowed_in(
         "NSF-CORE-GLOBAL-STORE-NO-WORKSPACE-ROW",
         "src/core/global_store.rs",
-        "read_global_store_memories",
-        "error.message()",
-        "The global workspace row being ABSENT means nothing has been promoted to the global store yet, so there are no memories to list. A resolution ERROR is a different path: it is mapped to \"failed to resolve global workspace row\" and returned with `?` just above. That message line is one line too far above the finding to fall inside its context window, which is why this fragment names the error accessor instead.",
+        // bd-amhns key repair. The site moved into the snapshot helper, and the
+        // old `error.message()` fragment is gone along with the message it
+        // named -- see the reason below.
+        "read_global_rows_in_snapshot",
+        "let memories = connection",
+        "The global workspace row being ABSENT means nothing has been promoted to the global store yet, so there are no memories to list. A resolution ERROR is a different path: `select_existing_workspace_row(..).map_err(global_read_error)?` propagates it one line above, so the `let Some(..) = .. else` shape keeps absence and failure structurally distinct instead of merging them into one empty vector. THE PREVIOUS REASON WAS STALE, not merely mis-keyed: it cited an error message, \"failed to resolve global workspace row\", that no longer exists anywhere in src/ -- that text now survives ONLY inside this inventory -- which is why the argument is restated against global_read_error. The fragment deliberately names the statement one line BELOW the finding: everything above it inside the +/-4 window is `.map_err(global_read_error)?`, which occurs 9 times in this file and would over-own.",
     ),
     allowed_in(
         "NSF-CORE-MEMORY-DEBT-PER-MEMORY-MAPS",
@@ -413,9 +434,14 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CORE-RESUME-SESSION-BOUNDS",
         "src/core/resume.rs",
-        "group_sessions",
-        "let oldest_at = members",
-        "Two sites, multiplicity 2. A session group is built by grouping memories, so it holds at least one member by construction and first()/last() are Some. Reachability is moot in any case: the only consumer immediately does `newest_at.get(..10).unwrap_or(\"unknown\")`, so even an empty bound renders as the explicit label `inferred-unknown` rather than as a fabricated date.",
+        // bd-amhns key repair, BOTH halves. group_sessions gained a projection
+        // parameter, and the two bounds became struct-literal fields, so
+        // `let oldest_at = members` no longer appears. The replacement fragment
+        // sits at the shared line 525, which falls inside the +/-4 window of
+        // BOTH sites, so multiplicity 2 is preserved by one fragment.
+        "group_sessions_with_projection",
+        "oldest_at: members",
+        "Two sites, multiplicity 2: newest_at from members.first() and oldest_at from members.last(). Both are unreachable BY CONSTRUCTION, and that is now proven rather than asserted -- every group is created as `vec![memory]` and the only other mutation is `.push(memory)`, so no path produces an empty group and none removes a member; first()/last() are therefore always Some. THE PREVIOUS REASON'S SECOND LEG IS REMOVED AS MIS-SCOPED rather than restated: it cited `.get(..10).unwrap_or(\"unknown\")` rendering `inferred-unknown`, but that expression derives the session LABEL a few lines above and is not a consumer of these two fields at all. The real consumer formats oldest_at/newest_at directly, where an empty bound would render as an empty string -- so unreachability has to carry this rule alone, and it does.",
     ),
     allowed_in(
         "NSF-CORE-RESUME-STALENESS-UNTAGGED",
@@ -3218,6 +3244,195 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "steward_pack_l2_config",
         ".unwrap_or_default();",
         "An empty PathBuf is the sentinel for \"no L2 cache root configured\", and the sole consumer tests for it directly: steward_pack_l2_cache does `if config.root.as_os_str().is_empty() { steward_pack_l2_default_root() } else { config.root }`. This is why the line below can use an explicit `unwrap_or(DEFAULT_MAX_BYTES)` while this one defaults to empty -- the byte cap is a constant available at config-build time, the default root is computed and is resolved at use. That asymmetry was what made this worth tracing rather than assuming.",
+    ),
+    // ----------------------------------------------------------------------
+    // bd-amhns, 2026-10-11. The judged remainder of the unclassified
+    // population. APPENDED AT THE END ON PURPOSE: classify_finding is
+    // first-match-wins, so appending makes these lowest priority and none of
+    // them can contest a finding an existing rule already owns. Every (site,
+    // fragment) pair below was verified mechanically against a
+    // reimplementation of context_window() rather than by eye -- that check
+    // caught two fragments I had chosen just outside their window.
+    //
+    // Headline from judging all 39: ZERO were correctness or safety defects.
+    // The three that discard a Result's REASON while keeping safe behaviour
+    // are bd-p42mq; the storage-error/absence collapse under
+    // load_team_members is bd-m3fe7.
+    // ----------------------------------------------------------------------
+    allowed_in(
+        "NSF-DB-EVIDENCE-READER-VIEWS",
+        "src/db/evidence_reader_projection.rs",
+        "derive",
+        "let (reader_body, reader_text) = if structured_cass {",
+        "materialized_reader_views returns Option<(String, String)>, NOT Result, so there is no error here to discard. Every None means \"no materializable reader view\": project_transcript declines a non-transcript excerpt, append_bounded declines one past its size bound, and the final `(!body.is_empty()).then_some(..)` declines an empty projection. Mapping that to empty views is the documented contract three lines above -- \"A refusal is a materialized empty view\" -- and no bytes are lost either way, because span.excerpt remains the stored value and the non-CASS arm returns it verbatim. RECORDED BECAUSE I GOT IT WRONG FIRST: this site was investigated AS a suspected defect on the stated premise that the default applied to a Result. It does not.",
+    ),
+    allowed_in(
+        "NSF-CORE-SUBSCRIBE-DELTA-TAGS",
+        "src/core/subscribe_poll.rs",
+        "hydrate_tags",
+        "delta.tags = tags.get(&delta.memory_id).cloned().unwrap_or_default();",
+        "An Option from a map lookup, not a swallowed failure. get_memory_tags_batch's own error is propagated by `.map_err(storage_error)?` two lines above, so by this point the batch read has SUCCEEDED and a missing key means the memory genuinely carries no tags. The bulk reader returns rows only for memories that have tags, so absence is the ordinary case for an untagged memory and the empty Vec is its correct value rather than a fabricated one. Same construct and same reasoning as the already-accepted NSF-CORE-RESUME-ADMISSION-TAGS.",
+    ),
+    allowed_in(
+        "NSF-CORE-TEAM-ROSTER-ABSENCE",
+        "src/core/memory_scope.rs",
+        "load_team_members",
+        "let members = bound_team_members(workspace_path, connection).unwrap_or_default();",
+        "Empty IS the correct value, because the roster is admission-only and strictly additive: memory_in_scope_with_tags admits a Team-scoped memory when the producer is the current agent OR is in this set, so a SMALLER roster admits strictly FEWER memories. An empty set therefore fails CLOSED -- it hides team memories and cannot admit one that should have been excluded -- which is also bound_team_members' own documented contract, \"No matching binding is absence of authority\". KNOWN RESIDUAL, recorded rather than papered over and filed as bd-m3fe7: the callee reaches None by three distinct routes -- a storage error on addressed_workspace_row, a genuinely absent workspace row, and a storage error on list_all_team_members -- so a database failure is indistinguishable from an unbound workspace here. The polarity above bounds the consequence to under-admission, which makes it a diagnostic gap rather than an authorization defect.",
+    ),
+    allowed_in(
+        "NSF-CLI-CONTEXT-DELTA-RULE-PROJECTION",
+        "src/cli/context_delta_evidence.rs",
+        "from_rule_ledger",
+        ".unwrap_or_default()",
+        "Eight optional projection fields of a verified prior-pack RULE item, carried as one group with multiplicity 8. Direct parallel of NSF-CLI-CONTEXT-DELTA-EVIDENCE-PROJECTION in this same file, which is function-scoped to the sibling from_ledger with the same fragment and the same count: from_rule_ledger is near line-for-line identical to it. Each value is an Option<&serde_json::Value> cloned into a default, and serde_json::Value's Default is Value::Null, so absence is PRESERVED as null rather than replaced by a fabricated zero, rank, or empty string. The REQUIRED fields do not take this path: rule_id uses ok_or_else(invalid)? and entityRevision is additionally validated as a canonical blake3 hash, so a malformed item is an error rather than a snapshot full of nulls.",
+    ),
+    allowed_in(
+        "NSF-CORE-RULE-ADMISSION-RELATIONS",
+        "src/core/search_rule_admission.rs",
+        "projections",
+        "relations.tags.remove(&canonical).unwrap_or_default();",
+        "Two sites, multiplicity 2 -- the tags map and the sources map, read one line apart. Safe because the authority-read FAILURE is handled ten lines above with an early `return BTreeMap::new();` under the comment \"Never fall back to indexed tags or source IDs\", so by this point relations was read successfully and a missing key means the rule genuinely has no tags or no sources. One fragment covers both sites: the two lines are adjacent, so line 117 falls inside the +/-4 window of each.",
+    ),
+    allowed_in(
+        "NSF-CORE-SCOPE-RULE-SOURCE-TAGS",
+        "src/core/context.rs",
+        "filter_native_rule_sources_by_scope",
+        "Ok(mut tags) => tags.remove(id).unwrap_or_default(),",
+        "The error is NOT swallowed, and the proof is the very next line: `Err(_) => return false,`. The default applies only inside the Ok arm, to a map lookup where a memory having no tags is the ordinary case. Fragment is the full match arm, which is unique in this 98,000-line file, so the generic-fragment hazard that NSF-CLI-PACK-LEDGER-ITEM-PROJECTION warns about does not apply here.",
+    ),
+    allowed_in(
+        "NSF-CORE-INCIDENT-FIX-ANCHORS",
+        "src/core/incident_card.rs",
+        "explains_a_fix",
+        "let anchors = symptom.map(anchor_terms).unwrap_or_default();",
+        "No error exists anywhere on this path: `symptom: Option<&str>` is a PARAMETER whose absence is a documented input state -- the doc comment says anchors come from the failure's symptom line \"when there is one\". Empty anchors are strictly CONSERVATIVE, which was measured in sentence_score rather than assumed: anchors contribute only a `+3` bonus, so losing them can only LOWER a sentence's score and never raise it, meaning a card with no symptom line can never be judged as explaining a fix more easily than one with a symptom. It is not a dead branch either -- the predicate still functions on FIX_WORDS alone, which scores 2 against a threshold of 1.",
+    ),
+    allowed_in(
+        "NSF-CORE-PACK-FLOOR-NOT-REQUESTED",
+        "src/core/context.rs",
+        "filter_context_pack_candidates_by_relevance_floor",
+        "let Some(floor) = relevance_floor else {",
+        "relevance_floor is a PARAMETER, and this function's return type is the list of omissions the floor CAUSED. No floor requested means zero floor-omissions, which is the honest answer rather than a fallback. A MALFORMED floor takes a different path entirely: validate_relevance_floor() maps to ContextPackError::Pack and returns with `?` two lines above.",
+    ),
+    allowed_in(
+        "NSF-CORE-PACK-EVIDENCE-SECTION-NOT-REQUESTED",
+        "src/core/context.rs",
+        "collect_direct_evidence_pack_candidates",
+        "if !request.sections.is_empty() && !request.sections.contains(&PackSection::Evidence) {",
+        "Not a fallback at all: this honors an EXPLICIT caller filter that excluded the Evidence section, and returning evidence candidates here would violate the request. The empty-sections case is deliberately excluded from the condition, so \"no sections named\" still means \"all sections\". As above, a malformed relevance floor errors out with `?` before this point.",
+    ),
+    allowed_in(
+        "NSF-CORE-PACK-EVIDENCE-BULK-HYDRATION",
+        "src/core/context.rs",
+        "collect_direct_evidence_pack_candidates",
+        ".map(|row| (row.span.id.clone(), row))",
+        "The default is NOT the final answer, which is the whole justification. A missing entry routes to the None arm below, which performs a per-span connection.get_evidence_span read, and THAT failure is counted into rejected_live_admission. So the bulk read is a batching optimization whose failure degrades to individual reads, and no evidence is dropped uncounted. I initially mis-called this a defect before reading the None arm. What IS genuinely lost is the bulk error's REASON, plus the performance cliff of N queries replacing one at exactly the moment the database is unhealthy; filed as bd-p42mq, which also names the positive control -- NSF-CORE-GLOBAL-FALLBACK-ADMISSION below does this correctly through the degraded channel.",
+    ),
+    allowed_in(
+        "NSF-CORE-PACK-EVIDENCE-PROVENANCE-CLAUSE",
+        "src/core/context.rs",
+        "direct_evidence_pack_candidate",
+        ".map(|turn| format!(\" through its source turn {turn}\"))",
+        "An optional clause in a provenance sentence. matched_through absent means the phrase \" through its source turn N\" is omitted from the why-string; no error exists on this path and nothing is fabricated in its place. The surrounding sentence is assembled from values already validated by the caller.",
+    ),
+    allowed_in(
+        "NSF-CORE-PACK-INCIDENT-CARD-PREFERENCE",
+        "src/core/context.rs",
+        "prefer_incident_cards",
+        "incident_card_spans_for_sessions(&sessions)",
+        "WEAKEST JUSTIFICATION IN THIS BATCH, and flagged as such rather than dressed up. prefer_incident_cards is TOTAL by signature -- it returns a plain Vec and takes no degraded channel -- so it cannot report a lookup failure even in principle. The default is at least consistent with that contract: no cards available to prefer, the original candidates survive untouched, so the pack is less curated rather than wrong and nothing is fabricated or wrongly admitted. But the signature's totality is arguably the thing to FIX rather than to justify, especially since the caller does hold a degraded channel. Filed as bd-p42mq.",
+    ),
+    allowed_in(
+        "NSF-POLICY-DOWNLOAD-SHELL-PROGRAM",
+        "src/policy/mod.rs",
+        "download_executed_by_shell",
+        ".split(|ch: char| ch.is_whitespace() || ch == '|')",
+        "PROVABLY UNREACHABLE: str::split always yields at least one item -- even the empty string splits to a single empty element -- so `.next()` is always Some and the default never applies. THE DIRECTION IS RECORDED ANYWAY, because this is a security predicate and the polarity is unforgiving: if a refactor ever made the default reachable, an empty program name makes DOWNLOAD_SHELLS.contains(&\"\") false, which means NO detection. The default sits on the FAIL-OPEN side. Justified because unreachable; written down because the next person to touch this line needs to know which way it falls.",
+    ),
+    allowed_in(
+        "NSF-CORE-REMOTE-EMBED-ZERO-INPUTS",
+        "src/core/remote_embed.rs",
+        "parse_embeddings_response",
+        "if data.is_empty() {",
+        "Airtight by ordering: the `data.len() != expected_count` guard eight lines above returns RemoteEmbedError::MalformedResponse, so reaching this line PROVES expected_count == 0 -- the caller asked for zero embeddings and got zero. A short, long, or partially-indexed response is a different path, and the comment just below states the rule that governs it: positional compatibility holds only when the entire response omits indexes, and a partially indexed one must never be repaired by guessing.",
+    ),
+    allowed_in(
+        "NSF-CORE-GLOBAL-FALLBACK-PRECONDITION",
+        "src/core/search.rs",
+        "global_store_fallback_memories",
+        "if !global_store_participates_in_scope(options.memory_scope)",
+        "Two explicit, deterministic preconditions read from the request: the scope does not include the global store, or the query is empty after trimming. Neither is a failure, and neither consults the store. The fragment recurs once more in this file, inside global_store_frankensearch_hits, but this rule is function-scoped and cannot reach it.",
+    ),
+    allowed_in(
+        "NSF-CORE-GLOBAL-FALLBACK-ADMISSION",
+        "src/core/search.rs",
+        "global_store_fallback_memories",
+        "admitted_global_store_memories(options, &memory_config, degraded)",
+        "EXEMPLARY, and the positive control cited by bd-p42mq. The callee returns Option, not Result, and every None return is immediately preceded by a degraded.push -- scope_metadata_unavailable, global_memory_disabled, global_lane_migration_required, and scope_metadata_unavailable again. The REASON travels out through the degraded channel; only the VALUE falls back, which is exactly what a fail-soft default should look like. The genuinely untrustworthy case is separated and fails hard instead: workspace_memory_policy(..)? propagates one line above, matching the doc comment's promise that an untrustworthy privacy policy fails the request rather than enabling the lane.",
+    ),
+    allowed_in(
+        "NSF-CORE-ASK-TARGETS-NO-PATHS",
+        "src/core/ask_corpus.rs",
+        "normalize_ask_targets",
+        "if paths.is_empty() {",
+        "No paths supplied means no normalized targets, read straight off the argument before any store access. The storage path below is a different one and propagates: get_workspace failures become corpus_storage_error through map_err(..)?.",
+    ),
+    allowed_in(
+        "NSF-CORE-ASK-ADMISSION-EMPTY-PAGE",
+        "src/core/ask_memory_admission.rs",
+        "load_selected_revisions",
+        "after_metadata_page(0);",
+        "metadata_page(..)? has ALREADY propagated on the line above, so the read succeeded and the page is genuinely empty. The fragment deliberately names the observer call rather than the return: the zero is reported to the caller through after_metadata_page, which makes this empty result explicitly OBSERVABLE rather than silent -- the distinction the whole contract is about.",
+    ),
+    allowed_in(
+        "NSF-DB-MEMORY-RECENT-ZERO-LIMIT",
+        "src/db/memory_temporal.rs",
+        "recent_with_boundary",
+        "if limit == 0 {",
+        "The caller asked for zero rows and gets zero. ORDER IS THE JUSTIFICATION HERE: reference(as_of)? validates the timestamp on the line BEFORE this check, so a malformed as_of is an error rather than an empty list -- had the shortcut come first, a bad timestamp with limit 0 would have been silently reported as \"no recent memories\".",
+    ),
+    allowed_in(
+        "NSF-CORE-LEXICAL-STOPWORD-EVIDENCE-TEXT",
+        "src/core/search.rs",
+        "drop_stopword_only_lexical_hits",
+        "(row.span.id, document.content().to_owned())",
+        "Conservative in the correct direction for a FILTER, which is what makes it safe: when the text is missing, the retain predicate hits `let Some(content) = content else { return true; }` and the hit is RETAINED. The function exists to DROP stopword-only hits, so failing to read a hit's text means it cannot prove the hit is stopword-only and therefore keeps it -- it under-filters and never over-filters, so no legitimate result is silently removed. The count it does drop is reported as SearchDegradation::lexical_stopword_only_filtered. This is the third and mildest instance of the discarded-Result-reason class noted on bd-p42mq: here the fallback costs nothing at all.",
+    ),
+    allowed_in(
+        "NSF-CORE-CASS-ERROR-NO-STABLE-CODE",
+        "src/core/cass_error_recall.rs",
+        "structured_error_diagnostics",
+        "vec![from_ee_error(&error.code, &message)]",
+        "An Option filtered on two explicit admission conditions -- a stable error code AND a non-empty message -- so no QUALIFYING error means no diagnostics, which is precisely this function's return type. The absent-envelope case is a separate early return above. The message is also redacted before use, so the empty result cannot be a redaction artifact leaking through.",
+    ),
+    allowed_in(
+        "NSF-CORE-CURATE-CORROBORATION-NO-SOURCES",
+        "src/core/curate_corroboration.rs",
+        "freeze_existing",
+        "candidate.source_ids = stored",
+        "A None source_id becomes \"\", which splits to a single empty element that the following `.filter(|id| !id.is_empty())` removes -- so no source IDs means no source IDs, and the filter also makes the result robust to stray commas in a stored list. The default is applied to an Option<String> field, not to a read.",
+    ),
+    allowed_in(
+        "NSF-CLI-PACK-RECORD-TASK-PATHS",
+        "src/cli/mod.rs",
+        "pack_record_task_path_hashes",
+        "pack_record_request_value(ledger, \"taskPaths\")",
+        "A DOCUMENTED COMPATIBILITY CONTRACT, stated in the comment directly above the function: \"treat old ledgers without task paths as the historical empty target set\". Absence is a ledger vintage, not a failure. The same comment records that this runs only after the central replay gate admitted both records, so validation has already happened upstream.",
+    ),
+    allowed_in(
+        "NSF-CORE-CURATE-PLANNED-NO-DERIVED",
+        "src/core/curate.rs",
+        "planned_application_from_decision",
+        "let shared_evidence_spans = derived",
+        "An Option-driven projection: no derived input means no planned evidence attachments. The statement named by the fragment is the next one, which applies the identical pattern to shared_evidence_spans from the same Option -- so the shape is the function's established idiom rather than a one-off default. Fragment sits one line below the finding because the collect chain above it is generic.",
+    ),
+    allowed_in(
+        "NSF-DAEMON-COMMITTED-DEGRADED-INIT",
+        "src/daemon/server.rs",
+        "daemon_committed_memory_json",
+        "and_then(|value| value.get(\"degraded\"))",
+        "ACCUMULATOR INITIALIZATION: an empty vector is the correct starting point for a list that `degraded.extend(..)` appends to immediately below, and absence of prior degradations genuinely means there were none. The report's own error path is handled further up, where it pushes a degradation of its own and yields None.",
     ),
 ];
 

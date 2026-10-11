@@ -729,3 +729,55 @@
 1	NSF-MESH-TEAM-INVITE-ORIGIN-WORKSPACE
 1	NSF-MESH-TEAM-REDEEM-ORIGIN-WORKSPACE
 1	NSF-STEWARD-PACK-L2-ROOT-SENTINEL
+#
+# bd-amhns, 2026-10-11 -- the judged remainder of the unclassified population.
+# 26 rules, 34 findings. No resident count moved: the four DRIFTED rules
+# repaired in the same change (GLOBAL-STORE-NO-DATABASE,
+# GLOBAL-STORE-NO-WORKSPACE-ROW, RESUME-SESSION-BOUNDS, DECIDE-NO-STORE) already
+# declared the right numbers here -- they simply OWNED zero, because their keys
+# pointed at functions and fragments that no longer existed. Repairing a key
+# therefore changes no row; it makes an existing row true again.
+#
+# Headline from judging all 39 sites: ZERO were correctness or safety defects.
+# This red was entirely key drift plus missing justifications. Recorded because
+# I expected otherwise.
+#
+# Two of the repaired rules had STALE REASONING, not just stale keys -- they
+# argued from code that had been deleted. Repairing only their keys would have
+# re-admitted expired arguments:
+#   GLOBAL-STORE-NO-WORKSPACE-ROW cited an error message, "failed to resolve
+#     global workspace row", that exists nowhere in src/ any more.
+#   RESUME-SESSION-BOUNDS cited a consumer that turned out to derive the session
+#     LABEL, not these two fields. Its unreachability leg is now proven instead.
+#
+# Three sites keep safe behaviour but discard a Result's REASON -> bd-p42mq.
+# One collapses storage error and absent binding into one value -> bd-m3fe7.
+# One is a provably-unreachable default on the FAIL-OPEN side of a security
+# predicate (DOWNLOAD-SHELL-PROGRAM); justified because unreachable, written
+# down because the polarity is unforgiving.
+1	NSF-DB-EVIDENCE-READER-VIEWS
+1	NSF-CORE-SUBSCRIBE-DELTA-TAGS
+1	NSF-CORE-TEAM-ROSTER-ABSENCE
+8	NSF-CLI-CONTEXT-DELTA-RULE-PROJECTION
+2	NSF-CORE-RULE-ADMISSION-RELATIONS
+1	NSF-CORE-SCOPE-RULE-SOURCE-TAGS
+1	NSF-CORE-INCIDENT-FIX-ANCHORS
+1	NSF-CORE-DECIDE-NO-STORE-RECORD-HEADS
+1	NSF-CORE-PACK-FLOOR-NOT-REQUESTED
+1	NSF-CORE-PACK-EVIDENCE-SECTION-NOT-REQUESTED
+1	NSF-CORE-PACK-EVIDENCE-BULK-HYDRATION
+1	NSF-CORE-PACK-EVIDENCE-PROVENANCE-CLAUSE
+1	NSF-CORE-PACK-INCIDENT-CARD-PREFERENCE
+1	NSF-POLICY-DOWNLOAD-SHELL-PROGRAM
+1	NSF-CORE-REMOTE-EMBED-ZERO-INPUTS
+1	NSF-CORE-GLOBAL-FALLBACK-PRECONDITION
+1	NSF-CORE-GLOBAL-FALLBACK-ADMISSION
+1	NSF-CORE-ASK-TARGETS-NO-PATHS
+1	NSF-CORE-ASK-ADMISSION-EMPTY-PAGE
+1	NSF-DB-MEMORY-RECENT-ZERO-LIMIT
+1	NSF-CORE-LEXICAL-STOPWORD-EVIDENCE-TEXT
+1	NSF-CORE-CASS-ERROR-NO-STABLE-CODE
+1	NSF-CORE-CURATE-CORROBORATION-NO-SOURCES
+1	NSF-CLI-PACK-RECORD-TASK-PATHS
+1	NSF-CORE-CURATE-PLANNED-NO-DERIVED
+1	NSF-DAEMON-COMMITTED-DEGRADED-INIT
