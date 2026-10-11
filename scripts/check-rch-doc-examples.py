@@ -6,6 +6,12 @@ material. RCH-specific blocks in AGENTS.md and README.md are also scanned, while
 general installation/build prose in those files is ignored. Cargo examples must
 use the repo verifier wrapper, or an explicitly remote-required `rch exec`
 shape, so copied docs cannot silently become local Cargo proof.
+
+CLAUDE.md is scanned in FULL rather than block-by-block, because it is not a
+distribution document: it is the instruction file loaded into every Claude Code
+session in this repo, so a bare `cargo check` there is an instruction to break
+the local-Cargo tripwire rather than prose about installing the tool. See
+`scan_mode` and bd-mgphf.
 """
 
 from __future__ import annotations
@@ -26,8 +32,20 @@ DEFAULT_FILES = [
     "docs/rch_runbook.md",
     "docs/rch_verification.md",
     "AGENTS.md",
+    "CLAUDE.md",
     "README.md",
 ]
+
+# Files where EVERY shell block is scanned, not only blocks that happen to
+# mention RCH. The RCH-token gate exists so that genuine distribution prose
+# (`cargo install ee`) in AGENTS.md / README.md is not flagged. CLAUDE.md is
+# not a distribution document -- it is the in-repo instruction file Claude Code
+# loads into every session, where a bare `cargo check` is never correct and is
+# read as an instruction. bd-mgphf: its Build Commands block told every agent
+# to run three tripwire-forbidden subcommands and was invisible twice over,
+# because the file was out of scope AND the block carried no RCH token.
+SCAN_ALL_PREFIXES = ("docs/rch_",)
+SCAN_ALL_FILES = frozenset({"CLAUDE.md"})
 SHELL_LANGS = {"", "bash", "sh", "shell", "zsh", "console"}
 RCH_BLOCK_RE = re.compile(
     r"(\bRCH\b|\brch\b|RCH_[A-Z0-9_]+|scripts/rch_verify\.sh|check-local-cargo-tripwire|"
@@ -158,8 +176,20 @@ def commands_from_block(path: str, block: CodeBlock) -> list[CommandExample]:
     return commands
 
 
+def scan_mode(path: str) -> str:
+    """Whether every shell block in `path` is scanned, or only RCH-token ones.
+
+    Single source of truth: `scan_file` and both self-test expectations read
+    this, so a file added to the scan-all set cannot be reported under one mode
+    and scanned under another.
+    """
+    if path in SCAN_ALL_FILES or path.startswith(SCAN_ALL_PREFIXES):
+        return "scan_all"
+    return "scan_rch_blocks_only"
+
+
 def is_rch_specific(path: str, block: CodeBlock) -> bool:
-    if path in {"docs/rch_runbook.md", "docs/rch_verification.md"}:
+    if scan_mode(path) == "scan_all":
         return True
     return RCH_BLOCK_RE.search(block.body) is not None
 
@@ -203,7 +233,7 @@ def scan_file(repo_root: Path, relative_path: str) -> dict:
     text = path.read_text(encoding="utf-8")
     result = {
         "path": relative_path,
-        "mode": "scan_all" if relative_path.startswith("docs/rch_") else "scan_rch_blocks_only",
+        "mode": scan_mode(relative_path),
         "fenced_blocks": 0,
         "command_blocks": 0,
         "commands": 0,
@@ -348,7 +378,7 @@ scripts/rch_verify.sh --dry-run -- cargo test --lib smoke -- --nocapture
             del fake_path
             result = {
                 "path": path,
-                "mode": "scan_all" if path.startswith("docs/rch_") else "scan_rch_blocks_only",
+                "mode": scan_mode(path),
                 "fenced_blocks": 0,
                 "command_blocks": 0,
                 "commands": 0,
@@ -400,7 +430,7 @@ scripts/rch_verify.sh --dry-run -- cargo test --lib smoke -- --nocapture
             blocks.append(result)
         merged = {
             "path": path,
-            "mode": "scan_all" if path.startswith("docs/rch_") else "scan_rch_blocks_only",
+            "mode": scan_mode(path),
             "fenced_blocks": sum(item["fenced_blocks"] for item in blocks),
             "command_blocks": sum(item["command_blocks"] for item in blocks),
             "commands": sum(item["commands"] for item in blocks),

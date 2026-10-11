@@ -21,13 +21,24 @@ cargo fmt --check                   # The ONLY cargo subcommand allowed locally
 Everything else is dispatched to the pinned RCH lane:
 
 ```bash
-RCH="scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --"
-
-$RCH cargo check --all-targets                 # Type check
-$RCH cargo clippy --all-targets -- -D warnings # Lint (warnings = errors)
-$RCH cargo test --workspace --all-targets      # Run all tests
-$RCH cargo test test_name -- --exact           # A single test
+# Type check
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+    cargo check --all-targets
+# Lint (warnings = errors)
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+    cargo clippy --all-targets -- -D warnings
+# Run all tests
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+    cargo test --workspace --all-targets
+# A single test
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+    cargo test test_name -- --exact
 ```
+
+Write the wrapper out in full on every line. A `RCH="..."` shorthand reads
+nicely and breaks both copy-paste of a single line and
+`scripts/check-rch-doc-examples.py`, which looks for the literal wrapper
+before `cargo` and cannot resolve a shell variable.
 
 Budget the wait: a cold worker compiles this tree in roughly 2.5 hours, and a
 worker is only warm if it already holds a target dir for the same profile.
