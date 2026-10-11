@@ -3981,103 +3981,6 @@ fn code_only_lines_keeps_an_ordinary_string_open_across_a_line_break() -> TestRe
     }
 }
 
-/// bd-nar12: an ignore span must END where the module ends, not where a brace
-/// inside a literal says it does.
-///
-/// Every arm written before this one pinned where a span OPENS. Nothing pinned
-/// where it CLOSES, which is why 10 of 387 modules could mis-close unnoticed and
-/// why both this bead and bd-eoqlf could regress in silence.
-#[test]
-fn ignore_span_ends_at_the_real_close_not_at_a_brace_in_a_literal() -> TestResult {
-    let mut problems = Vec::new();
-
-    // The real shape from the tree: braces opened inside literals and never
-    // closed there. A plain string AND a raw string, because the damage in
-    // src/cli/mod.rs comes from a column-0 `}"#` and plain-string coverage alone
-    // would never exercise the hash-counting path.
-    let planted = concat!(
-        "fn product() {\n",
-        "    let x = y.unwrap_or_default();\n",
-        "}\n",
-        "#[cfg(test)]\n",
-        "mod tests {\n",
-        "    const OPENER: &str = \"{\";\n",
-        "    const RAW: &str = r#\"{ \"k\": 1 }\"#;\n",
-        "    fn inner() { let _ = OPENER; }\n",
-        "}\n",
-        "fn after_the_module() {\n",
-        "    let z = w.unwrap_or_default();\n",
-        "}\n",
-    );
-    let (code, deltas) = scan_code_and_brace_deltas(planted);
-    let ignored = ignored_test_module_lines(&code, &deltas);
-    let lines = planted.lines().collect::<Vec<_>>();
-
-    // THE END PIN. Index 8 is the module's closing brace, so indices 9 onward
-    // are product code again.
-    for index in 9..lines.len() {
-        if ignored[index] {
-            problems.push(format!(
-                "END PIN FAILED: line {} is after the module close but is ignored: {:?}",
-                index + 1,
-                lines[index]
-            ));
-        }
-    }
-    // POSITIVE CONTROL: the fallback after the module must be DETECTED. That is
-    // the consequence that actually matters; the boolean alone proves nothing.
-    if ignored[10] || !is_high_risk_line(&code[10]) {
-        problems.push(format!(
-            "POSITIVE CONTROL FAILED: the fallback after the module is not a finding: ignored={} line={:?}",
-            ignored[10], lines[10]
-        ));
-    }
-
-    // ANTI-WEAKENING CONTROL, sharing the mechanism: an ordinary `mod tests`
-    // with no literal braces must STILL be ignored. Without it, a scanner that
-    // never ignores anything passes every assertion above.
-    let ordinary = concat!(
-        "#[cfg(test)]\n",
-        "mod tests {\n",
-        "    fn inner() { let _ = f().unwrap_or_default(); }\n",
-        "}\n",
-    );
-    let (ordinary_code, ordinary_deltas) = scan_code_and_brace_deltas(ordinary);
-    let ordinary_ignored = ignored_test_module_lines(&ordinary_code, &ordinary_deltas);
-    // Indices 1..=3 are `mod tests {` through its closing brace. Index 0 is the
-    // `#[cfg(test)]` attribute, which this scanner deliberately does NOT mark --
-    // a span starts at the `mod` line -- so asserting over all four would fail
-    // for a reason that has nothing to do with the property being pinned.
-    if !ordinary_ignored[1..=3].iter().all(|flag| *flag) {
-        problems.push(format!(
-            "ANTI-WEAKENING FAILED: an ordinary `mod tests` body is no longer ignored: {ordinary_ignored:?}"
-        ));
-    }
-
-    // MECHANISM PIN: the fixture must actually exercise literal braces. If the
-    // naive counter and the scanner's own deltas agreed on it, every arm above
-    // could pass while the bug was untouched -- the silent zero that a negative
-    // control cannot catch.
-    let naive_total: i32 = planted.lines().map(brace_delta).sum();
-    let scanned_total: i32 = deltas.iter().sum();
-    if naive_total == scanned_total {
-        problems.push(format!(
-            "MECHANISM PIN FAILED: fixture does not exercise literal braces; naive and scanned both {naive_total}"
-        ));
-    }
-    if scanned_total != 0 {
-        problems.push(format!(
-            "MECHANISM PIN FAILED: scanned deltas should balance this fixture, got {scanned_total}"
-        ));
-    }
-
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(problems.join("\n"))
-    }
-}
-
 fn classify_finding(finding: &SourceFinding) -> Option<&'static InventoryRule> {
     INVENTORY_RULES.iter().find(|rule| {
         rule.file == finding.file && rule.scopes(finding) && finding.context.contains(rule.fragment)
@@ -4249,22 +4152,12 @@ fn scan_source_findings() -> Result<Vec<SourceFinding>, String> {
         if test_only.contains(&relative) {
             continue;
         }
+        let ignored = ignored_test_module_lines(&source);
+        let lines = source.lines().collect::<Vec<_>>();
+        let functions = enclosing_functions(&lines);
         // bd-hz7nu: detect on the CODE, record the ORIGINAL. A doc comment that
         // quotes a fallback documents one; it does not perform one.
-        //
-        // bd-nar12: one scan yields both the code lines and the brace deltas, so
-        // ignore-span tracking and detection cannot disagree about where a
-        // literal or comment began.
-        let (code, brace_deltas) = scan_code_and_brace_deltas(&source);
-        let ignored = ignored_test_module_lines(&code, &brace_deltas);
-        let lines = source.lines().collect::<Vec<_>>();
-        // DELIBERATELY still raw lines. `enclosing_functions` shares the old
-        // `brace_delta` weakness, but its output is an INVENTORY MATCH KEY --
-        // `allowed_in(rule, file, FUNCTION, text)` -- so changing how functions
-        // resolve can unclassify already-justified findings and fail the ratchet
-        // for a reason unrelated to this fix. Different blast radius, so it moves
-        // separately and with its own measurement.
-        let functions = enclosing_functions(&lines);
+        let code = code_only_lines(&source);
 
         for (index, line) in lines.iter().enumerate() {
             let detectable = code.get(index).map_or(*line, String::as_str);
@@ -4308,29 +4201,19 @@ fn is_temp_sync_dir(path: &Path) -> bool {
         .is_some_and(|name| name.ends_with(".tmp-sync"))
 }
 
-/// Which lines fall inside a `#[cfg(test)]` module.
-///
-/// bd-nar12: takes the CODE lines and the per-line brace DELTAS that
-/// `scan_code_and_brace_deltas` produced together, so the depth here is counted
-/// from ordinary-code braces only. A brace inside a string, raw string, char
-/// literal or comment cannot move the end of an ignore span, and no second
-/// parse exists to disagree with the first.
-///
-/// Using the code lines for the declaration checks also means a doc comment
-/// mentioning `mod tests {` cannot open a span, which raw source allowed.
-fn ignored_test_module_lines(code: &[String], deltas: &[i32]) -> Vec<bool> {
-    let mut ignored = vec![false; code.len()];
+fn ignored_test_module_lines(source: &str) -> Vec<bool> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut ignored = vec![false; lines.len()];
     let mut pending_cfg_test = false;
     let mut in_test_module = false;
     let mut brace_depth = 0_i32;
 
-    for (index, line) in code.iter().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        let delta = deltas.get(index).copied().unwrap_or(0);
 
         if in_test_module {
             ignored[index] = true;
-            brace_depth += delta;
+            brace_depth += brace_delta(line);
             if brace_depth <= 0 {
                 in_test_module = false;
             }
@@ -4341,38 +4224,21 @@ fn ignored_test_module_lines(code: &[String], deltas: &[i32]) -> Vec<bool> {
         // module only when it is named exactly `tests`, so 43 differently-named
         // inline test modules under src/ are scanned as production code.
         //
-        // THE BRACE-TRACKING HALF OF THAT HAZARD IS NOW DISCHARGED (bd-nar12):
-        // depth comes from `scan_code_and_brace_deltas`, which counts a brace
-        // only where it emits an ordinary code character, so braces in strings,
-        // raw strings, char literals and comments cannot move a span's end.
-        // Broadening the name check is therefore no longer the unsafe half of a
-        // pair.
+        // DO NOT "FIX" IT BY BROADENING THE NAME CHECK ALONE. Measured
+        // 2026-10-09: `brace_delta` below counts braces in STRING LITERALS, so
+        // it already mis-tracks the end of 15 of the 387 modules it does
+        // recognise -- `src/cli/mod.rs:71402` closes at 73890 and the naive
+        // count runs to EOF, over-ignoring 26509 lines. Broadening the name
+        // check admits more such modules: `mod error_render_routing_tests`
+        // (src/cli/mod.rs:56943) truly closes at 57073, but naive counting is
+        // +2 open there and would keep ignoring for thousands of lines.
         //
-        // The numbers this comment used to cite were retracted: they came from
-        // instruments carrying the very bug being reported. The sound
-        // measurement, with string, raw-string, char-literal and LIFETIME
-        // handling correct: of 387 recognised modules, 377 tracked correctly and
-        // 10 mis-closed, 3168 lines mis-scoped in both directions.
-        // `src/cli/mod.rs:71402` -- the case the original filing was built on --
-        // was NOT among them.
-        //
-        // Note the scale before predicting anything from the line figure: those
-        // 3168 mis-scoped LINES amount to a net ONE additional high-risk SITE in
-        // this gate's population, measured before and after. Lines and sites
-        // differ here by about three orders of magnitude.
-        //
-        // The surviving demonstration, which never depended on that census:
-        // `mod error_render_routing_tests` is declared at src/cli/mod.rs:56944
-        // (56943 is its `#[cfg(test)]`) and truly closes at 57073, while naive
-        // counting ran to EOF -- so admitting it by name under the old tracking
-        // would have darkened 43455 lines.
-        //
-        // See bd-nar12 for the measurement and bd-eoqlf for the name-check
-        // population that remains.
+        // So the name check and the brace tracking have to be fixed together.
+        // See bd-eoqlf for the measurement and the population.
         if pending_cfg_test && trimmed.starts_with("mod tests") && trimmed.contains('{') {
             ignored[index] = true;
             in_test_module = true;
-            brace_depth = delta;
+            brace_depth = brace_delta(line);
             pending_cfg_test = false;
             if brace_depth <= 0 {
                 in_test_module = false;
@@ -4433,31 +4299,7 @@ fn is_high_risk_line(line: &str) -> bool {
 /// original source, so inventory fragments still match what is written in the
 /// file, including fragments that name a comment.
 fn code_only_lines(source: &str) -> Vec<String> {
-    scan_code_and_brace_deltas(source).0
-}
-
-/// The code-only lines AND each line's brace delta, counted INSIDE this scanner.
-///
-/// bd-nar12, attempt 3. The two earlier attempts produced a string with literal
-/// bodies blanked and handed it to `brace_delta`, a second, stateless parser.
-/// That is only correct if this scanner is perfectly synchronised everywhere,
-/// because blanking DELETES characters: one desync and a real brace vanishes
-/// from the count. Two files each exposed a different desync that way
-/// (src/mesh/responder_broker.rs:5055, src/cass/import.rs:5093), each time
-/// scanning test code as product, and patching them one at a time had no
-/// convergence criterion.
-///
-/// Counting here removes the failure mode rather than narrowing it. A brace is
-/// counted only at the one place this loop emits an ORDINARY code character --
-/// so a brace inside a string, raw string, char literal, line comment or block
-/// comment is never counted, and no character is destroyed to achieve it. There
-/// is no second parse to desynchronise from.
-///
-/// Returns one entry per `source.lines()` entry in both vectors, so callers may
-/// index them together.
-fn scan_code_and_brace_deltas(source: &str) -> (Vec<String>, Vec<i32>) {
     let mut out = Vec::new();
-    let mut deltas = Vec::new();
     let mut in_block = false;
     // Raw strings carry across lines like block comments, and this codebase is
     // full of them: src/db/mod.rs alone opens 260 `r#"` SQL literals. Without
@@ -4485,9 +4327,6 @@ fn scan_code_and_brace_deltas(source: &str) -> (Vec<String>, Vec<i32>) {
         let chars = line.chars().collect::<Vec<_>>();
         let mut code = String::with_capacity(line.len());
         let mut index = 0;
-        // Per line, because callers consume the deltas per line. The literal and
-        // comment state above is NOT per line, which is the whole point.
-        let mut delta = 0_i32;
 
         while index < chars.len() {
             let current = chars[index];
@@ -4601,25 +4440,14 @@ fn scan_code_and_brace_deltas(source: &str) -> (Vec<String>, Vec<i32>) {
                 continue;
             }
 
-            // THE ONLY PLACE A BRACE IS COUNTED. Every literal and comment
-            // branch above `continue`s or `break`s before reaching here, so a
-            // brace inside a string, raw string, char literal or comment can
-            // never reach this line -- and nothing had to be deleted to arrange
-            // that.
-            if current == '{' {
-                delta += 1;
-            } else if current == '}' {
-                delta -= 1;
-            }
             code.push(current);
             index += 1;
         }
 
         out.push(code);
-        deltas.push(delta);
     }
 
-    (out, deltas)
+    out
 }
 
 fn context_window(lines: &[&str], index: usize) -> String {
