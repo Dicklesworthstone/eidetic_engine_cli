@@ -117,7 +117,12 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CORE-ASK-CANDIDATES-ZERO-LIMIT",
         "src/core/ask_candidates.rs",
-        "select_candidates",
+        // bd-amhns: was `select_candidates`. The body moved into a
+        // scorer-injecting wrapper; the site itself did not move and the reason
+        // below still describes it exactly -- the guard is literally
+        // `if limit == 0`, and the AmbiguousSource error return is still above
+        // it (ask_candidates.rs:126-131). Key repair, not a judgement change.
+        "select_candidates_with_scorer",
         "return Ok(Vec::new());",
         "A caller asking for zero candidates gets zero. This early return sits          AFTER the explicit error returns for InvalidConfidence and          AmbiguousSource, so it cannot mask either: an invalid request errors          before reaching it. An empty result for limit == 0 is the honest answer,          not a swallowed failure.",
     ),
@@ -2885,8 +2890,14 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     ),
     allowed_in(
         "NSF-CORE-RESUME-ADMISSION-TAGS",
-        "src/core/resume.rs",
-        "build_resume_report",
+        // bd-amhns: was "src/core/resume.rs" / `build_resume_report`. The site
+        // moved to src/core/resume_snapshot.rs:148 inside `load_with_boundary`,
+        // where the fragment below appears verbatim. The reason is unchanged and
+        // still holds -- it argues about what ResumeAdmissionBoundary::admit
+        // does with an empty tag slice, which the move does not affect. Key
+        // repair, both halves of it.
+        "src/core/resume_snapshot.rs",
+        "load_with_boundary",
         "let memory_tags = tags.get(&memory.id).map(Vec::as_slice).unwrap_or_default();",
         "ALSO LEFT AS DEBT IN TRANCHE 3, where I could not prove the fail-open direction. Proved now: the empty slice reaches ResumeAdmissionBoundary::admit, which returns None unless scope.memory_in_scope_with_tags holds, and tags matter in exactly one branch -- MemoryScope::Global, where it is memory_tags_include_global_scope(tags). Empty tags make that FALSE, so an untagged memory is EXCLUDED from the resume, not admitted. Under Swarm and Workspace scope the branch returns true regardless of tags, so the empty slice changes nothing. Fail-closed either way. The tags map's own load error is propagated before this point.",
     ),
@@ -2942,7 +2953,10 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CORE-MODEL-INDEX-PROBE-METADATA",
         "src/core/model.rs",
-        "build_model_lifecycle_report",
+        // bd-amhns: was `build_model_lifecycle_report`. Now wrapped as
+        // `..._with_index_status`; the fragment is present verbatim at
+        // model.rs:1090 and the reason still describes it. Key repair only.
+        "build_model_lifecycle_report_with_index_status",
         "let mut index_metadata = index_status",
         "Two `.ok()` calls collapse here, and they are honest ONLY because the line this fragment names captures the error first: index_probe_error holds the probe failure as a string and is reported separately, so the empty metadata is accompanied by a stated reason rather than standing in for one. Delete that capture and this becomes a silent fallback.",
     ),
