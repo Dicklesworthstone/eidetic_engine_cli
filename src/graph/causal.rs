@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use asupersync::Cx;
-use fnx_algorithms::{find_cycle_directed, min_cost_flow, transitive_closure};
+use fnx_algorithms::{find_cycle_directed, min_cost_flow};
 use fnx_runtime::CgseValue;
 use serde::{Deserialize, Serialize};
 
@@ -86,7 +86,7 @@ pub fn compute_causal_ancestry_with_cx<Caps>(
     graph: &DiGraph,
     failure_id: &str,
 ) -> GraphResult<CausalAncestry> {
-    let graph = graph.clone();
+    let graph = reachable_causal_subgraph(graph, failure_id)?;
     let failure_id = failure_id.to_owned();
     run_with_budget(
         cx,
@@ -107,20 +107,15 @@ fn compute_causal_ancestry_unbudgeted(graph: &DiGraph, failure_id: &str) -> Caus
     }
 
     let degraded = causal_degradations(graph, failure_id);
-    let closure = transitive_closure(graph, Some(false));
-    let path_lengths = shortest_path_lengths(graph, failure_id);
-    let mut ancestors: Vec<_> = closure
-        .successors(failure_id)
-        .unwrap_or_default()
+    // A single-source breadth-first traversal already supplies both membership
+    // and minimum hop counts. Materializing the all-pairs transitive closure
+    // here makes an individual memory query pay for the entire archive.
+    let mut ancestors: Vec<_> = shortest_path_lengths(graph, failure_id)
         .into_iter()
-        .filter(|ancestor| *ancestor != failure_id)
-        .filter_map(|ancestor| {
-            path_lengths
-                .get(ancestor)
-                .map(|path_length| CausalAncestor {
-                    memory_id: ancestor.to_owned(),
-                    path_length: *path_length,
-                })
+        .filter(|(ancestor, _)| ancestor != failure_id)
+        .map(|(memory_id, path_length)| CausalAncestor {
+            memory_id,
+            path_length,
         })
         .collect();
     sort_by_ulid_payload_or_lexical(&mut ancestors, |ancestor| ancestor.memory_id.as_str());
@@ -156,7 +151,7 @@ pub fn compute_min_cost_explanation_with_cx<Caps>(
     graph: &DiGraph,
     failure_id: &str,
 ) -> GraphResult<Option<MinCostExplanation>> {
-    let graph = graph.clone();
+    let graph = reachable_causal_subgraph(graph, failure_id)?;
     let failure_id = failure_id.to_owned();
     run_with_budget(
         cx,
@@ -265,23 +260,12 @@ fn compare_explanation_cost(
 }
 
 fn terminal_ancestors(graph: &DiGraph, failure_id: &str) -> Vec<String> {
-    let ancestry = compute_causal_ancestry(graph, failure_id);
-    let reachable: BTreeSet<_> = ancestry
-        .ancestors
-        .iter()
-        .map(|ancestor| ancestor.memory_id.clone())
-        .collect();
-    ancestry
-        .ancestors
-        .into_iter()
-        .filter(|ancestor| {
-            graph
-                .successors(&ancestor.memory_id)
-                .unwrap_or_default()
-                .into_iter()
-                .all(|successor| !reachable.contains(successor))
-        })
-        .map(|ancestor| ancestor.memory_id)
+    // The caller has already rejected cycles and owns a budgeted, reachable
+    // snapshot. Do not re-enter the public budget wrapper and clone it again.
+    shortest_path_lengths(graph, failure_id)
+        .into_keys()
+        .filter(|ancestor| ancestor != failure_id)
+        .filter(|ancestor| graph.successors(ancestor).unwrap_or_default().is_empty())
         .collect()
 }
 
@@ -417,6 +401,54 @@ fn shortest_path_lengths(graph: &DiGraph, source: &str) -> BTreeMap<String, usiz
     }
 
     lengths
+}
+
+/// Copy only evidence reachable in the failure-to-cause direction. In
+/// particular, another failure that cites the same cause is not an ancestor.
+/// Keeping unrelated nodes out also prevents unrelated cycles from suppressing
+/// a valid explanation, and bounds subsequent fnx cycle/flow work to this cone.
+fn reachable_causal_subgraph(graph: &DiGraph, source: &str) -> GraphResult<DiGraph> {
+    let mut scoped = DiGraph::with_runtime_policy(graph.runtime_policy().clone());
+    if !graph.has_node(source) {
+        return Ok(scoped);
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    visited.insert(source.to_owned());
+    queue.push_back(source.to_owned());
+    scoped.add_node_with_attrs(
+        source.to_owned(),
+        graph.node_attrs(source).cloned().unwrap_or_default(),
+    );
+
+    while let Some(current) = queue.pop_front() {
+        let mut successors = graph.successors(&current).unwrap_or_default();
+        sort_by_ulid_payload_or_lexical(&mut successors, |successor| *successor);
+        for successor in successors {
+            if visited.insert(successor.to_owned()) {
+                scoped.add_node_with_attrs(
+                    successor.to_owned(),
+                    graph.node_attrs(successor).cloned().unwrap_or_default(),
+                );
+                queue.push_back(successor.to_owned());
+            }
+            let attrs = graph.edge_attrs(&current, successor).cloned().ok_or_else(|| {
+                GraphError::GraphEngine {
+                    operation: "project reachable causal evidence",
+                    source: format!("missing edge attributes for {current} -> {successor}"),
+                }
+            })?;
+            scoped
+                .add_edge_with_attrs(current.clone(), successor.to_owned(), attrs)
+                .map_err(|error| GraphError::GraphEngine {
+                    operation: "project reachable causal evidence",
+                    source: error.to_string(),
+                })?;
+        }
+    }
+
+    Ok(scoped)
 }
 
 fn edge_cost(attrs: &AttrMap) -> f64 {
@@ -1232,5 +1264,115 @@ mod tests {
         let first = compute_causal_ppr_boosts(&scores, CausalBoostConfig::default());
         let second = compute_causal_ppr_boosts(&scores, CausalBoostConfig::default());
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn unrelated_cycle_does_not_degrade_or_block_a_causal_explanation() {
+        let mut graph = graph();
+        add_causal_edge(&mut graph, "unrelated_a", "unrelated_b", 0.9);
+        add_causal_edge(&mut graph, "unrelated_b", "unrelated_a", 0.9);
+        add_causal_edge(&mut graph, "failure", "cause", 0.8);
+        add_causal_edge(&mut graph, "cause", "root", 0.9);
+        // Even a predecessor of a relevant cause is outside the evidence cone.
+        add_causal_edge(&mut graph, "unrelated_a", "cause", 0.99);
+
+        let ancestry = compute_causal_ancestry(&graph, "failure");
+        assert!(ancestry.degraded.is_empty());
+        assert_eq!(
+            ancestry.ancestors,
+            vec![
+                CausalAncestor {
+                    memory_id: "cause".to_owned(),
+                    path_length: 1,
+                },
+                CausalAncestor {
+                    memory_id: "root".to_owned(),
+                    path_length: 2,
+                },
+            ]
+        );
+        let explanation = require_min_cost_explanation(&graph, "failure");
+        assert_eq!(explanation.cause_id, "root");
+        assert_eq!(path_pairs(&explanation), vec![("failure", "cause"), ("cause", "root")]);
+        assert_eq!(explanation.path[0].edge_id.as_deref(), Some("failure->cause"));
+        assert_eq!(explanation.path[0].evidence_count, Some(2));
+    }
+
+    #[test]
+    fn causal_projection_preserves_only_reachable_nodes_and_edge_attributes() -> TestResult {
+        let mut graph = graph();
+        add_causal_edge(&mut graph, "failure", "cause", 0.8);
+        add_causal_edge(&mut graph, "cause", "root", 0.9);
+        for index in 0..128 {
+            add_causal_edge(&mut graph, &format!("other_{index}"), "cause", 0.99);
+        }
+
+        let scoped = graph_result(reachable_causal_subgraph(&graph, "failure"))?;
+        assert_eq!(scoped.nodes_ordered().len(), 3);
+        assert_eq!(scoped.edges_ordered().len(), 2);
+        for node in ["failure", "cause", "root"] {
+            assert_eq!(scoped.node_attrs(node), graph.node_attrs(node));
+        }
+        for (source, target) in [("failure", "cause"), ("cause", "root")] {
+            assert_eq!(scoped.edge_attrs(source, target), graph.edge_attrs(source, target));
+        }
+        assert!(!scoped.has_node("other_0"));
+        let missing = graph_result(reachable_causal_subgraph(&graph, "missing"))?;
+        assert!(missing.nodes_ordered().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn causal_breadth_first_distances_choose_shortest_path_and_exclude_self() {
+        let mut graph = graph();
+        add_causal_edge(&mut graph, "failure", "a_long", 0.9);
+        add_causal_edge(&mut graph, "a_long", "intermediate", 0.9);
+        add_causal_edge(&mut graph, "intermediate", "root", 0.9);
+        add_causal_edge(&mut graph, "failure", "z_short", 0.9);
+        add_causal_edge(&mut graph, "z_short", "root", 0.9);
+        add_causal_edge(&mut graph, "root", "failure", 0.9);
+
+        let ancestry = compute_causal_ancestry(&graph, "failure");
+        assert!(!ancestry.ancestors.iter().any(|ancestor| ancestor.memory_id == "failure"));
+        assert_eq!(
+            ancestry.ancestors.iter().find(|ancestor| ancestor.memory_id == "root").map(|ancestor| ancestor.path_length),
+            Some(2)
+        );
+        assert!(ancestry.degraded.iter().any(|entry| entry.code == "graph.causal_cycle"));
+        assert!(compute_min_cost_explanation(&graph, "failure").is_none());
+    }
+
+    #[test]
+    fn causal_breadth_first_membership_matches_closure_on_all_three_node_graphs() {
+        let ids = ["a", "b", "c"];
+        for mask in 0_u16..512 {
+            let mut graph = graph();
+            for id in ids {
+                graph.add_node(id);
+            }
+            for (source_index, source) in ids.iter().enumerate() {
+                for (target_index, target) in ids.iter().enumerate() {
+                    if mask & (1 << (source_index * ids.len() + target_index)) != 0 {
+                        add_causal_edge(&mut graph, source, target, 0.8);
+                    }
+                }
+            }
+            // Keep the previous all-pairs algorithm as a test-only oracle.
+            let closure = fnx_algorithms::transitive_closure(&graph, Some(false));
+            for source in ids {
+                let expected: BTreeSet<_> = closure
+                    .successors(source)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|target| *target != source)
+                    .map(str::to_owned)
+                    .collect();
+                let actual: BTreeSet<_> = shortest_path_lengths(&graph, source)
+                    .into_keys()
+                    .filter(|target| target != source)
+                    .collect();
+                assert_eq!(actual, expected, "mask={mask}, source={source}");
+            }
+        }
     }
 }
