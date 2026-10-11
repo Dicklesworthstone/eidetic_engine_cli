@@ -5,8 +5,122 @@
 //! ordering. Fenced blocks and inline spans have different closing rules.
 //! Preserve all bytes; this splitter never rewrites quoted commands or
 //! fabricates transcript line offsets.
+//! Bare outcome reports belong to the preceding observation. A failed retry
+//! must not become a repair merely because its counters followed a newline.
 
 pub(super) fn split(excerpt: &str) -> impl Iterator<Item = &str> {
+    let raw: Vec<_> = split_raw(excerpt).collect();
+    let mut grouped = Vec::with_capacity(raw.len());
+    let mut first = 0;
+    let mut byte_start = 0;
+    while first < raw.len() {
+        let mut end = first + 1;
+        let mut bytes = raw[first].len();
+        let mut veto = false;
+        while let Some(part) = raw.get(end) {
+            if !part.trim().is_empty() {
+                let Some(failed) = outcome_report_veto(part) else {
+                    break;
+                };
+                veto |= failed;
+            }
+            // Consume separators even when no report follows. Otherwise a
+            // long blank run would be scanned again for every blank clause.
+            bytes += part.len();
+            end += 1;
+        }
+        if veto {
+            // One contiguous borrowed observation lets the existing outcome
+            // classifier see every contradictory report. Do not synthesize a
+            // failure word, copy source text, or invent an evidence locator.
+            grouped.push(&excerpt[byte_start..byte_start + bytes]);
+        } else {
+            // Successful observations retain their exact historical clauses,
+            // candidate IDs and excerpts, including whitespace-only slices.
+            grouped.extend_from_slice(&raw[first..end]);
+        }
+        first = end;
+        byte_start += bytes;
+    }
+    grouped.into_iter()
+}
+
+/// Only bare reports extend an observation. A command, named resource,
+/// qualification or quoted example is a new clause, never a result trailer.
+/// This recognizes framing; the existing outcome classifier owns the verdict.
+fn outcome_report_veto(excerpt: &str) -> Option<bool> {
+    #[cfg(test)]
+    OUTCOME_TRAILER_BYTES.with(|bytes| bytes.set(bytes.get().saturating_add(excerpt.len())));
+    let text = excerpt.trim();
+    if let Some(veto) = super::process_report_veto(text) {
+        return Some(veto || super::outcome_signal_text(text).has_counted_failure);
+    }
+    let lower = text.to_ascii_lowercase();
+    if elapsed_report(&lower) {
+        return Some(false);
+    }
+    if !lower.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || ch.is_whitespace()
+            || matches!(ch, ',' | ';' | ':' | '=' | '.' | '(' | ')' | '[' | ']' | '+' | '-')
+    }) {
+        return None;
+    }
+    let mut has_count = false;
+    let mut has_result = false;
+    for word in lower.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        if word.bytes().all(|byte| byte.is_ascii_digit()) {
+            has_count = true;
+            continue;
+        }
+        match word {
+            "failed" | "failing" | "failure" | "failures" | "error" | "errors"
+            | "passed" | "passing" | "succeeded" | "successes" | "ok" | "ignored"
+            | "skipped" | "measured" | "filtered" => has_result = true,
+            "test" | "tests" | "check" | "checks" | "assertion" | "assertions"
+            | "result" | "results" | "out" | "unknown" | "null" => {}
+            _ => return None,
+        }
+    }
+    let result_header = lower.starts_with("test result:") || lower.starts_with("test results:");
+    if !has_result || !(has_count || result_header || lower.contains([':', '='])) {
+        return None;
+    }
+    let outcome = super::outcome_signal_text(text);
+    Some(
+        outcome.has_counted_failure
+            || outcome.text.split(|ch: char| !ch.is_ascii_alphabetic()).any(|word| {
+                word.eq_ignore_ascii_case("failed") || word.eq_ignore_ascii_case("failing")
+            }),
+    )
+}
+
+fn elapsed_report(text: &str) -> bool {
+    let Some(value) = text.strip_prefix("finished in ") else {
+        return false;
+    };
+    let value = value.trim().trim_end_matches(['.', ';']);
+    let Some(number) = value.strip_suffix("ms").or_else(|| value.strip_suffix('s')) else {
+        return false;
+    };
+    let mut digits = 0;
+    let mut dots = 0;
+    for byte in number.bytes() {
+        if byte.is_ascii_digit() {
+            digits += 1;
+        } else if byte == b'.' {
+            dots += 1;
+        } else {
+            return false;
+        }
+    }
+    digits > 0 && dots <= 1
+}
+
+fn split_raw(excerpt: &str) -> impl Iterator<Item = &str> {
     let mut characters = excerpt.char_indices().peekable();
     let mut start = 0;
     let mut line_start = 0;
@@ -91,6 +205,7 @@ fn fence_indent(prefix: &str) -> bool {
 std::thread_local! {
     // Measure actual tail inspections, not elapsed time or a replica parser.
     static FENCE_TAIL_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static OUTCOME_TRAILER_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn line_tail(text: &str, start: usize) -> &str {
@@ -366,5 +481,143 @@ mod tests {
             assert!(bytes.get() > 0, "real fence tails must have been inspected");
             assert!(bytes.get() <= text.len());
         });
+    }
+
+    #[test]
+    fn failed_counter_trailers_cannot_leave_an_optimistic_repair_admitted() {
+        for report in [
+            "1 failed.",
+            "errors: 2.",
+            "21 passed, 1 failed.",
+            "Process exited with code 0, 1 failed.",
+            "0 passed; 1 assertion failed; 0 ignored.",
+            "test result: FAILED.\n21 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out.",
+            "1 failed.\n0 failed.\nProcess exited with code 0.",
+        ] {
+            let retry = format!("{REPAIR}\n{report}");
+            let source = format!("{FAILURE}\n{retry}");
+            let parts: Vec<_> = split(&source)
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .collect();
+            assert_eq!(parts, [FAILURE, retry.as_str()], "{report}");
+            assert!(!super::super::resolution_signal(parts[1]), "{report}");
+            assert!(super::super::inline_pair(&source).is_none(), "{report}");
+        }
+    }
+
+    #[test]
+    fn numeric_and_unknown_failure_reports_never_round_down_to_a_clean_retry() {
+        for report in [
+            "errors: unknown.",
+            "failures: null.",
+            "1,000 failed.",
+            "+0 failed.",
+            ".0 failed.",
+            "failures=0.5.",
+            "999999999999999999999999999999 failed.",
+        ] {
+            let source = format!("{FAILURE}\n{REPAIR}\n{report}");
+            assert!(super::super::inline_pair(&source).is_none(), "{report}");
+            assert_eq!(split(&source).collect::<String>(), source);
+        }
+    }
+
+    #[test]
+    fn process_failures_propagate_through_counter_and_elapsed_time_trailers() {
+        for status in ["101", "-9", "unknown", "0.5"] {
+            for time in ["0.03s", "12ms", "3s"] {
+                let report = format!(
+                    "test result: ok.\n21 passed; 0 failed; 0 ignored; 0 measured; \
+                     0 filtered out; finished in {time}.\nProcess exited with code {status}."
+                );
+                let source = format!("{FAILURE}\n{REPAIR}\n{report}");
+                assert!(super::super::inline_pair(&source).is_none(), "{report}");
+            }
+        }
+    }
+
+    #[test]
+    fn successful_reports_preserve_every_historical_clause_and_selected_excerpt() {
+        for report in [
+            "21 passed, 0 failed.",
+            "test result: ok.\n21 passed; 0 failed; 0 ignored; finished in 0.03s.",
+            "0 tests failed.\nProcess exited with code 0.",
+        ] {
+            let source = format!("{FAILURE}\n{REPAIR}\n{report}\n");
+            assert_eq!(
+                split(&source).collect::<Vec<_>>(),
+                split_raw(&source).collect::<Vec<_>>()
+            );
+            assert_eq!(super::super::inline_pair(&source), Some((FAILURE, REPAIR)));
+        }
+    }
+
+    #[test]
+    fn reports_cannot_cross_independent_observations_or_quoted_examples() {
+        for barrier in [
+            "The independent lint command for src/ui.rs completed.",
+            "Another command started for src/ui.rs.",
+            "`1 failed`",
+            "```text\n1 failed\n```",
+            "Example: 1 failed.",
+            "1 failed in src/unrelated.rs.",
+        ] {
+            assert!(outcome_report_veto(barrier).is_none(), "{barrier}");
+            let source = format!("{FAILURE}\n{REPAIR}\n{barrier}\n1 failed.");
+            assert_eq!(super::super::inline_pair(&source), Some((FAILURE, REPAIR)));
+            assert_eq!(split(&source).collect::<String>(), source);
+        }
+    }
+
+    #[test]
+    fn failed_retry_can_still_be_followed_by_a_real_source_backed_repair() {
+        let failure = "cargo test src/api.rs failed.";
+        let retry = "Fixed src/api.rs and cargo test passed.\n1 failed.";
+        let repair = "cargo test src/api.rs passed after restoring the guard.";
+        let source = format!("{failure}\n{retry}\n{repair}");
+        let pairs: Vec<_> = super::super::inline_pairs(&source).collect();
+        assert_eq!(pairs, [(retry, repair)]);
+        assert!(source.contains(pairs[0].0));
+        assert!(source.contains(pairs[0].1));
+    }
+
+    #[test]
+    fn structured_and_unicode_observations_keep_original_source_bytes() {
+        let body = format!("資料 café 🦀\r\n{FAILURE}\r\n{REPAIR}\r\n21 passed;\r\n1 failed.");
+        let raw = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": body}]}
+        })
+        .to_string();
+        let hash = blake3::hash(raw.as_bytes());
+        let projected = super::super::text::message_text(&raw).expect("admitted transcript");
+        assert_eq!(projected, body);
+        assert!(super::super::inline_pair(&projected).is_none());
+        let mut offset = 0;
+        for part in split(&projected) {
+            assert_eq!(part.as_ptr(), projected[offset..].as_ptr());
+            assert_eq!(part, &projected[offset..offset + part.len()]);
+            offset += part.len();
+        }
+        assert_eq!(offset, projected.len());
+        assert_eq!(blake3::hash(raw.as_bytes()), hash);
+    }
+
+    #[test]
+    fn outcome_lookahead_is_linear_even_across_long_blank_and_report_runs() {
+        for repetitions in [1, 100, 10_000] {
+            let blanks = "\n \t\r\n".repeat(repetitions);
+            let reports = "21 passed;\n0 failed;\n".repeat(repetitions);
+            for ending in ["Another observation.", "1 failed."] {
+                let source = format!("{FAILURE}\n{REPAIR}{blanks}{reports}{ending}");
+                OUTCOME_TRAILER_BYTES.with(|bytes| bytes.set(0));
+                assert_eq!(split(&source).collect::<String>(), source);
+                OUTCOME_TRAILER_BYTES.with(|bytes| {
+                    assert!(bytes.get() > 0);
+                    assert!(bytes.get() <= source.len(), "a source suffix was rescanned");
+                });
+            }
+        }
     }
 }
