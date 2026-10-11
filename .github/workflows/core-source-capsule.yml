@@ -28,6 +28,27 @@ jobs:
           git ls-tree -r HEAD > "$RUNNER_TEMP/core-source/source-blobs.txt"
           git archive --format=tar.gz --output="$RUNNER_TEMP/core-source/source.tar.gz" HEAD
           (cd "$RUNNER_TEMP/core-source" && sha256sum source.tar.gz) | tee "$RUNNER_TEMP/core-source/source.sha256"
+      - name: Summarize active critical work from the same source
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          selected = []
+          tracker = Path('.beads/issues.jsonl')
+          if tracker.exists():
+              with tracker.open(encoding='utf-8') as records:
+                  for line in records:
+                      if not line.strip():
+                          continue
+                      issue = json.loads(line)
+                      if issue.get('status') in ('open', 'in_progress', 'blocked') and issue.get('priority') in (0, 1):
+                          selected.append({key: issue.get(key) for key in ('id', 'title', 'status', 'priority')})
+          selected.sort(key=lambda issue: (issue['priority'], issue['id']))
+          summary = {'source': os.environ['GITHUB_SHA'], 'total': len(selected), 'issues': selected[:100], 'truncated': len(selected) > 100}
+          output = Path(os.environ['RUNNER_TEMP']) / 'core-source' / 'active-critical-beads.json'
+          output.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: core-source-${{ github.sha }}
