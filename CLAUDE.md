@@ -46,7 +46,7 @@ same project and same worker within one hour:
 | lane | target dir | crates | build |
 |---|---|---|---|
 | `cargo` dispatch | `<project>/.rch-target-<worker>-pool-<hash>` (reused) | 278 | 127m33s |
-| `rch exec --job` | `/data/projects/<project>/.rch-target` (cold) | 475+ | >2.9h |
+| `rch exec --job` | `/data/projects/<project>/.rch-target` (cold) | 475 | **217m07s** |
 
 A cargo dispatch logs `Rewriting CARGO_TARGET_DIR for remote execution` and
 redirects into the worker-scoped pool dir. **A `--job` logs no such line** — it
@@ -56,9 +56,11 @@ So a `--job` can never reuse a cargo dispatch's warmth, only a previous
 the same `cargo build --locked --bin ee` has been measured at both 12m49s
 (bd-3ghvw, warm) and over 2.9 hours (cold).
 
-Practical consequence: a shell e2e suite that runs in 20 minutes can cost 20
-minutes or 3+ hours depending on a directory you never named. Set
-`RCH_BUILD_TIMEOUT_SEC` / `RCH_TEST_TIMEOUT_SEC` for the cold case.
+Practical consequence: a 20-minute shell e2e suite costs 20 minutes or
+**3.6 hours** depending on a directory you never named, so a `--job` that must
+build needs `RCH_BUILD_TIMEOUT_SEC`/`RCH_TEST_TIMEOUT_SEC` at 18000 and a
+single stage. Two cargo stages in one `--job` do not fit: the second needs the
+TEST profile, which is another dependency tier on top of the 217 minutes.
 
 ## Architecture
 
