@@ -12,6 +12,9 @@ use serde_json::Value;
 
 use super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES};
 
+#[path = "cass_error_recall_libtest.rs"]
+mod libtest;
+
 const MAX_COMPILER_RECORDS: usize = 256;
 
 #[derive(Debug, Default)]
@@ -44,6 +47,9 @@ enum Message {
 
 #[derive(Deserialize)]
 struct Record {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    event: Option<String>,
     schema: Option<String>,
     reason: Option<String>,
     #[serde(rename = "$message_type")]
@@ -62,7 +68,8 @@ fn cargo_reason(reason: &str) -> bool {
 }
 
 /// None means another output family, not successful compiler output. Invalid
-/// or mixed streams are errors, never a salvaged prefix of diagnostics. Typed
+/// or conflicting streams are errors, never a salvaged prefix. Cargo may
+/// transition to libtest only after a successful build-finished event. Typed
 /// deserialization rejects duplicate discriminator, level, code and status
 /// fields while tolerating unrelated future producer metadata.
 pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
@@ -78,6 +85,8 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     // then validated completely, including trailing records and separators.
     #[derive(Deserialize)]
     struct Family {
+        #[serde(rename = "type")]
+        kind: Option<Value>,
         reason: Option<Value>,
         #[serde(rename = "$message_type")]
         message_type: Option<Value>,
@@ -93,6 +102,7 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         .and_then(Value::as_str)
         .is_some_and(cargo_reason)
         && family.message_type.as_ref().and_then(Value::as_str) != Some("diagnostic")
+        && !matches!(family.kind.as_ref().and_then(Value::as_str), Some("suite" | "test"))
     {
         return Ok(None);
     }
@@ -104,6 +114,7 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     let mut cargo = false;
     let mut rustc = false;
     let mut finished = None;
+    let mut harness = libtest::Harness::default();
     while let Some(record) = records.next() {
         let record = record.map_err(|_| ())?;
         if count == MAX_COMPILER_RECORDS {
@@ -116,6 +127,34 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
             if !raw[..raw.len() - body.len()].contains('\n') {
                 return Err(());
             }
+        }
+        if record.kind.is_some() {
+            if rustc
+                || (cargo && finished != Some(true))
+                || record.schema.is_some()
+                || record.message_type.is_some()
+                || record.code.is_some()
+                || record.level.is_some()
+                || record.success.is_some()
+                || record.reason.as_deref().is_some_and(cargo_reason)
+            {
+                return Err(());
+            }
+            if let Some(diagnostic) = harness.observe(raw)?
+                && keys.insert(diagnostic.layered_key().key)
+                && output.diagnostics.len() < MAX_DIAGNOSTICS_PER_FAILURE
+            {
+                output.diagnostics.push(diagnostic);
+            }
+            output.failed |= harness.failed();
+            count += 1;
+            consumed = end;
+            continue;
+        }
+        // Test binaries may follow Cargo's build, never precede more compiler
+        // output. A stray event field cannot masquerade as a build record.
+        if harness.seen() || record.event.is_some() {
+            return Err(());
         }
         let diagnostic = match (record.reason.as_deref(), record.message_type.as_deref()) {
             (Some("compiler-message"), None) => {
@@ -215,7 +254,9 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         count += 1;
         consumed = end;
     }
-    output.allows_completion = !output.failed && (!cargo || finished == Some(true));
+    output.allows_completion = !output.failed
+        && (!cargo || finished == Some(true))
+        && (!harness.seen() || harness.allows_completion());
     Ok(Some(output))
 }
 
