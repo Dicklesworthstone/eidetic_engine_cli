@@ -2825,7 +2825,15 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     ),
     allowed_in(
         "NSF-DAEMON-SEARCH-RELEVANCE-RANGE",
-        "src/daemon/server.rs",
+        // bd-amhns: was "src/daemon/server.rs". `validate_canonical_search_result`
+        // was extracted into its own module; server.rs no longer contains this
+        // site (checked: zero occurrences there). The reason below still holds
+        // VERBATIM because the guard it cites moved with the function -- the
+        // `for field in ["score", "relevanceScore"]` loop with its ok_or_else(..)?
+        // and is_finite() checks sits immediately above the site, and the
+        // 0.0..=1.0 range check immediately below. Repairing the key, not the
+        // judgement.
+        "src/daemon/search_result_contract.rs",
         "validate_canonical_search_result",
         "let relevance = result[\"relevanceScore\"].as_f64().unwrap_or_default();",
         "UNREACHABLE, and the guard is four lines above: `for field in [\"score\", \"relevanceScore\"]` requires each to be present and numeric via ok_or_else(..)? and then finite. By this line relevanceScore is guaranteed a finite number. Worth stating because the default would otherwise be dangerous rather than merely wrong -- 0.0 sits INSIDE the 0.0..=1.0 range checked on the next line, so a missing score would have validated instead of failing. The required-field loop is what makes that unreachable.",
@@ -3080,7 +3088,12 @@ const INVENTORY_RULES: &[InventoryRule] = &[
     allowed_in(
         "NSF-CORE-LEARN-PROPOSED-CONTENT-HASH",
         "src/core/learn.rs",
-        "propose_experiments",
+        // bd-amhns: was `propose_experiments`. The site did not move and the
+        // reason below is unchanged -- the enclosing function is
+        // `propose_experiments_with_boundary` (declared at learn.rs:2981), so
+        // the scope key had drifted and this rule matched nothing while its
+        // site reported as unclassified. Repairing the key, not the judgement.
+        "propose_experiments_with_boundary",
         "\"proposedContentHash\": blake3::hash(input.proposed_content.as_deref().unwrap_or_default()",
         "A proposal with no content hashes as empty, and that is CONSISTENT rather than fabricated: the verifier recomputes the identical expression (curate's audited_source_memory_ids_for_rule_candidate compares against blake3::hash(stored.proposed_content.as_deref().unwrap_or_default())), so writer and reader agree on what the hash of an absent body is. The hash is a binding between the audit row and the proposal, not an assertion that content existed.",
     ),
