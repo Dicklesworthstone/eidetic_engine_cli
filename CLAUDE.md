@@ -40,8 +40,25 @@ nicely and breaks both copy-paste of a single line and
 `scripts/check-rch-doc-examples.py`, which looks for the literal wrapper
 before `cargo` and cannot resolve a shell variable.
 
-Budget the wait: a cold worker compiles this tree in roughly 2.5 hours, and a
-worker is only warm if it already holds a target dir for the same profile.
+Budget the wait from the TARGET DIR, not from the worker. Measured 2026-10-11,
+same project and same worker within one hour:
+
+| lane | target dir | crates | build |
+|---|---|---|---|
+| `cargo` dispatch | `<project>/.rch-target-<worker>-pool-<hash>` (reused) | 278 | 127m33s |
+| `rch exec --job` | `/data/projects/<project>/.rch-target` (cold) | 475+ | >2.9h |
+
+A cargo dispatch logs `Rewriting CARGO_TARGET_DIR for remote execution` and
+redirects into the worker-scoped pool dir. **A `--job` logs no such line** — it
+inherits the worker's own default target dir, which is a different directory.
+So a `--job` can never reuse a cargo dispatch's warmth, only a previous
+`--job`'s, and `rch exec` has no worker pinning to let you choose. That is why
+the same `cargo build --locked --bin ee` has been measured at both 12m49s
+(bd-3ghvw, warm) and over 2.9 hours (cold).
+
+Practical consequence: a shell e2e suite that runs in 20 minutes can cost 20
+minutes or 3+ hours depending on a directory you never named. Set
+`RCH_BUILD_TIMEOUT_SEC` / `RCH_TEST_TIMEOUT_SEC` for the cold case.
 
 ## Architecture
 
