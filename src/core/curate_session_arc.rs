@@ -115,6 +115,15 @@ fn inline_pairs(excerpt: &str) -> impl Iterator<Item = (&str, &str)> {
                 } else {
                     None
                 };
+                // A marker cannot override contradictory concrete subjects.
+                // Inspect the latest marked failure before considering weaker
+                // topic matches; skipping it to an older unanchored failure
+                // would merely manufacture a different causal relationship.
+                if explicitly_linked.as_ref().is_some_and(|key| {
+                    !resources.is_empty() && !key.1.is_empty() && resources.is_disjoint(&key.1)
+                }) {
+                    return None;
+                }
                 let key = explicitly_linked
                     .or_else(|| sequence::matching_subject(&subjects, &topic, &resources));
                 let key = key.or_else(|| {
@@ -1168,5 +1177,84 @@ mod episode_tests {
             inline_pairs(&source).collect::<Vec<_>>(),
             [(failure, repair), (SECOND_FAILURE, SECOND_REPAIR)]
         );
+    }
+
+    #[test]
+    fn explicit_markers_cannot_pair_conflicting_resource_identities() {
+        for (failed, repaired) in [
+            ("src/api.rs", "src/ui.rs"),
+            ("src/Api.rs", "src/api.rs"),
+            ("src/api.rs", "api.rs"),
+            ("Store::open()", "OtherStore::open()"),
+            ("src/api.rs:12:9", "src/ui.rs:14:2"),
+            (r"C:\one\api.rs(12,9):", r"C:\two\api.rs(14,2):"),
+        ] {
+            let failure = format!("Failure arc: cargo test {failed} failed.");
+            let repair =
+                format!("Fix: cargo test {repaired} passed after restoring the guard.");
+            assert!(failure_signal(&failure));
+            assert!(resolution_signal(&repair));
+            let left = sequence::resource_keys(&failure);
+            let right = sequence::resource_keys(&repair);
+            assert!(!left.is_empty() && !right.is_empty());
+            assert!(left.is_disjoint(&right));
+            for separator in [" ", "\n", "\r\n"] {
+                let body = format!("{failure}{separator}{repair}");
+                assert!(inline_pairs(&body).next().is_none(), "{body}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_marked_repair_does_not_consume_the_named_failure() {
+        let failure = "Failure arc: cargo test src/api.rs failed.";
+        let wrong = "Fix: cargo test src/ui.rs passed after restoring the guard.";
+        let right = "Fix: cargo test src/api.rs passed after restoring the guard.";
+        let source = format!("{failure}\n{wrong}\n{right}");
+        assert_eq!(
+            inline_pairs(&source).collect::<Vec<_>>(),
+            [(failure, right)]
+        );
+    }
+
+    #[test]
+    fn contradictory_marker_cannot_fall_back_to_an_older_unanchored_failure() {
+        let older = "Failure arc: cargo test failed.";
+        let current = "Failure arc: cargo test src/api.rs failed.";
+        let wrong = "Fix: cargo test src/ui.rs passed after restoring the guard.";
+        assert!(sequence::resource_keys(older).is_empty());
+        let source = format!("{older}\n{current}\n{wrong}");
+        assert!(inline_pairs(&source).next().is_none());
+        let right = "Fix: cargo test src/api.rs passed after restoring the guard.";
+        let source = format!("{source}\n{right}");
+        assert_eq!(
+            inline_pairs(&source).collect::<Vec<_>>(),
+            [(current, right)]
+        );
+    }
+
+    #[test]
+    fn explicit_markers_still_link_nonconflicting_and_unspecified_subjects() {
+        for (failure, repair) in [
+            (
+                "Failure arc: cargo test src/api.rs:12:9 failed.",
+                "Fix: cargo test src/api.rs:14:2 passed after restoring the guard.",
+            ),
+            (
+                "Failure arc: cargo test src/api.rs failed.",
+                "Fix: cargo test passed after restoring the guard.",
+            ),
+            (
+                "Failure arc: cargo test failed.",
+                "Fix: cargo test src/api.rs passed after restoring the guard.",
+            ),
+        ] {
+            let source = format!("{failure}\n{repair}");
+            assert_eq!(
+                inline_pairs(&source).collect::<Vec<_>>(),
+                [(failure, repair)],
+                "{source}"
+            );
+        }
     }
 }
