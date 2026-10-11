@@ -14,6 +14,9 @@ use crate::util::radix_ulid_sort::{
 
 use super::{AttrMap, DiGraph};
 
+#[path = "causal_seed_walk.rs"]
+mod seed_walk;
+
 const CONTRIBUTION_SCORE_ATTR: &str = "contribution_score";
 const FLOW_DEMAND_ATTR: &str = "causal_demand";
 const FLOW_CAPACITY_ATTR: &str = "causal_capacity";
@@ -433,12 +436,13 @@ fn reachable_causal_subgraph(graph: &DiGraph, source: &str) -> GraphResult<DiGra
                 );
                 queue.push_back(successor.to_owned());
             }
-            let attrs = graph.edge_attrs(&current, successor).cloned().ok_or_else(|| {
-                GraphError::GraphEngine {
+            let attrs = graph
+                .edge_attrs(&current, successor)
+                .cloned()
+                .ok_or_else(|| GraphError::GraphEngine {
                     operation: "project reachable causal evidence",
                     source: format!("missing edge attributes for {current} -> {successor}"),
-                }
-            })?;
+                })?;
             scoped
                 .add_edge_with_attrs(current.clone(), successor.to_owned(), attrs)
                 .map_err(|error| GraphError::GraphEngine {
@@ -523,10 +527,14 @@ pub fn extract_causal_seed_ids(query: &str) -> Vec<String> {
 }
 
 /// Build a Personalized PageRank seed map from query bead ids by walking BACKWARD
-/// along causal-ancestry edges (bd-1n0np.19.1), reusing
-/// [`compute_causal_ancestry`]. Each query seed gets `seed_weight`; each upstream
-/// ancestor gets `ancestor_decay^path_length` so nearer lessons dominate. Caps
-/// bound the work; an empty `query_seed_ids` is a graceful no-op (empty map).
+/// along causal-ancestry edges (bd-1n0np.19.1). Each query seed gets `seed_weight`;
+/// each upstream ancestor gets `ancestor_decay^path_length` so nearer lessons
+/// dominate. Select exactly the same nearest prefix as complete ancestry, but
+/// stop before expanding a cutoff level. At most `max_ancestors_per_seed` nodes
+/// have their successor lists read per seed; high-degree lists still require
+/// inspection to preserve exact within-level ordering. Retained traversal state
+/// is bounded by that cap. No full graph clone, closure, or flow solve is needed.
+/// An empty `query_seed_ids` is a graceful no-op (empty map).
 /// Deterministic — the result feeds `graph::ppr::personalized_pagerank`.
 #[must_use]
 pub fn causal_ancestry_ppr_seed_map(
@@ -537,15 +545,10 @@ pub fn causal_ancestry_ppr_seed_map(
     let mut seed_map: BTreeMap<String, f64> = BTreeMap::new();
     for seed in query_seed_ids.iter().take(config.max_seeds) {
         *seed_map.entry(seed.clone()).or_insert(0.0) += config.seed_weight;
-        let ancestry = compute_causal_ancestry(graph, seed);
-        for ancestor in ancestry
-            .ancestors
-            .iter()
-            .take(config.max_ancestors_per_seed)
-        {
+        for ancestor in seed_walk::nearest_ancestors(graph, seed, config.max_ancestors_per_seed) {
             let exponent = i32::try_from(ancestor.path_length).unwrap_or(i32::MAX);
             let weight = config.ancestor_decay.powi(exponent);
-            *seed_map.entry(ancestor.memory_id.clone()).or_insert(0.0) += weight;
+            *seed_map.entry(ancestor.memory_id).or_insert(0.0) += weight;
         }
     }
     seed_map
@@ -1293,8 +1296,14 @@ mod tests {
         );
         let explanation = require_min_cost_explanation(&graph, "failure");
         assert_eq!(explanation.cause_id, "root");
-        assert_eq!(path_pairs(&explanation), vec![("failure", "cause"), ("cause", "root")]);
-        assert_eq!(explanation.path[0].edge_id.as_deref(), Some("failure->cause"));
+        assert_eq!(
+            path_pairs(&explanation),
+            vec![("failure", "cause"), ("cause", "root")]
+        );
+        assert_eq!(
+            explanation.path[0].edge_id.as_deref(),
+            Some("failure->cause")
+        );
         assert_eq!(explanation.path[0].evidence_count, Some(2));
     }
 
@@ -1314,7 +1323,10 @@ mod tests {
             assert_eq!(scoped.node_attrs(node), graph.node_attrs(node));
         }
         for (source, target) in [("failure", "cause"), ("cause", "root")] {
-            assert_eq!(scoped.edge_attrs(source, target), graph.edge_attrs(source, target));
+            assert_eq!(
+                scoped.edge_attrs(source, target),
+                graph.edge_attrs(source, target)
+            );
         }
         assert!(!scoped.has_node("other_0"));
         let missing = graph_result(reachable_causal_subgraph(&graph, "missing"))?;
@@ -1333,9 +1345,15 @@ mod tests {
         add_causal_edge(&mut graph, "root", "failure", 0.9);
 
         let ancestry = compute_causal_ancestry(&graph, "failure");
-        assert!(!ancestry.ancestors.iter().any(|ancestor| ancestor.memory_id == "failure"));
+        assert!(
+            !ancestry.ancestors.iter().any(|ancestor| ancestor.memory_id == "failure")
+        );
         assert_eq!(
-            ancestry.ancestors.iter().find(|ancestor| ancestor.memory_id == "root").map(|ancestor| ancestor.path_length),
+            ancestry
+                .ancestors
+                .iter()
+                .find(|ancestor| ancestor.memory_id == "root")
+                .map(|ancestor| ancestor.path_length),
             Some(2)
         );
         assert!(ancestry.degraded.iter().any(|entry| entry.code == "graph.causal_cycle"));
