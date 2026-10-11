@@ -40,27 +40,34 @@ nicely and breaks both copy-paste of a single line and
 `scripts/check-rch-doc-examples.py`, which looks for the literal wrapper
 before `cargo` and cannot resolve a shell variable.
 
-Budget the wait from the TARGET DIR, not from the worker. Measured 2026-10-11,
-same project and same worker within one hour:
+Budget the wait pessimistically: **the same build has been measured at 32
+minutes and at 217 minutes, and you cannot choose which you get.** All
+2026-10-11, same project:
 
 | lane | target dir | crates | build |
 |---|---|---|---|
-| `cargo` dispatch | `<project>/.rch-target-<worker>-pool-<hash>` (reused) | 278 | 127m33s |
-| `rch exec --job` | `/data/projects/<project>/.rch-target` (cold) | 475 | **217m07s** |
+| `cargo` dispatch | `<project>/.rch-target-<worker>-pool-<hash>` | 278 | 127m33s |
+| `rch exec --job` | `/data/projects/<project>/.rch-target` | 475 | 217m07s |
+| `rch exec --job` | same path, different worker | 475 | **31m57s** |
 
-A cargo dispatch logs `Rewriting CARGO_TARGET_DIR for remote execution` and
-redirects into the worker-scoped pool dir. **A `--job` logs no such line** — it
-inherits the worker's own default target dir, which is a different directory.
-So a `--job` can never reuse a cargo dispatch's warmth, only a previous
-`--job`'s, and `rch exec` has no worker pinning to let you choose. That is why
-the same `cargo build --locked --bin ee` has been measured at both 12m49s
-(bd-3ghvw, warm) and over 2.9 hours (cold).
+Two independent effects, and it is worth not confusing them:
 
-Practical consequence: a 20-minute shell e2e suite costs 20 minutes or
-**3.6 hours** depending on a directory you never named, so a `--job` that must
-build needs `RCH_BUILD_TIMEOUT_SEC`/`RCH_TEST_TIMEOUT_SEC` at 18000 and a
-single stage. Two cargo stages in one `--job` do not fit: the second needs the
-TEST profile, which is another dependency tier on top of the 217 minutes.
+**Which directory** — a cargo dispatch logs `Rewriting CARGO_TARGET_DIR for
+remote execution` and redirects into a worker-scoped pool dir; a `--job` logs
+no such line and inherits the worker's own default dir. So a `--job` never
+reuses a cargo dispatch's warmth, only a previous `--job`'s. That is a real
+difference in WORK — 278 crates against 475.
+
+**Which worker** — and this dominates the clock. Rows 2 and 3 are the same
+lane, the same directory path and the same 475 crates, 6.8x apart, on workers
+whose rated speeds differ by 9%. Do not attribute a slow build to a cold
+directory without comparing crate COUNTS; if two runs compiled the same number
+of crates, the directory was not the variable.
+
+Since `rch exec` has no worker pinning, treat the slow case as the budget:
+`RCH_BUILD_TIMEOUT_SEC`/`RCH_TEST_TIMEOUT_SEC` at 18000, and **one cargo stage
+per `--job`** — a second `cargo test` stage needs the TEST profile, another
+dependency tier on top of whatever the first stage cost.
 
 ## Architecture
 
