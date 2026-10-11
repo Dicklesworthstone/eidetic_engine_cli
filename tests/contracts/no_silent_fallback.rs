@@ -4014,6 +4014,100 @@ fn code_only_lines_keeps_an_ordinary_string_open_across_a_line_break() -> TestRe
     }
 }
 
+/// bd-nar12: an ignore span must END where the module ends, not where a brace
+/// inside a literal says it does.
+///
+/// Every arm written before this one pinned where a span OPENS. Nothing pinned
+/// where it CLOSES, which is why 10 of 387 modules could mis-close unnoticed.
+#[test]
+fn ignore_span_ends_at_the_real_close_not_at_a_brace_in_a_literal() -> TestResult {
+    let mut problems = Vec::new();
+
+    // Braces opened inside literals and never closed there. A plain string, a
+    // raw string, AND a byte raw string, because the two desyncs this bead
+    // uncovered were a per-line `in_string` reset and an unrecognised `br#"`.
+    let planted = concat!(
+        "fn product() {\n",
+        "    let x = y.unwrap_or_default();\n",
+        "}\n",
+        "#[cfg(test)]\n",
+        "mod tests {\n",
+        "    const OPENER: &str = \"{\";\n",
+        "    const RAW: &str = r#\"{ \"k\": 1 }\"#;\n",
+        "    const BYTES: &[u8] = br#\"{ \"k\": 1 }\"#;\n",
+        "    fn inner() { let _ = OPENER; }\n",
+        "}\n",
+        "fn after_the_module() {\n",
+        "    let z = w.unwrap_or_default();\n",
+        "}\n",
+    );
+    let (code, deltas) = scan_code_and_brace_deltas(planted);
+    let ignored = ignored_test_module_lines(&code, &deltas);
+    let lines = planted.lines().collect::<Vec<_>>();
+
+    // THE END PIN. Index 9 is the module's closing brace, so 10 onward is
+    // product code again.
+    for index in 10..lines.len() {
+        if ignored[index] {
+            problems.push(format!(
+                "END PIN FAILED: line {} is after the module close but is ignored: {:?}",
+                index + 1,
+                lines[index]
+            ));
+        }
+    }
+    // POSITIVE CONTROL: the fallback after the module must be DETECTED. The
+    // boolean alone proves nothing.
+    if ignored[11] || !is_high_risk_line(&code[11]) {
+        problems.push(format!(
+            "POSITIVE CONTROL FAILED: the fallback after the module is not a finding: ignored={} line={:?}",
+            ignored[11], lines[11]
+        ));
+    }
+
+    // ANTI-WEAKENING, sharing the mechanism: an ordinary `mod tests` with no
+    // literal braces must STILL be ignored, or "ignore nothing, ever" passes
+    // every arm above.
+    let ordinary = concat!(
+        "#[cfg(test)]\n",
+        "mod tests {\n",
+        "    fn inner() { let _ = f().unwrap_or_default(); }\n",
+        "}\n",
+    );
+    let (ordinary_code, ordinary_deltas) = scan_code_and_brace_deltas(ordinary);
+    let ordinary_ignored = ignored_test_module_lines(&ordinary_code, &ordinary_deltas);
+    // 1..=3 is `mod tests {` through its closing brace. Index 0 is the
+    // `#[cfg(test)]` attribute, which this scanner deliberately does NOT mark.
+    if !ordinary_ignored[1..=3].iter().all(|flag| *flag) {
+        problems.push(format!(
+            "ANTI-WEAKENING FAILED: an ordinary `mod tests` body is no longer ignored: {ordinary_ignored:?}"
+        ));
+    }
+
+    // MECHANISM PIN: the fixture must actually exercise literal braces. If the
+    // naive counter and the scanner's deltas agreed, every arm above could pass
+    // while the bug was untouched -- the silent zero a negative control cannot
+    // catch.
+    let naive_total: i32 = planted.lines().map(brace_delta).sum();
+    let scanned_total: i32 = deltas.iter().sum();
+    if naive_total == scanned_total {
+        problems.push(format!(
+            "MECHANISM PIN FAILED: fixture does not exercise literal braces; naive and scanned both {naive_total}"
+        ));
+    }
+    if scanned_total != 0 {
+        problems.push(format!(
+            "MECHANISM PIN FAILED: scanned deltas should balance this fixture, got {scanned_total}"
+        ));
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
 /// bd-nar12: the BYTE raw-string forms `br"` and `br#"` must open a raw string.
 ///
 /// The boundary check rejected them because the `b` sits where an identifier
@@ -4258,12 +4352,21 @@ fn scan_source_findings() -> Result<Vec<SourceFinding>, String> {
         if test_only.contains(&relative) {
             continue;
         }
-        let ignored = ignored_test_module_lines(&source);
-        let lines = source.lines().collect::<Vec<_>>();
-        let functions = enclosing_functions(&lines);
+        // bd-nar12: one scan yields both the code lines and the brace deltas, so
+        // ignore-span tracking and detection cannot disagree about where a
+        // literal or comment began.
         // bd-hz7nu: detect on the CODE, record the ORIGINAL. A doc comment that
         // quotes a fallback documents one; it does not perform one.
-        let code = code_only_lines(&source);
+        let (code, brace_deltas) = scan_code_and_brace_deltas(&source);
+        let ignored = ignored_test_module_lines(&code, &brace_deltas);
+        let lines = source.lines().collect::<Vec<_>>();
+        // DELIBERATELY still raw lines. `enclosing_functions` shares the old
+        // `brace_delta` weakness, but its output is an INVENTORY MATCH KEY --
+        // `allowed_in(rule, file, FUNCTION, text)` -- so changing how functions
+        // resolve can unclassify already-justified findings and fail the ratchet
+        // for a reason unrelated to this fix. Different blast radius, so it moves
+        // separately and with its own measurement.
+        let functions = enclosing_functions(&lines);
 
         for (index, line) in lines.iter().enumerate() {
             let detectable = code.get(index).map_or(*line, String::as_str);
@@ -4307,19 +4410,29 @@ fn is_temp_sync_dir(path: &Path) -> bool {
         .is_some_and(|name| name.ends_with(".tmp-sync"))
 }
 
-fn ignored_test_module_lines(source: &str) -> Vec<bool> {
-    let lines = source.lines().collect::<Vec<_>>();
-    let mut ignored = vec![false; lines.len()];
+/// Which lines fall inside a `#[cfg(test)]` module.
+///
+/// bd-nar12: takes the CODE lines and the per-line brace DELTAS that
+/// `scan_code_and_brace_deltas` produced together, so depth is counted from
+/// ordinary-code braces only. A brace inside a string, raw string, char literal
+/// or comment cannot move a span's end, and there is no second parse to
+/// disagree with the first.
+///
+/// Using the code lines for the DECLARATION checks also means a doc comment
+/// mentioning `mod tests {` cannot open a span, which raw source allowed.
+fn ignored_test_module_lines(code: &[String], deltas: &[i32]) -> Vec<bool> {
+    let mut ignored = vec![false; code.len()];
     let mut pending_cfg_test = false;
     let mut in_test_module = false;
     let mut brace_depth = 0_i32;
 
-    for (index, line) in lines.iter().enumerate() {
+    for (index, line) in code.iter().enumerate() {
         let trimmed = line.trim();
+        let delta = deltas.get(index).copied().unwrap_or(0);
 
         if in_test_module {
             ignored[index] = true;
-            brace_depth += brace_delta(line);
+            brace_depth += delta;
             if brace_depth <= 0 {
                 in_test_module = false;
             }
@@ -4344,7 +4457,7 @@ fn ignored_test_module_lines(source: &str) -> Vec<bool> {
         if pending_cfg_test && trimmed.starts_with("mod tests") && trimmed.contains('{') {
             ignored[index] = true;
             in_test_module = true;
-            brace_depth = brace_delta(line);
+            brace_depth = delta;
             pending_cfg_test = false;
             if brace_depth <= 0 {
                 in_test_module = false;
@@ -4428,6 +4541,29 @@ fn is_high_risk_line(line: &str) -> bool {
 /// original source, so inventory fragments still match what is written in the
 /// file, including fragments that name a comment.
 fn code_only_lines(source: &str) -> Vec<String> {
+    scan_code_and_brace_deltas(source).0
+}
+
+/// The code-only lines AND each line's brace delta, from ONE pass.
+///
+/// bd-nar12. Earlier attempts produced a string with literal bodies blanked and
+/// handed it to `brace_delta`, a second, stateless parser. That is correct only
+/// if this scanner is synchronised everywhere, because blanking DELETES
+/// characters: one desync and a real brace vanishes from the count. Counting
+/// here removes the failure mode instead of narrowing it -- a brace is counted
+/// only at the single place this loop emits an ORDINARY code character, so a
+/// brace inside a string, raw string, char literal or comment is never counted,
+/// and nothing is destroyed to arrange that.
+///
+/// Two desyncs had to be fixed before this could be trusted, each visible only
+/// once the other was gone: `in_string` resetting per line (ac7ff8cce), and the
+/// byte raw-string forms never opening a literal (1721b7b16). Both have tests
+/// that red without their fix.
+///
+/// Returns one entry per `source.lines()` entry in both vectors, so callers may
+/// index them together.
+fn scan_code_and_brace_deltas(source: &str) -> (Vec<String>, Vec<i32>) {
+    let mut deltas = Vec::new();
     let mut out = Vec::new();
     let mut in_block = false;
     // Raw strings carry across lines like block comments, and this codebase is
@@ -4456,6 +4592,9 @@ fn code_only_lines(source: &str) -> Vec<String> {
         let chars = line.chars().collect::<Vec<_>>();
         let mut code = String::with_capacity(line.len());
         let mut index = 0;
+        // Per line, because callers consume the deltas per line. The literal and
+        // comment state above is deliberately NOT per line.
+        let mut delta = 0_i32;
 
         while index < chars.len() {
             let current = chars[index];
@@ -4577,14 +4716,25 @@ fn code_only_lines(source: &str) -> Vec<String> {
                 continue;
             }
 
+            // THE ONLY PLACE A BRACE IS COUNTED. Every literal and comment
+            // branch above continues or breaks before reaching here, so a brace
+            // inside a string, raw string, char literal or comment can never
+            // arrive at this line -- and nothing had to be deleted to arrange
+            // it.
+            if current == '{' {
+                delta += 1;
+            } else if current == '}' {
+                delta -= 1;
+            }
             code.push(current);
             index += 1;
         }
 
         out.push(code);
+        deltas.push(delta);
     }
 
-    out
+    (out, deltas)
 }
 
 fn context_window(lines: &[&str], index: usize) -> String {
