@@ -3905,6 +3905,82 @@ fn code_only_lines_removes_commentary_without_blinding_the_detector() -> TestRes
     }
 }
 
+/// bd-nar12: an ORDINARY string that spans lines must stay open across the
+/// newline, exactly as a raw string or block comment does.
+///
+/// `in_string` used to be declared per-line, so the continuation lines of a
+/// multi-line string were scanned as code. The visible consequence is below: a
+/// `//` occurring INSIDE such a string was read as a comment opener, and
+/// everything after it on that line was discarded -- including real code that
+/// follows the string's closing quote.
+///
+/// This arm REDS without the fix, which is the only reason it is worth having.
+#[test]
+fn code_only_lines_keeps_an_ordinary_string_open_across_a_line_break() -> TestResult {
+    let mut problems = Vec::new();
+
+    // Backslash continuation, the form this tree actually uses for long
+    // assertion messages. The continuation line carries `//` (inside the
+    // string) and then a REAL finding after the closing quote.
+    let continued = concat!(
+        "let msg = \"start \\\n",
+        "    see http://host\"; let x = y.unwrap_or_default();\n",
+    );
+    let code = code_only_lines(continued);
+    if !is_high_risk_line(&code[1]) {
+        problems.push(format!(
+            "POSITIVE CONTROL FAILED (backslash continuation): code after the string's closing quote was discarded, almost certainly by reading `//` inside the string as a comment: {:?}",
+            code[1]
+        ));
+    }
+
+    // A literal newline inside quotes is also legal Rust and must behave the
+    // same way.
+    let literal_newline = concat!(
+        "let msg = \"start\n",
+        "    see http://host\"; let x = y.unwrap_or_default();\n",
+    );
+    let code = code_only_lines(literal_newline);
+    if !is_high_risk_line(&code[1]) {
+        problems.push(format!(
+            "POSITIVE CONTROL FAILED (literal newline in string): {:?}",
+            code[1]
+        ));
+    }
+
+    // ANTI-WEAKENING: a genuine line comment must STILL truncate. Without this,
+    // "never treat // as a comment" passes both arms above and silently
+    // reintroduces bd-hz7nu, where documenting a fallback created fallback debt.
+    let genuine_comment = "let ok = 1; // .unwrap_or_default() is the shape\n";
+    let code = code_only_lines(genuine_comment);
+    if is_high_risk_line(&code[0]) {
+        problems.push(format!(
+            "ANTI-WEAKENING FAILED: a real line comment no longer truncates, so commentary counts as product code again: {:?}",
+            code[0]
+        ));
+    }
+
+    // And a string closed on its own line must not leave the scanner open, or
+    // every later line in the file would be swallowed as string content.
+    let balanced = concat!(
+        "let a = \"closed here\";\n",
+        "let x = y.unwrap_or_default();\n",
+    );
+    let code = code_only_lines(balanced);
+    if !is_high_risk_line(&code[1]) {
+        problems.push(format!(
+            "POSITIVE CONTROL FAILED (balanced string): the scanner stayed open past a closed string: {:?}",
+            code[1]
+        ));
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
 fn classify_finding(finding: &SourceFinding) -> Option<&'static InventoryRule> {
     INVENTORY_RULES.iter().find(|rule| {
         rule.file == finding.file && rule.scopes(finding) && finding.context.contains(rule.fragment)
@@ -4231,12 +4307,26 @@ fn code_only_lines(source: &str) -> Vec<String> {
     // fifteen REAL findings vanished on the first attempt, which the population
     // delta caught before it could be committed.
     let mut in_raw: Option<usize> = None;
+    // bd-nar12: ORDINARY strings carry across lines too, so this must live out
+    // here beside `in_raw` and `in_block`. Rust permits both a literal newline
+    // inside quotes and a trailing-backslash continuation, and this tree uses
+    // the backslash form heavily for long assertion messages --
+    // src/mesh/responder_broker.rs has six inside one test module.
+    //
+    // Declared per-line, it reset on every newline, so the continuation lines
+    // of such a string were scanned as CODE. That is survivable for comment
+    // stripping, which is all this scanner originally fed: the characters are
+    // pushed through either way, so a real brace still reaches the caller. It
+    // is NOT survivable for anything that must count braces, because a desync
+    // there silently drops real code from the count. That is exactly how the
+    // first attempt at bd-nar12 came to scan responder_broker.rs:5055 -- a line
+    // inside `mod tests` -- as product debt, and why it was reverted.
+    let mut in_string = false;
 
     for line in source.lines() {
         let chars = line.chars().collect::<Vec<_>>();
         let mut code = String::with_capacity(line.len());
         let mut index = 0;
-        let mut in_string = false;
 
         while index < chars.len() {
             let current = chars[index];
