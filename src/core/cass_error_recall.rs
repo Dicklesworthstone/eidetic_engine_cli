@@ -42,9 +42,9 @@ mod compiler;
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
-/// V3 adds typed Cargo JSONL/rustc JSON errors so unchanged older sessions can
-/// acquire the newly supported fingerprints on their next import derivation.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v3";
+/// V4 adds libtest JSON execution histories after Cargo's build phase, so
+/// unchanged v3 sessions are reconsidered on their next import derivation.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v4";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -1380,3 +1380,7 @@ mod proof_tests;
 #[cfg(test)]
 #[path = "cass_error_recall_write_tests.rs"]
 mod write_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_libtest_store_tests.rs"]
+mod libtest_store_tests;
