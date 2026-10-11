@@ -285,12 +285,22 @@ ADRs record decisions; they are not excuses for keeping old APIs alive.
 
 ## Compiler Checks (CRITICAL)
 
-**After any substantive code changes, you MUST verify no errors were introduced:**
+**After any substantive code changes, you MUST verify no errors were introduced.**
+
+`scripts/check-local-cargo-tripwire.sh` forbids `check` and `clippy` locally
+(along with `build`, `test`, `bench`, `doc`, `run`, `install`, `rustc` and
+`fix`). `fmt` is the one exception, so it is also the only local syntax check
+you have. Everything else is dispatched:
 
 ```bash
-cargo check --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo fmt --check                   # the ONLY cargo subcommand allowed locally
+```
+
+```bash
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+    cargo check --all-targets
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+    cargo clippy --all-targets -- -D warnings
 ```
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
@@ -823,9 +833,17 @@ When fixes are ready for release:
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
 cargo tree -e features | grep -E '(tokio|rusqlite|petgraph|sqlx|diesel)' && echo "FORBIDDEN DEP" || echo "ok"
+```
+
+`clippy` and `test` are tripwire-forbidden locally, so the release gate runs
+them on the pinned lane:
+
+```bash
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+    cargo clippy --all-targets -- -D warnings
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+    cargo test --workspace --all-targets
 ```
 
 ### 2. Commit Changes
@@ -1645,7 +1663,7 @@ Note for Codex/GPT-5.2:
 
 You constantly bother me and stop working with concerned questions that look similar to this:
 
-```
+```text
 Unexpected changes (need guidance)
 
 - Working tree still shows edits I did not make in Cargo.toml, Cargo.lock, src/cli/commands/upgrade.rs, src/storage/sqlite.rs, tests/conformance.rs, tests/storage_deps.rs. Please advise whether to keep/commit/revert these before any further work. I did not touch them.

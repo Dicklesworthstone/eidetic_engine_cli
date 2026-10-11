@@ -45,7 +45,16 @@ DEFAULT_FILES = [
 # to run three tripwire-forbidden subcommands and was invisible twice over,
 # because the file was out of scope AND the block carried no RCH token.
 SCAN_ALL_PREFIXES = ("docs/rch_",)
-SCAN_ALL_FILES = frozenset({"CLAUDE.md"})
+# AGENTS.md joined CLAUDE.md for the same reason and with the same evidence:
+# measured with this module's own regexes, 3 of its 4 forbidden-cargo blocks
+# were invisible because they carried no RCH token -- including "Compiler
+# Checks (CRITICAL)", which told every agent to run `cargo check` and
+# `cargo clippy`, and the release "Verify Locally" block. Neither file is a
+# distribution document, so a bare forbidden subcommand in either is never
+# correct. README.md deliberately stays block-gated: its uncovered blocks are
+# `cargo build --release` and `cargo install`, which is the genuine
+# build-from-source prose the RCH-token exemption exists to permit.
+SCAN_ALL_FILES = frozenset({"AGENTS.md", "CLAUDE.md"})
 SHELL_LANGS = {"", "bash", "sh", "shell", "zsh", "console"}
 RCH_BLOCK_RE = re.compile(
     r"(\bRCH\b|\brch\b|RCH_[A-Z0-9_]+|scripts/rch_verify\.sh|check-local-cargo-tripwire|"
@@ -449,8 +458,26 @@ scripts/rch_verify.sh --dry-run -- cargo test --lib smoke -- --nocapture
         reports.append(merged)
 
     denials = [denial for report in reports for denial in report["denials"]]
-    if len(denials) != 3:
-        raise SystemExit(f"self-test expected exactly 3 denials, got {len(denials)}: {denials}")
+    # Four, not three, since AGENTS.md joined CLAUDE.md in SCAN_ALL_FILES. The
+    # fourth is the fixture's bare `cargo build --release`, which the old
+    # block-gate excused as distribution prose. Measured on the real AGENTS.md
+    # before changing this: 3 of its 4 forbidden-cargo blocks were invisible,
+    # and ALL THREE were agent instructions (Compiler Checks, the release
+    # Verify-Locally block, and a quoted transcript) -- none was distribution
+    # prose. AGENTS.md is an instruction file, not a distribution document.
+    # The exemption itself is NOT weakened: it still applies to README.md, and
+    # the README skip is asserted below.
+    if len(denials) != 4:
+        raise SystemExit(f"self-test expected exactly 4 denials, got {len(denials)}: {denials}")
+    # Pin the policy change positively, so a revert to block-gating reds here
+    # instead of silently re-hiding agent instructions.
+    if not any(
+        denial["file"] == "AGENTS.md" and "cargo build --release" in denial["command_excerpt"]
+        for denial in denials
+    ):
+        raise SystemExit(
+            "self-test expected AGENTS.md's non-RCH cargo block to be DENIED under scan_all"
+        )
     if not any("bad" in denial["command_excerpt"] for denial in denials):
         raise SystemExit("self-test denials did not include the synthetic bad cargo commands")
     if not any("rch exec" in denial["command_excerpt"] for denial in denials):
