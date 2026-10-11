@@ -2813,7 +2813,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/cli/mod.rs",
         "usage_parts",
         "DomainError::Usage { message, repair } =>",
-        "A usage error that carries no repair hint has none, and the empty string is that. The surrounding function panics on any other DomainError variant, so it is a narrow extractor over a matched shape rather than a general error path.",
+        "RETIRED to 0 by bd-eoqlf: the site is test code and is no longer scanned. `usage_parts` is a helper inside `#[cfg(test)] mod memory_link_arg_shape_tests`, which the scanner read as production only because the test-module exclusion matched the literal name `tests`. The reason this row carried was itself the tell -- it argued from the helper panicking on any other DomainError variant, which is assertion behaviour, not product behaviour. Kept as a 0 row rather than removed so the ledger records the retirement.",
     ),
     allowed_in(
         "NSF-CLI-CLAIM-GATE-DEGRADED-REPAIR-JSON",
@@ -4791,22 +4791,41 @@ fn ignored_test_module_lines(code: &[String], deltas: &[i32]) -> Vec<bool> {
             continue;
         }
 
-        // bd-eoqlf: this literal is WRONG -- it recognises a `#[cfg(test)]`
-        // module only when it is named exactly `tests`, so 43 differently-named
-        // inline test modules under src/ are scanned as production code.
+        // bd-eoqlf: ANY `#[cfg(test)]` module, not only one named `tests`.
         //
-        // DO NOT "FIX" IT BY BROADENING THE NAME CHECK ALONE. Measured
-        // 2026-10-09: `brace_delta` below counts braces in STRING LITERALS, so
-        // it already mis-tracks the end of 15 of the 387 modules it does
-        // recognise -- `src/cli/mod.rs:71402` closes at 73890 and the naive
-        // count runs to EOF, over-ignoring 26509 lines. Broadening the name
-        // check admits more such modules: `mod error_render_routing_tests`
-        // (src/cli/mod.rs:56943) truly closes at 57073, but naive counting is
-        // +2 open there and would keep ignoring for thousands of lines.
+        // The name test used to be `starts_with("mod tests")`, which scanned
+        // every differently-named inline test module as production code. The
+        // comment that stood here refused to broaden it, because the brace
+        // tracking of the day counted braces in STRING LITERALS and so
+        // mis-closed 15 of the 387 modules it already recognised -- admitting
+        // more of them would have ignored thousands of further lines. That
+        // reasoning was sound when written and is now spent: bd-nar12 attempt 4
+        // (02e0abb37) moved this function onto the per-line `deltas` computed by
+        // `scan_code_and_brace_deltas`, where a brace inside a string, raw
+        // string, char literal or comment cannot move a span's end, and
+        // `ignore_span_ends_at_the_real_close_not_at_a_brace_in_a_literal` pins
+        // it. The blocker was removed twelve hours before this change; the
+        // warning simply outlived the revert it was restored by.
         //
-        // So the name check and the brace tracking have to be fixed together.
-        // See bd-eoqlf for the measurement and the population.
-        if pending_cfg_test && trimmed.starts_with("mod tests") && trimmed.contains('{') {
+        // Measured at 74e7f6d37, over the whole scanned population:
+        //
+        //     scanned high-risk sites, `mod tests` only     622
+        //     scanned high-risk sites, any `#[cfg(test)] mod` 621
+        //     sites entering the population                   0
+        //     files whose ignore span now reaches EOF         0
+        //
+        // 8475 lines of genuine test code leave the production denominator --
+        // `src/cass/refresh.rs` alone contributes 792 of its 1493 -- and only
+        // ONE of them is a high-risk line today: `src/cli/mod.rs:40743`, inside
+        // `mod memory_link_arg_shape_tests`, whose sibling match arm is
+        // `panic!("expected a usage error, got {other:?}")`. That one site's
+        // rule is retired to a 0 row in the same commit, because this ratchet
+        // fails on a stale count as readily as on a rising one.
+        //
+        // The zero in the last row is the load-bearing number. An over-ignoring
+        // regression here does not show up as a site appearing; it shows up as
+        // a span running to end of file, so that is what is counted.
+        if pending_cfg_test && test_module_declaration(trimmed) {
             ignored[index] = true;
             in_test_module = true;
             brace_depth = delta;
@@ -4840,6 +4859,31 @@ fn ignored_test_module_lines(code: &[String], deltas: &[i32]) -> Vec<bool> {
 /// rejects them -- which is the bug this function exists to fix. A `b` is
 /// therefore permitted, but only when the `b` is ITSELF at a token boundary;
 /// otherwise `abr#"` or `numbr#"` would open a raw string.
+/// A `mod <name> {` declaration line, under any visibility (bd-eoqlf).
+///
+/// Deliberately requires the opening brace ON this line. `mod y;` is an
+/// out-of-line module, and a `#[cfg(test)]` one is handled by
+/// `cfg_test_only_files`, which gates the whole included FILE; treating the
+/// `;` form as a span opener here would start a span that never closes.
+fn test_module_declaration(trimmed: &str) -> bool {
+    let after_visibility = trimmed
+        .strip_prefix("pub")
+        .map_or(trimmed, |after_pub| match after_pub.strip_prefix('(') {
+            // `pub(crate) mod`, `pub(super) mod`, `pub(in path) mod`.
+            Some(scoped) => scoped.split_once(')').map_or(after_pub, |(_, tail)| tail),
+            None => after_pub,
+        })
+        .trim_start();
+    let Some(after_mod) = after_visibility.strip_prefix("mod ") else {
+        return false;
+    };
+    let name = after_mod.trim_start();
+    let name_end = name
+        .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .unwrap_or(name.len());
+    name_end != 0 && name[name_end..].trim_start().starts_with('{')
+}
+
 fn raw_opener_at_token_boundary(chars: &[char], index: usize) -> bool {
     let boundary = |character: Option<&char>| -> bool {
         character.is_none_or(|value| !value.is_alphanumeric() && *value != '_' && *value != '\'')
