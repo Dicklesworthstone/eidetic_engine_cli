@@ -216,7 +216,6 @@ impl Harness {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::core::cass_error_recall::{ToolOutput, failure_diagnostics};
     use serde_json::{Value, json};
 
