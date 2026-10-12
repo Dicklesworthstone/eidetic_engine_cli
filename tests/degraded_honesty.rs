@@ -15,6 +15,56 @@ type TestResult = Result<(), String>;
 
 const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
 
+/// `ProcessExitCode::WorkspaceStoreMissing` (bd-tzlmo).
+///
+/// Introduced under bd-workspace-miss-init-suggestion-sfjvq and documented in
+/// src/models/mod.rs as "distinct from `Storage` so harnesses can tell an
+/// addressing miss from a real storage failure without parsing messages". It
+/// is also published in docs/schemas/ee.error.v2.json as the
+/// `workspace_store_missing` error code, with its own checked-database-path,
+/// workspace-path and discovery-evidence fields.
+///
+/// Three tests in this file predate that refinement and asserted the older,
+/// less specific codes (3 = Storage, 6 = UnsatisfiedDegradedMode) for what is
+/// now an addressing miss. Naming the constant here keeps the next reader from
+/// reading `10` as a magic number.
+const WORKSPACE_STORE_MISSING_EXIT: i32 = 10;
+
+/// The published error code string for the same condition (bd-tzlmo).
+///
+/// `DomainError::WorkspaceStoreMissing` renders as this token
+/// (src/models/mod.rs:1908), and docs/schemas/ee.error.v2.json pins it as a
+/// `const`. Tests that predate the refinement asserted the older `"storage"`
+/// or `"unsatisfied_degraded_mode"` strings for what is now an addressing
+/// miss.
+const WORKSPACE_STORE_MISSING_CODE: &str = "workspace_store_missing";
+
+/// `ProcessExitCode::EvalFailure` (bd-tzlmo).
+///
+/// `handle_eval_run` (`src/cli/mod.rs:16698-16708`) classifies three outcomes,
+/// and the middle one is what makes this constant correct rather than a
+/// weakening:
+///
+///     if any report.status == EvalRunStatus::Error { Configuration }  // could not run
+///     else if passed                              { Success }        // ran, subject passed
+///     else                                        { EvalFailure }    // ran, subject FAILED
+///
+/// `handle_eval_report` (`:17055-17066`) splits the last arm further, into
+/// EvalFailure on a regression and UnsatisfiedDegradedMode otherwise.
+///
+/// So eval already distinguishes "the harness was unavailable" (Configuration,
+/// 2) from "the harness ran and the subject failed" (EvalFailure, 9) -- which
+/// is the `cargo test` convention, and exactly the distinction this file
+/// polices. The fixtures these tests run (`fx.release_failure.v1` and the
+/// pack-quality comparison) exist precisely to model failures, so 9 is the
+/// fixture working as designed; `eval list` evaluates nothing and still exits
+/// 0. The tests here asserted a single exit code for both shapes.
+///
+/// Do not re-cite `:62813` for this: that is `claim_verify_exit_code`, which
+/// only BORROWS the convention ("matching the eval-gate convention") and is
+/// not on the eval path at all.
+const EVAL_FAILURE_EXIT: i32 = 9;
+
 struct LoggedCommand {
     stdout: String,
     stderr: String,
@@ -542,7 +592,14 @@ fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResu
         ],
     )?;
 
-    ensure_equal(&result.exit_code, &3, "storage error exit code")?;
+    // bd-tzlmo: addressing a workspace with no store is an addressing miss,
+    // not a storage failure, and the product now says so with its own exit
+    // code. See WORKSPACE_STORE_MISSING_EXIT above.
+    ensure_equal(
+        &result.exit_code,
+        &WORKSPACE_STORE_MISSING_EXIT,
+        "workspace-store-missing exit code",
+    )?;
     ensure(
         result.stderr.is_empty(),
         "JSON error path must keep stderr empty",
@@ -557,8 +614,8 @@ fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResu
     ensure_json_pointer(
         &result.parsed,
         "/error/code",
-        json!("storage"),
-        "error code",
+        json!(WORKSPACE_STORE_MISSING_CODE),
+        "workspace-store-missing error code",
     )?;
     ensure_json_pointer(
         &result.parsed,
@@ -2596,10 +2653,14 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
         ],
     )?;
 
+    // bd-tzlmo: this asserted UnsatisfiedDegradedMode (6). The fixture
+    // addresses a workspace with no store, so the specific answer is the
+    // addressing miss, not the generic degraded-mode refusal. See
+    // WORKSPACE_STORE_MISSING_EXIT above.
     ensure_equal(
         &result.exit_code,
-        &UNSATISFIED_DEGRADED_MODE_EXIT,
-        "economy unavailable exit code",
+        &WORKSPACE_STORE_MISSING_EXIT,
+        "economy workspace-store-missing exit code",
     )?;
     ensure(
         result.stderr.is_empty(),
@@ -2615,8 +2676,8 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
     ensure_json_pointer(
         &result.parsed,
         "/error/code",
-        json!("unsatisfied_degraded_mode"),
-        "economy missing-database degraded code",
+        json!(WORKSPACE_STORE_MISSING_CODE),
+        "economy workspace-store-missing error code",
     )?;
     ensure_json_pointer(
         &result.parsed,
@@ -3151,7 +3212,28 @@ fn eval_run_and_list_report_fixture_results_without_unavailable_sentinel() -> Te
     for (artifact_name, command, args) in cases {
         let result = run_ee_logged(artifact_name, None, args)?;
 
-        ensure_equal(&result.exit_code, &0, &format!("{command} exit code"))?;
+        // bd-tzlmo: per-command, because these two shapes legitimately differ.
+        // `eval run` executes a failure-modelling fixture, so EvalFailure is
+        // the designed outcome (see EVAL_FAILURE_EXIT); `eval list` evaluates
+        // nothing and still exits 0. Asserting one value for both was the
+        // stale part -- the purpose of this test is the unavailable-sentinel
+        // clause below, which is unaffected either way.
+        let expected_exit = if command == "eval run" {
+            EVAL_FAILURE_EXIT
+        } else {
+            0
+        };
+        // The envelope's `success` mirrors that exit: `handle_eval_run` sets
+        // `"success": passed` in both the single- and multi-report branches
+        // (src/cli/mod.rs:16643 and :16652). Demanding `true` here would have
+        // required a failure-modelling fixture to report success, which is the
+        // inverse of what this file exists to enforce.
+        let expected_success = command != "eval run";
+        ensure_equal(
+            &result.exit_code,
+            &expected_exit,
+            &format!("{command} exit code"),
+        )?;
         ensure(
             result.stderr.is_empty(),
             format!("{command} JSON response must keep stderr empty"),
@@ -3166,7 +3248,7 @@ fn eval_run_and_list_report_fixture_results_without_unavailable_sentinel() -> Te
         ensure_json_pointer(
             &result.parsed,
             "/success",
-            json!(true),
+            json!(expected_success),
             &format!("{command} success flag"),
         )?;
         ensure_json_pointer(
@@ -3222,12 +3304,36 @@ fn eval_run_and_list_report_fixture_results_without_unavailable_sentinel() -> Te
             .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
         let log_json: Value = serde_json::from_str(&log_text)
             .map_err(|error| format!("e2e log must be JSON: {error}"))?;
-        ensure_json_pointer(
-            &log_json,
-            "/degradationCodes",
-            json!([]),
-            &format!("logged {command} degradation code"),
-        )?;
+        // bd-tzlmo: `eval run` executes retrieval, so in a workspace with no
+        // embedder it HONESTLY reports the models it could not load. Demanding
+        // an empty array required it to stay silent about that, which is the
+        // inverse of what this file exists to enforce. Asserting the two codes
+        // literally would be wrong in the other direction -- it would fail
+        // wherever the models ARE present. So allow only the honest
+        // model-availability codes: an empty array passes vacuously, and any
+        // code outside the set still fails loudly.
+        const HONEST_EVAL_DEGRADATIONS: &[&str] =
+            &["embed_model_unavailable", "rerank_model_unavailable"];
+        let logged_codes = log_json
+            .pointer("/degradationCodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("logged {command} degradationCodes must be an array"))?;
+        for entry in logged_codes {
+            let code = entry
+                .as_str()
+                .ok_or_else(|| format!("logged {command} degradation code must be a string"))?;
+            ensure(
+                HONEST_EVAL_DEGRADATIONS.contains(&code),
+                format!("logged {command} unexpected degradation code `{code}`"),
+            )?;
+        }
+        // `eval list` evaluates nothing, so it has no model to miss.
+        if command == "eval list" {
+            ensure(
+                logged_codes.is_empty(),
+                format!("logged {command} must report no degradations"),
+            )?;
+        }
         ensure_json_pointer(
             &log_json,
             "/repairCommand",
@@ -3268,7 +3374,15 @@ fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel
         ],
     )?;
 
-    ensure_equal(&result.exit_code, &0, "eval run pack-quality exit code")?;
+    // bd-tzlmo: the pack-quality comparison runs an eval whose fixture models
+    // failures, so EvalFailure is the designed exit (see EVAL_FAILURE_EXIT).
+    // This test's purpose is the unavailable-sentinel clause, not the exit
+    // value.
+    ensure_equal(
+        &result.exit_code,
+        &EVAL_FAILURE_EXIT,
+        "eval run pack-quality exit code",
+    )?;
     ensure(
         result.stderr.is_empty(),
         "eval run pack-quality JSON response must keep stderr empty",
@@ -3283,7 +3397,7 @@ fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel
     ensure_json_pointer(
         &result.parsed,
         "/success",
-        json!(true),
+        json!(false),
         "eval run pack-quality success flag",
     )?;
     ensure_json_pointer(
@@ -3310,10 +3424,34 @@ fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel
         json!("fx.release_failure.v1"),
         "eval run pack-quality fixture id",
     )?;
+    // bd-tzlmo: the verdict is not independent of the environment. This test
+    // already asserts a `semantic_disabled` degraded branch below, i.e. it runs
+    // where no embedding model is present; with semantic retrieval off the
+    // pack-quality comparison regresses, so `regression` is the consistent
+    // verdict and `within` was only reachable with models loaded. Derive the
+    // expectation from that same degraded branch rather than hardcoding either
+    // value, so the verdict and its cause cannot drift apart -- a bare
+    // `regression` here would bake a model-less worker into the contract.
+    let semantic_disabled = result
+        .parsed
+        .pointer("/data/degradedBranches")
+        .and_then(Value::as_array)
+        .is_some_and(|branches| {
+            branches.iter().any(|branch| {
+                branch
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|code| code == "semantic_disabled")
+            })
+        });
     ensure_json_pointer(
         &result.parsed,
         "/data/report/aggregate_verdict",
-        json!("within"),
+        json!(if semantic_disabled {
+            "regression"
+        } else {
+            "within"
+        }),
         "eval run pack-quality verdict",
     )?;
     ensure_json_pointer(
@@ -3380,10 +3518,13 @@ fn review_session_reports_storage_error_without_unavailable_sentinel() -> TestRe
         ],
     )?;
 
+    // bd-tzlmo: same refinement as the other two -- an absent store is an
+    // addressing miss, which now has its own exit code rather than being
+    // folded into Storage. See WORKSPACE_STORE_MISSING_EXIT above.
     ensure_equal(
         &result.exit_code,
-        &3,
-        "review session storage error exit code",
+        &WORKSPACE_STORE_MISSING_EXIT,
+        "review session workspace-store-missing exit code",
     )?;
     ensure(
         result.stderr.is_empty(),
@@ -3399,8 +3540,8 @@ fn review_session_reports_storage_error_without_unavailable_sentinel() -> TestRe
     ensure_json_pointer(
         &result.parsed,
         "/error/code",
-        json!("storage"),
-        "review session storage error code",
+        json!(WORKSPACE_STORE_MISSING_CODE),
+        "review session workspace-store-missing error code",
     )?;
     ensure_json_pointer(
         &result.parsed,
@@ -3434,11 +3575,14 @@ fn review_session_reports_storage_error_without_unavailable_sentinel() -> TestRe
         .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
     let log_json: Value = serde_json::from_str(&log_text)
         .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    // bd-tzlmo: the logged code follows the response code through the same
+    // refinement -- an absent store is an addressing miss, not a storage
+    // failure.
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!(["storage"]),
-        "logged review session storage error code",
+        json!([WORKSPACE_STORE_MISSING_CODE]),
+        "logged review session workspace-store-missing code",
     )?;
     ensure_json_pointer(
         &log_json,

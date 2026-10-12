@@ -60,7 +60,13 @@ const REQUIRED_SCHEMA_FILES: &[&str] = &[
     "docs/schemas/ee.mesh.hello.v1.json",
     "docs/schemas/ee.mesh.hello.response.v1.json",
     "docs/schemas/ee.mesh.hello.error.v1.json",
-    "docs/schemas/ee.mesh.lane_grant_preview.v1.json",
+    // v2, not v1: src/ emits only LANE_GRANT_PREVIEW_SCHEMA_V2
+    // (src/mesh/lane_grant_preview.rs:44) and src/output/mod.rs:13276
+    // include_str!s the v2 file. A sibling contract test
+    // (tests/contracts/mesh_lane_grant_preview_schema.rs:279) asserts that v1
+    // "must not remain runtime-published", so requiring the onboarding doc to
+    // name the v1 stem contradicted it outright.
+    "docs/schemas/ee.mesh.lane_grant_preview.v2.json",
     "docs/schemas/ee.repair_action_graph.v1.json",
 ];
 

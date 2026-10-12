@@ -320,6 +320,8 @@ every step):
 | `tailscale_probe_timeout` | warning | Probe hit the 1500ms budget | Set `EE_TAILSCALE_PROBE_TIMEOUT_MS=<larger>` |
 | `tailscale_probe_unavailable` | info | Tailscale probe was disabled or unavailable in the current environment | Keep mesh disabled or repair the local Tailscale install |
 | `tailscale_status` | info | `ee status` nested a Tailscale posture degradation | Read the nested repair action before attempting auto-enroll |
+| `tailscale_peer_list_unavailable` | warning | No peer list was obtained: the local probe did not run, mesh is disabled, or the local daemon is unreachable/unauthenticated | Set `EE_MESH_ENABLED=1`, then `tailscale status` and `tailscale up` before discovery |
+| `tailscale_peer_probe_timeout` | warning | At least one peer did not answer the ee hello probe within budget | Raise `EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS` (default 750ms) or retry discovery later |
 | `no_ee_peers_on_tailnet` | info | Tailnet healthy, no other ee instances | Run ee on a second tailnet host |
 | `peer_discovery_workspace_mismatch` | info | Peers run ee but for a different workspace | (Optional) explicit `ee mesh enroll <node-key>` |
 | `hello_responder_not_running` | medium | `ee daemon` not running; peers cannot reach us | `ee daemon --foreground` |
@@ -349,6 +351,14 @@ every step):
 | `steward_auto_enroll_disabled` | info | `EE_MESH_AUTO_ENROLL_ON_DEMAND=0` (default) | Set the env var if you want auto-reconciliation |
 | `mesh_peer_policy_denied` | medium | SRR6.5 peer policy denied the requested mesh lane | Review trust and lane policy before retrying |
 | `mesh_peer_human_explicit_filtered` | medium | Human-explicit memories were filtered from peer exposure | Use preview-grant and explicit policy before widening access |
+| `mesh_peer_explicit_consent_required` | medium | `ee mesh peer add` was called without the explicit human-consent bit | Re-run with explicit consent; reachability is never consent |
+| `mesh_peer_handshake_denied` | medium | Enrollment needs a granted capability handshake with discovery consent; one or both were absent | Complete a hello/capability handshake before enrolling |
+| `mesh_peer_network_only_denied` | medium | The reachable endpoint's node-key does not match the node-key in the granted handshake | Re-handshake against the endpoint you intend to enroll; do not enroll on reachability alone |
+| `mesh_peer_capability_handshake_mismatch` | medium | The granted handshake did not advertise a capability the requested profile requires | Request the missing `mesh:<capability>` in the handshake, or enroll at a narrower profile |
+| `mesh_peer_unknown_attempt_denied` | medium | An unenrolled node attempted contact; network reachability is not trust | Enroll the peer explicitly first if it is legitimate |
+| `mesh_peer_key_rotation_revoked` | medium | Rotation was attempted on a peer in the `Revoked` state | Revoked peers cannot rotate; re-enroll if the peer is trusted again |
+| `mesh_peer_key_rotation_invalid_key` | medium | Rotation supplied an empty public-key fingerprint | Supply the peer's new non-empty fingerprint |
+| `mesh_peer_key_rotation_unchanged` | info | The supplied fingerprint equals the one already on record, so rotation would be a no-op | Supply a genuinely new fingerprint, or skip the rotation |
 | `mesh_approval_token_invalid` | high | Bearer is malformed, tampered with, from another workspace/store/surface, or signed by a non-current key | Discard it and explicitly issue a fresh token after reviewing a new preview |
 | `mesh_approval_token_stale` | warning | Authenticated bearer expired or its canonical preview no longer matches current target/policy/memory-or-ledger revisions/scanner generation/sample/grant generation | Re-run the ordinary preview, review the drift, then explicitly issue a new token |
 | `mesh_store_authentication_unavailable` | high | The workspace store-auth root is missing or unreadable | Run `ee doctor --json`; do not grant until local authentication is repaired |
@@ -547,3 +557,31 @@ ee audit timeline \
   remediation graph
 - `docs/migration-guide.md` — v0.3.0 migration notes (added when
   bd-36bbk.1.20 lands)
+
+### Implementing Source
+
+Each surface above is owned by one module. Read these when the documented
+behaviour and the observed behaviour disagree — the source is the ground
+truth, and this list exists so the doc and the code are checked against each
+other rather than drifting apart silently.
+
+- `src/mesh/auto_enrollment.rs` — the auto-enroll flow itself, including the
+  forensic audit row written before any durable peer-group write
+- `src/mesh/auto_enrollment_safety.rs` — the preconditions and refusals behind
+  the Safety Patterns section
+- `src/mesh/discovery_policy.rs` — service-tag, allowlist, denylist, and
+  consent-policy posture
+- `src/mesh/discovery_cache.rs` — the discovery cache TTL
+- `src/mesh/peer_state.rs` — the per-peer state machine and grace period that
+  the TTL alone deliberately does not replace
+- `src/mesh/hello_responder.rs` — the hello responder, which lives inside
+  `ee daemon` rather than a separate serve command
+- `src/mesh/identity_change_guard.rs` — the guard covering tailnet changes and
+  node-key rotation
+- `src/mesh/lane_grant_preview.rs` — pre-grant lane visibility; defines the
+  canonical preview schema constant
+- `src/mesh/emergency_disable.rs` — mesh disable and its no-op reporting
+- `src/mesh/repair_action_graph.rs` — the remediation graph shared by status
+  and doctor
+- `src/config/env_registry.rs` — the registry that decides which environment
+  variables the migration guide must list

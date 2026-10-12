@@ -254,8 +254,27 @@ memory bodies in `sources[]`.
 > Sources of truth: `tests/fixtures/failure_modes/README.md` for the
 > agent-facing catalog AND the union of `pub const *_CODE` constants
 > + `"code": "..."` JSON literals in `src/`. When either source gains
-> a new code, add a row here in the same commit. The
-> `tests/degraded_code_taxonomy_consistency_test.rs` enforces this.
+> a new code, add a row here in the same commit.
+>
+> **That rule is NOT enforced for the `src/` half, so it depends on the
+> author remembering it.** Every test in
+> `tests/degraded_code_taxonomy_consistency_test.rs` is keyed on the J6
+> fixture catalog, not on `src/`: the blocking one requires each fixture
+> code to be classified here, and the reverse check reports
+> informationally and cannot fail. The generated catalog in
+> `docs/degraded_codes.md` is likewise built from the fixtures. So a code
+> that never acquired a fixture is outside all of it, and will not be
+> caught here.
+>
+> Measured 2026-10-12: 63 of the 348 `pub const *_CODE` constants in
+> `src/` were absent from this file. The 13 swarm replay ledger codes and the
+> 7 git ahead probe codes have since been classified below, leaving 43.
+> bd-nnheo tracks classifying them and
+> adding the missing gate; until that lands, read the sentence above as a
+> convention rather than a guarantee. Note for whoever writes that gate:
+> the constant declaration is frequently wrapped by rustfmt, so the code
+> string sits on the line AFTER its name. A one-line scan silently
+> undercounts the population by 27.
 
 ### `build_time` (13 codes — surfaced through `ee capabilities`)
 
@@ -533,6 +552,57 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | Code | Severity | Bead |
 |------|----------|------|
 | `qos_registry_unavailable` | medium | bd-1zb7k.20.2 |
+
+#### Swarm replay ledger (13)
+All thirteen are emitted by `src/core/lab.rs` (introduced in `07c432833`,
+"feat(lab): add redaction-safe swarm replay ledgers"), and every one is
+state-dependent on the replay host, the trace, or the observed command
+result, so all are `response_time`. Classified under bd-nnheo.
+
+The severity in each row is the value the emission site itself assigns, not a
+judgement, EXCEPT for the two marked (derived): those two reach the caller
+through the warnings channel, which carries no severity field, so they are
+classified from the behaviour that is observable — both escalate a passing
+replay to `Degraded`, which is what `warning` means here. The third
+warnings-channel code, `swarm_replay_dry_run_admission_only`, is `info`
+because it escalates nothing and is the expected outcome of a dry run.
+
+| Code | Severity | Meaning at the emission site |
+|------|----------|------------------------------|
+| `swarm_replay_command_not_allowlisted` | medium | Command is outside the replay allowlist and was refused before execution |
+| `swarm_replay_command_spawn_failed` | high | The runner could not spawn the replay command |
+| `swarm_replay_command_timeout` | high | Command exceeded the trace timeout |
+| `swarm_replay_dry_run_admission_only` | info | Commands were admitted but not executed |
+| `swarm_replay_execution_not_enabled` | medium | Non-dry-run swarm command execution is not enabled in this runner slice |
+| `swarm_replay_expected_exit_mismatch` | medium | Observed exit code differs from the trace expectation |
+| `swarm_replay_expected_schema_mismatch` | medium | Observed stdout schema differs from the trace expectation |
+| `swarm_replay_host_profile_refused` | high | Host does not satisfy the trace's resource profile hints |
+| `swarm_replay_local_cargo_refused` | high | Local Cargo commands are not admitted by the replay runner; use the RCH proof path |
+| `swarm_replay_prerequisite_unavailable` | medium | A step needs an artifact an earlier step was supposed to produce, or a shape the runner cannot safely reconstruct |
+| `swarm_replay_rch_proof_missing` | warning (derived) | The trace requires an RCH proof and none is attached to the ledger |
+| `swarm_replay_slo_budget_failed` | high | A command exceeded its SLO failure budget |
+| `swarm_replay_slo_budget_warned` | warning (derived) | One or more commands exceeded SLO warning budgets |
+
+#### Git ahead probe (7)
+All seven are emitted by `src/core/git_ahead.rs` and describe what the local
+git probe could not establish about push readiness, so all are
+`response_time`. Classified under bd-nnheo.
+
+Severity is `warning` for every one of them, and that is sourced rather than
+chosen: the file has exactly one construction of its degradation struct, a
+private helper at `:370-381` that hardcodes the severity, and all ten emission
+sites go through it. If a future code in this file needs a different severity,
+that helper is the thing to change.
+
+| Code | Severity | Meaning at the emission site |
+|------|----------|------------------------------|
+| `git_ahead_no_upstream` | warning | Git reported no upstream branch for this checkout |
+| `git_ahead_detached_head` | warning | HEAD is detached, so upstream-ahead ownership cannot be trusted |
+| `git_ahead_status_missing_ab` | warning | Git status omitted the branch ahead/behind counts |
+| `git_ahead_log_unavailable` | warning | Ahead commits were expected, but the git-log snapshot was unavailable |
+| `git_ahead_log_failed` | warning | Ahead commits were expected, but the git-log probe failed |
+| `git_ahead_log_timeout` | warning | Ahead commits were expected, but the git-log probe timed out |
+| `git_ahead_log_count_mismatch` | warning | The ahead count disagreed with the parsed ahead-commit list |
 
 #### Storage and runtime state (33)
 | Code | Severity | Bead |

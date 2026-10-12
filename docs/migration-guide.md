@@ -793,9 +793,12 @@ is byte-identical to v0.2.x. This invariant is gated by
 | `EE_MESH_HELLO_PORT` | `41888` | bd-36bbk.1.12 | Tailnet-only hello responder port used by `ee daemon` |
 | `EE_MESH_HELLO_RESPONDER_DISABLED` | `0` | bd-36bbk.1.12 | Emergency switch to keep mesh enabled but prevent the responder from binding |
 | `EE_MESH_MODE` | `off` | bd-36bbk umbrella | Default mesh command mode; accepted values are `off`, `cache`, `revisable`, and `blocking` |
+| `EE_MESH_TRANSPORT_DISABLED` | `false` | bd-tc-epic-qzk7o.3.2 (T2.1) | Belt-and-braces kill switch: refuses authenticated mesh TCP connects and accepted sessions before any network or authentication work |
 | `EE_TAILSCALE_BINARY_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the `tailscale` binary path (production code rejects relative paths) |
 | `EE_TAILSCALE_PROBE_SOCKET_OVERRIDE` | unset | bd-36bbk.1.1 | Test-only: pin the tailscaled socket path |
 | `EE_TAILSCALE_PROBE_TIMEOUT_MS` | `1500` | bd-36bbk.1.1 | Hard budget for the local probe subprocess/socket call |
+| `EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS` | `750` | bd-36bbk.1.2 | Per-peer hello probe budget; a candidate that overruns it is recorded as `probe_timeout` |
+| `EE_TAILSCALE_DISCOVERY_BUDGET_MS` | `5000` | bd-36bbk.1.2 | Total autodiscovery wall-clock budget; exhausting it emits `peer_discovery_budget_exhausted` |
 | `EE_TAILSCALE_DISCOVERY_MODE` | `service_tag` | bd-36bbk.1.7 | Caller-side mesh peer discovery policy; accepted values are `service_tag`, `auto_admit`, `allowlist` |
 | `EE_TAILSCALE_RESPOND_MODE` | `service_tag` | bd-36bbk.1.7 | Responder-side mesh discovery consent policy; same value space as `EE_TAILSCALE_DISCOVERY_MODE` |
 
