@@ -39,9 +39,7 @@ fn observation_groups<'a>(
         while let Some((next, Some(next_message))) = projected.peek() {
             // Missing, overlapping, inverted or overflowed positions cannot
             // prove that an otherwise bare report belongs to this operation.
-            if !precedes(tail, next)
-                || tail.end_line.checked_add(1) != Some(next.start_line)
-            {
+            if !precedes(tail, next) || tail.end_line.checked_add(1) != Some(next.start_line) {
                 break;
             }
             let Some(failed) = super::clauses::report_window_veto(next_message) else {
@@ -1272,8 +1270,7 @@ mod tests {
             (r"C:\one\api.rs(12,9):", r"C:\two\api.rs(14,2):"),
         ] {
             let failure = format!("Failure arc: cargo test {failed} failed.");
-            let repair =
-                format!("Fix: cargo test {repaired} passed after restoring the guard.");
+            let repair = format!("Fix: cargo test {repaired} passed after restoring the guard.");
             assert!(failure_signal(&failure));
             assert!(resolution_signal(&repair));
             let left = resource_keys(&failure);
@@ -1289,12 +1286,8 @@ mod tests {
                 assert!(mine(&sources).is_empty(), "{failure} / {repair}");
                 assert_eq!(sources, before);
                 assert!(mine(&[sources[1].clone(), sources[0].clone()]).is_empty());
-                let combined = marked_span(
-                    "combined",
-                    10,
-                    &format!("{failure}\n{repair}"),
-                    structured,
-                );
+                let combined =
+                    marked_span("combined", 10, &format!("{failure}\n{repair}"), structured);
                 assert!(mine(&[combined]).is_empty());
             }
         }
@@ -1454,7 +1447,12 @@ mod tests {
             assert_eq!(expected.len(), 2);
             let mut sources = original.to_vec();
             sources.push(marked_span("counts", 3, "21 passed; 0 failed.", structured));
-            sources.push(marked_span("exit", 4, "Process exited with code 0.", structured));
+            sources.push(marked_span(
+                "exit",
+                4,
+                "Process exited with code 0.",
+                structured,
+            ));
             assert_eq!(mine(&sources), expected);
             for row in &expected {
                 let arc = row.session_arc.as_ref().unwrap();
@@ -1502,15 +1500,25 @@ mod tests {
         }
         let sources = [
             span("failure", 1, WINDOW_FAILURE),
-            span("barrier", 2, r#"{"type":"tool_result","content":"ignored"}"#),
+            span(
+                "barrier",
+                2,
+                r#"{"type":"tool_result","content":"ignored"}"#,
+            ),
             span("repair", 3, WINDOW_REPAIR),
         ];
-        assert!(mine(&sources).is_empty(), "projection denial remains a causal barrier");
+        assert!(
+            mine(&sources).is_empty(),
+            "projection denial remains a causal barrier"
+        );
     }
 
     #[test]
     fn session_arc_result_windows_require_complete_adjacent_positions() {
-        let prefix = [span("failure", 1, WINDOW_FAILURE), span("repair", 2, WINDOW_REPAIR)];
+        let prefix = [
+            span("failure", 1, WINDOW_FAILURE),
+            span("repair", 2, WINDOW_REPAIR),
+        ];
         let expected = mine(&prefix);
         assert_eq!(expected.len(), 2);
         for (start, end) in [(4, 4), (2, 2), (3, 2)] {
@@ -1538,18 +1546,30 @@ mod tests {
             ];
             assert_eq!(mine(&sources[..1]).len(), 2);
             assert!(mine(&sources).is_empty());
-            let clean = [sources[0].clone(), marked_span("clean", 11, "0 failed.", structured)];
+            let clean = [
+                sources[0].clone(),
+                marked_span("clean", 11, "0 failed.", structured),
+            ];
             assert_eq!(mine(&clean), mine(&sources[..1]));
 
             // An earlier complete window stays independent; a later report
             // does not retrospectively invalidate every lesson in the session.
             let earlier = [
                 span("earlier-failure", 1, "cargo test src/ui.rs failed."),
-                span("earlier-repair", 2, "Fixed src/ui.rs by restoring the guard."),
+                span(
+                    "earlier-repair",
+                    2,
+                    "Fixed src/ui.rs by restoring the guard.",
+                ),
             ];
             let expected = mine(&earlier);
             assert_eq!(expected.len(), 2);
-            let all = [earlier[0].clone(), earlier[1].clone(), sources[0].clone(), sources[1].clone()];
+            let all = [
+                earlier[0].clone(),
+                earlier[1].clone(),
+                sources[0].clone(),
+                sources[1].clone(),
+            ];
             assert_eq!(mine(&all), expected);
         }
     }

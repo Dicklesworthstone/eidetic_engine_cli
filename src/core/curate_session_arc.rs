@@ -1190,8 +1190,7 @@ mod episode_tests {
             (r"C:\one\api.rs(12,9):", r"C:\two\api.rs(14,2):"),
         ] {
             let failure = format!("Failure arc: cargo test {failed} failed.");
-            let repair =
-                format!("Fix: cargo test {repaired} passed after restoring the guard.");
+            let repair = format!("Fix: cargo test {repaired} passed after restoring the guard.");
             assert!(failure_signal(&failure));
             assert!(resolution_signal(&repair));
             let left = sequence::resource_keys(&failure);

@@ -77,7 +77,10 @@ fn outcome_report_veto(excerpt: &str) -> Option<bool> {
     if !lower.chars().all(|ch| {
         ch.is_ascii_alphanumeric()
             || ch.is_whitespace()
-            || matches!(ch, ',' | ';' | ':' | '=' | '.' | '(' | ')' | '[' | ']' | '+' | '-')
+            || matches!(
+                ch,
+                ',' | ';' | ':' | '=' | '.' | '(' | ')' | '[' | ']' | '+' | '-'
+            )
     }) {
         return None;
     }
@@ -92,11 +95,11 @@ fn outcome_report_veto(excerpt: &str) -> Option<bool> {
             continue;
         }
         match word {
-            "failed" | "failing" | "failure" | "failures" | "error" | "errors"
-            | "passed" | "passing" | "succeeded" | "successes" | "ok" | "ignored"
-            | "skipped" | "measured" | "filtered" => has_result = true,
-            "test" | "tests" | "check" | "checks" | "assertion" | "assertions"
-            | "result" | "results" | "out" | "unknown" | "null" => {}
+            "failed" | "failing" | "failure" | "failures" | "error" | "errors" | "passed"
+            | "passing" | "succeeded" | "successes" | "ok" | "ignored" | "skipped" | "measured"
+            | "filtered" => has_result = true,
+            "test" | "tests" | "check" | "checks" | "assertion" | "assertions" | "result"
+            | "results" | "out" | "unknown" | "null" => {}
             _ => return None,
         }
     }
@@ -107,9 +110,12 @@ fn outcome_report_veto(excerpt: &str) -> Option<bool> {
     let outcome = super::outcome_signal_text(text);
     Some(
         outcome.has_counted_failure
-            || outcome.text.split(|ch: char| !ch.is_ascii_alphabetic()).any(|word| {
-                word.eq_ignore_ascii_case("failed") || word.eq_ignore_ascii_case("failing")
-            }),
+            || outcome
+                .text
+                .split(|ch: char| !ch.is_ascii_alphabetic())
+                .any(|word| {
+                    word.eq_ignore_ascii_case("failed") || word.eq_ignore_ascii_case("failing")
+                }),
     )
 }
 
@@ -640,8 +646,14 @@ mod tests {
     fn complete_result_windows_share_the_clause_outcome_policy() {
         for (source, expected) in [
             ("21 passed; 0 failed; finished in 0.03s.", Some(false)),
-            ("1 failed.\n0 failed.\nProcess exited with code 0.", Some(true)),
-            ("test result: ok.\nProcess exited with code 101.", Some(true)),
+            (
+                "1 failed.\n0 failed.\nProcess exited with code 0.",
+                Some(true),
+            ),
+            (
+                "test result: ok.\nProcess exited with code 101.",
+                Some(true),
+            ),
             ("errors: unknown.\nfinished in 12ms.", Some(true)),
             ("Process exited with code 0.5.", Some(true)),
             ("finished in 3s.", Some(false)),

@@ -930,8 +930,19 @@ mod tests {
     #[test]
     fn lexical_normalization_preserves_unicode_source_and_is_idempotent() {
         let pieces = [
-            "資料", "🦀", "--check", "-legacy", "id::read", "title:release",
-            r#"\""#, "\"", "(", ")", " ", ":", "\\",
+            "資料",
+            "🦀",
+            "--check",
+            "-legacy",
+            "id::read",
+            "title:release",
+            r#"\""#,
+            "\"",
+            "(",
+            ")",
+            " ",
+            ":",
+            "\\",
         ];
         for left in pieces {
             for middle in pieces {
@@ -985,7 +996,10 @@ mod tests {
                 .map_err(|error| error.to_string())?;
             index.commit(&cx).await.map_err(|error| error.to_string())?;
             for (query, expected) in [
-                ("content:--check", vec!["evidence-command", "evidence-legacy"]),
+                (
+                    "content:--check",
+                    vec!["evidence-command", "evidence-legacy"],
+                ),
                 ("content:--check -legacy", vec!["evidence-command"]),
                 (
                     r#"content:--check -"legacy --no-verify""#,
