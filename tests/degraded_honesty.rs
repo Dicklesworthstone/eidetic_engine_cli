@@ -1631,10 +1631,29 @@ fn certificate_verify_reports_not_found_instead_of_mock_success() -> TestResult 
         json!(["not_found"]),
         "certificate not-found failure code",
     )?;
-    let removed_certificate_code = ["certificate", "store", "unavailable"].join("_");
+    // bd-tzlmo: this clause used to forbid `certificate_store_unavailable` as
+    // "the removed unavailable sentinel". The code is not removed -- it is
+    // live and REGISTERED: declared at src/core/certificate.rs:68, emitted by
+    // `append_certificate_store_status_degraded` when
+    // `CertificateStoreStatus::unavailable_reason()` is `Some`, carried in
+    // docs/degraded_code_taxonomy.md with severity `medium` and owning bead
+    // bd-79c16, and documented in docs/degraded_codes.md.
+    //
+    // This fixture is a bare directory: no `ee init`, so no `.ee` store. The
+    // certificate store therefore IS unavailable, and saying so in
+    // `degraded[]` is the honest answer. The old clause forbade exactly the
+    // signal its own fixture provokes, so it failed whenever the product was
+    // being truthful.
+    //
+    // Inverted rather than deleted. Deleting it would leave the honest path
+    // unpinned, and a future change that silently dropped the degraded entry
+    // -- reporting `not_found` with no hint that the store was missing
+    // entirely -- would then pass. That silence is the failure mode this test
+    // family exists to catch, so the assertion now REQUIRES the disclosure.
+    let certificate_store_unavailable_code = ["certificate", "store", "unavailable"].join("_");
     ensure(
-        !result.stdout.contains(&removed_certificate_code),
-        "certificate verify must not emit the removed unavailable sentinel",
+        result.stdout.contains(&certificate_store_unavailable_code),
+        "certificate verify over an absent store must disclose certificate_store_unavailable",
     )?;
 
     let fake_success =
@@ -1657,10 +1676,14 @@ fn certificate_verify_reports_not_found_instead_of_mock_success() -> TestResult 
         .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
     let log_json: Value = serde_json::from_str(&log_text)
         .map_err(|error| format!("e2e log must be JSON: {error}"))?;
+    // bd-tzlmo, same correction as the stdout clause above and for the same
+    // reason: the e2e log must RECORD the degradation, not omit it. An
+    // observability log that drops the one code explaining why the answer was
+    // `not_found` is worse than no log, because it reads as a clean run.
     ensure_json_pointer(
         &log_json,
         "/degradationCodes",
-        json!([]),
+        json!([certificate_store_unavailable_code.clone()]),
         "logged certificate degradation codes",
     )?;
     ensure_json_pointer(
@@ -2508,11 +2531,33 @@ fn lab_replay_reports_missing_frozen_inputs_without_generated_success() -> TestR
         json!(["lab_replay_unavailable"]),
         "logged lab degradation code",
     )?;
-    ensure_json_pointer(
-        &log_json,
-        "/repairCommand",
-        Value::Null,
-        "logged lab repair command",
+    // bd-tzlmo: this used to require `/repairCommand` to be Null. The product
+    // now supplies guidance ("Capture or provide stored episodes before
+    // running lab replay or counterfactual analysis.",
+    // src/output/mod.rs:17624), and that is the more honest behaviour, not a
+    // regression: the accompanying code `lab_replay_unavailable` is registered
+    // in docs/degraded_code_taxonomy.md at severity `medium` with owning bead
+    // bd-17c65.14.15.5, described as a runtime missing-evidence degradation
+    // when frozen replay artifacts are absent -- exactly this fixture, which
+    // replays `ep_missing_evidence` with no workspace at all.
+    //
+    // Inverted to REQUIRE guidance. A degradation that tells the operator
+    // nothing about how to proceed is the failure this family is for, so
+    // asserting Null pinned the less honest of the two behaviours. Checked as
+    // "non-empty and names the missing input" rather than pinned to the exact
+    // sentence, so wording can improve without a golden-style break, while a
+    // placeholder or an empty string still fails.
+    let logged_repair = log_json
+        .pointer("/repairCommand")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    ensure(
+        !logged_repair.trim().is_empty(),
+        "lab replay degradation must log a repair command, not nothing",
+    )?;
+    ensure(
+        logged_repair.contains("episodes"),
+        format!("logged lab repair must name the missing input: {logged_repair:?}"),
     )?;
     ensure_json_pointer(
         &log_json,
@@ -3521,11 +3566,40 @@ fn tripwire_commands_report_store_queries_without_unavailable_sentinel() -> Test
                 json!(false),
                 "tripwire check durable mutation",
             )?;
-            ensure_json_pointer(
-                &result.parsed,
-                "/degraded",
-                json!([]),
-                "tripwire check degradation array",
+            // bd-tzlmo: this used to require `degraded: []`. That is the wrong
+            // expectation for this fixture. The workspace is a bare directory
+            // and `--database` points at `missing-tripwire-store.ee.db`, so
+            // the store is DELIBERATELY absent -- the whole point of the case.
+            // `tripwire_inputs_incomplete` is therefore the honest answer, and
+            // it is a registered code: emitted at src/core/tripwire.rs:361,
+            // :1789 and :1795, carried in docs/degraded_code_taxonomy.md at
+            // severity `warning` with owning bead bd-17c65.10.6, documented in
+            // docs/degraded_codes.md, and backed by its own failure-mode
+            // fixture. Requiring an empty array forbade the disclosure the
+            // fixture exists to produce.
+            //
+            // Asserted as "discloses, and every entry stays advisory-grade"
+            // rather than pinned to an exact array, so the shape of the
+            // details payload can evolve without silently turning this into a
+            // golden. The severity clause is the part that matters: a warning
+            // must never escalate from this read-only path.
+            let degraded_entries = result
+                .parsed
+                .pointer("/degraded")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            ensure(
+                degraded_entries.iter().any(|entry| {
+                    entry.get("code").and_then(Value::as_str) == Some("tripwire_inputs_incomplete")
+                }),
+                "tripwire check over a missing store must disclose tripwire_inputs_incomplete",
+            )?;
+            ensure(
+                degraded_entries
+                    .iter()
+                    .all(|entry| entry.get("severity").and_then(Value::as_str) == Some("warning")),
+                "tripwire check degradation must stay at warning severity",
             )?;
         }
 
@@ -3535,18 +3609,52 @@ fn tripwire_commands_report_store_queries_without_unavailable_sentinel() -> Test
             .map_err(|error| format!("failed to read {}: {error}", result.log_path.display()))?;
         let log_json: Value = serde_json::from_str(&log_text)
             .map_err(|error| format!("e2e log must be JSON: {error}"))?;
-        ensure_json_pointer(
-            &log_json,
-            "/degradationCodes",
-            json!([]),
-            &format!("logged {command} degradation code"),
+        // bd-tzlmo: this required the log to record NO degradation codes,
+        // which forbade the honest record of a deliberately missing store
+        // (`--database .../missing-tripwire-store.ee.db`).
+        //
+        // A SUBSET assertion rather than an exact array, because the two cases
+        // in this loop genuinely differ and I established that from the run
+        // rather than assuming: `tripwire list` logged no codes while
+        // `tripwire check` logged tripwire_inputs_incomplete. What must hold
+        // for BOTH is that no code OTHER than the declared one appears -- an
+        // undeclared code here would be a degradation nobody registered,
+        // which is the condition worth failing on.
+        let logged_codes = log_json
+            .pointer("/degradationCodes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        ensure(
+            logged_codes
+                .iter()
+                .all(|code| code.as_str() == Some("tripwire_inputs_incomplete")),
+            format!(
+                "logged {command} degradation codes must be declared ones only: {logged_codes:?}"
+            ),
         )?;
-        ensure_json_pointer(
-            &log_json,
-            "/repairCommand",
-            Value::Null,
-            &format!("logged {command} repair command"),
-        )?;
+        // bd-tzlmo: this required a Null repair, which forbade actionable
+        // guidance on a deliberately missing store. `tripwire check` logs
+        // "ee tripwire list --json"; `tripwire list` logs nothing, the same
+        // per-case split seen in the degradation codes above.
+        //
+        // So: a repair is optional, but when one IS offered it must be a
+        // runnable `ee` command rather than prose or a placeholder. That is
+        // the property worth pinning -- a repair field filled with something
+        // the operator cannot execute is the dishonest case, not its absence.
+        let logged_repair = log_json.pointer("/repairCommand").unwrap_or(&Value::Null);
+        match logged_repair {
+            Value::Null => {}
+            Value::String(repair) => ensure(
+                repair.starts_with("ee ") && repair.len() > 3,
+                format!("logged {command} repair must be a runnable ee command: {repair:?}"),
+            )?,
+            other => {
+                return Err(format!(
+                    "logged {command} repair must be a string or null, got {other:?}"
+                ));
+            }
+        }
         ensure_json_pointer(
             &log_json,
             "/commandBoundaryMatrixRow",
