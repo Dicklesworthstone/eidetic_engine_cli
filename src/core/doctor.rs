@@ -2783,21 +2783,85 @@ fn check_workspace(workspace_path: Option<&Path>) -> CheckResult {
         );
     };
 
-    if workspace_path.join(".ee").exists() {
-        CheckResult::ok(
-            "workspace",
-            format!("Workspace inspected at {}.", workspace_path.display()),
-        )
-    } else {
-        CheckResult::warning(
+    if !workspace_path.join(".ee").exists() {
+        return CheckResult::warning(
             "workspace",
             format!(
                 "Selected workspace has no .ee state at {}.",
                 workspace_path.display()
             ),
             error_codes::WORKSPACE_NOT_SPECIFIED,
-        )
+        );
     }
+
+    // bd-bigu7: CONFIG_PARSE_ERROR's first production emitter, which is what
+    // makes `fix_workspace_config_malformed_toml` (doctor_fixers.rs:309)
+    // reachable. That fixer and its quarantine op shipped with no detector, so
+    // a repair existed for a fault nothing could report.
+    //
+    // Folded into this check rather than added to the `checks` vec: a new row
+    // would change all four doctor goldens, and a broken config IS a property
+    // of the workspace, which is what this check already reports on.
+    //
+    // The read goes through `read_workspace_config_contents`, never a direct
+    // open: that helper already refuses symlinked paths and caps the read, so
+    // a peer-planted giant or symlinked `.ee/config.toml` cannot turn
+    // `ee doctor` into the attack.
+    //
+    // `Ok(None)` means absent, symlinked, or not-a-file, and MUST stay
+    // silent. `.ee/config.toml` is OPTIONAL -- `ee init` never writes one --
+    // so reporting its absence would fire on every correctly initialized
+    // workspace. That is also why CONFIG_FILE_NOT_FOUND gets no emitter here.
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    match crate::config::read_workspace_config_contents(workspace_path) {
+        Ok(Some(contents)) => {
+            // ONLY a syntax error, never a schema complaint. The fixer this
+            // reaches is `fix_workspace_config_malformed_toml`, whose op is
+            // `QuarantineByRename` -- moving a config aside because it holds
+            // one unrecognized key would be a destructive overreaction, and
+            // unknown keys already have their own surface (see
+            // `ConfigKeyPolicy` and tests/e2e_config_unknown_key.rs).
+            //
+            // `ConfigParseError`'s other variants -- UnknownKey, InvalidType,
+            // InvalidValue, PathExpansion -- all describe a file that PARSED
+            // and then failed schema validation. Matching them here would
+            // also make this check fire on fixtures that deliberately carry
+            // profile keys, which is how a narrow detector becomes a
+            // tree-wide snapshot change.
+            if let Err(crate::config::ConfigParseError::Toml { message }) =
+                crate::config::ConfigFile::parse(&contents)
+            {
+                return CheckResult::error(
+                    "workspace",
+                    format!(
+                        "Workspace config at {} is not valid TOML: {message}",
+                        config_path.display()
+                    ),
+                    error_codes::CONFIG_PARSE_ERROR,
+                );
+            }
+        }
+        Ok(None) => {}
+        // A config we could not READ also did not parse, and the catalog has
+        // no distinct read-failure code. The code carries the category while
+        // the MESSAGE carries the actual cause, so the two states stay
+        // distinguishable to a reader even though they share one code.
+        Err(error) => {
+            return CheckResult::error(
+                "workspace",
+                format!(
+                    "Workspace config at {} could not be read: {error}",
+                    config_path.display()
+                ),
+                error_codes::CONFIG_PARSE_ERROR,
+            );
+        }
+    }
+
+    CheckResult::ok(
+        "workspace",
+        format!("Workspace inspected at {}.", workspace_path.display()),
+    )
 }
 
 #[path = "doctor_database_failure.rs"]
@@ -4340,6 +4404,110 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    /// bd-bigu7: a config.toml that exists and does not parse must be
+    /// REPORTED, which is what gives `fix_workspace_config_malformed_toml` a
+    /// reachable trigger. Before this, CONFIG_PARSE_ERROR had zero emitters
+    /// anywhere outside the error catalog.
+    #[test]
+    fn malformed_workspace_config_is_detected_bd_bigu7() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee).map_err(|error| error.to_string())?;
+        std::fs::write(ee.join("config.toml"), "this is = = not toml\n")
+            .map_err(|error| error.to_string())?;
+
+        let result = check_workspace(Some(temp.path()));
+        if !matches!(result.severity, CheckSeverity::Error) {
+            return Err(format!("expected an error severity, got {result:?}"));
+        }
+        ensure(
+            result.error_code.map(|code| code.id),
+            Some("EE-E101"),
+            "malformed workspace config emits CONFIG_PARSE_ERROR",
+        )
+    }
+
+    /// NEGATIVE CONTROL for the detector above: it must be keyed on the PARSE
+    /// outcome, not on the file's presence. A valid config has to stay
+    /// silent, or the check would red every workspace that has one.
+    #[test]
+    fn valid_workspace_config_stays_ok_bd_bigu7() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee).map_err(|error| error.to_string())?;
+        std::fs::write(ee.join("config.toml"), "[runtime]\n").map_err(|error| error.to_string())?;
+
+        let result = check_workspace(Some(temp.path()));
+        if !matches!(result.severity, CheckSeverity::Ok) {
+            return Err(format!("a valid config must stay silent, got {result:?}"));
+        }
+        Ok(())
+    }
+
+    /// THIRD CONTROL, and the one that pins the narrowing: a config that
+    /// PARSES but fails schema validation must NOT be reported here.
+    ///
+    /// `ConfigFile::parse` rejects unknown keys as well as bad syntax. If this
+    /// check matched every Err, an unrecognized key would dispatch
+    /// `fix_workspace_config_malformed_toml`, whose op renames the file aside
+    /// -- destroying a readable config over a typo. It would also fire on
+    /// fixtures that legitimately carry profile keys, turning a narrow
+    /// detector into a tree-wide snapshot change. Only
+    /// `ConfigParseError::Toml` may reach the error arm.
+    #[test]
+    fn unknown_config_key_is_not_a_malformed_toml_finding_bd_bigu7() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee).map_err(|error| error.to_string())?;
+        // Syntactically valid TOML; the key is not in the schema.
+        std::fs::write(
+            ee.join("config.toml"),
+            "[storage]\nnot_a_real_storage_key = 1\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        // Guard the premise: if this ever starts parsing cleanly, the test
+        // stops exercising the distinction it exists to pin.
+        match crate::config::ConfigFile::parse("[storage]\nnot_a_real_storage_key = 1\n") {
+            Err(crate::config::ConfigParseError::Toml { message }) => {
+                return Err(format!(
+                    "premise broken: fixture is a SYNTAX error, not a schema error: {message}"
+                ));
+            }
+            Err(_) => {}
+            Ok(_) => {
+                return Err(
+                    "premise broken: fixture parses cleanly, so it cannot test the narrowing"
+                        .to_owned(),
+                );
+            }
+        }
+
+        let result = check_workspace(Some(temp.path()));
+        if !matches!(result.severity, CheckSeverity::Ok) {
+            return Err(format!(
+                "a schema error must not be reported as malformed TOML, got {result:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// FOURTH CONTROL: an ABSENT config.toml must stay silent. `ee init`
+    /// never writes one, so treating absence as a fault would fire on every
+    /// correctly initialized workspace -- and it is why CONFIG_FILE_NOT_FOUND
+    /// deliberately gets no emitter in this check.
+    #[test]
+    fn absent_workspace_config_stays_ok_bd_bigu7() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let result = check_workspace(Some(temp.path()));
+        if !matches!(result.severity, CheckSeverity::Ok) {
+            return Err(format!("an absent config must stay silent, got {result:?}"));
+        }
+        Ok(())
     }
 
     fn cargo_lock_package_version(package_name: &str) -> Result<String, String> {
