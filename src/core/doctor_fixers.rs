@@ -487,6 +487,11 @@ pub const FIX_DISPATCHED_FINDINGS: &[&str] = &[
     "search_index_stale",
     "schema_migration_pending",
     "cass_integration_drift",
+    // bd-223vl joined this one; it is listed because fix_finding_for_check can
+    // now return it.
+    "wal_checkpoint_pending",
+    // bd-bigu7.
+    "workspace_config_malformed_toml",
 ];
 
 /// How `ee doctor --fix` treats one failing doctor check.
@@ -607,6 +612,33 @@ pub fn fix_finding_for_check(
         // bd-tgz18 failure again: authoritative-looking guidance for a problem
         // it does not address.
         Some("EE-E205") => Some("wal_checkpoint_pending"),
+        // bd-bigu7: EE-E101 is CONFIG_PARSE_ERROR, emitted by `check_workspace`
+        // (src/core/doctor.rs) when `.ee/config.toml` exists and is not valid
+        // TOML. `fix_workspace_config_malformed_toml` was written for exactly
+        // that -- same "warning" severity, a `path` of `.ee/config.toml`, and
+        // a quarantine of the unreadable file -- and the two were never
+        // joined, so `--fix` reported Manual and withheld a repair while the
+        // detector did not even exist. The detector landed in 628fd43eb; this
+        // is the join.
+        //
+        // GUARDED on the check name, following bd-tgz18. EE-E101 has exactly
+        // one emitter today, so an unguarded arm would behave identically --
+        // but the moment another check reuses CONFIG_PARSE_ERROR for its own
+        // config complaint, an unguarded arm would quarantine
+        // `.ee/config.toml` for a problem in some other file. That is the
+        // wrong-fixer failure this function already carries two guards
+        // against. Whoever adds a second EE-E101 emitter decides explicitly
+        // whether it belongs here.
+        //
+        // Unlike the WAL arm this is NOT advisory: `Op::QuarantineByRename` is
+        // in `Op::is_writing`, so `fix_mode_for_check` reports AutoRepair and
+        // `--fix` moves the file. That is deliberate and it is the only
+        // repair available: a config that does not parse cannot be read at
+        // all, so `ee` cannot proceed on it, and the quarantine RENAMES rather
+        // than deletes -- the operator's bytes survive under the quarantine
+        // directory. `--fix` is opt-in, and a detector whose repair never runs
+        // is the gap this bead exists to close.
+        Some("EE-E101") if check_name == "workspace" => Some("workspace_config_malformed_toml"),
         _ if check_name == "search_index" => Some("search_index_stale"),
         _ => None,
     }
@@ -634,6 +666,11 @@ pub fn fix_dispatch_for_finding(workspace_root: &Path, finding: &str) -> Option<
         // check-derived arguments (a row count, a summary, a label, a path)
         // that this signature cannot carry.
         "wal_checkpoint_pending" => Some(fix_wal_checkpoint_pending(workspace_root)),
+        // bd-bigu7. Also takes only `workspace_root`, so like the WAL fixer it
+        // fits this signature as it stands.
+        "workspace_config_malformed_toml" => {
+            Some(fix_workspace_config_malformed_toml(workspace_root))
+        }
         _ => None,
     }
 }
@@ -864,7 +901,13 @@ mod tests {
         );
         let mut reached = std::collections::BTreeSet::new();
         for code in codes {
-            for name in ["database", "search_index", "cass", "runtime"] {
+            // bd-bigu7 added "workspace": fix_finding_for_check's EE-E101 arm
+            // is GUARDED on that check name, so without it here the sweep
+            // cannot reach workspace_config_malformed_toml and the
+            // reached-equals-listed assertion below fails. Any future arm
+            // guarded on a new check name must extend this list too -- that
+            // coupling is the point of the assertion.
+            for name in ["database", "search_index", "cass", "runtime", "workspace"] {
                 for unreadable in [false, true] {
                     if let Some(finding) = fix_finding_for_check(code, name, unreadable) {
                         assert!(
@@ -1150,6 +1193,54 @@ mod tests {
             "ee maintenance wal-checkpoint --workspace . --mode truncate --json"
         );
         assert_eq!(dispatch.op.kind_str(), "run_wal_checkpoint");
+    }
+
+    /// bd-bigu7: the detector's error code must now reach the fixer. Before
+    /// this join, `check_workspace` emitted EE-E101 and `--fix` still reported
+    /// Manual, so the repair existed and could not run.
+    #[test]
+    fn config_parse_error_dispatches_the_malformed_toml_quarantine_bd_bigu7() {
+        assert_eq!(
+            fix_finding_for_check(Some("EE-E101"), "workspace", false),
+            Some("workspace_config_malformed_toml")
+        );
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E101"), "workspace", false),
+            (FixMode::AutoRepair, Some("workspace_config_malformed_toml")),
+            "QuarantineByRename is a writing op, so this is a repair and not guidance"
+        );
+        let dispatch = fix_dispatch_for_finding(&root(), "workspace_config_malformed_toml")
+            .expect("the finding must dispatch");
+        assert!(matches!(dispatch.op, Op::QuarantineByRename { .. }));
+        assert!(
+            dispatch.op.is_writing(),
+            "the operator's bytes move, so this must not be mis-declared advisory"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the guard: EE-E101 from any OTHER check must not
+    /// quarantine `.ee/config.toml`.
+    ///
+    /// This is the bd-tgz18 failure in miniature -- a real code dispatched to
+    /// the wrong fixer, which is worse than no dispatch because the repair
+    /// looks authoritative. Today EE-E101 has exactly one emitter, so an
+    /// UNGUARDED arm would pass every other test in this file; only this
+    /// control fails if the guard is dropped.
+    #[test]
+    fn config_parse_error_from_another_check_does_not_quarantine_bd_bigu7() {
+        for name in [
+            "database",
+            "search_index",
+            "cass",
+            "runtime",
+            "shard_fanout",
+        ] {
+            assert_ne!(
+                fix_finding_for_check(Some("EE-E101"), name, false),
+                Some("workspace_config_malformed_toml"),
+                "EE-E101 on the {name} check must not reach the workspace config quarantine"
+            );
+        }
     }
 
     #[test]
