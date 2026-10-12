@@ -26,7 +26,7 @@
 
 #[path = "cass_prefetch_worker.rs"]
 mod cass_prefetch_worker;
-use cass_prefetch_worker::CassPrefetchWorker;
+use cass_prefetch_worker::{CassPrefetchWorker, WarmBatchScope};
 
 #[path = "search_result_contract.rs"]
 mod search_result_contract;
@@ -1164,8 +1164,17 @@ fn start_server_with_dispatch_policy(
     // A cloned policy is configuration, not ownership of another daemon's
     // observations, shutdown flag or speculative single-flight slot.
     dispatch_policy.cass_prefetch = Arc::new(Mutex::new(CassPrefetchCoordinator::new()));
-    dispatch_policy.cass_prefetch_worker =
-        should_warm.then(|| CassPrefetchWorker::new(Arc::clone(&shutdown), Arc::clone(&pool)));
+    // bd-16pwc.7: the worker settles its completed batch with THIS daemon's
+    // coordinator, so it holds the same handle the request path locks rather
+    // than a second one that could never be read.
+    let coordinator_for_worker = Arc::clone(&dispatch_policy.cass_prefetch);
+    dispatch_policy.cass_prefetch_worker = should_warm.then(|| {
+        CassPrefetchWorker::new(
+            Arc::clone(&shutdown),
+            Arc::clone(&pool),
+            coordinator_for_worker,
+        )
+    });
 
     // Host the long-lived write-owner actor when bound to a workspace (Inc 2,
     // bd-wx6ou.3): a current_thread asupersync runtime drives the actor task;
@@ -5918,8 +5927,11 @@ fn dispatch_context(
         );
     }
     // Submit only after successful rendering and size/deadline checks. This
-    // never waits for warming, modifies the response or awards evidence-use
-    // hit/miss credit. Semantic-only requests do not opt into lexical work.
+    // never waits for warming and never modifies the response. It also never
+    // awards evidence-use credit HERE: since bd-16pwc.7 the worker stages the
+    // topics it actually warmed, and the NEXT request settles them, because a
+    // hit is a statement about a later request. Semantic-only requests do not
+    // opt into lexical work.
     if params.source_mode != SearchSourceMode::SemanticOnly
         && let Some((worker, generation)) = prefetch_worker.zip(prefetch_generation)
     {
@@ -5931,6 +5943,16 @@ fn dispatch_context(
             ),
             generation,
             prefetch_prediction.candidates,
+            // Keyed exactly as `plan_and_observe_cass_prefetch` keys its
+            // observation: same agent scope, same `advisory_workspace_id`,
+            // same generation pair. A different key here would stage credit
+            // in a bucket no request ever settles.
+            WarmBatchScope {
+                agent_scope: AgentScope::new(&request.agent_id),
+                workspace: advisory_workspace_id.clone(),
+                generation: PrefetchGeneration::new(0, generation),
+                corpus_revision: crate::core::index::expected_index_corpus_revision().clone(),
+            },
         );
     }
     pending_delivery.finish(response, defer_advisory_until_socket_write)
@@ -5988,6 +6010,30 @@ fn plan_and_observe_cass_prefetch(
     let mut prefetch = coordinator
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // bd-16pwc.7: settle the PREVIOUS warm batch against this request before
+    // anything else. This is the only place that can award a hit, because
+    // `WarmFetchOutcome::Hit` is defined as "a LATER real context request used
+    // the pre-staged evidence" — warm time cannot know that, and awarding it
+    // at predict time would credit topics the foreground interrupt never
+    // warmed, which is the common case rather than the edge.
+    //
+    // THE HIT RULE IS AN APPROXIMATION, stated here so a reviewer judges it
+    // instead of discovering it. "This request asked for a topic that was
+    // successfully warmed" is not the same claim as "this request was served
+    // from the warmed structures". Exact detection would require the search
+    // path to report that it read warm state, which it does not expose:
+    // warming deliberately drops every document and grants no cached evidence
+    // authority. This is the strongest claim supportable without
+    // instrumenting search, and bd-16pwc.5 must carry the same caveat
+    // wherever it publishes hits/misses.
+    prefetch.award_warm_batch_credit(
+        &agent_scope,
+        workspace_id,
+        topic,
+        generation,
+        corpus_revision,
+    );
 
     // Schedule BEFORE observing, and not the other way round.
     //

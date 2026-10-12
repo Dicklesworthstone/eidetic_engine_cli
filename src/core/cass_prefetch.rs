@@ -1390,6 +1390,26 @@ pub enum WarmFetchOutcome {
     Miss,
 }
 
+/// One completed warm batch awaiting its verdict (bd-16pwc.7).
+///
+/// Staged when warming finishes, settled on the NEXT real context request for
+/// the same `(agent_scope, workspace)`. Holding it is what makes
+/// [`WarmFetchOutcome::Hit`] honest: a hit is a statement about a LATER
+/// request, so warm time cannot award one.
+///
+/// The generation and corpus revision are the ones the batch was warmed
+/// AGAINST, not the live ones. A later request compares them and expires the
+/// whole batch when either moved, because evidence staged against a
+/// superseded index was never usable by that request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingWarmBatch {
+    /// Topics whose warming query actually completed. Never the submitted
+    /// candidate list: a predicted-but-unwarmed topic must not earn credit.
+    warmed: Vec<TopicId>,
+    generation: PrefetchGeneration,
+    corpus_revision: CorpusRevision,
+}
+
 /// Daemon-facing coordinator for speculative CASS prefetch (bd-16pwc.4,
 /// increment 1c). Composes the shipped pieces — the per-(agent, workspace)
 /// [`CassPrefetchHistoryStore`], a [`SpeculativePrefetch`] predictor behind
@@ -1423,6 +1443,12 @@ pub struct CassPrefetchCoordinator<P: SpeculativePrefetch> {
     metrics: CassPrefetchWorkspaceMetrics,
     top_k: usize,
     budget_per_slot: Duration,
+    /// Completed warm batches awaiting their verdict, one per
+    /// `(agent_scope, workspace)` (bd-16pwc.7). The worker is single-flight,
+    /// so a second batch for one key means the first was superseded rather
+    /// than queued. Bounded by [`MAX_PREFETCH_RESIDENT_HISTORIES`]; eviction
+    /// settles the evicted batch as misses rather than dropping it silently.
+    pending: BTreeMap<(AgentScope, String), PendingWarmBatch>,
 }
 
 impl Default for CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor> {
@@ -1452,6 +1478,7 @@ impl<P: SpeculativePrefetch> CassPrefetchCoordinator<P> {
             metrics: CassPrefetchWorkspaceMetrics::new(),
             top_k: DEFAULT_PREFETCH_TOP_K,
             budget_per_slot: DEFAULT_PREFETCH_BUDGET,
+            pending: BTreeMap::new(),
         }
     }
 
@@ -1578,6 +1605,147 @@ impl<P: SpeculativePrefetch> CassPrefetchCoordinator<P> {
             WarmFetchOutcome::Miss => metrics.record_miss(),
         }
         None
+    }
+
+    /// Stage one completed warm batch for `(agent_scope, workspace)` and
+    /// account its cost (bd-16pwc.7). The speculative worker calls this when
+    /// warming finishes, passing the elapsed time IT measured, so the
+    /// coordinator still reads no clock and the determinism contract holds.
+    ///
+    /// `warmed` must contain only topics whose warming query actually
+    /// completed — never the submitted candidate list. Warming is routinely
+    /// cut short by the foreground-inflight interrupt, so predicted-but-
+    /// unwarmed is the common case, and crediting it would report
+    /// effectiveness for evidence that was never staged.
+    ///
+    /// An over-budget batch records `budget_exceeded` and stages NOTHING: it
+    /// is neither a hit nor a miss (bd-16pwc.2), and cancelled work must not
+    /// be creditable by a later request. Within budget the batch is staged,
+    /// and any batch it displaces settles as misses, because a superseded
+    /// batch's topics were warmed and then never requested.
+    pub fn record_warm_batch(
+        &mut self,
+        agent_scope: impl Into<AgentScope>,
+        workspace: impl Into<String>,
+        warmed: Vec<TopicId>,
+        generation: PrefetchGeneration,
+        corpus_revision: &CorpusRevision,
+        spent: Duration,
+    ) -> Option<&'static str> {
+        let agent_scope = agent_scope.into();
+        let workspace = workspace.into();
+        // Whatever was staged before is superseded either way: this batch is
+        // the newer one, and the worker is single-flight.
+        self.settle_pending_as_misses(&agent_scope, &workspace);
+        if spent > self.budget_per_slot {
+            self.metrics
+                .for_workspace_mut(&workspace)
+                .record_budget_exceeded();
+            return Some(CASS_PREFETCH_BUDGET_EXCEEDED_CODE);
+        }
+        if warmed.is_empty() {
+            // Nothing reached the backend, so there is nothing a later
+            // request could use. A miss here would blame the next request
+            // for work the interrupt cancelled before it started.
+            return None;
+        }
+        if self.pending.len() >= MAX_PREFETCH_RESIDENT_HISTORIES {
+            // Deterministic eviction by key order, never by wall clock. The
+            // evicted batch settles as misses so a bounded map cannot silently
+            // swallow staged work.
+            let evicted = self.pending.keys().next().cloned();
+            if let Some((evicted_scope, evicted_workspace)) = evicted {
+                self.settle_pending_as_misses(&evicted_scope, &evicted_workspace);
+            }
+        }
+        self.pending.insert(
+            (agent_scope, workspace),
+            PendingWarmBatch {
+                warmed,
+                generation,
+                corpus_revision: corpus_revision.clone(),
+            },
+        );
+        None
+    }
+
+    /// Settle the staged batch for `(agent_scope, workspace)` against the
+    /// request now being served (bd-16pwc.7). Call this BEFORE scheduling, on
+    /// every real context request, with the live generation and corpus
+    /// revision.
+    ///
+    /// Three outcomes, and only the first is a hit:
+    ///
+    ///   - the batch was warmed against this generation AND corpus revision,
+    ///     and contains the requested topic → one `Hit`, and that topic is
+    ///     consumed so a repeated request cannot earn the same credit twice;
+    ///   - either stamp moved → the whole batch EXPIRED, every remaining
+    ///     topic is a `Miss`;
+    ///   - coherent but no topic match → nothing is recorded yet. The batch
+    ///     stays staged; its topics become misses when a newer batch
+    ///     displaces it or its stamps go stale.
+    pub fn award_warm_batch_credit(
+        &mut self,
+        agent_scope: &AgentScope,
+        workspace: &str,
+        topic: &str,
+        current_generation: PrefetchGeneration,
+        current_corpus_revision: &CorpusRevision,
+    ) {
+        let key = (agent_scope.clone(), workspace.to_owned());
+        let Some(batch) = self.pending.get(&key) else {
+            return;
+        };
+        if !batch.generation.is_coherent_with(current_generation)
+            || &batch.corpus_revision != current_corpus_revision
+        {
+            self.settle_pending_as_misses(agent_scope, workspace);
+            return;
+        }
+        // APPROXIMATION, stated here and at the daemon call site: matching the
+        // requested topic against a successfully warmed one is the strongest
+        // claim supportable without instrumenting search. Exact detection
+        // would require the search path to report that it was served from warm
+        // structures, which it does not expose — warming deliberately drops
+        // every document and grants no cached evidence authority.
+        let requested = TopicId::new(topic);
+        let Some(position) = batch.warmed.iter().position(|warmed| warmed == &requested) else {
+            return;
+        };
+        let drained = {
+            let batch = self
+                .pending
+                .get_mut(&key)
+                .expect("the batch was just observed under this key");
+            batch.warmed.remove(position);
+            batch.warmed.is_empty()
+        };
+        if drained {
+            self.pending.remove(&key);
+        }
+        self.metrics.for_workspace_mut(workspace).record_hit();
+    }
+
+    /// Drop any staged batch for the key, counting every topic still in it as
+    /// a miss: it was warmed and then never requested.
+    fn settle_pending_as_misses(&mut self, agent_scope: &AgentScope, workspace: &str) {
+        let key = (agent_scope.clone(), workspace.to_owned());
+        let Some(batch) = self.pending.remove(&key) else {
+            return;
+        };
+        let metrics = self.metrics.for_workspace_mut(workspace);
+        for _ in &batch.warmed {
+            metrics.record_miss();
+        }
+    }
+
+    /// Number of topics staged for `(agent_scope, workspace)`, for tests and
+    /// the flight recorder. Zero when no batch is staged.
+    #[must_use]
+    pub fn pending_warm_topics(&self, agent_scope: &AgentScope, workspace: &str) -> usize {
+        self.pending
+            .get(&(agent_scope.clone(), workspace.to_owned()))
+            .map_or(0, |batch| batch.warmed.len())
     }
 
     /// Metrics bucket for `workspace`, when it has been observed.
@@ -2176,6 +2344,285 @@ mod tests {
         assert_eq!(metrics.hits, 1);
         assert_eq!(metrics.misses, 1);
         assert!((metrics.hit_rate() - 0.5).abs() < f64::EPSILON);
+    }
+
+    fn staged(
+        coordinator: &mut CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>,
+        scope: &AgentScope,
+        topics: &[&str],
+        generation: PrefetchGeneration,
+        revision: &CorpusRevision,
+        spent: Duration,
+    ) -> Option<&'static str> {
+        coordinator.record_warm_batch(
+            scope.clone(),
+            "ws",
+            topics.iter().map(TopicId::new).collect(),
+            generation,
+            revision,
+            spent,
+        )
+    }
+
+    #[test]
+    fn warm_batch_hit_is_awarded_on_the_next_matching_request_bd_16pwc_7() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(1, 1);
+        assert_eq!(
+            staged(
+                &mut coordinator,
+                &scope,
+                &["alpha", "beta"],
+                generation,
+                &rev,
+                Duration::from_millis(10)
+            ),
+            None
+        );
+        assert_eq!(coordinator.pending_warm_topics(&scope, "ws"), 2);
+        // One hit for the matching topic, and the topic is CONSUMED: a
+        // repeated request must not be able to bill the same staged work
+        // twice, which is how a hit rate climbs without any new warming.
+        coordinator.award_warm_batch_credit(&scope, "ws", "alpha", generation, &rev);
+        coordinator.award_warm_batch_credit(&scope, "ws", "alpha", generation, &rev);
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(metrics.hits, 1);
+        assert_eq!(metrics.misses, 0);
+        assert_eq!(coordinator.pending_warm_topics(&scope, "ws"), 1);
+    }
+
+    #[test]
+    fn predicted_but_unwarmed_topic_earns_no_hit_bd_16pwc_7() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(1, 1);
+        // PLANTED NEGATIVE. "gamma" was predicted and submitted, but the
+        // foreground interrupt cut warming before its query ran, so it never
+        // entered the warmed list. Any implementation that awards credit at
+        // PREDICT time, or from the submitted candidate list, turns this red.
+        assert_eq!(
+            staged(
+                &mut coordinator,
+                &scope,
+                &["alpha"],
+                generation,
+                &rev,
+                Duration::from_millis(5)
+            ),
+            None
+        );
+        coordinator.award_warm_batch_credit(&scope, "ws", "gamma", generation, &rev);
+        // NO metrics bucket exists, and that is the strongest available form of
+        // "nothing was recorded" -- stronger than hits == 0, because the
+        // implementation never reached the metrics map at all. Written with
+        // map_or rather than expect() for exactly that reason: an earlier draft
+        // asserted `metrics_for("ws").expect("metrics bucket")` and FAILED here,
+        // not because a hit was awarded but because the absence it was trying
+        // to prove meant there was no bucket to unwrap.
+        assert_eq!(
+            coordinator
+                .metrics_for("ws")
+                .map_or(0, |bucket| bucket.hits),
+            0
+        );
+        // Not a miss either: the batch is still coherent and staged, so
+        // "gamma" was simply never staged. Misses land when a batch expires
+        // or is displaced, which is what keeps hit_rate honest.
+        assert_eq!(
+            coordinator
+                .metrics_for("ws")
+                .map_or(0, |bucket| bucket.misses),
+            0
+        );
+        assert_eq!(coordinator.pending_warm_topics(&scope, "ws"), 1);
+    }
+
+    #[test]
+    fn warm_batch_expires_as_misses_on_generation_bump_bd_16pwc_7() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        assert_eq!(
+            staged(
+                &mut coordinator,
+                &scope,
+                &["alpha", "beta"],
+                PrefetchGeneration::new(1, 1),
+                &rev,
+                Duration::from_millis(5)
+            ),
+            None
+        );
+        // Reindexed underneath it. Evidence staged against index generation 1
+        // was never usable by a request reading generation 2, so BOTH topics
+        // are misses and the batch is dropped rather than left to earn a late
+        // hit against an index it was not warmed for.
+        coordinator.award_warm_batch_credit(
+            &scope,
+            "ws",
+            "alpha",
+            PrefetchGeneration::new(1, 2),
+            &rev,
+        );
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(metrics.misses, 2);
+        assert_eq!(metrics.hits, 0);
+        assert_eq!(coordinator.pending_warm_topics(&scope, "ws"), 0);
+    }
+
+    #[test]
+    fn warm_batch_expires_as_misses_on_corpus_revision_change_bd_16pwc_7() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let generation = PrefetchGeneration::new(1, 1);
+        assert_eq!(
+            staged(
+                &mut coordinator,
+                &scope,
+                &["alpha"],
+                generation,
+                &CorpusRevision::from("corpus:v1"),
+                Duration::from_millis(5)
+            ),
+            None
+        );
+        // Same generation, different corpus revision: the generation pair
+        // alone cannot see this change (bd-1eh60), so the revision must be
+        // compared too or expired evidence would be credited as a hit.
+        coordinator.award_warm_batch_credit(
+            &scope,
+            "ws",
+            "alpha",
+            generation,
+            &CorpusRevision::from("corpus:v2"),
+        );
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(metrics.misses, 1);
+        assert_eq!(metrics.hits, 0);
+        assert_eq!(coordinator.pending_warm_topics(&scope, "ws"), 0);
+    }
+
+    #[test]
+    fn warm_batch_displaced_by_a_newer_one_settles_as_misses_bd_16pwc_7() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(1, 1);
+        for topics in [&["alpha", "beta"][..], &["gamma"][..]] {
+            assert_eq!(
+                staged(
+                    &mut coordinator,
+                    &scope,
+                    topics,
+                    generation,
+                    &rev,
+                    Duration::from_millis(5)
+                ),
+                None
+            );
+        }
+        // The worker is single-flight, so a second completed batch means the
+        // first was superseded, never queued: its two topics were warmed and
+        // then never requested.
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(metrics.misses, 2);
+        assert_eq!(metrics.hits, 0);
+        assert_eq!(coordinator.pending_warm_topics(&scope, "ws"), 1);
+    }
+
+    #[test]
+    fn over_budget_warm_batch_is_accounted_and_stages_nothing_bd_16pwc_7() {
+        let mut coordinator =
+            CassPrefetchCoordinator::new().with_budget_per_slot(Duration::from_millis(50));
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(1, 1);
+        assert_eq!(
+            staged(
+                &mut coordinator,
+                &scope,
+                &["alpha"],
+                generation,
+                &rev,
+                Duration::from_millis(60)
+            ),
+            Some(CASS_PREFETCH_BUDGET_EXCEEDED_CODE)
+        );
+        // This is the increment site that was unreachable in production
+        // before bd-16pwc.7: budget_exceeded could never move because
+        // record_warm_fetch had no production caller.
+        coordinator.award_warm_batch_credit(&scope, "ws", "alpha", generation, &rev);
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(metrics.budget_exceeded, 1);
+        // Cancelled work is neither a hit nor a miss (bd-16pwc.2), and
+        // nothing is staged, so a later request cannot earn credit from a
+        // batch that blew its slot.
+        assert_eq!(metrics.hits, 0);
+        assert_eq!(metrics.misses, 0);
+        assert_eq!(coordinator.pending_warm_topics(&scope, "ws"), 0);
+    }
+
+    #[test]
+    fn warm_batch_with_no_completed_queries_stages_nothing_bd_16pwc_7() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        assert_eq!(
+            staged(
+                &mut coordinator,
+                &scope,
+                &[],
+                PrefetchGeneration::new(1, 1),
+                &rev,
+                Duration::from_millis(5)
+            ),
+            None
+        );
+        assert_eq!(coordinator.pending_warm_topics(&scope, "ws"), 0);
+        // An interrupted warm that reached no query is not the next request's
+        // fault, so it records no miss. Charging one here would make the hit
+        // rate fall every time the foreground stayed busy.
+        assert_eq!(
+            coordinator
+                .metrics_for("ws")
+                .map_or(0, |bucket| bucket.misses),
+            0
+        );
+    }
+
+    #[test]
+    fn warm_batch_credit_is_isolated_per_agent_scope_bd_16pwc_7() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(1, 1);
+        let owner = test_agent_scope();
+        let other = AgentScope::new("agent:other");
+        assert_eq!(
+            staged(
+                &mut coordinator,
+                &owner,
+                &["alpha"],
+                generation,
+                &rev,
+                Duration::from_millis(5)
+            ),
+            None
+        );
+        // Another agent asking for the same topic in the same workspace must
+        // not collect the owner's credit (bd-298n0): the batch is keyed by
+        // (agent_scope, workspace), not by workspace alone.
+        coordinator.award_warm_batch_credit(&other, "ws", "alpha", generation, &rev);
+        assert_eq!(
+            coordinator
+                .metrics_for("ws")
+                .map_or(0, |bucket| bucket.hits),
+            0
+        );
+        assert_eq!(coordinator.pending_warm_topics(&owner, "ws"), 1);
+        assert_eq!(coordinator.pending_warm_topics(&other, "ws"), 0);
     }
 
     #[test]
