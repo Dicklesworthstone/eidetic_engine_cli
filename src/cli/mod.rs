@@ -8454,6 +8454,19 @@ pub enum ConfigCommand {
     Get(ConfigGetArgs),
     /// Set one workspace config key in `.ee/config.toml`.
     Set(ConfigSetArgs),
+    /// Explain what one config key does, its effective value, and its source.
+    Explain(ConfigExplainArgs),
+}
+
+/// Arguments for `ee config explain` (bd-2vq2z.15).
+#[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
+pub struct ConfigExplainArgs {
+    /// Exact config key to explain, such as search.semantic_weight.
+    pub key: String,
+
+    /// Config path to inspect. Defaults to <workspace>/.ee/config.toml.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
 }
 
 /// Arguments for `ee config show`.
@@ -28052,7 +28065,119 @@ where
                 }
             }
         }
+        ConfigCommand::Explain(args) => {
+            let options = ConfigSurfaceOptions {
+                workspace_root,
+                config_path: args.config.clone(),
+            };
+            handle_config_explain(cli, &options, &args.key, stdout, stderr)
+        }
     }
+}
+
+/// `ee config explain <key>` (bd-2vq2z.15).
+///
+/// `src/core/config_explain.rs` shipped the knob registry, `explain`, the
+/// `ee.config_explain.v1` renderer and four lint rules, and nothing ever
+/// invoked them: `ConfigCommand` had only Show/Get/Set, so the surface that
+/// bead promised could not be reached. `scripts/e2e_reach.sh` already carries
+/// the acceptance block and records a `log_drop` naming the bead on every run.
+///
+/// Reads through `merged_config` rather than `get_config` because
+/// `config_explain::explain` takes the TYPED `ConfigValueSource`, while the
+/// get/show reports stringify the layer. Going through the typed path keeps
+/// `explain` the single place that decides what an explanation looks like,
+/// instead of rebuilding one here and leaving that function dead.
+fn handle_config_explain<W, E>(
+    cli: &Cli,
+    options: &ConfigSurfaceOptions,
+    key: &str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let merged = match crate::core::config_surface::merged_config(options) {
+        Ok(merged) => merged,
+        Err(error) => {
+            let domain_error = config_surface_error_to_domain(error);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
+        }
+    };
+
+    // The effective value comes from the same merged read `config show`
+    // renders, so explain and show cannot disagree about what is in effect.
+    let effective_value = merged
+        .to_show_report()
+        .entries
+        .into_iter()
+        .find(|entry| entry.key == key)
+        .map(|entry| entry.value);
+
+    let Some(explanation) =
+        crate::core::config_explain::explain(key, effective_value, merged.source(key))
+    else {
+        // An honest miss rather than a crash: the key has no entry in the knob
+        // registry, so there is nothing truthful to say about its effect.
+        // Reuses the existing surface error so the envelope and exit code
+        // match every other unknown-key answer from this command family.
+        let domain_error = config_surface_error_to_domain(
+            crate::core::config_surface::ConfigSurfaceError::UnknownKey {
+                key: key.to_owned(),
+            },
+        );
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
+    };
+
+    let data = explanation.data_json();
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &config_explain_human_output(&explanation))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&data.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_config_success(stdout, data),
+    }
+}
+
+/// Human rendering for `ee config explain`.
+///
+/// Leads with the runtime status, because the truth-in-labeling gap this bead
+/// was filed for was a knob whose NAME implied behaviour it did not have.
+fn config_explain_human_output(
+    explanation: &crate::core::config_explain::ConfigExplanation,
+) -> String {
+    let knob = &explanation.knob;
+    let mut out = format!(
+        "{} [{}] status={}\n",
+        knob.key,
+        knob.category,
+        knob.status.as_str()
+    );
+    out.push_str(&format!("  effect: {}\n", knob.effect));
+    out.push_str(&format!("  valid range: {}\n", knob.valid_range));
+    out.push_str(&format!(
+        "  effective value: {} (source: {})\n",
+        explanation.effective_value.as_deref().unwrap_or("<unset>"),
+        explanation.source_layer
+    ));
+    if let Some(caveat) = knob.caveat {
+        out.push_str(&format!("  caveat: {caveat}\n"));
+    }
+    for finding in &explanation.lint_findings {
+        out.push_str(&format!(
+            "  [{}] {}: {}\n",
+            finding.severity, finding.code, finding.message
+        ));
+    }
+    out
 }
 
 fn write_config_show_report<W>(
@@ -69857,6 +69982,7 @@ impl NormalizedInvocation {
                     ConfigCommand::Show(_) => "config show".to_string(),
                     ConfigCommand::Get(_) => "config get".to_string(),
                     ConfigCommand::Set(_) => "config set".to_string(),
+                    ConfigCommand::Explain(_) => "config explain".to_string(),
                 },
                 Command::Coordination(coordination) => match coordination {
                     CoordinationCommand::Evidence(evidence) => match evidence {
@@ -71574,7 +71700,7 @@ mod tests {
         AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, AuditCommand, BackupCommand,
         BackupRedaction, BootstrapCommand, BootstrapDocGlob,
         COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, CliProcess,
-        Command, ContextPackError, ContextPackOptions, ContextPackOutputOptions,
+        Command, ConfigCommand, ContextPackError, ContextPackOptions, ContextPackOutputOptions,
         ContextPackProfile, CurateCommand, DAEMON_SEARCH_FALLBACK_CODE,
         DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DaemonSearchFallbackReason,
         DiagCommand, DiagQuarantineCommand, DiagResourceBudgetArg, DiagResourceCommandClassArg,
@@ -90450,6 +90576,62 @@ mod tests {
             }
             _ => Err("expected diag write-owner command".to_string()),
         }
+    }
+
+    /// bd-2vq2z.15: the surface this bead promised must be invocable.
+    ///
+    /// src/core/config_explain.rs shipped the registry, `explain`, the
+    /// `ee.config_explain.v1` renderer and four lint rules, and nothing could
+    /// reach them: ConfigCommand had only Show/Get/Set. scripts/e2e_reach.sh
+    /// gates its acceptance block on `config --help` advertising `explain` and
+    /// logs a drop naming this bead when it does not, so this is the local
+    /// guard that the subcommand keeps existing at all.
+    #[test]
+    fn config_explain_command_parses_bd_2vq2z_15() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "config", "explain", "search.semantic_weight"])
+            .map_err(|error| format!("failed to parse config explain: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Config(ConfigCommand::Explain(args))) => ensure_equal(
+                &args.key,
+                &"search.semantic_weight".to_owned(),
+                "config explain key",
+            ),
+            other => Err(format!("expected config explain command, got {other:?}")),
+        }
+    }
+
+    /// bd-2vq2z.15: and the key the e2e targets must HAVE explain coverage,
+    /// with the caveat that ends the semantic-weight confusion. Without this,
+    /// the subcommand could parse and still answer "no explain coverage",
+    /// which would leave the e2e red for a different reason.
+    #[test]
+    fn config_explain_covers_semantic_weight_with_a_caveat_bd_2vq2z_15() -> TestResult {
+        let explanation = crate::core::config_explain::explain(
+            "search.semantic_weight",
+            Some("0.5".to_owned()),
+            None,
+        )
+        .ok_or_else(|| "search.semantic_weight has no explain coverage".to_string())?;
+
+        ensure_equal(
+            &explanation.knob.status.as_str(),
+            &"active",
+            "semantic weight is active, not mislabeled as unwired",
+        )?;
+        let caveat = explanation
+            .knob
+            .caveat
+            .ok_or_else(|| "semantic weight must carry a truth-in-labeling caveat".to_string())?;
+        ensure(
+            caveat.contains("neural") && caveat.contains("vector"),
+            "the caveat must name both the neural and vector tiers",
+        )?;
+        ensure_equal(
+            &explanation.source_layer,
+            &"unknown",
+            "an unattributed source renders as unknown rather than panicking",
+        )
     }
 
     #[test]

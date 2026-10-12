@@ -378,7 +378,14 @@ pub fn set_config(
     })
 }
 
-fn merged_config(
+/// Resolve the merged config WITH its typed per-key source attribution.
+///
+/// `pub(crate)` for `ee config explain` (bd-2vq2z.15), which needs the typed
+/// [`crate::config::ConfigValueSource`] rather than the stringified layer that
+/// `ConfigShowEntry` and `ConfigGetReport` carry. `config_explain::explain`
+/// takes the typed value, so a caller holding only the `&'static str` cannot
+/// use that API and would have to rebuild the explanation by hand.
+pub(crate) fn merged_config(
     options: &ConfigSurfaceOptions,
 ) -> Result<crate::config::MergedConfig, ConfigSurfaceError> {
     let environment = process_env();

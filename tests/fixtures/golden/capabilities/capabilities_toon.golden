@@ -23,7 +23,7 @@ data:
   unimplemented[2]{code,featureFlag,shipTarget,trackingBead}:
     diagram_backend_unavailable,franken-mermaid-adapter,v0.3,bd-17c65.5.5
     mcp_feature_disabled,mcp,v0.2,bd-17c65.5.5
-  commands[557]{name,available}:
+  commands[558]{name,available}:
     agent,true
     agent detect,true
     agent scan,true
@@ -85,6 +85,7 @@ data:
     claim verify,true
     completion,true
     config,true
+    config explain,true
     config get,true
     config set,true
     config show,true
@@ -1452,6 +1453,6 @@ data:
     enabledFeatures: 4
     totalFeatures: 8
     unimplementedCapabilities: 2
-    availableCommands: 556
-    totalCommands: 557
+    availableCommands: 557
+    totalCommands: 558
 degraded[0]:
