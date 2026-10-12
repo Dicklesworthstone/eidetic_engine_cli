@@ -43,7 +43,7 @@ use crate::core::rule::{
 use crate::core::status::{
     DegradationReport, MeshStorageStatusReport, StatusReport, StatusSkylineReport,
 };
-use crate::core::store_integrity::{StoreIntegrityReport, StoreIntegrityStatus};
+use crate::core::store_integrity::{GenerationSource, StoreIntegrityReport, StoreIntegrityStatus};
 use crate::core::swarm_brief::{RchWorkerPressureObservation, RchWorkerPressureReport};
 use crate::core::tailscale_probe::{TailscaleLocalReport, TailscaleProbeDegradation};
 use crate::core::why::WhyReport;
@@ -9871,11 +9871,12 @@ pub fn render_store_integrity_human(report: &StoreIntegrityReport) -> String {
         store_integrity_status_label(report.status)
     ));
     output.push_str(&format!(
-        "Read fence: mode={} verdict={} severity={} workspace_generation={} strict_failed={}\n",
+        "Read fence: mode={} verdict={} severity={} workspace_generation={} generations={} strict_failed={}\n",
         report.read_fence.mode,
         report.read_fence.verdict,
         report.read_fence.severity,
         report.read_fence.workspace_generation,
+        generation_source_label(report.read_fence.generation_source),
         report.read_fence.strict_failed
     ));
     for asset in &report.read_fence.stale_assets {
@@ -9907,6 +9908,18 @@ pub fn render_store_integrity_human(report: &StoreIntegrityReport) -> String {
         ));
     }
     output
+}
+
+/// Human label for where the compared generations came from
+/// (bd-1n0np.8.13). `unavailable` is spelled out rather than shown as a blank
+/// so an operator does not read a missing store as a fresh one.
+fn generation_source_label(source: GenerationSource) -> &'static str {
+    match source {
+        GenerationSource::Observed => "observed",
+        GenerationSource::Supplied => "supplied",
+        GenerationSource::Mixed => "mixed",
+        GenerationSource::Unavailable => "unavailable",
+    }
 }
 
 fn store_integrity_status_label(status: StoreIntegrityStatus) -> &'static str {

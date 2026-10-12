@@ -5355,11 +5355,13 @@ pub struct DiagStoreIntegrityArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_read_fence: bool,
 
-    /// Current durable workspace/database generation.
-    #[arg(long, default_value_t = 0, value_name = "GENERATION")]
-    pub db_generation: u64,
+    /// Current durable workspace/database generation. Read from the
+    /// workspace store when omitted.
+    #[arg(long, value_name = "GENERATION")]
+    pub db_generation: Option<u64>,
 
-    /// Derived asset generation as NAME=GENERATION. May be repeated.
+    /// Derived asset generation as NAME=GENERATION. May be repeated. Read
+    /// from the workspace store when omitted.
     #[arg(
         long = "asset-generation",
         value_parser = parse_asset_generation_arg,
@@ -32313,6 +32315,97 @@ fn parse_store_integrity_write_observation_arg(
     )
 }
 
+/// Generations read from a real workspace store (bd-1n0np.8.13).
+struct ObservedStoreGenerations {
+    db_generation: Option<u64>,
+    asset_generations: Vec<(String, u64)>,
+}
+
+/// Read the live database and derived-asset generations for
+/// `ee diag store-integrity`.
+///
+/// Fail-soft by construction: a diagnostic must still render against a
+/// workspace that has no store, so every failure path yields `None` and the
+/// caller falls back to the supplied flags. `None` is reported as
+/// `GenerationSource::Unavailable` and never as a fresh store.
+fn observed_store_generations(workspace_root: &Path) -> Option<ObservedStoreGenerations> {
+    let status = get_index_status(&IndexStatusOptions {
+        workspace_path: workspace_root.to_path_buf(),
+        database_path: None,
+        index_dir: None,
+    })
+    .ok()?;
+    // The search index is the only derived asset with a generation reader
+    // today. The graph asset is deliberately OMITTED rather than reported at
+    // the database generation: an absent asset is invisible to the read
+    // fence, whereas a fabricated fresh one would read as positive proof
+    // that a stale graph is current.
+    let asset_generations = status
+        .index_generation
+        .map(|generation| vec![("search".to_owned(), generation)])
+        .unwrap_or_default();
+    Some(ObservedStoreGenerations {
+        db_generation: status.db_generation,
+        asset_generations,
+    })
+}
+
+/// Decide which generations the read fence compares, and say where they came
+/// from (bd-1n0np.8.13).
+///
+/// An explicit flag always wins over an observation, so the deterministic
+/// pure-calculation mode stays available for replaying a captured incident.
+fn resolve_store_integrity_generations(
+    cli: &Cli,
+    args: &DiagStoreIntegrityArgs,
+) -> (
+    u64,
+    Vec<(String, u64)>,
+    crate::core::store_integrity::GenerationSource,
+) {
+    use crate::core::store_integrity::GenerationSource;
+
+    let supplied_db = args.db_generation;
+    let supplied_assets =
+        (!args.asset_generations.is_empty()).then(|| args.asset_generations.clone());
+
+    // Both inputs pinned: there is nothing to observe, and opening a store
+    // would be a side effect with no effect on the answer.
+    if let (Some(db_generation), Some(asset_generations)) = (supplied_db, supplied_assets.clone()) {
+        return (db_generation, asset_generations, GenerationSource::Supplied);
+    }
+
+    let Some(observed) = observed_store_generations(&cli.resolve_workspace()) else {
+        return (
+            supplied_db.unwrap_or(0),
+            supplied_assets.unwrap_or_default(),
+            GenerationSource::Unavailable,
+        );
+    };
+
+    // Capture the provenance booleans BEFORE the values are moved, so the
+    // label is computed from what was asked rather than from what came out.
+    let assets_supplied = supplied_assets.is_some();
+    let db_from_store = supplied_db.is_none() && observed.db_generation.is_some();
+    let assets_from_store = !assets_supplied && !observed.asset_generations.is_empty();
+    let db_generation = supplied_db.or(observed.db_generation).unwrap_or(0);
+    let asset_generations = supplied_assets.unwrap_or(observed.asset_generations);
+
+    // Name the mixture instead of rounding it to the more flattering end: a
+    // verdict built from one observed and one typed generation is neither a
+    // measurement nor a pure calculation. And a store that yielded nothing
+    // we asked of it is `Unavailable`, not a store reporting zero.
+    let any_observed = db_from_store || assets_from_store;
+    let any_supplied = supplied_db.is_some() || assets_supplied;
+    let generation_source = match (any_observed, any_supplied) {
+        (true, true) => GenerationSource::Mixed,
+        (true, false) => GenerationSource::Observed,
+        (false, _) => GenerationSource::Unavailable,
+    };
+
+    (db_generation, asset_generations, generation_source)
+}
+
 fn handle_diag_store_integrity<W>(
     cli: &Cli,
     args: &DiagStoreIntegrityArgs,
@@ -32351,12 +32444,30 @@ where
         .iter()
         .map(crate::core::store_integrity::StoreIntegrityWriteObservationInput::to_observation)
         .collect();
+
+    // bd-1n0np.8.13: observe the real store for any generation the caller did
+    // not supply.
+    //
+    // Before this, EVERY input to this command arrived on the command line, so
+    // the surface could only restate what the caller already knew: it never
+    // opened a store, and therefore could not detect a stale derived asset in
+    // a live workspace. ADR 0059 advertises a read fence that fails closed;
+    // without a store read, `--strict-read-fence` could only ever fail closed
+    // on numbers the caller typed.
+    //
+    // Explicit flags still win, which preserves the deterministic
+    // pure-calculation mode that `tests/store_integrity_surface.rs` drives
+    // and keeps this command usable for replaying a captured incident.
+    let (db_generation, asset_generations, generation_source) =
+        resolve_store_integrity_generations(cli, args);
+
     let report = crate::core::store_integrity::run_store_integrity_report(
         crate::core::store_integrity::StoreIntegrityOptions {
             read_fence: args.read_fence,
-            db_generation: args.db_generation,
-            asset_generations: args.asset_generations.clone(),
+            db_generation,
+            asset_generations,
             strict_read_fence: args.strict_read_fence,
+            generation_source,
             write_stream_config: crate::core::write_owner::WriteStreamStatsConfig::new(
                 args.window_start_ms,
                 args.window_end_ms,
@@ -90379,7 +90490,7 @@ mod tests {
                     "read fence",
                 )?;
                 ensure_equal(&args.strict_read_fence, &true, "strict read fence")?;
-                ensure_equal(&args.db_generation, &12, "db generation")?;
+                ensure_equal(&args.db_generation, &Some(12), "db generation")?;
                 ensure_equal(
                     &args.asset_generations,
                     &vec![("search".to_owned(), 12), ("graph".to_owned(), 11)],

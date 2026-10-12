@@ -21,9 +21,38 @@ pub struct StoreIntegrityOptions {
     pub db_generation: u64,
     pub asset_generations: Vec<(String, u64)>,
     pub strict_read_fence: bool,
+    /// Where `db_generation` and `asset_generations` came from. Carried
+    /// through to the report so a verdict is never read as a claim about a
+    /// store that was never opened (bd-1n0np.8.13).
+    pub generation_source: GenerationSource,
     pub write_stream_config: WriteStreamStatsConfig,
     pub write_observations: Vec<WriteStreamObservation>,
     pub quarantine_config: WriteImmuneQuarantineConfig,
+}
+
+/// Provenance of the generations the read fence compared (bd-1n0np.8.13).
+///
+/// A read-fence verdict means something fundamentally different in each case:
+/// `Observed` is a claim about a live store, while `Supplied` is arithmetic on
+/// numbers the caller already held. Reporting the verdict without its source
+/// would make a calculation indistinguishable from a measurement, and
+/// `workspace_generation: 0` alone cannot say whether the store is empty,
+/// absent, or simply never consulted.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationSource {
+    /// Every generation was read from the live store.
+    Observed,
+    /// Every generation came from an explicit caller argument. This is the
+    /// default because the pure-function entry point makes no store access.
+    #[default]
+    Supplied,
+    /// Some generations were observed and some were supplied explicitly.
+    Mixed,
+    /// Observation was attempted and failed — no store, or one that could not
+    /// be opened — so the supplied values were used. Deliberately distinct
+    /// from `Supplied`: there the caller chose, here the store was missing.
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,6 +103,10 @@ pub struct StoreIntegrityReadFenceReport {
     pub verdict: String,
     pub severity: String,
     pub strict_failed: bool,
+    /// Provenance of the generations below. Emitted beside the verdict, not
+    /// instead of it, so a consumer can tell a measurement from a
+    /// calculation (bd-1n0np.8.13).
+    pub generation_source: GenerationSource,
     pub workspace_generation: u64,
     pub asset_generations: Vec<StoreIntegrityAssetGeneration>,
     pub stale_assets: Vec<StoreIntegrityStaleAsset>,
@@ -119,7 +152,8 @@ pub fn run_store_integrity_report(options: StoreIntegrityOptions) -> StoreIntegr
         options.asset_generations,
         options.strict_read_fence,
     );
-    let read_fence = StoreIntegrityReadFenceReport::from_consistency(&consistency);
+    let read_fence =
+        StoreIntegrityReadFenceReport::from_consistency(&consistency, options.generation_source);
 
     let stats =
         compute_source_write_stats(&options.write_observations, options.write_stream_config);
@@ -146,15 +180,33 @@ pub fn run_store_integrity_report(options: StoreIntegrityOptions) -> StoreIntegr
         decisions,
     };
 
-    let status = if read_fence.strict_failed {
-        StoreIntegrityStatus::Blocked
-    } else if quarantined_source_count > 0
-        || !matches!(consistency.severity, ConsistencySeverity::Info)
-    {
-        StoreIntegrityStatus::Degraded
-    } else {
-        StoreIntegrityStatus::Ok
-    };
+    // bd-1n0np.8.13: an unobservable store must never read as a clean one.
+    //
+    // When observation fails, `asset_generations` is empty, so the fence finds
+    // nothing behind and would otherwise return `Ok` — reporting health it
+    // never measured. That is a silent false negative, and the one failure
+    // this surface must not have: the whole point of a read fence is to be
+    // trusted when it says the derived assets are current.
+    //
+    // Under `--strict-read-fence` the caller has asked to fail closed, and
+    // "I could not look" is a closed-fail. The cause travels in the same
+    // block as `generation_source`, so a reader is never left guessing which
+    // condition produced the status.
+    let generations_unobservable = matches!(
+        options.generation_source,
+        GenerationSource::Unavailable | GenerationSource::Mixed
+    ) && consistency.asset_generations.is_empty();
+    let status =
+        if read_fence.strict_failed || (options.strict_read_fence && generations_unobservable) {
+            StoreIntegrityStatus::Blocked
+        } else if quarantined_source_count > 0
+            || generations_unobservable
+            || !matches!(consistency.severity, ConsistencySeverity::Info)
+        {
+            StoreIntegrityStatus::Degraded
+        } else {
+            StoreIntegrityStatus::Ok
+        };
 
     StoreIntegrityReport {
         schema: STORE_INTEGRITY_REPORT_SCHEMA_V1,
@@ -166,7 +218,10 @@ pub fn run_store_integrity_report(options: StoreIntegrityOptions) -> StoreIntegr
 }
 
 impl StoreIntegrityReadFenceReport {
-    fn from_consistency(consistency: &ConsistencyBlock) -> Self {
+    fn from_consistency(
+        consistency: &ConsistencyBlock,
+        generation_source: GenerationSource,
+    ) -> Self {
         let (stale_assets, snapshot_generation) = match &consistency.verdict {
             ConsistencyVerdict::Coherent => (Vec::new(), None),
             ConsistencyVerdict::AssetsBehind { .. } => (
@@ -191,6 +246,7 @@ impl StoreIntegrityReadFenceReport {
             verdict: consistency.verdict.as_str().to_string(),
             severity: consistency.severity.as_str().to_string(),
             strict_failed: consistency.strict_failed,
+            generation_source,
             workspace_generation: consistency.db_generation,
             asset_generations: consistency
                 .asset_generations
