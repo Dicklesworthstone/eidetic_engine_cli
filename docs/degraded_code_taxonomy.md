@@ -412,6 +412,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `context_profile_budget_capped` | info | bd-17c65.2.4 (B7) |
 | `context_lexical_fallback` | medium | bd-auto-index-rebuild-on-fallback-x35vi; documented by bd-tjxvl |
 | `context_evidence_hit_unhydrated` | low | bd-16imy |
+| `context_evidence_below_relative_floor` | low | bd-reality-core-convergence-1azkt.11 |
+| `context_evidence_near_duplicates_collapsed` | low | bd-reality-core-convergence-1azkt.11 |
 | `context_rule_hit_unhydrated` | low | bd-3h6bz |
 | `context_stream_partial_emission` | warning | bd-17c65.10.18 |
 | `cass_prefetch_budget_exceeded` | info | bd-16pwc.2 (SRR5) |
@@ -495,6 +497,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `conformal_calibration_insufficient` | warning | bd-17c65.14.2 (N2) |
 | `search_score_calibration_file_too_large` | warning | bd-1nsk4 |
 | `search_score_calibration_rows_corrupt` | warning | bd-3ihl4 |
+| `search_score_calibration_unreadable` | warning | bd-nnheo (classified); emitted by src/core/search.rs |
 | `discovery_cache_invalidated_tailnet_changed` | info | bd-36bbk.1.13 |
 | `discovery_cache_stale_due_to_workspace_mismatch` | info | bd-36bbk.1.13 |
 | `drift_grace_soft_stale_peer_count_high` | warning | bd-36bbk.1.13 |
@@ -998,6 +1001,27 @@ macOS platform fallback emitted by the `NumaPinningAdapter` trait
 | `numa_pin_unsupported_platform` | info | bd-ldstd (swarmx.4 scaffold) |
 | `numa_unavailable_on_macos` | info | bd-1prrl.3 (macOS platform fallback) |
 
+#### Resource and output caps (5 — response_time)
+
+All five are refusals or truncations driven by a configured limit, so each
+depends on the workspace size or the live request rather than on what was
+compiled. Classified under bd-nnheo; the severity in each row is the value its
+own emission site assigns, verified at a `code: ... severity: ...` pair rather
+than inferred from a nearby literal.
+
+The first four come from `src/core/graph_memory_budget.rs` and are ordered the
+way that module checks them, which is also the order an operator should read
+them in: the per-algorithm cap is checked BEFORE the combined snapshot cap so
+the refusal names the remediation that actually applies.
+
+| Code | Severity | Meaning at the emission site |
+|------|----------|------------------------------|
+| `large_graph_uncached` | high | Graph snapshot estimate exceeds the configured cap, so the build was skipped; raise the snapshot cap or shrink the workspace |
+| `algorithm_memory_cap` | warning | The requested algorithm working-set alone exceeds the per-algorithm cap |
+| `memory_pressure` | warning | Active snapshots plus the requested algorithm would breach the snapshot cap |
+| `unexpected_growth` | warning | In-build allocation grew past the tripwire, so the build aborted and rolled back |
+| `degraded_array_truncated` | info | The aggregated `degraded[]` array was truncated; the entry reports the dropped count and the dropped codes, sorted and deduplicated |
+
 #### Lexical RAM-tier warmload (4 — response_time)
 
 Surfaced under `data.search.lexicalRamTier`
@@ -1046,9 +1070,10 @@ the closed daemon hot-mode surface.
 | `daemon_socket_unavailable` | info | bd-oja31 (bd-1feff emission wiring) |
 | `daemon_unknown_method` | medium | bd-oja31 |
 
-#### Integrity / schema (15)
+#### Integrity / schema (16)
 | Code | Severity | Bead |
 |------|----------|------|
+| `shard_fanout_apply_plan_blocked` | high | bd-nnheo (classified); src/db/migrate.rs refuses the shard fan-out migration when the planner reports blockers |
 | `handoff_capsule_machine_mismatch` | high | bd-17c65.13.6 (M5) |
 | `handoff_capsule_tampered` | high | bd-17c65.13.6 (M5) |
 | `handoff_hmac_missing` | high | bd-17c65.13.6 (M5) |
