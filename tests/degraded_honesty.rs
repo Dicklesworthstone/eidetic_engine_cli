@@ -3334,12 +3334,29 @@ fn eval_run_and_list_report_fixture_results_without_unavailable_sentinel() -> Te
                 format!("logged {command} must report no degradations"),
             )?;
         }
-        ensure_json_pointer(
-            &log_json,
-            "/repairCommand",
-            Value::Null,
-            &format!("logged {command} repair command"),
-        )?;
+        // bd-tzlmo: the repair travels WITH the degradation. When `eval run`
+        // honestly reports an unloadable model it also names the fix, so Null
+        // is only correct where there was nothing to repair. Keyed on the same
+        // array as the clause above so the two cannot disagree: no
+        // degradations means no repair, and a degradation means the repair has
+        // to be an actionable `ee` command rather than prose.
+        match log_json.pointer("/repairCommand") {
+            _ if logged_codes.is_empty() => ensure_json_pointer(
+                &log_json,
+                "/repairCommand",
+                Value::Null,
+                &format!("logged {command} repair command"),
+            )?,
+            Some(Value::String(repair)) => ensure(
+                repair.starts_with("ee "),
+                format!("logged {command} repair command must be runnable, got `{repair}`"),
+            )?,
+            other => {
+                return Err(format!(
+                    "logged {command} reported degradations {logged_codes:?} but no repair command: {other:?}"
+                ));
+            }
+        }
         ensure_json_pointer(
             &log_json,
             "/commandBoundaryMatrixRow",
@@ -3454,11 +3471,24 @@ fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel
         }),
         "eval run pack-quality verdict",
     )?;
-    ensure_json_pointer(
-        &result.parsed,
-        "/data/artifactPaths/0/stdout",
-        json!("target/ee-e2e/usr_pre_task_brief/<run-id>/04-context.stdout.json"),
-        "eval run pack-quality artifact path",
+    // bd-tzlmo: the old expectation was the literal string
+    // "target/ee-e2e/usr_pre_task_brief/<run-id>/04-context.stdout.json",
+    // including the `<run-id>` placeholder, so it could never match a real
+    // path -- the product emits a concrete artifact path, and the run writes
+    // into a per-case temp directory whose name carries a random component.
+    // Assert the part that IS contractual: the first artifact names a readable
+    // JSON artifact. Deliberately not matching the directory layout, so a
+    // future relocation of the artifact root does not re-red this row.
+    let artifact_stdout = result
+        .parsed
+        .pointer("/data/artifactPaths/0/stdout")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "eval run pack-quality must report a stdout artifact path".to_owned())?;
+    ensure(
+        artifact_stdout.ends_with(".json"),
+        format!(
+            "eval run pack-quality artifact path must be a JSON artifact, got `{artifact_stdout}`"
+        ),
     )?;
     ensure_json_pointer(
         &result.parsed,
