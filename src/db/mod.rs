@@ -1262,13 +1262,64 @@ impl DbConnection {
         Self::open(DatabaseConfig::memory())
     }
 
+    /// Open a read-write file database, creating it owner-only when it did
+    /// not already exist (bd-db-layer-store-create-mode-xzpq1).
+    ///
+    /// `ee init` already chmods the store it creates to `0o600`
+    /// (src/core/init.rs), and `SecurityProfile::Default` declares `0o600` the
+    /// maximum acceptable mode for a database. This path did neither, so a
+    /// store created through the db layer rather than through `init` landed at
+    /// the process umask -- `0o644` under the usual `umask 022` -- which the
+    /// product's own default profile forbids. The two creation paths now
+    /// agree.
     pub fn open_file(path: impl Into<PathBuf>) -> Result<Self> {
-        Self::open(DatabaseConfig::file(path))
+        let path = path.into();
+        // Observed BEFORE opening, so an existing store keeps the mode its
+        // operator chose. A peer could create the file in the gap; the worst
+        // consequence is that we tighten a brand-new store to the maximum the
+        // Default profile already requires, so the race is benign.
+        let is_new = !path.exists();
+        let connection = Self::open(DatabaseConfig::file(path.clone()))?;
+        if is_new {
+            Self::restrict_new_database_mode(&path);
+        }
+        Ok(connection)
     }
 
     pub fn open_file_read_only(path: impl Into<PathBuf>) -> Result<Self> {
         Self::open(DatabaseConfig::read_only_file(path))
     }
+
+    /// Tighten a database file this process just created to owner-only
+    /// (bd-db-layer-store-create-mode-xzpq1).
+    ///
+    /// BEST-EFFORT AND DELIBERATELY NON-FATAL. Refusing to hand back a working
+    /// connection because a chmod failed would turn a hardening step into an
+    /// outage, and the layering here is "creation tries, audit verifies":
+    /// `crate::policy::security_profile::check_workspace_permissions` is the
+    /// surface that reports the mode a store actually has, so a silent failure
+    /// here is observable there rather than invisible.
+    ///
+    /// NOT COVERED: the `-wal` and `-shm` sidecars. SQLite creates them lazily
+    /// on first write, so they do not exist at open time and cannot be
+    /// chmodded from here. A `0o600` database beside a `0o644` WAL is not a
+    /// complete fix, and the owning bead records that as outstanding rather
+    /// than implied.
+    #[cfg(unix)]
+    fn restrict_new_database_mode(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::debug!(
+                target: "ee::db",
+                path = %path.display(),
+                %error,
+                "could not tighten a newly created store to owner-only"
+            );
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn restrict_new_database_mode(_path: &Path) {}
 
     pub fn open_schema_only(path: impl Into<PathBuf>) -> Result<Self> {
         Self::open(DatabaseConfig::schema_only(path))
@@ -47445,6 +47496,69 @@ mod tests {
             &config.mode(),
             &DatabaseOpenMode::ReadWrite,
             "memory config mode",
+        )
+    }
+
+    /// bd-db-layer-store-create-mode-xzpq1: a store created through the db
+    /// layer must land at the same mode `ee init` gives it, which is the
+    /// maximum `SecurityProfile::Default` accepts.
+    ///
+    /// Reads the mode BACK off disk rather than inspecting the call, because
+    /// the whole defect was that a creation path nobody had measured
+    /// disagreed with the policy that judges it.
+    #[cfg(unix)]
+    #[test]
+    fn open_file_creates_the_store_owner_only_bd_db_layer_store_create_mode() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let path = tempdir.path().join("fresh-store.db");
+        {
+            let _connection = DbConnection::open_file(&path)?;
+        }
+
+        let mode = std::fs::metadata(&path)
+            .map_err(|error| TestFailure::new(error.to_string()))?
+            .permissions()
+            .mode()
+            & 0o777;
+        ensure_equal(&mode, &0o600, "a newly created store is owner-only")
+    }
+
+    /// CONTROL for the rule above: an EXISTING store keeps the mode its
+    /// operator chose.
+    ///
+    /// The tightening is keyed on "this process just created the file", not on
+    /// "every open". Without this control the implementation could chmod on
+    /// every open -- silently overriding a deliberate 0o640 group-read setup
+    /// on every single connection -- and the test above would still pass.
+    #[cfg(unix)]
+    #[test]
+    fn open_file_leaves_an_existing_store_mode_alone_bd_db_layer_store_create_mode() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let path = tempdir.path().join("existing-store.db");
+        {
+            let _connection = DbConnection::open_file(&path)?;
+        }
+        // An operator-chosen mode that is NOT the default we would apply.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        {
+            let _reopened = DbConnection::open_file(&path)?;
+        }
+
+        let mode = std::fs::metadata(&path)
+            .map_err(|error| TestFailure::new(error.to_string()))?
+            .permissions()
+            .mode()
+            & 0o777;
+        ensure_equal(
+            &mode,
+            &0o640,
+            "reopening must not re-chmod an existing store",
         )
     }
 
