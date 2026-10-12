@@ -36,6 +36,21 @@
       "effect": "guidance"
     },
     {
+      "finding": "database_locked",
+      "op_kind": "manual",
+      "effect": "guidance"
+    },
+    {
+      "finding": "database_unavailable",
+      "op_kind": "manual",
+      "effect": "guidance"
+    },
+    {
+      "finding": "database_migration_drift",
+      "op_kind": "manual",
+      "effect": "guidance"
+    },
+    {
       "finding": "database_missing",
       "op_kind": "manual",
       "effect": "guidance"
@@ -59,6 +74,16 @@
       "finding": "cass_integration_drift",
       "op_kind": "manual",
       "effect": "guidance"
+    },
+    {
+      "finding": "wal_checkpoint_pending",
+      "op_kind": "run_wal_checkpoint",
+      "effect": "guidance"
+    },
+    {
+      "finding": "workspace_config_malformed_toml",
+      "op_kind": "quarantine_by_rename",
+      "effect": "repair"
     }
   ],
   "exit_codes": [
