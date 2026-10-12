@@ -1,7 +1,17 @@
 name: Doc and registry contracts
 
-# bd-479c6 / bd-nnheo: restores a hosted gate for the doc-and-registry contract
-# tests, which had none.
+# bd-479c6 / bd-nnheo: a hosted gate for the doc-and-registry contract tests,
+# which had none.
+#
+# INERT AS OF 2026-10-12, AND NOT BECAUSE OF ANYTHING IN THIS FILE. GitHub
+# Actions is disabled REPOSITORY-WIDE:
+#   gh api repos/<owner>/<repo>/actions/permissions -> {"enabled":false}
+# The most recent run of any workflow here is 2026-10-08, and main has taken
+# many pushes since. Repository-level and workflow-level switches are separate,
+# so `gh workflow list` reports this lane active while nothing can run. This
+# file is correct and registered; it starts gating the moment Actions is
+# re-enabled, and gates nothing before that. Do not read a green checkmark that
+# never appeared as a pass -- see bd-479c6.
 #
 # WHY THIS EXISTS. `CI` has been disabled_manually since 2026-08-27, and the
 # only broad `cargo test --tests` invocation in .github/workflows lives inside
