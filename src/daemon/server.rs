@@ -7052,8 +7052,73 @@ mod tests {
         assert_eq!(
             metrics.hits + metrics.misses,
             0,
-            "scheduling alone must not record warm-fetch hits or misses; only \
-             record_warm_fetch may, and nothing executes fetches yet"
+            "scheduling alone must not record warm-fetch hits or misses; credit \
+             requires a STAGED batch, which only the speculative worker creates \
+             (bd-16pwc.7), and no batch was staged here"
+        );
+    }
+
+    /// bd-16pwc.7: credit is awarded by the PRODUCTION request path, not only
+    /// by the coordinator API that its own unit tests drive directly.
+    ///
+    /// The unit tests in `core::cass_prefetch` prove the bookkeeping against a
+    /// hand-driven coordinator. This one proves the WIRING: that
+    /// `plan_and_observe_cass_prefetch` -- the function the daemon context
+    /// handler actually calls -- settles a staged batch and moves `hits`.
+    /// Before this leg existed, `record_warm_fetch` had no production caller at
+    /// all, so these counters could not move no matter what traffic arrived.
+    ///
+    /// NO-CLAIM: this covers the credit site on the request path. It does not
+    /// drive a full `ee.daemon.context` call with pack content, so it is not
+    /// yet the end-to-end daemon-traffic proof bd-16pwc.4 asks for.
+    #[test]
+    fn cass_prefetch_awards_a_hit_through_the_request_path_bd_16pwc_7() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+
+        // Two real requests, so the history exists and the key is realistic.
+        prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "deploy", Some(7));
+        prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "release", Some(7));
+
+        // Stand in for the speculative worker completing a batch. This is the
+        // ONE step the request path does not perform itself: CassPrefetchWorker
+        // calls exactly this after `warm_prefetch_lexical` returns, with the
+        // elapsed time it measured. Same generation pair and corpus revision
+        // the request path derives, or the batch would expire instead of
+        // matching.
+        assert_eq!(
+            coordinator
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record_warm_batch(
+                    AgentScope::new(TEST_AGENT_ID),
+                    PREFETCH_WORKSPACE.to_owned(),
+                    vec![crate::core::cass_prefetch::TopicId::new("deploy")],
+                    PrefetchGeneration::new(0, 7),
+                    crate::core::index::expected_index_corpus_revision(),
+                    Duration::from_millis(1),
+                ),
+            None,
+            "a within-budget batch stages without a degraded code"
+        );
+        assert_eq!(
+            prefetch_metrics(&coordinator).hits,
+            0,
+            "staging alone must award nothing; a hit is a claim about a LATER request"
+        );
+
+        // A third REAL request for the warmed topic, through the production
+        // path, is what awards the hit.
+        prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "deploy", Some(7));
+
+        let metrics = prefetch_metrics(&coordinator);
+        assert_eq!(
+            metrics.hits, 1,
+            "the request path must award exactly one hit for a warmed topic: {metrics:?}"
+        );
+        assert_eq!(
+            metrics.misses, 0,
+            "a coherent batch whose topic was requested records no miss: {metrics:?}"
         );
     }
 
