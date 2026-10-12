@@ -1,0 +1,146 @@
+name: Doc and registry contracts
+
+# bd-479c6 / bd-nnheo: restores a hosted gate for the doc-and-registry contract
+# tests, which had none.
+#
+# WHY THIS EXISTS. `CI` has been disabled_manually since 2026-08-27, and the
+# only broad `cargo test --tests` invocation in .github/workflows lives inside
+# that disabled workflow. The one always-active workflow (CI Static) never runs
+# cargo test. Six active workflows DO invoke `--test integration_a_d`, and each
+# filters to a single named test. That shard announces 763 tests, so four named
+# filters were its entire hosted coverage.
+#
+# Measured consequence on 2026-10-12, found only by widening a local filter:
+# `every_j6_fixture_code_is_classified_in_taxonomy` — which calls ensure(), so
+# it BLOCKS — was failing on main because two J6 fixture codes shipped with no
+# taxonomy row, and 3 of the 7 auto_enroll tests were failing on doc drift. A
+# gate that blocks and a gate that does not exist are indistinguishable while
+# nothing invokes either.
+#
+# SCOPE IS DELIBERATELY NARROW, so this lane is green the day it lands. It runs
+# the two modules that were verified green at the commit this file accompanies:
+# auto_enroll_documentation_consistency (7 tests) and
+# degraded_code_taxonomy_consistency_test (4 tests). Both are pure file readers —
+# they compare docs against registries and touch no runtime — so the cost here is
+# the build, not the tests.
+#
+# `degraded_honesty` is INTENTIONALLY EXCLUDED. It has 5 known failures on main:
+# four share one cause and are blocked on bd-9zfku (ADR 0088 splits the `repair`
+# field so a runnable command and advisory prose stop competing for it), and one
+# is bd-tk7uq's legitimate-output marker collision. Adding it today would land
+# this lane born-red, which is how a baseline decays into a permanent allowlist.
+# Add it in the commit that greens those rows, not before.
+#
+# To retire this lane, set `if: ${{ false }}` on the job the way
+# apply-native-evidence-20260917.yml does. Do not delete the file.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # The inputs these two modules actually read, enumerated from their own
+    # source rather than guessed. If a test starts reading a new file, add it
+    # here in the same commit or this lane goes quiet about it.
+    paths:
+      - docs/degraded_code_taxonomy.md
+      - docs/agent-ux/auto_enrollment_onboarding.md
+      - docs/migration-guide.md
+      - docs/adr/0038-auto-enrollment-zero-touch.md
+      - README.md
+      - docs/schemas/**
+      - tests/fixtures/failure_modes/**
+      - tests/auto_enroll_documentation_consistency.rs
+      - tests/degraded_code_taxonomy_consistency_test.rs
+      - src/config/env_registry.rs
+      - src/db/mod.rs
+      - .github/workflows/doc-registry-contracts-20261012.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: doc-registry-contracts-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-08-31
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      EE_EMBED_DOWNLOAD: 'off'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
+        with:
+          toolchain: nightly-2026-08-31
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: doc-registry-contracts-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            core-memory-${{ runner.os }}-nightly-2026-08-31-${{ hashFiles('Cargo.lock') }}-
+      - name: Guard provenance and build the test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Provenance guard, same reasoning as decision-atomicity.yml: if the
+          # checkout is not the commit that triggered the run, every verdict
+          # below describes a tree nobody asked about.
+          checked_out_sha=$(git rev-parse HEAD)
+          if test "$checked_out_sha" != "$GITHUB_SHA"; then
+            echo "ATTRIBUTION: provenance guard STOPPED this lane -- the checkout is $checked_out_sha but the run was triggered for $GITHUB_SHA."
+            exit 1
+          fi
+          # Build in its own step, UNBOUNDED inside the job timeout. A cold
+          # build of this crate takes far longer than any sane per-test
+          # timeout, so wrapping build+run in one `timeout` would report a
+          # slow compile as a test failure. Separating them also means the
+          # next step's timeout measures only test execution.
+          cargo test --locked --test integration_a_d --no-run
+      - name: Run the doc and registry contract tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/doc-registry-contracts.log"
+          # 10m is generous: all 11 tests read files and compare strings, and
+          # the binary is already built by the previous step.
+          timeout 10m cargo test --locked --test integration_a_d \
+            auto_enroll_documentation_consistency \
+            degraded_code_taxonomy_consistency_test \
+            -- --test-threads=1 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+
+          # A cargo exit code alone cannot distinguish "all tests passed" from
+          # "the binary never ran", so grade the log too. 124 is the `timeout`
+          # kill, which otherwise reads as an ordinary failure.
+          if test "$rc" -eq 124; then
+            echo "ATTRIBUTION: the test command was KILLED at its 20m timeout, so this run graded nothing."
+            exit 1
+          fi
+          if test "$rc" -ne 0; then
+            echo "ATTRIBUTION: cargo test exited $rc. The failures above are doc-or-registry drift, not flakes: these tests read files and compare them against registries in src/."
+            exit "$rc"
+          fi
+          if ! grep -Eq '^test result: ok\. [0-9]+ passed; 0 failed' "$log"; then
+            echo "ATTRIBUTION: cargo test exited 0 but the log does NOT grade green, so no test result line was produced. Treating as a failure rather than a pass."
+            exit 1
+          fi
+
+          # Both modules must actually have run. Without this, a filter typo or
+          # a renamed module would report a cheerful green over zero tests --
+          # which is the same defect class this whole lane exists to catch.
+          for module in auto_enroll_documentation_consistency degraded_code_taxonomy_consistency_test; do
+            if ! grep -Fq "test ${module}::" "$log"; then
+              echo "ATTRIBUTION: no test from ${module} appears in the log, so this lane covered nothing for it. A green here would be vacuous."
+              exit 1
+            fi
+          done
