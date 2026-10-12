@@ -351,6 +351,12 @@ pub fn query_anchor_match_context(query: &str) -> AnchorMatchContext {
 /// outside quotes is a field prefix only after a real field name (`id`,
 /// `content`, `title`); anywhere else it separates words. Everything else
 /// passes through unchanged.
+///
+/// Walk option values through the same quote/escape state as ordinary text.
+/// Consuming a whole option at once would miss an opening quote, preserve an
+/// unknown field inside its value, or swallow a closing query group. Only an
+/// original single-colon field prefix has field semantics: removing dashes or
+/// splitting a Rust path must not manufacture a new `title:`/`content:` filter.
 #[must_use]
 pub fn lexical_engine_query(query: &str) -> std::borrow::Cow<'_, str> {
     if !query.contains(['-', ':']) {
@@ -358,26 +364,60 @@ pub fn lexical_engine_query(query: &str) -> std::borrow::Cow<'_, str> {
     }
     let mut out = String::with_capacity(query.len());
     let mut in_quote = false;
+    let mut escaped = false;
     let mut at_token_start = true;
     let mut token_start = 0;
+    let mut field_allowed = true;
     let mut rest = query;
     while let Some(ch) = rest.chars().next() {
+        if escaped {
+            // Preserve the downstream parser's escape verbatim. In particular,
+            // an escaped quote is not the start/end of a phrase.
+            out.push(ch);
+            escaped = false;
+            rest = &rest[ch.len_utf8()..];
+            continue;
+        }
+        if ch == '\\' {
+            out.push(ch);
+            escaped = true;
+            at_token_start = false;
+            field_allowed = false;
+            rest = &rest[1..];
+            continue;
+        }
         if ch == '"' {
             in_quote = !in_quote;
+            out.push(ch);
+            at_token_start = false;
+            field_allowed = false;
+            rest = &rest[1..];
+            continue;
         }
-        if ch == ':' && !in_quote {
-            let field = out[token_start..].trim_start_matches(['(', '+', '-']);
-            if !matches!(field, "id" | "content" | "title") {
-                out.push(' ');
-                at_token_start = true;
-                token_start = out.len();
-                rest = &rest[1..];
-                continue;
-            }
+        if in_quote {
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+            continue;
         }
-        if ch == '-' && at_token_start && !in_quote {
+        if ch == ':' {
+            let field = out[token_start..].trim_start_matches(['+', '-']);
+            let real_field = field_allowed
+                && matches!(field, "id" | "content" | "title")
+                && !rest.starts_with("::");
+            out.push(if real_field { ':' } else { ' ' });
+            // A field's value, an option value, or the tail of a technical
+            // path cannot become another field merely because we split it.
+            field_allowed = false;
+            at_token_start = true;
+            token_start = out.len();
+            rest = &rest[1..];
+            continue;
+        }
+        if ch == '-' && at_token_start {
             let dashes = rest.len() - rest.trim_start_matches('-').len();
-            let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let token_end = rest
+                .find(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | '"'))
+                .unwrap_or(rest.len());
             let word = &rest[dashes..token_end];
             let short_flag = dashes == 1
                 && (1..=3).contains(&word.len())
@@ -388,20 +428,36 @@ pub fn lexical_engine_query(query: &str) -> std::borrow::Cow<'_, str> {
                     .next()
                     .is_some_and(|first| first.is_alphanumeric());
             if short_flag || long_option {
-                out.push_str(word);
-            } else if dashes >= 2 && word.is_empty() {
+                // Strip only the prefix. Colons, quoted option values and
+                // group delimiters still pass through the common state machine.
+                field_allowed = false;
+            } else if dashes >= 2
+                && word.is_empty()
+                && rest[dashes..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| next.is_whitespace() || next == ')')
+            {
                 // A bare `--` ends options in a command line; it names nothing.
+                field_allowed = false;
             } else {
-                out.push_str(&rest[..token_end]);
+                out.push_str(&rest[..dashes]);
             }
-            rest = &rest[token_end..];
+            rest = &rest[dashes..];
             at_token_start = false;
             continue;
         }
         out.push(ch);
-        at_token_start = ch.is_whitespace() || ch == '(';
-        if at_token_start {
+        if ch.is_whitespace() || matches!(ch, '(' | ')') {
+            at_token_start = true;
+            field_allowed = true;
             token_start = out.len();
+        } else if ch == '+' && at_token_start {
+            // Required-clause syntax does not turn the following option into
+            // an exclusion, and must not hide an otherwise valid field name.
+            token_start = out.len();
+        } else {
+            at_token_start = false;
         }
         rest = &rest[ch.len_utf8()..];
     }
@@ -777,5 +833,186 @@ mod tests {
             lexical_engine_query("no dashes here"),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+
+    #[test]
+    fn lexical_options_do_not_bypass_quoted_values_or_excluded_phrases() {
+        for (query, expected) in [
+            (
+                r#"--message="std::fs --check" File::open"#,
+                r#"message="std::fs --check" File  open"#,
+            ),
+            (
+                r#"release -"legacy --no-verify" --check"#,
+                r#"release -"legacy --no-verify" check"#,
+            ),
+            (
+                r#"--message="quoted \"value\" --flag" --check"#,
+                r#"message="quoted \"value\" --flag" check"#,
+            ),
+            (
+                r#"--message="unfinished --check std::fs"#,
+                r#"message="unfinished --check std::fs"#,
+            ),
+        ] {
+            assert_eq!(lexical_engine_query(query), expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn lexical_escapes_never_change_the_phrase_state() {
+        for (query, expected) in [
+            (r#"\" --check File::open"#, r#"\" check File  open"#),
+            (
+                r#""before \" --check std::fs" --verify"#,
+                r#""before \" --check std::fs" verify"#,
+            ),
+            (r"\-legacy --check", r"\-legacy check"),
+            (r"title\:release --check", r"title\:release check"),
+            (r"C:\repo\cache.rs:12 --check", r"C \repo\cache.rs 12 check"),
+        ] {
+            assert_eq!(lexical_engine_query(query), expected, "{query}");
+        }
+        for count in 0..=8 {
+            let slashes = "\\".repeat(count);
+            let query = format!("{slashes}\"--check std::fs");
+            let expected = if count % 2 == 0 {
+                query.clone()
+            } else {
+                // An escaped quote remains part of the current bare token;
+                // its dashes are not an independent option prefix.
+                format!("{slashes}\"--check std  fs")
+            };
+            assert_eq!(lexical_engine_query(&query), expected, "{count} slashes");
+        }
+    }
+
+    #[test]
+    fn lexical_field_and_group_boundaries_keep_options_searchable() {
+        for (query, expected) in [
+            ("content:--check", "content:check"),
+            ("title:-j8", "title:j8"),
+            ("content:(-p OR -j8)", "content:(p OR j8)"),
+            ("(+--check OR (-rf))", "(+check OR (rf))"),
+            ("(-p) OR (--check)", "(p) OR (check)"),
+            ("-- --check", " check"),
+            ("(--)", "()"),
+        ] {
+            assert_eq!(lexical_engine_query(query), expected, "{query}");
+        }
+        for query in [
+            "release -legacy",
+            r#"release -"legacy release""#,
+            "+title:release -content:legacy",
+            r#"content:"cargo fmt --check""#,
+            "(title:release OR content:pack)",
+        ] {
+            assert_eq!(lexical_engine_query(query), query);
+        }
+    }
+
+    #[test]
+    fn lexical_technical_colons_cannot_invent_reserved_field_filters() {
+        for (query, expected) in [
+            ("id::from_str", "id  from_str"),
+            ("title::render", "title  render"),
+            ("std::content:render", "std  content render"),
+            ("--title:release", "title release"),
+            ("--filter=unknown:release", "filter=unknown release"),
+            ("--target=std::fs", "target=std  fs"),
+            ("--check title:release", "check title:release"),
+            ("title:release content:pack", "title:release content:pack"),
+        ] {
+            assert_eq!(lexical_engine_query(query), expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn lexical_normalization_preserves_unicode_source_and_is_idempotent() {
+        let pieces = [
+            "資料", "🦀", "--check", "-legacy", "id::read", "title:release",
+            r#"\""#, "\"", "(", ")", " ", ":", "\\",
+        ];
+        for left in pieces {
+            for middle in pieces {
+                for right in pieces {
+                    let query = format!("{left}{middle}{right}");
+                    let source = query.clone();
+                    let normalized = lexical_engine_query(&query);
+                    assert_eq!(query, source, "source query was rewritten");
+                    assert!(normalized.len() <= query.len());
+                    assert_eq!(
+                        lexical_engine_query(&normalized),
+                        normalized,
+                        "normalization drifted for {query:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn lexical_command_queries_retrieve_the_expected_backend_documents() -> Result<(), String> {
+        use crate::search::{IndexableDocument, LexicalRead, LexicalWrite, TantivyIndex};
+        use std::collections::BTreeSet;
+
+        crate::core::run_cli_future(async {
+            let cx = asupersync::Cx::current().ok_or("test runtime context missing")?;
+            let index = TantivyIndex::in_memory().map_err(|error| error.to_string())?;
+            let mut documents = vec![
+                IndexableDocument::new("evidence-command", "Run cargo fmt --check before release."),
+                IndexableDocument::new(
+                    "evidence-legacy",
+                    "Run cargo fmt --check before release. legacy --no-verify",
+                ),
+                IndexableDocument::new("evidence-flags", "Run cargo test -p ee -j8."),
+                IndexableDocument::new(
+                    "evidence-symbol",
+                    "id::from_str resolves source identities. Use std::fs::read for source bytes.",
+                ),
+                IndexableDocument::new("title-only", "An unrelated packaging observation.")
+                    .with_title("check"),
+            ];
+            for document in &mut documents {
+                document
+                    .metadata
+                    .insert("source_marker".to_owned(), document.id.clone());
+            }
+            index
+                .index_documents(&cx, &documents)
+                .await
+                .map_err(|error| error.to_string())?;
+            index.commit(&cx).await.map_err(|error| error.to_string())?;
+            for (query, expected) in [
+                ("content:--check", vec!["evidence-command", "evidence-legacy"]),
+                ("content:--check -legacy", vec!["evidence-command"]),
+                (
+                    r#"content:--check -"legacy --no-verify""#,
+                    vec!["evidence-command"],
+                ),
+                ("content:(-p OR -j8)", vec!["evidence-flags"]),
+                ("id::from_str", vec!["evidence-symbol"]),
+                ("--target=std::fs", vec!["evidence-symbol"]),
+            ] {
+                let normalized = lexical_engine_query(query);
+                let hits = index
+                    .search(&cx, &normalized, 10)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let actual: BTreeSet<_> = hits.iter().map(|hit| hit.doc_id.to_string()).collect();
+                let expected: BTreeSet<_> = expected.into_iter().map(str::to_owned).collect();
+                assert_eq!(actual, expected, "query: {query}; normalized: {normalized}");
+                for hit in &hits {
+                    let wire = serde_json::to_value(hit).map_err(|error| error.to_string())?;
+                    assert_eq!(
+                        wire["metadata"]["source_marker"].as_str(),
+                        Some(hit.doc_id.as_str())
+                    );
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
     }
 }
