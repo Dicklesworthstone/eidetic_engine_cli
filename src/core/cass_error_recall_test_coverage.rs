@@ -12,11 +12,19 @@ use super::{MAX_SCANNED_OUTPUT_BYTES, ToolOutput, compiler};
 mod plain;
 #[path = "cass_error_recall_structured_test_coverage.rs"]
 mod structured;
+#[path = "cass_error_recall_js_tests.rs"]
+pub(super) mod javascript;
 
 pub(super) struct Requirement(structured::Requirement);
 
 impl Requirement {
     pub(super) fn capture(output: &ToolOutput, process_complete: bool) -> Self {
+        // A typed JavaScript failure must not fall back to generic invocation
+        // equality. Until subject coverage is available, retain the error but
+        // abstain from asserting that another report proves its repair.
+        if !matches!(javascript::inspect(&output.text), Ok(None)) {
+            return Self(structured::Requirement::Unproven);
+        }
         Self(match plain::project(output) {
             Ok(Some(projected)) => structured::Requirement::capture(&projected, process_complete),
             Ok(None) => structured::Requirement::capture(output, process_complete),
@@ -29,6 +37,10 @@ impl Requirement {
     }
 
     pub(super) fn refresh(&mut self, output: &ToolOutput, process_complete: bool) {
+        if !matches!(javascript::inspect(&output.text), Ok(None)) {
+            self.0 = structured::Requirement::Unproven;
+            return;
+        }
         match plain::project(output) {
             Ok(Some(projected)) => self.0.refresh(&projected, process_complete),
             Ok(None) => self.0.refresh(output, process_complete),
