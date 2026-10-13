@@ -238,8 +238,8 @@ mod tests {
         }
         let mut inspected = 0;
         let error = diff_with_digest(
-            &super::super::digest_map(original),
-            &inputs(original),
+            &super::super::digest_map(&original),
+            &inputs(&original),
             &changed,
             IDENTITY.to_owned(),
             |document| {
