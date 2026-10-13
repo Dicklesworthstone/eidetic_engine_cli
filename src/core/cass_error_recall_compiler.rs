@@ -26,6 +26,16 @@ pub(super) struct CompilerOutput {
     pub diagnostics: Vec<CanonicalDiagnostic>,
     pub failed: bool,
     pub allows_completion: bool,
+    /// Only actual libtest streams may enter the test-inventory projection.
+    pub has_test_execution: bool,
+    /// Transient commitments to linted files, never source text or provenance.
+    pub eslint_coverage: Option<EslintCoverage>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct EslintCoverage {
+    pub checked_files: BTreeSet<[u8; 32]>,
+    pub failed_files: BTreeSet<[u8; 32]>,
 }
 
 #[derive(Deserialize)]
@@ -77,7 +87,8 @@ fn cargo_reason(reason: &str) -> bool {
 /// deserialization rejects duplicate discriminator, level, code and status
 /// fields while tolerating unrelated future Rust producer metadata.
 pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
-    if !text.trim_start().starts_with('{') {
+    let start = text.trim_start();
+    if !start.starts_with(['{', '[']) {
         return Ok(None);
     }
     if text.len() > MAX_SCANNED_OUTPUT_BYTES {
@@ -85,6 +96,10 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     }
     if let Some(output) = checkers::inspect(text)? {
         return Ok(Some(output));
+    }
+    if start.starts_with('[') {
+        // Unrelated arrays are data, not an object-shaped compiler stream.
+        return Ok(None);
     }
     // Identify the family before interpreting generic field names like code
     // or message. An unrelated producer may legitimately use other shapes.
@@ -266,6 +281,7 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         count += 1;
         consumed = end;
     }
+    output.has_test_execution = harness.seen();
     output.allows_completion = !output.failed
         && (!cargo || finished == Some(true))
         && (!harness.seen() || harness.allows_completion());

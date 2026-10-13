@@ -1,6 +1,6 @@
 //! Complete external checker reports for the CASS failure-to-repair loop.
 //!
-//! Support Pyright --outputjson and ESLint --format json-with-metadata.
+//! Support Pyright --outputjson and both ESLint JSON formatters.
 //! Producer summaries are cross-checked against every diagnostic before any
 //! class is returned. A clean, nonempty report only permits the caller's
 //! independent process-completion check; it never supplies completion itself.
@@ -12,8 +12,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-    CanonicalDiagnostic, CompilerOutput, MAX_COMPILER_RECORDS, MAX_DIAGNOSTICS_PER_FAILURE,
-    MAX_SCANNED_OUTPUT_BYTES,
+    CanonicalDiagnostic, CompilerOutput, EslintCoverage, MAX_COMPILER_RECORDS,
+    MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES,
 };
 
 fn field_present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
@@ -25,11 +25,15 @@ fn field_present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bo
 /// its validator through Option's absent/null equivalence. Probe the first
 /// object only, then require a complete single document for a selected family.
 pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
-    if !text.trim_start().starts_with('{') {
+    let start = text.trim_start();
+    if !start.starts_with(['{', '[']) {
         return Ok(None);
     }
     if text.len() > MAX_SCANNED_OUTPUT_BYTES {
         return Err(());
+    }
+    if start.starts_with('[') {
+        return inspect_eslint_array(text);
     }
     #[derive(Deserialize)]
     struct Family {
@@ -72,6 +76,24 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         return inspect_eslint(text).map(Some);
     }
     Ok(None)
+}
+
+/// ESLint --format json emits the file results directly, without metadata.
+/// Probe only top-level result markers; strings and nested examples cannot
+/// become diagnostics. Reparse the original bytes into typed rows so the probe
+/// cannot erase duplicate fields. An empty array proves no analyzed files.
+fn inspect_eslint_array(text: &str) -> Result<Option<CompilerOutput>, ()> {
+    let value: Value = serde_json::from_str(text).map_err(|_| ())?;
+    let files = value.as_array().ok_or(())?;
+    let claimed = files.iter().any(|file| {
+        (file.get("filePath").is_some() && file.get("messages").is_some())
+            || (file.get("errorCount").is_some() && file.get("warningCount").is_some())
+    });
+    if !files.is_empty() && !claimed {
+        return Ok(None);
+    }
+    let files: Vec<EslintFile> = serde_json::from_str(text).map_err(|_| ())?;
+    inspect_eslint_files(files).map(Some)
 }
 
 fn canonical(producer: &str, rule: Option<&str>, message: &str) -> CanonicalDiagnostic {
@@ -266,14 +288,24 @@ impl EslintMessage {
 
 fn inspect_eslint(text: &str) -> Result<CompilerOutput, ()> {
     let report: EslintReport = serde_json::from_str(text).map_err(|_| ())?;
-    if report.results.len() > MAX_COMPILER_RECORDS || !report.metadata.rules_meta.is_object() {
+    if !report.metadata.rules_meta.is_object() {
+        return Err(());
+    }
+    inspect_eslint_files(report.results)
+}
+
+/// Both formatters carry the same LintResult rows. Validate every row and
+/// counter once, including files beyond the returned-diagnostic cap.
+fn inspect_eslint_files(results: Vec<EslintFile>) -> Result<CompilerOutput, ()> {
+    if results.len() > MAX_COMPILER_RECORDS {
         return Err(());
     }
     let mut output = CompilerOutput::default();
     let mut keys = BTreeSet::new();
     let mut files = BTreeSet::new();
     let mut messages = 0_usize;
-    for file in &report.results {
+    let mut coverage = EslintCoverage::default();
+    for file in &results {
         if file.file_path.trim().is_empty() || !files.insert(file.file_path.as_str()) {
             return Err(());
         }
@@ -301,8 +333,21 @@ fn inspect_eslint(text: &str) -> Result<CompilerOutput, ()> {
         if counts != [file.error_count, file.fatal_error_count, file.warning_count] {
             return Err(());
         }
+        // Exact producer paths bind proof coverage without becoming an error
+        // key, stored metadata or a public locator. Do not case-fold or resolve
+        // paths on this host: two different source identities must not alias.
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"ee.cass.eslint.proof_file.v1\0");
+        hash.update(&(file.file_path.len() as u64).to_le_bytes());
+        hash.update(file.file_path.as_bytes());
+        let identity = *hash.finalize().as_bytes();
+        coverage.checked_files.insert(identity);
+        if file.error_count > 0 {
+            coverage.failed_files.insert(identity);
+        }
     }
-    output.allows_completion = !output.failed && !report.results.is_empty();
+    output.allows_completion = !output.failed && !results.is_empty();
+    output.eslint_coverage = Some(coverage);
     Ok(output)
 }
 
@@ -774,5 +819,135 @@ mod tests {
             assert_eq!(report.resolved_failures, 0, "{command}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn eslint_array_and_metadata_formats_share_diagnostics_and_coverage() {
+        let file = lint_file(vec![lint_message(2), lint_message(1)]);
+        let array = json!([file.clone()]).to_string();
+        let wrapped = lint_report(vec![file]).to_string();
+        let direct = inspect(&array).unwrap().unwrap();
+        let metadata = inspect(&wrapped).unwrap().unwrap();
+        assert_eq!(direct.diagnostics.len(), 1);
+        assert_eq!(direct.diagnostics, metadata.diagnostics);
+        let direct_coverage = direct.eslint_coverage.unwrap();
+        let metadata_coverage = metadata.eslint_coverage.unwrap();
+        assert_eq!(direct_coverage.checked_files, metadata_coverage.checked_files);
+        assert_eq!(direct_coverage.failed_files, metadata_coverage.failed_files);
+        assert_eq!(direct_coverage.failed_files.len(), 1);
+        assert!(!direct.has_test_execution);
+        assert_eq!(failure_diagnostics(&optimistic(array.clone())), direct.diagnostics);
+        assert_eq!(structured_error_diagnostics(&array), direct.diagnostics);
+        assert!(optimistic(array.clone()).failed());
+        assert!(!optimistic(array).succeeded());
+        let public = format!("{:?}", direct.diagnostics).to_lowercase();
+        for hidden in ["private_source", "private_output", "private_fix", "/private/project"] {
+            assert!(!public.contains(hidden));
+        }
+    }
+
+    #[test]
+    fn eslint_array_success_requires_checked_files_and_independent_completion() {
+        for messages in [Vec::new(), vec![lint_message(1)]] {
+            let text = json!([lint_file(messages)]).to_string();
+            assert!(optimistic(text.clone()).succeeded());
+            assert!(!ToolOutput { text: text.clone(), ..ToolOutput::default() }.succeeded());
+            assert!(!ToolOutput { exit_code: Some(1), ..optimistic(text) }.succeeded());
+        }
+        let empty = inspect("[]").unwrap().unwrap();
+        assert!(empty.diagnostics.is_empty());
+        assert!(!empty.failed);
+        assert!(!empty.allows_completion);
+        assert!(!optimistic("[]".to_owned()).succeeded());
+    }
+
+    #[test]
+    fn eslint_array_refuses_inconsistent_or_mixed_rows() {
+        let original = json!([lint_file(vec![lint_message(2)])]);
+        for (pointer, replacement) in [
+            ("/0/errorCount", json!(0)),
+            ("/0/fatalErrorCount", json!(1)),
+            ("/0/warningCount", json!(1)),
+            ("/0/messages", Value::Null),
+            ("/0/messages/0/severity", json!(3)),
+            ("/0/messages/0/endColumn", json!(1)),
+            ("/0/filePath", Value::Null),
+        ] {
+            let mut bad = original.clone();
+            *bad.pointer_mut(pointer).unwrap() = replacement;
+            let text = bad.to_string();
+            assert!(inspect(&text).is_err(), "{text}");
+            assert!(!optimistic(text.clone()).succeeded());
+            assert!(structured_error_diagnostics(&text).is_empty());
+        }
+        let file = original[0].clone();
+        for bad in [json!([file.clone(), file.clone()]), json!([file.clone(), 0]), json!([null, file])] {
+            assert!(inspect(&bad.to_string()).is_err());
+            assert!(!optimistic(bad.to_string()).succeeded());
+        }
+    }
+
+    #[test]
+    fn eslint_array_duplicate_fields_and_incomplete_documents_never_salvage_prefixes() {
+        let valid = json!([lint_file(Vec::new())]).to_string();
+        for text in [
+            valid.replacen("\"errorCount\":0", "\"errorCount\":1,\"errorCount\":0", 1),
+            valid.replacen("\"messages\":[]", "\"messages\":null,\"messages\":[]", 1),
+            format!("{valid}\n{valid}"),
+            format!("{valid} trailing output"),
+            valid[..valid.len() - 1].to_owned(),
+        ] {
+            assert!(inspect(&text).is_err());
+            assert!(structured_error_diagnostics(&text).is_empty());
+            assert!(!optimistic(text).succeeded());
+        }
+    }
+
+    #[test]
+    fn eslint_array_probe_ignores_strings_and_nested_examples() {
+        for value in [
+            json!(["error[E0277]: example"]),
+            json!([1, null, true]),
+            json!([{"example": lint_file(vec![lint_message(2)])}]),
+            json!([[lint_file(vec![lint_message(2)])]]),
+            json!({"example": [lint_file(vec![lint_message(2)])]}),
+        ] {
+            assert!(inspect(&value.to_string()).unwrap().is_none());
+            assert!(structured_error_diagnostics(&value.to_string()).is_empty());
+        }
+    }
+
+    #[test]
+    fn eslint_array_bounds_include_complete_tail_and_exact_byte_boundary() {
+        let files = (0..MAX_COMPILER_RECORDS)
+            .map(|number| json!({
+                "filePath": format!("/src/{number}.js"), "messages": [],
+                "errorCount": 0, "fatalErrorCount": 0, "warningCount": 0
+            }))
+            .collect::<Vec<_>>();
+        let text = json!(files).to_string();
+        assert!(text.len() < MAX_SCANNED_OUTPUT_BYTES);
+        assert!(inspect(&text).unwrap().unwrap().allows_completion);
+        let exact = format!("{text}{}", " ".repeat(MAX_SCANNED_OUTPUT_BYTES - text.len()));
+        assert!(inspect(&exact).is_ok());
+        assert!(inspect(&format!("{exact} ")).is_err());
+        let mut too_many: Value = serde_json::from_str(&text).unwrap();
+        let mut extra = too_many[0].clone();
+        extra["filePath"] = json!("/src/extra.js");
+        too_many.as_array_mut().unwrap().push(extra);
+        assert!(inspect(&too_many.to_string()).is_err());
+        let messages = ["alpha", "beta", "gamma", "delta", "epsilon"]
+            .into_iter()
+            .map(|word| {
+                let mut message = lint_message(2);
+                message["message"] = json!(format!("Invalid {word} annotation"));
+                message
+            })
+            .collect::<Vec<_>>();
+        let mut tail = json!([lint_file(messages)]);
+        assert_eq!(inspect(&tail.to_string()).unwrap().unwrap().diagnostics.len(), MAX_DIAGNOSTICS_PER_FAILURE);
+        tail[0]["messages"][4]["severity"] = json!(3);
+        assert!(inspect(&tail.to_string()).is_err());
+        assert!(!optimistic(tail.to_string()).succeeded());
     }
 }

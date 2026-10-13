@@ -1,13 +1,13 @@
-//! Bind a libtest repair to the tests that failed, not just the command text.
+//! Bind a repair to the failed execution subjects, not just command text.
 //!
-//! The existing compiler decoder validates the complete bounded JSONL stream.
-//! This second projection retains only transient hashes of exact test names
-//! and terminal outcomes. Suite identity is its complete selected inventory:
-//! libtest does not identify the binary, so duplicate inventories, incomplete
-//! fail-fast inventories and changed membership are conservatively unproven.
-//! These commitments are never stored or substituted for evidence provenance.
+//! The compiler/checker decoder validates complete bounded reports. Libtest
+//! retains transient hashes of exact test names and terminal outcomes. ESLint
+//! retains exact file commitments and requires every failed file in the clean
+//! retry. These commitments are never stored or substituted for provenance.
+//! Libtest suite identity is its complete selected inventory: duplicate,
+//! incomplete fail-fast and changed inventories remain unproven.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 
@@ -40,16 +40,31 @@ pub(super) struct RequiredSuite {
 }
 
 /// Other errors retain their existing exact-invocation proof rules. A typed
-/// test failure cannot fall back to those rules when its coverage is unknown.
+/// test or lint failure cannot fall back when its coverage is unknown.
 pub(super) enum Requirement {
     Other,
     Unproven,
     Libtest(Vec<RequiredSuite>),
+    Eslint(BTreeSet<Name>),
 }
 
 impl Requirement {
     pub(super) fn capture(output: &ToolOutput, process_complete: bool) -> Self {
-        match execution(&output.text) {
+        let decoded = match compiler::inspect(&output.text) {
+            Ok(Some(decoded)) => decoded,
+            Ok(None) => return Self::Other,
+            Err(()) => return Self::Unproven,
+        };
+        if let Some(coverage) = &decoded.eslint_coverage {
+            return if !process_complete {
+                Self::Unproven
+            } else if coverage.failed_files.is_empty() {
+                Self::Other
+            } else {
+                Self::Eslint(coverage.failed_files.clone())
+            };
+        }
+        match execution(&output.text, &decoded) {
             Ok(None) => Self::Other,
             Ok(Some(execution)) if process_complete && execution.complete => {
                 let required: Vec<_> = execution
@@ -79,7 +94,7 @@ impl Requirement {
         !matches!(self, Self::Other)
     }
 
-    /// Later polls may reveal additional failed tests beyond the diagnostic
+    /// Later polls may reveal additional failed subjects beyond the diagnostic
     /// display cap. Replace the requirement from the accumulated output, not
     /// the latest chunk alone. A damaged stream cannot erase an earlier guard.
     pub(super) fn refresh(&mut self, output: &ToolOutput, process_complete: bool) {
@@ -95,6 +110,10 @@ impl Requirement {
         match self {
             Self::Other => true,
             Self::Unproven => false,
+            Self::Eslint(required) => proof
+                .eslint_files
+                .as_ref()
+                .is_some_and(|checked| required.is_subset(checked)),
             Self::Libtest(required) => proof.execution.as_ref().is_some_and(|execution| {
                 required.iter().all(|suite| {
                     execution
@@ -116,6 +135,7 @@ impl Requirement {
 #[derive(Default)]
 pub(super) struct Proof {
     execution: Option<Execution>,
+    eslint_files: Option<BTreeSet<Name>>,
 }
 
 impl Proof {
@@ -123,11 +143,19 @@ impl Proof {
         if !output.succeeded() {
             return Self::default();
         }
+        let Ok(Some(decoded)) = compiler::inspect(&output.text) else {
+            return Self::default();
+        };
         Self {
-            execution: execution(&output.text)
+            execution: execution(&output.text, &decoded)
                 .ok()
                 .flatten()
                 .filter(|execution| execution.complete && execution.allows_completion),
+            eslint_files: decoded
+                .eslint_coverage
+                .as_ref()
+                .filter(|_| decoded.allows_completion)
+                .map(|coverage| coverage.checked_files.clone()),
         }
     }
 }
@@ -149,13 +177,13 @@ fn name_commitment(name: &str) -> Name {
     *hash.finalize().as_bytes()
 }
 
-/// Interpret only a stream already accepted by the shipping decoder. It owns
-/// duplicate-field refusal, ordering, count reconciliation, bounds and status
-/// checks; this projection must never salvage another JSON output family.
-fn execution(text: &str) -> Result<Option<Execution>, ()> {
-    let Some(decoded) = compiler::inspect(text)? else {
+/// Interpret only a libtest stream already accepted by the shipping decoder.
+/// Its explicit family marker prevents lint result arrays from entering this
+/// object-stream projection. The decoder owns all validity and status checks.
+fn execution(text: &str, decoded: &compiler::CompilerOutput) -> Result<Option<Execution>, ()> {
+    if !decoded.has_test_execution {
         return Ok(None);
-    };
+    }
     let mut active: Option<Suite> = None;
     let mut suites = BTreeMap::new();
     let mut seen = false;
@@ -369,5 +397,80 @@ mod tests {
         assert!(!Requirement::capture(&native, true).is_guarded());
         assert_ne!(name_commitment("Case"), name_commitment("case"));
         assert_ne!(name_commitment("path::case"), name_commitment("case"));
+    }
+
+    fn lint(files: &[(&str, bool)], wrapped: bool) -> ToolOutput {
+        let files = files
+            .iter()
+            .map(|(path, failed)| {
+                let messages = if *failed {
+                    vec![json!({"severity": 2, "message": "Unused cache value", "ruleId": "no-unused-vars"})]
+                } else {
+                    Vec::new()
+                };
+                json!({
+                    "filePath": path, "messages": messages,
+                    "errorCount": u64::from(*failed), "fatalErrorCount": 0, "warningCount": 0
+                })
+            })
+            .collect::<Vec<_>>();
+        output(if wrapped {
+            json!({"results": files, "metadata": {"rulesMeta": {}}}).to_string()
+        } else {
+            json!(files).to_string()
+        })
+    }
+
+    #[test]
+    fn lint_proof_covers_every_failed_file_across_both_formats() {
+        for wrapped_failure in [false, true] {
+            let failed = lint(&[("/src/a.js", true), ("/src/b.js", true)], wrapped_failure);
+            assert_eq!(super::super::failure_diagnostics(&failed).len(), 1);
+            let requirement = Requirement::capture(&failed, true);
+            assert!(requirement.is_guarded());
+            for wrapped_proof in [false, true] {
+                for missing in [
+                    vec![("/src/a.js", false)],
+                    vec![("/src/A.js", false), ("/src/b.js", false)],
+                    vec![("/src/a.js", false), ("/src/other.js", false)],
+                ] {
+                    let proof = lint(&missing, wrapped_proof);
+                    assert!(proof.succeeded());
+                    assert!(!requirement.is_verified_by(&Proof::capture(&proof)));
+                }
+                let complete = lint(
+                    &[("/src/extra.js", false), ("/src/b.js", false), ("/src/a.js", false)],
+                    wrapped_proof,
+                );
+                assert!(requirement.is_verified_by(&Proof::capture(&complete)));
+            }
+        }
+    }
+
+    #[test]
+    fn lint_cannot_inherit_generic_json_test_success_or_incomplete_process_proof() {
+        let failed = lint(&[("/src/a.js", true)], false);
+        let requirement = Requirement::capture(&failed, true);
+        for proof in [
+            output("[]".to_owned()),
+            output("[\"ok\"]".to_owned()),
+            output("{\"success\":true}".to_owned()),
+            output(suite(&[("case", "ok")])),
+        ] {
+            assert!(!requirement.is_verified_by(&Proof::capture(&proof)));
+        }
+        let mut proof = lint(&[("/src/a.js", false)], true);
+        let known_good = Proof::capture(&proof);
+        assert!(requirement.is_verified_by(&known_good));
+        proof.exit_code = Some(1);
+        assert!(!requirement.is_verified_by(&Proof::capture(&proof)));
+        assert!(!Requirement::capture(&failed, false).is_verified_by(&known_good));
+        let mut damaged = Requirement::capture(&failed, false);
+        damaged.refresh(&failed, true);
+        assert!(damaged.is_verified_by(&known_good));
+        damaged.refresh(&output(format!("{} trailing", failed.text)), true);
+        assert!(!damaged.is_verified_by(&known_good));
+        damaged.refresh(&output("unrelated".to_owned()), true);
+        assert!(!damaged.is_verified_by(&known_good));
     }
 }

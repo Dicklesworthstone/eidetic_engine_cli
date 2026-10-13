@@ -45,9 +45,9 @@ mod test_coverage;
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
-/// V5 adds Pyright and ESLint structured checker reports. Re-importing an
-/// unchanged older session must reconsider its previously unrecognized arcs.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v5";
+/// V6 adds ordinary ESLint JSON arrays and failed-file proof coverage. Unchanged
+/// older sessions are reconsidered on import without rewriting their evidence.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v6";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -538,7 +538,7 @@ pub(crate) fn session_failure_arcs(
             ) else {
                 continue;
             };
-            // A running failure can reveal more failed tests on later polls.
+            // A running failure can reveal more failed subjects on later polls.
             // Refresh coverage even after its first diagnostics were recorded;
             // the final output, not the four-diagnostic cap, defines the proof.
             for failure in pending
@@ -549,7 +549,7 @@ pub(crate) fn session_failure_arcs(
                     .test_requirement
                     .refresh(&observed.output, observed.complete);
                 if failure.test_requirement.is_guarded() {
-                    // Do not credit a retry launched before the failed test
+                    // Do not credit a retry launched before the failed
                     // invocation's final observation, or narration before it.
                     failure.index = index;
                 }
@@ -1281,15 +1281,15 @@ fn structured_output_allows_completion(text: &str) -> bool {
     if text.len() > MAX_SCANNED_OUTPUT_BYTES {
         return false;
     }
-    if start.starts_with('[') {
-        // Arrays may contain example diagnostics; they do not declare a
-        // native command status. Still require complete JSON for proof.
-        return serde_json::from_str::<Value>(text).is_ok();
-    }
     match compiler::inspect(text) {
         Ok(Some(output)) => return output.allows_completion,
         Err(()) => return false,
         Ok(None) => {}
+    }
+    if start.starts_with('[') {
+        // Unrecognized arrays remain ordinary data. Recognized checker arrays
+        // above must validate completely and cannot prove an empty analysis.
+        return serde_json::from_str::<Value>(text).is_ok();
     }
     #[derive(serde::Deserialize)]
     struct Schema {
@@ -1331,7 +1331,7 @@ fn structured_output_allows_completion(text: &str) -> bool {
                             | "rch_verify_build_admission_denied"
                             | "rch_verify_known_blocker_active"
                             | "rch_verify_proof_broker_reuse_existing"
-                    ) || (code.starts_with("rch_verify_proof_broker_")
+                        ) || (code.starts_with("rch_verify_proof_broker_")
                         && !matches!(
                             code.as_str(),
                             "rch_verify_proof_broker_bypassed"
