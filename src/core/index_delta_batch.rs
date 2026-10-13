@@ -1,9 +1,11 @@
 //! Bounded embedding and WAL batches for a private delta generation.
 //!
 //! Coalescing source writes must also coalesce inference and durable vector
-//! appends. One inference call and one WAL batch cover each bounded group;
-//! every output's identity and the complete response cardinality are checked
-//! before any vector in that group is passed to the writer.
+//! appends. Each bounded group writes every document, but only byte-distinct
+//! uncached inputs need inference. Every fresh output's identity and the whole
+//! response cardinality are checked before any vector reaches the writer.
+
+use std::collections::{BTreeMap, btree_map::Entry};
 
 use frankensearch::VectorIndex;
 use frankensearch::core::traits::IdentityBoundEmbedding;
@@ -15,6 +17,39 @@ use super::{IncrementalFallback, IncrementalFallbackReason, incremental_fallback
 const MAX_BATCH_DOCUMENTS: usize = 32;
 const MAX_BATCH_INPUT_BYTES: usize = 256 * 1024;
 const MAX_BATCH_VECTOR_BYTES: usize = 1024 * 1024;
+const MAX_CACHED_INPUTS: usize = 128;
+const MAX_CACHED_VECTOR_BYTES: usize = 1024 * 1024;
+
+/// Reuse is confined to one tier, expected identity and upsert invocation.
+/// Keys borrow the caller's existing inputs; neither source text nor identity
+/// metadata is copied into the cache. Only validated vectors may enter it;
+/// boxed slices discard a provider's excess Vec capacity before retention.
+/// Once either bound is full, later misses still use normal bounded inference.
+/// This is not a persistent cache or a way around the planner's delta budget.
+#[derive(Default)]
+struct ValidatedInputCache<'a> {
+    vectors: BTreeMap<&'a str, Box<[f32]>>,
+    vector_bytes: usize,
+}
+
+impl<'a> ValidatedInputCache<'a> {
+    fn get(&self, text: &str) -> Option<&[f32]> {
+        self.vectors.get(text).map(Box::as_ref)
+    }
+
+    fn remember(&mut self, text: &'a str, values: Vec<f32>) {
+        let bytes = values.len().saturating_mul(std::mem::size_of::<f32>());
+        if self.vectors.len() >= MAX_CACHED_INPUTS
+            || bytes > MAX_CACHED_VECTOR_BYTES.saturating_sub(self.vector_bytes)
+        {
+            return;
+        }
+        if let Entry::Vacant(entry) = self.vectors.entry(text) {
+            self.vector_bytes += bytes;
+            entry.insert(values.into_boxed_slice());
+        }
+    }
+}
 
 pub(super) fn checkpoint(cx: &asupersync::Cx, tier: &str) -> Result<(), IncrementalFallback> {
     cx.checkpoint()
@@ -27,8 +62,9 @@ fn tier_error(detail: String) -> IncrementalFallback {
 
 /// Bound documents, input bytes, and expected f32 values independently. A
 /// single over-budget document is sent alone, unchanged, so batching never
-/// truncates evidence or prevents progress. This is not a quota on a provider's
-/// internal allocations, its identity metadata, or its wire encoding.
+/// truncates evidence or prevents progress. These bounds apply BEFORE input
+/// deduplication, including all expanded WAL entries. They are not quotas on
+/// a provider's internal allocations, identity metadata, or wire encoding.
 fn batch_len(documents: &[IndexableDocument], dimension: usize) -> usize {
     let vector_bytes = dimension.saturating_mul(std::mem::size_of::<f32>());
     let mut input_bytes = 0_usize;
@@ -55,7 +91,7 @@ fn validate_batch(
 ) -> Result<(), IncrementalFallback> {
     if vectors.len() != expected_count {
         return Err(tier_error(format!(
-            "{tier}-tier embedding batch returned {} vectors for {expected_count} documents",
+            "{tier}-tier embedding batch returned {} vectors for {expected_count} distinct inputs",
             vectors.len(),
         )));
     }
@@ -98,28 +134,64 @@ async fn embed_batches_with(
     tier: &str,
     mut write: impl FnMut(Vec<(String, Vec<f32>)>) -> Result<(), IncrementalFallback>,
 ) -> Result<(), IncrementalFallback> {
+    let mut cache = ValidatedInputCache::default();
     while !documents.is_empty() {
         checkpoint(cx, tier)?;
         let count = batch_len(documents, embedder.dimension());
         let (batch, remainder) = documents.split_at(count);
-        let texts: Vec<_> = batch
-            .iter()
-            .map(|document| document.content.as_str())
-            .collect();
-        let vectors = embedder
-            .embed_batch_bound(cx, &texts)
-            .await
-            .map_err(|error| tier_error(format!("{tier}-tier batch embedding failed: {error}")))?;
+        let mut missing = BTreeMap::new();
+        let mut texts = Vec::new();
+        for document in batch {
+            let text = document.content.as_str();
+            if cache.get(text).is_none()
+                && let Entry::Vacant(entry) = missing.entry(text)
+            {
+                entry.insert(texts.len());
+                // Keep first-occurrence order: the provider's output order
+                // binds these inputs, not the map's lexical key order.
+                texts.push(text);
+            }
+        }
+        let vectors = if texts.is_empty() {
+            Vec::new()
+        } else {
+            embedder
+                .embed_batch_bound(cx, &texts)
+                .await
+                .map_err(|error| {
+                    tier_error(format!("{tier}-tier batch embedding failed: {error}"))
+                })?
+        };
         // Cancellation during inference must be seen before a WAL write even
         // when a custom embedder returns Ok without checking its caller Cx.
+        // Cache-only batches take this checkpoint too; they cannot renew Cx.
         checkpoint(cx, tier)?;
-        validate_batch(&vectors, batch.len(), expected_identity, tier)?;
+        validate_batch(&vectors, texts.len(), expected_identity, tier)?;
         let entries = batch
             .iter()
-            .zip(vectors)
-            .map(|(document, vector)| (document.id.clone(), vector.values))
-            .collect();
+            .map(|document| {
+                let text = document.content.as_str();
+                let values = cache.get(text).or_else(|| {
+                    missing
+                        .get(text)
+                        .and_then(|position| vectors.get(*position))
+                        .map(|vector| vector.values.as_slice())
+                });
+                let values = values.ok_or_else(|| {
+                    tier_error(format!("{tier}-tier embedding batch has an unresolved input"))
+                })?;
+                // Reuse inference, never a document identity or a mutable WAL
+                // buffer. Equal text under different IDs still writes every ID.
+                Ok((document.id.clone(), values.to_vec()))
+            })
+            .collect::<Result<Vec<_>, IncrementalFallback>>()?;
+        checkpoint(cx, tier)?;
         write(entries)?;
+        for (text, vector) in texts.into_iter().zip(vectors) {
+            // All fresh vectors were validated against this invocation's one
+            // expected identity before the write. A failure above caches none.
+            cache.remember(text, vector.values);
+        }
         documents = remainder;
     }
     Ok(())
@@ -137,10 +209,12 @@ mod tests {
     type TestResult = Result<(), String>;
 
     // Real hash inference and identities, with invocation sizes observed at
-    // the trait boundary. No fake vectors or mock index implementation.
+    // the trait boundary. One opt-in fault drops an actual response vector;
+    // no fake vectors or mock index implementation supply successful results.
     struct ObservedHash {
         inner: HashEmbedder,
         sizes: Mutex<Vec<usize>>,
+        truncate_response: bool,
     }
 
     impl ObservedHash {
@@ -148,6 +222,7 @@ mod tests {
             Self {
                 inner: HashEmbedder::default_256(),
                 sizes: Mutex::new(Vec::new()),
+                truncate_response: false,
             }
         }
     }
@@ -170,7 +245,15 @@ mod tests {
                 .lock()
                 .expect("batch observations")
                 .push(texts.len());
-            self.inner.embed_batch(cx, texts)
+            if self.truncate_response {
+                Box::pin(async move {
+                    let mut vectors = self.inner.embed_batch(cx, texts).await?;
+                    let _ = vectors.pop();
+                    Ok(vectors)
+                })
+            } else {
+                self.inner.embed_batch(cx, texts)
+            }
         }
 
         fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
@@ -362,12 +445,292 @@ mod tests {
     }
 
     #[test]
+    fn identical_text_reuses_inference_across_batches_without_merging_documents() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let embedder = ObservedHash::new();
+            let identity = embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint();
+            let mut docs = documents(65);
+            for (position, document) in docs.iter_mut().enumerate() {
+                document.content = if position % 2 == 0 {
+                    "shared repair"
+                } else {
+                    "shared failure"
+                }
+                .to_owned();
+                document.title = Some(format!("distinct title {position}"));
+                document
+                    .metadata
+                    .insert("source".to_owned(), position.to_string());
+            }
+            let expected: Vec<_> = docs
+                .iter()
+                .map(|document| {
+                    (
+                        document.id.clone(),
+                        embedder.inner.embed_sync(&document.content),
+                    )
+                })
+                .collect();
+            let mut written = Vec::new();
+            let mut sizes = Vec::new();
+            embed_batches_with(&cx, &embedder, &docs, &identity, "fast", |entries| {
+                sizes.push(entries.len());
+                written.extend(entries);
+                Ok(())
+            })
+            .await
+            .map_err(|error| error.detail)?;
+            assert_eq!(written, expected);
+            assert_eq!(sizes, vec![32, 32, 1]);
+            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![2]);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn mixed_hits_misses_and_unicode_preserve_exact_input_and_provider_order() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let embedder = ObservedHash::new();
+            let identity = embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint();
+            let mut docs = documents(65);
+            for document in &mut docs[..32] {
+                document.content = "already cached".to_owned();
+            }
+            let bodies = [
+                "z-new",
+                "already cached",
+                "café",
+                "cafe\u{301}",
+                "Café",
+                "",
+                "a-new",
+            ];
+            for (position, document) in docs[32..].iter_mut().enumerate() {
+                document.content = bodies[position % bodies.len()].to_owned();
+            }
+            let expected: Vec<_> = docs
+                .iter()
+                .map(|document| {
+                    (
+                        document.id.clone(),
+                        embedder.inner.embed_sync(&document.content),
+                    )
+                })
+                .collect();
+            let mut written = Vec::new();
+            embed_batches_with(&cx, &embedder, &docs, &identity, "fast", |entries| {
+                written.extend(entries);
+                Ok(())
+            })
+            .await
+            .map_err(|error| error.detail)?;
+            assert_eq!(written, expected);
+            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![1, 6]);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn cache_capacity_bounds_entries_and_vector_bytes_without_replacing_admitted_values() {
+        let hash = HashEmbedder::default_256();
+        let docs = documents(MAX_CACHED_INPUTS + 1);
+        let mut cache = ValidatedInputCache::default();
+        for document in &docs {
+            cache.remember(&document.content, hash.embed_sync(&document.content));
+        }
+        assert_eq!(cache.vectors.len(), MAX_CACHED_INPUTS);
+        assert_eq!(
+            cache.vector_bytes,
+            MAX_CACHED_INPUTS * 256 * std::mem::size_of::<f32>()
+        );
+        assert!(cache.get(&docs[0].content).is_some());
+        assert!(cache.get(&docs[MAX_CACHED_INPUTS].content).is_none());
+
+        // Allocation accounting is independent of inference. Exercise the
+        // inclusive byte bound without constructing a pathological provider.
+        let mut full = ValidatedInputCache::default();
+        full.remember(
+            "full",
+            vec![0.0; MAX_CACHED_VECTOR_BYTES / std::mem::size_of::<f32>()],
+        );
+        assert_eq!(full.vector_bytes, MAX_CACHED_VECTOR_BYTES);
+        full.remember("overflow", vec![1.0]);
+        full.remember("full", vec![1.0]);
+        assert_eq!(full.vectors.len(), 1);
+        assert_eq!(full.get("full").expect("original value")[0], 0.0);
+        assert!(full.get("overflow").is_none());
+        let mut empty = ValidatedInputCache::default();
+        empty.remember(
+            "oversized",
+            vec![0.0; MAX_CACHED_VECTOR_BYTES / std::mem::size_of::<f32>() + 1],
+        );
+        assert_eq!(empty.vector_bytes, 0);
+        assert!(empty.vectors.is_empty());
+    }
+
+    #[test]
+    fn cache_overflow_recomputes_misses_without_losing_any_wal_entry() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let embedder = ObservedHash::new();
+            let identity = embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint();
+            let original = documents(MAX_CACHED_INPUTS + MAX_BATCH_DOCUMENTS);
+            let mut docs = original.clone();
+            for (position, document) in original[MAX_CACHED_INPUTS..].iter().enumerate() {
+                docs.push(IndexableDocument::new(
+                    format!("overflow_replay_{position}"),
+                    document.content.clone(),
+                ));
+            }
+            docs.push(IndexableDocument::new(
+                "cached_replay",
+                original[0].content.clone(),
+            ));
+            let expected: Vec<_> = docs
+                .iter()
+                .map(|document| {
+                    (
+                        document.id.clone(),
+                        embedder.inner.embed_sync(&document.content),
+                    )
+                })
+                .collect();
+            let mut written = Vec::new();
+            embed_batches_with(&cx, &embedder, &docs, &identity, "fast", |entries| {
+                assert!(entries.len() <= MAX_BATCH_DOCUMENTS);
+                written.extend(entries);
+                Ok(())
+            })
+            .await
+            .map_err(|error| error.detail)?;
+            assert_eq!(written, expected);
+            assert_eq!(
+                *embedder.sizes.lock().expect("sizes"),
+                vec![MAX_BATCH_DOCUMENTS; MAX_CACHED_INPUTS / MAX_BATCH_DOCUMENTS + 2]
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn cached_only_batches_still_stop_on_writer_failure() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let embedder = ObservedHash::new();
+            let identity = embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint();
+            let mut docs = documents(65);
+            for document in &mut docs {
+                document.content = "shared repair".to_owned();
+            }
+            let mut writes = 0;
+            let result = embed_batches_with(&cx, &embedder, &docs, &identity, "fast", |_| {
+                writes += 1;
+                if writes == 2 {
+                    Err(tier_error("cached batch refused".to_owned()))
+                } else {
+                    Ok(())
+                }
+            })
+            .await;
+            assert_eq!(
+                result.expect_err("writer failure").detail,
+                "cached batch refused"
+            );
+            assert_eq!(writes, 2);
+            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![1]);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn malformed_response_for_a_deduplicated_input_never_reaches_the_writer() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let mut embedder = ObservedHash::new();
+            embedder.truncate_response = true;
+            let identity = embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint();
+            let mut docs = documents(65);
+            for document in &mut docs {
+                document.content = "shared repair".to_owned();
+            }
+            let result = embed_batches_with(&cx, &embedder, &docs, &identity, "fast", |_| {
+                panic!("a missing distinct-input vector cannot be expanded or written")
+            })
+            .await;
+            assert_eq!(
+                result.expect_err("missing vector").reason,
+                IncrementalFallbackReason::TierUnavailable
+            );
+            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![1]);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn reuse_never_crosses_invocations_or_shares_mutable_writer_buffers() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let embedder = ObservedHash::new();
+            let identity = embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint();
+            let mut docs = documents(65);
+            for document in &mut docs {
+                document.content = "shared repair".to_owned();
+            }
+            let expected = embedder.inner.embed_sync("shared repair");
+            for _ in 0..2 {
+                let mut count = 0;
+                embed_batches_with(&cx, &embedder, &docs, &identity, "fast", |mut entries| {
+                    for (_, values) in &mut entries {
+                        assert_eq!(values.as_slice(), expected.as_slice());
+                        values.fill(42.0);
+                    }
+                    count += entries.len();
+                    Ok(())
+                })
+                .await
+                .map_err(|error| error.detail)?;
+                assert_eq!(count, docs.len());
+            }
+            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![1, 1]);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
     fn staged_batch_updates_match_a_full_build_and_leave_the_live_index_unchanged() -> TestResult {
+        assert_staged_updates(false)
+    }
+
+    #[test]
+    fn staged_duplicate_inputs_match_a_full_build_without_merging_index_identities() -> TestResult {
+        assert_staged_updates(true)
+    }
+
+    fn assert_staged_updates(repeat_content: bool) -> TestResult {
         use super::super::super::{
             IndexBuilder, compact_incremental_vector_index, hash_fallback_embedder_stack,
             open_fast_vector_index,
         };
-        use std::collections::BTreeMap;
 
         let root = tempfile::tempdir().map_err(|error| error.to_string())?;
         let parent = root
@@ -400,8 +763,12 @@ mod tests {
                 })
                 .collect::<Result<BTreeMap<_, _>, String>>()?;
             let mut updated = original.clone();
-            for document in &mut updated[..65] {
-                document.content.push_str(" revised");
+            for (position, document) in updated[..65].iter_mut().enumerate() {
+                if repeat_content && position % 2 == 0 {
+                    document.content = "shared revised lesson".to_owned();
+                } else {
+                    document.content.push_str(" revised");
+                }
             }
             updated.truncate(68);
             let mut index = open_fast_vector_index(&staging).map_err(|error| error.detail)?;
@@ -431,7 +798,14 @@ mod tests {
             .map_err(|error| error.detail)?;
             compact_incremental_vector_index(&mut index, "fast").map_err(|error| error.detail)?;
             drop(index);
-            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![32, 32, 1]);
+            assert_eq!(
+                *embedder.sizes.lock().expect("sizes"),
+                if repeat_content {
+                    vec![17, 16]
+                } else {
+                    vec![32, 32, 1]
+                }
+            );
             IndexBuilder::new(&rebuilt)
                 .with_embedder_stack(stack)
                 .add_documents(updated)
