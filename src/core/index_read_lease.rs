@@ -791,7 +791,9 @@ mod tests {
             .expect_err("a second candidate must not reset the budget");
         assert!(error.to_string().contains("read budget"));
         assert_eq!(file_snapshot(root.path())?, before);
-        cx.set_cancel_reason(asupersync::CancelReason::user("cancel exhausted inspection"));
+        cx.set_cancel_reason(asupersync::CancelReason::user(
+            "cancel exhausted inspection",
+        ));
         assert!(matches!(
             inspection.entry(&cx),
             Err(IndexRebuildError::Cancelled(reason))
@@ -804,8 +806,11 @@ mod tests {
     fn unrelated_directory_entries_cannot_make_missing_index_discovery_unbounded() -> TestResult {
         let (root, index) = fixture()?;
         for ordinal in 0..=MAX_INSPECTION_ENTRIES {
-            std::fs::write(root.path().join(format!("unrelated-{ordinal}")), b"preserved")
-                .map_err(|e| e.to_string())?;
+            std::fs::write(
+                root.path().join(format!("unrelated-{ordinal}")),
+                b"preserved",
+            )
+            .map_err(|e| e.to_string())?;
         }
         let before = file_snapshot(root.path())?;
         crate::core::run_cli_with_cx(Duration::from_secs(10), |cx| async move {

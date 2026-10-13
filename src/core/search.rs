@@ -18602,16 +18602,17 @@ mod tests {
                 source_id: None,
                 reason: None,
                 evidence_json: Some(
-                    serde_json::json!({"score": 0.8, "groundTruthRelevance": 0.7})
-                        .to_string(),
+                    serde_json::json!({"score": 0.8, "groundTruthRelevance": 0.7}).to_string(),
                 ),
                 session_id: None,
                 applied_at: None,
                 created_at: "2026-06-06T00:00:00Z".to_owned(),
             })
             .collect::<Vec<_>>();
-        let calibration =
-            SearchScoreCalibration::for_workspace_with_feedback_events(&workspace, &feedback_events);
+        let calibration = SearchScoreCalibration::for_workspace_with_feedback_events(
+            &workspace,
+            &feedback_events,
+        );
         assert_eq!(calibration.status, SearchScoreCalibrationStatus::Corrupt);
         assert!(calibration.residual_quantile.is_some());
         // This degraded state must not be allowed to advertise 95% coverage.
@@ -18637,8 +18638,7 @@ mod tests {
                 source_id: None,
                 reason: None,
                 evidence_json: Some(
-                    serde_json::json!({"score": 0.8, "groundTruthRelevance": 0.7})
-                        .to_string(),
+                    serde_json::json!({"score": 0.8, "groundTruthRelevance": 0.7}).to_string(),
                 ),
                 session_id: None,
                 applied_at: None,
@@ -18647,17 +18647,21 @@ mod tests {
             .collect::<Vec<_>>();
         let first = SearchScoreCalibration::for_workspace_with_feedback_events(&workspace, &events);
         assert!(first.feedback_event_ids_truncated);
-        assert_eq!(first.feedback_event_ids.len(), MAX_SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_IDS);
-        let first_id = first.calibration_id();
-        events.last_mut().ok_or("missing tail event")?.evidence_json = Some(
-            serde_json::json!({"score": 0.8, "groundTruthRelevance": 0.1}).to_string(),
+        assert_eq!(
+            first.feedback_event_ids.len(),
+            MAX_SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_IDS
         );
-        let changed = SearchScoreCalibration::for_workspace_with_feedback_events(&workspace, &events);
+        let first_id = first.calibration_id();
+        events.last_mut().ok_or("missing tail event")?.evidence_json =
+            Some(serde_json::json!({"score": 0.8, "groundTruthRelevance": 0.1}).to_string());
+        let changed =
+            SearchScoreCalibration::for_workspace_with_feedback_events(&workspace, &events);
         assert_eq!(changed.feedback_event_ids, first.feedback_event_ids);
         assert_eq!(changed.sample_count, first.sample_count);
         assert_ne!(changed.calibration_id(), first_id);
         events.reverse();
-        let reordered = SearchScoreCalibration::for_workspace_with_feedback_events(&workspace, &events);
+        let reordered =
+            SearchScoreCalibration::for_workspace_with_feedback_events(&workspace, &events);
         assert_eq!(reordered.calibration_id(), changed.calibration_id());
         Ok(())
     }

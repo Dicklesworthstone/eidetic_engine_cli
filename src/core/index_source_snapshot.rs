@@ -1541,8 +1541,10 @@ mod tests {
             let original = super::super::reembed_index(&options).expect("baseline count plan");
             // Preserve the derived rows under another name. A source-only
             // preview must not need anchor projection or pending-job reads.
-            db.execute_raw(&format!("ALTER TABLE {table} RENAME TO preview_saved_{table}"))
-                .expect("withhold unrelated derived sidecar");
+            db.execute_raw(&format!(
+                "ALTER TABLE {table} RENAME TO preview_saved_{table}"
+            ))
+            .expect("withhold unrelated derived sidecar");
             let before = std::fs::read(&path).expect("source before preview");
             let generation = db.get_workspace_generation(WORKSPACE).expect("generation");
             let report = super::super::reembed_index(&options).expect("source-only preview");
