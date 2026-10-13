@@ -17449,6 +17449,26 @@ impl DbConnection {
     /// Visit admitted CASS evidence without materializing an intermediate span
     /// or session snapshot. The callback sees rows in canonical transcript
     /// order while each joined source read remains page-bounded.
+    ///
+    /// TEST-ONLY TODAY, and gated so it says so. Arrived with the bounded
+    /// evidence indexing work (`37280dda4`, bd-16imy, 2026-08-09) and has had
+    /// exactly one caller ever since: the page-bound assertion in
+    /// `search_evidence_admission_pages_excerpt_reads_without_losing_counts`.
+    /// Every production path uses the sibling
+    /// `visit_search_admitted_evidence_spans_in_current_snapshot`, which takes
+    /// the caller's existing transaction instead of opening a read snapshot.
+    ///
+    /// Without the gate the non-test lib build emitted
+    /// `method ... is never used` on every compile for two months, which
+    /// `cargo clippy --all-targets -- -D warnings` denies. The gate removes
+    /// the condition rather than silencing the lint: an `allow` would have
+    /// left a production-visible entry point that nothing enters.
+    ///
+    /// The open question is deliberately NOT closed here: whether any
+    /// production caller should be opening its own read snapshot this way is a
+    /// design question about the index-source path, not something to settle by
+    /// changing an attribute. If one should, delete the gate in that change.
+    #[cfg(test)]
     pub(crate) fn visit_search_admitted_evidence_spans_for_workspace(
         &self,
         workspace_id: &str,
