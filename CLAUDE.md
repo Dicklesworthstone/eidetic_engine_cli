@@ -23,17 +23,27 @@ Everything else is dispatched to the pinned RCH lane:
 ```bash
 # Type check
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-    cargo check --all-targets
+    cargo check --locked --all-targets
 # Lint (warnings = errors)
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --locked --all-targets -- -D warnings
 # Run all tests
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-    cargo test --workspace --all-targets
+    cargo test --locked --workspace --all-targets
 # A single test
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-    cargo test test_name -- --exact
+    cargo test --locked test_name -- --exact
 ```
+
+**`--pinned-franken-stack` refuses any cargo command without `--locked`.** It
+exits 1 before materializing anything, with `"status":
+"source_state_refused"`, `blocking_codes:
+["rch_verify_franken_stack_locked_required"]` and no `test result:` line —
+`elapsed_ms` is 0, so the round trip is cheap but it buys you nothing. The
+examples above carried no `--locked` until 2026-10-13 and every one of them
+was refused as written; `scripts/check-rch-doc-examples.py` could not catch it
+because it only checks that the wrapper precedes `cargo`. It now also requires
+`--locked` on pinned examples.
 
 Write the wrapper out in full on every line. A `RCH="..."` shorthand reads
 nicely and breaks both copy-paste of a single line and
