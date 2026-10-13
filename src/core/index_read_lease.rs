@@ -18,8 +18,54 @@ use super::{IndexRebuildError, ensure_index_path_has_no_symlinks, index_checkpoi
 use rustix::fs::{FlockOperation, OFlags, flock};
 use rustix::io::Errno;
 
+// A hook has other work to do inside its 9--10 second outer deadline. Do not
+// spend the publisher's entire grace period merely waiting to start a read.
+const MAX_READ_WAIT: Duration = Duration::from_millis(250);
 const MAX_WAIT: Duration = Duration::from_secs(5);
+const MAX_INSPECTION_ENTRIES: usize = 4096;
+const INSPECTION_WALL_BUDGET: Duration = Duration::from_secs(1);
 const RETRY_DELAY: Duration = Duration::from_millis(5);
+
+/// One cooperative budget for the entire read-only generation selection,
+/// including failed candidates. Never reset it when trying another retained
+/// directory. This bounds directory work, retained-path allocation and starting
+/// another candidate, not a synchronous backend syscall. A successful backend
+/// open still obeys the caller's cancellation/budget before its result is used.
+struct InspectionBudget {
+    request: crate::core::budget::RequestBudget,
+    entries_remaining: usize,
+}
+
+impl InspectionBudget {
+    fn new() -> Self {
+        Self {
+            request: crate::core::budget::RequestBudget::unbounded()
+                .with_wall_clock(INSPECTION_WALL_BUDGET),
+            entries_remaining: MAX_INSPECTION_ENTRIES,
+        }
+    }
+
+    fn checkpoint(&self, cx: &asupersync::Cx) -> Result<(), IndexRebuildError> {
+        // Preserve an explicit cancellation, even when both budgets expired.
+        index_checkpoint(cx)?;
+        self.request.check().map_err(|_| inspection_budget_error())
+    }
+
+    fn entry(&mut self, cx: &asupersync::Cx) -> Result<(), IndexRebuildError> {
+        self.checkpoint(cx)?;
+        self.entries_remaining = self
+            .entries_remaining
+            .checked_sub(1)
+            .ok_or_else(inspection_budget_error)?;
+        Ok(())
+    }
+}
+
+fn inspection_budget_error() -> IndexRebuildError {
+    IndexRebuildError::Index(
+        "Index generation inspection exceeded its read budget; no generation was admitted; retry after publication or inspect retained generations before explicit index maintenance".to_owned(),
+    )
+}
 
 /// Closing the sole owned descriptor releases its OS lease on success, error,
 /// cancellation, unwinding, or process exit. Never clone/upgrade this handle.
@@ -42,6 +88,7 @@ impl IndexGenerationLease {
         index_dir: &Path,
         maximum_generation: u64,
     ) -> Result<PathBuf, IndexRebuildError> {
+        index_checkpoint(cx)?;
         let identity = super::active_semantic_identity();
         self.index_for_snapshot_with_identity(
             cx,
@@ -60,7 +107,8 @@ impl IndexGenerationLease {
         maximum_generation: u64,
         identity: Option<(&str, u32)>,
     ) -> Result<PathBuf, IndexRebuildError> {
-        index_checkpoint(cx)?;
+        let mut inspection = InspectionBudget::new();
+        inspection.checkpoint(cx)?;
         let parent = index_parent(index_dir);
         verify_parent_identity(parent, &self._directory)?;
         ensure_index_path_has_no_symlinks(index_dir, "select snapshot index")?;
@@ -87,15 +135,16 @@ impl IndexGenerationLease {
                 .is_none()
             })
             .and_then(|metadata| metadata.generation);
-        index_checkpoint(cx)?;
+        inspection.checkpoint(cx)?;
         if let Some(generation) = current.filter(|generation| *generation <= maximum_generation) {
-            ensure_generation_entries_are_regular(cx, index_dir)?;
+            inspect_generation_entries(cx, index_dir, &mut inspection)?;
             let valid = super::validated_index_generation_with_identity(index_dir, identity).ok()
                 == Some(generation);
             index_checkpoint(cx)?;
             if valid {
                 return Ok(index_dir.to_path_buf());
             }
+            inspection.checkpoint(cx)?;
             // A valid manifest is not proof of a complete generation. Continue
             // to retained candidates after a missing/corrupt vector or lexical
             // tier, rather than returning a path the caller cannot open.
@@ -110,7 +159,7 @@ impl IndexGenerationLease {
         let entries = std::fs::read_dir(parent)
             .map_err(|error| lease_error("inspect retained generations", error))?;
         for entry in entries {
-            index_checkpoint(cx)?;
+            inspection.entry(cx)?;
             let entry = entry.map_err(|error| lease_error("inspect retained generation", error))?;
             let path = entry.path();
             let Some(sequence) =
@@ -155,16 +204,17 @@ impl IndexGenerationLease {
         }
         candidates.sort();
         for (generation, _, path) in candidates.into_iter().rev() {
-            index_checkpoint(cx)?;
-            ensure_generation_entries_are_regular(cx, &path)?;
+            inspection.checkpoint(cx)?;
+            inspect_generation_entries(cx, &path, &mut inspection)?;
             let valid = super::validated_index_generation_with_identity(&path, identity).ok()
                 == Some(generation);
             index_checkpoint(cx)?;
             if valid {
                 return Ok(path);
             }
+            inspection.checkpoint(cx)?;
         }
-        index_checkpoint(cx)?;
+        inspection.checkpoint(cx)?;
         Err(IndexRebuildError::Index(
             if current.is_some_and(|generation| generation > maximum_generation) {
                 "The live index is newer than the source snapshot and no compatible retained generation is available; retry with a fresh snapshot"
@@ -183,7 +233,8 @@ impl IndexGenerationLease {
         cx: &asupersync::Cx,
         index_dir: &Path,
     ) -> Result<bool, IndexRebuildError> {
-        index_checkpoint(cx)?;
+        let mut inspection = InspectionBudget::new();
+        inspection.checkpoint(cx)?;
         let parent = index_parent(index_dir);
         verify_parent_identity(parent, &self._directory)?;
         let prefix = format!(
@@ -194,7 +245,7 @@ impl IndexGenerationLease {
         for entry in std::fs::read_dir(parent)
             .map_err(|error| lease_error("inspect retained generation presence", error))?
         {
-            index_checkpoint(cx)?;
+            inspection.entry(cx)?;
             let entry = entry.map_err(|error| lease_error("inspect retained entry", error))?;
             if super::retained_generation_sequence(&entry.file_name().to_string_lossy(), &prefix)
                 .or(super::displaced_generation_sequence(
@@ -211,11 +262,11 @@ impl IndexGenerationLease {
                 .map_err(|error| lease_error("inspect retained entry", error))?
                 .is_dir()
             {
-                index_checkpoint(cx)?;
+                inspection.checkpoint(cx)?;
                 return Ok(true);
             }
         }
-        index_checkpoint(cx)?;
+        inspection.checkpoint(cx)?;
         Ok(false)
     }
 
@@ -223,7 +274,7 @@ impl IndexGenerationLease {
         cx: &asupersync::Cx,
         index_dir: &Path,
     ) -> Result<Self, IndexRebuildError> {
-        Self::acquire(cx, index_dir, false, MAX_WAIT).await
+        Self::acquire(cx, index_dir, false, MAX_READ_WAIT).await
     }
 
     /// Best-effort lexical warming never waits for a publisher, discovers a
@@ -282,8 +333,15 @@ impl IndexGenerationLease {
         let parent = index_parent(index_dir);
         let directory = open_directory(parent)?;
         let started = Instant::now();
+        let mut attempted = false;
         loop {
             index_checkpoint(cx)?;
+            // Always permit the first nonblocking attempt (including prefetch's
+            // zero wait), but never acquire on a retry after an overdue timer.
+            if attempted && started.elapsed() >= max_wait {
+                return Err(generation_busy_error());
+            }
+            attempted = true;
             if try_lease(&directory, exclusive)? {
                 // Opening and then waiting must not let a replaced parent
                 // redirect subsequent pathname reads outside the leased inode.
@@ -295,9 +353,7 @@ impl IndexGenerationLease {
             }
             let remaining = max_wait.saturating_sub(started.elapsed());
             if remaining.is_zero() {
-                return Err(IndexRebuildError::Index(
-                    "Index generation is busy; no mixed-generation read or publication was attempted; retry the operation".to_owned(),
-                ));
+                return Err(generation_busy_error());
             }
             // Yield to the owning runtime, never block its worker with flock
             // or thread::sleep. Both the wall bound and caller budget apply.
@@ -315,16 +371,24 @@ fn ensure_generation_entries_are_regular(
     cx: &asupersync::Cx,
     root: &Path,
 ) -> Result<(), IndexRebuildError> {
+    inspect_generation_entries(cx, root, &mut InspectionBudget::new())
+}
+
+fn inspect_generation_entries(
+    cx: &asupersync::Cx,
+    root: &Path,
+    inspection: &mut InspectionBudget,
+) -> Result<(), IndexRebuildError> {
     let mut pending = vec![root.to_path_buf()];
     while let Some(path) = pending.pop() {
-        index_checkpoint(cx)?;
+        inspection.entry(cx)?;
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| lease_error("inspect generation entry", error))?;
         if metadata.is_dir() {
             for entry in std::fs::read_dir(&path)
                 .map_err(|error| lease_error("inspect generation directory", error))?
             {
-                index_checkpoint(cx)?;
+                inspection.entry(cx)?;
                 let entry =
                     entry.map_err(|error| lease_error("inspect generation entry", error))?;
                 let kind = entry
@@ -345,7 +409,7 @@ fn ensure_generation_entries_are_regular(
             ));
         }
     }
-    index_checkpoint(cx)
+    inspection.checkpoint(cx)
 }
 
 fn open_directory(parent: &Path) -> Result<File, IndexRebuildError> {
@@ -388,6 +452,12 @@ fn verify_parent_identity(parent: &Path, directory: &File) -> Result<(), IndexRe
         ));
     }
     Ok(())
+}
+
+fn generation_busy_error() -> IndexRebuildError {
+    IndexRebuildError::Index(
+        "Index generation is busy; no mixed-generation read or publication was attempted; retry the operation".to_owned(),
+    )
 }
 
 fn lease_error(action: &str, error: impl std::fmt::Display) -> IndexRebuildError {
@@ -673,5 +743,133 @@ mod tests {
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn production_reader_wait_is_short_without_releasing_the_publisher() -> TestResult {
+        let (_root, index) = fixture()?;
+        let publisher = open_directory(index_parent(&index)).map_err(|e| e.to_string())?;
+        assert!(try_lease(&publisher, true).map_err(|e| e.to_string())?);
+        crate::core::run_cli_with_cx(Duration::from_secs(10), |cx| async move {
+            let start = Instant::now();
+            let result = IndexGenerationLease::read(&cx, &index).await;
+            assert!(matches!(
+                result,
+                Err(IndexRebuildError::Index(message)) if message.contains("busy")
+            ));
+            assert!(start.elapsed() >= MAX_READ_WAIT);
+            assert!(start.elapsed() < Duration::from_secs(2));
+            let probe = open_directory(index_parent(&index)).map_err(|e| e.to_string())?;
+            assert!(!try_lease(&probe, false).map_err(|e| e.to_string())?);
+            drop(publisher);
+            let reader = IndexGenerationLease::read(&cx, &index)
+                .await
+                .map_err(|e| e.to_string())?;
+            assert!(!try_lease(&probe, true).map_err(|e| e.to_string())?);
+            drop(reader);
+            assert!(try_lease(&probe, true).map_err(|e| e.to_string())?);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?
+    }
+
+    #[test]
+    fn inspection_budget_is_shared_across_generation_trees_and_preserves_files() -> TestResult {
+        let (root, index) = fixture()?;
+        let retained = root.path().join("index.previous");
+        std::fs::create_dir(&index).map_err(|e| e.to_string())?;
+        std::fs::create_dir(&retained).map_err(|e| e.to_string())?;
+        std::fs::write(index.join("segment"), b"live bytes").map_err(|e| e.to_string())?;
+        std::fs::write(retained.join("segment"), b"retained bytes").map_err(|e| e.to_string())?;
+        let before = file_snapshot(root.path())?;
+        let cx = asupersync::Cx::for_testing();
+        let mut inspection = InspectionBudget::new();
+        inspection.entries_remaining = 3;
+        inspect_generation_entries(&cx, &index, &mut inspection).map_err(|e| e.to_string())?;
+        assert_eq!(inspection.entries_remaining, 1);
+        let error = inspect_generation_entries(&cx, &retained, &mut inspection)
+            .expect_err("a second candidate must not reset the budget");
+        assert!(error.to_string().contains("read budget"));
+        assert_eq!(file_snapshot(root.path())?, before);
+        cx.set_cancel_reason(asupersync::CancelReason::user("cancel exhausted inspection"));
+        assert!(matches!(
+            inspection.entry(&cx),
+            Err(IndexRebuildError::Cancelled(reason))
+                if reason.message.as_deref() == Some("cancel exhausted inspection")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn unrelated_directory_entries_cannot_make_missing_index_discovery_unbounded() -> TestResult {
+        let (root, index) = fixture()?;
+        for ordinal in 0..=MAX_INSPECTION_ENTRIES {
+            std::fs::write(root.path().join(format!("unrelated-{ordinal}")), b"preserved")
+                .map_err(|e| e.to_string())?;
+        }
+        let before = file_snapshot(root.path())?;
+        crate::core::run_cli_with_cx(Duration::from_secs(10), |cx| async move {
+            let lease = IndexGenerationLease::read(&cx, &index)
+                .await
+                .map_err(|e| e.to_string())?;
+            let error = lease
+                .has_retained_generation_directory(&cx, &index)
+                .expect_err("presence scans must charge non-candidates too");
+            assert!(error.to_string().contains("read budget"));
+            let error = lease
+                .index_for_snapshot_with_identity(&cx, &index, 10, None)
+                .expect_err("an incomplete discovery must not admit a generation");
+            assert!(error.to_string().contains("read budget"));
+            assert_eq!(file_snapshot(root.path())?, before);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?
+    }
+
+    #[test]
+    fn inspection_deadline_is_checked_even_without_directory_entries() -> TestResult {
+        let cx = asupersync::Cx::for_testing();
+        let inspection = InspectionBudget {
+            request: crate::core::budget::RequestBudget::unbounded_at(
+                Instant::now() - Duration::from_secs(2),
+            )
+            .with_wall_clock(INSPECTION_WALL_BUDGET),
+            entries_remaining: MAX_INSPECTION_ENTRIES,
+        };
+        let error = inspection.checkpoint(&cx).expect_err("expired wall budget");
+        assert!(error.to_string().contains("read budget"));
+        Ok(())
+    }
+
+    #[test]
+    fn overdue_reader_retry_cannot_acquire_after_the_publisher_releases() -> TestResult {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let (_root, index) = fixture()?;
+        let publisher = open_directory(index_parent(&index)).map_err(|e| e.to_string())?;
+        assert!(try_lease(&publisher, true).map_err(|e| e.to_string())?);
+        crate::core::run_cli_with_cx(Duration::from_secs(10), |cx| async move {
+            let mut reader = std::pin::pin!(IndexGenerationLease::read(&cx, &index));
+            poll_fn(|task_cx| match reader.as_mut().poll(task_cx) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(result) => panic!("reader bypassed publisher: {result:?}"),
+            })
+            .await;
+            // Delay polling the reader, as a busy runtime worker can do. The
+            // source lease is free when it resumes, but its wait has expired.
+            asupersync::time::sleep(cx.now(), MAX_READ_WAIT + Duration::from_millis(50)).await;
+            drop(publisher);
+            assert!(matches!(
+                reader.await,
+                Err(IndexRebuildError::Index(message)) if message.contains("busy")
+            ));
+            let fresh = IndexGenerationLease::acquire(&cx, &index, false, Duration::ZERO)
+                .await
+                .map_err(|e| e.to_string())?;
+            drop(fresh);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?
     }
 }
