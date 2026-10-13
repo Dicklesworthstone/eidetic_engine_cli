@@ -14,6 +14,9 @@ use serde_json::{Map, Number, Value};
 
 use super::CassRole;
 
+#[path = "transcript_memo.rs"]
+mod memo;
+
 pub(crate) const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_TEXT_BLOCKS: usize = 256;
 pub(crate) const MAX_TRANSCRIPT_RECORDS: usize = 256;
@@ -177,6 +180,17 @@ fn project_with(
             projection_version: TRANSCRIPT_PROJECTION_VERSION,
         }]);
     }
+    // Admission, display and index projection can ask for the same window in
+    // succession. Reuse only the pure decoding result, never a stored row's
+    // eligibility. Plain text above stays borrowed and consumes no memo space.
+    memo::project(excerpt, purpose, || project_structured(excerpt, purpose))
+}
+
+/// Every cache miss still validates the complete source through this path.
+fn project_structured(
+    excerpt: &str,
+    purpose: ProjectionPurpose,
+) -> Option<Vec<TranscriptProjection<'_>>> {
     // Stream values rather than splitting lines: pretty-printed envelopes and
     // escaped newlines inside a body are not additional conversation turns.
     let mut records = serde_json::Deserializer::from_str(excerpt).into_iter::<UniqueValue>();
