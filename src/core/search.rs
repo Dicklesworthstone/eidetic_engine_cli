@@ -5357,6 +5357,13 @@ fn split_conformal_quantile(mut residuals: Vec<f32>, coverage: f32) -> f32 {
     residuals[rank]
 }
 
+fn search_calibration_is_eligible_for_coverage(calibration: &SearchScoreCalibration) -> bool {
+    calibration.status == SearchScoreCalibrationStatus::Calibrated
+        && calibration.residual_quantile.is_some()
+        && calibration.feedback_event_unavailable_reason.is_none()
+        && calibration.feedback_event_malformed_count == 0
+}
+
 fn annotate_hits_with_score_calibration(
     workspace_path: &Path,
     database_path: Option<&Path>,
@@ -5419,9 +5426,16 @@ fn annotate_hits_with_score_calibration(
     // RRF score as a 95%-calibrated [0,1] relevance. When uncalibrated we emit
     // `coverageGuarantee: null` and `calibrated: false` so [0,1] reads as
     // "unknown", not "95% sure".
-    let calibrated = calibration.residual_quantile.is_some();
+    // A residual quantile can exist even when the JSONL was corrupt,
+    // unreadable, or oversized (because feedback supplied enough samples).
+    // Never claim a coverage guarantee for a degraded evidence set.
+    let calibrated = search_calibration_is_eligible_for_coverage(&calibration);
     for hit in hits {
-        let interval = calibration.interval_for_score(hit.relevance_score());
+        let interval = if calibrated {
+            calibration.interval_for_score(hit.relevance_score())
+        } else {
+            [0.0, 1.0]
+        };
         let mut metadata = hit
             .metadata
             .take()
@@ -18545,6 +18559,45 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("feedback_events_open_failed")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_calibration_with_valid_feedback_cannot_claim_coverage() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-corrupt-feedback-fail-closed");
+        let calibration_dir = workspace.join(".ee").join("search");
+        std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+        std::fs::write(calibration_dir.join("calibration.jsonl"), "not json\n")
+            .map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
+        let feedback_events = (0..MIN_SEARCH_SCORE_CALIBRATION_SAMPLES)
+            .map(|index| StoredFeedbackEvent {
+                id: format!("fb_corrupt_{index:026}"),
+                workspace_id: workspace_id.clone(),
+                target_type: "candidate".to_owned(),
+                target_id: format!("cand_corrupt_{index:02}"),
+                signal: "confirmation".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                source_id: None,
+                reason: None,
+                evidence_json: Some(
+                    serde_json::json!({"score": 0.8, "groundTruthRelevance": 0.7})
+                        .to_string(),
+                ),
+                session_id: None,
+                applied_at: None,
+                created_at: "2026-06-06T00:00:00Z".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let calibration =
+            SearchScoreCalibration::for_workspace_with_feedback_events(&workspace, &feedback_events);
+        assert_eq!(calibration.status, SearchScoreCalibrationStatus::Corrupt);
+        assert!(calibration.residual_quantile.is_some());
+        // This degraded state must not be allowed to advertise 95% coverage.
+        // The production annotation gate is pinned below by testing the same
+        // eligibility predicate used by annotate_hits_with_score_calibration.
+        assert!(!search_calibration_is_eligible_for_coverage(&calibration));
         Ok(())
     }
 
