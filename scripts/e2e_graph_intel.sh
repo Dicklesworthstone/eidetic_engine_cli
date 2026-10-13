@@ -18,7 +18,18 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 3
 fi
 
-EE_BIN="${EE_BIN:-${EE_BINARY:-ee}}"
+E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "${E2E_SCRIPT_DIR}/.." && pwd)}"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
+
+# The default used to be bare `ee`, i.e. PATH. verify.sh hands every stage
+# EE_BIN/EE_BINARY explicitly, so that was dormant there and live for any
+# standalone run -- including rch exec --job, where one dispatch built ee and
+# a sibling suite silently graded the installed binary instead (bd-z6g1s).
+# Resolve from Cargo's effective target directory; EE_BIN/EE_BINARY still win.
+EE_BIN="${EE_BIN:-${EE_BINARY:-$(ee_resolve_binary debug)}}"
 if [[ "${EE_BIN}" == */* ]]; then
     REAL_EE="${EE_BIN}"
 else
@@ -29,19 +40,13 @@ if [[ -z "${REAL_EE}" || ! -x "${REAL_EE}" ]]; then
     exit 3
 fi
 
-# Staleness guard (bd-smxdr). Existing/executable is not the same as current:
-# the PATH fallback above resolves whatever ee happens to be installed, and
-# this bead's own charter note records the hazard -- "e2e runs on fresh
+# Staleness guard (bd-smxdr). Existing/executable is not the same as current,
+# and this bead's own charter note records the hazard -- "e2e runs on fresh
 # binaries only -- the installed 0.13.0 predates the verb". Under verify.sh
 # this stage inherits the exported EE_BINARY and runs after the build at
 # verify.sh:1195, so it is already correct there; this protects the STANDALONE
-# path, where a newer-but-still-stale installed ee could green silently
-# instead of erroring on an unknown verb.
-E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "${E2E_SCRIPT_DIR}/.." && pwd)}"
-# shellcheck source=scripts/lib/ee_binary_resolution.sh
-# shellcheck disable=SC1091
-source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
+# path, where a newer-but-still-stale binary could green silently instead of
+# erroring on an unknown verb.
 if ! ee_require_current_binary "${REAL_EE}" "e2e_graph_intel"; then
     exit 3
 fi
