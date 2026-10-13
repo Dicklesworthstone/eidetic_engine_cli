@@ -145,6 +145,47 @@ ee_binary_version() {
 # source version. Always prints the resolved path and both versions BEFORE
 # deciding, so a log reader can see which binary produced a verdict even when
 # the check passes.
+# Modification time and size of a candidate binary, as observability beside the
+# version. BSD/macOS `stat` and GNU `stat` take incompatible flags, so both are
+# tried and neither failure is fatal -- a missing timestamp must never turn a
+# usable binary into a refusal.
+ee_binary_mtime() {
+    local binary="${1:?ee_binary_mtime: binary path required}"
+    stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%S' "$binary" 2>/dev/null \
+        || stat -c '%y' "$binary" 2>/dev/null \
+        || printf 'unknown'
+}
+
+ee_binary_size() {
+    local binary="${1:?ee_binary_size: binary path required}"
+    stat -f '%z' "$binary" 2>/dev/null \
+        || stat -c '%s' "$binary" 2>/dev/null \
+        || printf 'unknown'
+}
+
+# ---------------------------------------------------------------------------
+# WHY THIS GUARD DOES NOT COMPARE MTIME AGAINST THE SOURCE TREE
+#
+# The obvious strengthening -- refuse a binary older than the newest .rs file
+# -- was proposed on bd-z6g1s and then rejected, because it would fail in the
+# one environment this guard actually runs in.
+#
+# A `rch exec --job` executes in a CLEAN OVERLAY with no `.git` directory, so
+# the tracked-file set cannot be enumerated with git there; and the overlay's
+# sources are freshly materialised, so every .rs file carries a NEW mtime. A
+# `--job` also inherits the worker's own target directory and legitimately
+# reuses a previous job's binary (that is the documented fast path: the same
+# build measured at 32 minutes rather than 217). Combine the two and the
+# common, correct case -- freshly synced sources, validly cached binary --
+# looks exactly like staleness. The guard would refuse good builds and wedge
+# every gate that calls it.
+#
+# A guard that fails closed on its own happy path is worse than the hole it
+# closes, so the within-version staleness hole stays OPEN and visible in the
+# log line above rather than being closed by a predicate that cannot tell
+# "stale" from "cached". Closing it properly needs build-commit identity
+# stamped into the binary, which is its own piece of work.
+# ---------------------------------------------------------------------------
 ee_require_current_binary() {
     local binary="${1:?ee_require_current_binary: binary path required}"
     local label="${2:-ee}"
@@ -168,8 +209,16 @@ ee_require_current_binary() {
 
     source_version="$(ee_source_version)"
     binary_version="$(ee_binary_version "$binary")"
-    printf '%s: ee_binary=%s binary_version=%s source_version=%s\n' \
-        "$label" "$binary" "${binary_version:-unknown}" "${source_version:-unknown}" >&2
+    # mtime and size accompany the versions because SEMVER EQUALITY IS NOT
+    # COMMIT IDENTITY: this guard passes for any binary declaring the same
+    # version, however stale within that version. It cannot refuse on that
+    # basis (see the note below), so it must at least leave enough in the log
+    # for a reader to notice. mtime+size are O(1); sha256 is deliberately not
+    # printed here even though ee_binary_sha256 exists, because a debug `ee` is
+    # ~2 GB and this runs five-plus times per Gate 8.5.
+    printf '%s: ee_binary=%s binary_version=%s source_version=%s mtime=%s size=%s\n' \
+        "$label" "$binary" "${binary_version:-unknown}" "${source_version:-unknown}" \
+        "$(ee_binary_mtime "$binary")" "$(ee_binary_size "$binary")" >&2
 
     if [ -z "$source_version" ] || [ -z "$binary_version" ]; then
         printf '%s: refusing: could not determine both binary and source versions.\n' \
