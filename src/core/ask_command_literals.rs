@@ -396,22 +396,54 @@ mod tests {
                 "Set BACKEND=sqlite for this workspace.",
                 "Set BACKEND=postgres for this workspace.",
             ),
-            ("Use MODE=Release during deployment.", "Use MODE=release during deployment."),
-            ("Use MODE=release during deployment.", "Use mode=release during deployment."),
-            ("Use A=one B=two for deployment.", "Use B=two A=one for deployment."),
-            ("Use LABEL='A  B' for deployment.", "Use LABEL='A B' for deployment."),
-            ("Use LABEL='A' for deployment.", "Use LABEL=\"A\" for deployment."),
-            ("Use TARGET=$DEST for deployment.", "Use TARGET=DEST for deployment."),
-            ("Use FILTER= for deployment.", "Use FILTER=all for deployment."),
-            (r"Use LABEL=A\ B for deployment.", r"Use LABEL=A\ C for deployment."),
-            ("Use LABEL='資料 完了' for deployment.", "Use LABEL='資料 未完了' for deployment."),
+            (
+                "Use MODE=Release during deployment.",
+                "Use MODE=release during deployment.",
+            ),
+            (
+                "Use MODE=release during deployment.",
+                "Use mode=release during deployment.",
+            ),
+            (
+                "Use A=one B=two for deployment.",
+                "Use B=two A=one for deployment.",
+            ),
+            (
+                "Use LABEL='A  B' for deployment.",
+                "Use LABEL='A B' for deployment.",
+            ),
+            (
+                "Use LABEL='A' for deployment.",
+                "Use LABEL=\"A\" for deployment.",
+            ),
+            (
+                "Use TARGET=$DEST for deployment.",
+                "Use TARGET=DEST for deployment.",
+            ),
+            (
+                "Use FILTER= for deployment.",
+                "Use FILTER=all for deployment.",
+            ),
+            (
+                r"Use LABEL=A\ B for deployment.",
+                r"Use LABEL=A\ C for deployment.",
+            ),
+            (
+                "Use LABEL='資料 完了' for deployment.",
+                "Use LABEL='資料 未完了' for deployment.",
+            ),
         ] {
             assert!(!compatible(left, right), "{left:?} / {right:?}");
             assert!(!compatible(right, left), "reverse {left:?} / {right:?}");
         }
         assert_eq!(
             assignment_literals("Set A='one two' B=\"three four\" C=five\\ six D="),
-            Some(vec!["A='one two'", "B=\"three four\"", "C=five\\ six", "D="])
+            Some(vec![
+                "A='one two'",
+                "B=\"three four\"",
+                "C=five\\ six",
+                "D="
+            ])
         );
         assert_eq!(assignment_literals("x == y and x != y"), Some(vec![]));
     }
@@ -419,7 +451,10 @@ mod tests {
     #[test]
     fn assignment_markup_agrees_without_loosening_incomplete_values() {
         for (left, right) in [
-            ("Set `BACKEND=sqlite` for deployment.", "Set BACKEND=sqlite for deployment."),
+            (
+                "Set `BACKEND=sqlite` for deployment.",
+                "Set BACKEND=sqlite for deployment.",
+            ),
             ("Use `LABEL='A  B'` here.", "Use LABEL='A  B' here."),
             ("Use MODE=release here.", "Select MODE=release here."),
         ] {
