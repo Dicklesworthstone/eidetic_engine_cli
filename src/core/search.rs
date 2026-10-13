@@ -5010,16 +5010,13 @@ impl SearchScoreCalibration {
     }
 
     fn calibration_id(&self) -> String {
-        let feedback_ids = self.feedback_event_ids.join("\n");
         let material = format!(
-            "schema={}\nmethod=scaled_split_conformal\nstatus={}\ncoverage={:.6}\nsample_count={}\njsonl_hash={}\nfeedback_ids={}\nfeedback_ids_truncated={}\nfeedback_evidence_hash={}\nquantile_bits={:?}\nfeedback_unavailable={:?}\nfeedback_malformed={}\n",
+            "schema={}\nmethod=scaled_split_conformal\nstatus={}\ncoverage={:.6}\nsample_count={}\njsonl_hash={}\nfeedback_evidence_hash={}\nquantile_bits={:?}\nfeedback_unavailable={:?}\nfeedback_malformed={}\n",
             SEARCH_SCORE_CALIBRATION_SCHEMA_V1,
             self.status.as_str(),
             SEARCH_SCORE_COVERAGE_GUARANTEE,
             self.sample_count,
             self.jsonl_hash.as_deref().unwrap_or("none"),
-            feedback_ids,
-            self.feedback_event_ids_truncated,
             self.feedback_evidence_hash,
             self.residual_quantile.map(f32::to_bits),
             self.feedback_event_unavailable_reason,
