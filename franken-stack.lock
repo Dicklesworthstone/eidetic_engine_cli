@@ -5,11 +5,22 @@
 # 0.17.0 publication candidate uses the
 # published Asupersync 0.5.0 source and coordinated downstream minor versions:
 # FrankenSQLite 0.4.10 (whole family; repairs strict read-only opens and bd-obwsy),
-# Frankensearch 0.7.1, franken-agent-detection 0.3.3, FrankenNetworkX 0.3.0
-# and SQLModel 0.5.0. This records source provenance while their registry packages
-# are qualified; publication status is tracked in UPGRADE_LOG.md.
+# Frankensearch 0.7.1, franken-agent-detection 0.3.8, FrankenNetworkX 0.3.0,
+# SQLModel 0.5.0 and tru 0.2.4. This records source provenance while their
+# registry packages are qualified; publication status is tracked in
+# UPGRADE_LOG.md.
+#
+# Each revision below must be one whose own manifest declares the version
+# Cargo.toml pins, since that is what the franken-stack preflight compares.
+# Verified 2026-10-13 by reading each commit's manifest at the paths
+# package_manifests maps in scripts/rch_verify.sh: 11 of 12 packages agreed.
+# franken_agent_detection did not -- its entry was f3c00b742, whose manifest
+# declares 0.3.3 while Cargo.toml pins =0.3.8 -- so it now points at v0.3.8
+# (99ae86cdf, manifest 0.3.8), of which f3c00b742 is an ancestor. sqlmodel's
+# two crates carry version.workspace = true and inherit 0.5.0 from the
+# workspace root; they are correct despite declaring no version of their own.
 asupersync	78b64636e99fea4ea2d868096576021dd3b8e519
-franken_agent_detection	f3c00b742756692567539037c48745dfc3e87f5a
+franken_agent_detection	99ae86cdf8c71c53cec1df5760766038eca20375
 franken_networkx	0159a5d90a45092792e9b04fbfd87f8b57fb79ee
 frankensearch	d1cb86e1848309fe39fb7c8c4c4d7356ebd878aa
 frankensqlite	92aeb2b9762f2f38154fde74c4055959c6ebe294
