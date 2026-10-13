@@ -31,6 +31,9 @@ mod near;
 #[path = "error_recall_evidence.rs"]
 mod evidence;
 
+#[path = "error_recall_memory.rs"]
+mod memory;
+
 /// Persist (or refresh) the error fingerprint for a canonicalized diagnostic,
 /// linking the failing error class into the truth store so recall can later find
 /// it (ADR-0057 writer). Returns the stored row. Redaction-safe: stores the
@@ -375,24 +378,29 @@ const PACK_RECALL_QUERY_BYTES: usize = 4096;
 /// Interactive packing reads at most 32 helpful targets through the existing
 /// fingerprint index, then hydrates only that window. Within it, admitted
 /// incident cards precede raw repair turns, with canonical id order breaking
-/// ties. This is a deterministic bounded sample, not a history-wide recency
-/// ranking. The complete diagnostic report remains available separately via
+/// ties. Current native memory repairs fill the remaining excerpt slots.
+/// This is a deterministic bounded sample, not a history-wide recency ranking.
+/// The complete diagnostic report remains available separately via
 /// [`error_recall_report`].
 ///
 /// Evidence text crosses the normal live direct-pack admission boundary.
-/// Canonical memory ids remain query hints without granting their target any
-/// additional admission authority. Proof locators and arbitrary link metadata
-/// do not become retrieval text. The final expansion is at most 4096 UTF-8
-/// bytes, including at most four distinct repair excerpts.
+/// Native memory bodies require current workspace, lifecycle, seal and review
+/// authority, then complete-source screening before excerpting. Canonical
+/// memory ids remain locator-only hints without granting admission authority.
+/// One snapshot covers every read; a caller-owned transaction stays owned by
+/// its caller. Proof locators and arbitrary link metadata never become text.
+/// The final expansion is at most 4096 UTF-8 bytes and four distinct excerpts.
 ///
 /// # Errors
 ///
-/// Propagates database errors from fingerprint, target, and evidence reads.
+/// Propagates database errors from fingerprint, target, and source reads.
 pub fn pack_error_recall_query_seed(
     connection: &DbConnection,
     workspace_id: &str,
     canonical: &CanonicalDiagnostic,
 ) -> Result<String> {
+    let snapshot = memory::Snapshot::begin_or_borrow(connection)?;
+    let reference_time = Utc::now();
     let fingerprint = ErrorFingerprint::from_canonical(canonical);
     let outcome = diagnose_error(connection, workspace_id, canonical)?;
     let metadata = ErrorRecallReport::from_outcome(&fingerprint, &outcome).query_seed();
@@ -439,9 +447,26 @@ pub fn pack_error_recall_query_seed(
         append_pack_recall_fragment(&mut seed, " helpful_repair:", &row.span.id);
         append_pack_recall_fragment(&mut seed, "\nprior fix: ", &text);
     }
-    for memory_id in memory_ids.into_iter().take(PACK_RECALL_EXCERPT_LIMIT) {
-        append_pack_recall_fragment(&mut seed, " helpful_repair:", memory_id);
+    let mut expanded_memories = BTreeSet::new();
+    if excerpts.len() < PACK_RECALL_EXCERPT_LIMIT {
+        for (id, text) in memory::read(connection, workspace_id, &memory_ids, reference_time)? {
+            if excerpts.len() == PACK_RECALL_EXCERPT_LIMIT {
+                break;
+            }
+            if !excerpts.insert(text.clone()) {
+                continue;
+            }
+            append_pack_recall_fragment(&mut seed, " helpful_repair:", &id);
+            append_pack_recall_fragment(&mut seed, "\nprior fix: ", &text);
+            expanded_memories.insert(id);
+        }
     }
+    for memory_id in memory_ids.into_iter().take(PACK_RECALL_EXCERPT_LIMIT) {
+        if !expanded_memories.contains(memory_id) {
+            append_pack_recall_fragment(&mut seed, " helpful_repair:", memory_id);
+        }
+    }
+    snapshot.finish()?;
     Ok(seed)
 }
 
