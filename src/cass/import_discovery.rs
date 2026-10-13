@@ -1,6 +1,6 @@
-//! Production discovery for colocated Unix ee/cass installations.
+//! Production discovery for trusted Unix ee/cass installations.
 //!
-//! The running executable supplies the extra installation directory, never
+//! The running executable supplies the extra installation directories, never
 //! HOME, PATH, argv[0], or the working directory. Explicit choices and system
 //! locations keep precedence. Inspection does not execute either binary.
 
@@ -8,14 +8,17 @@ use std::path::{Path, PathBuf};
 
 use super::{CassError, DiscoveredBinary, DiscoverySource, client};
 
-/// Discover an import executable, including a safely installed sibling of ee.
+/// Discover an import executable, including a safely installed companion of ee.
 ///
 /// Environment/config overrides and the system allowlist retain the existing
 /// validation and precedence. If neither resolves, Unix installations may use
-/// `cass` beside the actual running `ee` executable. Both files and every
-/// ancestor must be non-symlinked, not group/world-writable, and owned by root
-/// or the owner of ee. An untrusted sibling preserves the original diagnostic.
-/// Other platforms retain the existing discovery behavior.
+/// `cass` beside the actual running `ee` executable. An ee installation in
+/// `.cargo/bin` may also use `.local/bin/cass` under the same installation root,
+/// and vice versa. The colocated binary takes precedence over that alternative.
+/// Both files and every ancestor on both paths must be non-symlinked, not
+/// group/world-writable, and owned by root or the owner of ee. An untrusted
+/// companion preserves the original diagnostic. Other platforms retain the
+/// existing discovery behavior.
 ///
 /// # Errors
 ///
@@ -28,7 +31,7 @@ pub fn discover_import_binary(
         #[cfg(unix)]
         {
             let executable = std::env::current_exe().ok()?;
-            trusted_sibling_with(&executable, inspect_entry)
+            trusted_installation_with(&executable, inspect_entry)
         }
         #[cfg(not(unix))]
         {
@@ -39,7 +42,7 @@ pub fn discover_import_binary(
 
 fn with_colocated_candidate(
     discovered: Result<DiscoveredBinary, CassError>,
-    sibling: impl FnOnce() -> Option<PathBuf>,
+    companion: impl FnOnce() -> Option<PathBuf>,
 ) -> Result<DiscoveredBinary, CassError> {
     match discovered {
         Err(error)
@@ -48,7 +51,7 @@ fn with_colocated_candidate(
                 CassError::BinaryNotFound { .. } | CassError::FoundButUntrusted { .. }
             ) =>
         {
-            sibling()
+            companion()
                 .map(|path| DiscoveredBinary::new(path, DiscoverySource::Path))
                 .ok_or(error)
         }
@@ -78,8 +81,32 @@ fn inspect_entry(path: &Path) -> std::io::Result<Entry> {
     })
 }
 
+/// Infer only the other conventional installer layout from ee's actual path.
+/// This is not a home-directory lookup or a general search of sibling folders.
 #[cfg(unix)]
-fn trusted_sibling_with(
+fn paired_installation_candidate(parent: &Path) -> Option<PathBuf> {
+    use std::ffi::OsStr;
+
+    if parent.file_name() != Some(OsStr::new("bin")) {
+        return None;
+    }
+    let installation = parent.parent()?;
+    let other = match installation.file_name()?.to_str()? {
+        ".cargo" => ".local",
+        ".local" => ".cargo",
+        _ => return None,
+    };
+    Some(
+        installation
+            .parent()?
+            .join(other)
+            .join("bin")
+            .join(super::DEFAULT_BINARY),
+    )
+}
+
+#[cfg(unix)]
+fn trusted_installation_with(
     executable: &Path,
     mut inspect: impl FnMut(&Path) -> std::io::Result<Entry>,
 ) -> Option<PathBuf> {
@@ -100,20 +127,35 @@ fn trusted_sibling_with(
         return None;
     }
     let parent = executable.parent()?;
-    let candidate = parent.join(super::DEFAULT_BINARY);
-    let sibling = inspect(&candidate).ok()?;
-    if !sibling.file || sibling.mode & 0o111 == 0 || !trusted(sibling) {
-        return None;
-    }
-    // Checking only the direct parent would admit a writable HOME ancestor.
-    // Sticky temporary directories are not automatic installation authorities.
+    // Validate ee's chain even when the selected companion is in another bin
+    // directory. Trust in the candidate cannot repair an unsafe authority path.
     for ancestor in parent.ancestors() {
         let entry = inspect(ancestor).ok()?;
         if !entry.directory || !trusted(entry) {
             return None;
         }
     }
-    Some(candidate)
+    let mut candidates = vec![parent.join(super::DEFAULT_BINARY)];
+    if let Some(candidate) = paired_installation_candidate(parent) {
+        candidates.push(candidate);
+    }
+    for candidate in candidates {
+        let Ok(entry) = inspect(&candidate) else {
+            continue;
+        };
+        if !entry.file || entry.mode & 0o111 == 0 || !trusted(entry) {
+            continue;
+        }
+        // Checking only the direct parent would admit a writable HOME ancestor.
+        // Sticky temporary directories are not installation authorities either.
+        let safe_ancestors = candidate.parent()?.ancestors().all(|ancestor| {
+            inspect(ancestor).is_ok_and(|entry| entry.directory && trusted(entry))
+        });
+        if safe_ancestors {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -196,10 +238,12 @@ mod tests {
 
         const EXECUTABLE: &str = "/home/operator/.local/bin/ee";
         const SIBLING: &str = "/home/operator/.local/bin/cass";
+        const CARGO_EXECUTABLE: &str = "/home/operator/.cargo/bin/ee";
+        const CARGO_CASS: &str = "/home/operator/.cargo/bin/cass";
 
-        fn installation() -> BTreeMap<PathBuf, Entry> {
+        fn installation_at(executable: &str, companion: &str) -> BTreeMap<PathBuf, Entry> {
             let mut entries = BTreeMap::new();
-            for path in [EXECUTABLE, SIBLING] {
+            for path in [executable, companion] {
                 entries.insert(
                     PathBuf::from(path),
                     Entry {
@@ -209,31 +253,39 @@ mod tests {
                         owner: 1000,
                     },
                 );
-            }
-            for path in Path::new(EXECUTABLE).parent().unwrap().ancestors() {
-                entries.insert(
-                    path.to_owned(),
-                    Entry {
-                        file: false,
-                        directory: true,
-                        mode: 0o755,
-                        owner: if path == Path::new("/") || path == Path::new("/home") {
-                            0
-                        } else {
-                            1000
+                for ancestor in Path::new(path).parent().unwrap().ancestors() {
+                    entries.insert(
+                        ancestor.to_owned(),
+                        Entry {
+                            file: false,
+                            directory: true,
+                            mode: 0o755,
+                            owner: if ancestor == Path::new("/") || ancestor == Path::new("/home") {
+                                0
+                            } else {
+                                1000
+                            },
                         },
-                    },
-                );
+                    );
+                }
             }
             entries
         }
 
-        fn resolve(entries: &BTreeMap<PathBuf, Entry>) -> Option<PathBuf> {
-            trusted_sibling_with(Path::new(EXECUTABLE), |path| {
+        fn installation() -> BTreeMap<PathBuf, Entry> {
+            installation_at(EXECUTABLE, SIBLING)
+        }
+
+        fn resolve_at(executable: &str, entries: &BTreeMap<PathBuf, Entry>) -> Option<PathBuf> {
+            trusted_installation_with(Path::new(executable), |path| {
                 entries.get(path).copied().ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::NotFound, "missing fixture entry")
                 })
             })
+        }
+
+        fn resolve(entries: &BTreeMap<PathBuf, Entry>) -> Option<PathBuf> {
+            resolve_at(EXECUTABLE, entries)
         }
 
         #[test]
@@ -242,6 +294,102 @@ mod tests {
             assert_eq!(resolve(&entries), Some(PathBuf::from(SIBLING)));
             entries.get_mut(Path::new(SIBLING)).unwrap().owner = 0;
             assert_eq!(resolve(&entries), Some(PathBuf::from(SIBLING)));
+        }
+
+        #[test]
+        fn cargo_and_local_installers_can_supply_each_others_companion() {
+            for (executable, companion) in [
+                (CARGO_EXECUTABLE, SIBLING),
+                (EXECUTABLE, CARGO_CASS),
+            ] {
+                let entries = installation_at(executable, companion);
+                assert_eq!(
+                    resolve_at(executable, &entries),
+                    Some(PathBuf::from(companion)),
+                    "{executable} must find {companion} without HOME or PATH"
+                );
+            }
+        }
+
+        #[test]
+        fn colocated_companion_wins_but_an_unsafe_one_cannot_hide_a_safe_alternative() {
+            let mut entries = installation_at(CARGO_EXECUTABLE, SIBLING);
+            let sibling_entry = *entries.get(Path::new(SIBLING)).unwrap();
+            entries.insert(PathBuf::from(CARGO_CASS), sibling_entry);
+            assert_eq!(
+                resolve_at(CARGO_EXECUTABLE, &entries),
+                Some(PathBuf::from(CARGO_CASS))
+            );
+            entries.get_mut(Path::new(CARGO_CASS)).unwrap().mode = 0o777;
+            assert_eq!(
+                resolve_at(CARGO_EXECUTABLE, &entries),
+                Some(PathBuf::from(SIBLING))
+            );
+            entries.get_mut(Path::new(SIBLING)).unwrap().owner = 2000;
+            assert!(resolve_at(CARGO_EXECUTABLE, &entries).is_none());
+        }
+
+        #[test]
+        fn cross_layout_discovery_checks_both_complete_ancestry_chains() {
+            for (executable, companion) in [
+                (CARGO_EXECUTABLE, SIBLING),
+                (EXECUTABLE, CARGO_CASS),
+            ] {
+                let original = installation_at(executable, companion);
+                for path in original.keys() {
+                    for bits in [0o020, 0o002, 0o1002] {
+                        let mut entries = original.clone();
+                        entries.get_mut(path).unwrap().mode |= bits;
+                        assert!(
+                            resolve_at(executable, &entries).is_none(),
+                            "writable {} for {executable}: {bits:o}",
+                            path.display()
+                        );
+                    }
+                    let mut entries = original.clone();
+                    let entry = entries.get_mut(path).unwrap();
+                    entry.file = false;
+                    entry.directory = false;
+                    assert!(
+                        resolve_at(executable, &entries).is_none(),
+                        "symlink/special {} for {executable}",
+                        path.display()
+                    );
+                    entries.remove(path);
+                    assert!(
+                        resolve_at(executable, &entries).is_none(),
+                        "missing {} for {executable}",
+                        path.display()
+                    );
+                    if path.as_path() != Path::new(executable) {
+                        let mut entries = original.clone();
+                        entries.get_mut(path).unwrap().owner = 2000;
+                        assert!(
+                            resolve_at(executable, &entries).is_none(),
+                            "foreign owner {} for {executable}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn paired_layout_does_not_search_arbitrary_neighboring_directories() {
+            for parent in [
+                "/usr/bin",
+                "/usr/local/bin",
+                "/home/operator/bin",
+                "/home/operator/.cache/bin",
+                "/home/operator/.local/share/bin",
+                "/home/operator/.cargo/tools",
+            ] {
+                assert!(paired_installation_candidate(Path::new(parent)).is_none());
+            }
+            assert_eq!(
+                paired_installation_candidate(Path::new("/home/資料/.cargo/bin")),
+                Some(PathBuf::from("/home/資料/.local/bin/cass"))
+            );
         }
 
         #[test]
@@ -311,7 +459,7 @@ mod tests {
         fn library_hosts_relative_paths_and_parent_traversal_cannot_supply_locations() {
             for path in ["ee", "./ee", "/opt/host", "/opt/ee-test", "/opt/../bin/ee"] {
                 assert!(
-                    trusted_sibling_with(Path::new(path), |_| {
+                    trusted_installation_with(Path::new(path), |_| {
                         panic!("invalid executable identity must reject before inspection")
                     })
                     .is_none(),
@@ -327,7 +475,7 @@ mod tests {
                 std::io::ErrorKind::NotFound,
             ] {
                 assert!(
-                    trusted_sibling_with(Path::new(EXECUTABLE), |_| {
+                    trusted_installation_with(Path::new(EXECUTABLE), |_| {
                         Err(std::io::Error::new(kind, "injected inspection failure"))
                     })
                     .is_none()
