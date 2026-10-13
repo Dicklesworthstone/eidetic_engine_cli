@@ -14,7 +14,7 @@ Labels, fields and the coverage rule are defined in
 - **Undo:** Not applicable. Nothing is written.
 - **Oracle:** `doctor_fixture_assert_pinned_gap` (artifact `-`), run from inside the child on the outer workspace: doctor healthy with an empty `actionable`, `--fix` reports 0 actions. The witness is `ee workspace resolve` from the child reporting exactly `["workspace_nested_markers"]`.
 - **Negative control:** Before the child is initialized, the same resolve from the same directory reports no diagnostics (`corrupt.sh`).
-- **Pinned sha:** fa6967499, measured on its stamped release build on vmi1227854 (corrupt 0, assert 0: "pinned gap confirmed"; with the child's `.ee` moved aside the witness fails with "witness lost").
+- **Pinned sha:** fa6967499, measured on its stamped release build on an RCH worker (corrupt 0, assert 0: "pinned gap confirmed"; with the child's `.ee` moved aside the witness fails with "witness lost").
 
 ## fm-workspace_config-config-toml-malformed
 
@@ -26,4 +26,4 @@ Labels, fields and the coverage rule are defined in
 - **Undo:** Not applicable. The config file is unchanged by `--fix`.
 - **Oracle:** `doctor_fixture_assert_pinned_gap` on `.ee/config.toml`: doctor healthy with an empty `actionable`, `--fix` reports 0 actions, and the config bytes are unchanged. The witness is `ee search` failing with `configuration`.
 - **Negative control:** The comment-only baseline config passes `ee search` and a healthy doctor report before it is broken.
-- **Pinned sha:** 02524267e, measured on its stamped release build on hz3.
+- **Pinned sha:** 02524267e, measured on its stamped release build on an RCH worker.

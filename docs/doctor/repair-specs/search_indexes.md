@@ -26,7 +26,7 @@ Labels, fields and the coverage rule are defined in
 - **Undo:** `doctor --undo <runId>` restores the exact stale baseline (the index's generation is the old one again and EE-E301 returns); a second undo reports 0 actions.
 - **Oracle:** `doctor_fixture_assert` round trip (fix, health, undo, content digest equal to the corrupted baseline, monotonic write lock), plus `completed_ok` with no guidance-only fixers, the applied `run_index_rebuild`, EE-E301 after undo, and an idempotent second undo.
 - **Negative control:** `doctor_fixture_healthy_store` asserts the store is healthy with equal generations before the edit.
-- **Pinned sha:** 02524267e, measured on its stamped release build on hz3.
+- **Pinned sha:** 02524267e, measured on its stamped release build on an RCH worker.
 
 ## fm-search_indexes-index_corrupt
 

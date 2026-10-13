@@ -62,7 +62,7 @@ Labels, fields and the coverage rule are defined in
 - **Undo:** Not applicable. The export is unchanged by `--fix`.
 - **Oracle:** `doctor_fixture_assert_pinned_gap` on `.beads/issues.jsonl`: doctor healthy with an empty `actionable`, `--fix` reports 0 actions, and the export bytes are unchanged. The witness is read-only: `sqlite3 -readonly` reads the deleted issue's status as `tombstone` in `.beads/beads.db` while the export carries the same id with another status.
 - **Negative control:** Before the export is replaced, it carries the tombstone, the database agrees, and `br doctor` reports `ok: true` (`corrupt.sh`). A measured control that restores the tombstone-bearing export makes `assert.sh` fail with "witness lost".
-- **Pinned sha:** 25a9d7f8d, measured on its stamped release build on vmi1227854 with `br` 0.6.0 (corrupt 0, assert 0: "pinned gap confirmed"; the restored-tombstone control failed with "witness lost"). `br doctor` reported `ok: false` with `base_jsonl`, `db.export_hash_cache` and `sync.metadata` on the drifted tracker.
+- **Pinned sha:** 25a9d7f8d, measured on its stamped release build on an RCH worker with `br` 0.6.0 (corrupt 0, assert 0: "pinned gap confirmed"; the restored-tombstone control failed with "witness lost"). `br doctor` reported `ok: false` with `base_jsonl`, `db.export_hash_cache` and `sync.metadata` on the drifted tracker.
 
 ## fm-state_files-orphaned-pid-write-lock
 
@@ -86,7 +86,7 @@ Labels, fields and the coverage rule are defined in
 - **Undo:** Not applicable. The modes are still open after `--fix`.
 - **Oracle:** `doctor_fixture_assert_pinned_gap` on `.ee/ee.db`: doctor healthy with an empty `actionable`, `--fix` reports 0 actions, and the database bytes are unchanged. The witness is the mode string from `ls -ld` (portable across GNU and BSD): `ee.db` is group- and other-readable, and `.ee` is group- and other-readable and enterable, before and after `--fix`. (A first version used `find -perm`, whose flag text trips the contract's forbidden-token scan; bd-2oh15 c10006.)
 - **Negative control:** `corrupt.sh` requires the healthy store's baseline modes to be private before opening them up; `doctor_fixture_healthy_store` asserts the store is healthy first.
-- **Pinned sha:** 02524267e, measured on its stamped release build on hz3 (corrupt 0, assert 0: "pinned gap confirmed").
+- **Pinned sha:** 02524267e, measured on its stamped release build on an RCH worker (corrupt 0, assert 0: "pinned gap confirmed").
 
 ## fm-state_files-workspace-ambiguous-multiple-candidates
 
@@ -98,4 +98,4 @@ Labels, fields and the coverage rule are defined in
 - **Undo:** Not applicable. Nothing is written.
 - **Oracle:** `doctor_fixture_assert_pinned_gap` (artifact `-`, since the damage is the environment) run under the ambiguous environment from inside the target: doctor healthy with an empty `actionable`, and `--fix` reports 0 actions. The witness is `ee workspace resolve` reporting exactly `["workspace_explicit_environment_conflict"]`.
 - **Negative control:** Without `EE_WORKSPACE` the same resolve reports no diagnostics (`corrupt.sh`). A measured control that points `EE_WORKSPACE` at the target itself makes `assert.sh` fail with "witness lost".
-- **Pinned sha:** 25a9d7f8d, measured on its stamped release build on vmi1227854 (corrupt 0, assert 0: "pinned gap confirmed"; the agreeing-environment control failed with "witness lost").
+- **Pinned sha:** 25a9d7f8d, measured on its stamped release build on an RCH worker (corrupt 0, assert 0: "pinned gap confirmed"; the agreeing-environment control failed with "witness lost").

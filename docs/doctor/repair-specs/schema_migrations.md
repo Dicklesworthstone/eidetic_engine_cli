@@ -14,7 +14,7 @@ Labels, fields and the coverage rule are defined in
 - **Undo:** Not applicable: nothing is written. The content digest is identical around `--fix`, and the ledger is still one row short afterwards.
 - **Oracle:** `doctor_fixture_assert_guidance_only` for `schema_migration_pending` / `database` EE-E700 (exit 6, `completed_partial`, `fixerDispatchPending`), plus every fixer result `run_migration` / `guidance_recorded`, an identical content digest around `--fix`, and the ledger row count unchanged.
 - **Negative control:** `doctor_fixture_healthy_store` asserts the store is healthy before the edit, and the lock-provisioning `--fix` reports `actionCount` 0.
-- **Pinned sha:** 02524267e, measured on its stamped release build on hz3.
+- **Pinned sha:** 02524267e, measured on its stamped release build on an RCH worker.
 
 ## fm-schema_migrations-migration-drift-checksum-mismatch
 
