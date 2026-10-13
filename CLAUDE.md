@@ -46,6 +46,26 @@ was refused as written; `scripts/check-rch-doc-examples.py` could not catch it
 because it only checks that the wrapper precedes `cargo`. It now also requires
 `--locked` on pinned examples.
 
+**A pinned refusal almost always means one stale row in `franken-stack.lock`,
+not a problem with your checkouts.** Each locked revision's own manifest must
+declare the version `Cargo.toml` pins. The report carries BOTH readings per
+repository — a live-checkout reading and a `materialized` block — and only the
+materialized one has `matches`; the live numbers are informational and do NOT
+block. On 2026-10-13 one stale row (`franken_agent_detection` locked at a
+commit declaring 0.3.3 against a `=0.3.8` pin) refused every pinned dispatch,
+and the live readings correlated so neatly with the symptom that they looked
+causal. They were not: the live checkouts are still drifted today and the lane
+is green. The repair text now names the offending `repo/package locked=
+expected=` rows, so read that rather than inferring.
+
+**`RCH_VERIFY_FRANKEN_STACK_PREFLIGHT=0` disables the whole franken-stack
+preflight** (it defaults to `1`). It is a blunt escape hatch, not a fix: it
+skips provenance verification entirely rather than scoping it, so a dispatch
+run under it carries no attestation that the dependency sources match the lock.
+Use it only to establish that the preflight is what is blocking you, then
+repair the lock row and drop the flag. Never use it to obtain a verdict you
+intend to cite as proof.
+
 Write the wrapper out in full on every line. A `RCH="..."` shorthand reads
 nicely and breaks both copy-paste of a single line and
 `scripts/check-rch-doc-examples.py`, which looks for the literal wrapper
