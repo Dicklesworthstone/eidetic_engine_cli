@@ -53,6 +53,23 @@ struct Event {
     failed_build: String,
 }
 
+/// BuildEvent.ImportPath is a build identity, NOT TestEvent.Package. Only
+/// a package's explicit FailedBuild field can associate those namespaces.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct BuildEvent {
+    import_path: String,
+    action: String,
+    output: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Record {
+    Test(Event),
+    Build(BuildEvent),
+}
+
 fn identity(value: &str) -> bool {
     !value.trim().is_empty() && !value.chars().any(char::is_control)
 }
@@ -70,7 +87,7 @@ fn commitment(package: &str, test: Option<&str>) -> [u8; 32] {
 fn diagnostic(package: &str, test: Option<&str>, build: bool) -> CanonicalDiagnostic {
     let message = match test {
         Some(test) => format!("go test failure: {package} test {test}"),
-        None if build => format!("go test build failure: {package}"),
+        None if build => format!("go build failure: {package}"),
         None => format!("go test package failure: {package}"),
     };
     let message = crate::policy::redact_secret_like_content(&message).content;
@@ -99,13 +116,15 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         action: bool,
         #[serde(default, rename = "Package", deserialize_with = "present")]
         package: bool,
+        #[serde(default, rename = "ImportPath", deserialize_with = "present")]
+        import_path: bool,
     }
     let family = serde_json::Deserializer::from_str(text)
         .into_iter::<Family>()
         .next()
         .ok_or(())?
         .map_err(|_| ())?;
-    if !family.action && !family.package {
+    if !family.action && !family.package && !family.import_path {
         return Ok(None);
     }
     if text.len() > MAX_SCANNED_OUTPUT_BYTES {
@@ -116,7 +135,9 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     let mut output = CompilerOutput::default();
     let mut keys = BTreeSet::new();
     let mut skipped_tests = BTreeSet::new();
-    let mut records = serde_json::Deserializer::from_str(text).into_iter::<Event>();
+    let mut build_failures = BTreeSet::new();
+    let mut linked_builds = BTreeSet::new();
+    let mut records = serde_json::Deserializer::from_str(text).into_iter::<Record>();
     let mut consumed = 0;
     let mut count = 0;
     while let Some(event) = records.next() {
@@ -134,6 +155,28 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         }
         consumed = end;
         count += 1;
+        let event = match event {
+            Record::Test(event) => event,
+            Record::Build(event) => {
+                if !identity(&event.import_path) {
+                    return Err(());
+                }
+                match event.action.as_str() {
+                    "build-output" if event.output.is_some() => {}
+                    "build-fail" if event.output.is_none() => {
+                        build_failures.insert(commitment(&event.import_path, None));
+                        output.failed = true;
+                        retain_diagnostic(
+                            &mut output,
+                            &mut keys,
+                            diagnostic(&event.import_path, None, true),
+                        );
+                    }
+                    _ => return Err(()),
+                }
+                continue;
+            }
+        };
         if !identity(&event.package)
             || (!event.test.is_empty() && !identity(&event.test))
             || event
@@ -244,6 +287,9 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
                     let subject = commitment(&event.package, None);
                     if failed {
                         coverage.failed_packages.insert(subject);
+                        if !event.failed_build.is_empty() {
+                            linked_builds.insert(commitment(&event.failed_build, None));
+                        }
                     } else if event.action == "pass" {
                         coverage.passed_packages.insert(subject);
                     }
@@ -251,21 +297,24 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
                 package.failed |= failed;
                 output.failed |= failed;
                 // A package's aggregate fail is not a duplicate test class.
-                (failed && (test.is_some() || !package.observed_test_failure))
-                    .then(|| diagnostic(&event.package, test, !event.failed_build.is_empty()))
+                (failed && (test.is_some() || !package.observed_test_failure)).then(|| {
+                    if event.failed_build.is_empty() {
+                        diagnostic(&event.package, test, false)
+                    } else {
+                        diagnostic(&event.failed_build, None, true)
+                    }
+                })
             }
             // Benchmark summaries and future actions need their own coverage
             // semantics; they cannot borrow ordinary test success authority.
             _ => return Err(()),
         };
-        if let Some(diagnostic) = failed_diagnostic
-            && keys.insert(diagnostic.layered_key().key)
-            && output.diagnostics.len() < MAX_DIAGNOSTICS_PER_FAILURE
-        {
-            output.diagnostics.push(diagnostic);
+        if let Some(diagnostic) = failed_diagnostic {
+            retain_diagnostic(&mut output, &mut keys, diagnostic);
         }
     }
     coverage.complete = !packages.is_empty()
+        && build_failures.is_subset(&linked_builds)
         && packages.values().all(|package| {
             package.terminal && package.tests.values().all(|state| state.terminal())
         });
@@ -275,6 +324,18 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         coverage.complete && !output.failed && !coverage.passed_tests.is_empty();
     output.go_test_coverage = Some(coverage);
     Ok(Some(output))
+}
+
+fn retain_diagnostic(
+    output: &mut CompilerOutput,
+    keys: &mut BTreeSet<String>,
+    diagnostic: CanonicalDiagnostic,
+) {
+    if keys.insert(diagnostic.layered_key().key)
+        && output.diagnostics.len() < MAX_DIAGNOSTICS_PER_FAILURE
+    {
+        output.diagnostics.push(diagnostic);
+    }
 }
 
 #[cfg(test)]
@@ -450,5 +511,200 @@ mod tests {
         events.insert(1, json!({"Action":"output","Package":"a","Output":""}));
         assert!(inspect(&stream(&events)).is_err());
         assert!(inspect(&format!("{}{}", stream(&failed()), " ".repeat(MAX_SCANNED_OUTPUT_BYTES))).is_err());
+    }
+
+    fn build_failure() -> Vec<Value> {
+        vec![
+            json!({"Action":"build-output","ImportPath":"example.org/cache [example.org/cache.test]","Output":"PRIVATE_BUILD_LOG_SENTINEL"}),
+            json!({"Action":"build-fail","ImportPath":"example.org/cache [example.org/cache.test]"}),
+            json!({"Action":"start","Package":"example.org/cache"}),
+            json!({"Action":"fail","Package":"example.org/cache","FailedBuild":"example.org/cache [example.org/cache.test]"}),
+        ]
+    }
+
+    fn passing(package: &str) -> Vec<Value> {
+        vec![
+            json!({"Action":"start","Package":package}),
+            json!({"Action":"run","Package":package,"Test":"TestRoundTrip"}),
+            json!({"Action":"pass","Package":package,"Test":"TestRoundTrip"}),
+            json!({"Action":"pass","Package":package}),
+        ]
+    }
+
+    #[test]
+    fn build_events_keep_failure_identity_without_persisting_build_output() {
+        let decoded = parsed(&build_failure());
+        assert!(decoded.failed);
+        assert!(!decoded.allows_completion);
+        assert_eq!(decoded.diagnostics.len(), 1);
+        assert!(decoded.diagnostics[0].message_template.starts_with("go build failure:"));
+        assert!(!format!("{:?}", decoded.diagnostics).contains("private_build_log_sentinel"));
+        let coverage = decoded.go_test_coverage.expect("coverage");
+        assert!(coverage.complete);
+        assert_eq!(coverage.failed_packages.len(), 1);
+        assert!(coverage.failed_tests.is_empty());
+        let standalone = parsed(&[
+            json!({"Action":"build-fail","ImportPath":"example.org/cache"}),
+        ]);
+        assert!(standalone.failed);
+        assert_eq!(standalone.diagnostics.len(), 1);
+        assert!(!standalone.go_test_coverage.expect("coverage").complete);
+    }
+
+    #[test]
+    fn build_identity_needs_an_explicit_link_not_a_similar_package_name() {
+        for link in ["example.org/cache", "example.org/other [example.org/cache.test]"] {
+            let mut events = build_failure();
+            events.last_mut().expect("package failure")["FailedBuild"] = json!(link);
+            let decoded = parsed(&events);
+            assert!(decoded.failed);
+            assert!(!decoded.go_test_coverage.expect("coverage").complete);
+        }
+        // A clean unrelated package cannot stand in for the failed build.
+        let mut events = build_failure()[..2].to_vec();
+        events.extend(passing("example.org/other"));
+        let decoded = parsed(&events);
+        assert!(decoded.failed);
+        assert!(!decoded.allows_completion);
+        assert!(!decoded.go_test_coverage.expect("coverage").complete);
+    }
+
+    #[test]
+    fn build_output_can_interleave_but_never_supplies_success_by_itself() {
+        let warning = json!({"Action":"build-output","ImportPath":"example.org/dependency","Output":"a compiler warning"});
+        let decoded = parsed(&[warning.clone()]);
+        assert!(!decoded.failed);
+        assert!(!decoded.allows_completion);
+        let mut events = passing("example.org/cache");
+        events.insert(2, warning);
+        let output = ToolOutput {
+            text: stream(&events),
+            ..ToolOutput::default()
+        };
+        assert!(parsed(&events).allows_completion);
+        assert!(!output.succeeded());
+        assert!(ToolOutput { exit_code: Some(0), ..output }.succeeded());
+    }
+
+    #[test]
+    fn malformed_or_cross_namespace_build_records_reject_the_whole_stream() {
+        for text in [
+            r#"{"Action":"build-fail","ImportPath":"a","Package":"a"}"#,
+            r#"{"Action":"build-fail","ImportPath":"a","ImportPath":"b"}"#,
+            r#"{"Action":"build-output","ImportPath":"a"}"#,
+            r#"{"Action":"build-fail","ImportPath":"a","Output":"failed"}"#,
+            r#"{"Action":"build-pass","ImportPath":"a"}"#,
+            r#"{"Action":"build-fail","ImportPath":null}"#,
+            r#"{"Action":"build-fail","ImportPath":" "}"#,
+            r#"{"Action":null,"Package":"a"}"#,
+        ] {
+            assert!(inspect(text).is_err(), "{text}");
+            let complete_prefix = format!("{}\n{text}", stream(&passing("a")));
+            assert!(inspect(&complete_prefix).is_err());
+        }
+    }
+
+    #[test]
+    fn go_subject_names_are_redacted_before_diagnostic_keying() {
+        let credential = format!("ghp_{}", "Q".repeat(36));
+        let secret_test = format!("api_key={credential}");
+        let decoded = parsed(&[
+            json!({"Action":"start","Package":"example.org/cache"}),
+            json!({"Action":"run","Package":"example.org/cache","Test":secret_test}),
+            json!({"Action":"fail","Package":"example.org/cache","Test":secret_test}),
+            json!({"Action":"fail","Package":"example.org/cache"}),
+        ]);
+        assert_eq!(decoded.diagnostics.len(), 1);
+        let rendered = format!("{:?}", decoded.diagnostics);
+        assert!(!rendered.contains(&credential));
+        assert!(!rendered.contains(&credential.to_ascii_lowercase()));
+    }
+
+    #[test]
+    fn real_store_go_build_repair_rejects_wrong_package_then_records_cited_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::core::cass_error_recall::record_session_error_recall;
+        use crate::core::error_diagnosis::error_recall_report;
+        use crate::db::{
+            CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput,
+            DbConnection, EvidenceProducerKind,
+        };
+
+        const WS: &str = "wsp_01234567890123456789012345";
+        let db = DbConnection::open_memory()?;
+        db.migrate()?;
+        db.insert_workspace(WS, &CreateWorkspaceInput {
+            path: "/tmp/cass-go-build-recall".to_owned(),
+            name: None,
+        })?;
+        let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x60_2000)).to_string();
+        db.insert_session(&session, &CreateSessionInput {
+            workspace_id: WS.to_owned(),
+            cass_session_id: "/sessions/go-build.jsonl".to_owned(),
+            source_path: None,
+            agent_name: Some("claude_code".to_owned()),
+            model: None,
+            started_at: None,
+            ended_at: None,
+            message_count: 0,
+            token_count: None,
+            content_hash: format!("blake3:{}", blake3::hash(b"go-build").to_hex()),
+            metadata_json: None,
+        })?;
+        let append = |number: u32, kind: &str, role: &str, record: Value|
+            -> Result<String, crate::db::DbError> {
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x60_2000 + u128::from(number))).to_string();
+            let excerpt = record.to_string();
+            db.insert_evidence_span(&id, &CreateEvidenceSpanInput {
+                workspace_id: WS.to_owned(), session_id: session.clone(),
+                memory_id: None, producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: format!("go-build:{number}"), span_kind: kind.to_owned(),
+                start_line: number, end_line: number, start_byte: None, end_byte: None,
+                role: Some(role.to_owned()),
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                excerpt, metadata_json: None, inherited_redaction_classes: Vec::new(),
+            })?;
+            Ok(id)
+        };
+        let call = |number, id| append(number, "tool_call", "assistant", json!({
+            "type":"assistant","message":{"role":"assistant","content":[{
+                "type":"tool_use","id":id,"name":"Bash","input":{"command":"go test -json ./..."}
+            }]}
+        }));
+        let result = |number, id, output: String, is_error| append(number, "tool_result", "user", json!({
+            "type":"user","message":{"role":"user","content":[{
+                "type":"tool_result","tool_use_id":id,"content":output,"is_error":is_error
+            }]}
+        }));
+        call(1, "failure")?;
+        let failing = build_failure();
+        let diagnostic = parsed(&failing).diagnostics.remove(0);
+        let failure_id = result(2, "failure", stream(&failing), true)?;
+        let repair_id = append(3, "message", "assistant", json!({
+            "type":"assistant","message":{"role":"assistant","content":[{
+                "type":"text","text":"Fixed the cache build failure by adding the missing Cache type in cache.go."
+            }]}
+        }))?;
+        call(4, "wrong-retry")?;
+        let wrong = result(5, "wrong-retry", stream(&passing("example.org/other")), false)?;
+        let report = record_session_error_recall(&db, WS, &session)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.resolved_failures, 0);
+        assert_eq!(report.incident_cards_recorded, 0);
+        assert!(error_recall_report(&db, WS, &diagnostic)?.helpful_repairs.is_empty());
+
+        call(6, "valid-retry")?;
+        let proof = result(7, "valid-retry", stream(&passing("example.org/cache")), false)?;
+        let report = record_session_error_recall(&db, WS, &session)?;
+        assert_eq!(report.resolved_failures, 1);
+        assert_eq!(report.incident_cards_recorded, 1);
+        let recall = error_recall_report(&db, WS, &diagnostic)?;
+        assert!(recall.helpful_repairs.contains(&repair_id));
+        assert_eq!(recall.proof_links, vec![proof]);
+        assert!(!recall.proof_links.contains(&wrong));
+        let card = crate::core::incident_card::incident_card_id(WS, &failure_id);
+        assert!(db.get_search_admitted_evidence_span(&card, WS)?.is_some());
+        assert_eq!(record_session_error_recall(&db, WS, &session)?.incident_cards_recorded, 0);
+        Ok(())
     }
 }
