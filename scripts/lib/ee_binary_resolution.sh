@@ -353,18 +353,27 @@ ee_assert_target_os_supported() {
     return 1
 }
 
-# Default binary for the five doctor-safety harnesses (bd-z6g1s).
+# Default binary for a harness that would otherwise fall back to PATH `ee`
+# (bd-z6g1s).
 #
 # Prints a provenance line naming the path AND the origin, then echoes the
 # path. The origin is not decoration: the three cases fail in different ways
 # and a log that records only the path cannot tell them apart afterwards.
 #
-#   caller        EE_DOCTOR_FIXTURE_BINARY or EE_BINARY was set. This is what
+#   caller        an explicit binary was supplied -- $2, else
+#                 EE_DOCTOR_FIXTURE_BINARY, else EE_BINARY. This is what
 #                 run-safety-harness.sh does, so Gate 8.5 always lands here
 #                 and this helper's fallbacks never apply to it.
 #   built         the binary this checkout built, and it executes here.
 #   path_fallback the built binary is absent or cannot execute here, so PATH
 #                 `ee` is used instead.
+#
+# $2 exists because callers disagree about the name of their override: the five
+# verify-* harnesses use EE_DOCTOR_FIXTURE_BINARY, verify.sh exports EE_BINARY,
+# and scripts/e2e_delivery.sh uses EE_BIN. Passing the value in keeps the
+# provenance line unconditional -- a caller that short-circuited this function
+# to honour its own variable would resolve correctly and print nothing, which
+# is the exact failure this whole bead is about.
 #
 # The executability probe is the load-bearing part, and preferring the built
 # binary WITHOUT it is a regression rather than a fix. Measured on the Mac dev
@@ -375,7 +384,7 @@ ee_assert_target_os_supported() {
 # the PATH binary it replaced, which at least runs. See `ee_binary_executes_here`.
 ee_resolve_fixture_binary() {
     local label="${1:?ee_resolve_fixture_binary: label required}"
-    local candidate="${EE_DOCTOR_FIXTURE_BINARY:-${EE_BINARY:-}}"
+    local candidate="${2:-${EE_DOCTOR_FIXTURE_BINARY:-${EE_BINARY:-}}}"
     local origin=caller
 
     if [ -z "$candidate" ]; then

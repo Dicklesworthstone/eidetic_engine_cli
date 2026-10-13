@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EE_BIN="${EE_BIN:-ee}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# bd-z6g1s: this script's own resolve_ee_bin_path below CANONICALISES a binary
+# name into an absolute path for the --ee-binary flag. That is a different job
+# from CHOOSING which binary to grade, and only the first was implemented: the
+# default was PATH `ee`, so a dispatch could build one binary and grade
+# another while printing an absolute path that looks like provenance.
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+EE_BIN="$(ee_resolve_fixture_binary e2e_delivery "${EE_BIN:-}")"
 ROOT="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}/ee-e2e-delivery.$$"
 WORKSPACE="$ROOT/workspace"
 LOG_DIR="$ROOT/logs"
