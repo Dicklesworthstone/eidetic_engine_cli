@@ -3,6 +3,17 @@
 //! into one advisory verdict before an agent spends another RCH slot or
 //! edits a file another agent is already covering.
 //!
+//! THIS MODULE HAS NO CALLER, and unlike its siblings it may not want one.
+//! Verified 2026-10-12 and re-verified 2026-10-13 against its own public
+//! symbols: the only mention in `src/` outside this file is its `pub mod` line
+//! in `src/core/mod.rs`. bd-1zb7k.17.4 is open, but the 2026-10-12 audit
+//! classified this one "dropped, maybe obsolete" rather than a clean dropped
+//! follow-up, because the signals it fuses are also read elsewhere. So the
+//! open question here is RETIRE-OR-WIRE, not just wiring: establish whether a
+//! consumer still wants this advisory before building one. Wiring a superseded
+//! module creates a second divergent implementation of a shipped surface,
+//! which is how `ownership_snapshot` (bd-nwzbb) ended up needing a ruling.
+//!
 //! Acceptance shape (from bead body):
 //! - `duplicateVerificationCandidates[]` keyed by command fingerprint and
 //!   source-tree fingerprint.

@@ -1,6 +1,16 @@
 //! bd-1n0np.7.4 — audited contradiction resolution: propose → validate (→ apply
 //! via curate).
 //!
+//! THIS MODULE HAS NO CALLER. Verified 2026-10-12 and re-verified 2026-10-13
+//! against its own public symbols (`propose_contradiction_resolution` and
+//! friends), not its name: the only mention of it in `src/` outside this file
+//! is its `pub mod` line in `src/core/mod.rs`. Note that a bare-name grep DOES
+//! hit `"contradiction_resolution"` in test files, where it is a feature-id
+//! STRING naming a verify.sh e2e stage rather than a reference to this module;
+//! that false positive is what made it look wired. bd-1n0np.7.4 is open for the
+//! consumer wiring, whose acceptance is "propose -> validate -> apply ... full
+//! audit rows" and is not satisfiable by this stage alone.
+//!
 //! Resolutions follow ADR-0014 (propose → validate → apply). This module is the
 //! contradiction-specific propose + validate stage: given a detected, decided
 //! contradiction (winner vs loser, from `contradiction_guard`), it proposes the

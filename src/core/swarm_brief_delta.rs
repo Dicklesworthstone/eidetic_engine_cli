@@ -1,5 +1,14 @@
 //! IW2 (bd-1zb7k.17.2): redaction-safe swarm brief delta capsules.
 //!
+//! THIS MODULE HAS NO CALLER. Verified 2026-10-12 and re-verified 2026-10-13
+//! against its own public symbols, not its name: the only mention of it
+//! anywhere in `src/` outside this file is its `pub mod` line in
+//! `src/core/mod.rs`. The differ below is complete and tested, but nothing
+//! invokes it, so none of it can reach a response. bd-1zb7k.17.2 is open for
+//! the consumer wiring; its acceptance is consumer-level ("a post-compaction
+//! agent can consume...") and a pure differ with inline tests cannot satisfy
+//! it. Do not take the tests passing as evidence the capability is live.
+//!
 //! Pure differ that takes two pre-collected swarm-brief snapshots
 //! (`before` and `after`) and returns a compact capsule describing what
 //! changed: agents whose status moved, reservations acquired / released /
