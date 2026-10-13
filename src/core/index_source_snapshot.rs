@@ -25,18 +25,24 @@ pub(crate) fn read_only_documents_in_current_snapshot(
             "live retrieval projection requires a read-only source connection".to_owned(),
         ));
     }
-    if !super::workspace_index_source_rows_fit(db, workspace_id, max_documents)? {
+    if !live_source_rows_fit(cx, db, workspace_id, max_documents)? {
         return Ok(None);
     }
-    if !live_source_allocation_fits(cx, db, workspace_id, max_source_bytes)? {
+    let allocation_fits = live_source_allocation_fits(cx, db, workspace_id, max_source_bytes);
+    super::index_checkpoint(cx)?;
+    if !allocation_fits? {
         return Ok(None);
     }
     super::index_checkpoint(cx)?;
-    let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
+    let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false);
+    super::index_checkpoint(cx)?;
+    let memories = memories?;
     let mut documents = Vec::new();
     for memories in memories.chunks(16) {
         super::index_checkpoint(cx)?;
-        documents.extend(super::memory_documents_with_anchors(db, memories)?);
+        let projected = super::memory_documents_with_anchors(db, memories);
+        super::index_checkpoint(cx)?;
+        documents.extend(projected?);
     }
     let visitor_checkpoint = || {
         cx.checkpoint()
@@ -45,19 +51,23 @@ pub(crate) fn read_only_documents_in_current_snapshot(
                 message: "live retrieval source projection cancelled".to_owned(),
             })
     };
-    db.visit_sessions_for_workspace_in_current_snapshot(workspace_id, |session| {
+    let sessions = db.visit_sessions_for_workspace_in_current_snapshot(workspace_id, |session| {
         visitor_checkpoint()?;
         documents.push(super::session_to_document(&session));
         Ok(())
-    })?;
+    });
     super::index_checkpoint(cx)?;
-    for artifact in db.list_artifacts(workspace_id, None)? {
+    sessions?;
+    let artifacts = db.list_artifacts(workspace_id, None);
+    super::index_checkpoint(cx)?;
+    for artifact in artifacts? {
         super::index_checkpoint(cx)?;
         documents.push(super::artifact_to_document(&artifact));
     }
     super::index_checkpoint(cx)?;
-    documents.extend(super::rule_documents(db, workspace_id)?);
+    let rules = super::rule_documents(db, workspace_id);
     super::index_checkpoint(cx)?;
+    documents.extend(rules?);
     // Fallback needs the complete admitted set, not transcript order. Use
     // the same rowid-seeking pages as rebuild instead of repeatedly sorting
     // the remaining cross-session corpus. Keep publication's stable ID order.
@@ -77,18 +87,101 @@ pub(crate) fn read_only_documents_in_current_snapshot(
         .collect();
     // Projection adds metadata and labels. Refuse the entire replacement if
     // those exceed the bound; a truncated corpus must never claim freshness.
-    let projected_bytes = documents.iter().fold(0_u64, |total, document| {
-        total
+    super::index_checkpoint(cx)?;
+    if documents.len() > max_documents as usize {
+        return Ok(None);
+    }
+    let mut projected_bytes = 0_u64;
+    for (number, document) in documents.iter().enumerate() {
+        if number % 16 == 0 {
+            super::index_checkpoint(cx)?;
+        }
+        projected_bytes = projected_bytes
             .saturating_add(document.content.len() as u64)
             .saturating_add(
                 serde_json::to_vec(&document.metadata)
                     .map_or(u64::MAX, |metadata| metadata.len() as u64),
-            )
-    });
-    if documents.len() > max_documents as usize || projected_bytes > max_source_bytes {
-        return Ok(None);
+            );
+        if projected_bytes > max_source_bytes {
+            super::index_checkpoint(cx)?;
+            return Ok(None);
+        }
     }
+    super::index_checkpoint(cx)?;
     Ok(Some(documents))
+}
+
+/// Preserve publication's conservative row scope without fully counting a
+/// large archive just to refuse interactive fallback. LIMIT belongs inside
+/// the aggregate's input and the remaining allowance is shared by all sources.
+/// This is not an exact admission count or a bound on scanning nonmatching rows.
+#[cfg(feature = "lexical-bm25")]
+fn live_source_rows_fit(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    workspace_id: &str,
+    max_documents: u32,
+) -> Result<bool, IndexRebuildError> {
+    live_source_rows_fit_with(cx, max_documents, |table, limit| {
+        let (selection, mut parameters) = if table == "memories" {
+            (
+                "SELECT 1 FROM memories m WHERE (m.workspace_id = ?1 OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND lower(replace(trim(mt.tag), '-', '_')) IN (?2, ?3))) AND m.tombstoned_at IS NULL".to_owned(),
+                vec![
+                    sqlmodel_core::Value::Text(workspace_id.to_owned()),
+                    sqlmodel_core::Value::Text(crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned()),
+                    sqlmodel_core::Value::Text(crate::models::HOUSE_RULE_MEMORY_SCOPE_TAG.to_owned()),
+                ],
+            )
+        } else if table == "evidence_spans" {
+            (
+                "SELECT 1 FROM evidence_spans WHERE workspace_id = ?1 AND producer_kind = 'cass_import' AND search_eligibility = 'admitted'".to_owned(),
+                vec![sqlmodel_core::Value::Text(workspace_id.to_owned())],
+            )
+        } else {
+            (
+                format!("SELECT 1 FROM {table} WHERE workspace_id = ?1"),
+                vec![sqlmodel_core::Value::Text(workspace_id.to_owned())],
+            )
+        };
+        let sql = format!(
+            "SELECT COUNT(*) FROM ({selection} LIMIT ?{}) bounded_corpus_rows",
+            parameters.len() + 1,
+        );
+        let limit = i64::try_from(limit).map_err(|_| {
+            IndexRebuildError::Index("invalid live corpus row ceiling".to_owned())
+        })?;
+        parameters.push(sqlmodel_core::Value::BigInt(limit));
+        source_size_value(&db.query(&sql, &parameters)?, 0)
+    })
+}
+
+#[cfg(feature = "lexical-bm25")]
+fn live_source_rows_fit_with(
+    cx: &asupersync::Cx,
+    max_documents: u32,
+    mut count: impl FnMut(&str, u64) -> Result<u64, IndexRebuildError>,
+) -> Result<bool, IndexRebuildError> {
+    let mut remaining = u64::from(max_documents);
+    for table in [
+        "memories",
+        "sessions",
+        "artifacts",
+        "procedural_rules",
+        "evidence_spans",
+    ] {
+        super::index_checkpoint(cx)?;
+        // At most u32::MAX + 1, so the sentinel also fits a signed SQL limit.
+        let measured = count(table, remaining + 1);
+        // The database may report an interrupted query as a storage error.
+        // Neither that error nor a successful refusal may hide cancellation.
+        super::index_checkpoint(cx)?;
+        let rows = measured?;
+        if rows > remaining {
+            return Ok(false);
+        }
+        remaining -= rows;
+    }
+    Ok(true)
 }
 
 /// Preflight the complete source read before any row body, metadata sidecar,
@@ -1872,6 +1965,168 @@ mod tests {
             generation
         );
         assert!(db.list_memory_anchors(MEMORY).expect("anchors").is_empty());
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn live_row_bound_is_cumulative_and_counts_only_one_excess_row() {
+        let cx = asupersync::Cx::for_testing();
+        for counts in [
+            [0_u64; 5],
+            [1; 5],
+            [0, 31, 0, 0, 20_000],
+            [256, 0, 0, 0, 1],
+            [u64::from(u32::MAX), 1, 0, 0, 0],
+            [u64::MAX; 5],
+        ] {
+            let total = counts.into_iter().fold(0_u64, u64::saturating_add);
+            for maximum in [0, 1, 4, 5, 31, 32, 255, 256, u32::MAX] {
+                let mut calls = 0;
+                let mut measured = 0_u64;
+                let fits = live_source_rows_fit_with(&cx, maximum, |_, limit| {
+                    assert_eq!(limit, u64::from(maximum) - measured + 1);
+                    assert!(i64::try_from(limit).is_ok());
+                    let rows = counts[calls].min(limit);
+                    calls += 1;
+                    measured += rows;
+                    Ok(rows)
+                })
+                .expect("bounded corpus count");
+                assert_eq!(fits, total <= u64::from(maximum));
+                assert_eq!(measured, total.min(u64::from(maximum) + 1));
+                if fits {
+                    assert_eq!(calls, 5, "every source must be checked before admission");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn live_row_bound_preserves_cancellation_over_query_errors_and_refusal() {
+        for query_fails in [false, true] {
+            let cx = asupersync::Cx::for_testing();
+            let mut calls = 0;
+            let result = live_source_rows_fit_with(&cx, 0, |_, _| {
+                calls += 1;
+                cx.set_cancel_reason(asupersync::CancelReason::user(
+                    "cancel corpus preflight",
+                ));
+                if query_fails {
+                    Err(IndexRebuildError::Index(
+                        "interrupted corpus count".to_owned(),
+                    ))
+                } else {
+                    Ok(1)
+                }
+            });
+            assert!(matches!(
+                result,
+                Err(IndexRebuildError::Cancelled(reason))
+                    if reason.message.as_deref() == Some("cancel corpus preflight")
+            ));
+            assert_eq!(calls, 1);
+            assert!(matches!(
+                live_source_rows_fit_with(&cx, 64, |_, _| {
+                    panic!("a cancelled request must not issue another count")
+                }),
+                Err(IndexRebuildError::Cancelled(_))
+            ));
+        }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn live_row_bound_matches_publication_scope_and_keeps_the_callers_snapshot() {
+        let (_root, db, path) = fixture();
+        const OTHER: &str = "wsp_00000000000000000000000072";
+        db.insert_workspace(
+            OTHER,
+            &CreateWorkspaceInput {
+                path: path.with_file_name("other-workspace").display().to_string(),
+                name: Some("other row-bound workspace".to_owned()),
+            },
+        )
+        .expect("other workspace");
+        for (number, tags, tombstone) in [
+            (1001, vec!["global", "house_rule"], false),
+            (1002, vec!["house_rule"], false),
+            (1003, vec!["private"], false),
+            (1004, vec!["global"], true),
+        ] {
+            let id = format!("mem_{number:026}");
+            db.insert_memory(
+                &id,
+                &CreateMemoryInput {
+                    workspace_id: OTHER.to_owned(),
+                    level: "episodic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "A stable source scope boundary.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: tags.into_iter().map(str::to_owned).collect(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("scoped memory");
+            if tombstone {
+                assert!(db.tombstone_memory(&id).expect("retired global memory"));
+            }
+        }
+        let session = source_session(&db);
+        source_evidence(&db, &session, 1, "A safe release observation.", false);
+        source_evidence(&db, &session, 2, "[REDACTED:history]", true);
+        let before = std::fs::read(&path).expect("source bytes");
+        let generation = db.get_workspace_generation(WORKSPACE).expect("generation");
+        let read = DbConnection::open_file_read_only(&path).expect("read-only source");
+        read.begin_read_snapshot().expect("caller snapshot");
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+            for maximum in 0..=6 {
+                let fits = live_source_rows_fit(&cx, &read, WORKSPACE, maximum)
+                    .expect("capped source count");
+                assert_eq!(fits, maximum >= 5);
+                assert_eq!(
+                    fits,
+                    super::super::workspace_index_source_rows_fit(&read, WORKSPACE, maximum)
+                        .expect("publication upper bound")
+                );
+            }
+            read.commit_read_snapshot().expect("caller retains snapshot");
+        })
+        .expect("runtime");
+        assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
+        assert_eq!(
+            db.get_workspace_generation(WORKSPACE).expect("generation"),
+            generation
+        );
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn live_row_refusal_precedes_allocation_queries_and_anchor_projection() {
+        let (_root, db, path) = fixture();
+        db.execute_raw("ALTER TABLE memory_anchors RENAME TO bound_saved_memory_anchors")
+            .expect("withhold projection sidecar");
+        let before = std::fs::read(&path).expect("source bytes");
+        let read = DbConnection::open_file_read_only(&path).expect("read-only source");
+        read.begin_read_snapshot().expect("caller snapshot");
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+            assert!(live_source_rows_fit(&cx, &read, WORKSPACE, 1).expect("body-free count"));
+            assert!(
+                read_only_documents_in_current_snapshot(&cx, &read, WORKSPACE, 0, u64::MAX)
+                    .expect("refuse before touching the missing sidecar")
+                    .is_none()
+            );
+            read.commit_read_snapshot().expect("caller retains snapshot");
+        })
+        .expect("runtime");
+        assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
     }
 
     #[cfg(feature = "lexical-bm25")]
