@@ -219,7 +219,9 @@ mod tests {
                 .len(),
             MAX_DELTA_DOCUMENTS
         );
-        changed[MAX_DELTA_DOCUMENTS].content.push_str(" one too many");
+        changed[MAX_DELTA_DOCUMENTS]
+            .content
+            .push_str(" one too many");
         assert_eq!(
             planned(&original, &changed)
                 .expect_err("inference budget")
@@ -395,8 +397,7 @@ mod tests {
     fn bulk_removals_preserve_exact_survivors_including_an_empty_corpus() -> TestResult {
         let original = documents(1024);
         for retained in [0, 1, 128, 768, 1024] {
-            let delta =
-                planned(&original, &original[..retained]).map_err(|error| error.detail)?;
+            let delta = planned(&original, &original[..retained]).map_err(|error| error.detail)?;
             assert!(delta.upserts.is_empty());
             assert_eq!(
                 delta.removals,
@@ -464,7 +465,9 @@ mod tests {
         let mut legacy = DocDigests::new(&stack, &original);
         legacy.schema = super::super::DOC_DIGESTS_SCHEMA_V2.to_owned();
         legacy.embedding_inputs = None;
-        legacy.write(&directory).map_err(|error| error.to_string())?;
+        legacy
+            .write(&directory)
+            .map_err(|error| error.to_string())?;
         assert_eq!(
             plan(&directory, &stack, survivors)
                 .expect_err("legacy removal budget remains conservative")
@@ -622,8 +625,8 @@ mod tests {
                 .write(&live)
                 .map_err(|error| error.to_string())?;
             assert!(observed.inputs.load(Ordering::SeqCst) >= original.len());
-            let before = std::fs::read(live.join("vector.fast.idx"))
-                .map_err(|error| error.to_string())?;
+            let before =
+                std::fs::read(live.join("vector.fast.idx")).map_err(|error| error.to_string())?;
             let original_vectors = finalized_vectors(&live)?;
 
             let mut current = original[..retained].to_vec();
@@ -646,7 +649,10 @@ mod tests {
             assert_eq!(actual.len(), retained);
             assert_eq!(
                 actual.keys().collect::<Vec<_>>(),
-                current.iter().map(|document| &document.id).collect::<Vec<_>>()
+                current
+                    .iter()
+                    .map(|document| &document.id)
+                    .collect::<Vec<_>>()
             );
             #[cfg(feature = "lexical-bm25")]
             assert_lexical_survivors(&cx, &staged, &current, true).await?;
@@ -665,8 +671,7 @@ mod tests {
             }
             assert_eq!(finalized_vectors(&live)?, original_vectors);
             assert_eq!(
-                std::fs::read(live.join("vector.fast.idx"))
-                    .map_err(|error| error.to_string())?,
+                std::fs::read(live.join("vector.fast.idx")).map_err(|error| error.to_string())?,
                 before
             );
             #[cfg(feature = "lexical-bm25")]

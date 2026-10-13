@@ -157,7 +157,10 @@ fn read_observed(
     let selected: BTreeSet<_> = targets
         .iter()
         .copied()
-        .filter(|id| id.parse::<MemoryId>().is_ok_and(|parsed| parsed.to_string() == *id))
+        .filter(|id| {
+            id.parse::<MemoryId>()
+                .is_ok_and(|parsed| parsed.to_string() == *id)
+        })
         .collect();
     if selected.is_empty() {
         return Ok(Vec::new());
@@ -169,11 +172,16 @@ fn read_observed(
         "SELECT id, created_at, updated_at, valid_from, valid_to, superseded_at, length(CAST(content AS BLOB)) FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND id IN ({}) ORDER BY id ASC",
         placeholders(&ids, 2)
     );
-    let rows = connection.query(&sql, &params).map_err(|_| storage_error())?;
+    let rows = connection
+        .query(&sql, &params)
+        .map_err(|_| storage_error())?;
     let mut seen = BTreeSet::new();
     let mut admitted = Vec::new();
     for row in rows {
-        let id = row.get(0).and_then(Value::as_str).ok_or_else(storage_error)?;
+        let id = row
+            .get(0)
+            .and_then(Value::as_str)
+            .ok_or_else(storage_error)?;
         if !selected.contains(id) || !seen.insert(id.to_owned()) {
             return Err(storage_error());
         }
@@ -184,7 +192,10 @@ fn read_observed(
     admitted.sort();
     let ids: Vec<_> = admitted.iter().map(String::as_str).collect();
     let withheld = withheld_ids(connection, workspace, &ids)?;
-    let ids: Vec<_> = ids.into_iter().filter(|id| !withheld.contains(*id)).collect();
+    let ids: Vec<_> = ids
+        .into_iter()
+        .filter(|id| !withheld.contains(*id))
+        .collect();
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -225,7 +236,10 @@ fn withheld_ids(
         .query(&sql, &parameters(ids))
         .map_err(|_| storage_error())?;
     for row in rows {
-        let id = row.get(0).and_then(Value::as_str).ok_or_else(storage_error)?;
+        let id = row
+            .get(0)
+            .and_then(Value::as_str)
+            .ok_or_else(storage_error)?;
         if !ids.contains(&id) || !seen.insert(id.to_owned()) {
             return Err(storage_error());
         }
@@ -239,8 +253,14 @@ fn withheld_ids(
     );
     let mut params = vec![Value::Text(workspace.to_owned())];
     params.extend(parameters(ids));
-    for row in connection.query(&sql, &params).map_err(|_| storage_error())? {
-        let id = row.get(0).and_then(Value::as_str).ok_or_else(storage_error)?;
+    for row in connection
+        .query(&sql, &params)
+        .map_err(|_| storage_error())?
+    {
+        let id = row
+            .get(0)
+            .and_then(Value::as_str)
+            .ok_or_else(storage_error)?;
         if !ids.contains(&id) {
             return Err(storage_error());
         }
@@ -377,8 +397,18 @@ mod tests {
     fn only_selected_current_workspace_bodies_are_hydrated() -> TestResult {
         let db = fixture()?;
         let one = memory(&db, WS, 1, BODY)?;
-        let two = memory(&db, WS, 2, "Flush the cache before retrying the serialization step.")?;
-        let foreign = memory(&db, OTHER, 3, "Foreign repair text must not enter the query.")?;
+        let two = memory(
+            &db,
+            WS,
+            2,
+            "Flush the cache before retrying the serialization step.",
+        )?;
+        let foreign = memory(
+            &db,
+            OTHER,
+            3,
+            "Foreign repair text must not enter the query.",
+        )?;
         let unrelated = memory(&db, WS, 4, "Unlinked repair text must not enter the query.")?;
         let mut loaded = Vec::new();
         let snapshot = Snapshot::begin_or_borrow(&db)?;
@@ -414,7 +444,9 @@ mod tests {
             db.execute_raw(&format!(
                 "UPDATE memories SET created_at = '{BASE}', updated_at = '{BASE}', valid_from = '{BASE}', valid_to = NULL, superseded_at = NULL, tombstoned_at = NULL WHERE id = '{id}'"
             ))?;
-            db.execute_raw(&format!("UPDATE memories SET {column} = '{value}' WHERE id = '{id}'"))?;
+            db.execute_raw(&format!(
+                "UPDATE memories SET {column} = '{value}' WHERE id = '{id}'"
+            ))?;
             let result = read_observed(&db, WS, &[&id], at(NOW), |_| {
                 panic!("withheld lifecycle body must not be hydrated: {column}")
             })?;
@@ -431,7 +463,9 @@ mod tests {
             "UPDATE memories SET valid_to = '2029-12-31T19:00:00.5-05:00' WHERE id = '{id}'"
         ))?;
         assert_eq!(read(&db, WS, &[&id], at(NOW))?.len(), 1);
-        db.execute_raw(&format!("UPDATE memories SET superseded_at = '{NOW}' WHERE id = '{id}'"))?;
+        db.execute_raw(&format!(
+            "UPDATE memories SET superseded_at = '{NOW}' WHERE id = '{id}'"
+        ))?;
         assert!(read(&db, WS, &[&id], at(NOW))?.is_empty());
         Ok(())
     }
@@ -525,7 +559,11 @@ mod tests {
     fn opaque_aliases_empty_inputs_and_over_limit_requests_do_not_query_storage() -> TestResult {
         let db = DbConnection::open_memory()?; // No schema: any attempted read would fail.
         let id = MemoryId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
-        for invalid in [format!("{id}\0suffix"), format!(" {id}"), "mem_bad".to_owned()] {
+        for invalid in [
+            format!("{id}\0suffix"),
+            format!(" {id}"),
+            "mem_bad".to_owned(),
+        ] {
             assert!(read(&db, WS, &[&invalid], at(NOW))?.is_empty());
         }
         assert!(read(&db, WS, &[], at(NOW))?.is_empty());

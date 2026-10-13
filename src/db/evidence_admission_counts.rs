@@ -185,7 +185,9 @@ impl DbConnection {
         workspace_id: Option<&str>,
         mut checkpoint: impl FnMut() -> Result<()>,
     ) -> Result<u64> {
-        if !count_rebuild_step(&mut checkpoint, || self.evidence_admission_counts_available())? {
+        if !count_rebuild_step(&mut checkpoint, || {
+            self.evidence_admission_counts_available()
+        })? {
             return Ok(0);
         }
         let params = [workspace_id.map_or(Value::Null, |id| Value::Text(id.to_owned()))];
@@ -323,7 +325,9 @@ impl DbConnection {
                     return Err(invalid_count_page());
                 }
                 previous = Some(rowid);
-                *buckets.entry((workspace, producer, eligibility)).or_default() += 1;
+                *buckets
+                    .entry((workspace, producer, eligibility))
+                    .or_default() += 1;
             }
             for ((workspace, producer, eligibility), count) in buckets {
                 count_rebuild_step(checkpoint, || {
@@ -905,7 +909,10 @@ mod tests {
         let generation = db.get_workspace_generation(WORKSPACE)?;
         let other_generation = db.get_workspace_generation(OTHER_WORKSPACE)?;
         let projections = crate::cass::transcript::projection_calls_for_test();
-        assert_eq!(db.rebuild_evidence_admission_counts(None)?, u64::from(count));
+        assert_eq!(
+            db.rebuild_evidence_admission_counts(None)?,
+            u64::from(count)
+        );
         assert_eq!(
             crate::cass::transcript::projection_calls_for_test(),
             projections
@@ -916,7 +923,10 @@ mod tests {
             other_generation
         );
         assert_eq!(db.list_evidence_spans_for_session(SESSION)?, before);
-        assert_eq!(db.list_evidence_spans_for_session(OTHER_SESSION)?, other_before);
+        assert_eq!(
+            db.list_evidence_spans_for_session(OTHER_SESSION)?,
+            other_before
+        );
         for workspace in [WORKSPACE, OTHER_WORKSPACE] {
             assert_matches_legacy(&db, workspace, 0)?;
         }
@@ -937,7 +947,10 @@ mod tests {
                 &[Value::BigInt(rowid), Value::Text(id)],
             )?;
         }
-        assert_eq!(db.rebuild_evidence_admission_counts(None)?, u64::from(count));
+        assert_eq!(
+            db.rebuild_evidence_admission_counts(None)?,
+            u64::from(count)
+        );
         for workspace in [WORKSPACE, OTHER_WORKSPACE] {
             assert_eq!(
                 db.rebuild_evidence_admission_counts(Some(workspace))?,
@@ -985,7 +998,10 @@ mod tests {
             assert_eq!(saved_count_state(&db, None)?, before);
             assert_eq!(db.get_workspace_generation(WORKSPACE)?, generation);
             assert_eq!(db.count_table_rows("evidence_spans")?, i64::from(count));
-            assert_eq!(db.rebuild_evidence_admission_counts(None)?, u64::from(count));
+            assert_eq!(
+                db.rebuild_evidence_admission_counts(None)?,
+                u64::from(count)
+            );
             assert_matches_legacy(&db, WORKSPACE, 0)?;
             assert_matches_legacy(&db, OTHER_WORKSPACE, 0)?;
         }
@@ -1028,11 +1044,7 @@ mod tests {
         let result: Result<()> = count_rebuild_step(
             &mut || {
                 calls += 1;
-                if calls == 2 {
-                    Err(cancelled())
-                } else {
-                    Ok(())
-                }
+                if calls == 2 { Err(cancelled()) } else { Ok(()) }
             },
             || Err(invalid_count_page()),
         );

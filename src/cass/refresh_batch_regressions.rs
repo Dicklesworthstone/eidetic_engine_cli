@@ -163,14 +163,20 @@ fn growing_session_batches_match_single_row_screening_and_preserve_history() {
         assert_eq!(actual.cass_span_id, expected.cass_span_id);
         assert_eq!(actual.excerpt, expected.excerpt);
         assert_eq!(actual.content_hash, expected.content_hash);
-        assert_eq!(actual.canonical_excerpt_hash, expected.canonical_excerpt_hash);
+        assert_eq!(
+            actual.canonical_excerpt_hash,
+            expected.canonical_excerpt_hash
+        );
         assert_eq!(actual.upstream_ref_hash, expected.upstream_ref_hash);
         assert_eq!(actual.producer_kind, expected.producer_kind);
         assert_eq!(
             actual.secret_redaction_status,
             expected.secret_redaction_status,
         );
-        assert_eq!(actual.redaction_classes_json, expected.redaction_classes_json);
+        assert_eq!(
+            actual.redaction_classes_json,
+            expected.redaction_classes_json
+        );
         assert_eq!(actual.instruction_risk, expected.instruction_risk);
         assert_eq!(actual.search_eligibility, expected.search_eligibility);
         assert_eq!(actual.pack_eligibility, expected.pack_eligibility);
@@ -206,7 +212,10 @@ fn growing_session_batches_match_single_row_screening_and_preserve_history() {
     assert_eq!(retry.admission, EvidenceAdmissionTally::default());
     assert_eq!(retry.index_job_id.as_deref(), Some(job_id.as_str()));
     assert_eq!(batch_table_counts(&db), before_counts);
-    assert_eq!(db.list_evidence_spans_for_session(&id).unwrap(), before_rows);
+    assert_eq!(
+        db.list_evidence_spans_for_session(&id).unwrap(),
+        before_rows
+    );
     assert_eq!(db.get_session(&id).unwrap(), before_session);
     completed(&db, &job_id);
     assert!(
@@ -297,9 +306,13 @@ fn last_batch_foreign_identity_collision_rolls_back_previous_batches() {
     .unwrap();
     let foreign_session =
         crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(8800)).to_string();
-    let foreign = CassSessionInfo::new("/private/foreign-session.jsonl").with_agent(CassAgent::Codex);
-    db.insert_session(&foreign_session, &session_input(&foreign_workspace, &foreign))
-        .unwrap();
+    let foreign =
+        CassSessionInfo::new("/private/foreign-session.jsonl").with_agent(CassAgent::Codex);
+    db.insert_session(
+        &foreign_session,
+        &session_input(&foreign_workspace, &foreign),
+    )
+    .unwrap();
     let foreign_span = span(&foreign, 1, "FOREIGN_PRIVATE_TRANSCRIPT must stay intact.");
     db.insert_evidence_span(
         &collision_id,

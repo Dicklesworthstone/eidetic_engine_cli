@@ -635,7 +635,10 @@ mod tests {
             malformed.push(value);
         }
         let mut missing = original.clone();
-        missing.as_object_mut().unwrap().remove("generalDiagnostics");
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("generalDiagnostics");
         malformed.push(missing);
         let mut conflicting = original.clone();
         conflicting["schema"] = json!("ee.response.v2");
@@ -678,7 +681,8 @@ mod tests {
                 .succeeded()
             );
         }
-        let nested = json!({"example": pyright_report(vec![pyright_diagnostic("error", "Invalid")])});
+        let nested =
+            json!({"example": pyright_report(vec![pyright_diagnostic("error", "Invalid")])});
         assert!(inspect(&nested.to_string()).unwrap().is_none());
     }
 
@@ -692,7 +696,10 @@ mod tests {
             })
             .collect();
         let valid = pyright_report(records.clone()).to_string();
-        assert_eq!(parsed(&valid).diagnostics.len(), MAX_DIAGNOSTICS_PER_FAILURE);
+        assert_eq!(
+            parsed(&valid).diagnostics.len(),
+            MAX_DIAGNOSTICS_PER_FAILURE
+        );
         records.last_mut().unwrap()["severity"] = json!("unknown");
         assert!(inspect(&pyright_report(records).to_string()).is_err());
         let too_many = pyright_report(vec![

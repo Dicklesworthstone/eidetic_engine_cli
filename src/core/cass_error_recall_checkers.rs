@@ -64,9 +64,9 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         .as_ref()
         .and_then(Value::as_array)
         .is_some_and(|results| {
-            results.iter().any(|result| {
-                result.get("filePath").is_some() && result.get("messages").is_some()
-            })
+            results
+                .iter()
+                .any(|result| result.get("filePath").is_some() && result.get("messages").is_some())
         });
     if eslint_metadata || eslint_results {
         return inspect_eslint(text).map(Some);
@@ -581,7 +581,11 @@ mod tests {
                 json!({"type":"tool_result","tool_use_id":"fail",
                     "content":failure_output,"is_error":true}),
             ),
-            ("message", "assistant", json!({"type":"text","text":repair_text})),
+            (
+                "message",
+                "assistant",
+                json!({"type":"text","text":repair_text}),
+            ),
             (
                 "tool_call",
                 "assistant",
@@ -601,8 +605,8 @@ mod tests {
         };
         for (offset, (kind, role, block)) in rows.iter().enumerate() {
             let number = u32::try_from(offset + 1)?;
-            let excerpt = json!({"type":role,"message":{"role":role,"content":[block]}})
-                .to_string();
+            let excerpt =
+                json!({"type":role,"message":{"role":role,"content":[block]}}).to_string();
             connection.insert_evidence_span(
                 &id(number),
                 &CreateEvidenceSpanInput {
@@ -673,17 +677,24 @@ mod tests {
             assert_eq!(recall.proof_links, [episode.proof.clone()]);
             let links = db.list_error_repair_links(WS, &diagnostic.layered_key().key)?;
             assert_eq!(links.len(), 3);
-            assert!(links.iter().all(|link| {
-                link.evidence_ref.as_deref() == Some(episode.failure.as_str())
-            }));
+            assert!(
+                links
+                    .iter()
+                    .all(|link| { link.evidence_ref.as_deref() == Some(episode.failure.as_str()) })
+            );
             let evidence = recalled_repair_evidence(db, WS, &recall)?;
             assert!(evidence.iter().any(|item| {
                 item.evidence_id == episode.repair
-                    && item.text.as_deref().is_some_and(|text| text.contains("fixed"))
+                    && item
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| text.contains("fixed"))
             }));
             assert!(pack_error_recall_query_seed(db, WS, &diagnostic)?.contains("prior fix:"));
             for source in before {
-                let after = db.get_evidence_span(&source.id)?.ok_or("source disappeared")?;
+                let after = db
+                    .get_evidence_span(&source.id)?
+                    .ok_or("source disappeared")?;
                 assert_eq!(after.excerpt, source.excerpt);
                 assert_eq!(after.content_hash, source.content_hash);
                 assert_eq!(
@@ -694,7 +705,8 @@ mod tests {
             let again = record_session_error_recall(db, WS, &episode.session)?;
             assert_eq!(again.incident_cards_recorded, 0);
             assert_eq!(
-                db.list_error_repair_links(WS, &diagnostic.layered_key().key)?.len(),
+                db.list_error_repair_links(WS, &diagnostic.layered_key().key)?
+                    .len(),
                 3
             );
         }
@@ -728,8 +740,10 @@ mod tests {
                 format!("{success} trailing text"),
                 failure.to_string(),
             ] {
-                let episode = build_episode(command, &failure.to_string(), repair, command, &proof)?;
-                let report = record_session_error_recall(&episode.connection, WS, &episode.session)?;
+                let episode =
+                    build_episode(command, &failure.to_string(), repair, command, &proof)?;
+                let report =
+                    record_session_error_recall(&episode.connection, WS, &episode.session)?;
                 assert_eq!(report.resolved_failures, 0, "{command}");
                 assert_eq!(report.repair_links_recorded, 0, "{command}");
                 assert_eq!(report.incident_cards_recorded, 0, "{command}");
