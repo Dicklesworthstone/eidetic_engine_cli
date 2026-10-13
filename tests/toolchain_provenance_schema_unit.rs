@@ -651,7 +651,9 @@ fn live_toolchain_collector_smoke_is_schema_valid_and_redacted() -> TestResult {
     // and this test's workspace is std::env::current_dir(), i.e. the repo root
     // under cargo test. An RCH --clean-overlay export has no .git, so every row
     // returns tracked=false there. That is why this assertion passed on every
-    // dev checkout and failed on hz3 AND hz4 at two separate bases.
+    // dev checkout and failed on TWO DIFFERENT RCH workers at two separate
+    // bases — two distinct hosts, so it is the export shape and not one
+    // worker's state.
     //
     // `tracked == in_git_repo` is STRICTLY STRONGER than the old bare `tracked`:
     // it keeps the original meaning inside a repo -- every declared script must

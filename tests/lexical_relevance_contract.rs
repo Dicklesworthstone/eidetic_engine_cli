@@ -19,7 +19,7 @@
 //! `2 ignored`.
 //!
 //! They are executed by `scripts/lexical_relevance_pins.sh`, which runs the
-//! binary Gate 5 just built instead of re-entering cargo — measured on RCH hz4
+//! binary Gate 5 just built instead of re-entering cargo — measured on an RCH worker
 //! at 82926d4c5, these two pins run in 0.00s while the cargo wrapper around
 //! them cost 74s re-walking freshness over crates Gate 5 had already walked.
 //! That script is wired as two stages: a REQUIRED harness guard, and the
