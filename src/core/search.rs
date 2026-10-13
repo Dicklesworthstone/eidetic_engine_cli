@@ -4640,6 +4640,7 @@ struct SearchScoreCalibration {
     /// bd-1cdea: `true` when more feedback events contributed residuals
     /// than the cap above could surface in the provenance summary.
     feedback_event_ids_truncated: bool,
+    feedback_evidence_hash: String,
 }
 
 fn search_score_calibration_jsonl_path(workspace_path: &Path) -> PathBuf {
@@ -4816,6 +4817,7 @@ impl SearchScoreCalibration {
         let mut feedback_event_ids: Vec<String> = Vec::new();
         let mut feedback_event_ids_truncated = false;
         let mut feedback_event_malformed_count = 0usize;
+        let mut feedback_evidence = Vec::<(String, u32)>::new();
 
         for event in feedback_events {
             let Some(evidence_json) = &event.evidence_json else {
@@ -4829,6 +4831,7 @@ impl SearchScoreCalibration {
                 continue;
             };
             residuals.push(residual);
+            feedback_evidence.push((event.id.clone(), residual.to_bits()));
             feedback_event_sample_count = feedback_event_sample_count.saturating_add(1);
             if feedback_event_ids.len() < MAX_SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_IDS {
                 feedback_event_ids.push(event.id.clone());
@@ -4836,6 +4839,16 @@ impl SearchScoreCalibration {
                 feedback_event_ids_truncated = true;
             }
         }
+        // The display cap must never cap the identity of contributing evidence.
+        feedback_evidence.sort_unstable();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"ee.search.feedback_calibration_evidence.v1");
+        for (id, bits) in &feedback_evidence {
+            hasher.update(&(id.len() as u64).to_be_bytes());
+            hasher.update(id.as_bytes());
+            hasher.update(&bits.to_be_bytes());
+        }
+        let feedback_evidence_hash = format!("blake3:{}", hasher.finalize().to_hex());
 
         // bd-25z97: an unreadable JSONL must NOT degrade into the silent
         // `Absent` path even when no feedback events compensate. Surface
@@ -4867,6 +4880,7 @@ impl SearchScoreCalibration {
                 jsonl_hash: None,
                 feedback_event_ids,
                 feedback_event_ids_truncated,
+                feedback_evidence_hash: feedback_evidence_hash.clone(),
             };
         }
 
@@ -4890,6 +4904,7 @@ impl SearchScoreCalibration {
                 jsonl_hash: None,
                 feedback_event_ids: Vec::new(),
                 feedback_event_ids_truncated: false,
+                feedback_evidence_hash: feedback_evidence_hash.clone(),
             };
         }
 
@@ -4920,6 +4935,7 @@ impl SearchScoreCalibration {
                 jsonl_hash: None,
                 feedback_event_ids,
                 feedback_event_ids_truncated,
+                feedback_evidence_hash: feedback_evidence_hash.clone(),
             };
         }
 
@@ -4947,6 +4963,7 @@ impl SearchScoreCalibration {
                 jsonl_hash: jsonl_load.jsonl_hash.clone(),
                 feedback_event_ids,
                 feedback_event_ids_truncated,
+                feedback_evidence_hash: feedback_evidence_hash.clone(),
             };
         }
 
@@ -4966,6 +4983,7 @@ impl SearchScoreCalibration {
                 jsonl_hash: jsonl_load.jsonl_hash.clone(),
                 feedback_event_ids,
                 feedback_event_ids_truncated,
+                feedback_evidence_hash: feedback_evidence_hash.clone(),
             };
         }
 
@@ -4987,13 +5005,14 @@ impl SearchScoreCalibration {
             jsonl_hash: jsonl_load.jsonl_hash.clone(),
             feedback_event_ids,
             feedback_event_ids_truncated,
+            feedback_evidence_hash,
         }
     }
 
     fn calibration_id(&self) -> String {
         let feedback_ids = self.feedback_event_ids.join("\n");
         let material = format!(
-            "schema={}\nmethod=scaled_split_conformal\nstatus={}\ncoverage={:.6}\nsample_count={}\njsonl_hash={}\nfeedback_ids={}\nfeedback_ids_truncated={}\n",
+            "schema={}\nmethod=scaled_split_conformal\nstatus={}\ncoverage={:.6}\nsample_count={}\njsonl_hash={}\nfeedback_ids={}\nfeedback_ids_truncated={}\nfeedback_evidence_hash={}\nquantile_bits={:?}\nfeedback_unavailable={:?}\nfeedback_malformed={}\n",
             SEARCH_SCORE_CALIBRATION_SCHEMA_V1,
             self.status.as_str(),
             SEARCH_SCORE_COVERAGE_GUARANTEE,
@@ -5001,6 +5020,10 @@ impl SearchScoreCalibration {
             self.jsonl_hash.as_deref().unwrap_or("none"),
             feedback_ids,
             self.feedback_event_ids_truncated,
+            self.feedback_evidence_hash,
+            self.residual_quantile.map(f32::to_bits),
+            self.feedback_event_unavailable_reason,
+            self.feedback_event_malformed_count,
         );
         format!("blake3:{}", blake3::hash(material.as_bytes()).to_hex())
     }
@@ -18598,6 +18621,47 @@ mod tests {
         // The production annotation gate is pinned below by testing the same
         // eligibility predicate used by annotate_hits_with_score_calibration.
         assert!(!search_calibration_is_eligible_for_coverage(&calibration));
+        Ok(())
+    }
+
+    #[test]
+    fn calibration_identity_covers_feedback_beyond_public_provenance_cap() -> TestResult {
+        let workspace = unique_test_dir("calibration-identity-full-feedback");
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
+        let mut events = (0..=MAX_SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_IDS)
+            .map(|index| StoredFeedbackEvent {
+                id: format!("fb_full_{index:026}"),
+                workspace_id: workspace_id.clone(),
+                target_type: "candidate".to_owned(),
+                target_id: format!("cand_full_{index:03}"),
+                signal: "confirmation".to_owned(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_owned(),
+                source_id: None,
+                reason: None,
+                evidence_json: Some(
+                    serde_json::json!({"score": 0.8, "groundTruthRelevance": 0.7})
+                        .to_string(),
+                ),
+                session_id: None,
+                applied_at: None,
+                created_at: "2026-06-06T00:00:00Z".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let first = SearchScoreCalibration::for_workspace_with_feedback_events(&workspace, &events);
+        assert!(first.feedback_event_ids_truncated);
+        assert_eq!(first.feedback_event_ids.len(), MAX_SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_IDS);
+        let first_id = first.calibration_id();
+        events.last_mut().ok_or("missing tail event")?.evidence_json = Some(
+            serde_json::json!({"score": 0.8, "groundTruthRelevance": 0.1}).to_string(),
+        );
+        let changed = SearchScoreCalibration::for_workspace_with_feedback_events(&workspace, &events);
+        assert_eq!(changed.feedback_event_ids, first.feedback_event_ids);
+        assert_eq!(changed.sample_count, first.sample_count);
+        assert_ne!(changed.calibration_id(), first_id);
+        events.reverse();
+        let reordered = SearchScoreCalibration::for_workspace_with_feedback_events(&workspace, &events);
+        assert_eq!(reordered.calibration_id(), changed.calibration_id());
         Ok(())
     }
 
