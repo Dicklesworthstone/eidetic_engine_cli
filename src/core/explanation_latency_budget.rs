@@ -18,9 +18,16 @@
 //!
 //! This module is intentionally side-effect free, holds no clock state, and
 //! takes the elapsed-millisecond reading as an input so callers can plug in
-//! synthetic timings under test. Subsystem wiring into context.rs / why.rs
-//! lands in follow-up slices (bd-1nxz4.4.b / .c per the proposed
-//! decomposition); this slice owns the classifier policy + repair strings.
+//! synthetic timings under test. This slice owns the classifier policy +
+//! repair strings.
+//!
+//! THIS MODULE HAS NO CALLER YET, so none of it can affect a response.
+//! Subsystem wiring is bd-1nxz4.4.1 (`ee context --explain`) and
+//! bd-1nxz4.4.2 (`ee why`), both blocking bd-1nxz4.4. Those are the real
+//! bead ids; this header previously referred to "bd-1nxz4.4.b / .c per the
+//! proposed decomposition", which were never filed, so the remaining work
+//! lived only in this comment and the finished policy below looked
+//! abandoned. Filed 2026-10-13 after a sweep of open bead ids against src/.
 
 use serde::{Serialize, Serializer};
 
