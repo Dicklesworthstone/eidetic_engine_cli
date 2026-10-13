@@ -46,6 +46,10 @@ pub(super) enum Requirement {
     Unproven,
     Libtest(Vec<RequiredSuite>),
     Eslint(BTreeSet<Name>),
+    GoTests {
+        packages: BTreeSet<Name>,
+        tests: BTreeSet<Name>,
+    },
 }
 
 impl Requirement {
@@ -55,6 +59,18 @@ impl Requirement {
             Ok(None) => return Self::Other,
             Err(()) => return Self::Unproven,
         };
+        if let Some(coverage) = &decoded.go_test_coverage {
+            return if !process_complete || !coverage.complete {
+                Self::Unproven
+            } else if coverage.failed_packages.is_empty() && coverage.failed_tests.is_empty() {
+                Self::Other
+            } else {
+                Self::GoTests {
+                    packages: coverage.failed_packages.clone(),
+                    tests: coverage.failed_tests.clone(),
+                }
+            };
+        }
         if let Some(coverage) = &decoded.eslint_coverage {
             return if !process_complete {
                 Self::Unproven
@@ -110,6 +126,10 @@ impl Requirement {
         match self {
             Self::Other => true,
             Self::Unproven => false,
+            Self::GoTests { packages, tests } => proof.go_tests.as_ref().is_some_and(|coverage| {
+                packages.is_subset(&coverage.passed_packages)
+                    && tests.is_subset(&coverage.passed_tests)
+            }),
             Self::Eslint(required) => proof
                 .eslint_files
                 .as_ref()
@@ -136,6 +156,7 @@ impl Requirement {
 pub(super) struct Proof {
     execution: Option<Execution>,
     eslint_files: Option<BTreeSet<Name>>,
+    go_tests: Option<compiler::GoTestCoverage>,
 }
 
 impl Proof {
@@ -156,6 +177,9 @@ impl Proof {
                 .as_ref()
                 .filter(|_| decoded.allows_completion)
                 .map(|coverage| coverage.checked_files.clone()),
+            go_tests: decoded
+                .go_test_coverage
+                .filter(|coverage| coverage.complete && decoded.allows_completion),
         }
     }
 }
@@ -476,5 +500,90 @@ mod tests {
         assert!(!damaged.is_verified_by(&known_good));
         damaged.refresh(&output("unrelated".to_owned()), true);
         assert!(!damaged.is_verified_by(&known_good));
+    }
+
+    fn go_suite(package: &str, results: &[(&str, &str)]) -> ToolOutput {
+        let mut events = vec![json!({"Action":"start","Package":package})];
+        for (name, action) in results {
+            events.push(json!({"Action":"run","Package":package,"Test":name}));
+            events.push(json!({"Action":action,"Package":package,"Test":name,"Elapsed":0.01}));
+        }
+        let failed = results.iter().any(|(_, action)| *action == "fail");
+        events.push(json!({"Action":if failed {"fail"} else {"pass"},"Package":package,"Elapsed":0.1}));
+        output(events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"))
+    }
+
+    #[test]
+    fn go_retry_must_pass_the_same_package_and_failed_test_not_an_unrelated_success() {
+        let failed = go_suite("example.org/cache", &[("TestCache", "fail")]);
+        let requirement = Requirement::capture(&failed, true);
+        assert!(requirement.is_guarded());
+        for passed in [
+            go_suite("example.org/other", &[("TestCache", "pass")]),
+            go_suite("example.org/cache", &[("TestOther", "pass")]),
+            go_suite("example.org/cache", &[("testCache", "pass")]),
+            go_suite("example.org/cache", &[("TestCache", "skip"), ("TestOther", "pass")]),
+        ] {
+            assert!(passed.succeeded());
+            assert!(!requirement.is_verified_by(&Proof::capture(&passed)));
+        }
+        let passed = go_suite("example.org/cache", &[("TestOther", "pass"), ("TestCache", "pass")]);
+        assert!(passed.succeeded());
+        assert!(requirement.is_verified_by(&Proof::capture(&passed)));
+    }
+
+    #[test]
+    fn go_coverage_keeps_every_failed_subject_beyond_the_diagnostic_cap() {
+        let names: Vec<_> = (0..8).map(|i| format!("TestCacheCase{i}")).collect();
+        let failed: Vec<_> = names.iter().map(|name| (name.as_str(), "fail")).collect();
+        let failure = go_suite("example.org/cache", &failed);
+        let required = Requirement::capture(&failure, true);
+        let decoded = compiler::inspect(&failure.text).unwrap().unwrap();
+        assert!(decoded.diagnostics.len() <= 4);
+        assert_eq!(decoded.go_test_coverage.unwrap().failed_tests.len(), 8);
+        let mut passed: Vec<_> = names.iter().map(|name| (name.as_str(), "pass")).collect();
+        passed[7].1 = "skip";
+        let skipped = go_suite("example.org/cache", &passed);
+        assert!(skipped.succeeded());
+        assert!(!required.is_verified_by(&Proof::capture(&skipped)));
+        passed[7].1 = "pass";
+        assert!(required.is_verified_by(&Proof::capture(&go_suite("example.org/cache", &passed))));
+    }
+
+    #[test]
+    fn go_coverage_cannot_cross_report_families_or_ignore_process_failure() {
+        let failed = go_suite("example.org/cache", &[("TestCache", "fail")]);
+        let required = Requirement::capture(&failed, true);
+        for passed in [output(suite(&[("TestCache", "ok")])), lint(&[("TestCache", false)], false)] {
+            assert!(passed.succeeded());
+            assert!(!required.is_verified_by(&Proof::capture(&passed)));
+        }
+        let mut passed = go_suite("example.org/cache", &[("TestCache", "pass")]);
+        let good = Proof::capture(&passed);
+        assert!(required.is_verified_by(&good));
+        assert!(!Requirement::capture(&failed, false).is_verified_by(&good));
+        let mut incomplete = Requirement::capture(&failed, false);
+        incomplete.refresh(&failed, true);
+        assert!(incomplete.is_verified_by(&good));
+        incomplete.refresh(&output(format!("{}\n{{", failed.text)), true);
+        assert!(!incomplete.is_verified_by(&good));
+        passed.exit_code = Some(1);
+        assert!(!required.is_verified_by(&Proof::capture(&passed)));
+    }
+
+    #[test]
+    fn a_skipped_repeat_cannot_inherit_an_earlier_pass_of_the_same_test() {
+        let required = Requirement::capture(&go_suite("a", &[("TestCache", "fail")]), true);
+        for results in [
+            [("TestCache", "pass"), ("TestCache", "skip"), ("Other", "pass")],
+            [("TestCache", "skip"), ("TestCache", "pass"), ("Other", "pass")],
+        ] {
+            let passed = go_suite("a", &results);
+            assert!(passed.succeeded());
+            assert!(!required.is_verified_by(&Proof::capture(&passed)));
+        }
+        assert!(required.is_verified_by(&Proof::capture(&go_suite("a", &[
+            ("TestCache", "pass"), ("TestCache", "pass")
+        ]))));
     }
 }

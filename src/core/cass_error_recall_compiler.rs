@@ -19,6 +19,9 @@ mod libtest;
 #[path = "cass_error_recall_checkers.rs"]
 mod checkers;
 
+#[path = "cass_error_recall_go.rs"]
+mod go;
+
 const MAX_COMPILER_RECORDS: usize = 256;
 
 #[derive(Debug, Default)]
@@ -30,12 +33,23 @@ pub(super) struct CompilerOutput {
     pub has_test_execution: bool,
     /// Transient commitments to linted files, never source text or provenance.
     pub eslint_coverage: Option<EslintCoverage>,
+    /// Explicit package/test subjects from native Go test JSON.
+    pub go_test_coverage: Option<GoTestCoverage>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct EslintCoverage {
     pub checked_files: BTreeSet<[u8; 32]>,
     pub failed_files: BTreeSet<[u8; 32]>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct GoTestCoverage {
+    pub passed_packages: BTreeSet<[u8; 32]>,
+    pub failed_packages: BTreeSet<[u8; 32]>,
+    pub passed_tests: BTreeSet<[u8; 32]>,
+    pub failed_tests: BTreeSet<[u8; 32]>,
+    pub complete: bool,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +107,9 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     }
     if text.len() > MAX_SCANNED_OUTPUT_BYTES {
         return Err(());
+    }
+    if let Some(output) = go::inspect(text)? {
+        return Ok(Some(output));
     }
     if let Some(output) = checkers::inspect(text)? {
         return Ok(Some(output));
