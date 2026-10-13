@@ -298,10 +298,14 @@ cargo fmt --check                   # the ONLY cargo subcommand allowed locally
 
 ```bash
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-    cargo check --all-targets
+    cargo check --locked --all-targets
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --locked --all-targets -- -D warnings
 ```
+
+`--pinned-franken-stack` refuses a Cargo command that omits `--locked`: it
+exits 1 with `rch_verify_franken_stack_locked_required` before materializing
+any source, so you get no verdict and no `test result:` line.
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
 
@@ -841,9 +845,9 @@ them on the pinned lane:
 
 ```bash
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --locked --all-targets -- -D warnings
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-    cargo test --workspace --all-targets
+    cargo test --locked --workspace --all-targets
 ```
 
 ### 2. Commit Changes
