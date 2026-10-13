@@ -536,20 +536,36 @@ pub(super) fn reembed_dry_run(
     let index_dir = options.resolve_index_dir();
     let db = DbConnection::open_file_read_only(&options.resolve_database_path())?;
     let workspace_id = super::resolve_index_workspace_id(&db, &options.workspace_path)?;
-    let snapshot = super::collect_workspace_index_source_snapshot(&db, &workspace_id)?;
+    // Like rebuild --dry-run, this is an exact admission/count plan, not a
+    // document build. In particular, never extract anchors, retain projected
+    // transcripts or enumerate pending jobs just to report their source counts.
+    let planned = capture(&db, || {
+        super::current_index_corpus_counts_in_current_snapshot(&db, &workspace_id)
+            .map_err(IndexRebuildError::Database)
+    });
+    // Database reads can surface cancellation as a storage error. Preserve
+    // the request reason after the owned snapshot has been released.
     super::index_checkpoint(cx)?;
-    let embedding =
-        super::ReembedEmbeddingSummary::from_posture(super::embedding_posture_for_document_count(
-            &db,
-            &workspace_id,
-            &index_dir,
-            snapshot.documents_total,
-        )?);
+    let (counts, evidence_admission) = planned?;
+    let documents_total = counts.total();
+    let memories_indexed = counts.memories;
+    let sessions_indexed = counts.sessions;
+    let artifacts_indexed = counts.artifacts;
+    let rules_indexed = counts.rules;
+    let evidence_indexed = counts.evidence;
+    let posture = super::embedding_posture_for_document_count(
+        &db,
+        &workspace_id,
+        &index_dir,
+        documents_total,
+    );
+    super::index_checkpoint(cx)?;
+    let embedding = super::ReembedEmbeddingSummary::from_posture(posture?);
     let idempotency_key = super::reembed_idempotency_key(
         &workspace_id,
         &embedding.fast_model_id,
         embedding.quality_model_id.as_deref(),
-        snapshot.document_counts,
+        counts,
     );
     let documents_embedded = embedding.documents_embedded();
     Ok(super::IndexReembedReport {
@@ -560,18 +576,18 @@ pub(super) fn reembed_dry_run(
         document_source: None,
         embedding_scope: "all_documents".to_owned(),
         embedding,
-        memories_indexed: snapshot.memories_indexed,
-        sessions_indexed: snapshot.sessions_indexed,
-        artifacts_indexed: snapshot.artifacts_indexed,
-        rules_indexed: snapshot.rules_indexed,
-        evidence_indexed: snapshot.evidence_indexed,
+        memories_indexed,
+        sessions_indexed,
+        artifacts_indexed,
+        rules_indexed,
+        evidence_indexed,
         documents_embedded,
-        documents_total: snapshot.documents_total,
+        documents_total,
         index_dir,
         elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
         dry_run: true,
         idempotency_key,
-        evidence_admission: snapshot.evidence_admission,
+        evidence_admission,
         errors: Vec::new(),
         runtime_profile: super::runtime_profile_for_workspace(&options.workspace_path),
     })
@@ -1329,6 +1345,20 @@ mod tests {
         assert_eq!(plan.sessions_indexed, 31);
         assert_eq!(plan.memories_indexed, 1);
         assert_eq!(plan.documents_total, 20_032);
+        let reembed_plan = super::super::reembed_index(&super::super::IndexReembedOptions {
+            workspace_path: options.workspace_path.clone(),
+            database_path: options.database_path.clone(),
+            index_dir: options.index_dir.clone(),
+            dry_run: true,
+        })
+        .expect("count-only reembed plan at import scale");
+        assert_eq!(reembed_plan.documents_total, plan.documents_total);
+        assert_eq!(reembed_plan.evidence_indexed, plan.evidence_indexed);
+        assert_eq!(reembed_plan.sessions_indexed, plan.sessions_indexed);
+        assert_eq!(reembed_plan.evidence_admission, plan.evidence_admission);
+        assert_eq!(reembed_plan.documents_embedded, 0);
+        assert!(reembed_plan.job_id.is_none());
+        assert!(!reembed_plan.index_dir.exists());
         assert_eq!(
             db.get_workspace_generation(WORKSPACE).expect("generation"),
             generation
@@ -1496,5 +1526,61 @@ mod tests {
                 .is_empty()
         );
         assert!(!root.path().join(".ee/index").exists());
+    }
+
+    #[test]
+    fn reembed_preview_does_not_require_anchor_or_job_sidecars() {
+        for table in ["memory_anchors", "search_index_jobs"] {
+            let (root, db, path) = fixture();
+            let options = super::super::IndexReembedOptions {
+                workspace_path: root.path().canonicalize().expect("workspace"),
+                database_path: Some(path.clone()),
+                index_dir: Some(root.path().join(".ee/index")),
+                dry_run: true,
+            };
+            let original = super::super::reembed_index(&options).expect("baseline count plan");
+            // Preserve the derived rows under another name. A source-only
+            // preview must not need anchor projection or pending-job reads.
+            db.execute_raw(&format!("ALTER TABLE {table} RENAME TO preview_saved_{table}"))
+                .expect("withhold unrelated derived sidecar");
+            let before = std::fs::read(&path).expect("source before preview");
+            let generation = db.get_workspace_generation(WORKSPACE).expect("generation");
+            let report = super::super::reembed_index(&options).expect("source-only preview");
+            assert_eq!(report.status, super::super::IndexReembedStatus::DryRun);
+            assert_eq!(report.documents_total, original.documents_total);
+            assert_eq!(report.memories_indexed, 1);
+            assert_eq!(report.evidence_admission, original.evidence_admission);
+            assert_eq!(report.idempotency_key, original.idempotency_key);
+            assert_eq!(report.documents_embedded, 0);
+            assert_eq!(report.job_status, "dry_run_not_queued");
+            assert!(report.job_id.is_none());
+            assert!(!report.index_dir.exists());
+            assert_eq!(
+                db.get_workspace_generation(WORKSPACE).expect("generation"),
+                generation
+            );
+            assert_eq!(std::fs::read(&path).expect("source after preview"), before);
+        }
+    }
+
+    #[test]
+    fn cancelled_reembed_preview_does_not_open_or_create_a_source_store() {
+        let root = tempfile::tempdir().expect("fixture");
+        let path = root.path().join("missing.db");
+        let options = super::super::IndexReembedOptions {
+            workspace_path: root.path().to_path_buf(),
+            database_path: Some(path.clone()),
+            index_dir: Some(root.path().join("missing-index")),
+            dry_run: true,
+        };
+        let cx = asupersync::Cx::for_testing();
+        cx.set_cancel_reason(asupersync::CancelReason::user("cancel reembed preview"));
+        assert!(matches!(
+            reembed_dry_run(&cx, &options),
+            Err(IndexRebuildError::Cancelled(reason))
+                if reason.message.as_deref() == Some("cancel reembed preview")
+        ));
+        assert!(!path.exists());
+        assert!(!options.resolve_index_dir().exists());
     }
 }
