@@ -69,6 +69,25 @@ pub(crate) async fn stage(
     workspace: &Path,
     staging: &Path,
 ) -> Result<PreparedRepair, IndexRebuildError> {
+    stage_with_selection(cx, workspace, staging, |db, workspace_id| {
+        // A doctor repair never fetches (bd-65jem). Reuse a verified cached
+        // model or the deterministic hash tier without registering a model.
+        Ok(cached_local_selection(
+            Some((db, workspace_id)),
+            &default_embedder_settings(),
+            configured_embed_backend() == EmbedBackendSelection::Remote,
+        )?
+        .stack)
+    })
+    .await
+}
+
+async fn stage_with_selection(
+    cx: &asupersync::Cx,
+    workspace: &Path,
+    staging: &Path,
+    select: impl FnOnce(&DbConnection, &str) -> Result<super::EmbedderStack, IndexRebuildError>,
+) -> Result<PreparedRepair, IndexRebuildError> {
     index_checkpoint(cx)?;
     ensure_index_path_has_no_symlinks(staging, "stage doctor index repair")?;
     if staging
@@ -82,7 +101,11 @@ pub(crate) async fn stage(
     let database_path = default_workspace_database_path(workspace);
     let db = DbConnection::open_file_read_only(&database_path)?;
     let workspace_id = resolve_index_workspace_id(&db, workspace)?;
-    let source = collect_workspace_index_source_snapshot(&db, &workspace_id)?;
+    let captured = collect_workspace_index_source_snapshot(&db, &workspace_id);
+    // A source read may report cancellation as a database error. Check the
+    // request after capture has released its snapshot, before loading a model.
+    index_checkpoint(cx)?;
+    let source = captured?;
     // An empty repair must not load or download a model to embed nothing, and
     // must not REGISTER one either.
     //
@@ -101,23 +124,24 @@ pub(crate) async fn stage(
     let stack = if source.documents_total == 0 {
         hash_fallback_embedder_stack()
     } else {
-        // A doctor repair never fetches (bd-65jem). The default Auto stack is
-        // a lazy downloader that pulled the ~531 MiB model into the user model
-        // cache -- a network fetch and a durable write outside the declared
-        // blast radius. Use the registry selection or a verified cached local
-        // model, else the deterministic hash tier; `ee model fetch` followed by
-        // `ee index rebuild` upgrades the index afterwards.
-        cached_local_selection(
-            Some((&db, workspace_id.as_str())),
-            &default_embedder_settings(),
-            configured_embed_backend() == EmbedBackendSelection::Remote,
-        )?
-        .stack
+        let selected = select(&db, &workspace_id);
+        index_checkpoint(cx)?;
+        selected?
     };
+    // Doctor must emit the same reconciliation state as an ordinary full
+    // build. Without it, the next write cannot plan a delta and re-embeds the
+    // entire repaired corpus. Bind only this captured source and its actual
+    // producer, never digests copied from the damaged generation.
+    let digests = super::delta::DocDigests::new(&stack, &source.documents);
+    index_checkpoint(cx)?;
     let fingerprint = embedder_fingerprint_for_index_metadata(&stack);
     let stats = build_index_generation(cx, staging, stack, source.documents).await?;
     validate_built_generation(staging, stats, source.document_counts)
         .map_err(IndexRebuildError::Index)?;
+    index_checkpoint(cx)?;
+    // The admission marker is written only after digests exist, and the
+    // existing durability barrier flushes both before doctor can publish them.
+    digests.write(staging)?;
     write_index_metadata(
         staging,
         source.generation,
@@ -132,6 +156,10 @@ pub(crate) async fn stage(
         document_count: source.documents_total,
     })
 }
+
+#[cfg(test)]
+#[path = "index_doctor_repair_tests.rs"]
+mod tests;
 
 /// The same parent-directory lease used by ordinary search and publication;
 /// no new lock file, database write, or independent coordination protocol.
