@@ -42,12 +42,38 @@ harness_init "consolidation"
 EE_JSON_RC_FAILURES="${LOG_DIR:-${EE_E2E_TMPDIR:-/tmp}}/ee_json_rc_failures.txt"
 : >"$EE_JSON_RC_FAILURES"
 ee_json() {
-    local out rc
+    local out rc err_code err_msg err_repair
     out="$(e2e_log_command "$EE_BIN" "$@")"
     rc=$?
     if [ "$rc" -ne 0 ]; then
-        printf 'ee %s exited nonzero (rc=%s)\n' "${1:-<none>}" "$rc" >>"$EE_JSON_RC_FAILURES"
-        printf '  [FAIL-rc] ee %s rc=%s\n' "${1:-}" "$rc" >&2
+        # RECORD THE ENVELOPE, NOT JUST THE NUMBER. Measured 2026-10-13: the
+        # first fleet run of this suite reported `[FAIL-rc] ee pack rc=3` and
+        # the whole log contained ZERO ee.error.v2 envelopes, because the body
+        # was captured into `out`, handed to the caller's jq assertions, and
+        # never written anywhere. An exit code alone cannot name a defect --
+        # exit 3 is every storage-class cause there is -- so the follow-up had
+        # to re-run a 100-minute dispatch just to learn the code.
+        #
+        # ee writes its JSON error envelope to stdout, so `out` already holds
+        # it; this only has to look. `// empty` keeps a non-JSON body from
+        # printing jq's null, and the rc relay stays exactly as it was.
+        err_code="$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null || true)"
+        err_msg="$(printf '%s' "$out" | jq -r '.error.message // empty' 2>/dev/null || true)"
+        err_repair="$(printf '%s' "$out" | jq -r '.error.repair // empty' 2>/dev/null || true)"
+        {
+            printf 'ee %s exited nonzero (rc=%s)\n' "${1:-<none>}" "$rc"
+            printf '  error.code=%s\n' "${err_code:-<absent>}"
+            printf '  error.message=%s\n' "${err_msg:-<absent>}"
+            printf '  error.repair=%s\n' "${err_repair:-<absent>}"
+        } >>"$EE_JSON_RC_FAILURES"
+        printf '  [FAIL-rc] ee %s rc=%s code=%s msg=%s\n' \
+            "${1:-}" "$rc" "${err_code:-<absent>}" "${err_msg:-<absent>}" >&2
+        # When the body is not an ee.error.v2 envelope at all, that is itself
+        # the finding: print a bounded excerpt rather than leaving the reader
+        # with a bare number and no body.
+        if [ -z "$err_code" ]; then
+            printf '  [FAIL-rc] body excerpt: %s\n' "$(printf '%s' "$out" | head -c 400)" >&2
+        fi
     fi
     printf '%s' "$out"
 }

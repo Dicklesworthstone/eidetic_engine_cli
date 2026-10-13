@@ -25,7 +25,27 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 3
 fi
 
-EE_BIN="${EE_BIN:-${EE_BINARY:-ee}}"
+E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "${E2E_SCRIPT_DIR}/.." && pwd)}"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
+
+# The default used to be bare `ee`, i.e. whatever is on PATH. Under verify.sh
+# every stage is handed EE_BIN/EE_BINARY explicitly (scripts/verify.sh:1809 and
+# siblings), so that fallback was DORMANT -- until a standalone run.
+#
+# Measured 2026-10-13 on an RCH worker: one `rch exec --job` built ee at
+# .rch-target/debug/ee and this suite then graded /home/ubuntu/.local/bin/ee
+# instead, while printing `binary_version=0.17.0 source_version=0.17.0` -- a
+# provenance line that reads like an attestation but names a binary the job did
+# not build. The guard below cannot catch that: equality of semver is not
+# identity of commit, and a version can span hundreds of commits.
+#
+# Resolve from Cargo's effective target directory, the way the e2e_lib.sh
+# callers already do. An explicit EE_BIN/EE_BINARY still wins, so verify.sh and
+# any pinned-binary caller behave exactly as before.
+EE_BIN="${EE_BIN:-${EE_BINARY:-$(ee_resolve_binary debug)}}"
 if [[ "${EE_BIN}" == */* ]]; then
     REAL_EE="${EE_BIN}"
 else
@@ -37,17 +57,12 @@ if [[ -z "${REAL_EE}" || ! -x "${REAL_EE}" ]]; then
 fi
 
 # Staleness guard (bd-smxdr). Existing/executable is not the same as current:
-# the PATH fallback above resolves whatever ee happens to be installed. This
-# e2e depends on `curate doctor --now` (the frozen-clock flag added for the
-# age-gated debt classes), so an older installed binary would fail confusingly
-# or, worse, exercise a different clock contract. Under verify.sh this stage
-# inherits the exported EE_BINARY and runs after the build at verify.sh:1195;
-# this protects the STANDALONE path.
-E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "${E2E_SCRIPT_DIR}/.." && pwd)}"
-# shellcheck source=scripts/lib/ee_binary_resolution.sh
-# shellcheck disable=SC1091
-source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
+# a resolved path can still name a binary months behind the source. This e2e
+# depends on `curate doctor --now` (the frozen-clock flag added for the
+# age-gated debt classes), so an older binary would fail confusingly or, worse,
+# exercise a different clock contract. Under verify.sh this stage inherits the
+# exported EE_BINARY and runs after the build at verify.sh:1195; this protects
+# the STANDALONE path.
 if ! ee_require_current_binary "${REAL_EE}" "e2e_memory_debt"; then
     exit 3
 fi
