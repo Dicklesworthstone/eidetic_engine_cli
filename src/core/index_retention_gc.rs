@@ -470,22 +470,18 @@ fn automatic_candidates(
         return Ok((candidates.len(), Vec::new()));
     }
     let mut interrupted = false;
-    let classified: Vec<_> = classify_candidates(
-        candidates,
-        RETAINED_GENERATION_LIMIT,
-        |path| {
-            if interrupted || budget.validation().is_err() {
-                interrupted = true;
-                return None;
-            }
-            let generation = recover_generation(path);
-            if budget.checkpoint().is_err() {
-                interrupted = true;
-                return None;
-            }
-            generation
-        },
-    )
+    let classified: Vec<_> = classify_candidates(candidates, RETAINED_GENERATION_LIMIT, |path| {
+        if interrupted || budget.validation().is_err() {
+            interrupted = true;
+            return None;
+        }
+        let generation = recover_generation(path);
+        if budget.checkpoint().is_err() {
+            interrupted = true;
+            return None;
+        }
+        generation
+    })
     .collect();
     // None from an interrupted validator is NOT an unusable generation. Drop
     // every provisional decision; in particular, never delete a valid copy
@@ -528,7 +524,9 @@ fn automatic_directory_bytes(
     while let Some(current) = pending.pop() {
         budget.checkpoint()?;
         let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
-            IndexRebuildError::Index(format!("Could not inspect automatic retention tree: {error}"))
+            IndexRebuildError::Index(format!(
+                "Could not inspect automatic retention tree: {error}"
+            ))
         })?;
         if metadata.file_type().is_dir() {
             let entries = std::fs::read_dir(&current).map_err(|error| {
@@ -1171,7 +1169,10 @@ mod automatic_tests {
 
     fn canary(path: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(path)?;
-        std::fs::write(path.join("canary"), b"retained source and publication sentinel")
+        std::fs::write(
+            path.join("canary"),
+            b"retained source and publication sentinel",
+        )
     }
 
     fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, Box<dyn std::error::Error>> {
@@ -1288,7 +1289,11 @@ mod automatic_tests {
             budget.validations_remaining = 1;
             let mut opens = 0;
             let result = automatic_candidates(
-                vec![candidate(1, Some(7)), candidate(2, Some(8)), candidate(3, Some(9))],
+                vec![
+                    candidate(1, Some(7)),
+                    candidate(2, Some(8)),
+                    candidate(3, Some(9)),
+                ],
                 &mut budget,
                 |_| {
                     opens += 1;
@@ -1327,16 +1332,18 @@ mod automatic_tests {
                         (entry.path, valid)
                     })
                     .collect();
-                let expected: Vec<_> = classify_candidates(build(), 2, |path| {
-                    watermarks.get(path).copied().flatten()
-                })
-                .collect();
+                let expected: Vec<_> =
+                    classify_candidates(build(), 2, |path| watermarks.get(path).copied().flatten())
+                        .collect();
                 let mut budget = work_budget();
                 budget.validations_remaining = usize::MAX;
                 let (kept, reclaimed) = automatic_candidates(build(), &mut budget, |path| {
                     watermarks.get(path).copied().flatten()
                 })?;
-                assert_eq!(kept, expected.iter().filter(|(_, reason)| reason.keeps()).count());
+                assert_eq!(
+                    kept,
+                    expected.iter().filter(|(_, reason)| reason.keeps()).count()
+                );
                 assert_eq!(
                     reclaimed
                         .into_iter()
@@ -1359,10 +1366,18 @@ mod automatic_tests {
         let root = tempfile::tempdir()?;
         let parent = root.path().canonicalize()?;
         let index = parent.join("index");
-        for name in ["index", "index.previous", "index.previous.001", ".index.publish-1-000"] {
+        for name in [
+            "index",
+            "index.previous",
+            "index.previous.001",
+            ".index.publish-1-000",
+        ] {
             canary(&parent.join(name))?;
         }
-        std::fs::write(parent.join("ee.db"), b"source database is never retention work")?;
+        std::fs::write(
+            parent.join("ee.db"),
+            b"source database is never retention work",
+        )?;
         let protected = inventory(&parent)?;
         for number in 0..31 {
             canary(&parent.join(format!(".index.reclaim-1-{number:03}")))?;
@@ -1495,7 +1510,10 @@ mod automatic_tests {
                 .ok_or("bounded retention with complete validation")?;
             assert_eq!(outcome.kept, 2);
             assert_eq!(outcome.reclaimed.len(), 1);
-            assert_eq!(outcome.reclaimed[0].reason, RetentionReason::DuplicateGeneration);
+            assert_eq!(
+                outcome.reclaimed[0].reason,
+                RetentionReason::DuplicateGeneration
+            );
             assert!(outcome.failures.is_empty());
             assert_eq!(inventory(&index)?, active);
             assert_eq!(recoverable_index_generation(&older), Some(7));

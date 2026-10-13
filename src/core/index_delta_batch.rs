@@ -178,7 +178,9 @@ async fn embed_batches_with(
                         .map(|vector| vector.values.as_slice())
                 });
                 let values = values.ok_or_else(|| {
-                    tier_error(format!("{tier}-tier embedding batch has an unresolved input"))
+                    tier_error(format!(
+                        "{tier}-tier embedding batch has an unresolved input"
+                    ))
                 })?;
                 // Reuse inference, never a document identity or a mutable WAL
                 // buffer. Equal text under different IDs still writes every ID.

@@ -148,9 +148,10 @@ fn trusted_installation_with(
         }
         // Checking only the direct parent would admit a writable HOME ancestor.
         // Sticky temporary directories are not installation authorities either.
-        let safe_ancestors = candidate.parent()?.ancestors().all(|ancestor| {
-            inspect(ancestor).is_ok_and(|entry| entry.directory && trusted(entry))
-        });
+        let safe_ancestors = candidate
+            .parent()?
+            .ancestors()
+            .all(|ancestor| inspect(ancestor).is_ok_and(|entry| entry.directory && trusted(entry)));
         if safe_ancestors {
             return Some(candidate);
         }
@@ -298,10 +299,7 @@ mod tests {
 
         #[test]
         fn cargo_and_local_installers_can_supply_each_others_companion() {
-            for (executable, companion) in [
-                (CARGO_EXECUTABLE, SIBLING),
-                (EXECUTABLE, CARGO_CASS),
-            ] {
+            for (executable, companion) in [(CARGO_EXECUTABLE, SIBLING), (EXECUTABLE, CARGO_CASS)] {
                 let entries = installation_at(executable, companion);
                 assert_eq!(
                     resolve_at(executable, &entries),
@@ -331,10 +329,7 @@ mod tests {
 
         #[test]
         fn cross_layout_discovery_checks_both_complete_ancestry_chains() {
-            for (executable, companion) in [
-                (CARGO_EXECUTABLE, SIBLING),
-                (EXECUTABLE, CARGO_CASS),
-            ] {
+            for (executable, companion) in [(CARGO_EXECUTABLE, SIBLING), (EXECUTABLE, CARGO_CASS)] {
                 let original = installation_at(executable, companion);
                 for path in original.keys() {
                     for bits in [0o020, 0o002, 0o1002] {
