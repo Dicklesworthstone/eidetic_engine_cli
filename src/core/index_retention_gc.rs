@@ -19,9 +19,14 @@
 //! output (`.publish-*`, including an attested displacement) or rejected
 //! quarantine (`.rejected-*`): it recognizes only canonical retained names and
 //! its own interrupted reclamation leftovers.
+//!
+//! Automatic reclamation is optional work in the masked publication tail.
+//! Its discovery, validation and deletion admission share a small budget;
+//! excess work belongs to explicit vacuum, not to a reader's lock wait.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::{
     INDEX_RETAINED_SUFFIX, IndexRebuildError, ensure_index_path_has_no_symlinks, index_base_name,
@@ -37,6 +42,56 @@ pub(super) const RETAINED_GENERATION_LIMIT: usize = 2;
 /// Name prefix (after the dot and index base name) of a retained generation
 /// that was renamed out of the retained namespace and is being deleted.
 const RECLAIM_PREFIX: &str = ".reclaim-";
+
+const AUTO_WALL_BUDGET: Duration = Duration::from_millis(250);
+const AUTO_WORK_LIMIT: usize = 4096;
+const AUTO_VALIDATION_LIMIT: usize = 8;
+const AUTO_RECLAIM_LIMIT: usize = 2;
+const AUTO_TREE_ENTRY_LIMIT: usize = 1024;
+
+/// Independent maintenance allowance: the caller masks cancellation to finish
+/// an already-committed publication. That mask must not also admit unbounded
+/// optional cleanup. No caller budget is renewed or publication undone here.
+struct AutomaticRetentionBudget {
+    request: crate::core::budget::RequestBudget,
+    work_remaining: usize,
+    validations_remaining: usize,
+}
+
+impl AutomaticRetentionBudget {
+    fn new() -> Self {
+        Self {
+            request: crate::core::budget::RequestBudget::unbounded()
+                .with_wall_clock(AUTO_WALL_BUDGET),
+            work_remaining: AUTO_WORK_LIMIT,
+            validations_remaining: AUTO_VALIDATION_LIMIT,
+        }
+    }
+
+    fn checkpoint(&mut self) -> Result<(), IndexRebuildError> {
+        self.request.check().map_err(|_| automatic_deferred())?;
+        self.work_remaining = self
+            .work_remaining
+            .checked_sub(1)
+            .ok_or_else(automatic_deferred)?;
+        Ok(())
+    }
+
+    fn validation(&mut self) -> Result<(), IndexRebuildError> {
+        self.checkpoint()?;
+        self.validations_remaining = self
+            .validations_remaining
+            .checked_sub(1)
+            .ok_or_else(automatic_deferred)?;
+        Ok(())
+    }
+}
+
+fn automatic_deferred() -> IndexRebuildError {
+    IndexRebuildError::Index(
+        "Automatic index retention budget exhausted; publication is preserved; use explicit ee index vacuum for remaining cleanup".to_owned(),
+    )
+}
 
 /// Why one retained directory is kept or reclaimed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,13 +189,43 @@ struct Candidate {
 /// candidates may require extra opens before enough recoverable snapshots are
 /// found; a readable watermark alone is never sufficient to retain a copy.
 pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, IndexRebuildError> {
-    let parent = index_parent(index_dir);
+    let (candidates, mut leftovers) = collect_candidates(index_dir, || Ok(()))?;
     let mut retention = RetentionPlan {
         limit,
         entries: Vec::new(),
     };
+    for (candidate, reason) in classify_candidates(candidates, limit, recoverable_index_generation)
+    {
+        retention.entries.push(RetainedGenerationEntry {
+            size_bytes: directory_bytes(&candidate.path),
+            path: candidate.path,
+            generation: candidate.generation,
+            reason,
+        });
+    }
+    leftovers.sort();
+    for path in leftovers {
+        retention.entries.push(RetainedGenerationEntry {
+            size_bytes: directory_bytes(&path),
+            path,
+            generation: None,
+            reason: RetentionReason::InterruptedReclaim,
+        });
+    }
+    Ok(retention)
+}
+
+/// A partial inventory cannot authorize any retention decision. Count even
+/// unrelated parent entries, and check again after metadata reads before
+/// returning the complete candidate set. Explicit vacuum has no automatic cap.
+fn collect_candidates(
+    index_dir: &Path,
+    mut checkpoint: impl FnMut() -> Result<(), IndexRebuildError>,
+) -> Result<(Vec<Candidate>, Vec<PathBuf>), IndexRebuildError> {
+    checkpoint()?;
+    let parent = index_parent(index_dir);
     if !path_exists_no_follow(parent) {
-        return Ok(retention);
+        return Ok((Vec::new(), Vec::new()));
     }
     ensure_index_path_has_no_symlinks(parent, "plan retained index reclamation")?;
     let base = index_base_name(index_dir)?;
@@ -155,6 +240,7 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
     let mut candidates = Vec::new();
     let mut leftovers = Vec::new();
     for entry in entries {
+        checkpoint()?;
         let entry = entry.map_err(|error| {
             IndexRebuildError::Index(format!(
                 "Failed to inspect a retained index generation in '{}': {error}",
@@ -182,6 +268,7 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
         let Some(sequence) = retained_generation_sequence(name, &retained_prefix) else {
             continue;
         };
+        checkpoint()?;
         let generation = parse_index_metadata(&path)
             .ok()
             .flatten()
@@ -192,6 +279,7 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |duration| duration.as_nanos());
+        checkpoint()?;
         candidates.push(Candidate {
             path,
             sequence,
@@ -200,25 +288,8 @@ pub(crate) fn plan(index_dir: &Path, limit: usize) -> Result<RetentionPlan, Inde
         });
     }
 
-    for (candidate, reason) in classify_candidates(candidates, limit, recoverable_index_generation)
-    {
-        retention.entries.push(RetainedGenerationEntry {
-            size_bytes: directory_bytes(&candidate.path),
-            path: candidate.path,
-            generation: candidate.generation,
-            reason,
-        });
-    }
-    leftovers.sort();
-    for path in leftovers {
-        retention.entries.push(RetainedGenerationEntry {
-            size_bytes: directory_bytes(&path),
-            path,
-            generation: None,
-            reason: RetentionReason::InterruptedReclaim,
-        });
-    }
-    Ok(retention)
+    checkpoint()?;
+    Ok((candidates, leftovers))
 }
 
 /// Rebuilding without a source write can retain several copies of the same
@@ -288,28 +359,83 @@ pub(crate) fn apply(index_dir: &Path, retention: &RetentionPlan) -> RetentionOut
     outcome
 }
 
-/// Plan with the default limit and apply under the caller's fence, logging
-/// the result. Used after every successful publication.
+/// Do bounded optional work under the caller's publication fence. Full tier
+/// validation still decides which distinct snapshots may be discarded. Never
+/// size kept trees or drain an arbitrarily large backlog in the masked tail.
+/// Synchronous backend/filesystem calls are not preemptible; the wall budget
+/// stops subsequent work, and deletion additionally requires a bounded tree.
 pub(crate) fn reclaim_after_publish(index_dir: &Path) -> Option<RetentionOutcome> {
-    let retention = match plan(index_dir, RETAINED_GENERATION_LIMIT) {
-        Ok(retention) => retention,
+    reclaim_after_publish_with_budget(index_dir, &mut AutomaticRetentionBudget::new())
+}
+
+fn reclaim_after_publish_with_budget(
+    index_dir: &Path,
+    budget: &mut AutomaticRetentionBudget,
+) -> Option<RetentionOutcome> {
+    let selected = (|| {
+        let (candidates, mut leftovers) = collect_candidates(index_dir, || budget.checkpoint())?;
+        let (kept, mut reclaimable) =
+            automatic_candidates(candidates, budget, recoverable_index_generation)?;
+        // Finish already-retired leftovers first, then the oldest excess
+        // copies. A subsequent publication can resume without a new sidecar.
+        leftovers.sort();
+        reclaimable.reverse();
+        let mut entries: Vec<_> = leftovers
+            .into_iter()
+            .map(|path| RetainedGenerationEntry {
+                path,
+                generation: None,
+                reason: RetentionReason::InterruptedReclaim,
+                size_bytes: 0,
+            })
+            .collect();
+        entries.extend(reclaimable);
+        budget.checkpoint()?;
+        Ok::<_, IndexRebuildError>((kept, entries))
+    })();
+    let (kept, entries) = match selected {
+        Ok(selected) => selected,
         Err(error) => {
             tracing::warn!(
                 target: "ee::index",
                 %error,
                 index_dir = %index_dir.display(),
-                "could not plan retained index generation reclamation; retained copies are kept"
+                "automatic index retention deferred; publication is preserved; use explicit ee index vacuum for remaining cleanup"
             );
             return None;
         }
     };
-    if retention.reclaimable().next().is_none() {
-        return Some(RetentionOutcome {
-            kept: retention.kept().count(),
-            ..RetentionOutcome::default()
-        });
+    let mut outcome = RetentionOutcome {
+        kept,
+        ..RetentionOutcome::default()
+    };
+    if entries.is_empty() {
+        return Some(outcome);
     }
-    let outcome = apply(index_dir, &retention);
+    let parent = index_parent(index_dir);
+    let base = index_base_name(index_dir).ok()?;
+    let total = entries.len();
+    for mut entry in entries.into_iter().take(AUTO_RECLAIM_LIMIT) {
+        // Measure only an entry we will attempt to reclaim, charging every
+        // nested entry to the same budget as discovery and tier validation.
+        // Refusal happens before rename, so an oversized copy stays intact.
+        match automatic_directory_bytes(&entry.path, budget) {
+            Ok(bytes) => entry.size_bytes = bytes,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::index",
+                    %error,
+                    path = %entry.path.display(),
+                    "automatic index deletion deferred before rename; use explicit ee index vacuum"
+                );
+                break;
+            }
+        }
+        match reclaim_one(parent, &base, &entry) {
+            Ok(()) => outcome.reclaimed.push(entry),
+            Err(error) => outcome.failures.push((entry.path, error)),
+        }
+    }
     tracing::info!(
         target: "ee::index",
         index_dir = %index_dir.display(),
@@ -317,7 +443,8 @@ pub(crate) fn reclaim_after_publish(index_dir: &Path) -> Option<RetentionOutcome
         reclaimed_bytes = outcome.reclaimed_bytes(),
         kept = outcome.kept,
         failures = outcome.failures.len(),
-        "reclaimed retained index generations beyond the retention bound"
+        deferred = total.saturating_sub(outcome.reclaimed.len() + outcome.failures.len()),
+        "finished bounded post-publication retention; explicit ee index vacuum can finish deferred cleanup"
     );
     for (path, error) in &outcome.failures {
         tracing::warn!(
@@ -328,6 +455,105 @@ pub(crate) fn reclaim_after_publish(index_dir: &Path) -> Option<RetentionOutcome
         );
     }
     Some(outcome)
+}
+
+fn automatic_candidates(
+    candidates: Vec<Candidate>,
+    budget: &mut AutomaticRetentionBudget,
+    mut recover_generation: impl FnMut(&Path) -> Option<u64>,
+) -> Result<(usize, Vec<RetainedGenerationEntry>), IndexRebuildError> {
+    budget.checkpoint()?;
+    if candidates.len() <= RETAINED_GENERATION_LIMIT {
+        // Keeping everything needs no proof of validity. Do not open tiers
+        // merely to discover there is no excess to delete. These are counts
+        // of preserved directories, not claims that their generations validate.
+        return Ok((candidates.len(), Vec::new()));
+    }
+    let mut interrupted = false;
+    let classified: Vec<_> = classify_candidates(
+        candidates,
+        RETAINED_GENERATION_LIMIT,
+        |path| {
+            if interrupted || budget.validation().is_err() {
+                interrupted = true;
+                return None;
+            }
+            let generation = recover_generation(path);
+            if budget.checkpoint().is_err() {
+                interrupted = true;
+                return None;
+            }
+            generation
+        },
+    )
+    .collect();
+    // None from an interrupted validator is NOT an unusable generation. Drop
+    // every provisional decision; in particular, never delete a valid copy
+    // because optional maintenance lacked time to finish checking it.
+    if interrupted {
+        return Err(automatic_deferred());
+    }
+    budget.checkpoint()?;
+    let mut kept = 0;
+    let mut reclaimable = Vec::new();
+    for (candidate, reason) in classified {
+        if reason.keeps() {
+            kept += 1;
+        } else {
+            reclaimable.push(RetainedGenerationEntry {
+                path: candidate.path,
+                generation: candidate.generation,
+                reason,
+                // Filled from the complete bounded tree immediately before
+                // deletion. No unmeasured entry is reported as reclaimed.
+                size_bytes: 0,
+            });
+        }
+    }
+    Ok((kept, reclaimable))
+}
+
+/// Bound the tree before invoking the existing no-follow deletion primitive.
+/// Under the exclusive generation fence cooperating publishers cannot add
+/// entries between inspection and deletion. This is not a hard I/O timeout or
+/// a fence against uncooperative filesystem writers. Explicit vacuum retains
+/// its complete-tree behavior for oversized or unreadable automatic candidates.
+fn automatic_directory_bytes(
+    path: &Path,
+    budget: &mut AutomaticRetentionBudget,
+) -> Result<u64, IndexRebuildError> {
+    let mut total = 0_u64;
+    let mut count = 1_usize;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        budget.checkpoint()?;
+        let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+            IndexRebuildError::Index(format!("Could not inspect automatic retention tree: {error}"))
+        })?;
+        if metadata.file_type().is_dir() {
+            let entries = std::fs::read_dir(&current).map_err(|error| {
+                IndexRebuildError::Index(format!(
+                    "Could not read automatic retention tree: {error}"
+                ))
+            })?;
+            for entry in entries {
+                budget.checkpoint()?;
+                count += 1;
+                if count > AUTO_TREE_ENTRY_LIMIT {
+                    return Err(automatic_deferred());
+                }
+                pending.push(
+                    entry
+                        .map_err(|error| IndexRebuildError::Index(error.to_string()))?
+                        .path(),
+                );
+            }
+        } else if metadata.file_type().is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    budget.checkpoint()?;
+    Ok(total)
 }
 
 fn reclaim_one(parent: &Path, base: &str, entry: &RetainedGenerationEntry) -> Result<(), String> {
@@ -925,5 +1151,360 @@ mod tests {
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())?
+    }
+}
+
+#[cfg(test)]
+mod automatic_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn work_budget() -> AutomaticRetentionBudget {
+        // Work-count tests must not depend on the speed of a debug filesystem.
+        // The independent production wall allowance has its own refusal test.
+        let mut budget = AutomaticRetentionBudget::new();
+        budget.request = crate::core::budget::RequestBudget::unbounded();
+        budget
+    }
+
+    fn canary(path: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(path)?;
+        std::fs::write(path.join("canary"), b"retained source and publication sentinel")
+    }
+
+    fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, Box<dyn std::error::Error>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory)? {
+                let entry = entry?;
+                let path = entry.path();
+                if entry.file_type()?.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.insert(path.strip_prefix(root)?.to_path_buf(), std::fs::read(path)?);
+                }
+            }
+        }
+        Ok(files)
+    }
+
+    #[test]
+    fn automatic_budget_is_shared_monotone_and_independent_of_request_masking() -> TestResult {
+        let mut budget = work_budget();
+        budget.work_remaining = 2;
+        budget.checkpoint()?;
+        budget.checkpoint()?;
+        assert!(budget.checkpoint().is_err());
+        assert!(budget.checkpoint().is_err());
+        assert_eq!(budget.work_remaining, 0);
+        let mut budget = work_budget();
+        budget.validations_remaining = 1;
+        budget.validation()?;
+        assert!(budget.validation().is_err());
+        assert!(budget.validation().is_err());
+        assert_eq!(budget.validations_remaining, 0);
+
+        let root = tempfile::tempdir()?;
+        let index = root.path().canonicalize()?.join("index");
+        canary(&index)?;
+        canary(&index_parent(&index).join(".index.reclaim-1-000"))?;
+        let before = inventory(root.path())?;
+        crate::core::run_cli_with_cx(Duration::from_secs(5), |cx| async move {
+            cx.masked(|| {
+                let mut expired = AutomaticRetentionBudget::new();
+                expired.request = crate::core::budget::RequestBudget::unbounded_at(
+                    std::time::Instant::now() - Duration::from_secs(1),
+                )
+                .with_wall_clock(Duration::ZERO);
+                assert!(reclaim_after_publish_with_budget(&index, &mut expired).is_none());
+            });
+        })?;
+        assert_eq!(inventory(root.path())?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_parent_inventory_cannot_authorize_deletion() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        let index = parent.join("index");
+        for name in ["index", "index.previous", ".index.reclaim-1-000"] {
+            canary(&parent.join(name))?;
+        }
+        for number in 0..32 {
+            std::fs::write(parent.join(format!("unrelated-{number}")), b"not an index")?;
+        }
+        let before = inventory(&parent)?;
+        let mut budget = work_budget();
+        budget.work_remaining = 8;
+        assert!(reclaim_after_publish_with_budget(&index, &mut budget).is_none());
+        assert_eq!(budget.work_remaining, 0);
+        assert_eq!(inventory(&parent)?, before);
+        // The explicit planner still inspects the complete parent and trees.
+        let full = plan(&index, RETAINED_GENERATION_LIMIT)?;
+        assert_eq!(full.reclaimable().count(), 2);
+        assert!(full.reclaimable_bytes() > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn an_already_bounded_retained_set_needs_no_tier_opens_or_tree_sizing() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        for name in ["index.previous", "index.previous.001"] {
+            canary(&parent.join(name))?;
+        }
+        let before = inventory(&parent)?;
+        let mut budget = work_budget();
+        budget.validations_remaining = 0;
+        // No manifest/tier is valid here. Keeping both must not pretend to
+        // validate them, classify them unusable, size them, or remove them.
+        let outcome = reclaim_after_publish_with_budget(&parent.join("index"), &mut budget)
+            .ok_or("bounded set should require no validation")?;
+        assert_eq!(outcome.kept, 2);
+        assert!(outcome.reclaimed.is_empty());
+        assert!(outcome.failures.is_empty());
+        assert_eq!(inventory(&parent)?, before);
+        assert_eq!(plan(&parent.join("index"), 2)?.reclaimable().count(), 2);
+        Ok(())
+    }
+
+    fn candidate(sequence: u32, generation: Option<u64>) -> Candidate {
+        Candidate {
+            path: PathBuf::from(format!("index.previous.{sequence:03}")),
+            sequence,
+            generation,
+            modified_nanos: u128::from(sequence),
+        }
+    }
+
+    #[test]
+    fn exhausted_validation_drops_every_provisional_disposition() {
+        for first_valid in [false, true] {
+            let mut budget = work_budget();
+            budget.validations_remaining = 1;
+            let mut opens = 0;
+            let result = automatic_candidates(
+                vec![candidate(1, Some(7)), candidate(2, Some(8)), candidate(3, Some(9))],
+                &mut budget,
+                |_| {
+                    opens += 1;
+                    first_valid.then_some(9)
+                },
+            );
+            assert!(result.is_err(), "no partial plan may reach the deleter");
+            assert_eq!(opens, 1);
+        }
+    }
+
+    #[test]
+    fn automatic_selection_matches_full_distinct_generation_policy_when_it_finishes() -> TestResult
+    {
+        for count in 3..40_u32 {
+            for reverse in [false, true] {
+                let build = || {
+                    let mut candidates: Vec<_> = (0..count)
+                        .map(|number| {
+                            candidate(number, (number % 7 != 0).then_some(u64::from(number / 3)))
+                        })
+                        .collect();
+                    if reverse {
+                        candidates.reverse();
+                    }
+                    candidates
+                };
+                let watermarks: BTreeMap<_, _> = build()
+                    .into_iter()
+                    .map(|entry| {
+                        let valid = if entry.sequence % 5 == 0 {
+                            None
+                        } else {
+                            entry.generation
+                        };
+                        (entry.path, valid)
+                    })
+                    .collect();
+                let expected: Vec<_> = classify_candidates(build(), 2, |path| {
+                    watermarks.get(path).copied().flatten()
+                })
+                .collect();
+                let mut budget = work_budget();
+                budget.validations_remaining = usize::MAX;
+                let (kept, reclaimed) = automatic_candidates(build(), &mut budget, |path| {
+                    watermarks.get(path).copied().flatten()
+                })?;
+                assert_eq!(kept, expected.iter().filter(|(_, reason)| reason.keeps()).count());
+                assert_eq!(
+                    reclaimed
+                        .into_iter()
+                        .map(|entry| (entry.path, entry.generation, entry.reason))
+                        .collect::<Vec<_>>(),
+                    expected
+                        .into_iter()
+                        .filter(|(_, reason)| !reason.keeps())
+                        .map(|(entry, reason)| (entry.path, entry.generation, reason))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_cleanup_drains_backlog_in_bounded_batches_without_touching_sources() -> TestResult
+    {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        let index = parent.join("index");
+        for name in ["index", "index.previous", "index.previous.001", ".index.publish-1-000"] {
+            canary(&parent.join(name))?;
+        }
+        std::fs::write(parent.join("ee.db"), b"source database is never retention work")?;
+        let protected = inventory(&parent)?;
+        for number in 0..31 {
+            canary(&parent.join(format!(".index.reclaim-1-{number:03}")))?;
+        }
+        let mut remaining = 31;
+        let mut reclaimed_bytes = 0;
+        while remaining > 0 {
+            let outcome = reclaim_after_publish_with_budget(&index, &mut work_budget())
+                .ok_or("bounded cleanup")?;
+            assert!(outcome.failures.is_empty());
+            assert_eq!(outcome.kept, 2);
+            assert_eq!(outcome.reclaimed.len(), remaining.min(AUTO_RECLAIM_LIMIT));
+            assert!(outcome.reclaimed.iter().all(|entry| {
+                entry.reason == RetentionReason::InterruptedReclaim && !entry.path.exists()
+            }));
+            reclaimed_bytes += outcome.reclaimed_bytes();
+            remaining -= outcome.reclaimed.len();
+        }
+        assert_eq!(
+            reclaimed_bytes,
+            31 * b"retained source and publication sentinel".len() as u64
+        );
+        assert_eq!(inventory(&parent)?, protected);
+        assert!(
+            reclaim_after_publish(&index)
+                .ok_or("idempotent bounded cleanup")?
+                .reclaimed
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_tree_is_deferred_intact_and_explicit_vacuum_can_finish_it() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        let index = parent.join("index");
+        canary(&index)?;
+        let oversized = parent.join(".index.reclaim-1-000");
+        std::fs::create_dir(&oversized)?;
+        // Root plus these files is one entry beyond the deletion allowance.
+        for number in 0..AUTO_TREE_ENTRY_LIMIT {
+            std::fs::write(oversized.join(format!("entry-{number}")), b"retained")?;
+        }
+        let before = inventory(&parent)?;
+        let outcome = reclaim_after_publish_with_budget(&index, &mut work_budget())
+            .ok_or("deletion admission is separate from candidate planning")?;
+        assert!(outcome.reclaimed.is_empty());
+        assert!(outcome.failures.is_empty());
+        assert_eq!(inventory(&parent)?, before);
+        let full = plan(&index, 2)?;
+        assert_eq!(full.reclaimable().count(), 1);
+        assert_eq!(full.reclaimable_bytes(), (AUTO_TREE_ENTRY_LIMIT * 8) as u64);
+        let outcome = apply(&index, &full);
+        assert_eq!(outcome.reclaimed.len(), 1);
+        assert!(outcome.failures.is_empty());
+        assert!(!oversized.exists());
+        assert!(index.join("canary").is_file());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_tree_measurement_and_deletion_do_not_follow_internal_symlinks() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        let outside = parent.join("unrelated-data");
+        canary(&outside)?;
+        let leftover = parent.join(".index.reclaim-1-000");
+        std::fs::create_dir(&leftover)?;
+        std::os::unix::fs::symlink(&outside, leftover.join("outside"))?;
+        assert_eq!(automatic_directory_bytes(&leftover, &mut work_budget())?, 0);
+        let outcome = reclaim_after_publish_with_budget(&parent.join("index"), &mut work_budget())
+            .ok_or("owned leftover containing a symlink")?;
+        assert_eq!(outcome.reclaimed.len(), 1);
+        assert_eq!(outcome.reclaimed_bytes(), 0);
+        assert!(!leftover.exists());
+        assert_eq!(
+            std::fs::read(outside.join("canary"))?,
+            b"retained source and publication sentinel"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_retention_preserves_real_generations_and_releases_reader_authority() -> TestResult
+    {
+        use super::super::{
+            IndexBuilder, IndexDocumentCounts, IndexGenerationLease, hash_fallback_embedder_stack,
+            write_index_metadata,
+        };
+
+        let root = tempfile::tempdir()?;
+        let parent = root.path().canonicalize()?;
+        let index = parent.join("index");
+        crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+            let older = parent.join("index.previous");
+            for (path, generation) in [
+                (index.clone(), 9),
+                (older.clone(), 7),
+                (parent.join("index.previous.001"), 8),
+                (parent.join("index.previous.002"), 8),
+            ] {
+                let documents = vec![crate::search::IndexableDocument::new(
+                    "mem_bounded_retention",
+                    "Index recovery preserves the complete captured source generation.",
+                )];
+                IndexBuilder::new(&path)
+                    .with_embedder_stack(hash_fallback_embedder_stack())
+                    .add_documents(documents.clone())
+                    .build(&cx)
+                    .await?;
+                #[cfg(feature = "lexical-bm25")]
+                super::super::build_lexical_tier(&cx, &path, &documents).await?;
+                write_index_metadata(&path, generation, IndexDocumentCounts::memory_only(1), None)?;
+            }
+            let publisher = IndexGenerationLease::publish(&cx, &index).await?;
+            let before = inventory(&parent)?;
+            let active = inventory(&index)?;
+            let mut refused = work_budget();
+            refused.validations_remaining = 1;
+            assert!(
+                cx.masked(|| reclaim_after_publish_with_budget(&index, &mut refused))
+                    .is_none()
+            );
+            assert_eq!(inventory(&parent)?, before);
+            let outcome = cx
+                .masked(|| reclaim_after_publish_with_budget(&index, &mut work_budget()))
+                .ok_or("bounded retention with complete validation")?;
+            assert_eq!(outcome.kept, 2);
+            assert_eq!(outcome.reclaimed.len(), 1);
+            assert_eq!(outcome.reclaimed[0].reason, RetentionReason::DuplicateGeneration);
+            assert!(outcome.failures.is_empty());
+            assert_eq!(inventory(&index)?, active);
+            assert_eq!(recoverable_index_generation(&older), Some(7));
+            drop(publisher);
+            let reader = IndexGenerationLease::read(&cx, &index).await?;
+            assert_eq!(reader.index_for_snapshot(&cx, &index, 7)?, older);
+            assert_eq!(reader.index_for_snapshot(&cx, &index, 9)?, index);
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })??;
+        Ok(())
     }
 }
