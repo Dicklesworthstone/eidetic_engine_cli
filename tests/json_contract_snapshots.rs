@@ -898,7 +898,7 @@ fn daemon_socket_scrubbing_replaces_the_volatile_path_and_nothing_else() {
     );
 
     // bd-47x3l: the XDG form, as `ee doctor` printed it on RCH worker
-    // vmi1227854. The parent is `${XDG_RUNTIME_DIR}/ee/`, not `/tmp/ee-<uid>/`;
+    // an RCH worker. The parent is `${XDG_RUNTIME_DIR}/ee/`, not `/tmp/ee-<uid>/`;
     // the private rule this harness used to carry left it in the snapshot.
     let xdg = message("/run/user/1000/ee/d-3f005d529dc893aa9eb9a073.sock");
     assert_eq!(

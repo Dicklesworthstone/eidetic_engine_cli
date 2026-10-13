@@ -84,7 +84,7 @@ mod tests {
     use std::time::Duration;
 
     // Verbatim doctor messages captured on a stamped 80ed63d5d release build
-    // (vmi1227854, 2026-09-24 16:01-16:06Z; bd-ixxzq c10142). The first is a
+    // (an RCH worker, 2026-09-24 16:01-16:06Z; bd-ixxzq c10142). The first is a
     // live python3 flock(2) holder on .ee/ee.write.lock; the second is the
     // lowest applied migration's checksum set to blake3 zeros. The prefix
     // classifier sent both to EE-E207. The tests below rebuild each error

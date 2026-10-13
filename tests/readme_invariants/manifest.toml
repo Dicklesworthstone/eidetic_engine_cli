@@ -226,7 +226,7 @@ sentence_hash = "blake3:5a77dd01c5678024833ce701ea9d22408cc6e82b8734fc4029c93c1a
 classification = "promise"
 verify = { type = "defer_bead", id = "bd-3usjw.62", defer_until = "2026-08-13" }
 
-# Measured in bd-5oa5m (M6, vmi1156319, 67830206d): warm-daemon read-only pack
+# Measured in bd-5oa5m (M6, on an RCH worker, 67830206d): warm-daemon read-only pack
 # median 708 ms vs 3155 ms local, identical pack hash. bd-snkcp re-measures the
 # daemon arms at its fixing sha.
 [[invariant]]
