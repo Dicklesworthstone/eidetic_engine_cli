@@ -425,6 +425,36 @@ pub const FORBIDDEN_SUCCESS_MARKERS: &[&str] = &[
     "tests/fixtures/",
 ];
 
+/// Declared domain vocabulary whose wire spelling collides with an
+/// identifier-prefix marker (bd-tk7uq).
+///
+/// `ee --json situation classify` emits `"surface":"fixture_family"`, the wire
+/// value of [`crate::models::situation::SituationRoutingSurface::FixtureFamily`].
+/// That is a routing-surface name, not fixture data, but it is a standalone
+/// token starting with `fixture_`, so the token-start rule matches it BY
+/// DESIGN -- and loosening that rule is the one thing this check cannot afford,
+/// because it is what catches genuine fixture identifiers like
+/// `fixture_memory_1`.
+///
+/// So the exemption is by EXACT TOKEN, never by prefix: `fixture_family` is
+/// declared vocabulary and passes, while `fixture_family_2`,
+/// `fixture_familyish` and `fixture_memory_1` are not declared and are still
+/// caught. Add an entry here only for a term the product genuinely declares,
+/// and only alongside a test tying it to the declaration -- see
+/// `exempt_domain_tokens_are_declared_vocabulary`, which fails if an
+/// exemption outlives the enum value that justified it.
+const MARKER_EXEMPT_DOMAIN_TOKENS: &[&str] = &["fixture_family"];
+
+/// The full identifier beginning at `start`, i.e. the whole token a marker
+/// matched rather than just the marker prefix.
+fn marker_token_at(haystack: &str, start: usize) -> &str {
+    let rest = &haystack[start..];
+    let end = rest
+        .find(|value: char| !is_marker_word_char(value))
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
 /// True when `marker` occurs in `haystack` at the start of a token.
 ///
 /// The identifier-prefix markers (`fixture_`, `mock_`, `stub_`, ...) exist to
@@ -453,7 +483,12 @@ fn marker_occurs_at_token_start(haystack: &str, marker: &str) -> bool {
             .chars()
             .next_back()
             .is_some_and(is_marker_word_char);
-        if !preceded_by_word_char {
+        // bd-tk7uq: a match at a token start is a hit UNLESS the whole token
+        // is declared domain vocabulary. Checked on the full token, so this
+        // cannot widen the prefix rule.
+        if !preceded_by_word_char
+            && !MARKER_EXEMPT_DOMAIN_TOKENS.contains(&marker_token_at(haystack, start))
+        {
             return true;
         }
         searched = start + 1;
@@ -1251,6 +1286,50 @@ mod tests {
             "tests/fixtures/"
         ));
         assert!(marker_occurs_at_token_start("label=[sample]", "[sample]"));
+    }
+
+    #[test]
+    fn declared_domain_vocabulary_is_exempt_by_exact_token_only() {
+        // bd-tk7uq: the real stdout of `ee --json situation classify` carries
+        // "surface":"fixture_family", a routing-surface name rather than
+        // fixture data. It is exempt.
+        assert!(!marker_occurs_at_token_start(
+            r#""surface":"fixture_family","confidence":"low""#,
+            "fixture_"
+        ));
+
+        // THE CONTROL THAT MATTERS, and the reason the exemption is keyed on
+        // the whole token: everything that is NOT declared vocabulary must
+        // still be caught, including tokens that merely START with the exempt
+        // one. If this ever passes, the fix has become the bug it replaced.
+        assert!(marker_occurs_at_token_start("fixture_memory_1", "fixture_"));
+        assert!(marker_occurs_at_token_start("fixture_family_2", "fixture_"));
+        assert!(marker_occurs_at_token_start(
+            "fixture_familyish",
+            "fixture_"
+        ));
+        assert!(marker_occurs_at_token_start(
+            r#"{"id":"fixture_memory_1","surface":"fixture_family"}"#,
+            "fixture_"
+        ));
+    }
+
+    #[test]
+    fn exempt_domain_tokens_are_declared_vocabulary() {
+        // Ties each exemption to the declaration that justifies it, so an
+        // exemption cannot outlive the enum value it was granted for. If the
+        // wire spelling is renamed -- one of the two repairs bd-tk7uq weighed
+        // -- this fails and the exemption goes with it rather than silently
+        // blinding the matcher to a token nothing emits any more.
+        for token in MARKER_EXEMPT_DOMAIN_TOKENS {
+            assert!(
+                crate::models::situation::SituationRoutingSurface::all()
+                    .iter()
+                    .any(|surface| surface.as_str() == *token),
+                "exempt token `{token}` is not a declared SituationRoutingSurface wire value; \
+                 remove the exemption or restore the declaration"
+            );
+        }
     }
 
     #[test]

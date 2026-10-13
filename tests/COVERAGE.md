@@ -193,7 +193,7 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 | DH-12 | economy report MUST degrade instead of seed | `economy_report_degrades_instead_of_reporting_seed_metrics` | RED (bd-9zfku) |
 | DH-13 | causal trace MUST report empty evidence | `causal_trace_without_failure_id_reports_empty_evidence_query` | PASS |
 | DH-14 | procedure list MUST report persisted records | `procedure_list_reports_persisted_records_without_unavailable_sentinel` | PASS |
-| DH-15 | situation classify MUST report heuristic routing | `situation_classify_reports_heuristic_routing_without_unavailable_sentinel` | RED (bd-tk7uq) |
+| DH-15 | situation classify MUST report heuristic routing | `situation_classify_reports_heuristic_routing_without_unavailable_sentinel` | PASS |
 | DH-16 | plan/goal/explain MUST report catalog reasoning | `plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel` | PASS |
 | DH-17 | eval run/list MUST report fixture results | `eval_run_and_list_report_fixture_results_without_unavailable_sentinel` | RED (bd-tzlmo) |
 | DH-18 | review session MUST report storage error | `review_session_reports_storage_error_without_unavailable_sentinel` | RED (bd-9zfku) |
