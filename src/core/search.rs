@@ -2009,6 +2009,13 @@ pub(crate) struct SearchAuditFacts {
     dropped: usize,
     floor: f32,
     pre_floor_top_score: Option<f32>,
+    /// Best weak semantic evidence, precomputed by `weak_semantic_evidence_top`
+    /// at the same place the `weak_query_recall` degradation is pushed, so the
+    /// audit and the degradation cannot disagree about whether recall was weak
+    /// (bd-6rent). A Hybrid relevance score is a rank position, so the
+    /// floor-proximity predicate alone never fires on the default path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    weak_semantic_top: Option<f32>,
     redactions: BTreeMap<String, Vec<String>>,
 }
 
@@ -2058,7 +2065,12 @@ impl SearchAuditFacts {
             ),
         );
         let top_score = hits.first().map(SearchHit::relevance_score);
-        if let Some(reason) = classify_search_query_miss(self.floor_counts, self.floor, top_score) {
+        if let Some(reason) = classify_search_query_miss(
+            self.floor_counts,
+            self.floor,
+            top_score,
+            self.weak_semantic_top,
+        ) {
             let details = search_query_miss_audit_details(SearchQueryMissAuditDetails {
                 query_hash: &q_hash,
                 reason,
@@ -6137,12 +6149,18 @@ fn build_query_assist(
     floor_counts: RelevanceFloorCounts,
     floor: f32,
     top_score_after_floor: Option<f32>,
+    weak_semantic_top: Option<f32>,
     dropped_below_floor: usize,
     below_floor_candidates: &[SearchHit],
 ) -> Option<QueryAssistReport> {
-    let weak_result_reason = classify_search_query_miss(floor_counts, floor, top_score_after_floor)
-        .map(SearchQueryMissReason::as_str)
-        .or_else(|| (kept == 0).then_some("empty_results"))?;
+    let weak_result_reason = classify_search_query_miss(
+        floor_counts,
+        floor,
+        top_score_after_floor,
+        weak_semantic_top,
+    )
+    .map(SearchQueryMissReason::as_str)
+    .or_else(|| (kept == 0).then_some("empty_results"))?;
     let mode = if explain {
         QueryAssistMode::Explain
     } else {
@@ -7773,10 +7791,25 @@ impl SearchQueryMissReason {
     }
 }
 
+/// Classify a search as unmet demand, or `None` when it was satisfied.
+///
+/// `weak_semantic_top` is `weak_semantic_evidence_top`'s verdict for the same
+/// hits. It is a separate input rather than something derived here because a
+/// Hybrid hit's relevance score is a rank position, so the floor-proximity
+/// branch below cannot fire on the default source mode
+/// (bd-reality-core-convergence-1azkt.11.1). Without it this function reports
+/// "no miss" for exactly the searches the response path reports as
+/// `weak_query_recall`, and `ee learn gaps` never sees a half-working query
+/// (bd-6rent).
+///
+/// Branch order is load-bearing: `no_relevant_results` must win over both weak
+/// forms, because a search that returned nothing is a stronger and more
+/// specific signal than a search whose evidence was merely thin.
 fn classify_search_query_miss(
     floor_counts: RelevanceFloorCounts,
     floor: f32,
     top_score_after_floor: Option<f32>,
+    weak_semantic_top: Option<f32>,
 ) -> Option<SearchQueryMissReason> {
     if floor_counts.has_no_relevant_results() {
         return Some(SearchQueryMissReason::NoRelevantResults);
@@ -7786,6 +7819,9 @@ fn classify_search_query_miss(
         && top >= floor
         && top < floor * 2.0
     {
+        return Some(SearchQueryMissReason::WeakQueryRecall);
+    }
+    if weak_semantic_top.is_some_and(f32::is_finite) {
         return Some(SearchQueryMissReason::WeakQueryRecall);
     }
     if floor_counts.is_low_recall() {
@@ -10163,6 +10199,7 @@ async fn run_search_inner_with_performance(
                 floor_counts,
                 floor,
                 above_floor.first().map(SearchHit::relevance_score),
+                weak_semantic_evidence_top(&above_floor, embed_backend),
                 dropped,
                 &query_assist_candidates,
             );
@@ -10197,6 +10234,7 @@ async fn run_search_inner_with_performance(
                 dropped,
                 floor,
                 pre_floor_top_score,
+                weak_semantic_top: weak_semantic_evidence_top(&above_floor, embed_backend),
                 redactions: if output_redaction_enabled {
                     above_floor
                         .iter()
@@ -10753,6 +10791,7 @@ async fn run_diag_search_in_snapshot(
         floor_counts,
         floor,
         above_floor.first().map(SearchHit::relevance_score),
+        weak_semantic_evidence_top(&above_floor, embed_backend),
         dropped,
         &query_assist_candidates,
     );
@@ -27052,7 +27091,7 @@ mod tests {
     #[test]
     fn search_query_miss_classifies_no_relevant_results_first() {
         assert_eq!(
-            classify_search_query_miss(RelevanceFloorCounts::new(5, 0), 0.05, None),
+            classify_search_query_miss(RelevanceFloorCounts::new(5, 0), 0.05, None, None),
             Some(SearchQueryMissReason::NoRelevantResults)
         );
     }
@@ -27060,7 +27099,7 @@ mod tests {
     #[test]
     fn search_query_miss_classifies_weak_recall_above_floor() {
         assert_eq!(
-            classify_search_query_miss(RelevanceFloorCounts::new(10, 10), 0.05, Some(0.07)),
+            classify_search_query_miss(RelevanceFloorCounts::new(10, 10), 0.05, Some(0.07), None),
             Some(SearchQueryMissReason::WeakQueryRecall)
         );
     }
@@ -27068,11 +27107,11 @@ mod tests {
     #[test]
     fn search_query_miss_classifies_low_recall_after_floor() {
         assert_eq!(
-            classify_search_query_miss(RelevanceFloorCounts::new(10, 2), 0.05, Some(0.30)),
+            classify_search_query_miss(RelevanceFloorCounts::new(10, 2), 0.05, Some(0.30), None),
             Some(SearchQueryMissReason::LowRecallAfterFloor)
         );
         assert_eq!(
-            classify_search_query_miss(RelevanceFloorCounts::new(6, 2), 0.05, Some(0.30)),
+            classify_search_query_miss(RelevanceFloorCounts::new(6, 2), 0.05, Some(0.30), None),
             None
         );
     }
@@ -27080,11 +27119,63 @@ mod tests {
     #[test]
     fn search_query_miss_ignores_later_visibility_and_limit_drops() {
         assert_eq!(
-            classify_search_query_miss(RelevanceFloorCounts::new(50, 50), 0.05, Some(0.30)),
+            classify_search_query_miss(RelevanceFloorCounts::new(50, 50), 0.05, Some(0.30), None),
             None
         );
         assert_eq!(
-            classify_search_query_miss(RelevanceFloorCounts::new(5, 5), 0.05, None),
+            classify_search_query_miss(RelevanceFloorCounts::new(5, 5), 0.05, None, None),
+            None
+        );
+    }
+
+    // bd-6rent. The response path emits `weak_query_recall` from two different
+    // predicates; before this, the audit classifier only had the first one, so
+    // a Hybrid search that the product itself called weak recorded no miss and
+    // `ee learn gaps` could never cluster it.
+    //
+    // These share every argument with
+    // `search_query_miss_ignores_later_visibility_and_limit_drops` above, which
+    // asserts `None` for `(new(50, 50), 0.05, Some(0.30))`. That test is the
+    // negative control for this one: the only input that differs is the weak
+    // semantic verdict, so a pass here cannot come from any other branch.
+    #[test]
+    fn search_query_miss_classifies_weak_semantic_evidence_on_hybrid_bd_6rent() {
+        assert_eq!(
+            classify_search_query_miss(
+                RelevanceFloorCounts::new(50, 50),
+                0.05,
+                Some(0.30),
+                Some(0.02)
+            ),
+            Some(SearchQueryMissReason::WeakQueryRecall),
+            "weak semantic evidence must be recorded as unmet demand even when \
+             the floor-proximity predicate cannot fire on a Hybrid rank score"
+        );
+    }
+
+    #[test]
+    fn search_query_miss_keeps_no_relevant_results_ahead_of_weak_semantic_bd_6rent() {
+        // Branch order is load-bearing: a search that returned nothing is a
+        // stronger signal than one whose evidence was merely thin, and the
+        // clustering in query_miss_cluster.rs keys on the reason string.
+        assert_eq!(
+            classify_search_query_miss(RelevanceFloorCounts::new(5, 0), 0.05, None, Some(0.02)),
+            Some(SearchQueryMissReason::NoRelevantResults)
+        );
+    }
+
+    #[test]
+    fn search_query_miss_ignores_non_finite_weak_semantic_top_bd_6rent() {
+        // `weak_semantic_evidence_top` filters non-finite scores, but the
+        // classifier must not depend on an upstream filter it cannot see: a NaN
+        // arriving here is not evidence of anything.
+        assert_eq!(
+            classify_search_query_miss(
+                RelevanceFloorCounts::new(50, 50),
+                0.05,
+                Some(0.30),
+                Some(f32::NAN)
+            ),
             None
         );
     }
@@ -27103,6 +27194,7 @@ mod tests {
             0,
             RelevanceFloorCounts::new(1, 0),
             0.05,
+            None,
             None,
             1,
             &[candidate],
@@ -27151,6 +27243,7 @@ mod tests {
             0,
             RelevanceFloorCounts::new(1, 0),
             0.05,
+            None,
             None,
             1,
             &[candidate],
@@ -27388,6 +27481,7 @@ mod tests {
             empty_counts,
             0.05,
             None,
+            None,
             0,
             &[],
         )
@@ -27398,6 +27492,7 @@ mod tests {
             0,
             empty_counts,
             0.05,
+            None,
             None,
             0,
             &[],
@@ -27432,6 +27527,7 @@ mod tests {
                 RelevanceFloorCounts::new(3, 3),
                 0.05,
                 Some(0.30),
+                None,
                 0,
                 &[]
             )
@@ -27447,6 +27543,7 @@ mod tests {
             0,
             RelevanceFloorCounts::new(5, 5),
             0.05,
+            None,
             None,
             0,
             &[],
