@@ -17401,7 +17401,40 @@ impl DbConnection {
         workspace_id: &str,
         visitor: impl FnMut(StoredEvidenceSpan) -> Result<()>,
     ) -> Result<EvidenceAdmissionScan> {
-        self.scan_search_admitted_evidence(workspace_id, None, visitor)
+        self.scan_search_admitted_evidence(workspace_id, None, false, visitor)
+    }
+
+    /// Index construction and exact counts do not require transcript order.
+    /// Seek the integer primary key instead of sorting the whole remaining
+    /// corpus for every cross-session page. The caller owns the snapshot;
+    /// rowids are traversal state only, never persisted document identities.
+    pub(crate) fn visit_index_evidence_in_current_snapshot(
+        &self,
+        workspace_id: &str,
+        visitor: impl FnMut(StoredEvidenceSpan) -> Result<()>,
+    ) -> Result<EvidenceAdmissionScan> {
+        self.scan_search_admitted_evidence(workspace_id, None, true, visitor)
+    }
+
+    pub(crate) fn visit_index_evidence_for_workspace(
+        &self,
+        workspace_id: &str,
+        visitor: impl FnMut(StoredEvidenceSpan) -> Result<()>,
+    ) -> Result<EvidenceAdmissionScan> {
+        self.begin_read_snapshot()?;
+        let result = self.scan_search_admitted_evidence(workspace_id, None, true, visitor);
+        match result {
+            Ok(scan) => {
+                self.commit_read_snapshot()?;
+                Ok(scan)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.rollback_read_snapshot() {
+                    tracing::error!(%error, %rollback_error, "failed to release index evidence snapshot");
+                }
+                Err(error)
+            }
+        }
     }
 
     fn scan_search_admitted_evidence_in_read_snapshot(
@@ -17411,7 +17444,7 @@ impl DbConnection {
         visitor: impl FnMut(StoredEvidenceSpan) -> Result<()>,
     ) -> Result<EvidenceAdmissionScan> {
         self.begin_read_snapshot()?;
-        let result = self.scan_search_admitted_evidence(workspace_id, session_id, visitor);
+        let result = self.scan_search_admitted_evidence(workspace_id, session_id, false, visitor);
 
         match result {
             Ok(scan) => {
@@ -17435,8 +17468,11 @@ impl DbConnection {
         &self,
         workspace_id: &str,
         session_id: Option<&str>,
+        index_order: bool,
         mut visitor: impl FnMut(StoredEvidenceSpan) -> Result<()>,
     ) -> Result<EvidenceAdmissionScan> {
+        let cx = asupersync::Cx::current();
+        checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
         let mut scan = EvidenceAdmissionScan::default();
         // Rows that are not search-admission candidates can never validate.
         // Account for them with one grouped count instead of decoding,
@@ -17451,14 +17487,23 @@ impl DbConnection {
             scan.rows_read = scan.rows_read.saturating_add(u64::from(count));
         }
         let mut cursor = None;
+        let mut rowid_cursor = None;
         let mut session_cache = std::collections::HashMap::new();
         loop {
-            let page = self.read_evidence_search_page(
-                workspace_id,
-                session_id,
-                cursor.as_ref(),
-                &mut session_cache,
-            )?;
+            checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
+            let page = if index_order {
+                let (page, last_rowid) =
+                    self.read_index_evidence_page(workspace_id, rowid_cursor, &mut session_cache)?;
+                rowid_cursor = last_rowid;
+                page
+            } else {
+                self.read_evidence_search_page(
+                    workspace_id,
+                    session_id,
+                    cursor.as_ref(),
+                    &mut session_cache,
+                )?
+            };
             let page_len = page.len();
             if page_len == 0 {
                 break;
@@ -17472,6 +17517,7 @@ impl DbConnection {
                 .max(u32::try_from(page_len).unwrap_or(u32::MAX));
 
             for row in page {
+                checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
                 cursor = Some(EvidenceSearchReadCursor {
                     session_id: row.span.session_id.clone(),
                     start_line: row.span.start_line,
@@ -17559,7 +17605,48 @@ impl DbConnection {
             "SELECT {EVIDENCE_COLUMNS} FROM evidence_spans e WHERE {where_clause} AND {EVIDENCE_SEARCH_CANDIDATE_PREDICATE} ORDER BY e.session_id ASC, e.start_line ASC, e.end_line ASC, e.id ASC LIMIT ?{limit_parameter}"
         );
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
-        let spans = self.evidence_spans_from_rows(&rows)?;
+        self.evidence_search_rows(&rows, session_cache)
+    }
+
+    fn read_index_evidence_page(
+        &self,
+        workspace_id: &str,
+        cursor: Option<i64>,
+        session_cache: &mut std::collections::HashMap<String, Option<Arc<StoredSession>>>,
+    ) -> Result<(Vec<EvidenceSearchReadRow>, Option<i64>)> {
+        const COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at";
+        let (seek, params) = match cursor {
+            None => (
+                "",
+                vec![
+                    Value::Text(workspace_id.to_owned()),
+                    Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE)),
+                ],
+            ),
+            Some(rowid) => (
+                "AND e.rowid > ?2",
+                vec![
+                    Value::Text(workspace_id.to_owned()),
+                    Value::BigInt(rowid),
+                    Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE)),
+                ],
+            ),
+        };
+        let rows = self.query_for(DbOperation::Query, &format!(
+            "SELECT {COLUMNS}, e.rowid FROM evidence_spans e WHERE e.workspace_id = ?1 {seek} AND {EVIDENCE_SEARCH_CANDIDATE_PREDICATE} ORDER BY e.rowid ASC LIMIT ?{}", params.len()), &params)?;
+        let last_rowid = rows
+            .last()
+            .map(|row| required_i64(row, 27, DbOperation::Query, "rowid"))
+            .transpose()?;
+        Ok((self.evidence_search_rows(&rows, session_cache)?, last_rowid))
+    }
+
+    fn evidence_search_rows(
+        &self,
+        rows: &[Row],
+        session_cache: &mut std::collections::HashMap<String, Option<Arc<StoredSession>>>,
+    ) -> Result<Vec<EvidenceSearchReadRow>> {
+        let spans = self.evidence_spans_from_rows(rows)?;
         let missing_sessions = spans
             .iter()
             .map(|span| span.session_id.as_str())
@@ -54530,6 +54617,49 @@ UPDATE memories
             &Some(1),
             "denied count includes the final row beyond the first bounded page",
         )?;
+
+        let mut index_rows = Vec::new();
+        let index_scan = connection.visit_index_evidence_for_workspace(workspace_id, |span| {
+            index_rows.push(span);
+            Ok(())
+        })?;
+        index_rows.sort_by(|left, right| {
+            (&left.session_id, left.start_line, left.end_line, &left.id).cmp(&(
+                &right.session_id,
+                right.start_line,
+                right.end_line,
+                &right.id,
+            ))
+        });
+        ensure_equal(
+            &index_rows,
+            &admitted_for_workspace,
+            "rowid traversal admits exactly the canonical transcript set",
+        )?;
+        ensure_equal(
+            &index_scan.admission,
+            &report,
+            "rowid traversal preserves every rejected producer bucket",
+        )?;
+        ensure_equal(&index_scan.pages_read, &2, "bounded rowid pages")?;
+
+        let cx = asupersync::Cx::for_testing();
+        let mut visits = 0;
+        {
+            let _ambient = asupersync::Cx::set_current(Some(cx.clone()));
+            let cancelled = connection.visit_index_evidence_for_workspace(workspace_id, |_| {
+                visits += 1;
+                cx.set_cancel_reason(asupersync::CancelReason::timeout());
+                Ok(())
+            });
+            ensure(
+                cancelled.is_err(),
+                "cancelled scan must not complete a partial corpus",
+            )?;
+        }
+        ensure_equal(&visits, &1, "cancellation is observed inside a page")?;
+        connection.begin_read_snapshot()?;
+        connection.commit_read_snapshot()?;
 
         connection.close()?;
         Ok(())

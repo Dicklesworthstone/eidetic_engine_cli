@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 65603)
-Total output lines: 6713
-
 //! CASS import execution (EE-107).
 //!
 //! This module is the first executable import slice: discover sessions
@@ -1289,6 +1286,11 @@ fn collect_cass_view_snapshot(
             ));
         }
         let total_lines = cass_view_total_lines(buffer.as_bytes())?;
+        if expected_total.is_some() && total_lines.is_none() {
+            return Err(invalid_view_page(
+                "view response format changed during import",
+            ));
+        }
         if expected_total.is_some() && total_lines != expected_total {
             return Err(invalid_view_page(UNSTABLE_VIEW_MESSAGE));
         }
@@ -3090,7 +3092,11 @@ mod tests {
                 "live growth or truncation is retryable",
             )?;
         }
-        for page in [view_window_fixture(7, 8, 8), "invalid JSON".to_owned()] {
+        for page in [
+            view_window_fixture(7, 8, 8),
+            "invalid JSON".to_owned(),
+            "{\"line\":6,\"content\":\"Build completed\"}".to_owned(),
+        ] {
             let error = collect_view_fixture(&[view_window_fixture(1, 5, 8), page])
                 .expect_err("malformed page");
             ensure(
@@ -3449,7 +3455,63 @@ mod tests {
             )?;
             ensure(
                 !redacted.contains(forbidden),
-     …603 tokens truncated…allback.jsonl token={secret}"
+                format!("forbidden path {forbidden:?} escaped as {redacted:?}"),
+            )?;
+        }
+
+        ensure_equal(
+            &redact_import_report_source_ref("cass://safe-source"),
+            &"cass://safe-source".to_owned(),
+            "non-file URI remains intact",
+        )?;
+        ensure_equal(
+            &redact_import_report_source_ref("https://example.test/session"),
+            &"https://example.test/session".to_owned(),
+            "multi-letter URI schemes are not mistaken for drive paths",
+        )?;
+        ensure_equal(
+            &redact_import_report_source_ref(r"source=C:\Users\Alice\session.jsonl"),
+            &"source=[REDACTED_PATH]".to_owned(),
+            "embedded drive path at a token boundary is redacted",
+        )
+    }
+
+    #[test]
+    fn public_cass_source_ref_redacts_secret_bearing_filenames_as_one_path() -> TestResult {
+        let token = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
+        for path in [
+            format!("/tmp/cass/session-{token}.jsonl"),
+            format!(r"C:\Users\Alice\session-{token}.jsonl"),
+            format!("file:///tmp/cass/session-{token}.jsonl"),
+        ] {
+            ensure_equal(
+                &redact_import_report_source_ref(&path),
+                &"[REDACTED_PATH]".to_owned(),
+                "secret-bearing filename must not leave placeholder or suffix fragments",
+            )?;
+        }
+        let redacted =
+            redact_import_report_source_ref(&format!("source=/tmp/session.jsonl token={token}"));
+        ensure(
+            redacted.contains("source=[REDACTED_PATH]"),
+            "path redaction",
+        )?;
+        ensure(
+            !redacted.contains(&token),
+            "separate secrets must still be redacted",
+        )
+    }
+
+    #[test]
+    fn cass_command_public_error_diagnostics_and_cursor_are_path_secret_safe() -> TestResult {
+        let secret = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
+        let command_path = r"C:\Users\Alice\private\session.jsonl";
+        let stderr_path = r"\\fileserver\profiles\Alice\private\trace.jsonl";
+        let error = CassImportError::CassCommand {
+            command: format!(r#"cass view "{command_path}" --api-key {secret}"#),
+            exit_code: Some(2),
+            stderr: format!(
+                "failed to read {stderr_path}\nsecondary source file:///C:/Users/Alice/private/fallback.jsonl token={secret}"
             ),
             timed_out: false,
             stderr_truncated: false,

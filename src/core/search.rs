@@ -10783,11 +10783,32 @@ fn search_degradations_with_connection(
     connection: Option<&DbConnection>,
     fast_embedder: Option<&dyn crate::search::Embedder>,
 ) -> (Vec<SearchDegradation>, Option<SearchIndexFreshness>) {
-    let Ok(index_status) =
-        cached_index_status_for_search(options, index_dir, connection, fast_embedder)
-    else {
-        return (vec![SearchDegradation::index_status_probe_failed()], None);
-    };
+    let index_status =
+        match cached_index_status_for_search(options, index_dir, connection, fast_embedder) {
+            Ok(status) => status,
+            Err(crate::core::index::IndexStatusError::SourceInspectionDeferred {
+                db_generation,
+                index_generation,
+            }) => {
+                return (
+                    vec![SearchDegradation::stale_index(
+                        Some(db_generation),
+                        index_generation,
+                    )],
+                    Some(SearchIndexFreshness {
+                        stale: true,
+                        db_generation: Some(db_generation),
+                        index_generation,
+                        generation_gap: index_generation
+                            .map(|generation| db_generation.saturating_sub(generation)),
+                        large_gap: index_generation.is_some_and(|generation| {
+                            search_index_gap_is_large(db_generation, generation)
+                        }),
+                    }),
+                );
+            }
+            Err(_) => return (vec![SearchDegradation::index_status_probe_failed()], None),
+        };
 
     match index_status.health {
         IndexHealth::Ready => (Vec::new(), None),

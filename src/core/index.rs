@@ -1677,25 +1677,14 @@ impl From<DbError> for IndexRebuildError {
     }
 }
 
-/// A full rebuild repairs missing or stale reader projections before admission
-/// verdicts (bd-reality-core-convergence-1azkt.45/.47), then repairs the bounded
-/// admission counters. These are derived caches: failure leaves reads on safe
-/// source projection, full revalidation and authoritative count scans.
-fn backfill_evidence_reader_state_for_rebuild(db: &DbConnection, workspace_id: &str) {
-    if let Err(error) = db.backfill_evidence_reader_projections(Some(workspace_id)) {
-        tracing::warn!(
-            target: "ee::index",
-            error = %error,
-            "evidence reader projection backfill failed; reads project source text"
-        );
-    }
-    if let Err(error) = db.backfill_evidence_admission_verdicts(Some(workspace_id)) {
-        tracing::warn!(
-            target: "ee::index",
-            error = %error,
-            "evidence admission verdict backfill failed; admission revalidates in full"
-        );
-    }
+/// Repair bounded admission counters without requiring full projection and
+/// verdict-cache backfills. A failed repair leaves authoritative count scans.
+fn prepare_evidence_counts_for_rebuild(db: &DbConnection, workspace_id: &str) {
+    // Reader projections and verdicts are optional, binding-checked caches.
+    // The source scan already derives missing projections and revalidates
+    // missing verdicts. Repairing both caches here adds two complete corpus
+    // passes and page-write transactions before either rebuild or publication
+    // can begin (GH#78). Never make cache repair a recovery prerequisite.
     if let Err(error) = db.rebuild_evidence_admission_counts(Some(workspace_id)) {
         tracing::warn!(
             target: "ee::index",
@@ -1730,14 +1719,35 @@ pub async fn rebuild_index_with_cx(
         DbConnection::open_file(&database_path)?
     };
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
-    let _publish_lock = if options.dry_run {
-        None
-    } else {
-        Some(IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?)
-    };
-    if !options.dry_run {
-        backfill_evidence_reader_state_for_rebuild(&db, &workspace_id);
+    if options.dry_run {
+        // Planning needs exact eligibility and counts, not owned search
+        // documents, anchor extraction, queued jobs or model initialization.
+        // Admission still validates sources inside one read-only snapshot.
+        let planned = source_snapshot::capture(&db, || {
+            current_index_corpus_counts_in_current_snapshot(&db, &workspace_id)
+                .map_err(IndexRebuildError::Database)
+        });
+        index_checkpoint(cx)?;
+        let (counts, evidence_admission) = planned?;
+        return Ok(IndexRebuildReport {
+            status: IndexRebuildStatus::DryRun,
+            memories_indexed: counts.memories,
+            sessions_indexed: counts.sessions,
+            artifacts_indexed: counts.artifacts,
+            rules_indexed: counts.rules,
+            evidence_indexed: counts.evidence,
+            documents_total: counts.total(),
+            index_dir,
+            elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+            dry_run: true,
+            evidence_admission,
+            errors: Vec::new(),
+            runtime_profile,
+        });
     }
+    let publish_lock = IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?;
+    prepare_evidence_counts_for_rebuild(&db, &workspace_id);
+    index_checkpoint(cx)?;
     let WorkspaceIndexSourceSnapshot {
         generation: source_generation,
         memories_indexed,
@@ -1750,31 +1760,16 @@ pub async fn rebuild_index_with_cx(
         documents: indexable_docs,
         evidence_admission,
         open_job_ids: _,
-    } = collect_workspace_index_source_snapshot(&db, &workspace_id)?;
+    } = {
+        let snapshot = collect_workspace_index_source_snapshot(&db, &workspace_id);
+        // Source reads can observe ambient cancellation as a database error.
+        // Preserve the request's cancellation kind instead of reporting that
+        // its integrity failed or publishing a partial source snapshot.
+        index_checkpoint(cx)?;
+        snapshot?
+    };
     index_checkpoint(cx)?;
 
-    if options.dry_run {
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        return Ok(IndexRebuildReport {
-            status: IndexRebuildStatus::DryRun,
-            memories_indexed,
-            sessions_indexed,
-            artifacts_indexed,
-            rules_indexed,
-            evidence_indexed,
-            documents_total,
-            index_dir,
-            elapsed_ms,
-            dry_run: true,
-            evidence_admission,
-            errors: Vec::new(),
-            runtime_profile,
-        });
-    }
-
-    let publish_lock = _publish_lock.as_ref().ok_or_else(|| {
-        IndexRebuildError::Index("index rebuild has no publication lease".to_owned())
-    })?;
     let _recovery_action = publish_lock
         .with_generation_fence(&index_dir, || {
             recover_interrupted_publish_for_snapshot(&index_dir, source_generation)
@@ -1813,7 +1808,7 @@ pub async fn rebuild_index_with_cx(
     };
     ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
     let build_result = publish_full_index_generation_with_stack(
-        publish_lock,
+        &publish_lock,
         &index_dir,
         registry_stack,
         indexable_docs,
@@ -1913,7 +1908,7 @@ async fn reembed_index_with_cx_and_stack(
         Some(IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?)
     };
     if !options.dry_run {
-        backfill_evidence_reader_state_for_rebuild(&db, &workspace_id);
+        prepare_evidence_counts_for_rebuild(&db, &workspace_id);
     }
     let WorkspaceIndexSourceSnapshot {
         generation: source_generation,
@@ -6234,11 +6229,13 @@ fn evidence_documents(
     workspace_id: &str,
 ) -> Result<EvidenceDocumentSelection, IndexRebuildError> {
     let mut documents = Vec::new();
-    let scan =
-        db.visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |span| {
-            documents.push(evidence_span_to_document(&span));
-            Ok(())
-        })?;
+    let scan = db.visit_index_evidence_in_current_snapshot(workspace_id, |span| {
+        documents.push(evidence_span_to_document(&span));
+        Ok(())
+    })?;
+    // Physical row order is irrelevant to corpus identity. Canonicalize the
+    // projected set so compaction/restoration cannot alter index tie ordering.
+    documents.sort_by(|left, right| left.id().cmp(right.id()));
     Ok(EvidenceDocumentSelection {
         documents,
         admission: scan.admission,
@@ -9294,12 +9291,12 @@ fn current_index_corpus_counts_with_snapshot(
         .count();
     let mut evidence = 0_usize;
     let evidence_scan = if caller_holds_snapshot {
-        db.visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |_| {
+        db.visit_index_evidence_in_current_snapshot(workspace_id, |_| {
             evidence = evidence.saturating_add(1);
             Ok(())
         })?
     } else {
-        db.visit_search_admitted_evidence_spans_for_workspace(workspace_id, |_| {
+        db.visit_index_evidence_for_workspace(workspace_id, |_| {
             evidence = evidence.saturating_add(1);
             Ok(())
         })?
@@ -10097,6 +10094,10 @@ impl IndexStatusDegradation {
 pub enum IndexStatusError {
     Database(DbError),
     Io(std::io::Error),
+    SourceInspectionDeferred {
+        db_generation: u64,
+        index_generation: Option<u64>,
+    },
 }
 
 impl IndexStatusError {
@@ -10105,6 +10106,7 @@ impl IndexStatusError {
         match self {
             Self::Database(_) => Some("ee doctor --json"),
             Self::Io(_) => Some("Check workspace path permissions"),
+            Self::SourceInspectionDeferred { .. } => Some("ee index rebuild --workspace ."),
         }
     }
 }
@@ -10114,6 +10116,13 @@ impl std::fmt::Display for IndexStatusError {
         match self {
             Self::Database(e) => write!(f, "Database error: {e}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::SourceInspectionDeferred {
+                db_generation,
+                index_generation,
+            } => write!(
+                f,
+                "index_source_inspection_deferred: database generation {db_generation}, index generation {index_generation:?}; full source inspection exceeds the interactive corpus limit. Run ee index rebuild --workspace ."
+            ),
         }
     }
 }
@@ -10198,6 +10207,22 @@ fn get_index_status_with_connection_mode(
             &owned_connection
         };
         if let Some(workspace_id) = workspace_id_for_index_status(db, &options.workspace_path)? {
+            // Freshness is a watermark question. Never scan a large stale
+            // corpus merely to report counts before retrieval can decide to
+            // degrade. Explicit rebuild (including dry-run) owns that work.
+            if let Some(generation) = db.get_workspace_generation(&workspace_id)? {
+                let metadata = read_index_metadata_with_identity(&index_dir, Ok(None));
+                if metadata.generation != Some(generation)
+                    && !workspace_index_source_rows_fit(db, &workspace_id, 2048).map_err(
+                        |error| IndexStatusError::Io(std::io::Error::other(error.to_string())),
+                    )?
+                {
+                    return Err(IndexStatusError::SourceInspectionDeferred {
+                        db_generation: generation,
+                        index_generation: metadata.generation,
+                    });
+                }
+            }
             let fast = if caller_holds_snapshot {
                 published_corpus_counts_at_current_generation(db, &workspace_id, &index_dir)?
             } else {

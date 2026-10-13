@@ -1229,6 +1229,168 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn cass_scale_partial_import_plans_and_recovers_without_hook_corpus_scans() {
+        let (root, db, path) = fixture();
+        let workspace = root.path().canonicalize().expect("workspace");
+        // Reporter shape: 31 sessions and 20,000 evidence rows. Insert through
+        // the real screening/write boundary, with missing index publication
+        // representing an interrupted import rather than corrupt source data.
+        for session_number in 0..31_u32 {
+            let session_id = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(
+                0x780000 + u128::from(session_number),
+            ))
+            .to_string();
+            let count = if session_number == 30 { 650 } else { 645 };
+            db.with_transaction(|| {
+                db.insert_session(
+                    &session_id,
+                    &crate::db::CreateSessionInput {
+                        workspace_id: WORKSPACE.to_owned(),
+                        cass_session_id: format!("partial-import-{session_number}"),
+                        source_path: None,
+                        agent_name: Some("codex".to_owned()),
+                        model: None,
+                        started_at: None,
+                        ended_at: None,
+                        message_count: count,
+                        token_count: None,
+                        content_hash: format!("blake3:{}", blake3::hash(session_id.as_bytes())),
+                        metadata_json: None,
+                    },
+                )?;
+                let session = db.get_session(&session_id)?.expect("session");
+                let spans = (1..=count)
+                    .rev()
+                    .map(|line| {
+                        let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                            0x790000 + u128::from(session_number) * 1000 + u128::from(line),
+                        ))
+                        .to_string();
+                        let excerpt = format!(
+                            "Build observation {session_number} line {line}. {}",
+                            "The durable import retains source evidence and release results. "
+                                .repeat(16)
+                        );
+                        (
+                            id,
+                            crate::db::CreateEvidenceSpanInput {
+                                workspace_id: WORKSPACE.to_owned(),
+                                session_id: session_id.clone(),
+                                memory_id: None,
+                                producer_kind: crate::db::EvidenceProducerKind::CassImport,
+                                cass_span_id: format!("partial-import-{session_number}:{line}"),
+                                span_kind: "message".to_owned(),
+                                start_line: line,
+                                end_line: line,
+                                start_byte: None,
+                                end_byte: None,
+                                role: Some("assistant".to_owned()),
+                                content_hash: format!(
+                                    "blake3:{}",
+                                    blake3::hash(excerpt.as_bytes())
+                                ),
+                                excerpt,
+                                metadata_json: None,
+                                inherited_redaction_classes: Vec::new(),
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                db.insert_evidence_spans_in_session(&spans, &session)?;
+                Ok(())
+            })
+            .expect("atomic session import");
+        }
+        let generation = db.get_workspace_generation(WORKSPACE).expect("generation");
+        let options = IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(path.clone()),
+            index_dir: Some(workspace.join(".ee/index")),
+            dry_run: true,
+        };
+        let started = std::time::Instant::now();
+        let status = super::super::get_index_status(&super::super::IndexStatusOptions {
+            workspace_path: workspace,
+            database_path: Some(path),
+            index_dir: options.index_dir.clone(),
+        });
+        assert!(matches!(
+            status,
+            Err(super::super::IndexStatusError::SourceInspectionDeferred { .. })
+        ));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(9),
+            "stale hook probe must not hydrate a 20k evidence corpus"
+        );
+        let plan = rebuild_index(&options).expect("read-only plan");
+        assert_eq!(plan.evidence_indexed, 20_000);
+        assert_eq!(plan.sessions_indexed, 31);
+        assert_eq!(plan.memories_indexed, 1);
+        assert_eq!(plan.documents_total, 20_032);
+        assert_eq!(
+            db.get_workspace_generation(WORKSPACE).expect("generation"),
+            generation
+        );
+        assert!(!plan.index_dir.exists());
+        assert!(db.list_memory_anchors(MEMORY).expect("anchors").is_empty());
+        let _hash = super::super::install_test_hash_workspace_embedder(WORKSPACE);
+        let concurrent_path = options.resolve_database_path();
+        super::super::install_before_index_publish_hook(move |_| {
+            let writer = DbConnection::open_file(&concurrent_path).expect("concurrent writer");
+            writer
+                .insert_memory(
+                    "mem_00000000000000000000000078",
+                    &CreateMemoryInput {
+                        workspace_id: WORKSPACE.to_owned(),
+                        level: "episodic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: "A stable source committed while the prior snapshot was building."
+                            .to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .expect("concurrent source commit");
+        });
+        let published = rebuild_index(&IndexRebuildOptions {
+            dry_run: false,
+            ..options.clone()
+        })
+        .expect("recover partial import");
+        assert_eq!(published.documents_total, plan.documents_total);
+        assert_eq!(published.evidence_admission, plan.evidence_admission);
+        let metadata =
+            super::super::read_index_metadata_with_identity(&published.index_dir, Ok(None));
+        assert!(
+            metadata.generation < db.get_workspace_generation(WORKSPACE).expect("generation"),
+            "a concurrent commit must not be falsely included in the publication watermark"
+        );
+        assert!(metadata.corruption_error.is_none());
+        assert!(metadata.compatibility_error.is_none());
+        let recovered = rebuild_index(&IndexRebuildOptions {
+            dry_run: false,
+            ..options
+        })
+        .expect("recover the remaining generation gap");
+        assert_eq!(recovered.documents_total, plan.documents_total + 1);
+        let metadata =
+            super::super::read_index_metadata_with_identity(&recovered.index_dir, Ok(None));
+        assert_eq!(
+            metadata.generation,
+            db.get_workspace_generation(WORKSPACE).expect("generation")
+        );
+    }
+
     #[test]
     fn errors_release_owned_snapshots_but_failed_nested_begin_preserves_the_callers() {
         let (_root, _db, path) = fixture();
