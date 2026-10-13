@@ -55,7 +55,18 @@ else
     exit 3
 fi
 
-EE_COMMAND="${EE_BIN:-${EE_BINARY:-ee}}"
+E2E_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "${E2E_SCRIPT_DIR}/.." && pwd)}"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
+
+# bd-z6g1s: the default was bare `ee`, i.e. PATH. verify.sh passes
+# EE_BIN/EE_BINARY to every stage, so that was dormant there and live for any
+# standalone run -- including rch exec --job, where a sibling suite silently
+# graded the installed binary instead of the one the job built. Resolve from
+# Cargo's effective target directory; EE_BIN/EE_BINARY still win.
+EE_COMMAND="${EE_BIN:-${EE_BINARY:-$(ee_resolve_binary debug)}}"
 if [[ "${EE_COMMAND}" == */* ]]; then
     REAL_EE="${EE_COMMAND}"
 else
@@ -65,6 +76,13 @@ if [[ -z "${REAL_EE}" || ! -x "${REAL_EE}" ]]; then
     emit_assert_fail_with_artifact_paths "ee_binary_available" \
         "executable prebuilt ee binary" "missing or non-executable" \
         "prebuilt ee binary missing; the E2E lane never invokes Cargo"
+    exit 3
+fi
+# Resolving a path is not enough: a resolved binary can be stale, or foreign to
+# this host (an RCH run can leave a Linux ELF in a shared target dir, which
+# satisfies -x and dies with exec format error). Refuse rather than report
+# assertion failures with one environmental cause.
+if ! ee_require_current_binary "${REAL_EE}" "e2e_native_reranker"; then
     exit 3
 fi
 

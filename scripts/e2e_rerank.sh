@@ -21,7 +21,16 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 3
 fi
 
-EE_BIN="${EE_BIN:-${EE_BINARY:-ee}}"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
+
+# bd-z6g1s: the default was bare `ee`, i.e. PATH. verify.sh passes
+# EE_BIN/EE_BINARY to every stage, so that was dormant there and live for any
+# standalone run -- including rch exec --job, where a sibling suite silently
+# graded the installed binary instead of the one the job built. REPO_ROOT is
+# already established above, so only the source and the default change here.
+EE_BIN="${EE_BIN:-${EE_BINARY:-$(ee_resolve_binary debug)}}"
 if [[ "${EE_BIN}" == */* ]]; then
     REAL_EE="${EE_BIN}"
 else
@@ -29,6 +38,13 @@ else
 fi
 if [[ -z "${REAL_EE}" || ! -x "${REAL_EE}" ]]; then
     printf '%s\n' '{"schema":"ee.test_event.v1","test_id":"rerank_e2e","kind":"assert_result","fields":{"label":"ee_binary_available","status":"fail","first_failure_diagnosis":"prebuilt ee binary missing before harness init","stdout_artifact_path":"","stderr_artifact_path":"stderr","schema_validation_status":"not_run","redaction_status":"not_run"}}' >&2
+    exit 3
+fi
+# Resolving a path is not enough: a resolved binary can be stale, or foreign to
+# this host (an RCH run can leave a Linux ELF in a shared target dir, which
+# satisfies -x and dies with exec format error). Refuse rather than report
+# assertion failures with one environmental cause.
+if ! ee_require_current_binary "${REAL_EE}" "e2e_rerank"; then
     exit 3
 fi
 
