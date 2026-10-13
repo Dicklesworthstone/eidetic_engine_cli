@@ -35,6 +35,15 @@ pub(super) fn compatible(left: &str, right: &str) -> bool {
     {
         return false;
     }
+    let (Some(left_assignments), Some(right_assignments)) = (
+        assignment_literals(&left.plain),
+        assignment_literals(&right.plain),
+    ) else {
+        return false;
+    };
+    if left_assignments != right_assignments {
+        return false;
+    }
     match (
         instruction_payload(&left.plain),
         instruction_payload(&right.plain),
@@ -147,6 +156,71 @@ fn machine_tokens(text: &str) -> Vec<&str> {
                 || word.contains("::")
         })
         .collect()
+}
+
+/// Assignment values are executable/configuration data even without Markdown
+/// or an imperative. Compare the complete words, not their case-folded tokens.
+/// Quoted and escaped whitespace is part of the value. This is a lexical guard,
+/// not a shell parser: unclosed quoting and unquoted command/parameter expansion
+/// cannot supply corroboration between different source spans.
+fn assignment_literals(text: &str) -> Option<Vec<&str>> {
+    let bytes = text.as_bytes();
+    let mut literals = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'=' || bytes.get(index + 1) == Some(&b'=') {
+            index += 1;
+            continue;
+        }
+        let mut start = index;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            start -= 1;
+        }
+        if start == index
+            || !(bytes[start].is_ascii_alphabetic() || bytes[start] == b'_')
+            || text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|previous| identifier_char(previous) || matches!(previous, '.' | ':'))
+        {
+            index += 1;
+            continue;
+        }
+        let end = literal_word_end(text, index + 1)?;
+        literals.push(&text[start..end]);
+        index = end;
+    }
+    Some(literals)
+}
+
+fn literal_word_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut index = start;
+    let mut quote = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' && quote != Some(b'\'') {
+            // An escape belongs to this word, including an escaped space.
+            if index + 1 == bytes.len() {
+                return None;
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if byte == delimiter {
+                quote = None;
+            }
+        } else if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+        } else if byte.is_ascii_whitespace() {
+            break;
+        } else if byte == b'$' && matches!(bytes.get(index + 1), Some(b'(' | b'{')) {
+            return None;
+        }
+        index += 1;
+    }
+    quote.is_none().then_some(index)
 }
 
 /// Only an explicit imperative introduces an opaque command payload. Retain
@@ -313,6 +387,82 @@ mod tests {
         let clusters = clustering::cluster_spans(&[span("a", SOFT), span("b", SOFT)]);
         assert_eq!(clusters.len(), 1);
         assert!(clusters[0].score > ASK_MIN_CONFIDENCE_DEFAULT);
+    }
+
+    #[test]
+    fn bare_assignments_preserve_values_case_order_and_quoted_whitespace() {
+        for (left, right) in [
+            (
+                "Set BACKEND=sqlite for this workspace.",
+                "Set BACKEND=postgres for this workspace.",
+            ),
+            ("Use MODE=Release during deployment.", "Use MODE=release during deployment."),
+            ("Use MODE=release during deployment.", "Use mode=release during deployment."),
+            ("Use A=one B=two for deployment.", "Use B=two A=one for deployment."),
+            ("Use LABEL='A  B' for deployment.", "Use LABEL='A B' for deployment."),
+            ("Use LABEL='A' for deployment.", "Use LABEL=\"A\" for deployment."),
+            ("Use TARGET=$DEST for deployment.", "Use TARGET=DEST for deployment."),
+            ("Use FILTER= for deployment.", "Use FILTER=all for deployment."),
+            (r"Use LABEL=A\ B for deployment.", r"Use LABEL=A\ C for deployment."),
+            ("Use LABEL='資料 完了' for deployment.", "Use LABEL='資料 未完了' for deployment."),
+        ] {
+            assert!(!compatible(left, right), "{left:?} / {right:?}");
+            assert!(!compatible(right, left), "reverse {left:?} / {right:?}");
+        }
+        assert_eq!(
+            assignment_literals("Set A='one two' B=\"three four\" C=five\\ six D="),
+            Some(vec!["A='one two'", "B=\"three four\"", "C=five\\ six", "D="])
+        );
+        assert_eq!(assignment_literals("x == y and x != y"), Some(vec![]));
+    }
+
+    #[test]
+    fn assignment_markup_agrees_without_loosening_incomplete_values() {
+        for (left, right) in [
+            ("Set `BACKEND=sqlite` for deployment.", "Set BACKEND=sqlite for deployment."),
+            ("Use `LABEL='A  B'` here.", "Use LABEL='A  B' here."),
+            ("Use MODE=release here.", "Select MODE=release here."),
+        ] {
+            assert!(compatible(left, right), "{left:?} / {right:?}");
+            assert!(compatible(right, left));
+        }
+        for text in [
+            "Set A='unfinished",
+            "Set A=\"unfinished",
+            "Set A=trailing\\",
+            "Set A=$(query x)",
+            "Set A=${NAME:-x}",
+        ] {
+            assert!(assignment_literals(text).is_none(), "{text:?}");
+            assert!(compatible(text, text));
+            assert!(!compatible(text, &format!("Please {text}")));
+        }
+    }
+
+    #[test]
+    fn evaluator_does_not_promote_different_backend_settings_as_corroboration() {
+        let left = "Set BACKEND=sqlite for the application workspace deployment configuration.";
+        let right = "Set BACKEND=postgres for the application workspace deployment configuration.";
+        let candidates = [candidate("a", left), candidate("b", right)];
+        let request = AskRequest {
+            question: "application workspace deployment backend configuration".to_owned(),
+            ..AskRequest::default()
+        };
+        let clusters = clustering::cluster_spans(&[span("a", left), span("b", right)]);
+        assert_eq!(clusters.len(), 2);
+        assert!(
+            clusters
+                .iter()
+                .all(|item| item.score.to_bits() == 0.52_f32.to_bits())
+        );
+        for semantic_degraded in [false, true] {
+            let report =
+                evaluate_ask_scored(&request, &candidates, &|_, _, _, _| 0.52, semantic_degraded);
+            assert!(report.abstained);
+            assert!(report.answer_text.is_none() && report.citations.is_empty());
+            assert!(!report.extractiveness_violated);
+            assert_eq!(report.nearest_evidence.as_ref().unwrap().len(), 2);
+        }
     }
 
     #[test]
