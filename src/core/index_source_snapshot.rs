@@ -525,7 +525,9 @@ fn charge_source_rows(
                     IndexRebuildError::Index("invalid live source row ceiling".to_owned())
                 })?;
                 params.push(sqlmodel_core::Value::BigInt(limit));
-                format!("SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE {scope} LIMIT ?2) bounded_source_rows")
+                format!(
+                    "SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE {scope} LIMIT ?2) bounded_source_rows"
+                )
             }
             SourceSizeStage::Bytes => {
                 let lengths = source_length_expression(columns);
