@@ -25,7 +25,15 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-EE_BIN="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
+# bd-z6g1s: prefer the binary this checkout BUILT over whatever `ee` is on
+# PATH, but only when it can actually execute here. run-safety-harness.sh
+# exports EE_DOCTOR_FIXTURE_BINARY, so this default applies only to a
+# standalone invocation -- the case that used to grade an installed binary
+# while printing nothing about which one it used.
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+EE_BIN="$(ee_resolve_fixture_binary verify-metamorphic)"
 FIXTURE_ROOT="${EE_DOCTOR_FIXTURE_ROOT:-${TMPDIR:-/tmp}/ee-doctor-fixtures-metamorphic}"
 FIXTURES_SRC="${EE_DOCTOR_FIXTURES_SRC:-$REPO_ROOT/tests/doctor_fixtures}"
 MANIFEST="$FIXTURES_SRC/manifest.json"

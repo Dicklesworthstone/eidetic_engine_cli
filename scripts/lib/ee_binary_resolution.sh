@@ -352,3 +352,42 @@ ee_assert_target_os_supported() {
     printf '%s: platform nobody declared it covers.\n' "$label" >&2
     return 1
 }
+
+# Default binary for the five doctor-safety harnesses (bd-z6g1s).
+#
+# Prints a provenance line naming the path AND the origin, then echoes the
+# path. The origin is not decoration: the three cases fail in different ways
+# and a log that records only the path cannot tell them apart afterwards.
+#
+#   caller        EE_DOCTOR_FIXTURE_BINARY or EE_BINARY was set. This is what
+#                 run-safety-harness.sh does, so Gate 8.5 always lands here
+#                 and this helper's fallbacks never apply to it.
+#   built         the binary this checkout built, and it executes here.
+#   path_fallback the built binary is absent or cannot execute here, so PATH
+#                 `ee` is used instead.
+#
+# The executability probe is the load-bearing part, and preferring the built
+# binary WITHOUT it is a regression rather than a fix. Measured on the Mac dev
+# host 2026-10-13: `ee_resolve_binary debug` resolved a 2.1 GB Linux x86-64
+# ELF left in the shared Cargo target directory by an RCH run. It satisfied
+# `[ -x ]` and `command -v`, so a resolver that stopped there would hand every
+# harness a binary that dies with `exec format error` -- strictly worse than
+# the PATH binary it replaced, which at least runs. See `ee_binary_executes_here`.
+ee_resolve_fixture_binary() {
+    local label="${1:?ee_resolve_fixture_binary: label required}"
+    local candidate="${EE_DOCTOR_FIXTURE_BINARY:-${EE_BINARY:-}}"
+    local origin=caller
+
+    if [ -z "$candidate" ]; then
+        candidate="$(ee_resolve_binary debug 2>/dev/null || true)"
+        origin=built
+        if [ -z "$candidate" ] || [ ! -x "$candidate" ] \
+            || ! ee_binary_executes_here "$candidate"; then
+            candidate="ee"
+            origin=path_fallback
+        fi
+    fi
+
+    printf '%s: ee_binary=%s origin=%s\n' "$label" "$candidate" "$origin" >&2
+    printf '%s\n' "$candidate"
+}

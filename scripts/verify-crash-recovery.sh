@@ -18,7 +18,19 @@
 # for inspection; nothing is removed.
 
 set -euo pipefail
-EE_BIN="${EE_DOCTOR_FIXTURE_BINARY:-ee}"
+# bd-z6g1s: this script had no SCRIPT_DIR/REPO_ROOT of its own, unlike its four
+# siblings, so they are introduced here to reach the shared resolver.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Prefer the binary this checkout BUILT over whatever `ee` is on PATH, but only
+# when it can actually execute here. run-safety-harness.sh exports
+# EE_DOCTOR_FIXTURE_BINARY, so this default applies only to a standalone
+# invocation -- the case that used to grade an installed binary while printing
+# nothing about which one it used.
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+EE_BIN="$(ee_resolve_fixture_binary verify-crash-recovery)"
 
 if ! command -v "$EE_BIN" >/dev/null 2>&1; then
     # A harness that ran nothing is not a pass (bd-2oh15 ruling, option a).
