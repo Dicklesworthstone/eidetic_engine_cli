@@ -179,9 +179,9 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 
 | ID | Clause | Test | Status |
 |----|--------|------|--------|
-| DH-01 | context without DB MUST use error envelope | `context_without_database_uses_honest_error_envelope_and_e2e_log` | PASS |
+| DH-01 | context without DB MUST use error envelope | `context_without_database_uses_honest_error_envelope_and_e2e_log` | RED (bd-9zfku) |
 | DH-02 | capabilities MUST NOT have fake success markers | `successful_capabilities_output_has_no_fake_success_markers` | PASS |
-| DH-03 | retrieval commands MUST NOT have fake logs | `retrieval_graph_memory_curate_rule_and_status_commands_have_no_fake_contract_logs` | PASS |
+| DH-03 | retrieval commands MUST NOT have fake logs | `retrieval_graph_memory_curate_rule_and_status_commands_have_no_fake_contract_logs` | RED (bd-9zfku) |
 | DH-04 | audit commands MUST read persisted rows | `audit_commands_read_persisted_rows_without_unavailable_sentinel` | PASS |
 | DH-05 | support bundle MUST create real bundles | `support_bundle_commands_create_real_bundles_with_redacted_diagnostics` | PASS |
 | DH-06 | certificate verify MUST report not-found | `certificate_verify_reports_not_found_instead_of_mock_success` | PASS |
@@ -190,15 +190,15 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 | DH-09 | rehearse MUST emit real sandbox artifacts | `rehearse_commands_emit_real_sandbox_artifacts_instead_of_degraded_stub` | PASS |
 | DH-10 | learn commands MUST use persisted ledgers | `learn_read_and_proposal_commands_use_persisted_ledgers` | PASS |
 | DH-11 | lab replay MUST report missing frozen inputs | `lab_replay_reports_missing_frozen_inputs_without_generated_success` | PASS |
-| DH-12 | economy report MUST degrade instead of seed | `economy_report_degrades_instead_of_reporting_seed_metrics` | PASS |
+| DH-12 | economy report MUST degrade instead of seed | `economy_report_degrades_instead_of_reporting_seed_metrics` | RED (bd-9zfku) |
 | DH-13 | causal trace MUST report empty evidence | `causal_trace_without_failure_id_reports_empty_evidence_query` | PASS |
 | DH-14 | procedure list MUST report persisted records | `procedure_list_reports_persisted_records_without_unavailable_sentinel` | PASS |
 | DH-15 | situation classify MUST report heuristic routing | `situation_classify_reports_heuristic_routing_without_unavailable_sentinel` | RED (bd-tk7uq) |
 | DH-16 | plan/goal/explain MUST report catalog reasoning | `plan_goal_and_explain_report_catalog_reasoning_without_unavailable_sentinel` | PASS |
-| DH-17 | eval run/list MUST report fixture results | `eval_run_and_list_report_fixture_results_without_unavailable_sentinel` | PASS |
-| DH-18 | review session MUST report storage error | `review_session_reports_storage_error_without_unavailable_sentinel` | PASS |
+| DH-17 | eval run/list MUST report fixture results | `eval_run_and_list_report_fixture_results_without_unavailable_sentinel` | RED (bd-tzlmo) |
+| DH-18 | review session MUST report storage error | `review_session_reports_storage_error_without_unavailable_sentinel` | RED (bd-9zfku) |
 | DH-19 | tripwire commands MUST report store queries | `tripwire_commands_report_store_queries_without_unavailable_sentinel` | PASS |
-| DH-20 | handoff create MUST degrade instead of placeholder | `handoff_create_degrades_instead_of_writing_placeholder_capsule` | PASS |
+| DH-20 | handoff create MUST degrade instead of placeholder | `handoff_create_degrades_instead_of_writing_placeholder_capsule` | IGNORED (obsolete; see ee-oskm) |
 | DH-21 | daemon foreground MUST run real health job | `daemon_foreground_runs_real_health_job_without_unavailable_sentinel` | PASS |
 | DH-22 | recorder start/event/finish MUST persist real state | `recorder_start_event_finish_persist_real_state` | PASS |
 | DH-23 | recorder tail MUST read initialized store | `recorder_tail_reads_initialized_store_without_degraded_sentinel` | PASS |
