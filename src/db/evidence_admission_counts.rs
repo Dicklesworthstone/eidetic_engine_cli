@@ -10,7 +10,7 @@
 //! stay current; successful IGNORE/UPSERT/REPLACE requires explicit rebuild.
 
 use super::{
-    BTreeSet, DbConnection, DbError, DbOperation, EVIDENCE_SEARCH_CANDIDATE_PREDICATE,
+    BTreeMap, BTreeSet, DbConnection, DbError, DbOperation, EVIDENCE_SEARCH_CANDIDATE_PREDICATE,
     EvidenceAdmissionReport, EvidenceProducerKind, Result, Value,
 };
 
@@ -21,6 +21,26 @@ const POLICY_VERSION: i64 = 1;
 const V131_CANDIDATE_PREDICATE: &str =
     "e.producer_kind = 'cass_import' AND e.search_eligibility = 'admitted'";
 const MAX_BUCKETS_PER_WORKSPACE: usize = 18;
+const COUNT_REBUILD_PAGE_ROWS: u32 = 256;
+
+// Preserve request cancellation even when the database operation reports an
+// interrupted-query error. No new context or deadline is created here.
+fn count_rebuild_step<T>(
+    checkpoint: &mut impl FnMut() -> Result<()>,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    checkpoint()?;
+    let result = operation();
+    checkpoint()?;
+    result
+}
+
+fn invalid_count_page() -> DbError {
+    DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: "evidence admission count page has invalid scope, ordering or fields".to_owned(),
+    }
+}
 
 impl DbConnection {
     fn evidence_admission_counts_available(&self) -> Result<bool> {
@@ -154,57 +174,74 @@ impl DbConnection {
     /// Call outside any caller-held transaction. Source generations, evidence
     /// content, security verdicts and provenance remain unchanged.
     pub fn rebuild_evidence_admission_counts(&self, workspace_id: Option<&str>) -> Result<u64> {
-        if !self.evidence_admission_counts_available()? {
+        let cx = asupersync::Cx::current();
+        self.rebuild_evidence_counts_with_checkpoint(workspace_id, || {
+            super::checkpoint_retry_cx(DbOperation::Query, cx.as_ref())
+        })
+    }
+
+    fn rebuild_evidence_counts_with_checkpoint(
+        &self,
+        workspace_id: Option<&str>,
+        mut checkpoint: impl FnMut() -> Result<()>,
+    ) -> Result<u64> {
+        if !count_rebuild_step(&mut checkpoint, || self.evidence_admission_counts_available())? {
             return Ok(0);
         }
         let params = [workspace_id.map_or(Value::Null, |id| Value::Text(id.to_owned()))];
+        // The page boundary is NOT a transaction boundary. Concurrent source
+        // writes cannot invalidate an earlier page, and any failed scan or
+        // cancelled finalization rolls back both buckets and readiness.
         self.with_transaction(|| {
-            self.execute_for(
-                DbOperation::Execute,
-                "DELETE FROM evidence_admission_counts WHERE (?1 IS NULL OR workspace_id = ?1)",
-                &params,
-            )?;
-            self.execute_for(
-                DbOperation::Execute,
-                "DELETE FROM evidence_admission_count_state WHERE (?1 IS NULL OR workspace_id = ?1)",
-                &params,
-            )?;
-            self.execute_for(
-                DbOperation::Execute,
-                "INSERT INTO evidence_admission_counts
-                    (workspace_id, producer_kind, search_eligibility, is_candidate, row_count)
-                 SELECT workspace_id, producer_kind, search_eligibility,
-                        producer_kind = 'cass_import' AND search_eligibility = 'admitted', COUNT(*)
-                 FROM evidence_spans WHERE (?1 IS NULL OR workspace_id = ?1)
-                 GROUP BY workspace_id, producer_kind, search_eligibility",
-                &params,
-            )?;
-            self.execute_for(
-                DbOperation::Execute,
-                "INSERT INTO evidence_admission_count_state
+            count_rebuild_step(&mut checkpoint, || {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "DELETE FROM evidence_admission_counts WHERE (?1 IS NULL OR workspace_id = ?1)",
+                    &params,
+                )
+            })?;
+            count_rebuild_step(&mut checkpoint, || {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "DELETE FROM evidence_admission_count_state WHERE (?1 IS NULL OR workspace_id = ?1)",
+                    &params,
+                )
+            })?;
+            self.rebuild_evidence_count_pages(workspace_id, &mut checkpoint)?;
+            // Group only the small derived bucket table, never evidence text
+            // or the whole source corpus. Readiness is published last.
+            count_rebuild_step(&mut checkpoint, || {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "INSERT INTO evidence_admission_count_state
                     (workspace_id, policy_version, candidate_predicate, ready, source_rows)
                  SELECT workspace_id, 1,
                         'e.producer_kind = ''cass_import'' AND e.search_eligibility = ''admitted''',
                         1, SUM(row_count)
                  FROM evidence_admission_counts WHERE (?1 IS NULL OR workspace_id = ?1)
                  GROUP BY workspace_id",
-                &params,
-            )?;
-            self.execute_for(
-                DbOperation::Execute,
-                "INSERT OR IGNORE INTO evidence_admission_count_state
+                    &params,
+                )
+            })?;
+            count_rebuild_step(&mut checkpoint, || {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "INSERT OR IGNORE INTO evidence_admission_count_state
                     (workspace_id, policy_version, candidate_predicate, ready, source_rows)
                  SELECT id, 1,
                         'e.producer_kind = ''cass_import'' AND e.search_eligibility = ''admitted''', 1, 0
                  FROM workspaces WHERE (?1 IS NULL OR id = ?1)",
-                &params,
-            )?;
-            let rows = self.query_for(
-                DbOperation::Query,
-                "SELECT COALESCE(SUM(source_rows), 0) FROM evidence_admission_count_state
+                    &params,
+                )
+            })?;
+            let rows = count_rebuild_step(&mut checkpoint, || {
+                self.query_for(
+                    DbOperation::Query,
+                    "SELECT COALESCE(SUM(source_rows), 0) FROM evidence_admission_count_state
                  WHERE (?1 IS NULL OR workspace_id = ?1)",
-                &params,
-            )?;
+                    &params,
+                )
+            })?;
             rows.first()
                 .and_then(|row| row.get(0))
                 .and_then(Value::as_i64)
@@ -215,6 +252,109 @@ impl DbConnection {
                         .to_owned(),
                 })
         })
+    }
+
+    /// One rowid-seeking page of narrow fields at a time. Rebuild previously
+    /// made a whole-source GROUP BY a prerequisite for recovery (GH#78).
+    /// No OFFSET, transcript ordering, projection hydration or unbounded Rust
+    /// bucket map is needed. The same writer transaction owns every page.
+    fn rebuild_evidence_count_pages(
+        &self,
+        workspace_id: Option<&str>,
+        checkpoint: &mut impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let scope = if workspace_id.is_some() {
+            " AND workspace_id = ?3"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT rowid, workspace_id, producer_kind, search_eligibility
+             FROM evidence_spans WHERE rowid >= ?1{scope} ORDER BY rowid LIMIT ?2"
+        );
+        // SQLite rowids can be negative, zero, or i64::MAX. An inclusive
+        // lower bound admits MIN; checked advancement cannot wrap past MAX.
+        let mut next_rowid = i64::MIN;
+        loop {
+            let mut params = vec![
+                Value::BigInt(next_rowid),
+                Value::BigInt(i64::from(COUNT_REBUILD_PAGE_ROWS)),
+            ];
+            if let Some(workspace) = workspace_id {
+                params.push(Value::Text(workspace.to_owned()));
+            }
+            let rows = count_rebuild_step(checkpoint, || {
+                self.query_for(DbOperation::Query, &sql, &params)
+            })?;
+            if rows.is_empty() {
+                return Ok(());
+            }
+            if rows.len() > COUNT_REBUILD_PAGE_ROWS as usize {
+                return Err(invalid_count_page());
+            }
+            let mut previous = None;
+            // Keys borrow this one page; even an all-workspace rebuild keeps
+            // at most PAGE_ROWS partitions, not every workspace seen so far.
+            let mut buckets = BTreeMap::<(&str, &str, &str), i64>::new();
+            for row in &rows {
+                checkpoint()?;
+                let rowid = row
+                    .get(0)
+                    .and_then(Value::as_i64)
+                    .ok_or_else(invalid_count_page)?;
+                let workspace = row
+                    .get(1)
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid_count_page)?;
+                let producer = row
+                    .get(2)
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid_count_page)?;
+                let eligibility = row
+                    .get(3)
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid_count_page)?;
+                if rowid < next_rowid
+                    || previous.is_some_and(|last| rowid <= last)
+                    || workspace_id.is_some_and(|expected| workspace != expected)
+                    || EvidenceProducerKind::parse(producer).is_none()
+                    || !matches!(eligibility, "admitted" | "quarantined" | "denied")
+                {
+                    return Err(invalid_count_page());
+                }
+                previous = Some(rowid);
+                *buckets.entry((workspace, producer, eligibility)).or_default() += 1;
+            }
+            for ((workspace, producer, eligibility), count) in buckets {
+                count_rebuild_step(checkpoint, || {
+                    self.execute_for(
+                        DbOperation::Execute,
+                        "INSERT INTO evidence_admission_counts
+                            (workspace_id, producer_kind, search_eligibility, is_candidate, row_count)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(workspace_id, producer_kind, search_eligibility, is_candidate)
+                         DO UPDATE SET row_count = evidence_admission_counts.row_count + excluded.row_count",
+                        &[
+                            Value::Text(workspace.to_owned()),
+                            Value::Text(producer.to_owned()),
+                            Value::Text(eligibility.to_owned()),
+                            Value::BigInt(i64::from(
+                                producer == "cass_import" && eligibility == "admitted",
+                            )),
+                            Value::BigInt(count),
+                        ],
+                    )
+                })?;
+            }
+            let last = previous.ok_or_else(invalid_count_page)?;
+            let Some(next) = last.checked_add(1) else {
+                return Ok(());
+            };
+            if rows.len() < COUNT_REBUILD_PAGE_ROWS as usize {
+                return Ok(());
+            }
+            next_rowid = next;
+        }
     }
 }
 
@@ -687,6 +827,238 @@ mod tests {
         assert_eq!(
             EVIDENCE_SEARCH_CANDIDATE_PREDICATE,
             V131_CANDIDATE_PREDICATE
+        );
+        Ok(())
+    }
+
+    fn count_page_fixture(count: u32) -> TestResult<DbConnection> {
+        let db = DbConnection::open_memory()?;
+        db.migrate()?;
+        setup_workspace(&db, WORKSPACE, SESSION)?;
+        setup_workspace(&db, OTHER_WORKSPACE, OTHER_SESSION)?;
+        let producers = [
+            "cass_import",
+            "agentsmd_import",
+            "docs_bootstrap",
+            "journal_distill",
+            "remember_reinforcement",
+            "legacy_unknown",
+        ];
+        for sequence in 1..=count {
+            let id = insert_span(&db, u128::from(sequence))?;
+            // Interleave both workspaces and all eighteen partition keys.
+            // This exercises repeated buckets split over several source pages.
+            let (workspace, session) = if (sequence / 18) % 2 == 0 {
+                (WORKSPACE, SESSION)
+            } else {
+                (OTHER_WORKSPACE, OTHER_SESSION)
+            };
+            db.execute_for(
+                DbOperation::Execute,
+                "UPDATE evidence_spans SET workspace_id = ?1, session_id = ?2,
+                 producer_kind = ?3, search_eligibility = ?4 WHERE id = ?5",
+                &[
+                    Value::Text(workspace.to_owned()),
+                    Value::Text(session.to_owned()),
+                    Value::Text(producers[(sequence % 6) as usize].to_owned()),
+                    Value::Text(
+                        ["admitted", "quarantined", "denied"][((sequence / 6) % 3) as usize]
+                            .to_owned(),
+                    ),
+                    Value::Text(id),
+                ],
+            )?;
+        }
+        Ok(db)
+    }
+
+    fn count_scalar(db: &DbConnection, sql: &str) -> Result<i64> {
+        db.query(sql, &[])?
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(Value::as_i64)
+            .ok_or_else(invalid_count_page)
+    }
+
+    fn saved_count_state(db: &DbConnection, workspace: Option<&str>) -> TestResult<String> {
+        let params = [workspace.map_or(Value::Null, |id| Value::Text(id.to_owned()))];
+        let buckets = db.query(
+            "SELECT * FROM evidence_admission_counts WHERE (?1 IS NULL OR workspace_id = ?1)
+             ORDER BY workspace_id, producer_kind, search_eligibility, is_candidate",
+            &params,
+        )?;
+        let state = db.query(
+            "SELECT * FROM evidence_admission_count_state WHERE (?1 IS NULL OR workspace_id = ?1)
+             ORDER BY workspace_id",
+            &params,
+        )?;
+        Ok(format!("{buckets:?}\n{state:?}"))
+    }
+
+    #[test]
+    fn paged_count_rebuild_matches_source_partitions_without_projecting_or_changing_evidence()
+    -> TestResult {
+        let count = 2 * COUNT_REBUILD_PAGE_ROWS + 17;
+        let db = count_page_fixture(count)?;
+        let before = db.list_evidence_spans_for_session(SESSION)?;
+        let other_before = db.list_evidence_spans_for_session(OTHER_SESSION)?;
+        let generation = db.get_workspace_generation(WORKSPACE)?;
+        let other_generation = db.get_workspace_generation(OTHER_WORKSPACE)?;
+        let projections = crate::cass::transcript::projection_calls_for_test();
+        assert_eq!(db.rebuild_evidence_admission_counts(None)?, u64::from(count));
+        assert_eq!(
+            crate::cass::transcript::projection_calls_for_test(),
+            projections
+        );
+        assert_eq!(db.get_workspace_generation(WORKSPACE)?, generation);
+        assert_eq!(
+            db.get_workspace_generation(OTHER_WORKSPACE)?,
+            other_generation
+        );
+        assert_eq!(db.list_evidence_spans_for_session(SESSION)?, before);
+        assert_eq!(db.list_evidence_spans_for_session(OTHER_SESSION)?, other_before);
+        for workspace in [WORKSPACE, OTHER_WORKSPACE] {
+            assert_matches_legacy(&db, workspace, 0)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn paged_count_rebuild_includes_negative_zero_and_maximum_rowids() -> TestResult {
+        let count = COUNT_REBUILD_PAGE_ROWS + 7;
+        let db = count_page_fixture(count)?;
+        for (sequence, rowid) in [(1, i64::MIN), (2, -1), (3, 0), (count, i64::MAX)] {
+            let id =
+                crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(u128::from(sequence)))
+                    .to_string();
+            db.execute_for(
+                DbOperation::Execute,
+                "UPDATE evidence_spans SET rowid = ?1 WHERE id = ?2",
+                &[Value::BigInt(rowid), Value::Text(id)],
+            )?;
+        }
+        assert_eq!(db.rebuild_evidence_admission_counts(None)?, u64::from(count));
+        for workspace in [WORKSPACE, OTHER_WORKSPACE] {
+            assert_eq!(
+                db.rebuild_evidence_admission_counts(Some(workspace))?,
+                u64::try_from(db.count_evidence_spans_for_workspace(workspace)?)?
+            );
+            assert_matches_legacy(&db, workspace, 0)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn count_rebuild_rolls_back_partial_pages_and_cancelled_readiness_then_retries() -> TestResult {
+        let count = COUNT_REBUILD_PAGE_ROWS + 7;
+        let db = count_page_fixture(count)?;
+        let generation = db.get_workspace_generation(WORKSPACE)?;
+        for fail_during_readiness in [false, true] {
+            db.execute_raw(
+                "UPDATE evidence_admission_counts SET row_count = 0;
+                 UPDATE evidence_admission_count_state SET ready = 0, source_rows = 0;",
+            )?;
+            let before = saved_count_state(&db, None)?;
+            let mut injected = false;
+            let result = db.rebuild_evidence_counts_with_checkpoint(None, || {
+                let rebuilt = count_scalar(
+                    &db,
+                    "SELECT COALESCE(SUM(row_count), 0) FROM evidence_admission_counts",
+                )?;
+                let ready = count_scalar(
+                    &db,
+                    "SELECT COUNT(*) FROM evidence_admission_count_state WHERE ready = 1",
+                )?;
+                if (fail_during_readiness && ready > 0)
+                    || (!fail_during_readiness && rebuilt > 0 && rebuilt < i64::from(count))
+                {
+                    injected = true;
+                    return Err(DbError::sqlmodel(
+                        DbOperation::Query,
+                        sqlmodel_core::Error::Cancelled,
+                    ));
+                }
+                Ok(())
+            });
+            assert!(injected, "the failure must occur after real derived writes");
+            assert!(result.is_err());
+            assert_eq!(saved_count_state(&db, None)?, before);
+            assert_eq!(db.get_workspace_generation(WORKSPACE)?, generation);
+            assert_eq!(db.count_table_rows("evidence_spans")?, i64::from(count));
+            assert_eq!(db.rebuild_evidence_admission_counts(None)?, u64::from(count));
+            assert_matches_legacy(&db, WORKSPACE, 0)?;
+            assert_matches_legacy(&db, OTHER_WORKSPACE, 0)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_paged_repair_keeps_another_workspaces_unready_counts_untouched() -> TestResult {
+        let db = count_page_fixture(2 * COUNT_REBUILD_PAGE_ROWS + 17)?;
+        db.execute_for(
+            DbOperation::Execute,
+            "UPDATE evidence_admission_count_state SET ready = 0 WHERE workspace_id = ?1",
+            &[Value::Text(OTHER_WORKSPACE.to_owned())],
+        )?;
+        let other = saved_count_state(&db, Some(OTHER_WORKSPACE))?;
+        let expected = u64::try_from(db.count_evidence_spans_for_workspace(WORKSPACE)?)?;
+        assert!(expected > u64::from(COUNT_REBUILD_PAGE_ROWS));
+        assert_eq!(
+            db.rebuild_evidence_admission_counts(Some(WORKSPACE))?,
+            expected
+        );
+        assert_eq!(saved_count_state(&db, Some(OTHER_WORKSPACE))?, other);
+        assert_matches_legacy(&db, WORKSPACE, 0)?;
+        assert!(
+            db.evidence_admission_report_for_indexed_count(OTHER_WORKSPACE, 0)?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn count_rebuild_checkpoint_prevents_sql_and_preserves_cancellation_over_query_error()
+    -> TestResult {
+        let cancelled = || DbError::sqlmodel(DbOperation::Query, sqlmodel_core::Error::Cancelled);
+        let early = count_rebuild_step(&mut || Err(cancelled()), || -> Result<()> {
+            panic!("a cancelled count rebuild must not start a database operation")
+        });
+        assert!(early.is_err());
+        let mut calls = 0;
+        let result: Result<()> = count_rebuild_step(
+            &mut || {
+                calls += 1;
+                if calls == 2 {
+                    Err(cancelled())
+                } else {
+                    Ok(())
+                }
+            },
+            || Err(invalid_count_page()),
+        );
+        let Err(error) = result else {
+            return Err("cancelled operation unexpectedly succeeded".into());
+        };
+        assert_eq!(calls, 2);
+        assert_eq!(error.to_string(), cancelled().to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn count_rebuild_preserves_empty_and_missing_scope_semantics() -> TestResult {
+        let db = count_page_fixture(0)?;
+        assert_eq!(db.rebuild_evidence_admission_counts(None)?, 0);
+        assert_matches_legacy(&db, WORKSPACE, 0)?;
+        assert_matches_legacy(&db, OTHER_WORKSPACE, 0)?;
+        let before = saved_count_state(&db, None)?;
+        assert_eq!(
+            db.rebuild_evidence_admission_counts(Some("wsp_missing"))?,
+            0
+        );
+        assert_eq!(saved_count_state(&db, None)?, before);
+        assert!(
+            db.evidence_admission_report_for_indexed_count("wsp_missing", 0)?
+                .is_none()
         );
         Ok(())
     }
