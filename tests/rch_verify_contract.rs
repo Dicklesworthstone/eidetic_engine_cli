@@ -2954,7 +2954,25 @@ fn pinned_franken_stack_materializes_locked_bundle_without_mutating_siblings() -
         .get("frankensqlite")
         .ok_or_else(|| "missing FrankenSQLite fixture".to_owned())?;
     write_fixture_file(live_frankensqlite, "live-only.txt", "not in locked tree\n")?;
-    git(live_frankensqlite, &["add", "live-only.txt"])?;
+    // Advance the live sibling's declared VERSION past the pin as well, not
+    // just its HEAD. This is the half of bd-wpemf's acceptance that asserts a
+    // sibling checkout ahead of the pins produces NO blocking code, and it is
+    // the shape of the real situation: the siblings in /Users/<user>/projects
+    // are developed independently, so on 2026-10-13 asupersync's live checkout
+    // declared 0.6.0 against a `=0.5.0` pin while its locked revision declared
+    // 0.5.0. The pinned lane must stay green on that, because it verifies the
+    // MATERIALIZED tree; the live reading is informational.
+    //
+    // Without this the test only moved HEAD by adding a file, leaving the
+    // version axis unexercised -- which is why nothing caught me spending
+    // hours blaming live-checkout drift for a refusal whose real cause was one
+    // stale row in franken-stack.lock.
+    write_fixture_file(
+        live_frankensqlite,
+        "crates/fsqlite/Cargo.toml",
+        "[package]\nname = \"fsqlite\"\nversion = \"9.9.9\"\nedition = \"2024\"\n",
+    )?;
+    git(live_frankensqlite, &["add", "."])?;
     git(
         live_frankensqlite,
         &["commit", "-m", "advance live sibling after lock"],
