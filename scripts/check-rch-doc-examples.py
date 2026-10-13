@@ -68,6 +68,19 @@ RCH_EXEC_RE = re.compile(r"(^|[;\s/])rch(\s+--json)?\s+exec(\s|--|$)")
 RCH_VERIFY_RE = re.compile(r"(^|[;\s])(?:bash\s+)?(?:\./)?scripts/rch_verify\.sh(\s|$)")
 TRIPWIRE_RE = re.compile(r"(^|[;\s])(?:sh\s+|bash\s+)?(?:\./)?scripts/check-local-cargo-tripwire\.sh(\s|$)")
 ROUTER_RE = re.compile(r"(^|[;\s])(?:python3\s+)?(?:\./)?scripts/rch_compile_blocker_router\.py(\s|$)")
+PINNED_FRANKEN_RE = re.compile(r"(^|\s)--pinned-franken-stack(\s|=|$)")
+LOCKED_RE = re.compile(r"(^|\s)--locked(\s|$)")
+
+# Every kind here increments `denied` and appends to `denials`. scan_file and
+# run_self_test both classify commands, so the membership test lives here
+# rather than being spelled out twice and drifting.
+DENIED_KINDS = ("denied_bare_cargo", "denied_pinned_without_locked")
+
+
+def suggested_wrapper_for(kind: str) -> str:
+    if kind == "denied_pinned_without_locked":
+        return "scripts/rch_verify.sh --pinned-franken-stack -- cargo <subcommand> --locked ..."
+    return "scripts/rch_verify.sh -- <cargo command>"
 
 
 @dataclass(frozen=True)
@@ -225,6 +238,13 @@ def classify_command(command: str) -> tuple[str, str]:
             "rch exec Cargo command lacks RCH_REQUIRE_REMOTE=1; raw rch exec examples can fall back to local Cargo",
         )
     if wrapper_before_cargo(command, RCH_VERIFY_RE, cargo_start):
+        if PINNED_FRANKEN_RE.search(command) and not LOCKED_RE.search(command):
+            return (
+                "denied_pinned_without_locked",
+                "--pinned-franken-stack refuses a Cargo command without --locked: the lane "
+                "exits 1 with rch_verify_franken_stack_locked_required before materializing "
+                "source, so the example cannot produce a verdict as written",
+            )
         return ("rch_verify_wrapper", "Cargo command is wrapped through scripts/rch_verify.sh")
     if wrapper_before_cargo(command, TRIPWIRE_RE, cargo_start):
         return ("tripwire_detector_example", "Cargo text is an input to the local-Cargo tripwire")
@@ -282,7 +302,7 @@ def scan_file(repo_root: Path, relative_path: str) -> dict:
                         "command": example.command,
                     }
                 )
-            if kind == "denied_bare_cargo":
+            if kind in DENIED_KINDS:
                 result["denied"] += 1
                 result["denials"].append(
                     {
@@ -292,7 +312,7 @@ def scan_file(repo_root: Path, relative_path: str) -> dict:
                         "command_hash": command_hash(example.command),
                         "command_excerpt": example.command[:240],
                         "classifier_reason": reason,
-                        "suggested_rch_wrapper": "scripts/rch_verify.sh -- <cargo command>",
+                        "suggested_rch_wrapper": suggested_wrapper_for(kind),
                     }
                 )
             else:
@@ -376,6 +396,12 @@ scripts/check-local-cargo-tripwire.sh --cmd 'cargo test --lib bad' --json
         "docs/rch_verification.md": """```bash
 scripts/rch_verify.sh --dry-run -- cargo test --lib smoke -- --nocapture
 ```
+```bash
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo check --all-targets
+```
+```bash
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo check --locked --all-targets
+```
 """,
     }
 
@@ -417,7 +443,7 @@ scripts/rch_verify.sh --dry-run -- cargo test --lib smoke -- --nocapture
                                 "command": example.command,
                             }
                         )
-                    if kind == "denied_bare_cargo":
+                    if kind in DENIED_KINDS:
                         result["denied"] += 1
                         result["denials"].append(
                             {
@@ -427,7 +453,7 @@ scripts/rch_verify.sh --dry-run -- cargo test --lib smoke -- --nocapture
                                 "command_hash": command_hash(example.command),
                                 "command_excerpt": example.command[:240],
                                 "classifier_reason": reason,
-                                "suggested_rch_wrapper": "scripts/rch_verify.sh -- <cargo command>",
+                                "suggested_rch_wrapper": suggested_wrapper_for(kind),
                             }
                         )
                     else:
@@ -467,8 +493,30 @@ scripts/rch_verify.sh --dry-run -- cargo test --lib smoke -- --nocapture
     # prose. AGENTS.md is an instruction file, not a distribution document.
     # The exemption itself is NOT weakened: it still applies to README.md, and
     # the README skip is asserted below.
-    if len(denials) != 4:
-        raise SystemExit(f"self-test expected exactly 4 denials, got {len(denials)}: {denials}")
+    # Five, not four, since --pinned-franken-stack without --locked became a
+    # denial on 2026-10-13. The lane has always refused those commands
+    # (rch_verify_franken_stack_locked_required, exit 1 before source
+    # materialization); CLAUDE.md shipped four of them as its canonical
+    # examples and this checker passed, because it only ever asked whether the
+    # wrapper preceded `cargo`.
+    if len(denials) != 5:
+        raise SystemExit(f"self-test expected exactly 5 denials, got {len(denials)}: {denials}")
+    # Positive control: the pinned example WITHOUT --locked must be denied.
+    if not any(
+        denial["classifier_reason"].startswith("--pinned-franken-stack refuses")
+        for denial in denials
+    ):
+        raise SystemExit(
+            "self-test expected the pinned Cargo example lacking --locked to be DENIED"
+        )
+    # Negative control, sharing the mechanism: the same command WITH --locked
+    # must NOT be denied, so the rule keys on the flag and not merely on
+    # --pinned-franken-stack being present.
+    if any("--locked" in denial["command_excerpt"] for denial in denials):
+        raise SystemExit(
+            "self-test denied a pinned Cargo example that DOES carry --locked; the "
+            "--locked rule is matching the wrong thing"
+        )
     # Pin the policy change positively, so a revert to block-gating reds here
     # instead of silently re-hiding agent instructions.
     if not any(
