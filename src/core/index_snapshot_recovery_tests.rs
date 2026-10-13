@@ -342,7 +342,9 @@ fn cancellation_after_lease_acquisition_preserves_generations_for_a_fresh_reques
         let lease = IndexGenerationLease::read(&cx, &index)
             .await
             .map_err(|error| error.to_string())?;
-        cx.set_cancel_reason(asupersync::CancelReason::user("cancel leased source snapshot"));
+        cx.set_cancel_reason(asupersync::CancelReason::user(
+            "cancel leased source snapshot",
+        ));
         // Exercise both the live and retained selection branches. A complete
         // backend must not turn cancellation into success or a generic error.
         for ceiling in [8, 7] {
@@ -403,8 +405,14 @@ fn publication_contention_times_out_without_changing_generations_then_recovers()
             reader,
             Err(IndexRebuildError::Index(message)) if message.contains("busy")
         ));
-        assert!(elapsed >= wait, "exercise retries, not only a zero-wait probe");
-        assert!(elapsed < Duration::from_secs(2), "bounded contention: {elapsed:?}");
+        assert!(
+            elapsed >= wait,
+            "exercise retries, not only a zero-wait probe"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "bounded contention: {elapsed:?}"
+        );
         assert_eq!(inventory(index_parent(&index))?, before);
         // Timing out a waiter must not release another owner's publisher lock.
         let probe = open_directory(index_parent(&index)).map_err(|error| error.to_string())?;
