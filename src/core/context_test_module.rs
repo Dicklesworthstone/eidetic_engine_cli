@@ -11757,14 +11757,51 @@ pub fn unrelated_context() -> u64 {{
 
     #[test]
     fn pack_storage_errors_never_suggest_init() {
-        let transient = super::ContextPackError::Storage(
-            "Read snapshot unavailable: snapshot pin 1 was poisoned or expired by the read-pool lifecycle watchdog".to_owned(),
-        );
+        // Rendered through the REAL producer rather than a hand-copied string.
+        // This fixture previously held a verbatim copy of the read-pool
+        // message; `repair_hint` classifies that text to decide between
+        // "retry" and "ee doctor", so a reword upstream could have left the
+        // copy asserting a classification production no longer earns, and the
+        // test would still have passed. Building the error here means the
+        // retryable-vs-corrupt decision is checked against what `ee` actually
+        // emits (bd-vdmn4).
+        let transient = super::ContextPackError::Storage(format!(
+            "Read snapshot unavailable: {}",
+            crate::db::DbError::ReadSnapshotUnavailable {
+                operation: crate::db::DbOperation::Query,
+                failure: crate::db::ReadSnapshotFailure::DeadlineElapsed,
+                pin: "1".to_owned(),
+                age_ms: 31_000,
+                budget_ms: 30_000,
+            }
+        ));
         let hint = transient.repair_hint().unwrap_or_default();
         assert!(hint.starts_with("Retry the command"), "{hint}");
+
+        // The revoked arm must classify the same way: it is equally retryable,
+        // and it is the arm whose text shares the fewest words with the old
+        // message.
+        let revoked = super::ContextPackError::Storage(format!(
+            "Read snapshot unavailable: {}",
+            crate::db::DbError::ReadSnapshotUnavailable {
+                operation: crate::db::DbOperation::Query,
+                failure: crate::db::ReadSnapshotFailure::Revoked,
+                pin: "2".to_owned(),
+                age_ms: 12,
+                budget_ms: 30_000,
+            }
+        ));
+        assert!(
+            revoked
+                .repair_hint()
+                .unwrap_or_default()
+                .starts_with("Retry the command"),
+            "a drain-revoked snapshot is retryable, not a corruption repair"
+        );
+
         let other = super::ContextPackError::Storage("database disk image is malformed".to_owned());
         assert_eq!(other.repair_hint(), Some("ee doctor --json"));
-        for error in [transient, other] {
+        for error in [transient, revoked, other] {
             assert!(!error.repair_hint().unwrap_or_default().contains("ee init"));
         }
     }

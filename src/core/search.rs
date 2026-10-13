@@ -15427,10 +15427,25 @@ mod tests {
             PoolConfig::default_single().with_max_pin_duration(Duration::ZERO),
         );
         let snapshot = pool.pin_snapshot().map_err(|error| error.to_string())?;
-        assert!(matches!(
-            finish_search_snapshot(snapshot, Ok(()), Path::new(":memory:")),
-            Err(SearchError::Index(message)) if message.contains("poisoned or expired")
-        ));
+        let message = match finish_search_snapshot(snapshot, Ok(()), Path::new(":memory:")) {
+            Err(SearchError::Index(message)) => message,
+            other => return Err(format!("expired snapshot certified success: {other:?}")),
+        };
+        // The subject is the WORDS, not just the refusal. This test used to
+        // match on "poisoned or expired", so it would have passed just as
+        // happily while the message framed a wall-clock deadline as data
+        // corruption -- which is what it did, for 25 days, at a measured cost
+        // of four fleet jobs and four wrong positions on bd-lrhkf. Asserting
+        // the absence of the misleading prefix is the half that has teeth
+        // (bd-vdmn4).
+        assert!(
+            message.contains("deadline elapsed"),
+            "an expired snapshot must say its deadline elapsed: {message}"
+        );
+        assert!(
+            !message.to_ascii_lowercase().contains("malformed"),
+            "a timing condition must not be reported in the vocabulary of data corruption: {message}"
+        );
         assert_eq!(pool.stats().active_pins, 0);
         Ok(())
     }

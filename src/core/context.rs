@@ -1518,10 +1518,21 @@ impl ContextPackError {
     }
 }
 
+/// Classify a storage failure as transient from its TEXT, because the typed
+/// error is gone by the time it reaches [`ContextPackError::Storage`], which
+/// holds a `String`.
+///
+/// That makes this function a silent responder to any rewording upstream: drop
+/// the matched words and a retryable fault starts recommending
+/// `ee doctor --json`, with nothing failing to say so. `deadline elapsed` is
+/// listed for exactly that reason -- `DbError::ReadSnapshotUnavailable`
+/// (bd-vdmn4) renders both "snapshot pin" and "deadline elapsed", so the
+/// classification survives losing either one.
 fn storage_error_is_transient(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     [
         "snapshot pin",
+        "deadline elapsed",
         "watchdog",
         "database is locked",
         "database is busy",

@@ -3032,6 +3032,43 @@ pub enum DbError {
         operation: DbOperation,
         message: String,
     },
+    /// A read-pool snapshot pin was refused for a LIFECYCLE reason: a
+    /// wall-clock deadline elapsed, or the pool revoked the pin while
+    /// draining. No row was read and nothing is malformed.
+    ///
+    /// This variant exists because routing the condition through
+    /// [`DbError::MalformedRow`] put a timing fault into the vocabulary of
+    /// data corruption, and `MalformedRow`'s Display puts "returned malformed
+    /// row" in front of it, so the first thing a reader saw pointed at the
+    /// schema while the cause was the clock. Measured cost on bd-lrhkf: four
+    /// fleet jobs, four successive wrong positions by two agents and the
+    /// orchestrator, and an innocent commit implicated for three of them.
+    /// None of that cost was in the code under test (bd-vdmn4).
+    ReadSnapshotUnavailable {
+        operation: DbOperation,
+        failure: ReadSnapshotFailure,
+        /// The pin id, or `<unpinned>` when the pin was already released.
+        pin: String,
+        age_ms: u128,
+        budget_ms: u128,
+    },
+}
+
+/// Why a read-pool snapshot pin became unusable.
+///
+/// The pin itself tracks usability in a single `AtomicBool`, and expiry is
+/// folded into it, so these two are not distinguishable from that flag by the
+/// time an error is built. They are reconstructed from the pin's age, which is
+/// monotonic. Keeping them apart matters because they are different signals:
+/// one is capacity, the other is an administrative revocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadSnapshotFailure {
+    /// The pin outlived `max_pin_duration`. A capacity signal: the holder was
+    /// slow, or the budget is too tight for this worker.
+    DeadlineElapsed,
+    /// The pool revoked the pin while draining, before its deadline. An
+    /// administrative signal, not a sign that anything ran late.
+    Revoked,
 }
 
 impl DbError {
@@ -3051,9 +3088,9 @@ impl DbError {
             Self::SqlModel { operation, .. } | Self::InvalidPath { operation, .. } => {
                 Some(*operation)
             }
-            Self::MalformedRow { operation, .. } | Self::StoragePanic { operation, .. } => {
-                Some(*operation)
-            }
+            Self::MalformedRow { operation, .. }
+            | Self::StoragePanic { operation, .. }
+            | Self::ReadSnapshotUnavailable { operation, .. } => Some(*operation),
             Self::InvalidMode { .. }
             | Self::InvalidMigration { .. }
             | Self::MigrationDrift { .. } => None,
@@ -3068,7 +3105,8 @@ impl DbError {
             | Self::InvalidMode { .. }
             | Self::InvalidMigration { .. }
             | Self::MalformedRow { .. }
-            | Self::StoragePanic { .. } => None,
+            | Self::StoragePanic { .. }
+            | Self::ReadSnapshotUnavailable { .. } => None,
         }
     }
 
@@ -3080,7 +3118,8 @@ impl DbError {
             | Self::InvalidMode { .. }
             | Self::InvalidMigration { .. }
             | Self::MalformedRow { .. }
-            | Self::StoragePanic { .. } => None,
+            | Self::StoragePanic { .. }
+            | Self::ReadSnapshotUnavailable { .. } => None,
         }
     }
 
@@ -3105,7 +3144,11 @@ impl DbError {
             | Self::InvalidMigration { .. }
             | Self::MigrationDrift { .. }
             | Self::MalformedRow { .. }
-            | Self::StoragePanic { .. } => false,
+            | Self::StoragePanic { .. }
+            // A read snapshot's lifecycle is not the write-owner lock. This is
+            // retryable, but it is not contention, and saying so would route it
+            // to the DATABASE_LOCKED repair ("wait for the active writer").
+            | Self::ReadSnapshotUnavailable { .. } => false,
         }
     }
 }
@@ -3167,6 +3210,26 @@ impl fmt::Display for DbError {
                     operation, message
                 )
             }
+            // The cause leads, and the words name TIME, not data. "no row was
+            // read" is in the message on purpose: the condition this replaces
+            // was read as corruption three times across graded runs, and the
+            // sentence a reader sees first is what decides where they look.
+            Self::ReadSnapshotUnavailable {
+                operation,
+                failure,
+                pin,
+                age_ms,
+                budget_ms,
+            } => match failure {
+                ReadSnapshotFailure::DeadlineElapsed => write!(
+                    f,
+                    "database {operation} refused read snapshot pin {pin}: its lifecycle deadline elapsed after {age_ms}ms (budget {budget_ms}ms). No row was read and nothing is malformed; this is a timing condition. Release the pin and acquire a fresh snapshot"
+                ),
+                ReadSnapshotFailure::Revoked => write!(
+                    f,
+                    "database {operation} refused read snapshot pin {pin}: the read pool revoked it while draining, at age {age_ms}ms of a {budget_ms}ms budget. No row was read and nothing is malformed; the pin did not run late. Acquire a fresh snapshot"
+                ),
+            },
         }
     }
 }
@@ -3180,7 +3243,8 @@ impl Error for DbError {
             | Self::InvalidMigration { .. }
             | Self::MigrationDrift { .. }
             | Self::MalformedRow { .. }
-            | Self::StoragePanic { .. } => None,
+            | Self::StoragePanic { .. }
+            | Self::ReadSnapshotUnavailable { .. } => None,
         }
     }
 }

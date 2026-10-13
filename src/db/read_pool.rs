@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
-use super::{DatabaseConfig, DatabaseLocation, DbConnection, DbError, DbOperation, Result};
+use super::{
+    DatabaseConfig, DatabaseLocation, DbConnection, DbError, DbOperation, ReadSnapshotFailure,
+    Result,
+};
 
 // SnapshotPin is intentionally a read transaction, not a write-owner transaction.
 // The local adapter path is `src/db/mod.rs`: `begin_read_snapshot()` executes
@@ -917,7 +920,7 @@ impl SnapshotPin<'_> {
         }
 
         if self.is_poisoned() {
-            return Err(self.poisoned_error());
+            return Err(self.lifecycle_error());
         }
 
         Ok(self.connection().deref())
@@ -929,7 +932,7 @@ impl SnapshotPin<'_> {
                 self.poisoned.store(true, Ordering::Release);
             }
             if self.is_poisoned() {
-                let error = self.poisoned_error();
+                let error = self.lifecycle_error();
                 self.rollback()?;
                 return Err(error);
             }
@@ -990,15 +993,36 @@ impl SnapshotPin<'_> {
         }
     }
 
-    fn poisoned_error(&self) -> DbError {
-        DbError::MalformedRow {
+    /// Build the typed refusal for a pin that is no longer usable.
+    ///
+    /// The cause is DERIVED here rather than stored. `poisoned` is a single
+    /// `AtomicBool` and expiry is folded into it -- `checked_connection` and
+    /// `commit` both store `true` when the age is past the budget -- so one
+    /// value is being asked to express two states and by this point the flag
+    /// cannot say which. Age is monotonic, so re-reading it is deterministic
+    /// and not a race: a pin past its budget had its deadline elapse, and a
+    /// pin poisoned while still inside its budget was revoked by
+    /// `force_poison_active_pins` during a drain.
+    ///
+    /// The old message said "poisoned or expired", which offered the reader a
+    /// third possibility that cannot occur: nothing in this file poisons a pin
+    /// because a holder panicked. The only two writers of the flag are the
+    /// watchdog's age sweep and the drain's force-poison (bd-vdmn4).
+    fn lifecycle_error(&self) -> DbError {
+        let age = self.age();
+        DbError::ReadSnapshotUnavailable {
             operation: DbOperation::Query,
-            message: format!(
-                "snapshot pin {} was poisoned or expired by the read-pool lifecycle watchdog; release it and acquire a fresh snapshot",
-                self.pin_id
-                    .map(|pin_id| pin_id.to_string())
-                    .unwrap_or_else(|| "<unpinned>".to_string())
-            ),
+            failure: if age >= self.max_pin_duration {
+                ReadSnapshotFailure::DeadlineElapsed
+            } else {
+                ReadSnapshotFailure::Revoked
+            },
+            pin: self
+                .pin_id
+                .map(|pin_id| pin_id.to_string())
+                .unwrap_or_else(|| "<unpinned>".to_string()),
+            age_ms: age.as_millis(),
+            budget_ms: self.max_pin_duration.as_millis(),
         }
     }
 
@@ -2086,6 +2110,104 @@ mod tests {
         drop(pin);
         assert_eq!(pool.stats().active_pins, 0);
         assert_eq!(pool.stats().expired_pins, 0);
+    }
+
+    /// An elapsed deadline must be reported as TIME, in a variant that is not
+    /// the data-corruption one.
+    ///
+    /// The regression this guards is not a wrong refusal -- the old code
+    /// refused correctly -- it is a correct refusal wearing the wrong label.
+    /// `DbError::MalformedRow`'s Display leads with "returned malformed row",
+    /// so the first thing a reader saw pointed at the schema. That cost four
+    /// fleet jobs and implicated an innocent commit three times (bd-vdmn4).
+    #[test]
+    fn expired_pin_refusal_names_the_deadline_and_not_malformed_data() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-deadline-vocabulary.db");
+        seed_snapshot_database(&database_path);
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::file(database_path),
+            PoolConfig::new(1, Duration::from_secs(30)).with_max_pin_duration(Duration::ZERO),
+        );
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+
+        let error = match pin.checked_connection() {
+            Ok(_) => panic!("a pin past its budget must not hand out a connection"),
+            Err(error) => error,
+        };
+        match &error {
+            DbError::ReadSnapshotUnavailable { failure, .. } => {
+                assert_eq!(*failure, ReadSnapshotFailure::DeadlineElapsed);
+            }
+            other => panic!("an elapsed deadline must be its own variant, got {other:?}"),
+        }
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("deadline elapsed"),
+            "the cause must lead: {rendered}"
+        );
+        assert!(
+            !rendered.to_ascii_lowercase().contains("malformed"),
+            "a timing condition must not borrow the vocabulary of corruption: {rendered}"
+        );
+        assert!(
+            rendered.contains("No row was read"),
+            "the reader needs to be told nothing was read: {rendered}"
+        );
+    }
+
+    /// The other half of the split, and the control for deriving the cause
+    /// from age rather than storing it: a pin revoked while the pool drains is
+    /// NOT over its budget and must not claim a deadline elapsed.
+    ///
+    /// Without this arm the derivation could return `DeadlineElapsed` for
+    /// every unusable pin and the test above would still pass -- which is the
+    /// same shape of hole as the message being replaced, where both causes
+    /// were merged into one sentence that named neither.
+    #[test]
+    fn drain_revoked_pin_refusal_does_not_claim_a_deadline() {
+        let tempdir = must(tempfile::tempdir(), "tempdir creates");
+        let database_path = tempdir.path().join("read-pool-revoked-vocabulary.db");
+        seed_snapshot_database(&database_path);
+        let pool = ReadConnectionPool::new(
+            DatabaseConfig::file(database_path),
+            // A budget long enough that the pin cannot age out mid-test, so
+            // `poisoned` can only have come from the drain.
+            PoolConfig::new(1, Duration::from_secs(30))
+                .with_max_pin_duration(Duration::from_secs(3_600)),
+        );
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+        assert!(!pin.is_expired(), "the pin must still be inside its budget");
+
+        let revoked = pool.force_poison_active_pins();
+        assert_eq!(revoked.len(), 1);
+        assert!(pin.is_poisoned());
+
+        let error = match pin.checked_connection() {
+            Ok(_) => panic!("a revoked pin must not hand out a connection"),
+            Err(error) => error,
+        };
+        match &error {
+            DbError::ReadSnapshotUnavailable { failure, .. } => {
+                assert_eq!(*failure, ReadSnapshotFailure::Revoked);
+            }
+            other => panic!("a revoked pin must carry its own cause, got {other:?}"),
+        }
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("revoked it while draining"),
+            "an administrative revocation must say so: {rendered}"
+        );
+        assert!(
+            !rendered.contains("deadline elapsed"),
+            "a pin inside its budget did not run late: {rendered}"
+        );
+        assert!(
+            !rendered.to_ascii_lowercase().contains("malformed"),
+            "a revocation is not corruption either: {rendered}"
+        );
     }
 
     #[test]
