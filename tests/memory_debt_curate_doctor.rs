@@ -288,3 +288,76 @@ fn curate_doctor_total_score_is_not_clamped_at_one_bd_92msh() -> Result<(), Box<
     );
     Ok(())
 }
+
+/// The TREND surface must read a saturating total back UNCLAMPED.
+///
+/// This is the second half of the same repair and it needs its own execution.
+/// `ee curate doctor --trend` reads exclusively through
+/// `MemoryDebtTrendSnapshot::from_stored`, so leaving the per-item clamp on the
+/// READ side would re-pin every trend point at exactly 1.0 while
+/// `summary.totalScore` in the very same report looked correct. The test above
+/// cannot see that: it never persists a snapshot and never reads one back.
+///
+/// Reverting `from_stored` alone to the per-item helper fails THIS test and
+/// nothing else, which is the property that makes it a control rather than a
+/// restatement.
+///
+/// It also closes a calibration hole in
+/// `memory_debt_snapshot_is_idempotent_and_trend_renders`: that test seeds ONE
+/// memory, whose total is about 0.572, and asserts the trend's schema, day and
+/// report hash but never its `totalScore`. A trend test calibrated below the
+/// saturation point cannot fail on saturation, so before this test no trend
+/// coverage existed that a clamped read could break.
+#[test]
+fn curate_doctor_trend_reads_back_an_unclamped_total_bd_92msh() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let db_path = temp.path().join("ee.db");
+    let (connection, workspace_id) = seed_workspace(temp.path(), &db_path)?;
+    for index in 1..=5 {
+        insert_memory(
+            &connection,
+            &workspace_id,
+            &format!("mem_{index:026}"),
+            "orphaned persisted memory for trend saturation coverage",
+            0.2,
+            0.9,
+        )?;
+    }
+    connection.close()?;
+
+    let snapshot_options = MemoryDebtSnapshotOptions {
+        workspace_path: temp.path(),
+        database_path: Some(&db_path),
+        now_rfc3339: Some("2026-06-15T00:00:00Z"),
+        dry_run: false,
+        limit: Some(50),
+    };
+    let snapshot = run_memory_debt_snapshot(&snapshot_options)?;
+    assert!(
+        snapshot.inserted,
+        "the trend can only be read back from a persisted snapshot row"
+    );
+
+    let mut doctor_options = MemoryDebtDoctorOptions::new(temp.path());
+    doctor_options.database_path = Some(&db_path);
+    doctor_options.trend = true;
+    doctor_options.now_rfc3339 = Some("2026-06-15T00:00:00Z");
+    let report = run_memory_debt_doctor(&doctor_options)?;
+    let data = report.data_json();
+
+    let item_count = data["trend"]["snapshots"][0]["itemCount"]
+        .as_u64()
+        .expect("trend itemCount is a number");
+    assert!(
+        item_count >= 5,
+        "the snapshot the trend reads must cover all five seeded debt items, saw {item_count}"
+    );
+    let trend_total = data["trend"]["snapshots"][0]["totalScore"]
+        .as_f64()
+        .expect("trend totalScore is a number");
+    assert!(
+        trend_total > 1.0,
+        "trend totalScore ({trend_total}) must survive the store-and-read round trip unclamped; the per-item clamp read every point back as exactly 1.0"
+    );
+    Ok(())
+}

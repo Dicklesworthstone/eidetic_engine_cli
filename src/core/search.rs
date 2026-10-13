@@ -27180,6 +27180,121 @@ mod tests {
         );
     }
 
+    /// The RECORDED row, not just the predicate: weak semantic evidence must
+    /// reach `audit_log` as a `search.miss_recorded` entry.
+    ///
+    /// The three tests above prove `classify_search_query_miss` maps weak
+    /// semantic evidence to `weak_query_recall`, and
+    /// `weak_semantic_evidence_flags_only_weak_neural_local_evidence` proves
+    /// `weak_semantic_evidence_top` produces that value on real evidence.
+    /// Neither proves the link `ee learn gaps` actually consumes:
+    /// `SearchAuditFacts::record` writing the row. Until this test that link
+    /// was compiled and never executed, which is the same shape as the defect
+    /// this bead is about -- a predicate present in the code and unreachable in
+    /// practice.
+    ///
+    /// It deliberately does NOT go through `run_search`, because it cannot:
+    /// `weak_semantic_evidence_top` is `NeuralLocal`-only (the threshold is
+    /// calibrated on Model2Vec cosines) and the determinism rules put the hash
+    /// embedder in tests, where that function correctly returns `None`. So the
+    /// facts are built with the value production computes from the identical
+    /// expression a few lines above the same construction site.
+    #[test]
+    fn search_query_miss_weak_semantic_evidence_reaches_the_audit_log_bd_6rent() -> TestResult {
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-search-weak-semantic-audit")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        let root = workspace
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database_path = root.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+
+        // Derive the workspace id the SAME way `record` does. If it does not
+        // match, `record` early-returns on `!persisted` and writes nothing,
+        // which would otherwise read as a classifier failure.
+        let canonical = default_workspace_root(&root);
+        let workspace_id = crate::core::curate::stable_workspace_id(&canonical);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: canonical.display().to_string(),
+                    name: Some("weak-semantic-audit".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut options = fusion_config_test_options(&root);
+        options.database_path = Some(database_path.clone());
+        options.query = "half working query with thin semantic evidence".to_owned();
+
+        // A `SemanticFast` hit's relevance_score is its raw score, so 0.30 sits
+        // clear of the `[floor, 2 * floor)` window: the floor-proximity branch
+        // cannot be what fires here, only the weak-semantic one.
+        let hits = vec![synthetic_hit("mem_00000000000000000000000871", 0.30)];
+        let facts = SearchAuditFacts {
+            floor_counts: RelevanceFloorCounts::new(50, 50),
+            kept: hits.len(),
+            dropped: 0,
+            floor: 0.05,
+            pre_floor_top_score: Some(0.30),
+            weak_semantic_top: Some(0.02),
+            redactions: std::collections::BTreeMap::new(),
+        };
+        let mut audit_ids = SearchAuditIdSource::Seeded(Deterministic::from_seed(6_871));
+        let mut trace = SearchPerformanceTrace::default();
+        facts.record(
+            &options,
+            &connection,
+            &hits,
+            SearchStatus::Success,
+            &mut audit_ids,
+            &mut trace,
+        );
+
+        // Control, asserted before the subject: a missing `search.executed` row
+        // means the binding never resolved, so the run is unmeasured rather
+        // than negative.
+        let executed = connection
+            .list_audit_by_target("workspace", &workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            executed
+                .iter()
+                .any(|entry| entry.action == audit_actions::SEARCH_EXECUTED),
+            "no search.executed row: the workspace binding did not resolve, so this run says nothing about the miss classifier"
+        );
+
+        let q_hash = audit_query_hash(&options.query);
+        let misses = connection
+            .list_audit_by_target("query_hash", &q_hash, None)
+            .map_err(|error| error.to_string())?;
+        let miss = misses
+            .iter()
+            .find(|entry| entry.action == audit_actions::SEARCH_MISS_RECORDED)
+            .ok_or_else(|| {
+                "weak semantic evidence recorded no search.miss_recorded row; ee learn gaps \
+                 cannot cluster a miss that was never written"
+                    .to_owned()
+            })?;
+        let details: serde_json::Value = serde_json::from_str(
+            miss.details
+                .as_deref()
+                .ok_or_else(|| "the miss row carries no details payload".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            details["reason"], "weak_query_recall",
+            "the recorded reason string is what query_miss_cluster.rs keys on"
+        );
+        Ok(())
+    }
+
     #[test]
     fn query_assist_triggers_on_below_floor_candidate() {
         let mut candidate = synthetic_hit("mem_semantic_release", 0.02);
