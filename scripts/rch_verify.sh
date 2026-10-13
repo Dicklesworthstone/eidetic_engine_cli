@@ -3873,10 +3873,39 @@ for repository in payload.get("repositories") or []:
 payload["blocking_codes"] = sorted(set(blocking))
 payload["status"] = "pinned" if not payload["blocking_codes"] else "blocked"
 payload["remote_source_verified"] = not payload["blocking_codes"]
-payload["repair"] = None if not payload["blocking_codes"] else (
-    "The archived locked dependency graph does not match Cargo.lock; repair "
-    "franken-stack.lock or Cargo.lock before retrying."
-)
+# Name the offending rows. The generic form is accurate but leaves the reader
+# to audit all twelve packages by hand to find the one that moved; on
+# 2026-10-13 a single stale row (franken_agent_detection, whose locked commit
+# declares 0.3.3 against a =0.3.8 pin) refused every pinned dispatch, and
+# finding it meant reading each locked revision's manifest one at a time. The
+# materialized verdict already knows which package disagreed, so say so.
+_mismatched = [
+    "{}/{} locked={} expected={}".format(
+        _repository.get("name"),
+        _package.get("name"),
+        _package.get("actual_version") or "unreadable",
+        ",".join(_package.get("expected_versions") or []) or "none",
+    )
+    for _repository in payload.get("repositories") or []
+    for _package in ((_repository.get("materialized") or {}).get("packages") or [])
+    if not _package.get("matches")
+]
+if not payload["blocking_codes"]:
+    payload["repair"] = None
+elif _mismatched:
+    payload["repair"] = (
+        "The archived locked dependency graph does not match Cargo.lock for: "
+        + "; ".join(sorted(_mismatched))
+        + ". Each locked revision's own manifest must declare the version "
+        "Cargo.toml pins, so repair that row of franken-stack.lock (or the pin) "
+        "before retrying. Live sibling checkouts are NOT the subject here and "
+        "do not need changing."
+    )
+else:
+    payload["repair"] = (
+        "The archived locked dependency graph does not match Cargo.lock; repair "
+        "franken-stack.lock or Cargo.lock before retrying."
+    )
 manifest_material = {
     "lock_hash": payload.get("lock_hash"),
     "cargo_lock_hash": payload.get("cargo_lock_hash"),
