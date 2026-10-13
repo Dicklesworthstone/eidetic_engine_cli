@@ -198,7 +198,7 @@ Each gate is mapped to its conformance tests, MUST clauses, and gap status.
 | DH-17 | eval run/list MUST report fixture results | `eval_run_and_list_report_fixture_results_without_unavailable_sentinel` | RED (bd-tzlmo) |
 | DH-18 | review session MUST report storage error | `review_session_reports_storage_error_without_unavailable_sentinel` | RED (bd-9zfku) |
 | DH-19 | tripwire commands MUST report store queries | `tripwire_commands_report_store_queries_without_unavailable_sentinel` | PASS |
-| DH-20 | handoff create MUST degrade instead of placeholder | `handoff_create_degrades_instead_of_writing_placeholder_capsule` | IGNORED (obsolete; see ee-oskm) |
+| DH-20 | handoff create MUST degrade instead of placeholder — REQUIREMENT OBSOLETE: handoff create writes real capsules now (bd-oskm, closed) | `handoff_create_degrades_instead_of_writing_placeholder_capsule` | IGNORED — superseded by `handoff_create_writes_real_capsule_file` (tests/handoff_capsule_roundtrip.rs), whose verdict is not re-derived here |
 | DH-21 | daemon foreground MUST run real health job | `daemon_foreground_runs_real_health_job_without_unavailable_sentinel` | PASS |
 | DH-22 | recorder start/event/finish MUST persist real state | `recorder_start_event_finish_persist_real_state` | PASS |
 | DH-23 | recorder tail MUST read initialized store | `recorder_tail_reads_initialized_store_without_degraded_sentinel` | PASS |
