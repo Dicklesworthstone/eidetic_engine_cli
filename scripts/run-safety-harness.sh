@@ -27,6 +27,36 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# WHICH BINARY THE SUB-HARNESSES GRADE. All five read
+# EE_DOCTOR_FIXTURE_BINARY and default it to bare `ee`, i.e. PATH. Until this
+# block landed, NOTHING in the chain set that variable: scripts/verify.sh has
+# zero references to it and so did this wrapper, so Gate 8.5 ran whatever ee
+# happened to be installed, in every verify.sh run -- not only standalone.
+#
+# That mattered because verify.sh works hard to attest the binary it BUILT
+# (EE_BINARY_SHA256 at verify.sh:428, target triple at :566, target OS at
+# :624) and none of those facts described what these five actually executed.
+# Measured on the Mac dev host 2026-10-13: PATH ee was 0.14.2 while
+# Cargo.toml said 0.17.0, three minor versions apart.
+#
+# Note the asymmetry this repairs: a MISSING ee already failed the gate loudly
+# (each sub-script exits 3, which this wrapper treats as a failure), while a
+# WRONG ee passed it silently. The silent case is the one that needed fixing.
+#
+# Precedence: an explicit EE_DOCTOR_FIXTURE_BINARY still wins, so callers that
+# deliberately pin a fixture binary are untouched. Otherwise take verify.sh's
+# exported EE_BINARY -- the binary it built and attested -- and fall back to
+# Cargo's effective target directory for a standalone run.
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+EE_DOCTOR_FIXTURE_BINARY="${EE_DOCTOR_FIXTURE_BINARY:-${EE_BINARY:-$(ee_resolve_binary debug)}}"
+export EE_DOCTOR_FIXTURE_BINARY
+# Print it BEFORE any sub-harness runs, so a log reader can see which binary
+# produced the verdicts even when they all pass.
+printf 'safety harness: ee_binary=%s\n' "$EE_DOCTOR_FIXTURE_BINARY" >&2
+
 FIXTURE_DIR="${EE_SAFETY_HARNESS_FIXTURE_DIR:-$REPO_ROOT/tests/doctor_fixtures}"
 EVENT_LOG="${EE_SAFETY_HARNESS_EVENT_LOG:-}"
 STRICT="${EE_SAFETY_HARNESS_STRICT:-0}"
@@ -95,6 +125,29 @@ abort_if_strict() {
 }
 
 emit_event "safety_harness_setup" "setup" "passed" "0" "" "fixture_dir=$FIXTURE_DIR"
+
+# Binary usability gate. Resolving a path is NOT enough, and this gate is the
+# proof: measured on the Mac dev host 2026-10-13, the resolved target-dir
+# binary was a Linux x86-64 ELF left behind by an RCH run, and it satisfied
+# [ -x ] while failing with `exec format error`. Running the five sub-harnesses
+# against it would report twenty-odd assertion failures whose single real cause
+# is the wrong platform -- the class scripts/lib/ee_binary_resolution.sh
+# already documents, and that e2e_session_budget.sh hit for 15 assert_fails.
+#
+# ee_require_current_binary checks all three things one at a time: the file
+# exists and is executable, it can actually EXECUTE on this host (126/127), and
+# its version equals Cargo.toml. It prints the resolved path and both versions
+# before deciding, so the log shows which binary produced a verdict.
+#
+# Routed through abort_if_strict rather than a hard exit, to match how this
+# wrapper already treats environmental gaps (missing fixture dir, missing
+# sub-script): advisory by default, fail-closed under
+# EE_SAFETY_HARNESS_STRICT=1. The point is that the gate now says "I did not
+# measure" instead of reporting a pass it did not earn.
+if ! ee_require_current_binary "$EE_DOCTOR_FIXTURE_BINARY" "safety harness"; then
+    abort_if_strict "safety_harness_binary_unusable" \
+        "$EE_DOCTOR_FIXTURE_BINARY is missing, foreign to this host, or not the current source version"
+fi
 
 # Check the shared assertion oracle before trusting any per-FM result. These
 # controls use a test double; they do not establish that real repairs work.
