@@ -74,6 +74,7 @@ fn outcome_report_veto(excerpt: &str) -> Option<bool> {
     if elapsed_report(&lower) {
         return Some(false);
     }
+    let lower = counter_report_body(&lower)?;
     if !lower.chars().all(|ch| {
         ch.is_ascii_alphanumeric()
             || ch.is_whitespace()
@@ -119,26 +120,62 @@ fn outcome_report_veto(excerpt: &str) -> Option<bool> {
     )
 }
 
-fn elapsed_report(text: &str) -> bool {
-    let Some(value) = text.strip_prefix("finished in ") else {
-        return false;
-    };
-    let value = value.trim().trim_end_matches(['.', ';']);
-    let Some(number) = value.strip_suffix("ms").or_else(|| value.strip_suffix('s')) else {
-        return false;
-    };
-    let mut digits = 0;
-    let mut dots = 0;
-    for byte in number.bytes() {
-        if byte.is_ascii_digit() {
-            digits += 1;
-        } else if byte == b'.' {
-            dots += 1;
-        } else {
-            return false;
+/// Strip only recognized test-run framing for classification. A duration is
+/// not a resource name: `1 failed in 0.03s` qualifies the preceding attempt,
+/// whereas `1 failed in src/other.rs` must remain an independent observation.
+/// Returned slices never replace the original evidence or candidate excerpts.
+fn counter_report_body(text: &str) -> Option<&str> {
+    let mut body = text.trim_end_matches(['.', ';']).trim();
+    if body.starts_with("===") {
+        if !body.ends_with("===") {
+            return None;
         }
+        body = body.trim_matches('=').trim();
     }
-    digits > 0 && dots <= 1
+    if let Some((counts, elapsed)) = body.rsplit_once(" in ")
+        && elapsed_duration(elapsed)
+    {
+        body = counts.trim_end();
+    }
+    Some(body)
+}
+
+fn elapsed_report(text: &str) -> bool {
+    let text = text.trim_end_matches(['.', ';']).trim();
+    if let Some(value) = text.strip_prefix("finished in ") {
+        return elapsed_duration(value);
+    }
+    // Python unittest writes the run count/timing before its final FAILED
+    // report. Do not let that neutral line detach the actual outcome.
+    let Some((run, elapsed)) = text
+        .strip_prefix("ran ")
+        .and_then(|body| body.split_once(" in "))
+    else {
+        return false;
+    };
+    let mut words = run.split_whitespace();
+    let Some(count) = words.next() else {
+        return false;
+    };
+    count.bytes().all(|byte| byte.is_ascii_digit())
+        && matches!(words.next(), Some("test" | "tests"))
+        && words.next().is_none()
+        && elapsed_duration(elapsed)
+}
+
+/// A finite, unsigned decimal duration with an explicit unit. Do not parse a
+/// float, round a value, accept a path, or accept trailing diagnostic prose.
+fn elapsed_duration(text: &str) -> bool {
+    let text = text.trim();
+    let Some(number) = text.strip_suffix("ms").or_else(|| text.strip_suffix('s')) else {
+        return false;
+    };
+    let number = number.trim_end();
+    let mut parts = number.split('.');
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    parts.next().is_some_and(digits)
+        && parts.next().is_none_or(digits)
+        && parts.next().is_none()
 }
 
 fn split_raw(excerpt: &str) -> impl Iterator<Item = &str> {
@@ -694,5 +731,85 @@ mod tests {
             assert!(bytes.get() >= reports.len() / 2);
             assert!(bytes.get() <= source.len());
         });
+    }
+
+    #[test]
+    fn timed_python_reports_veto_repairs_in_inline_and_separate_windows() {
+        for report in [
+            "1 failed, 21 passed in 0.03s",
+            "================ 1 failed, 21 passed in 0.03s ================",
+            "1 error, 21 passed in 125ms",
+            "Ran 22 tests in 0.003s\nFAILED (failures=1, errors=0)",
+            "Ran 1 test in 1s\nFAILED (errors=1)",
+        ] {
+            assert_eq!(report_window_veto(report), Some(true), "{report}");
+            let source = format!("{FAILURE}\n{REPAIR}\n{report}");
+            assert!(super::super::inline_pair(&source).is_none(), "{report}");
+            assert_eq!(split(&source).collect::<String>(), source);
+        }
+    }
+
+    #[test]
+    fn clean_timed_reports_do_not_detach_a_later_nonzero_exit() {
+        for report in [
+            "21 passed, 0 failed in 0.03s",
+            "================ 21 passed in 0.03s ================",
+            "Ran 21 tests in 0.003s",
+        ] {
+            assert_eq!(report_window_veto(report), Some(false), "{report}");
+            let source = format!("{FAILURE}\n{REPAIR}\n{report}");
+            assert_eq!(super::super::inline_pair(&source), Some((FAILURE, REPAIR)));
+            let failed = format!("{source}\nProcess exited with code 101.");
+            assert!(super::super::inline_pair(&failed).is_none(), "{report}");
+            assert_eq!(
+                report_window_veto(&format!("{report}\nProcess exited with code 101.")),
+                Some(true)
+            );
+        }
+    }
+
+    #[test]
+    fn test_timing_framing_cannot_swallow_resources_commands_or_examples() {
+        for barrier in [
+            "1 failed in src/other.rs",
+            "1 failed in 0.03s while running src/other.rs",
+            "Example: 1 failed in 0.03s",
+            "`1 failed in 0.03s`",
+            "=== 1 failed in 0.03s === then another command started",
+            "=== 1 failed in 0.03s",
+            "Ran cargo test in 0.03s",
+            "Ran 21 tests in src/other.rs",
+            "Ran 21 tests in 0.03s after the independent command",
+        ] {
+            assert_eq!(report_window_veto(barrier), None, "{barrier}");
+            let source = format!("{FAILURE}\n{REPAIR}\n{barrier}\n1 failed.");
+            assert_eq!(super::super::inline_pair(&source), Some((FAILURE, REPAIR)));
+        }
+    }
+
+    #[test]
+    fn report_durations_require_complete_decimal_numbers_and_units() {
+        for valid in ["0s", "0.03s", "125ms", "1.25 s", "12 ms"] {
+            assert!(elapsed_duration(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "s",
+            ".s",
+            ".3s",
+            "3.s",
+            "3..0s",
+            "-1s",
+            "+0s",
+            "NaNs",
+            "infs",
+            "0.03s command",
+            "src/test.rs",
+            "0/1s",
+            "0.03",
+            "１s",
+        ] {
+            assert!(!elapsed_duration(invalid), "{invalid}");
+        }
     }
 }
