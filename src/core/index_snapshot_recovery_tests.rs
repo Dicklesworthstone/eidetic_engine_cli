@@ -328,3 +328,138 @@ fn retained_presence_preserves_missing_index_and_never_admits_staging_directorie
     })
     .map_err(|error| error.to_string())?
 }
+
+// #78: a hook can be cancelled after acquiring its lease, or while a rebuild
+// holds publication authority. Neither case may poison the next recovery read.
+#[test]
+fn cancellation_after_lease_acquisition_preserves_generations_for_a_fresh_request() -> TestResult {
+    let (_root, index) = fixture()?;
+    let retry_index = index.clone();
+    let before = crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
+        build_generation(&cx, &index, 8).await?;
+        build_generation(&cx, &index_parent(&index).join("index.previous"), 7).await?;
+        let before = inventory(index_parent(&index))?;
+        let lease = IndexGenerationLease::read(&cx, &index)
+            .await
+            .map_err(|error| error.to_string())?;
+        cx.set_cancel_reason(asupersync::CancelReason::user("cancel leased source snapshot"));
+        // Exercise both the live and retained selection branches. A complete
+        // backend must not turn cancellation into success or a generic error.
+        for ceiling in [8, 7] {
+            assert!(matches!(
+                lease.index_for_snapshot(&cx, &index, ceiling),
+                Err(IndexRebuildError::Cancelled(reason))
+                    if reason.message.as_deref() == Some("cancel leased source snapshot")
+            ));
+        }
+        drop(lease);
+        let writer = open_directory(index_parent(&index)).map_err(|error| error.to_string())?;
+        assert!(try_lease(&writer, true).map_err(|error| error.to_string())?);
+        assert_eq!(inventory(index_parent(&index))?, before);
+        Ok::<_, String>(before)
+    })
+    .map_err(|error| error.to_string())??;
+
+    // Use a fresh runtime/request, not a reset cancellation flag. The same
+    // on-disk generations must still support both source snapshot ceilings.
+    crate::core::run_cli_with_cx(Duration::from_secs(10), |cx| async move {
+        let lease = IndexGenerationLease::read(&cx, &retry_index)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            lease
+                .index_for_snapshot(&cx, &retry_index, 8)
+                .map_err(|error| error.to_string())?,
+            retry_index
+        );
+        assert_eq!(
+            lease
+                .index_for_snapshot(&cx, &retry_index, 7)
+                .map_err(|error| error.to_string())?,
+            index_parent(&retry_index).join("index.previous")
+        );
+        assert_eq!(inventory(index_parent(&retry_index))?, before);
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?
+}
+
+#[test]
+fn publication_contention_times_out_without_changing_generations_then_recovers() -> TestResult {
+    let (_root, index) = fixture()?;
+    crate::core::run_cli_with_cx(Duration::from_secs(40), |cx| async move {
+        build_generation(&cx, &index, 8).await?;
+        let retained = index_parent(&index).join("index.previous");
+        build_generation(&cx, &retained, 7).await?;
+        let before = inventory(index_parent(&index))?;
+        let publisher = IndexGenerationLease::publish(&cx, &index)
+            .await
+            .map_err(|error| error.to_string())?;
+        let wait = Duration::from_millis(75);
+        let started = Instant::now();
+        let reader = IndexGenerationLease::acquire(&cx, &index, false, wait).await;
+        let elapsed = started.elapsed();
+        assert!(matches!(
+            reader,
+            Err(IndexRebuildError::Index(message)) if message.contains("busy")
+        ));
+        assert!(elapsed >= wait, "exercise retries, not only a zero-wait probe");
+        assert!(elapsed < Duration::from_secs(2), "bounded contention: {elapsed:?}");
+        assert_eq!(inventory(index_parent(&index))?, before);
+        // Timing out a waiter must not release another owner's publisher lock.
+        let probe = open_directory(index_parent(&index)).map_err(|error| error.to_string())?;
+        assert!(!try_lease(&probe, false).map_err(|error| error.to_string())?);
+        drop(publisher);
+        let reader = IndexGenerationLease::read(&cx, &index)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            reader
+                .index_for_snapshot(&cx, &index, 7)
+                .map_err(|error| error.to_string())?,
+            retained,
+            "retry must not admit the live generation newer than its source snapshot"
+        );
+        assert_eq!(inventory(index_parent(&index))?, before);
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?
+}
+
+#[test]
+fn cancellation_during_publication_wait_preserves_reason_and_releases_waiter() -> TestResult {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let (_root, index) = fixture()?;
+    crate::core::run_cli_with_cx(Duration::from_secs(10), |cx| async move {
+        let publisher = IndexGenerationLease::publish(&cx, &index)
+            .await
+            .map_err(|error| error.to_string())?;
+        let before = inventory(index_parent(&index))?;
+        let started = Instant::now();
+        let mut waiting = std::pin::pin!(IndexGenerationLease::read(&cx, &index));
+        // Reach an actual pending lock retry before cancelling. This catches a
+        // lost cancellation inside the sleep/retry loop, unlike pre-cancelling.
+        poll_fn(|task_cx| match waiting.as_mut().poll(task_cx) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(result) => panic!("reader bypassed the publisher: {result:?}"),
+        })
+        .await;
+        cx.set_cancel_reason(asupersync::CancelReason::user("cancel waiting hook"));
+        assert!(matches!(
+            waiting.await,
+            Err(IndexRebuildError::Cancelled(reason))
+                if reason.message.as_deref() == Some("cancel waiting hook")
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(inventory(index_parent(&index))?, before);
+        let probe = open_directory(index_parent(&index)).map_err(|error| error.to_string())?;
+        assert!(!try_lease(&probe, false).map_err(|error| error.to_string())?);
+        drop(publisher);
+        assert!(try_lease(&probe, true).map_err(|error| error.to_string())?);
+        assert_eq!(inventory(index_parent(&index))?, before);
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?
+}
