@@ -20,7 +20,26 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 3
 fi
 
-EE_BIN="${EE_BIN:-${EE_BINARY:-ee}}"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
+
+# bd-z6g1s. PATH shadowing IS this suite's subject, so this default was the one
+# worth checking before changing, and resolving from the target dir turns out to
+# be what the subject NEEDS rather than a risk to it.
+#
+# The shadow is built explicitly in a temp dir (SHADOW_BIN_DIR below) and
+# prepended by hand, and REAL_BIN_DIR is derived from REAL_EE. If REAL_EE came
+# from PATH, the real binary and the shadow would both live on PATH and
+# path_shadow_advisory_present would be asserting against an ambiguous
+# arrangement -- and REAL_EE would be whatever stale ee happened to be
+# installed (0.14.2 against 0.17.0 source on the Mac dev host), so the advisory
+# under test would be the advisory of a three-versions-old binary.
+#
+# Resolving from Cargo's effective target directory keeps the real binary's
+# directory DISTINCT from the shadow's, which is the arrangement the assertion
+# describes. EE_BIN/EE_BINARY still win.
+EE_BIN="${EE_BIN:-${EE_BINARY:-$(ee_resolve_binary debug)}}"
 if [[ "${EE_BIN}" == */* ]]; then
     REAL_EE="${EE_BIN}"
 else
@@ -30,6 +49,14 @@ if [[ -z "${REAL_EE}" || ! -x "${REAL_EE}" ]]; then
     echo "e2e_ergonomics: ee binary not found or not executable: ${EE_BIN}" >&2
     echo "e2e_ergonomics: provide EE_BIN or EE_BINARY pointing at a prebuilt ee" >&2
     printf '%s\n' '{"schema":"ee.test_event.v1","test_id":"ergonomics_e2e","kind":"assert_result","fields":{"label":"ee_binary_available","status":"fail","first_failure_diagnosis":"prebuilt ee binary missing before harness init","stdout_artifact_path":"","stderr_artifact_path":"stderr","schema_validation_status":"not_run","redaction_status":"not_run"}}' >&2
+    exit 3
+fi
+# Resolving a path is not enough: a resolved binary can be stale, or foreign to
+# this host (an RCH run can leave a Linux ELF in a shared target dir, which
+# satisfies -x and dies with exec format error). This suite is especially
+# sensitive to it, since a stale REAL_EE would make the shadow advisory assert
+# against the wrong binary rather than fail outright.
+if ! ee_require_current_binary "${REAL_EE}" "e2e_ergonomics"; then
     exit 3
 fi
 
