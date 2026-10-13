@@ -368,8 +368,13 @@ mod preparation_tests {
         )
         .unwrap();
         let SessionImportPersistResult::Imported { session_id, .. } =
-            persist_session_import_if_absent(&db, &workspace, &session, std::slice::from_ref(&first))
-                .unwrap()
+            persist_session_import_if_absent(
+                &db,
+                &workspace,
+                &session,
+                std::slice::from_ref(&first),
+            )
+            .unwrap()
         else {
             panic!("fixture must import its retained source");
         };
