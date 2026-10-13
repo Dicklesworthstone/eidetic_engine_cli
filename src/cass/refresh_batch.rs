@@ -299,9 +299,7 @@ mod preparation_tests {
     #[test]
     fn writer_failure_never_prepares_the_unvisited_tail() {
         let row_bytes = prepared_heap_bytes(&row(0, "small".to_owned()));
-        for (limit, expected_prepared) in
-            [(0, 1), (row_bytes * 2 + 1, 3), (usize::MAX, 128)]
-        {
+        for (limit, expected_prepared) in [(0, 1), (row_bytes * 2 + 1, 3), (usize::MAX, 128)] {
             let prepared = Cell::new(0);
             let mut calls = 0;
             let error = write_prepared_batches(
