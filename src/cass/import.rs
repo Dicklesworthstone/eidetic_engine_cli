@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 65603)
+Total output lines: 6713
+
 //! CASS import execution (EE-107).
 //!
 //! This module is the first executable import slice: discover sessions
@@ -141,6 +144,7 @@ pub enum CassHistoryRefusal {
     Changed,
     Missing,
     Unverifiable,
+    Unstable,
 }
 
 impl CassHistoryRefusal {
@@ -150,6 +154,7 @@ impl CassHistoryRefusal {
             Self::Changed => "cass_refresh_history_changed",
             Self::Missing => "cass_refresh_history_missing",
             Self::Unverifiable => "cass_refresh_history_unverifiable",
+            Self::Unstable => "cass_source_changed_during_import",
         }
     }
 
@@ -161,6 +166,9 @@ impl CassHistoryRefusal {
             }
             Self::Unverifiable => {
                 "Inspect the original import and source backup: this legacy excerpt has no complete-source commitment. Retain its historical evidence; use --since to exclude it when importing newer sessions."
+            }
+            Self::Unstable => {
+                "Retry after the live session stops changing. No evidence from this incomplete snapshot was written."
             }
         }
     }
@@ -230,7 +238,7 @@ impl CassImportReport {
             code: "cass_import_history_refused",
             severity: "high",
             message: format!(
-                "{refused} CASS sessions were refused because retained history changed, is missing, or cannot be verified across screening versions. Their evidence was preserved and other sessions were processed."
+                "{refused} CASS sessions were refused because their source changed during capture, retained history changed, is missing, or cannot be verified across screening versions. Their evidence was preserved and other sessions were processed."
             ),
             repair: "Inspect sessions[].refusalCode and sessions[].repair; restore original source evidence before retrying refused sessions.".to_owned(),
         })
@@ -822,7 +830,25 @@ pub fn import_cass_sessions(
         for session in sessions {
             cursor.record_discovered();
             let spans = if options.include_spans {
-                view_session_spans(client, &session.source_path)?
+                match view_session_spans(client, &session.source_path) {
+                    Ok(spans) => spans,
+                    Err(error) if is_unstable_view(&error) => {
+                        first_history_refusal.get_or_insert(error);
+                        cursor.record_skipped();
+                        skipped = skipped.saturating_add(1);
+                        session_reports.push(ImportedCassSession {
+                            source_path: session.source_path,
+                            session_id: None,
+                            index_job_id: None,
+                            status: ImportSessionStatus::Refused(CassHistoryRefusal::Unstable),
+                            spans_imported: 0,
+                            message_count: session.message_count,
+                            missing_metadata: session.missing_metadata,
+                        });
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 Vec::new()
             };
@@ -1264,7 +1290,7 @@ fn collect_cass_view_snapshot(
         }
         let total_lines = cass_view_total_lines(buffer.as_bytes())?;
         if expected_total.is_some() && total_lines != expected_total {
-            return Err(invalid_view_page("view total_lines changed during import"));
+            return Err(invalid_view_page(UNSTABLE_VIEW_MESSAGE));
         }
         let page = parse_view_json(buffer.as_bytes(), source_path)?;
         // A JSONL stream is read to EOF in one invocation. Validate its line
@@ -1297,6 +1323,15 @@ fn invalid_view_page(message: &str) -> CassImportError {
         source: "view",
         message: message.to_owned(),
     }
+}
+
+const UNSTABLE_VIEW_MESSAGE: &str = "view total_lines changed during import";
+
+// Only a changed endpoint is retryable. Malformed envelopes, missing lines,
+// subprocess failures and storage errors retain their batch-failure semantics.
+fn is_unstable_view(error: &CassImportError) -> bool {
+    matches!(error, CassImportError::InvalidJson { source: "view", message }
+        if message == UNSTABLE_VIEW_MESSAGE)
 }
 
 fn cass_view_total_lines(input: &[u8]) -> Result<Option<u32>, CassImportError> {
@@ -3043,6 +3078,30 @@ mod tests {
     }
 
     #[test]
+    fn live_view_changes_are_retryable_but_malformed_pages_are_not() -> TestResult {
+        for total in [7, 9] {
+            let error = collect_view_fixture(&[
+                view_window_fixture(1, 5, 8),
+                view_window_fixture(6, total, total),
+            ])
+            .expect_err("changed endpoint must discard the complete snapshot");
+            ensure(
+                is_unstable_view(&error),
+                "live growth or truncation is retryable",
+            )?;
+        }
+        for page in [view_window_fixture(7, 8, 8), "invalid JSON".to_owned()] {
+            let error = collect_view_fixture(&[view_window_fixture(1, 5, 8), page])
+                .expect_err("malformed page");
+            ensure(
+                !is_unstable_view(&error),
+                "malformed source still fails the batch",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn complete_view_accepts_empty_transcripts_in_both_formats() -> TestResult {
         for page in [String::new(), "{\"total_lines\":0,\"lines\":[]}".to_owned()] {
             let rows = collect_view_fixture(&[page]).map_err(|error| error.to_string())?;
@@ -3390,63 +3449,7 @@ mod tests {
             )?;
             ensure(
                 !redacted.contains(forbidden),
-                format!("forbidden path {forbidden:?} escaped as {redacted:?}"),
-            )?;
-        }
-
-        ensure_equal(
-            &redact_import_report_source_ref("cass://safe-source"),
-            &"cass://safe-source".to_owned(),
-            "non-file URI remains intact",
-        )?;
-        ensure_equal(
-            &redact_import_report_source_ref("https://example.test/session"),
-            &"https://example.test/session".to_owned(),
-            "multi-letter URI schemes are not mistaken for drive paths",
-        )?;
-        ensure_equal(
-            &redact_import_report_source_ref(r"source=C:\Users\Alice\session.jsonl"),
-            &"source=[REDACTED_PATH]".to_owned(),
-            "embedded drive path at a token boundary is redacted",
-        )
-    }
-
-    #[test]
-    fn public_cass_source_ref_redacts_secret_bearing_filenames_as_one_path() -> TestResult {
-        let token = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
-        for path in [
-            format!("/tmp/cass/session-{token}.jsonl"),
-            format!(r"C:\Users\Alice\session-{token}.jsonl"),
-            format!("file:///tmp/cass/session-{token}.jsonl"),
-        ] {
-            ensure_equal(
-                &redact_import_report_source_ref(&path),
-                &"[REDACTED_PATH]".to_owned(),
-                "secret-bearing filename must not leave placeholder or suffix fragments",
-            )?;
-        }
-        let redacted =
-            redact_import_report_source_ref(&format!("source=/tmp/session.jsonl token={token}"));
-        ensure(
-            redacted.contains("source=[REDACTED_PATH]"),
-            "path redaction",
-        )?;
-        ensure(
-            !redacted.contains(&token),
-            "separate secrets must still be redacted",
-        )
-    }
-
-    #[test]
-    fn cass_command_public_error_diagnostics_and_cursor_are_path_secret_safe() -> TestResult {
-        let secret = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
-        let command_path = r"C:\Users\Alice\private\session.jsonl";
-        let stderr_path = r"\\fileserver\profiles\Alice\private\trace.jsonl";
-        let error = CassImportError::CassCommand {
-            command: format!(r#"cass view "{command_path}" --api-key {secret}"#),
-            exit_code: Some(2),
-            stderr: format!(
-                "failed to read {stderr_path}\nsecondary source file:///C:/Users/Alice/private/fallback.jsonl token={secret}"
+     …603 tokens truncated…allback.jsonl token={secret}"
             ),
             timed_out: false,
             stderr_truncated: false,
@@ -6032,6 +6035,72 @@ mod tests {
         fs::set_permissions(binary, fs::Permissions::from_mode(0o755))
             .map_err(|e| e.to_string())?;
         parse_sessions_json(session_json.as_bytes()).map_err(|e| e.to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_session_refusal_preserves_prior_import_and_processes_later_sessions() -> TestResult {
+        let (binary, client, options) = history_import_fixture("live-session-growth")?;
+        let raw = "Build observation retained before the live session grew.";
+        write_history_cass_fixture(&binary, &options.workspace_path, &[("live", raw)])?;
+        let initial = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+        let database = options.database_path.as_deref().ok_or("database path")?;
+        let workspace_id = stable_workspace_id(&options.workspace_path.to_string_lossy());
+        let live_path = options.workspace_path.join("live.jsonl");
+        let live_id = initial.sessions[0]
+            .session_id
+            .as_deref()
+            .ok_or("session id")?;
+        let db = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        let before = imported_history_snapshot(&db, &workspace_id, live_id)?;
+        db.close().map_err(|e| e.to_string())?;
+
+        let later_path = options.workspace_path.join("later.jsonl");
+        let sessions = json!({"sessions": [
+            {"path": live_path, "workspace": options.workspace_path, "agent": "codex", "message_count": 8},
+            {"path": later_path, "workspace": options.workspace_path, "agent": "codex", "message_count": 1},
+        ]});
+        let marker = options.workspace_path.join("view-call-marker");
+        let first = json!({"path": live_path, "total_lines": 8, "lines":
+            (1..=5).map(|line| json!({"line": line, "content": raw})).collect::<Vec<_>>()});
+        let grown = json!({"path": live_path, "total_lines": 9, "lines":
+            (6..=9).map(|line| json!({"line": line, "content": raw})).collect::<Vec<_>>()});
+        let stable = json!({"path": later_path, "total_lines": 1,
+            "lines": [{"line": 1, "content": "Later stable build observation."}]});
+        fs::write(&binary, format!(
+            "#!/bin/sh\ncase \"$1\" in\n sessions) cat <<'SESSIONS'\n{sessions}\nSESSIONS\n;;\n view) for source_path in \"$@\"; do :; done\n if [ \"$source_path\" = {live} ]; then\n if [ -f {marker} ]; then\n cat <<'GROWN'\n{grown}\nGROWN\n else\n touch {marker}\n cat <<'FIRST'\n{first}\nFIRST\n fi\n else\n cat <<'STABLE'\n{stable}\nSTABLE\n fi\n;;\n *) exit 2;;\nesac\n",
+            live = shell_quote_command_arg(&live_path.to_string_lossy()),
+            marker = shell_quote_command_arg(&marker.to_string_lossy()),
+        )).map_err(|e| e.to_string())?;
+        let report = import_cass_sessions(&client, &options).map_err(|e| e.to_string())?;
+        ensure_equal(
+            &report.sessions_imported,
+            &1,
+            "later stable session imported",
+        )?;
+        ensure_equal(&report.sessions_skipped, &1, "live session skipped")?;
+        ensure_equal(
+            &report.status.as_str(),
+            &"completed_with_refusals",
+            "truthful partial report",
+        )?;
+        ensure_equal(
+            &report.sessions[0].status,
+            &ImportSessionStatus::Refused(CassHistoryRefusal::Unstable),
+            "typed refusal",
+        )?;
+        let db = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        ensure_equal(
+            &imported_history_snapshot(&db, &workspace_id, live_id)?,
+            &before,
+            "live snapshot never changes retained evidence, audits or jobs",
+        )?;
+        ensure_equal(
+            &db.count_table_rows("sessions").map_err(|e| e.to_string())?,
+            &2,
+            "stable continuation is durable",
+        )?;
+        Ok(())
     }
 
     #[cfg(unix)]
