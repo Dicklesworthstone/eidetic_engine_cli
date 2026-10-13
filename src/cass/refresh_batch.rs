@@ -6,6 +6,7 @@
 //! all commit, or none of them do.
 
 use crate::db::{DbConnection, DbError, EvidenceAdmissionTally, StoredSession};
+use sqlmodel_core::Value;
 
 use super::{
     CassViewSpanForImport, cass_redaction_audit_input, evidence_input, refusal,
@@ -25,22 +26,34 @@ pub(super) fn insert_additions(
     let mut added_lines = Vec::with_capacity(additions.len());
     let mut admission = EvidenceAdmissionTally::default();
     for batch in additions.chunks(REFRESH_WRITE_BATCH_ROWS) {
+        let identities = batch
+            .iter()
+            .map(|span| stable_evidence_id(&session.id, &span.cass_span_id))
+            .collect::<Vec<_>>();
+        // Only existence matters here. Do not hydrate another session's
+        // private transcript or issue a separate query for every new row.
+        // Deliberately do NOT filter by workspace/session: evidence IDs occupy
+        // a global namespace, including malformed or foreign-scope rows.
+        let parameters = identities
+            .iter()
+            .map(|id| Value::Text(id.clone()))
+            .collect::<Vec<_>>();
+        let placeholders = std::iter::repeat_n("?", parameters.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let occupied = connection.query(
+            &format!("SELECT 1 FROM evidence_spans WHERE id IN ({placeholders}) LIMIT 1"),
+            &parameters,
+        )?;
+        if !occupied.is_empty() {
+            return Err(refusal("cass_refresh_evidence_identity_exists"));
+        }
+        // Construct the screened inputs only after the identity probe passes.
         let rows = batch
             .iter()
-            .map(|span| {
-                (
-                    stable_evidence_id(&session.id, &span.cass_span_id),
-                    evidence_input(workspace_id, &session.id, span),
-                )
-            })
+            .zip(identities)
+            .map(|(span, id)| (id, evidence_input(workspace_id, &session.id, span)))
             .collect::<Vec<_>>();
-        // Preserve the refresh-specific identity refusal. An occupied identity
-        // anywhere in the database cannot be overwritten or re-admitted.
-        for (id, _) in &rows {
-            if connection.get_evidence_span(id)?.is_some() {
-                return Err(refusal("cass_refresh_evidence_identity_exists"));
-            }
-        }
         admission.merge(&connection.insert_evidence_spans_in_session(&rows, session)?);
         for (span, (evidence_id, _)) in batch.iter().zip(&rows) {
             if span.redacted {

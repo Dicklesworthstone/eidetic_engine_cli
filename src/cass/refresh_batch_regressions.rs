@@ -271,3 +271,59 @@ fn metadata_only_refresh_has_no_evidence_or_admission_writes() {
         counts,
     );
 }
+
+#[test]
+fn last_batch_foreign_identity_collision_rolls_back_previous_batches() {
+    let (db, workspace, id, _, _) = fixture(0, &[]);
+    let session = discovered(145);
+    let spans = (1..=145)
+        .map(|line| span(&session, line, &format!("Build observation {line}.")))
+        .collect::<Vec<_>>();
+    // Refresh orders additions by raw reference, not numeric line number.
+    // Occupy the last reference so earlier batches have already been written.
+    let last = spans
+        .iter()
+        .max_by(|left, right| left.cass_span_id.cmp(&right.cass_span_id))
+        .unwrap();
+    let collision_id = stable_evidence_id(&id, &last.cass_span_id);
+    let foreign_workspace = WorkspaceId::from_uuid(uuid::Uuid::from_u128(8799)).to_string();
+    db.insert_workspace(
+        &foreign_workspace,
+        &CreateWorkspaceInput {
+            path: "/foreign-refresh-workspace".to_owned(),
+            name: None,
+        },
+    )
+    .unwrap();
+    let foreign_session =
+        crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(8800)).to_string();
+    let foreign = CassSessionInfo::new("/private/foreign-session.jsonl").with_agent(CassAgent::Codex);
+    db.insert_session(&foreign_session, &session_input(&foreign_workspace, &foreign))
+        .unwrap();
+    let foreign_span = span(&foreign, 1, "FOREIGN_PRIVATE_TRANSCRIPT must stay intact.");
+    db.insert_evidence_span(
+        &collision_id,
+        &evidence_input(&foreign_workspace, &foreign_session, &foreign_span),
+    )
+    .unwrap();
+    let foreign_before = db.get_evidence_span(&collision_id).unwrap().unwrap();
+    let before_counts = batch_table_counts(&db);
+    let before_session = db.get_session(&id).unwrap();
+    let error = refresh_session(&db, &workspace, &id, &session, &spans)
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("cass_refresh_evidence_identity_exists"),
+    );
+    assert!(!error.to_string().contains(&foreign.source_path));
+    assert!(!error.to_string().contains("FOREIGN_PRIVATE_TRANSCRIPT"));
+    assert_eq!(batch_table_counts(&db), before_counts);
+    assert_eq!(db.get_session(&id).unwrap(), before_session);
+    assert!(db.list_evidence_spans_for_session(&id).unwrap().is_empty());
+    assert_eq!(
+        db.get_evidence_span(&collision_id).unwrap().unwrap(),
+        foreign_before,
+    );
+}
