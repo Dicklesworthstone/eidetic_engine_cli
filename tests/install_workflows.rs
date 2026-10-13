@@ -971,18 +971,34 @@ printf 'matching-tag=accepted\n'
 
 #[test]
 fn franken_stack_lock_pins_complete_full_sha_closure() -> TestResult {
+    // Updated 2026-10-13. This list had drifted from franken-stack.lock on three
+    // rows and the test was a latent red: it expected franken_agent_detection
+    // 0feebc55, frankensearch dd093fb2 and frankensqlite a8b76fb8, whose own
+    // manifests declare 0.2.3, 0.6.0 and 0.4.1. Cargo.toml pins =0.3.8, =0.7.1
+    // and =0.4.10, so those three expectations could not have been right. The
+    // lock had already moved frankensearch and frankensqlite to revisions
+    // declaring the pinned versions; only franken_agent_detection was stale in
+    // the lock (f3c00b742 declares 0.3.3) and it now points at v0.3.8.
+    //
+    // These values are NOT regenerated from the lock to force green. The
+    // independent criterion is that each revision's own manifest declares the
+    // version Cargo.toml pins, read at the paths package_manifests maps in
+    // scripts/rch_verify.sh; all twelve packages satisfy it as listed. Verify
+    // that way, not by copying the lock, or this test stops being a tripwire.
+    // sqlmodel's two crates carry version.workspace = true and inherit 0.5.0
+    // from the workspace root.
     const EXPECTED: &[(&str, &str)] = &[
         ("asupersync", "78b64636e99fea4ea2d868096576021dd3b8e519"),
         (
             "franken_agent_detection",
-            "0feebc55fed8db4d596f330742fe11ca4cb70764",
+            "99ae86cdf8c71c53cec1df5760766038eca20375",
         ),
         (
             "franken_networkx",
             "0159a5d90a45092792e9b04fbfd87f8b57fb79ee",
         ),
-        ("frankensearch", "dd093fb230404ab08be2ed6f27776ed6c4796485"),
-        ("frankensqlite", "a8b76fb810ff0e26bb49c81add43c7709e1e7302"),
+        ("frankensearch", "d1cb86e1848309fe39fb7c8c4c4d7356ebd878aa"),
+        ("frankensqlite", "92aeb2b9762f2f38154fde74c4055959c6ebe294"),
         ("sqlmodel_rust", "12d490b22ce3a82533591b5b39d2318b21da1f0f"),
         ("toon_rust", "d356b8d344a7d709417c2e381f8b595d237683b9"),
     ];
