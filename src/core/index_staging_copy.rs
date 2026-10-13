@@ -4,6 +4,8 @@
 //! other generation. Unsupported cloning falls back to a bounded byte copy;
 //! capacity and I/O failures remain failures. The caller owns the private
 //! staging directory, publication lease, flush barrier, and abandoned-file cleanup.
+//! CLI copies observe the already-installed request's cancellation between I/O
+//! calls. This is cooperative: it cannot preempt an individual filesystem call.
 
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -43,15 +45,43 @@ impl StagingCopier {
         target: &Path,
         clone: impl FnOnce(&File, &Path) -> io::Result<CloneAttempt>,
     ) -> io::Result<()> {
-        let before = fs::symlink_metadata(source_path)?;
+        // run_cli_with_cx installs the bounded request before entering these
+        // synchronous adapters. Borrow it only to observe cancellation; never
+        // mint a context, renew a budget, spawn work, or acquire capabilities.
+        // Context-free filesystem callers retain their existing behavior. The
+        // publisher still owns explicit Cx checks and terminal cancellation.
+        let request = asupersync::Cx::current();
+        self.copy_with_checkpoint(source_path, target, clone, || {
+            if let Some(cx) = &request {
+                cx.checkpoint().map_err(|error| {
+                    io::Error::other(format!("index staging request interrupted: {error}"))
+                })?;
+            }
+            Ok(())
+        })
+    }
+
+    fn copy_with_checkpoint(
+        &mut self,
+        source_path: &Path,
+        target: &Path,
+        clone: impl FnOnce(&File, &Path) -> io::Result<CloneAttempt>,
+        mut checkpoint: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        let before = checked_io(&mut checkpoint, || fs::symlink_metadata(source_path))?;
         require_regular(&before)?;
-        let mut source = open_source(source_path)?;
-        require_unchanged(&before, &source.metadata()?)?;
+        let mut source = checked_io(&mut checkpoint, || open_source(source_path))?;
+        require_unchanged(&before, &checked_io(&mut checkpoint, || source.metadata())?)?;
         let length = before.len();
         let (mut destination, cloned) = if length == 0 || self.clone_unavailable {
-            (create_destination(target)?, false)
+            (
+                checked_io(&mut checkpoint, || create_destination(target))?,
+                false,
+            )
         } else {
-            match clone(&source, target)? {
+            // A cancelled or failed clone must not start the byte-copy fallback.
+            // Do not retry an interrupted clone: it may have created its target.
+            match checked_io(&mut checkpoint, || clone(&source, target))? {
                 CloneAttempt::Cloned(file) => (file, true),
                 CloneAttempt::Unavailable { file, error } => {
                     if let Some(error) = error {
@@ -71,7 +101,7 @@ impl StagingCopier {
                     (
                         match file {
                             Some(file) => file,
-                            None => create_destination(target)?,
+                            None => checked_io(&mut checkpoint, || create_destination(target))?,
                         },
                         false,
                     )
@@ -81,18 +111,30 @@ impl StagingCopier {
         if !cloned {
             // A refused clone may have touched our exclusively created inode.
             // Never reopen/truncate a target supplied by somebody else.
-            destination.set_len(0)?;
-            destination.seek(SeekFrom::Start(0))?;
-            copy_bytes(&mut source, &mut destination, length, &mut self.buffer)?;
+            checked_io(&mut checkpoint, || destination.set_len(0))?;
+            checked_io(&mut checkpoint, || destination.seek(SeekFrom::Start(0)))?;
+            copy_bytes_with_checkpoint(
+                &mut source,
+                &mut destination,
+                length,
+                &mut self.buffer,
+                &mut checkpoint,
+            )?;
         }
-        let written = destination.metadata()?;
+        let written = checked_io(&mut checkpoint, || destination.metadata())?;
         require_regular(&written)?;
         if written.len() != length {
             return Err(changed("staged file length differs from its source"));
         }
-        require_unchanged(&before, &source.metadata()?)?;
-        require_unchanged(&before, &fs::symlink_metadata(source_path)?)?;
-        require_unchanged(&written, &fs::symlink_metadata(target)?)?;
+        require_unchanged(&before, &checked_io(&mut checkpoint, || source.metadata())?)?;
+        require_unchanged(
+            &before,
+            &checked_io(&mut checkpoint, || fs::symlink_metadata(source_path))?,
+        )?;
+        require_unchanged(
+            &written,
+            &checked_io(&mut checkpoint, || fs::symlink_metadata(target))?,
+        )?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -100,6 +142,7 @@ impl StagingCopier {
                 return Err(changed("staging must own an independent inode"));
             }
         }
+        checkpoint()?;
         if cloned {
             self.stats.cloned_files = self.stats.cloned_files.saturating_add(1);
             self.stats.cloned_bytes = self.stats.cloned_bytes.saturating_add(length);
@@ -276,12 +319,55 @@ fn clone_is_unavailable(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::Unsupported
 }
 
+/// Observe cancellation before interpreting an I/O result, including a failure.
+/// No file created by an interrupted operation is mistaken for a finished copy;
+/// the existing staging owner remains responsible for discarding it.
+fn checked_io<T>(
+    checkpoint: &mut impl FnMut() -> io::Result<()>,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    checkpoint()?;
+    let result = operation();
+    checkpoint()?;
+    result
+}
+
+/// Retry only an interrupted backend operation, never a failed checkpoint.
+/// read_exact/write_all retry internally and cannot observe the request during
+/// repeated EINTR or short transfers, so the bounded copy drives those loops.
+fn retry_io<T>(
+    checkpoint: &mut impl FnMut() -> io::Result<()>,
+    mut operation: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    loop {
+        checkpoint()?;
+        let result = operation();
+        checkpoint()?;
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
+
+#[cfg(test)]
 fn copy_bytes(
     source: &mut impl Read,
     target: &mut impl Write,
     length: u64,
     buffer: &mut Vec<u8>,
 ) -> io::Result<()> {
+    copy_bytes_with_checkpoint(source, target, length, buffer, &mut || Ok(()))
+}
+
+fn copy_bytes_with_checkpoint(
+    source: &mut impl Read,
+    target: &mut impl Write,
+    length: u64,
+    buffer: &mut Vec<u8>,
+    checkpoint: &mut impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
+    checkpoint()?;
     let desired = usize::try_from(length)
         .unwrap_or(usize::MAX)
         .min(COPY_BUFFER_BYTES);
@@ -293,18 +379,29 @@ fn copy_bytes(
         let count = usize::try_from(remaining)
             .unwrap_or(usize::MAX)
             .min(buffer.len());
-        source.read_exact(&mut buffer[..count])?;
-        target.write_all(&buffer[..count])?;
+        let mut filled = 0;
+        while filled != count {
+            let read = retry_io(checkpoint, || source.read(&mut buffer[filled..count]))?;
+            if read == 0 {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
+            filled += read;
+        }
+        let mut written = 0;
+        while written != count {
+            let write = retry_io(checkpoint, || target.write(&buffer[written..count]))?;
+            if write == 0 {
+                return Err(io::Error::from(io::ErrorKind::WriteZero));
+            }
+            written += write;
+        }
         remaining -= count as u64;
     }
     let mut extra = [0_u8; 1];
-    loop {
-        match source.read(&mut extra) {
-            Ok(0) => return Ok(()),
-            Ok(_) => return Err(changed("index staging source grew during copying")),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-        }
+    if retry_io(checkpoint, || source.read(&mut extra))? == 0 {
+        Ok(())
+    } else {
+        Err(changed("index staging source grew during copying"))
     }
 }
 
@@ -578,5 +675,332 @@ mod tests {
         assert_eq!(reader.search_top_k(&query, 10, None)?, original_hits);
         assert_eq!(fs::read(&source)?, before);
         Ok(())
+    }
+
+    #[test]
+    fn cancelled_cli_request_does_not_create_a_destination() -> TestResult {
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(5), |cx| async move {
+            let root = tempfile::tempdir()?;
+            let source = root.path().join("source");
+            let target = root.path().join("target");
+            fs::write(&source, b"live source")?;
+            cx.set_cancel_reason(asupersync::CancelReason::user("cancel staging"));
+            let mut copier = StagingCopier::default();
+            let error = copier.copy_file(&source, &target).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("index staging request interrupted")
+            );
+            assert!(!target.exists());
+            assert!(copier.buffer.is_empty());
+            assert_eq!(copier.stats().copied_files + copier.stats().cloned_files, 0);
+            assert_eq!(fs::read(&source)?, b"live source");
+            assert!(matches!(
+                crate::core::index::index_checkpoint(&cx),
+                Err(crate::core::index::IndexRebuildError::Cancelled(reason))
+                    if reason.message.as_deref() == Some("cancel staging")
+            ));
+            Ok::<(), io::Error>(())
+        })
+        .map_err(|error| io::Error::other(error.to_string()))??;
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_during_clone_prevents_fallback_and_completion() -> TestResult {
+        for native in [false, true] {
+            crate::core::run_cli_with_cx(std::time::Duration::from_secs(5), |cx| async move {
+                let root = tempfile::tempdir()?;
+                let source = root.path().join("source");
+                let target = root.path().join("target");
+                fs::write(&source, b"live source")?;
+                let mut copier = StagingCopier::default();
+                let error = copier
+                    .copy_with(&source, &target, |file, path| {
+                        let result = if native {
+                            clone_file(file, path)
+                        } else {
+                            unavailable()
+                        };
+                        cx.set_cancel_reason(asupersync::CancelReason::user("cancel clone"));
+                        result
+                    })
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("index staging request interrupted")
+                );
+                assert!(copier.buffer.is_empty());
+                assert!(!copier.clone_unavailable);
+                assert_eq!(copier.stats().clone_refusals, 0);
+                assert_eq!(copier.stats().copied_files + copier.stats().cloned_files, 0);
+                if !native {
+                    assert!(
+                        !target.exists(),
+                        "a cancelled refusal must not start copying"
+                    );
+                }
+                assert_eq!(fs::read(&source)?, b"live source");
+                Ok::<(), io::Error>(())
+            })
+            .map_err(|error| io::Error::other(error.to_string()))??;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_copy_checkpoint_preserves_source_and_never_counts_partial_success() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let bytes = vec![29_u8; COPY_BUFFER_BYTES + 17];
+        fs::write(&source, &bytes)?;
+        let mut checkpoints = 0;
+        let mut complete = StagingCopier::default();
+        complete.copy_with_checkpoint(
+            &source,
+            &root.path().join("complete"),
+            |_, _| unavailable(),
+            || {
+                checkpoints += 1;
+                Ok(())
+            },
+        )?;
+        assert_eq!(complete.stats().copied_files, 1);
+        assert!(
+            checkpoints > 20,
+            "include copy and final admission boundaries"
+        );
+        for stop_at in 1..=checkpoints {
+            let mut observed = 0;
+            let mut copier = StagingCopier::default();
+            let error = copier
+                .copy_with_checkpoint(
+                    &source,
+                    &root.path().join(format!("interrupted-{stop_at}")),
+                    |_, _| unavailable(),
+                    || {
+                        observed += 1;
+                        if observed == stop_at {
+                            Err(io::Error::other("stop at the selected boundary"))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.to_string(), "stop at the selected boundary");
+            assert_eq!(observed, stop_at);
+            assert_eq!(copier.stats().copied_files + copier.stats().cloned_files, 0);
+            assert_eq!(copier.stats().copied_bytes + copier.stats().cloned_bytes, 0);
+            assert_eq!(fs::read(&source)?, bytes);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_errors_are_not_retried_even_when_they_are_interrupted() {
+        let mut checks = 0;
+        let mut calls = 0;
+        let error = retry_io(
+            &mut || {
+                checks += 1;
+                if checks == 2 {
+                    Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "request cancelled",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                calls += 1;
+                Err::<(), _>(io::Error::from(io::ErrorKind::Interrupted))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(checks, 2);
+        assert_eq!(error.to_string(), "request cancelled");
+    }
+
+    #[test]
+    fn post_io_cancellation_precedes_backend_errors_and_success() {
+        for backend_failed in [false, true] {
+            let cancelled = std::cell::Cell::new(false);
+            let error = checked_io(
+                &mut || {
+                    if cancelled.get() {
+                        Err(io::Error::other("cancelled during the operation"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    cancelled.set(true);
+                    if backend_failed {
+                        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "cancelled during the operation");
+        }
+    }
+
+    struct ShortIo {
+        bytes: Vec<u8>,
+        position: usize,
+        calls: usize,
+        maximum: usize,
+    }
+
+    impl Read for ShortIo {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.calls % 3 == 1 {
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            let count = output
+                .len()
+                .min(self.maximum)
+                .min(self.bytes.len() - self.position);
+            output[..count].copy_from_slice(&self.bytes[self.position..self.position + count]);
+            self.position += count;
+            Ok(count)
+        }
+    }
+
+    impl Write for ShortIo {
+        fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.calls % 3 == 1 {
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            let count = input.len().min(self.maximum);
+            self.bytes.extend_from_slice(&input[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn interrupted_short_transfers_preserve_exact_bytes_at_buffer_boundaries() -> TestResult {
+        for length in [
+            0,
+            1,
+            COPY_BUFFER_BYTES - 1,
+            COPY_BUFFER_BYTES,
+            COPY_BUFFER_BYTES + 1,
+        ] {
+            let bytes: Vec<_> = (0..length).map(|index| (index % 251) as u8).collect();
+            let mut source = ShortIo {
+                bytes: bytes.clone(),
+                position: 0,
+                calls: 0,
+                maximum: 4093,
+            };
+            let mut target = ShortIo {
+                bytes: Vec::new(),
+                position: 0,
+                calls: 0,
+                maximum: 1021,
+            };
+            let mut buffer = Vec::new();
+            copy_bytes(&mut source, &mut target, length as u64, &mut buffer)?;
+            assert_eq!(target.bytes, bytes);
+            assert_eq!(source.position, length);
+            assert!(buffer.len() <= COPY_BUFFER_BYTES);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_read_is_not_written_and_cancelled_write_is_not_retried() {
+        struct CancellingIo<'a> {
+            cancelled: &'a std::cell::Cell<bool>,
+            writes: usize,
+        }
+        impl Read for CancellingIo<'_> {
+            fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+                output[0] = 42;
+                self.cancelled.set(true);
+                Ok(1)
+            }
+        }
+        impl Write for CancellingIo<'_> {
+            fn write(&mut self, _input: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                self.cancelled.set(true);
+                Ok(1)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        for cancel_read in [true, false] {
+            let cancelled = std::cell::Cell::new(false);
+            let mut device = CancellingIo {
+                cancelled: &cancelled,
+                writes: 0,
+            };
+            let mut checkpoint = || {
+                if cancelled.get() {
+                    Err(io::Error::other("cancelled transfer"))
+                } else {
+                    Ok(())
+                }
+            };
+            let mut buffer = Vec::new();
+            let mut output = Vec::new();
+            let result = if cancel_read {
+                copy_bytes_with_checkpoint(
+                    &mut device,
+                    &mut output,
+                    2,
+                    &mut buffer,
+                    &mut checkpoint,
+                )
+            } else {
+                copy_bytes_with_checkpoint(
+                    &mut &b"source"[..],
+                    &mut device,
+                    6,
+                    &mut buffer,
+                    &mut checkpoint,
+                )
+            };
+            assert_eq!(result.unwrap_err().to_string(), "cancelled transfer");
+            assert!(output.is_empty());
+            assert_eq!(device.writes, usize::from(!cancel_read));
+        }
+    }
+
+    #[test]
+    fn cancellation_before_allocation_and_zero_writes_are_distinct_failures() {
+        let mut buffer = Vec::new();
+        let mut output = Vec::new();
+        let error = copy_bytes_with_checkpoint(
+            &mut &b"source"[..],
+            &mut output,
+            u64::MAX,
+            &mut buffer,
+            &mut || Err(io::Error::other("cancel before allocation")),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "cancel before allocation");
+        assert!(buffer.is_empty());
+        assert!(output.is_empty());
+        let mut empty = [];
+        let mut target = io::Cursor::new(&mut empty[..]);
+        let error = copy_bytes(&mut &b"source"[..], &mut target, 6, &mut buffer).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
     }
 }
