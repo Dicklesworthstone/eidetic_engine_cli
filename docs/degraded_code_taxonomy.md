@@ -632,6 +632,7 @@ that helper is the thing to change.
 | `storage_not_initialized` | medium | bd-17c65.10.6 (J6) |
 | `storage_not_ready` | medium | bd-17c65.10.6 (J6) |
 | `memory_health_unavailable` | low | bd-17c65.10.6 (J6) |
+| `snapshot_approaching_cap` | low | bd-nnheo |
 | `snapshot_pin_expired` | medium | bd-2caru.6 |
 | `snapshot_pin_force_released` | medium | bd-2caru.6 |
 | `snapshot_release_failed` | medium | bd-2caru.6 |
