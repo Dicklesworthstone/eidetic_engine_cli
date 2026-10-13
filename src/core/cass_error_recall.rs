@@ -1331,7 +1331,7 @@ fn structured_output_allows_completion(text: &str) -> bool {
                             | "rch_verify_build_admission_denied"
                             | "rch_verify_known_blocker_active"
                             | "rch_verify_proof_broker_reuse_existing"
-                        ) || (code.starts_with("rch_verify_proof_broker_")
+                    ) || (code.starts_with("rch_verify_proof_broker_")
                         && !matches!(
                             code.as_str(),
                             "rch_verify_proof_broker_bypassed"

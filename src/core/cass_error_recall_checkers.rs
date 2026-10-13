@@ -832,16 +832,27 @@ mod tests {
         assert_eq!(direct.diagnostics, metadata.diagnostics);
         let direct_coverage = direct.eslint_coverage.unwrap();
         let metadata_coverage = metadata.eslint_coverage.unwrap();
-        assert_eq!(direct_coverage.checked_files, metadata_coverage.checked_files);
+        assert_eq!(
+            direct_coverage.checked_files,
+            metadata_coverage.checked_files
+        );
         assert_eq!(direct_coverage.failed_files, metadata_coverage.failed_files);
         assert_eq!(direct_coverage.failed_files.len(), 1);
         assert!(!direct.has_test_execution);
-        assert_eq!(failure_diagnostics(&optimistic(array.clone())), direct.diagnostics);
+        assert_eq!(
+            failure_diagnostics(&optimistic(array.clone())),
+            direct.diagnostics
+        );
         assert_eq!(structured_error_diagnostics(&array), direct.diagnostics);
         assert!(optimistic(array.clone()).failed());
         assert!(!optimistic(array).succeeded());
         let public = format!("{:?}", direct.diagnostics).to_lowercase();
-        for hidden in ["private_source", "private_output", "private_fix", "/private/project"] {
+        for hidden in [
+            "private_source",
+            "private_output",
+            "private_fix",
+            "/private/project",
+        ] {
             assert!(!public.contains(hidden));
         }
     }
@@ -851,8 +862,20 @@ mod tests {
         for messages in [Vec::new(), vec![lint_message(1)]] {
             let text = json!([lint_file(messages)]).to_string();
             assert!(optimistic(text.clone()).succeeded());
-            assert!(!ToolOutput { text: text.clone(), ..ToolOutput::default() }.succeeded());
-            assert!(!ToolOutput { exit_code: Some(1), ..optimistic(text) }.succeeded());
+            assert!(
+                !ToolOutput {
+                    text: text.clone(),
+                    ..ToolOutput::default()
+                }
+                .succeeded()
+            );
+            assert!(
+                !ToolOutput {
+                    exit_code: Some(1),
+                    ..optimistic(text)
+                }
+                .succeeded()
+            );
         }
         let empty = inspect("[]").unwrap().unwrap();
         assert!(empty.diagnostics.is_empty());
@@ -881,7 +904,11 @@ mod tests {
             assert!(structured_error_diagnostics(&text).is_empty());
         }
         let file = original[0].clone();
-        for bad in [json!([file.clone(), file.clone()]), json!([file.clone(), 0]), json!([null, file])] {
+        for bad in [
+            json!([file.clone(), file.clone()]),
+            json!([file.clone(), 0]),
+            json!([null, file]),
+        ] {
             assert!(inspect(&bad.to_string()).is_err());
             assert!(!optimistic(bad.to_string()).succeeded());
         }
@@ -920,15 +947,20 @@ mod tests {
     #[test]
     fn eslint_array_bounds_include_complete_tail_and_exact_byte_boundary() {
         let files = (0..MAX_COMPILER_RECORDS)
-            .map(|number| json!({
-                "filePath": format!("/src/{number}.js"), "messages": [],
-                "errorCount": 0, "fatalErrorCount": 0, "warningCount": 0
-            }))
+            .map(|number| {
+                json!({
+                    "filePath": format!("/src/{number}.js"), "messages": [],
+                    "errorCount": 0, "fatalErrorCount": 0, "warningCount": 0
+                })
+            })
             .collect::<Vec<_>>();
         let text = json!(files).to_string();
         assert!(text.len() < MAX_SCANNED_OUTPUT_BYTES);
         assert!(inspect(&text).unwrap().unwrap().allows_completion);
-        let exact = format!("{text}{}", " ".repeat(MAX_SCANNED_OUTPUT_BYTES - text.len()));
+        let exact = format!(
+            "{text}{}",
+            " ".repeat(MAX_SCANNED_OUTPUT_BYTES - text.len())
+        );
         assert!(inspect(&exact).is_ok());
         assert!(inspect(&format!("{exact} ")).is_err());
         let mut too_many: Value = serde_json::from_str(&text).unwrap();
@@ -945,7 +977,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut tail = json!([lint_file(messages)]);
-        assert_eq!(inspect(&tail.to_string()).unwrap().unwrap().diagnostics.len(), MAX_DIAGNOSTICS_PER_FAILURE);
+        assert_eq!(
+            inspect(&tail.to_string())
+                .unwrap()
+                .unwrap()
+                .diagnostics
+                .len(),
+            MAX_DIAGNOSTICS_PER_FAILURE
+        );
         tail[0]["messages"][4]["severity"] = json!(3);
         assert!(inspect(&tail.to_string()).is_err());
         assert!(!optimistic(tail.to_string()).succeeded());

@@ -147,9 +147,8 @@ fn live_source_rows_fit(
             "SELECT COUNT(*) FROM ({selection} LIMIT ?{}) bounded_corpus_rows",
             parameters.len() + 1,
         );
-        let limit = i64::try_from(limit).map_err(|_| {
-            IndexRebuildError::Index("invalid live corpus row ceiling".to_owned())
-        })?;
+        let limit = i64::try_from(limit)
+            .map_err(|_| IndexRebuildError::Index("invalid live corpus row ceiling".to_owned()))?;
         parameters.push(sqlmodel_core::Value::BigInt(limit));
         source_size_value(&db.query(&sql, &parameters)?, 0)
     })
@@ -2009,9 +2008,7 @@ mod tests {
             let mut calls = 0;
             let result = live_source_rows_fit_with(&cx, 0, |_, _| {
                 calls += 1;
-                cx.set_cancel_reason(asupersync::CancelReason::user(
-                    "cancel corpus preflight",
-                ));
+                cx.set_cancel_reason(asupersync::CancelReason::user("cancel corpus preflight"));
                 if query_fails {
                     Err(IndexRebuildError::Index(
                         "interrupted corpus count".to_owned(),
@@ -2097,7 +2094,8 @@ mod tests {
                         .expect("publication upper bound")
                 );
             }
-            read.commit_read_snapshot().expect("caller retains snapshot");
+            read.commit_read_snapshot()
+                .expect("caller retains snapshot");
         })
         .expect("runtime");
         assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
@@ -2123,7 +2121,8 @@ mod tests {
                     .expect("refuse before touching the missing sidecar")
                     .is_none()
             );
-            read.commit_read_snapshot().expect("caller retains snapshot");
+            read.commit_read_snapshot()
+                .expect("caller retains snapshot");
         })
         .expect("runtime");
         assert_eq!(std::fs::read(&path).expect("unchanged source"), before);

@@ -72,8 +72,8 @@ impl Fixture {
     }
 
     fn documents(&self) -> Result<Vec<IndexableDocument>, String> {
-        let db = DbConnection::open_file_read_only(&self.database)
-            .map_err(|error| error.to_string())?;
+        let db =
+            DbConnection::open_file_read_only(&self.database).map_err(|error| error.to_string())?;
         collect_workspace_index_source_snapshot(&db, WORKSPACE)
             .map(|source| source.documents)
             .map_err(|error| error.to_string())
@@ -118,15 +118,17 @@ fn doctor_repair_records_exact_source_and_supports_the_next_delta() -> TestResul
     assert!(unchanged.upserts.is_empty() && unchanged.removals.is_empty());
 
     // A single edited memory is a delta, not another all-corpus inference job.
-    documents[0].content.push_str(" Check the repair's exit status.");
+    documents[0]
+        .content
+        .push_str(" Check the repair's exit status.");
     let changed = delta::plan(&fixture.staging, &stack, &documents)
         .map_err(|error| format!("the first post-repair write must stay incremental: {error:?}"))?;
     assert_eq!(changed.upserts.len(), 1);
     assert_eq!(changed.upserts[0].id, documents[0].id);
     assert!(changed.removals.is_empty());
 
-    let source = DbConnection::open_file_read_only(&fixture.database)
-        .map_err(|error| error.to_string())?;
+    let source =
+        DbConnection::open_file_read_only(&fixture.database).map_err(|error| error.to_string())?;
     for number in 0..4_u32 {
         assert!(
             source
@@ -181,8 +183,12 @@ fn empty_doctor_repair_never_selects_a_model_and_records_empty_digests() -> Test
         })
         .await?;
         let documents = Vec::new();
-        let delta = delta::plan(&fixture.staging, &hash_fallback_embedder_stack(), &documents)
-            .map_err(|error| IndexRebuildError::Index(format!("empty repair digests: {error:?}")))?;
+        let delta = delta::plan(
+            &fixture.staging,
+            &hash_fallback_embedder_stack(),
+            &documents,
+        )
+        .map_err(|error| IndexRebuildError::Index(format!("empty repair digests: {error:?}")))?;
         assert!(delta.upserts.is_empty() && delta.removals.is_empty());
         Ok::<_, IndexRebuildError>(())
     })
