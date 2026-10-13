@@ -847,8 +847,24 @@ them on the pinned lane:
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
     cargo clippy --locked --all-targets -- -D warnings
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-    cargo test --locked --workspace --all-targets
+    cargo test --locked --workspace --lib --bins --tests --examples
 ```
+
+The test gate here is the NON-BENCHMARK one, matching what the central
+verifier actually runs (`cargo test --workspace --lib --bins --tests
+--examples`, scripts/verify.sh). Benchmarks are deliberately not in it: they
+are gated behind `./scripts/verify.sh --include-bench`, which dispatches
+`./scripts/bench_perf_regression.sh --check-regression`.
+
+Until 2026-10-13 this block substituted `--workspace --all-targets` for the
+four explicit target flags, which pulls benches into the normal gate.
+`agent_docs_match_normal_non_benchmark_test_gate` in
+tests/verification_drift_guard.rs forbids that exact invocation ANYWHERE in
+this file, so the test was red for as long as the block said it.
+
+Do not quote the forbidden invocation here, not even to explain it: the guard
+is a substring scan over the whole file, so a prose mention of it reds the
+guard exactly as a real instruction would.
 
 ### 2. Commit Changes
 

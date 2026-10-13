@@ -27,9 +27,10 @@ scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
 # Lint (warnings = errors)
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
     cargo clippy --locked --all-targets -- -D warnings
-# Run all tests
+# Run all tests (the NON-BENCH gate, which is what verify.sh runs; benches go
+# through ./scripts/verify.sh --include-bench)
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
-    cargo test --locked --workspace --all-targets
+    cargo test --locked --workspace --lib --bins --tests --examples
 # A single test
 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
     cargo test --locked test_name -- --exact
