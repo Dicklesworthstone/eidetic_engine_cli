@@ -1119,6 +1119,13 @@ mod tests {
         let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
         options.source_mode = crate::core::search::SearchSourceMode::Hybrid;
         let database = options.database_path.as_ref().ok_or("fixture database")?;
+        // Snapshot the registry before the pack runs so the post-condition below can be
+        // differential. Whether a real embed model is installed on the host is not this
+        // test's subject; that the read-only path leaves the registry untouched is.
+        let registry_before = DbConnection::open_file_read_only(database)
+            .map_err(|error| error.to_string())?
+            .list_model_registry_entries(&workspace_id)
+            .map_err(|error| error.to_string())?;
         let before = std::fs::read(database).map_err(|error| error.to_string())?;
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let provider =
@@ -1168,15 +1175,18 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             0
         );
-        assert!(
+        // WAL keeps writes out of the main database file, so the byte comparison above does
+        // not cover them: this is the clause that proves the read-only path promoted no model
+        // and wrote no row. It compares against the snapshot rather than asserting that every
+        // Available entry is Hash-provided, because a host can have a real embed model
+        // installed and Available while the cached-local-only constraint still forces the
+        // hash fallback the clauses above assert. The absolute form red on exactly that host
+        // (bd-5tl24).
+        assert_eq!(
             connection
                 .list_model_registry_entries(&workspace_id)
-                .map_err(|error| error.to_string())?
-                .iter()
-                .all(
-                    |entry| entry.status != crate::models::ModelRegistryStatus::Available
-                        || entry.provider == crate::models::ModelProvider::Hash
-                )
+                .map_err(|error| error.to_string())?,
+            registry_before
         );
         Ok(())
     }
