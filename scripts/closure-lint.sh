@@ -1549,6 +1549,28 @@ close_reason_contains_abstention() {
     # conventions, failure-mode taxonomy references, and "placeholder" in a
     # removal context. A genuine abstention keeps no removal framing and still
     # trips the final regex below.
+    #
+    # The last three rules were added 2026-10-13 for bd-2pos6.2, whose close
+    # reason tripped this check while REPORTING that placeholder behaviour was
+    # removed. Three occurrences survived every rule above:
+    #   selected_..._does_not_emit_placeholder_degradation ... ok   (x2)
+    #   comprehensiveRules should no longer be placeholder-backed
+    # The first two are snake_case TEST NAMES that assert the absence of the
+    # behaviour, and they were quoted beside libtest's "... ok", so they are
+    # evidence of the opposite of abstention. The third is removal framing the
+    # existing `no placeholders?` rule cannot reach, because "no LONGER be
+    # placeholder-backed" is neither "no placeholder" nor "placeholder
+    # removed", and the hyphen in "placeholder-backed" also defeats the
+    # whitespace in the rule above it.
+    #
+    # The identifier rules deliberately require a negation segment AND an
+    # abstention word INSIDE ONE snake_case token, in either order, so they
+    # cannot swallow prose: `[a-z0-9_]*` never crosses a space. Verified
+    # against seven genuine-abstention controls that must still trip ("ships
+    # an honest stub", "a placeholder until v2", "abstains when no corpus is
+    # present", "conservative abstention", "deferred until v2", "a degraded
+    # result because the model is unavailable", "remains a stub pending the
+    # daemon slice") and three negation-framed cases that must not.
     scrubbed=$(
         printf "%s\n" "$close_reason" |
             sed -E \
@@ -1565,7 +1587,10 @@ close_reason_contains_abstention() {
                 -e 's/(PLACEHOLDER_[A-Z0-9_]+|[A-Z0-9_]+_PLACEHOLDER[A-Z0-9_]*)//g' \
                 -e 's/(^|[^[:alnum:]_])no[[:space:]]+placeholders?([^[:alnum:]_]|$)/\1\2/Ig' \
                 -e 's/placeholders?[[:space:]]+((backed[- ]?)?(section|mechanism|item|entry|entries|impl|implementation)s?[[:space:]]+)?(retired|removed|deleted|replaced|eliminated|dropped|gone)//Ig' \
-                -e 's/(retired|removed|deleted|replaced|eliminated|dropped)[[:space:]]+(the[[:space:]]+)?placeholders?//Ig'
+                -e 's/(retired|removed|deleted|replaced|eliminated|dropped)[[:space:]]+(the[[:space:]]+)?placeholders?//Ig' \
+                -e 's/[a-z0-9_]*(does_not|do_not|no_longer|never)[a-z0-9_]*(placeholder|stub|degrad|abstain|unavailable)[a-z0-9_]*//Ig' \
+                -e 's/[a-z0-9_]*(placeholder|stub|degrad|abstain|unavailable)[a-z0-9_]*(does_not|do_not|no_longer|never)[a-z0-9_]*//Ig' \
+                -e 's/(should[[:space:]]+)?no[[:space:]]+longer[[:space:]]+(be[[:space:]]+)?placeholders?([- ]backed)?//Ig'
     )
 
     case_insensitive_line_regex_match "$scrubbed" "$ABSTENTION_REGEX"
