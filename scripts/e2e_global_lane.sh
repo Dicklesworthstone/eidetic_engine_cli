@@ -16,7 +16,9 @@
 #   - demote-global tombstones the row and it stops surfacing.
 #
 # Environment:
-#   EE_BIN / EE_BINARY  Path to the ee binary (default: `ee` on PATH)
+#   EE_BIN / EE_BINARY  Path to the ee binary. When neither is set, the binary
+#                       built from this source tree is preferred over PATH; see
+#                       ee_resolve_fixture_binary (bd-z6g1s, bd-pf1qo).
 #   EE_E2E_TMPDIR       Temp base (default /private/tmp)
 
 set -uo pipefail
@@ -30,7 +32,19 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 3
 fi
 
-EE_BIN="${EE_BIN:-${EE_BINARY:-ee}}"
+# Defaulting to a bare `ee` graded whatever build happened to be installed,
+# while printing a version pair that reads like an attestation -- semver
+# equality is not commit identity, so the broken and correct states were
+# indistinguishable without inspecting the resolved PATH (bd-z6g1s). This
+# script was excluded from that sweep as "references git"; every one of those
+# matches is memory TEXT passed to `ee remember`, not a git invocation, so it
+# was dispatch-runnable all along (bd-pf1qo).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+# shellcheck disable=SC1091
+source "$REPO_ROOT/scripts/lib/ee_binary_resolution.sh"
+EE_BIN="$(ee_resolve_fixture_binary e2e_global_lane "${EE_BIN:-${EE_BINARY:-}}")"
 if [[ "${EE_BIN}" == */* ]]; then
     REAL_EE="${EE_BIN}"
 else
