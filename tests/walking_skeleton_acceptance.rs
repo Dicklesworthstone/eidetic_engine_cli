@@ -107,7 +107,7 @@ fn require_schema(json: &serde_json::Value, expected: &str, label: &str) -> Test
 /// A FAILURE THAT REQUIRES CONTENTION CANNOT BE CLEARED BY A QUIET RUN, AND A
 /// QUIET RUN IS EXACTLY WHAT A RE-TEST AFTER HOURS PRODUCES. A green here does
 /// not close the row; it establishes only that the test can pass, which was
-/// never in question. This test took 261.92s on an idle hz3 -- itself a
+/// never in question. This test took 261.92s on an idle RCH worker -- itself a
 /// plausible timeout subject -- and its sibling
 /// `walking_skeleton_durability_scenario` has been measured at 740s against a
 /// 60s budget.

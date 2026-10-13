@@ -1590,8 +1590,10 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
     // (:2557). This assertion said 0 until b8015752b changed it to 1 on the
     // reasoning that registering the model makes it available -- conflating the
     // two, and corroborated against a dev Mac whose model cache is populated.
-    // On a worker with no cache it is 0, which is why this row was red on hz3
-    // AND hz4 at two different bases (bd-tvi3a runs, bd-hwye2 row).
+    // On a worker with no cache it is 0, which is why this row was red on TWO
+    // DIFFERENT RCH workers at two different bases -- two distinct hosts, so
+    // it is the empty cache and not one worker's state (bd-tvi3a runs,
+    // bd-hwye2 row).
     ensure_equal(
         &status_empty_json["data"]["availableCount"],
         &serde_json::json!(0),
@@ -1727,7 +1729,7 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
     // WHAT MAKES THIS FAIL, stated so it cannot quietly become unfalsifiable:
     // on a host where a semantic embedder actually loads, `semantic` is true and
     // this source becomes "registry_observed" -- the exact value this assertion
-    // carried until now, observed red on hz3 at d214bb962 with
+    // carried until now, observed red on an RCH worker at d214bb962 with
     // `expected registry_observed, got frankensearch_hash_fallback`. So both
     // values have been seen at this call site and the comparison discriminates
     // them. If the pin above ever stops forcing the fallback, BOTH assertions
@@ -7960,7 +7962,7 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
         .ok_or_else(|| "why links must be an array".to_string())?;
     // WHAT THE SEEDING ESTABLISHED, not how many rows exist. This asserted 4 --
     // the number of links the block above inserts by hand -- and measured 8 on
-    // hz4: the four seeded, plus ADR 0051's remember-time auto-links into
+    // on an RCH worker: the four seeded, plus ADR 0051's remember-time auto-links into
     // `current` from `expired`, `future`, `boundary` and `unknown`.
     //
     // A relation filter CANNOT separate the two here, unlike the pre-seeding
@@ -8118,7 +8120,7 @@ fn memory_temporal_links_and_graph_outputs_compose() -> TestResult {
             "graph feature dry-run status",
         )?;
         // A LOWER BOUND, because the exact total is not this fixture's to own.
-        // This asserted 6 and measured 24 on hz4: src/core/graph_diff.rs:385
+        // This asserted 6 and measured 24 on an RCH worker: src/core/graph_diff.rs:385
         // sets edge_count = view.edges.len(), and the view expands stored links
         // into edges by its own directed/undirected rule, so reproducing the
         // number here would mean re-implementing that rule in a smoke test and

@@ -14021,7 +14021,7 @@ fn rule_linked_memory_id(
     // Semantic hits carry ids and scores only. Treating missing
     // entity_revision as stale dropped every neural/hybrid rule hit from
     // packs while `ee search` still returned the rule (bd-3h6bz,
-    // north_star_3b_pack_surfaces_promoted_rule on hz2).
+    // north_star_3b_pack_surfaces_promoted_rule on an RCH worker).
     if let Some(indexed_revision) = hit
         .metadata
         .as_ref()

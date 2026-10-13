@@ -653,7 +653,7 @@ fn no_stage_is_declared_non_required_without_a_bead() {
     //   "Lexical Relevance Contract Harness Guard" -> bd-iqg34
     //       red because the RCH target dir writes the test binary outside
     //       <target>/debug/deps, so the harness cannot locate it. Measured on
-    //       hz4, job 30025237340881842: GUARD_EXIT=1 in 0s.
+    //       an RCH worker, job 30025237340881842: GUARD_EXIT=1 in 0s.
     // The guard was REQUIRED when introduced at e99eb0bbb, which fail-fasted
     // verify.sh on this fleet. Returns to 1 when bd-iqg34 is fixed and the
     // guard goes back to required, and to 0 when the pins themselves go green.
@@ -4098,7 +4098,7 @@ fn bench_test_functions_do_not_accumulate() {
 // is the case that matters. Its cost is not its own script's cost: it is
 // dominated by the toolchain re-walking freshness across every crate in the
 // lock file, which is why one warm single-target `cargo test` was measured at
-// 74s on RCH worker hz4 while the stage wrapping it declared far less. Those
+// 74s on an RCH worker while the stage wrapping it declared far less. Those
 // stages must therefore say where their number came from, in a shape a machine
 // can compare against the number itself.
 //

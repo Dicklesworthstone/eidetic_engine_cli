@@ -3214,7 +3214,8 @@ mod tests {
             // from HOME/.local/share/ee, so the WORKER's own store leaked in:
             // on a host holding one at an old schema, the pack gains a
             // global_lane_migration_required degradation and every count and
-            // snapshot digest derived from degraded[] moves. hz3 and hz4 have
+            // snapshot digest derived from degraded[] moves. Two different RCH
+            // workers have
             // one; the workers bd-8ig10 was verified on did not
             // (bd-context-pack-golden-stale-and-load-sensitive-8ig10).
             .env("XDG_DATA_HOME", workspace.join(".ee").join("empty-user-data"))

@@ -11,7 +11,7 @@ type TestResult = Result<(), String>;
 /// enough on a quiet laptop and not enough on a loaded CI worker: the scan
 /// truncates, `storeDiscovery.nearbyStores` comes back empty, and the
 /// storeless-discovery assertions below fail for a reason that has nothing to
-/// do with the error envelopes they exist to pin (bd-idr8e, measured on hz3:
+/// do with the error envelopes they exist to pin (bd-idr8e, measured on an RCH worker:
 /// six failures, all with `{"outcome": "truncated", "nearbyStores": []}`).
 ///
 /// These tests spawn the real binary, so they cannot inject a budget the way
