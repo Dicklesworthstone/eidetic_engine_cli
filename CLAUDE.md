@@ -69,6 +69,28 @@ no such line and inherits the worker's own default dir. So a `--job` never
 reuses a cargo dispatch's warmth, only a previous `--job`'s. That is a real
 difference in WORK — 278 crates against 475.
 
+**That rewrite DISCARDS the configured `target-dir` and can exhaust the
+internal disk.** `.cargo/config.toml` sends builds to
+`/Volumes/USBNVME16TB/temp_agent_space/cargo-target`, but the pool dir it
+rewrites to is `<project>/.rch-target-…`, i.e. on whichever volume holds the
+project. Measured 2026-10-13: a `cargo test --locked --lib` dispatch compiled
+496 crates over 30.7 minutes and then died with
+
+    error: failed to write file <project>/.rch-target-<worker>-pool-<hash>/debug/
+      incremental/…/dep-graph.part.bin: No space left on device (os error 28)
+
+with 2.3 TiB free on the configured volume and 10 GiB free on `/`. It was not
+too big for the machine; it was pointed at the wrong volume. Confirmed by the
+log line itself: present once in the cargo dispatch, absent in the `--job`
+rerun, which formed no local pool dir. **For a long build prefer
+`RCH_REQUIRE_REMOTE=1 rch exec --job -- cargo <subcommand> --locked …`, which
+never writes artifacts to this machine.** Keep `RCH_REQUIRE_REMOTE=1`: a bare
+`rch exec` may fall back to a LOCAL cargo build, which lands straight back on
+the volume that just filled up.
+The failure surfaces as exit 101 with NO `test result:` line — 101 is cargo's
+tests-failed code, so reading the exit code alone reports a compile-space
+failure as a failing test. See bd-to1fr.
+
 **Which worker** — and this dominates the clock. Rows 2 and 3 are the same
 lane, the same directory path and the same 475 crates, 6.8x apart, on workers
 whose rated speeds differ by 9%. Do not attribute a slow build to a cold
