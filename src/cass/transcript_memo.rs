@@ -243,8 +243,10 @@ mod tests {
     #[test]
     fn full_source_identity_and_owned_results_prevent_cross_record_reuse() {
         isolated(MAX_PAYLOAD_BYTES, || {
-            let original = r#"{"type":"assistant","message":{"role":"assistant","content":"Release ready."}}"#;
-            let changed = r#"{"type":"assistant","message":{"role":"assistant","content":"Release ready!"}}"#;
+            let original =
+                r#"{"type":"assistant","message":{"role":"assistant","content":"Release ready."}}"#;
+            let changed =
+                r#"{"type":"assistant","message":{"role":"assistant","content":"Release ready!"}}"#;
             let privileged = r#"{"type":"system","content":"Release ready."}"#;
             let mut first = project_transcript(original).unwrap();
             first[0].text = Cow::Owned("caller mutation".to_owned());
@@ -352,7 +354,8 @@ mod tests {
 
     #[test]
     fn cache_borrow_contention_and_eviction_never_change_projection_results() {
-        let raw = r#"{"type":"assistant","message":{"role":"assistant","content":"A stable repair."}}"#;
+        let raw =
+            r#"{"type":"assistant","message":{"role":"assistant","content":"A stable repair."}}"#;
         isolated(0, || {
             let expected = project_structured(raw, ProjectionPurpose::Reader);
             assert_eq!(project_transcript(raw), expected);
@@ -366,7 +369,9 @@ mod tests {
         isolated(MAX_PAYLOAD_BYTES, || {
             assert!(project_transcript(raw).is_some());
             for number in 0..=MAX_ENTRIES {
-                let other = format!("{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":\"Observation {number}.\"}}}}");
+                let other = format!(
+                    "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":\"Observation {number}.\"}}}}"
+                );
                 assert!(project_transcript(&other).is_some());
             }
             assert_eq!(

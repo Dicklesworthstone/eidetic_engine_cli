@@ -2621,11 +2621,8 @@ where
     // The ceiling belongs inside source capture, before bodies, anchors and
     // evidence projections are hydrated. The collector checks it in the same
     // database snapshot as generation capture, closing the preflight/write race.
-    let captured = collect_workspace_index_source_snapshot_with_limit(
-        db,
-        workspace_id,
-        max_corpus_documents,
-    );
+    let captured =
+        collect_workspace_index_source_snapshot_with_limit(db, workspace_id, max_corpus_documents);
     // An interrupted source operation can return a database error. Preserve
     // the caller's cancellation reason before interpreting that result.
     let snapshot = match index_checkpoint(cx).and(captured) {
@@ -4237,9 +4234,9 @@ fn workspace_index_source_rows_fit(
             "SELECT COUNT(*) FROM ({selection} LIMIT ?{})",
             parameters.len() + 1,
         );
-        parameters.push(SqlValue::BigInt(i64::try_from(row_limit).map_err(|_| {
-            IndexRebuildError::Index("index source row limit exceeds i64".to_owned())
-        })?));
+        parameters.push(SqlValue::BigInt(i64::try_from(row_limit).map_err(
+            |_| IndexRebuildError::Index("index source row limit exceeds i64".to_owned()),
+        )?));
         let counted = db.query(&sql, &parameters);
         if let Some(cx) = &request {
             index_checkpoint(cx)?;
