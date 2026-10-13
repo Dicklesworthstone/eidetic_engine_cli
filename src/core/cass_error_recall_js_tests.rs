@@ -99,9 +99,54 @@ fn time(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
 
+/// Diagnostic and coverage consumers use the same complete-document validator.
+pub(in crate::core::cass_error_recall) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
+    decode(text).map(|decoded| decoded.map(|decoded| decoded.output))
+}
+
+type Subject = [u8; 32];
+
+/// Transient exact source identities. Never persisted or exposed as provenance.
+#[derive(Default)]
+pub(super) struct Execution {
+    inventory: BTreeSet<Subject>,
+    failed: BTreeSet<Subject>,
+    passed: BTreeSet<Subject>,
+    complete: bool,
+}
+
+impl Execution {
+    pub(super) fn has_known_failures(&self) -> bool {
+        self.complete && !self.failed.is_empty()
+    }
+
+    pub(super) fn verified_by(&self, proof: &Self) -> bool {
+        self.has_known_failures()
+            && proof.complete
+            && self.inventory == proof.inventory
+            && self.failed.is_subset(&proof.passed)
+    }
+}
+
+pub(super) struct Decoded {
+    pub output: CompilerOutput,
+    pub execution: Execution,
+}
+
+fn subject(parts: &[&str]) -> Subject {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"ee.cass.javascript-test.proof_subject.v1\0");
+    hash.update(&(parts.len() as u64).to_le_bytes());
+    for part in parts {
+        hash.update(&(part.len() as u64).to_le_bytes());
+        hash.update(part.as_bytes());
+    }
+    *hash.finalize().as_bytes()
+}
+
 /// Probe only root fields, then reparse the original bytes into typed structs:
 /// a probe must never erase duplicate fields or salvage a truncated document.
-pub(in crate::core::cass_error_recall) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
+pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     if !text.trim_start().starts_with('{') {
         return Ok(None);
     }
@@ -136,6 +181,13 @@ pub(in crate::core::cass_error_recall) fn inspect(text: &str) -> Result<Option<C
         return Err(());
     }
     let mut output = CompilerOutput::default();
+    let mut execution = Execution {
+        complete: !report.was_interrupted
+            && report.num_runtime_error_test_suites == 0
+            && report.num_pending_test_suites == 0
+            && !report.snapshot.as_ref().is_some_and(|snapshot| snapshot.failure),
+        ..Execution::default()
+    };
     let mut counts = [0_u64; 4];
     let mut files = BTreeSet::new();
     let mut keys = BTreeSet::new();
@@ -154,6 +206,7 @@ pub(in crate::core::cass_error_recall) fn inspect(text: &str) -> Result<Option<C
         if seen > MAX_TEST_RESULTS {
             return Err(());
         }
+        execution.inventory.insert(subject(&["file", &file.name]));
         let mut names = BTreeSet::new();
         let mut file_failed = false;
         let mut file_executed = false;
@@ -178,6 +231,18 @@ pub(in crate::core::cass_error_recall) fn inspect(text: &str) -> Result<Option<C
                 "todo" => 3,
                 _ => return Err(()),
             };
+            // Component boundaries matter: ["a b", "c"] must not alias
+            // ["a", "b c"], even though their flattened fullName is equal.
+            let mut identity = vec!["test", file.name.as_str()];
+            identity.extend(assertion.ancestor_titles.iter().map(String::as_str));
+            identity.push(assertion.title.as_str());
+            let identity = subject(&identity);
+            execution.inventory.insert(identity);
+            if category == 0 {
+                execution.passed.insert(identity);
+            } else if category == 1 {
+                execution.failed.insert(identity);
+            }
             counts[category] += 1;
             file_executed |= category < 2;
             if category == 1 {
@@ -202,6 +267,10 @@ pub(in crate::core::cass_error_recall) fn inspect(text: &str) -> Result<Option<C
             "failed" => {
                 failed_files += 1;
                 if !file_failed {
+                    // A setup/runtime failure does not reveal the selected
+                    // assertion inventory. Keep its diagnostic, but do not
+                    // pretend a later unrelated green file proves its repair.
+                    execution.complete = false;
                     retain(
                         &mut output,
                         &mut keys,
@@ -241,7 +310,7 @@ pub(in crate::core::cass_error_recall) fn inspect(text: &str) -> Result<Option<C
     output.allows_completion = !output.failed
         && report.num_passed_tests > 0
         && report.num_pending_test_suites == 0;
-    Ok(Some(output))
+    Ok(Some(Decoded { output, execution }))
 }
 
 fn retain(output: &mut CompilerOutput, keys: &mut BTreeSet<String>, message: &str) {

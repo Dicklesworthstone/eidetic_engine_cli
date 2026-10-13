@@ -221,3 +221,6 @@ fn javascript_redacts_before_fingerprinting_and_enforces_the_byte_bound() {
     assert!(inspect(&exact).is_ok());
     assert!(inspect(&format!("{exact} ")).is_err());
 }
+
+#[path = "cass_error_recall_js_coverage_tests.rs"]
+mod coverage;
