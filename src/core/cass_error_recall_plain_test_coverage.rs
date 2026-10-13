@@ -99,8 +99,7 @@ pub(super) fn project(output: &ToolOutput) -> Result<Option<ToolOutput>, ()> {
         if let Some(tests) = line.strip_prefix("running ").and_then(|tail| {
             tail.strip_suffix(" tests")
                 .or_else(|| tail.strip_suffix(" test"))
-        })
-        {
+        }) {
             if active {
                 return Err(());
             }
@@ -167,7 +166,12 @@ mod tests {
         for (name, result) in results {
             text.push_str(&format!("test {name} ... {result}\n"));
         }
-        let n = |value| results.iter().filter(|(_, result)| *result == value).count();
+        let n = |value| {
+            results
+                .iter()
+                .filter(|(_, result)| *result == value)
+                .count()
+        };
         let failed = n("FAILED");
         text.push_str(&format!(
             "\ntest result: {}. {} passed; {failed} failed; {} ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
@@ -267,7 +271,10 @@ mod tests {
         let mut nonzero = passed;
         nonzero.exit_code = Some(101);
         assert!(!required.is_verified_by(&Proof::capture(&nonzero)));
-        required.refresh(&output("running 2 tests\ntest case ... FAILED".into()), false);
+        required.refresh(
+            &output("running 2 tests\ntest case ... FAILED".into()),
+            false,
+        );
         required.refresh(&output("unrelated output".into()), true);
         assert!(!required.is_verified_by(&proof));
     }

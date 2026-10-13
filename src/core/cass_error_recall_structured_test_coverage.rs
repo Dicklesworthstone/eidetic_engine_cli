@@ -439,7 +439,11 @@ mod tests {
                     assert!(!requirement.is_verified_by(&Proof::capture(&proof)));
                 }
                 let complete = lint(
-                    &[("/src/extra.js", false), ("/src/b.js", false), ("/src/a.js", false)],
+                    &[
+                        ("/src/extra.js", false),
+                        ("/src/b.js", false),
+                        ("/src/a.js", false),
+                    ],
                     wrapped_proof,
                 );
                 assert!(requirement.is_verified_by(&Proof::capture(&complete)));

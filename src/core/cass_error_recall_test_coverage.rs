@@ -8,10 +8,10 @@
 use super::failure_diagnostics;
 use super::{MAX_SCANNED_OUTPUT_BYTES, ToolOutput, compiler};
 
-#[path = "cass_error_recall_structured_test_coverage.rs"]
-mod structured;
 #[path = "cass_error_recall_plain_test_coverage.rs"]
 mod plain;
+#[path = "cass_error_recall_structured_test_coverage.rs"]
+mod structured;
 
 pub(super) struct Requirement(structured::Requirement);
 
