@@ -2946,6 +2946,99 @@ fn franken_stack_version_mismatch_refuses_before_rch() -> TestResult {
     Ok(())
 }
 
+/// The PINNED half of bd-wpemf's both-directions requirement.
+///
+/// The test above runs in LIVE mode, so until this landed nothing exercised the
+/// pinned mismatch path or its repair string at all. That mattered: on
+/// 2026-10-13 one stale row in `franken-stack.lock` refused every pinned
+/// dispatch, and the generic repair ("repair franken-stack.lock or Cargo.lock")
+/// left the reader to audit all twelve packages by hand to find it.
+///
+/// The sibling test `pinned_franken_stack_materializes_locked_bundle_without_mutating_siblings`
+/// is the other direction: a live checkout whose version has moved PAST the pin
+/// must NOT block, because the pinned lane verifies the materialized tree. Both
+/// are needed — an assertion that only the mismatch refuses would still pass if
+/// the lane refused unconditionally.
+#[test]
+fn pinned_franken_stack_version_mismatch_names_the_offending_row() -> TestResult {
+    let fixture =
+        seed_franken_stack_fixture("rch-franken-pinned-mismatch", None, Some("asupersync"))?;
+    // The pinned lane refuses a SKIPPED build admission outright, so supply a
+    // binary for the preflight to interrogate rather than switching it off.
+    let admission_stub = write_admission_stub_ee("fake-ee-pinned-mismatch-admit.sh", true)?;
+    let admission_stub_arg = admission_stub
+        .to_str()
+        .ok_or_else(|| "pinned mismatch admission stub path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--pinned-franken-stack",
+            "--treeish",
+            "HEAD",
+            "--build-admission-ee-bin",
+            admission_stub_arg,
+            "--skip-known-blocker",
+            "--dry-run",
+            "--",
+            "cargo",
+            "check",
+            "--locked",
+            "--all-targets",
+        ],
+        &[
+            ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1"),
+            ("RCH_VERIFY_FORCE_TOML_FALLBACK", "1"),
+            // Stated rather than silent: the pinned lane refuses a silent
+            // proof-broker bypass, and a real broker would write a ledger.
+            (
+                "RCH_VERIFY_PROOF_BROKER_BYPASS_REASON",
+                "hermetic contract test",
+            ),
+        ],
+        &fixture.project,
+    )?;
+
+    if status.success() {
+        return Err(format!(
+            "pinned lane should refuse a locked revision that disagrees with Cargo.lock\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse pinned mismatch report: {error}"))?;
+    let stack = &report["franken_stack"];
+    if report["status"] != "source_state_refused"
+        || stack["mode"] != "pinned"
+        || stack["status"] != "blocked"
+        || !degraded_contains(&report, "rch_verify_franken_stack_version_mismatch")?
+    {
+        return Err(format!("pinned mismatch classification drifted: {report}"));
+    }
+
+    // The point of the test: the repair must NAME the row, not just the file.
+    // The fixture pins asupersync 0.3.9 in Cargo.lock and commits 9.9.9 at the
+    // locked revision, so both versions must appear against this package.
+    let repair = stack["repair"]
+        .as_str()
+        .ok_or_else(|| format!("pinned mismatch repair is not a string: {report}"))?;
+    if !repair.contains("asupersync/asupersync")
+        || !repair.contains("locked=9.9.9")
+        || !repair.contains("expected=0.3.9")
+    {
+        return Err(format!(
+            "pinned mismatch repair must name the offending package and both versions: {repair}"
+        ));
+    }
+    // And it must say what is NOT at fault. Live-checkout drift is reported
+    // beside the materialized verdict, and reading it as the cause is the
+    // specific error this sentence exists to prevent.
+    if !repair.contains("Live sibling checkouts are NOT the subject") {
+        return Err(format!(
+            "pinned mismatch repair must rule out live sibling checkouts: {repair}"
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn pinned_franken_stack_materializes_locked_bundle_without_mutating_siblings() -> TestResult {
     let fixture = seed_franken_stack_fixture("rch-franken-pinned", None, None)?;
