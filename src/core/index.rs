@@ -2302,6 +2302,16 @@ async fn process_index_jobs_with_drain(
         });
     }
 
+    // CASS queues one job per committed session. All jobs selected here share
+    // one workspace: capture and publish their source snapshot once, rather
+    // than repeatedly scanning and copying the corpus inside one request.
+    // Selection limits, single-job reports and read-only dry-runs stay intact.
+    let drain = match drain {
+        IndexJobDrain::Ordinary if pending_jobs.len() > 1 => IndexJobDrain::Coalesced {
+            max_corpus_documents: None,
+        },
+        other => other,
+    };
     let jobs = match drain {
         IndexJobDrain::Ordinary => {
             let mut reports = Vec::with_capacity(pending_jobs.len());
@@ -2608,32 +2618,46 @@ where
         return Ok(reports);
     }
 
-    let snapshot = match collect_workspace_index_source_snapshot(db, workspace_id) {
+    // The ceiling belongs inside source capture, before bodies, anchors and
+    // evidence projections are hydrated. The collector checks it in the same
+    // database snapshot as generation capture, closing the preflight/write race.
+    let captured = collect_workspace_index_source_snapshot_with_limit(
+        db,
+        workspace_id,
+        max_corpus_documents,
+    );
+    // An interrupted source operation can return a database error. Preserve
+    // the caller's cancellation reason before interpreting that result.
+    let snapshot = match index_checkpoint(cx).and(captured) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
             return Err(error);
         }
     };
-    let WorkspaceIndexSourceSnapshot {
-        generation: published_generation,
-        document_counts,
-        documents_total,
-        documents: indexable_docs,
-        open_job_ids,
-        ..
-    } = snapshot;
-    if max_corpus_documents.is_some_and(|limit| documents_total > limit) {
+    // Retain the projected-document check as a second fence. An early refusal
+    // has no exact admitted count; never report the upper bound as that count.
+    if snapshot.as_ref().is_none_or(|source| {
+        max_corpus_documents.is_some_and(|limit| source.documents_total > limit)
+    }) {
         let limit = max_corpus_documents.unwrap_or(u32::MAX);
         for finalizer in &mut job_finalizers {
             finalizer.mark_cancelled();
         }
         drop(job_finalizers);
         requeue_cancelled_search_index_jobs(db, workspace_id)?;
-        let message = format!(
-            "coalesced index repair deferred because the authoritative corpus contains \
-             {documents_total} documents, above the interactive limit of {limit}"
-        );
+        let message = match &snapshot {
+            Some(source) => format!(
+                "coalesced index repair deferred because the authoritative corpus contains \
+                 {} documents, above the interactive limit of {limit}",
+                source.documents_total,
+            ),
+            None => format!(
+                "coalesced index repair deferred because the source-row upper bound is \
+                 above the interactive limit of {limit}; source bodies were not loaded \
+                 and the exact admitted document count was not computed"
+            ),
+        };
         for job in &claimed {
             reports.push(IndexProcessingJobReport {
                 job_id: job.id.clone(),
@@ -2643,13 +2667,25 @@ where
                 outcome: "skipped".to_owned(),
                 processing_mode: COALESCED_MODE.to_owned(),
                 fallback_to_full: None,
-                documents_total,
+                documents_total: snapshot
+                    .as_ref()
+                    .map_or(job.documents_total, |source| source.documents_total),
                 documents_indexed: 0,
                 error: Some(message.clone()),
             });
         }
         return Ok(reports);
     }
+    let WorkspaceIndexSourceSnapshot {
+        generation: published_generation,
+        document_counts,
+        documents_total,
+        documents: indexable_docs,
+        open_job_ids,
+        ..
+    } = snapshot.ok_or_else(|| {
+        IndexRebuildError::Index("admitted index source snapshot is missing".to_owned())
+    })?;
     if let Err(error) = after_snapshot() {
         finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
         return Err(error);
@@ -2895,13 +2931,19 @@ where
         explicitly_cancelled: false,
     };
 
-    let snapshot = match collect_workspace_index_source_snapshot(db, &job.workspace_id) {
+    let captured = collect_workspace_index_source_snapshot(db, &job.workspace_id);
+    // Source queries can return an interrupted-storage error after the request
+    // has been cancelled. Preserve that request reason before terminalizing
+    // the claimed job; a failed transition cannot later be undone by Drop.
+    let snapshot = match index_checkpoint(cx).and(captured) {
         Ok(snapshot) => snapshot,
-        // bd-2yz9p: a claimed job must never rely on the Drop finalizer for
-        // its failure record; persist the real cause while it is in hand.
+        // Keep the concrete cause for real failures, but let the masked
+        // cancellation finalizer perform running -> cancelled for interrupts.
         Err(error) => {
-            let mut message = error.to_string();
-            append_failed_index_job_transition(db, &job.id, &mut message);
+            if !matches!(&error, IndexRebuildError::Cancelled(_)) {
+                let mut message = error.to_string();
+                append_failed_index_job_transition(db, &job.id, &mut message);
+            }
             job_finalizer.mark_cancelled();
             return Err(error);
         }
@@ -2914,25 +2956,21 @@ where
         open_job_ids,
         ..
     } = snapshot;
-    if let Err(error) = after_snapshot() {
-        if matches!(&error, IndexRebuildError::Cancelled(_)) {
-            job_finalizer.mark_cancelled();
-        } else {
+    let after_capture = after_snapshot();
+    if let Err(error) = index_checkpoint(cx).and(after_capture) {
+        if !matches!(&error, IndexRebuildError::Cancelled(_)) {
             let mut message = error.to_string();
             append_failed_index_job_transition(db, &job.id, &mut message);
-            job_finalizer.mark_cancelled();
         }
-        return Err(error);
-    }
-    if let Err(error) = index_checkpoint(cx) {
-        let mut message = error.to_string();
-        append_failed_index_job_transition(db, &job.id, &mut message);
         job_finalizer.mark_cancelled();
         return Err(error);
     }
-    if let Err(error) = update_running_index_job_total(db, &job.id, documents_total) {
-        let mut message = error.to_string();
-        append_failed_index_job_transition(db, &job.id, &mut message);
+    let updated = update_running_index_job_total(db, &job.id, documents_total);
+    if let Err(error) = index_checkpoint(cx).and(updated) {
+        if !matches!(&error, IndexRebuildError::Cancelled(_)) {
+            let mut message = error.to_string();
+            append_failed_index_job_transition(db, &job.id, &mut message);
+        }
         job_finalizer.mark_cancelled();
         return Err(error);
     }
@@ -4146,11 +4184,15 @@ pub(crate) fn index_source_upper_bound_fits(
 /// A conservative body-free upper bound, including globally tagged memories
 /// that the canonical collector also includes. Ineligible rows may defer an
 /// automatic repair; they must never let a large corpus through the ceiling.
+/// Count only enough matching rows to disprove the remaining allowance. This
+/// bounds count output/work on matching rows, not scanning nonmatching rows
+/// or a synchronous database call already in progress.
 fn workspace_index_source_rows_fit(
     db: &DbConnection,
     workspace_id: &str,
     max_documents: u32,
 ) -> Result<bool, IndexRebuildError> {
+    let request = asupersync::Cx::current();
     let mut total = 0_u64;
     for table in [
         "memories",
@@ -4159,9 +4201,12 @@ fn workspace_index_source_rows_fit(
         "procedural_rules",
         "evidence_spans",
     ] {
-        let (sql, parameters) = if table == "memories" {
+        if let Some(cx) = &request {
+            index_checkpoint(cx)?;
+        }
+        let (selection, mut parameters) = if table == "memories" {
             (
-                "SELECT COUNT(*) FROM memories m WHERE (m.workspace_id = ?1 OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND lower(replace(trim(mt.tag), '-', '_')) IN (?2, ?3))) AND m.tombstoned_at IS NULL".to_owned(),
+                "SELECT 1 FROM memories m WHERE (m.workspace_id = ?1 OR EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = m.id AND lower(replace(trim(mt.tag), '-', '_')) IN (?2, ?3))) AND m.tombstoned_at IS NULL".to_owned(),
                 vec![
                     SqlValue::Text(workspace_id.to_owned()),
                     SqlValue::Text(crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned()),
@@ -4175,16 +4220,31 @@ fn workspace_index_source_rows_fit(
             // live fallback by rows that could never be indexed
             // (bd-reality-core-convergence-1azkt.64).
             (
-                "SELECT COUNT(*) FROM evidence_spans WHERE workspace_id = ?1 AND producer_kind = 'cass_import' AND search_eligibility = 'admitted'".to_owned(),
+                "SELECT 1 FROM evidence_spans WHERE workspace_id = ?1 AND producer_kind = 'cass_import' AND search_eligibility = 'admitted'".to_owned(),
                 vec![SqlValue::Text(workspace_id.to_owned())],
             )
         } else {
             (
-                format!("SELECT COUNT(*) FROM {table} WHERE workspace_id = ?1"),
+                format!("SELECT 1 FROM {table} WHERE workspace_id = ?1"),
                 vec![SqlValue::Text(workspace_id.to_owned())],
             )
         };
-        let rows = db.query(&sql, &parameters)?;
+        // The extra row distinguishes an exactly-full corpus from overflow.
+        // u32::MAX + 1 fits i64; do not truncate the limit to u32 or reset it
+        // per table. LIMIT must be inside the aggregate's input subquery.
+        let row_limit = u64::from(max_documents).saturating_sub(total) + 1;
+        let sql = format!(
+            "SELECT COUNT(*) FROM ({selection} LIMIT ?{})",
+            parameters.len() + 1,
+        );
+        parameters.push(SqlValue::BigInt(i64::try_from(row_limit).map_err(|_| {
+            IndexRebuildError::Index("index source row limit exceeds i64".to_owned())
+        })?));
+        let counted = db.query(&sql, &parameters);
+        if let Some(cx) = &request {
+            index_checkpoint(cx)?;
+        }
+        let rows = counted?;
         let count = match rows.first().and_then(|row| row.get(0)) {
             Some(SqlValue::BigInt(value)) => u64::try_from(*value).ok(),
             Some(SqlValue::Int(value)) => u64::try_from(*value).ok(),
