@@ -58,12 +58,19 @@ pub(crate) fn read_only_documents_in_current_snapshot(
     super::index_checkpoint(cx)?;
     documents.extend(super::rule_documents(db, workspace_id)?);
     super::index_checkpoint(cx)?;
-    db.visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |span| {
+    // Fallback needs the complete admitted set, not transcript order. Use
+    // the same rowid-seeking pages as rebuild instead of repeatedly sorting
+    // the remaining cross-session corpus. Keep publication's stable ID order.
+    let mut evidence_documents = Vec::new();
+    let evidence_scan = db.visit_index_evidence_in_current_snapshot(workspace_id, |span| {
         visitor_checkpoint()?;
-        documents.push(super::evidence_span_to_document(&span));
+        evidence_documents.push(super::evidence_span_to_document(&span));
         Ok(())
-    })?;
+    });
     super::index_checkpoint(cx)?;
+    evidence_scan?;
+    evidence_documents.sort_by(|left, right| left.id().cmp(right.id()));
+    documents.extend(evidence_documents);
     let documents: Vec<_> = documents
         .into_iter()
         .map(super::CanonicalSearchDocument::into_indexable)
@@ -94,7 +101,9 @@ pub(crate) fn read_only_documents_in_current_snapshot(
 /// and members; many tiny values must not hide behind a small byte length.
 /// Related rows consume the same budget, so a million tiny tags cannot pass
 /// merely because their strings are short. The final projected-byte check is
-/// independent and still refuses a partial corpus.
+/// independent and still refuses a partial corpus. Row overhead is checked
+/// with a capped body-free count first, then UTF-8 lengths, and only then the
+/// repeated structural-character scans. Row/byte refusals need no structure scan.
 #[cfg(feature = "lexical-bm25")]
 fn live_source_allocation_fits(
     cx: &asupersync::Cx,
@@ -168,8 +177,7 @@ fn live_source_allocation_fits(
         ),
     ] {
         super::index_checkpoint(cx)?;
-        let (rows, bytes, structure) = source_row_sizes(db, workspace_id, table, columns, &scope)?;
-        if !budget.charge(rows, bytes, structure) {
+        if !charge_source_rows(cx, db, workspace_id, table, columns, &scope, &mut budget)? {
             return Ok(false);
         }
     }
@@ -193,14 +201,15 @@ fn live_source_allocation_fits(
     // Rules retain the addressed workspace path in each projected document.
     // Account for those copies without reading the path itself into Rust.
     super::index_checkpoint(cx)?;
-    let (rows, bytes, structure) = source_row_sizes(
+    if !charge_source_rows(
+        cx,
         db,
         workspace_id,
         "workspaces",
         "id path name scope_kind repository_root repository_fingerprint subproject_path created_at updated_at",
         "id = ?1",
-    )?;
-    if !budget.charge(rows, bytes, structure) {
+        &mut budget,
+    )? {
         return Ok(false);
     }
     let (_, path_bytes, _) = source_row_sizes(db, workspace_id, "workspaces", "path", "id = ?1")?;
@@ -237,14 +246,15 @@ fn live_source_allocation_fits(
         if source_size_value(&exists, 0)? == 0 {
             continue;
         }
-        let (rows, bytes, structure) = source_row_sizes(
+        if !charge_source_rows(
+            cx,
             db,
             workspace_id,
             table,
             columns,
             &format!("evidence_span_id IN ({evidence_ids})"),
-        )?;
-        if !budget.charge(rows, bytes, structure) {
+            &mut budget,
+        )? {
             return Ok(false);
         }
     }
@@ -406,16 +416,34 @@ fn source_row_sizes(
 ) -> Result<(u64, u64, u64), IndexRebuildError> {
     // All identifiers and predicates come from the fixed collector inventory
     // above. The only caller-provided value is bound as a SQL parameter.
-    let lengths = columns
+    let lengths = source_length_expression(columns);
+    let structure = source_structure_expression(columns).unwrap_or_else(|| "0".to_owned());
+    let sizes = db.query(
+        &format!("SELECT COUNT(*), coalesce(SUM({lengths}), 0), coalesce(SUM({structure}), 0) FROM {table} WHERE {scope}"),
+        &[sqlmodel_core::Value::Text(workspace_id.to_owned())],
+    )?;
+    Ok((
+        source_size_value(&sizes, 0)?,
+        source_size_value(&sizes, 1)?,
+        source_size_value(&sizes, 2)?,
+    ))
+}
+
+#[cfg(feature = "lexical-bm25")]
+fn source_length_expression(columns: &str) -> String {
+    columns
         .split_whitespace()
         .map(|column| format!("length(CAST(coalesce({column}, '') AS BLOB))"))
         .collect::<Vec<_>>()
-        .join(" + ");
-    // These are conservative lexical counts, not a second JSON parser. A
-    // symbol inside a quoted string also consumes the allowance. An object
-    // can allocate a whole BTreeMap node for one member; arrays reserve spare
-    // Value slots. The byte multiplier alone cannot account for either shape.
-    let structure = columns
+        .join(" + ")
+}
+
+#[cfg(feature = "lexical-bm25")]
+fn source_structure_expression(columns: &str) -> Option<String> {
+    // Count structural characters conservatively, including in quoted text.
+    // Do not replace this with JSON parsing: invalid/legacy source still costs
+    // memory to hydrate, and many small JSON values amplify that cost.
+    let terms = columns
         .split_whitespace()
         .filter(|column| {
             column.ends_with("_json") || matches!(*column, "content" | "excerpt" | "snippet")
@@ -428,20 +456,91 @@ fn source_row_sizes(
                 })
         })
         .collect::<Vec<_>>();
-    let structure = if structure.is_empty() {
-        "0".to_owned()
-    } else {
-        structure.join(" + ")
+    (!terms.is_empty()).then(|| terms.join(" + "))
+}
+
+#[cfg(feature = "lexical-bm25")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceSizeStage {
+    Rows { limit: u64 },
+    Bytes,
+    Structure,
+}
+
+/// Refusal is monotone: once cheap row/byte charges exceed the remaining
+/// allowance, do not start a more expensive scan. Only a complete successful
+/// measurement admits the source. The caller holds one snapshot throughout.
+#[cfg(feature = "lexical-bm25")]
+fn charge_source_measurements(
+    cx: &asupersync::Cx,
+    budget: &mut SourceReadBudget,
+    mut measure: impl FnMut(SourceSizeStage) -> Result<u64, IndexRebuildError>,
+) -> Result<bool, IndexRebuildError> {
+    super::index_checkpoint(cx)?;
+    let Some(remaining) = budget
+        .charged
+        .and_then(|used| budget.maximum.checked_sub(used))
+    else {
+        return Ok(false);
     };
-    let sizes = db.query(
-        &format!("SELECT COUNT(*), coalesce(SUM({lengths}), 0), coalesce(SUM({structure}), 0) FROM {table} WHERE {scope}"),
-        &[sqlmodel_core::Value::Text(workspace_id.to_owned())],
-    )?;
-    Ok((
-        source_size_value(&sizes, 0)?,
-        source_size_value(&sizes, 1)?,
-        source_size_value(&sizes, 2)?,
-    ))
+    // One excess row proves refusal without counting the rest of a huge
+    // association table. Dividing first keeps this within i64 even at u64::MAX.
+    let limit = remaining / SourceReadBudget::ROW_OVERHEAD + 1;
+    let rows = measure(SourceSizeStage::Rows { limit });
+    super::index_checkpoint(cx)?;
+    let rows = rows?;
+    if !budget.charge(rows, 0, 0) {
+        return Ok(false);
+    }
+    if rows == 0 {
+        return Ok(true);
+    }
+    let bytes = measure(SourceSizeStage::Bytes);
+    super::index_checkpoint(cx)?;
+    if !budget.charge(0, bytes?, 0) {
+        return Ok(false);
+    }
+    let structure = measure(SourceSizeStage::Structure);
+    super::index_checkpoint(cx)?;
+    Ok(budget.charge(0, 0, structure?))
+}
+
+#[cfg(feature = "lexical-bm25")]
+fn charge_source_rows(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    workspace_id: &str,
+    table: &str,
+    columns: &str,
+    scope: &str,
+    budget: &mut SourceReadBudget,
+) -> Result<bool, IndexRebuildError> {
+    charge_source_measurements(cx, budget, |stage| {
+        // Identifiers/predicates come only from the fixed source inventory.
+        // All queries return integers, never source bodies or truncated rows.
+        let mut params = vec![sqlmodel_core::Value::Text(workspace_id.to_owned())];
+        let sql = match stage {
+            SourceSizeStage::Rows { limit } => {
+                let limit = i64::try_from(limit).map_err(|_| {
+                    IndexRebuildError::Index("invalid live source row ceiling".to_owned())
+                })?;
+                params.push(sqlmodel_core::Value::BigInt(limit));
+                format!("SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE {scope} LIMIT ?2) bounded_source_rows")
+            }
+            SourceSizeStage::Bytes => {
+                let lengths = source_length_expression(columns);
+                format!("SELECT coalesce(SUM({lengths}), 0) FROM {table} WHERE {scope}")
+            }
+            SourceSizeStage::Structure => {
+                let Some(structure) = source_structure_expression(columns) else {
+                    return Ok(0);
+                };
+                format!("SELECT coalesce(SUM({structure}), 0) FROM {table} WHERE {scope}")
+            }
+        };
+        let sizes = db.query(&sql, &params)?;
+        source_size_value(&sizes, 0)
+    })
 }
 
 #[cfg(feature = "lexical-bm25")]
@@ -1584,5 +1683,273 @@ mod tests {
         ));
         assert!(!path.exists());
         assert!(!options.resolve_index_dir().exists());
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn staged_preflight_rejects_row_overhead_without_measuring_bodies() {
+        let cx = asupersync::Cx::for_testing();
+        for maximum in [0, 1023, 1024, 2047, u64::MAX] {
+            let mut budget = SourceReadBudget::new(maximum);
+            let mut calls = 0;
+            let fits = charge_source_measurements(&cx, &mut budget, |stage| {
+                calls += 1;
+                let SourceSizeStage::Rows { limit } = stage else {
+                    panic!("over-budget rows must not start a body scan");
+                };
+                assert_eq!(limit, maximum / SourceReadBudget::ROW_OVERHEAD + 1);
+                assert!(i64::try_from(limit).is_ok());
+                Ok(limit)
+            })
+            .expect("bounded count");
+            assert!(!fits);
+            assert_eq!(calls, 1);
+            assert!(
+                !charge_source_measurements(&cx, &mut budget, |_| {
+                    panic!("a rejected budget must not restart source inspection")
+                })
+                .expect("monotone refusal")
+            );
+        }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn staged_preflight_rejects_bytes_before_structural_scans_and_skips_empty_sources() {
+        let cx = asupersync::Cx::for_testing();
+        let maximum = SourceReadBudget::ROW_OVERHEAD + 4 * SourceReadBudget::TEXT_COPIES;
+        let mut budget = SourceReadBudget::new(maximum);
+        let mut stages = Vec::new();
+        assert!(
+            !charge_source_measurements(&cx, &mut budget, |stage| {
+                stages.push(stage);
+                match stage {
+                    SourceSizeStage::Rows { .. } => Ok(1),
+                    SourceSizeStage::Bytes => Ok(5),
+                    SourceSizeStage::Structure => panic!("oversized text must not be rescanned"),
+                }
+            })
+            .expect("payload refusal")
+        );
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[1], SourceSizeStage::Bytes);
+        let mut empty = SourceReadBudget::new(0);
+        assert!(
+            charge_source_measurements(&cx, &mut empty, |stage| {
+                assert_eq!(stage, SourceSizeStage::Rows { limit: 1 });
+                Ok(0)
+            })
+            .expect("an empty scope costs no source allocation")
+        );
+        assert_eq!(empty.charged, Some(0));
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn staged_preflight_matches_one_pass_accounting_at_boundaries_and_overflow() {
+        let cx = asupersync::Cx::for_testing();
+        for (rows, bytes, structure) in [
+            (0, 0, 0),
+            (1, 7, 256),
+            (31, 20_000, 4096),
+            (20_000, 40_000_000, 20_000_000),
+            (u64::MAX, 0, 0),
+            (1, u64::MAX, 0),
+            (1, 0, u64::MAX),
+        ] {
+            let exact = rows
+                .saturating_mul(SourceReadBudget::ROW_OVERHEAD)
+                .saturating_add(bytes.saturating_mul(SourceReadBudget::TEXT_COPIES))
+                .saturating_add(structure);
+            for maximum in [0, exact.saturating_sub(1), exact, u64::MAX] {
+                let mut original = SourceReadBudget::new(maximum);
+                let expected = original.charge(rows, bytes, structure);
+                let mut staged = SourceReadBudget::new(maximum);
+                let actual = charge_source_measurements(&cx, &mut staged, |stage| {
+                    Ok(match stage {
+                        SourceSizeStage::Rows { limit } => rows.min(limit),
+                        SourceSizeStage::Bytes => bytes,
+                        SourceSizeStage::Structure => structure,
+                    })
+                })
+                .expect("staged accounting");
+                assert_eq!(
+                    actual, expected,
+                    "source={rows}/{bytes}/{structure}, cap={maximum}"
+                );
+                if actual {
+                    assert_eq!(staged.charged, original.charged);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn staged_preflight_preserves_cancellation_before_propagating_query_errors() {
+        let cx = asupersync::Cx::for_testing();
+        let mut budget = SourceReadBudget::new(4096);
+        let mut calls = 0;
+        let result = charge_source_measurements(&cx, &mut budget, |_| {
+            calls += 1;
+            cx.set_cancel_reason(asupersync::CancelReason::user("cancel source sizing"));
+            Err(IndexRebuildError::Index(
+                "source query interrupted".to_owned(),
+            ))
+        });
+        assert!(matches!(
+            result,
+            Err(IndexRebuildError::Cancelled(reason))
+                if reason.message.as_deref() == Some("cancel source sizing")
+        ));
+        assert_eq!(calls, 1);
+        assert_eq!(budget.charged, Some(0));
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn staged_source_queries_are_exact_and_keep_the_readers_snapshot() {
+        let (_root, db, path) = fixture_with_content("Legacy é🦀\0 {\"array\":[1,2,3]}");
+        let before = std::fs::read(&path).expect("source bytes");
+        let generation = db.get_workspace_generation(WORKSPACE).expect("generation");
+        let read = DbConnection::open_file_read_only(&path).expect("read-only source");
+        read.begin_read_snapshot().expect("caller snapshot");
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+            let (rows, bytes, structure) = source_row_sizes(
+                &read,
+                WORKSPACE,
+                "memories m",
+                "id content typed_fields_json",
+                "m.workspace_id = ?1",
+            )
+            .expect("one-pass reference");
+            let exact = rows * SourceReadBudget::ROW_OVERHEAD
+                + bytes * SourceReadBudget::TEXT_COPIES
+                + structure;
+            for maximum in [0, exact - 1, exact, exact + 1] {
+                let mut budget = SourceReadBudget::new(maximum);
+                assert_eq!(
+                    charge_source_rows(
+                        &cx,
+                        &read,
+                        WORKSPACE,
+                        "memories m",
+                        "id content typed_fields_json",
+                        "m.workspace_id = ?1",
+                        &mut budget,
+                    )
+                    .expect("staged SQL"),
+                    maximum >= exact
+                );
+                if maximum >= exact {
+                    assert_eq!(budget.charged, Some(exact));
+                }
+            }
+            // This column deliberately does not exist. A row-only refusal
+            // must not even prepare the later body/structure query.
+            let mut no_room = SourceReadBudget::new(0);
+            assert!(
+                !charge_source_rows(
+                    &cx,
+                    &read,
+                    WORKSPACE,
+                    "memories m",
+                    "unavailable_body_json",
+                    "m.workspace_id = ?1",
+                    &mut no_room,
+                )
+                .expect("row refusal before body access")
+            );
+            read.commit_read_snapshot()
+                .expect("caller still owns snapshot");
+        })
+        .expect("runtime");
+        assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
+        assert_eq!(
+            db.get_workspace_generation(WORKSPACE).expect("generation"),
+            generation
+        );
+        assert!(db.list_memory_anchors(MEMORY).expect("anchors").is_empty());
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn paged_live_fallback_preserves_the_canonical_evidence_set_and_read_only_state() {
+        let (_root, db, path) = fixture();
+        let first = source_session(&db);
+        let second = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x7200)).to_string();
+        db.insert_session(
+            &second,
+            &crate::db::CreateSessionInput {
+                workspace_id: WORKSPACE.to_owned(),
+                cass_session_id: "second-live-source".to_owned(),
+                source_path: None,
+                agent_name: Some("codex".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 257,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(b"second live source")),
+                metadata_json: None,
+            },
+        )
+        .expect("second source session");
+        for ordinal in (1..=257).rev() {
+            source_evidence(
+                &db,
+                if ordinal % 2 == 0 { &first } else { &second },
+                ordinal,
+                &format!("Stable release observation number {ordinal}."),
+                false,
+            );
+        }
+        let withheld = source_evidence(&db, &first, 258, "[REDACTED:history]", true);
+        let before = std::fs::read(&path).expect("source bytes");
+        let generation = db.get_workspace_generation(WORKSPACE).expect("generation");
+        let read = DbConnection::open_file_read_only(&path).expect("read-only source");
+        read.begin_read_snapshot().expect("caller snapshot");
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(60), |cx| async move {
+            let mut expected = Vec::new();
+            read.visit_search_admitted_evidence_spans_in_current_snapshot(WORKSPACE, |span| {
+                expected.push(super::super::evidence_span_to_document(&span).into_indexable());
+                Ok(())
+            })
+            .expect("canonical transcript traversal");
+            expected.sort_by(|left, right| left.id.cmp(&right.id));
+            assert_eq!(expected.len(), 257);
+            let documents = read_only_documents_in_current_snapshot(
+                &cx,
+                &read,
+                WORKSPACE,
+                300,
+                64 * 1024 * 1024,
+            )
+            .expect("paged fallback")
+            .expect("complete source fits");
+            assert_eq!(documents.len(), 260);
+            assert!(documents.iter().all(|document| document.id != withheld));
+            let actual: Vec<_> = documents
+                .iter()
+                .filter(|document| {
+                    document.id != MEMORY && document.id != first && document.id != second
+                })
+                .collect();
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert_eq!(actual.id, expected.id);
+                assert_eq!(actual.content, expected.content);
+                assert_eq!(actual.metadata, expected.metadata);
+            }
+            read.commit_read_snapshot()
+                .expect("caller still owns snapshot");
+        })
+        .expect("runtime");
+        assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
+        assert_eq!(
+            db.get_workspace_generation(WORKSPACE).expect("generation"),
+            generation
+        );
+        assert!(db.list_memory_anchors(MEMORY).expect("anchors").is_empty());
     }
 }
