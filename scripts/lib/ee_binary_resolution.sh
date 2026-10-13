@@ -146,21 +146,58 @@ ee_binary_version() {
 # deciding, so a log reader can see which binary produced a verdict even when
 # the check passes.
 # Modification time and size of a candidate binary, as observability beside the
-# version. BSD/macOS `stat` and GNU `stat` take incompatible flags, so both are
-# tried and neither failure is fatal -- a missing timestamp must never turn a
+# version. Neither failure is fatal -- a missing timestamp must never turn a
 # usable binary into a refusal.
+#
+# GNU IS TRIED FIRST, AND THE ORDER IS THE WHOLE FIX. The first version of
+# these helpers put the BSD form first with the GNU form as a `||` fallback,
+# which looks like ordinary portability and is not: on GNU coreutils `-f` means
+# "file system status", NOT "format". So `stat -f '%Sm' -t ... FILE` SUCCEEDS on
+# Linux and prints the FILESYSTEM's statistics, the `||` never fires, and the
+# field carries the wrong data with exit 0. Measured on an RCH worker
+# 2026-10-13, where the provenance line read
+#
+#     mtime=/data/projects/eidetic_engine_cli/.rch-target/debug/ee \
+#     898458b21e9b3581 255 ef53 4096 4096 202873593 ...
+#
+# -- a device id, a namelen and block counts where a timestamp belongs, spread
+# over five lines. A fallback chain only works when the wrong form FAILS on the
+# other platform; `stat -c` does fail on BSD ("illegal option"), so this order
+# degrades correctly in both directions.
+#
+# Both now emit EPOCH SECONDS rather than a formatted date. GNU `%y` renders
+# "2026-10-13 17:59:08.837009596 -0400", whose spaces break the single-line
+# provenance record every caller greps, and an integer is what a staleness
+# comparison actually wants.
+#
+# The value is VALIDATED, not trusted, which is the second defence and the one
+# that makes the order non-load-bearing. This repo already had two correct
+# implementations when I wrote a third one wrong:
+# scripts/beads_export_repair.sh:77-80 does GNU-first plus a digit check, and
+# scripts/e2e_overhaul/workspace_hygiene.sh:532-536 tries BSD first but
+# accepts the answer only if it matches ^[0-9]+$, so GNU's filesystem output
+# falls through instead of being printed as a time. Either guard alone would
+# have caught this; the version I shipped had neither.
 ee_binary_mtime() {
     local binary="${1:?ee_binary_mtime: binary path required}"
-    stat -f '%Sm' -t '%Y-%m-%dT%H:%M:%S' "$binary" 2>/dev/null \
-        || stat -c '%y' "$binary" 2>/dev/null \
-        || printf 'unknown'
+    local value
+    value="$(stat -c '%Y' "$binary" 2>/dev/null \
+        || stat -f '%m' "$binary" 2>/dev/null || true)"
+    case "$value" in
+        '' | *[!0-9]*) printf 'unknown' ;;
+        *) printf '%s' "$value" ;;
+    esac
 }
 
 ee_binary_size() {
     local binary="${1:?ee_binary_size: binary path required}"
-    stat -f '%z' "$binary" 2>/dev/null \
-        || stat -c '%s' "$binary" 2>/dev/null \
-        || printf 'unknown'
+    local value
+    value="$(stat -c '%s' "$binary" 2>/dev/null \
+        || stat -f '%z' "$binary" 2>/dev/null || true)"
+    case "$value" in
+        '' | *[!0-9]*) printf 'unknown' ;;
+        *) printf '%s' "$value" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -216,7 +253,7 @@ ee_require_current_binary() {
     # for a reader to notice. mtime+size are O(1); sha256 is deliberately not
     # printed here even though ee_binary_sha256 exists, because a debug `ee` is
     # ~2 GB and this runs five-plus times per Gate 8.5.
-    printf '%s: ee_binary=%s binary_version=%s source_version=%s mtime=%s size=%s\n' \
+    printf '%s: ee_binary=%s binary_version=%s source_version=%s mtime_epoch=%s size_bytes=%s\n' \
         "$label" "$binary" "${binary_version:-unknown}" "${source_version:-unknown}" \
         "$(ee_binary_mtime "$binary")" "$(ee_binary_size "$binary")" >&2
 
