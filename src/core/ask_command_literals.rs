@@ -44,6 +44,12 @@ pub(super) fn compatible(left: &str, right: &str) -> bool {
     if left_assignments != right_assignments {
         return false;
     }
+    if option_literals(&left.plain)
+        .zip(option_literals(&right.plain))
+        .is_none_or(|(left, right)| left != right)
+    {
+        return false;
+    }
     match (
         instruction_payload(&left.plain),
         instruction_payload(&right.plain),
@@ -223,19 +229,95 @@ fn literal_word_end(text: &str, start: usize) -> Option<usize> {
     quote.is_none().then_some(index)
 }
 
-/// Only an explicit imperative introduces an opaque command payload. Retain
-/// its conditions and arguments in full; we do not guess where a shell
-/// command ends and prose resumes. The ordering parser handles its stronger
-/// before/after equivalence before this fallback is called.
-fn instruction_payload(text: &str) -> Option<&str> {
+/// Bind each option to its following lexical word as well as its own bytes.
+/// An option's arity is not inferred: the neighboring word is evidence that
+/// must agree, not a parsed argument to execute. This also preserves values
+/// for boolean-looking options and options unknown to this version of ee.
+fn option_literals(text: &str) -> Option<Vec<(&str, Option<&str>)>> {
+    let bytes = text.as_bytes();
+    let mut literals = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'-'
+            || (index > 0
+                && !bytes[index - 1].is_ascii_whitespace()
+                && !matches!(bytes[index - 1], b'(' | b'[' | b'{'))
+        {
+            index += 1;
+            continue;
+        }
+        let end = literal_word_end(text, index)?;
+        let option = &text[index..end];
+        if option != "--" && !option.chars().any(char::is_alphabetic) {
+            index = end;
+            continue;
+        }
+        index = end;
+        let argument = if option.contains('=') {
+            // The whole quoted/escaped value is already in this word.
+            None
+        } else {
+            let mut start = end;
+            while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+                start += 1;
+            }
+            if start == bytes.len() {
+                None
+            } else {
+                let next_end = literal_word_end(text, start)?;
+                // Do not reinterpret an option-looking substring inside a
+                // quoted argument. A following real option still gets its
+                // own neighborhood so its value cannot disappear.
+                if bytes[start] != b'-' {
+                    index = next_end;
+                }
+                Some(&text[start..next_end])
+            }
+        };
+        literals.push((option, argument));
+    }
+    Some(literals)
+}
+
+/// An explicit imperative or command label introduces an opaque payload.
+/// Preserve any preceding condition as well as the full tail; finding `run`
+/// inside a qualified statement must not erase its workspace or environment.
+/// The ordering parser handles its stronger before/after equivalence before
+/// this fallback is called. No command is parsed, normalized or executed here.
+fn instruction_payload(text: &str) -> Option<(&str, &str)> {
     let text = text.trim();
     let start = ask_list_content_start(text.as_bytes(), 0, text.len()).unwrap_or(0);
     let text = &text[start..];
-    let (verb, rest) = text.split_once(char::is_whitespace)?;
-    ["run", "execute", "invoke"]
-        .iter()
-        .any(|expected| verb.eq_ignore_ascii_case(expected))
-        .then_some(rest.trim())
+    let mut offset = 0;
+    for word in text.split_whitespace() {
+        let start = offset + text[offset..].find(word)?;
+        let end = start + word.len();
+        offset = end;
+        let verb = word.strip_suffix(':').unwrap_or(word);
+        let prefix = text[..start].trim_end();
+        let command_boundary = prefix.is_empty()
+            || prefix.ends_with([',', ';', ':'])
+            || prefix.split_whitespace().next_back().is_some_and(|word| {
+                ["please", "should", "must"]
+                    .iter()
+                    .any(|expected| word.eq_ignore_ascii_case(expected))
+            });
+        let imperative = command_boundary
+            && ["run", "execute", "invoke"]
+                .iter()
+                .any(|expected| verb.eq_ignore_ascii_case(expected));
+        let label = word.ends_with(':')
+            && ["command", "invocation"]
+                .iter()
+                .any(|expected| verb.eq_ignore_ascii_case(expected));
+        if imperative || label {
+            let tail = text[end..].trim_start();
+            if !tail.is_empty() {
+                return Some((&text[..start], tail));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -497,6 +579,130 @@ mod tests {
             assert!(report.answer_text.is_none() && report.citations.is_empty());
             assert!(!report.extractiveness_violated);
             assert_eq!(report.nearest_evidence.as_ref().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn option_values_remain_literal_without_an_imperative_or_markdown() {
+        for (left, right) in [
+            (
+                "The recommended tool uses --profile release for this workspace.",
+                "The recommended tool uses --profile debug for this workspace.",
+            ),
+            ("Use tool -C Source here.", "Use tool -C source here."),
+            (
+                "Use tool --name 'A  B' here.",
+                "Use tool --name 'A B' here.",
+            ),
+            (
+                "Use tool --name='A  B' here.",
+                "Use tool --name='A B' here.",
+            ),
+            (
+                "Use tool --all --profile release.",
+                "Use tool --all --profile debug.",
+            ),
+            ("Use tool -- --profile here.", "Use tool -- --other here."),
+        ] {
+            assert!(!compatible(left, right), "{left:?} / {right:?}");
+            assert!(!compatible(right, left));
+        }
+        assert_eq!(
+            option_literals("Use --name 'a --embedded b' --all --profile release"),
+            Some(vec![
+                ("--name", Some("'a --embedded b'")),
+                ("--all", Some("--profile")),
+                ("--profile", Some("release")),
+            ])
+        );
+        assert!(option_literals("Use --name 'unfinished").is_none());
+        assert!(compatible(
+            "Use `tool --name 'A  B'` here.",
+            "Use tool --name 'A  B' here.",
+        ));
+    }
+
+    #[test]
+    fn conditional_commands_keep_their_scope_operators_and_argument_order() {
+        for (left, right) in [
+            (
+                "For the release, run copy source target.",
+                "For the release, run copy target source.",
+            ),
+            (
+                "When ready, execute test && deploy.",
+                "When ready, execute test ; deploy.",
+            ),
+            (
+                "In staging, invoke deploy App.",
+                "In production, invoke deploy App.",
+            ),
+            (
+                "The command: copy source target.",
+                "The command: copy target source.",
+            ),
+        ] {
+            assert!(!compatible(left, right), "{left:?} / {right:?}");
+            assert!(!compatible(right, left));
+        }
+        for (left, right) in [
+            (
+                "When ready, run cargo test.",
+                "When ready, execute cargo test.",
+            ),
+            ("Run: cargo test.", "Invoke: cargo test."),
+            ("Command: cargo test.", "Invocation: cargo test."),
+        ] {
+            assert!(compatible(left, right), "{left:?} / {right:?}");
+            assert!(compatible(right, left));
+        }
+        assert!(instruction_payload("The rerun completes.").is_none());
+        assert!(instruction_payload("The test run completed.").is_none());
+        assert!(compatible(
+            "You should run cargo test.",
+            "You should invoke cargo test.",
+        ));
+    }
+
+    #[test]
+    fn evaluator_preserves_option_alternatives_and_exact_citation_bytes() {
+        let left = "The recommended tool uses --profile release for this workspace deployment.";
+        let right = "The recommended tool uses --profile debug for this workspace deployment.";
+        let mut candidates = [candidate("a", left), candidate("b", right)];
+        let request = AskRequest {
+            question: "recommended tool profile workspace deployment".to_owned(),
+            ..AskRequest::default()
+        };
+        for semantic_degraded in [false, true] {
+            let weak =
+                evaluate_ask_scored(&request, &candidates, &|_, _, _, _| 0.52, semantic_degraded);
+            assert!(weak.abstained && weak.citations.is_empty());
+            assert_eq!(weak.nearest_evidence.as_ref().unwrap().len(), 2);
+            let strong =
+                evaluate_ask_scored(&request, &candidates, &|_, _, _, _| 0.8, semantic_degraded);
+            assert!(!strong.abstained);
+            assert_eq!(strong.citations.len(), 2);
+            for citation in &strong.citations {
+                let original = candidates
+                    .iter()
+                    .find(|row| row.memory_id == citation.memory_id)
+                    .unwrap();
+                assert_eq!(
+                    original.content.get(citation.byte_start..citation.byte_end),
+                    Some(citation.text.as_str()),
+                );
+            }
+            let expected = ask_data_json(&strong);
+            candidates.reverse();
+            assert_eq!(
+                expected,
+                ask_data_json(&evaluate_ask_scored(
+                    &request,
+                    &candidates,
+                    &|_, _, _, _| 0.8,
+                    semantic_degraded,
+                )),
+            );
         }
     }
 
