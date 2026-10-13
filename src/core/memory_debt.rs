@@ -314,7 +314,7 @@ impl MemoryDebtTrendSnapshot {
             generation: stored.generation,
             report_hash: stored.report_hash.clone(),
             item_count: stored.item_count,
-            total_score: finite_score(stored.total_score),
+            total_score: finite_debt_total(stored.total_score),
             created_at: stored.created_at.clone(),
         }
     }
@@ -608,7 +608,7 @@ fn build_memory_debt_report(
     // consistent with item_count/class_counts (both full-queue) and so a trend
     // snapshot's totalScore shifts only when corpus debt changes, not when the
     // --limit changes. Compute it BEFORE truncating the queue.
-    let total_score = round_score(queue.iter().map(|item| f64::from(item.score)).sum());
+    let total_score = round_debt_total(queue.iter().map(|item| f64::from(item.score)).sum());
     let returned_count = total_count.min(limit as usize);
     let truncated = total_count > returned_count;
     queue.truncate(returned_count);
@@ -1378,11 +1378,56 @@ fn finite_score(value: f32) -> f32 {
     }
 }
 
+/// Guard a stored AGGREGATE debt total: reject non-finite and negative values,
+/// keep the magnitude.
+///
+/// `finite_score` cannot be used here for the same reason `round_score` cannot
+/// be used on the sum: its [0.0, 1.0] clamp encodes "this is one normalized
+/// score". Applying it to a stored snapshot total RE-CLAMPED every trend point
+/// back to 1.0 on read, which would have silently defeated the write-side fix
+/// on the one surface it was meant to repair -- `ee curate doctor --trend`
+/// reads exclusively through `MemoryDebtTrendSnapshot::from_stored`.
+///
+/// Of the eight `finite_score` call sites in this module, this was the only
+/// aggregate; the other seven guard per-memory confidence, utility, importance
+/// and event weight, where the clamp is correct and stays.
+fn finite_debt_total(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
 fn round_score(value: f64) -> f32 {
     if !value.is_finite() {
         return 0.0;
     }
     ((value.clamp(0.0, 1.0) * 1000.0).round() / 1000.0) as f32
+}
+
+/// Round an AGGREGATE debt magnitude to three decimals.
+///
+/// Deliberately NOT `round_score`. That clamp to [0.0, 1.0] is correct for a
+/// single normalized per-item score and WRONG for a sum of them, and the
+/// summary's `total_score` is a sum over the whole queue. Per-item bases start
+/// at 0.32 (`detect_orphan`) and 0.48 (`detect_stale_anchor`), so the sum
+/// crosses 1.0 at three or four debt items and the clamp pinned it there
+/// permanently.
+///
+/// Measured 2026-10-13 by the first graded run of scripts/e2e_memory_debt.sh:
+/// two trend snapshots either side of a real fix both read exactly 1.0 while
+/// `resolving_orphan_shrinks_queue` passed in the same execution, proving the
+/// queue responded and the metric could not. A gauge that cannot move is
+/// indistinguishable from a gauge that is working.
+///
+/// The lower bound stays, because `src/core/backup.rs` validates stored
+/// snapshots for `total_score >= 0.0` and finite. Only the ceiling is dropped.
+fn round_debt_total(value: f64) -> f32 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    ((value.max(0.0) * 1000.0).round() / 1000.0) as f32
 }
 
 #[cfg(test)]

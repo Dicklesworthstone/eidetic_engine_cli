@@ -223,3 +223,68 @@ fn memory_debt_snapshot_is_idempotent_and_trend_renders() -> Result<(), Box<dyn 
     );
     Ok(())
 }
+
+/// Seed `count` orphan-debt memories and return the reported `summary.totalScore`.
+fn orphan_debt_total_score(temp: &Path, count: u32) -> Result<f64, Box<dyn Error>> {
+    let db_path = temp.join("ee.db");
+    let (connection, workspace_id) = seed_workspace(temp, &db_path)?;
+    for index in 1..=count {
+        insert_memory(
+            &connection,
+            &workspace_id,
+            &format!("mem_{index:026}"),
+            "orphaned persisted memory for debt saturation coverage",
+            0.2,
+            0.9,
+        )?;
+    }
+    connection.close()?;
+
+    let mut options = MemoryDebtDoctorOptions::new(temp);
+    options.database_path = Some(&db_path);
+    options.class_filter = Some("orphan");
+    options.limit = 50;
+    options.now_rfc3339 = Some("2026-06-15T00:00:00Z");
+    let report = run_memory_debt_doctor(&options)?;
+    let data = report.data_json();
+    assert_eq!(
+        data["summary"]["itemCount"], count,
+        "every seeded memory must land in the orphan debt queue"
+    );
+    Ok(data["summary"]["totalScore"]
+        .as_f64()
+        .expect("totalScore is a number"))
+}
+
+/// `summary.totalScore` is a SUM over the debt queue, so it must be able to
+/// exceed 1.0 and must keep responding as debt grows.
+///
+/// REGRESSION GUARD, not a refactor test. Until 2026-10-13 the sum was passed
+/// through the PER-ITEM rounding helper, which clamps to [0.0, 1.0]. Per-item
+/// orphan scores here are 0.572 each (base 0.32, plus utility 0.9 * 0.12,
+/// importance 0.8 * 0.10, and (1 - confidence 0.2) * 0.08), so five of them sum
+/// to about 2.86 and the clamp reported exactly 1.0 instead. On any corpus with
+/// three or more debt items the gauge was pinned, which is why
+/// `ee curate doctor --trend` could not show debt rising or falling.
+///
+/// The `> 1.0` assertion is the one that discriminates. Note that the older
+/// sibling test above CANNOT catch this: it seeds two items and compares the
+/// total against a single item's score, a comparison the clamp still satisfies.
+/// A test calibrated below the saturation point cannot fail on saturation.
+#[test]
+fn curate_doctor_total_score_is_not_clamped_at_one_bd_92msh() -> Result<(), Box<dyn Error>> {
+    let five_temp = tempfile::tempdir()?;
+    let five_total = orphan_debt_total_score(five_temp.path(), 5)?;
+    assert!(
+        five_total > 1.0,
+        "totalScore ({five_total}) must be an unclamped sum; the per-item clamp reported exactly 1.0 for this corpus"
+    );
+
+    let one_temp = tempfile::tempdir()?;
+    let one_total = orphan_debt_total_score(one_temp.path(), 1)?;
+    assert!(
+        five_total > one_total,
+        "totalScore must keep responding as debt grows: five items ({five_total}) must exceed one ({one_total})"
+    );
+    Ok(())
+}
