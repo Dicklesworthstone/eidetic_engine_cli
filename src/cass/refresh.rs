@@ -23,6 +23,9 @@ use super::{
 const CHECKPOINT_KEY: &str = "eeCassImportCheckpoint";
 const CHECKPOINT_SCHEMA: &str = "ee.cass.session_checkpoint.v1";
 
+#[path = "refresh_batch.rs"]
+mod batch;
+
 type SessionMetadata = serde_json::Map<String, serde_json::Value>;
 
 struct MetadataRefresh {
@@ -242,26 +245,8 @@ pub(super) fn refresh_session(
         );
         input.metadata_json = Some(serde_json::Value::Object(metadata).to_string());
 
-        let mut added_lines = Vec::with_capacity(additions.len());
-        let mut admission = EvidenceAdmissionTally::default();
-        for span in additions {
-            let evidence_id = stable_evidence_id(session_id, &span.cass_span_id);
-            if connection.get_evidence_span(&evidence_id)?.is_some() {
-                return Err(refusal("cass_refresh_evidence_identity_exists"));
-            }
-            let reason = connection.insert_evidence_span_with_admission(
-                &evidence_id,
-                &evidence_input(workspace_id, session_id, span),
-            )?;
-            admission.record(reason.as_deref());
-            if span.redacted {
-                connection.insert_audit(
-                    &stable_cass_redaction_audit_id(&evidence_id),
-                    &cass_redaction_audit_input(workspace_id, session_id, &evidence_id, span),
-                )?;
-            }
-            added_lines.push(span.end_line);
-        }
+        let (mut added_lines, admission) =
+            batch::insert_additions(connection, workspace_id, &stored, &additions)?;
         for (audit_id, audit) in &reconciliations {
             connection.insert_audit(audit_id, audit)?;
         }
