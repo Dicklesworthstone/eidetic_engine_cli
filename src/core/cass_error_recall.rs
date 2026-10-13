@@ -45,9 +45,9 @@ mod test_coverage;
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
-/// V4 adds libtest JSON execution histories after Cargo's build phase, so
-/// unchanged v3 sessions are reconsidered on their next import derivation.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v4";
+/// V5 adds Pyright and ESLint structured checker reports. Re-importing an
+/// unchanged older session must reconsider its previously unrecognized arcs.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v5";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
