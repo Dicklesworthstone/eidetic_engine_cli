@@ -1,9 +1,10 @@
-//! Bounded Rust compiler JSON diagnostics and Cargo JSONL completion checks.
+//! Bounded compiler JSON diagnostics and completion checks.
 //!
 //! Cargo's compiler-message embeds a rustc diagnostic. Use its typed level,
 //! code and message, never rendered output, children, artifacts or examples.
-//! A build-finished success is not a process/test success: it only permits the
-//! caller to consider its independent completion observation. Any error wins.
+//! Pyright's complete JSON report supplies Python type-checking diagnostics.
+//! Neither a build-finished marker nor an analysis summary is process success:
+//! they only permit an independent completion observation. Any error wins.
 
 use std::collections::BTreeSet;
 
@@ -67,11 +68,18 @@ fn cargo_reason(reason: &str) -> bool {
     )
 }
 
+/// Presence, including JSON null, selects a claimed producer shape. A null or
+/// malformed diagnostics field must not escape validation as unrelated JSON.
+fn field_present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(true)
+}
+
 /// None means another output family, not successful compiler output. Invalid
 /// or conflicting streams are errors, never a salvaged prefix. Cargo may
 /// transition to libtest only after a successful build-finished event. Typed
 /// deserialization rejects duplicate discriminator, level, code and status
-/// fields while tolerating unrelated future producer metadata.
+/// fields while tolerating unrelated future Rust producer metadata.
 pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     if !text.trim_start().starts_with('{') {
         return Ok(None);
@@ -90,12 +98,23 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         reason: Option<Value>,
         #[serde(rename = "$message_type")]
         message_type: Option<Value>,
+        #[serde(default, rename = "generalDiagnostics", deserialize_with = "field_present")]
+        pyright: bool,
+        summary: Option<Value>,
     }
     let family = serde_json::Deserializer::from_str(text)
         .into_iter::<Family>()
         .next()
         .ok_or(())?
         .map_err(|_| ())?;
+    if family.pyright
+        || family.summary.as_ref().is_some_and(|summary| {
+            summary.get("filesAnalyzed").is_some()
+                && summary.get("errorCount").is_some()
+        })
+    {
+        return inspect_pyright(text).map(Some);
+    }
     if !family
         .reason
         .as_ref()
@@ -263,6 +282,119 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         && (!cargo || finished == Some(true))
         && (!harness.seen() || harness.allows_completion());
     Ok(Some(output))
+}
+
+/// Documented `pyright --outputjson` contract. Unlike Cargo this is ONE
+/// complete report, not a JSONL stream. Unknown root fields are refused so a
+/// conflicting native status cannot be hidden beside otherwise valid output.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PyrightReport {
+    version: String,
+    time: String,
+    general_diagnostics: Vec<PyrightDiagnostic>,
+    summary: PyrightSummary,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PyrightSummary {
+    files_analyzed: u64,
+    error_count: u64,
+    warning_count: u64,
+    information_count: u64,
+    time_in_sec: f64,
+}
+
+#[derive(Deserialize)]
+struct PyrightDiagnostic {
+    file: String,
+    severity: String,
+    message: String,
+    rule: Option<String>,
+    range: PyrightRange,
+}
+
+#[derive(Deserialize)]
+struct PyrightRange {
+    start: PyrightPosition,
+    end: PyrightPosition,
+}
+
+#[derive(Deserialize)]
+struct PyrightPosition {
+    line: u64,
+    character: u64,
+}
+
+fn inspect_pyright(text: &str) -> Result<CompilerOutput, ()> {
+    let report: PyrightReport = serde_json::from_str(text).map_err(|_| ())?;
+    if report.version.trim().is_empty()
+        || report.time.trim().is_empty()
+        || report.general_diagnostics.len() > MAX_COMPILER_RECORDS
+        || !report.summary.time_in_sec.is_finite()
+        || report.summary.time_in_sec < 0.0
+    {
+        return Err(());
+    }
+    let mut output = CompilerOutput::default();
+    let mut counts = [0_u64; 3];
+    let mut keys = BTreeSet::new();
+    for diagnostic in report.general_diagnostics {
+        let category = match diagnostic.severity.as_str() {
+            "error" => 0,
+            "warning" => 1,
+            "information" => 2,
+            _ => return Err(()),
+        };
+        if diagnostic.file.trim().is_empty()
+            || diagnostic.message.trim().is_empty()
+            || diagnostic.rule.as_ref().is_some_and(|rule| rule.trim().is_empty())
+            || (diagnostic.range.end.line, diagnostic.range.end.character)
+                < (diagnostic.range.start.line, diagnostic.range.start.character)
+        {
+            return Err(());
+        }
+        counts[category] += 1;
+        if category != 0 {
+            continue;
+        }
+        output.failed = true;
+        let detail = match diagnostic.rule {
+            Some(rule) => format!("{rule}: {}", diagnostic.message),
+            None => diagnostic.message,
+        };
+        // Named third-party rules and exception text are not trusted canonical
+        // codes. Redact BEFORE keying and retain only a producer-namespaced
+        // message template. File names, positions, versions and wall times do
+        // not fragment the same class or enter its persisted representation.
+        let detail = crate::policy::redact_secret_like_content(&detail).content;
+        let canonical = CanonicalDiagnostic {
+            tool: crate::core::error_recall::DiagnosticTool::Shell,
+            canonical_code: None,
+            message_template: crate::core::error_recall::canonical_message_template(
+                &format!("pyright: {detail}"),
+            ),
+        };
+        if keys.insert(canonical.layered_key().key)
+            && output.diagnostics.len() < MAX_DIAGNOSTICS_PER_FAILURE
+        {
+            output.diagnostics.push(canonical);
+        }
+    }
+    // Validate even after the output cap. A clean summary cannot erase an
+    // error, and missing/truncated diagnostics cannot mint partial evidence.
+    if counts
+        != [
+            report.summary.error_count,
+            report.summary.warning_count,
+            report.summary.information_count,
+        ]
+    {
+        return Err(());
+    }
+    output.allows_completion = !output.failed && report.summary.files_analyzed > 0;
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -461,5 +593,201 @@ mod tests {
                 .diagnostics
                 .is_empty()
         );
+    }
+
+    fn pyright_diagnostic(severity: &str, message: &str) -> Value {
+        json!({
+            "file": "/private/project/module.py",
+            "severity": severity,
+            "message": message,
+            "rule": "reportArgumentType",
+            "range": {
+                "start": {"line": 2, "character": 0},
+                "end": {"line": 2, "character": 5}
+            }
+        })
+    }
+
+    fn pyright_report(diagnostics: Vec<Value>) -> Value {
+        let count = |severity: &str| {
+            diagnostics.iter().filter(|item| item["severity"] == severity).count()
+        };
+        json!({
+            "version": "1.1.400",
+            "time": "2026-10-13T12:00:00Z",
+            "summary": {
+                "filesAnalyzed": 3,
+                "errorCount": count("error"),
+                "warningCount": count("warning"),
+                "informationCount": count("information"),
+                "timeInSec": 0.1
+            },
+            "generalDiagnostics": diagnostics
+        })
+    }
+
+    #[test]
+    fn pyright_errors_reach_import_and_native_log_recall_with_identical_keys() {
+        let value = pyright_report(vec![
+            pyright_diagnostic("error", "Argument type is incompatible"),
+            pyright_diagnostic("warning", "error[E0277]: this is only warning text"),
+            pyright_diagnostic("information", "The inferred type is int"),
+        ]);
+        let text = value.to_string();
+        let expected = parsed(&text).diagnostics;
+        assert_eq!(expected.len(), 1);
+        assert!(expected[0].message_template.starts_with("pyright:"));
+        assert_eq!(expected[0].canonical_code, None);
+        assert_eq!(
+            super::super::structured_error_diagnostics(&text),
+            expected
+        );
+        for exit_code in [None, Some(0), Some(1)] {
+            let output = ToolOutput {
+                text: text.clone(),
+                is_error: Some(false),
+                exit_code,
+            };
+            assert_eq!(failure_diagnostics(&output), expected);
+            assert!(output.failed());
+            assert!(!output.succeeded());
+        }
+    }
+
+    #[test]
+    fn pyright_completion_requires_analyzed_files_and_independent_process_success() {
+        for diagnostics in [
+            Vec::new(),
+            vec![pyright_diagnostic("warning", "Deprecated annotation")],
+        ] {
+            let mut value = pyright_report(diagnostics);
+            let output = ToolOutput {
+                text: value.to_string(),
+                ..ToolOutput::default()
+            };
+            assert!(parsed(&output.text).allows_completion);
+            assert!(failure_diagnostics(&output).is_empty());
+            assert!(!output.succeeded());
+            assert!(ToolOutput { exit_code: Some(0), ..output.clone() }.succeeded());
+            assert!(ToolOutput { is_error: Some(false), ..output.clone() }.succeeded());
+            assert!(!ToolOutput { exit_code: Some(1), ..output }.succeeded());
+            value["summary"]["filesAnalyzed"] = json!(0);
+            let output = ToolOutput {
+                text: value.to_string(),
+                is_error: Some(false),
+                exit_code: Some(0),
+            };
+            assert!(!output.succeeded(), "empty analysis is not a repair proof");
+        }
+    }
+
+    #[test]
+    fn pyright_keys_ignore_source_locations_time_and_version_and_redact_messages() {
+        let mut first = pyright_report(vec![pyright_diagnostic(
+            "error", "Argument type is incompatible",
+        )]);
+        let before = parsed(&first.to_string()).diagnostics;
+        first["version"] = json!("1.1.401");
+        first["time"] = json!("a later source timestamp");
+        first["generalDiagnostics"][0]["file"] = json!("/other/private/location.py");
+        first["generalDiagnostics"][0]["range"]["end"]["line"] = json!(100);
+        let after = parsed(&first.to_string()).diagnostics;
+        assert_eq!(before, after);
+        assert!(!format!("{after:?}").contains("/other/private"));
+        let credential = format!("ghp_{}", "Q".repeat(36));
+        first["generalDiagnostics"][0]["message"] = json!(format!("api_key={credential}"));
+        first["generalDiagnostics"][0]["rule"] = json!(format!("api_key={credential}"));
+        let redacted = parsed(&first.to_string()).diagnostics;
+        assert!(!format!("{redacted:?}").contains(&credential));
+        assert!(!format!("{redacted:?}").contains(&credential.to_ascii_lowercase()));
+    }
+
+    #[test]
+    fn pyright_duplicate_classes_do_not_consume_the_diagnostic_budget() {
+        let first = pyright_diagnostic("error", "Argument type is incompatible");
+        let second = pyright_diagnostic("error", "Import cannot be resolved");
+        let result = parsed(&pyright_report(vec![first.clone(), first, second]).to_string());
+        assert_eq!(result.diagnostics.len(), 2);
+        assert!(result.failed);
+        assert!(!result.allows_completion);
+    }
+
+    #[test]
+    fn pyright_malformed_reports_cannot_hide_errors_or_certify_repairs() {
+        let original = pyright_report(vec![pyright_diagnostic("error", "Invalid argument")]);
+        let mut malformed = Vec::new();
+        for pointer in [
+            "/summary/errorCount", "/summary/warningCount", "/summary/informationCount",
+        ] {
+            let mut value = original.clone();
+            *value.pointer_mut(pointer).unwrap() = json!(99);
+            malformed.push(value);
+        }
+        for (pointer, replacement) in [
+            ("/generalDiagnostics", Value::Null),
+            ("/generalDiagnostics/0/severity", json!("future_severity")),
+            ("/generalDiagnostics/0/file", json!("")),
+            ("/generalDiagnostics/0/message", json!(" ")),
+            ("/generalDiagnostics/0/range/end/line", json!(1)),
+            ("/generalDiagnostics/0/range/start/character", json!(-1)),
+            ("/summary/timeInSec", json!(-0.1)),
+            ("/summary/filesAnalyzed", json!(1.5)),
+            ("/version", json!("")),
+        ] {
+            let mut value = original.clone();
+            *value.pointer_mut(pointer).unwrap() = replacement;
+            malformed.push(value);
+        }
+        let mut missing = original.clone();
+        missing.as_object_mut().unwrap().remove("generalDiagnostics");
+        malformed.push(missing);
+        let mut conflicting = original.clone();
+        conflicting["schema"] = json!("ee.response.v2");
+        conflicting["success"] = json!(true);
+        malformed.push(conflicting);
+        for value in malformed {
+            let text = value.to_string();
+            assert!(inspect(&text).is_err(), "{text}");
+            let output = ToolOutput { text, is_error: Some(false), exit_code: Some(0) };
+            assert!(failure_diagnostics(&output).is_empty());
+            assert!(!output.succeeded());
+        }
+    }
+
+    #[test]
+    fn pyright_rejects_duplicate_fields_and_incomplete_or_concatenated_documents() {
+        let valid = pyright_report(Vec::new()).to_string();
+        for text in [
+            valid.replacen("\"generalDiagnostics\":[]", "\"generalDiagnostics\":null,\"generalDiagnostics\":[]", 1),
+            valid.replacen("\"errorCount\":0", "\"errorCount\":1,\"errorCount\":0", 1),
+            format!("{valid}\n{valid}"),
+            format!("{valid} trailing text"),
+            valid[..valid.len() - 1].to_owned(),
+        ] {
+            assert!(inspect(&text).is_err(), "{text}");
+            assert!(!ToolOutput { text, is_error: Some(false), exit_code: Some(0) }.succeeded());
+        }
+        let nested = json!({"example": pyright_report(vec![pyright_diagnostic("error", "Invalid")])});
+        assert!(inspect(&nested.to_string()).unwrap().is_none());
+    }
+
+    #[test]
+    fn pyright_validates_every_record_after_output_cap_and_bounds_complete_input() {
+        let mut records: Vec<_> = (0..8)
+            .map(|number| {
+                let mut value = pyright_diagnostic("error", "Invalid annotation");
+                value["rule"] = json!(format!("reportCase{number}Type"));
+                value
+            })
+            .collect();
+        let valid = pyright_report(records.clone()).to_string();
+        assert_eq!(parsed(&valid).diagnostics.len(), MAX_DIAGNOSTICS_PER_FAILURE);
+        records.last_mut().unwrap()["severity"] = json!("unknown");
+        assert!(inspect(&pyright_report(records).to_string()).is_err());
+        let too_many = pyright_report(vec![
+            pyright_diagnostic("error", "Invalid"); MAX_COMPILER_RECORDS + 1
+        ]).to_string();
+        assert!(inspect(&too_many).is_err());
+        assert!(inspect(&format!("{valid}{}", " ".repeat(MAX_SCANNED_OUTPUT_BYTES))).is_err());
     }
 }
