@@ -438,9 +438,7 @@ fn empty_removal_batch_checks_cancellation_without_opening_a_tier() -> TestResul
     );
     assert_eq!(checkpoints, 1);
     assert!(!missing.exists());
-    assert!(
-        delete_with_checkpoint(&missing, &[], || Err(failure("test", "cancelled"))).is_err()
-    );
+    assert!(delete_with_checkpoint(&missing, &[], || Err(failure("test", "cancelled"))).is_err());
     assert!(!missing.exists());
     Ok(())
 }
@@ -473,9 +471,8 @@ fn batched_removals_match_individual_deletes_with_less_native_commit_work() -> T
         let staged = root.join("staged");
         let individual = root.join("individual");
         let _ = fragment(&live, &documents(24))?;
-        let pinned =
-            crate::search::TantivyIndex::open_read_only(&live.join(LEXICAL_INDEX_SUBDIR))
-                .map_err(|error| error.to_string())?;
+        let pinned = crate::search::TantivyIndex::open_read_only(&live.join(LEXICAL_INDEX_SUBDIR))
+            .map_err(|error| error.to_string())?;
         let before = files(&live)?;
         for copy in [&staged, &individual] {
             std::fs::create_dir(copy).map_err(|error| error.to_string())?;
@@ -526,10 +523,7 @@ fn batched_removals_match_individual_deletes_with_less_native_commit_work() -> T
         let expected = (16..24)
             .map(|number| format!("mem_{number:03}"))
             .collect::<Vec<_>>();
-        assert_eq!(
-            lexical_ids(&cx, &staged, "quartzmarker").await?,
-            expected
-        );
+        assert_eq!(lexical_ids(&cx, &staged, "quartzmarker").await?, expected);
         assert_eq!(
             lexical_ids(&cx, &individual, "quartzmarker").await?,
             expected
@@ -640,9 +634,7 @@ fn removal_batch_refuses_redirected_staging_without_touching_the_target() -> Tes
     )
     .map_err(|error| error.to_string())?;
     let before = files(&live)?;
-    assert!(
-        delete_with_checkpoint(&redirected, &["mem_000".to_owned()], || Ok(())).is_err()
-    );
+    assert!(delete_with_checkpoint(&redirected, &["mem_000".to_owned()], || Ok(())).is_err());
     assert_eq!(files(&live)?, before);
     Ok(())
 }
@@ -723,10 +715,9 @@ fn bulk_withdrawal_keeps_vector_reuse_and_matches_a_fresh_rebuild() -> TestResul
                     assert_eq!(actual, lexical_ids(&cx, &rebuilt, query).await?);
                 }
             }
-            let reader = crate::search::TantivyIndex::open_read_only(
-                &staged.join(LEXICAL_INDEX_SUBDIR),
-            )
-            .map_err(|error| error.to_string())?;
+            let reader =
+                crate::search::TantivyIndex::open_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
+                    .map_err(|error| error.to_string())?;
             assert_eq!(
                 reader.doc_count().map_err(|error| error.to_string())?,
                 64 - remove_count
@@ -774,7 +765,10 @@ fn upsert_byte_boundary_counts_every_document_field_including_metadata_keys() {
                 full.metadata.insert(String::new(), payload);
             }
         }
-        assert_eq!(document_payload_bytes(&full), MAX_UPSERT_BATCH_PAYLOAD_BYTES);
+        assert_eq!(
+            document_payload_bytes(&full),
+            MAX_UPSERT_BATCH_PAYLOAD_BYTES
+        );
         let documents = [full, IndexableDocument::new("next", "quartzmarker")];
         assert_eq!(
             upsert_batches(&documents)
@@ -792,10 +786,7 @@ fn upsert_payload_uses_utf8_bytes_and_the_exact_inclusive_limit() {
     first.metadata.insert("clé".to_owned(), "値".to_owned());
     let bytes = "é".len() + "資料".len() + "🏴".len() + "clé".len() + "値".len();
     assert_eq!(document_payload_bytes(&first), bytes);
-    let second = IndexableDocument::new(
-        "",
-        "x".repeat(MAX_UPSERT_BATCH_PAYLOAD_BYTES - bytes),
-    );
+    let second = IndexableDocument::new("", "x".repeat(MAX_UPSERT_BATCH_PAYLOAD_BYTES - bytes));
     let source = [first, second, IndexableDocument::new("last", "")];
     let batches = upsert_batches(&source).collect::<Vec<_>>();
     assert_eq!(

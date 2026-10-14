@@ -104,9 +104,8 @@ fn collected_errors(line: &str) -> Option<u64> {
         }
     }
     if excluded.is_some_and(|excluded| excluded > count)
-        || selected.is_some_and(|selected| {
-            selected.checked_add(excluded.unwrap_or(0)) != Some(count)
-        })
+        || selected
+            .is_some_and(|selected| selected.checked_add(excluded.unwrap_or(0)) != Some(count))
     {
         return None;
     }
@@ -221,9 +220,7 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
                 return Err(());
             }
         }
-        if in_errors
-            && let Some(module) = heading(line)
-        {
+        if in_errors && let Some(module) = heading(line) {
             if !module_path(module) || modules.len() == MAX_TESTS || !modules.insert(module) {
                 return Err(());
             }
@@ -371,8 +368,10 @@ mod tests {
             .unwrap();
         let good = green(&["tests/test_queue.py"]);
         for text in [
-            good.replace("PASSED", "SKIPPED").replace("1 passed", "1 skipped"),
-            good.replace("PASSED", "XFAIL").replace("1 passed", "1 xfailed"),
+            good.replace("PASSED", "SKIPPED")
+                .replace("1 passed", "1 skipped"),
+            good.replace("PASSED", "XFAIL")
+                .replace("1 passed", "1 xfailed"),
             good.replace("tests/test_queue.py", "other/test_queue.py"),
             good.replace("test_queue.py", "test_Queue.py"),
             good.replace("=== 1 passed in 0.01s ===", ""),
@@ -409,7 +408,10 @@ mod tests {
                 "ERROR tests/test_queue.py\nERROR tests/test_queue.py\n",
             ),
             full.replace("=== 1 error in", "=== 0 errors in"),
-            full.replace("Interrupted: 1 error during collection", "KeyboardInterrupt"),
+            full.replace(
+                "Interrupted: 1 error during collection",
+                "KeyboardInterrupt",
+            ),
             format!("{full}Process exited with code 1\n"),
             format!("{full}{full}"),
         ] {
@@ -449,7 +451,9 @@ mod tests {
 
     #[test]
     fn every_failed_module_is_required_beyond_the_diagnostic_display_limit() {
-        let paths: Vec<_> = (0..6).map(|index| format!("tests/test_{index}.py")).collect();
+        let paths: Vec<_> = (0..6)
+            .map(|index| format!("tests/test_{index}.py"))
+            .collect();
         let paths: Vec<_> = paths.iter().map(String::as_str).collect();
         let failure = python_decode(&report(&paths, false)).unwrap().unwrap();
         assert_eq!(failure.diagnostics.len(), MAX_DIAGNOSTICS_PER_FAILURE);
@@ -506,10 +510,8 @@ mod tests {
         const REPAIR: &str = "The pytest collection failed in tests/test_queue.py because Queue was imported from an obsolete module. I fixed tests/test_queue.py by importing Queue from queue_backend.";
 
         fn id(number: u32) -> String {
-            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
-                9700 + u128::from(number),
-            ))
-            .to_string()
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(9700 + u128::from(number)))
+                .to_string()
         }
 
         fn insert(
@@ -614,7 +616,9 @@ mod tests {
         #[test]
         fn collection_repair_populates_cited_recall_only_after_the_module_executes() -> TestResult {
             let good = green(&[MODULE]);
-            let skipped = good.replace("PASSED", "SKIPPED").replace("1 passed", "1 skipped");
+            let skipped = good
+                .replace("PASSED", "SKIPPED")
+                .replace("1 passed", "1 skipped");
             let (db, session) = episode(&skipped, COMMAND)?;
             let first = record_session_error_recall(&db, WS, &session)?;
             assert_eq!(first.failures_seen, 1);
