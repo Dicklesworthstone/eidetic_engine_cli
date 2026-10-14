@@ -79,6 +79,16 @@ fn assertion_tally(stdout: &str) -> (usize, usize) {
 /// `SCRIPT_RC=0 SCRIPT_SECONDS=39`, `assert_result passes: 16`, `fails: 0`,
 /// with that event carrying `items=1 identical across two packs`.
 ///
+/// 16 -> 18 when the two workspace-isolation assertions were added for bullet 1
+/// ("workspace isolation"), earned by `SCRIPT_RC=0 SCRIPT_SECONDS=52`,
+/// `assert_result passes: 18`, `fails: 0`, with
+/// `second_workspace_retrieval_works` reporting `own_hits=1` and
+/// `second_workspace_cannot_see_imported_spans` reporting `evidence_hits=0
+/// while its own memory IS retrievable`. The first attempt at that pair is why
+/// the control exists: it passed the isolation assertion VACUOUSLY while its
+/// own control failed on a policy-denied write, so the zero meant "nothing
+/// stored anywhere" rather than "isolated".
+///
 /// Counted from a DIRECT run of the script, deliberately. Running it through
 /// this harness cannot establish the count: the harness captures the script
 /// with `Command::output()`, so a passing run prints nothing and a single
@@ -87,7 +97,7 @@ fn assertion_tally(stdout: &str) -> (usize, usize) {
 ///
 /// It moves only when a run earns it. The floor is lower on purpose; see the
 /// module comment.
-const OBSERVED_ASSERTION_COUNT: usize = 16;
+const OBSERVED_ASSERTION_COUNT: usize = 18;
 const MINIMUM_ASSERTION_COUNT: usize = 10;
 
 #[test]
