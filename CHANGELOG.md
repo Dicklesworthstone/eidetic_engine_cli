@@ -24,6 +24,7 @@ checked-in Beads records. The durable research ledger is
 | 2026-09-12 | **`0.15.2`** complete registry publication, read-only WAL correction and rerank storage-failure handling. |
 | 2026-09-12 → 2026-09-26 | **`0.16.0`** `ee ask` over procedural rules and native CASS evidence, tag backfill, stable mesh device identity, index capacity admission, doctor index recovery, backup fidelity, CASS session refresh. |
 | 2026-09-26 → 2026-10-02 | **`0.17.0`** retrieval quality ranking, pre-publication retrieval, pack freshness and typed pack diffs, resume task frames and transcript history, knowledge-skyline Pareto frontier, FrankenSQLite 0.4.6. |
+| 2026-10-02 → 2026-10-14 | **`0.18.0`** readable CASS evidence and failure-to-fix recall, incremental index publication again, rules and evidence ranked with memories in packs, 0.17.0 imports keep refreshing (#70), FrankenSQLite 0.4.10, Frankensearch 0.7.1. |
 
 Release surface (as of 2026-09-12):
 
@@ -77,58 +78,259 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
-### Shared context-pack selection
+## [0.18.0] - 2026-10-14
 
-- Query-file result caps and pagination now rank admitted memories, procedural
-  rules, and native evidence together by relevance, utility, and stable typed
-  identity. A relevant transcript hit can occupy the first result instead of
-  losing its slot to every memory and rule candidate.
-- Rules and evidence compete in the same token budget. A higher-ranked native
-  item can replace weaker selected memories when the complete replacement fits;
-  memory LODs move together and the reserved anti-pattern stays protected.
-  Infeasible replacements leave the selected pack intact.
-- Displaced memories retain budget omissions, and ranks, token accounting,
-  objective audit, persistence, and replay follow the resulting mixed pack.
-  Native items retain their rule or evidence identities and source revisions.
-  Older cached selections are reassembled under the new policy.
+Covers `v0.17.0..35b0bc06b`: 931 commits (924 non-merge: 60 features, 205
+fixes, 19 performance changes; 455 tracker bookkeeping), plus three fixes made
+in the 2026-10-14 release wave (GH #70, #67, #68). Imported CASS history
+becomes readable evidence that teaches `ee` how past failures were fixed.
+Writes publish incremental index updates again, and packs rank all sources.
+
+### Upgrade notes
+
+- **Forward-only migrations V127–V131:** `evidence_admission_verdicts`,
+  `pack_rule_items`, `pack_guard_triggers_without_joins`,
+  `evidence_reader_projections` and `evidence_admission_counts`. V127, V130 and
+  V131 backfill existing evidence. There is no down-migration: once a 0.18.0
+  command has migrated a store, ee 0.17.0 reports it as `storage_unavailable`
+  ("could not be opened or needs migration"). Run `ee backup create` first if
+  you may need 0.17.0 again.
+- **Rebuild indexes:** run `ee migrate run --workspace . --json`, then
+  `ee index rebuild --workspace . --json`. Frankensearch 0.7.1 changes the
+  producer revision, so even default-model semantic indexes need re-embedding,
+  and projection revision 4 marks indexes stale. Sources stored only as
+  `external_ingestion_oversized` markers need a CASS re-import.
+- The error-recall derivation is now v9, so the next `ee import cass`
+  re-processes old sessions. Pack cache keys and policy hashes change, so new
+  packs can differ from 0.17.0 output; historical packs still replay.
+- **`ee.import.cass.v1`** adds a required `evidenceAdmission` object.
+  `status` can be `completed_with_refusals`. `sessions[].status` can be
+  `refused`, with `refusalCode` and `repair`. Refused sessions count toward
+  `sessionsSkipped` and raise `cass_import_history_refused` (high).
+- **Pack items can be rules:** `entityKind: "rule"`, section
+  `procedural_rules`, provenance `ee://rule/<id>`. A rule with a source memory
+  now carries its own id instead of that memory's, so
+  `ee outcome --pack <id> --item <n>` credits the rule.
+- **Config paths:** the user layer is `$XDG_CONFIG_HOME/ee/config.toml` when
+  that root is absolute (HOME is then ignored). Storage defaults prefer an
+  absolute `$XDG_DATA_HOME/ee`. Empty or relative XDG roots are ignored.
+- `ee doctor` reports malformed `.ee/config.toml` as EE-E101 (`blocked`), and
+  `--fix` quarantines it by renaming. `ee.daemon.write` rejects unknown
+  parameters and a `confidence` outside 0–1. It accepts `null` optional strings
+  and the new `dryRun`, `validFrom` and `validTo`.
+- `ee model fetch <model>` now selects the model in initialized workspaces;
+  reembed and restart the daemon after switching. On Unix, new stores are
+  created `0600`. Nothing in this cut is specific to Windows.
+
+### CASS import and refresh
+
+- `[cass] binary` in the **user** config is honored by import, `status`,
+  `capabilities` and `doctor`; `EE_CASS_BINARY` still wins (`873ed8b4f`). A
+  workspace's own `.ee/config.toml` cannot set it, because `ee import cass`
+  executes that path and a cloned repository must not choose it (GH #67). On
+  Unix, ee also accepts a `cass` in its own bin directory, or in the paired
+  `.cargo/bin` or `.local/bin`. The path must be owned by root or ee's owner
+  and not be group- or world-writable (`e100b74e7`, `5cd1e2dd7`).
+- Each import reports admitted and quarantined span counts, with each span's
+  first policy reason (`e518c5d3f`). Refresh checks retained history against
+  full source-line commitments. Changed, missing, unverifiable or still-growing
+  sessions are refused while the rest of the batch imports (GH #65, #66, #77;
+  `d40699c43`, `b645122c9`).
+- Sessions imported by 0.17.0 keep importing after the upgrade (GH #70).
+  Claude Code and Codex transcript lines are compact JSON, and a compact-JSON
+  excerpt stored by 0.17.0 has no source commitment, so every such session was
+  refused as `cass_refresh_history_unverifiable` on each run and never received
+  its new lines. Such an excerpt is now kept when today's `cass view` line is
+  byte-for-byte the stored excerpt (same BLAKE3 hash and length): nothing
+  outside it is left to authenticate. An excerpt that differs from today's
+  source is still refused.
+
+### Failure-to-fix recall and session learning
+
+- `ee import cass` pairs each failed run with a later successful retry of the
+  same invocation, and records error fingerprints linked to the repair and
+  proof (`55aa95673`). `ee diagnose-error` returns `data.repairEvidence`.
+  `ee pack --error-log` adds up to 4 fix excerpts (4096 bytes) to retrieval
+  (`359b78c21`).
+- Each resolved failure also produces an extractive **incident card** of at
+  most 120 tokens: symptom, fix and verifying command. Search and packs use it
+  instead of the raw turns (ADR 0091, `439a47667`).
+- Learnable output: rustc/Cargo (text and JSON), libtest, Pyright, ESLint,
+  Jest/Vitest, `go test -json`, pytest, `unittest`, Python tracebacks, Node TAP,
+  `ee`/RCH structured failures and long-running Codex exec output.
+- A repair counts only when the same command, cwd, environment and filters
+  succeed later, and every failed test passes in the same test list. Narration
+  is never linked as the fix (`81719ab5e`, `353b7b156`, `f70c68464`).
+- `ee review session --propose` keeps labeled lessons, drops task requests and
+  names topics by subject; recall on the internal test corpus rose from 0.67 to
+  0.83 (`4667de09b`). Session-arc confidence is 0.6/0.7/0.8 for one, two or
+  three independent sessions, replacing a fixed 0.82 (`9236f211b`).
+- Pairing reads test counters and exit codes (`21 passed, 0 failed` is a
+  success) and checks the windows that follow, so a failed retry never becomes
+  a lesson (`296ea999d`, `505fa9fb6`, `a721ca31a`).
 
 ### Readable CASS evidence
 
-- CASS readers share a bounded, typed projection for Claude and Codex transcript
-  records. Search, context packs, and extractive answers use decoded message
-  text with each record's own role; transcript summaries are labeled explicitly.
-  Reasoning blocks, explicit analysis-channel records, and JSON envelope
-  metadata do not consume reader tokens.
-- Migration V130 persists reader projections and their egress-screen result,
-  avoiding repeated JSON decoding and instruction scans on normal evidence
-  reads. Evidence writes, recovery, migration and index rebuild materialize
-  current projections; bounded lookups validate exact source/version and
-  content bindings. Missing or stale values derive in memory without read-time
-  database writes. Source identity, reader bytes and pack hashes are unchanged.
-- Structured records without safe, readable text are excluded from retrieval
-  instead of falling back to raw JSON. Evidence admission revision 3 invalidates
-  older cached verdicts, including previously admitted unreadable records.
-- Evidence index projection revision 4 marks existing indexes stale so a rebuild
-  applies the new reader text consistently. Stored source excerpts, hashes,
-  evidence identities, and line locators remain unchanged. See the
-  [transcript projection migration notes](docs/migration-guide.md#cass-transcript-reader-projection).
-- Escaped-Unicode JSONL windows are screened as complete ordered records. Clean
-  windows retain their original bytes, and secret redaction preserves the role
-  and kind of every record. Bootstrap and linked-session learning use the
-  stricter message projection, so summaries and records containing reasoning
-  cannot supply lessons or supporting provenance.
-- Oversized structured imports that cannot be bounded safely remain withheld.
-  Truncation cannot discard an unsafe neighboring record and admit the remaining
-  valid JSON prefix as conversation evidence.
-- Safe multi-record CASS windows now fit the 64 KiB import limit by sharing the
-  escaped-byte budget across message bodies. Later short replies stay complete,
-  every member keeps its role, envelope and observed text, and long summaries
-  can be bounded too. Screening still covers the complete source before any
-  shortening, including credentials in later records and omitted tails.
-- Oversized Claude messages with mixed visible text and thinking blocks now
-  retain useful reply text. Screened reasoning blocks remain unchanged as fixed
-  envelope overhead, never enter search/pack content, and do not gain learning
-  eligibility through truncation.
+- CASS readers share a bounded, typed projection of Claude and Codex records.
+  Search, packs and extractive answers use decoded message text with each
+  record's own role, and summaries are labeled. Reasoning, analysis-channel
+  records and envelope metadata cost no reader tokens. Records without safe,
+  readable text are excluded rather than shown as raw JSON (`bc90a61f6`).
+- Migration V130 stores reader projections and egress-screen results, bound to
+  exact source, version and content. Writes, recovery, migration and rebuild
+  fill them in. Missing or stale values are computed in memory, with no writes
+  at read time. Source identity, reader bytes and pack hashes are unchanged.
+- Admission revision 3 invalidates older cached verdicts, including unreadable
+  records that were admitted before. Projection revision 4 marks indexes stale
+  so a rebuild applies the new text. Stored excerpts, hashes, ids and line
+  locators are unchanged
+  ([migration notes](docs/migration-guide.md#cass-transcript-reader-projection)).
+- Escaped-Unicode JSONL windows are screened as complete, ordered records.
+  Clean windows keep their bytes, and redaction keeps each record's role and
+  kind. Bootstrap and linked-session learning use the stricter projection, so
+  summaries and reasoning-bearing records cannot supply lessons.
+- Safe multi-record windows share the 64 KiB import budget across message
+  bodies; short later replies stay whole and every record keeps its role,
+  envelope and text. Mixed Claude messages shrink only visible text, and
+  screened thinking blocks stay out of search, packs and learning. The full
+  source is screened before shortening. Windows that cannot be bounded safely
+  stay withheld; a valid prefix never stands in for the whole (`a63e7c469`).
+
+### Search and retrieval
+
+- Queries that quote flags or paths (`cargo fmt --check`,
+  `std::fs::read_to_string`, `src/core/search.rs:120`) no longer become
+  exclusions or field filters that match nothing (`e518c5d3f`, `681dd4b8d`).
+- Lexical hits that share only common words with the query are dropped and
+  counted in `lexical_stopword_only_filtered` (`313e3fc9d`). The check splits
+  words the way the index does, so `request_timeout` counts as `request` and
+  `timeout` and non-ASCII letters are lowercased: a memory containing
+  `request_timeout=30` is kept for the query `request timeout` (GH #68). Recency has a 0.5
+  floor, so older memories rank lower but stay in packs (`6f64aa179`).
+- Corrupt calibration data yields an unknown `[0,1]` interval with null
+  coverage, not a 95% claim (`c01fe8207`). Weak semantic searches are recorded
+  as misses for `ee learn gaps` (`77bc3b095`). An explicit remote embedding
+  backend overrides the workspace registry (`d53ca2fe2`).
+
+### Context packs
+
+- Result caps and pagination rank admitted memories, rules and native evidence
+  together, so a relevant transcript hit can take the first slot. A
+  higher-ranked rule or evidence item replaces weaker memories only when the
+  complete replacement fits the token budget. A memory's LODs move together,
+  and the reserved anti-pattern stays. Displaced memories keep persisted
+  omissions, audit and replay (`3bbec38e9`).
+- Rules with no source memory now enter packs (V128, `cf8c95030`). Without an
+  explicit floor, evidence below 25% of the best evidence score is left out
+  (`context_evidence_below_relative_floor`). Exact transcript repeats collapse,
+  while distinct incident cards keep occurrence counts (`b6bcabf9f`).
+- `--relevance-floor` applies to every candidate type, and an explicit
+  `--as-of` covers its whole millisecond (`d23129050`, `fdff9016a`). Packs that
+  use a memory from another shard are saved; 0.17.0 reported success without
+  saving them. Storage errors suggest a retry rather than `ee init`
+  (`159178b4b`).
+
+### `ee ask`, `ee resume`, `ee focus` and `ee why`
+
+- Imported Claude Code transcripts now reach all four commands. Private-path
+  checks screen the message rather than the envelope (which always contains an
+  absolute cwd), and `cass-session://` citations are no longer mistaken for
+  secrets (`10116d00f`, `2620011e5`). In `ee ask`, two sources no longer agree
+  when their option arguments or assignment values differ (`978572317`).
+
+### Index publication
+
+- Ordinary writes publish incremental index updates again; since 2026-08-06
+  every write had re-embedded the whole corpus. A full build is used when
+  digests are missing, the embedder changed, or more than 25% (at most 256) of
+  inputs changed. Metadata edits and removals skip re-embedding (`95d981a63`).
+- Each publication keeps only the two newest valid index copies. `ee index
+  vacuum` shows a `retention` plan, and `--apply` removes the rest and records
+  an audit row. Publication no longer fails after 1000 copies (`e20782cd4`,
+  `bc9d81d45`).
+- Large stale stores: rebuild planning and live fallback read in bounded pages,
+  and hook-time reads wait at most 250 ms for a writer (GH #78, partly
+  addressed; `60d7d1511`). Index files are staged with filesystem copy-on-write
+  where supported (`feb0da79f`).
+
+### Models, doctor and configuration
+
+- `ee model fetch potion-base-8M` (256d, about 31 MB) or `potion-base-32M`
+  (512d, about 131 MB) selects a smaller English model (GH #51, `8119c39dc`).
+  After a failed automatic download, ee waits before retrying, from 10 minutes
+  doubling up to 24 h (`c162289f5`).
+- `ee config explain <key>` shows what a setting does, its effective value and
+  its source (`569acaf06`). `ee doctor --fix` gives WAL checkpoint guidance for
+  EE-E205 (`fa27e0529`). `ee diag store-integrity` reads omitted generations
+  from the store (`3222a386c`). `ee curate doctor --trend` totals are no longer
+  capped at 1.0 (`c4cc8575e`).
+
+### Daemon, mesh, backup and security
+
+- Remember retries with an idempotency key are atomic (`5a0e047f1`). Mesh
+  responders shut down cleanly, route changes reach running listeners
+  (`a0260f996`), and backups taken before V128 restore (`112300fbb`).
+- Unicode-escaped JSON is decoded before credential screening (`c077ef030`).
+  `curl | sh`, recursive `rm` and `chmod 777` are flagged only in dangerous
+  positions, so `rm -rf target` stays searchable (`95d981a63`).
+
+### Performance
+
+- Debug-build timings from commit messages, for one 3,000-span session: search
+  7.1 s -> 3.4 s and status 5.4 s -> 2.0 s (`e013e2afc`). A pack over 5k spans:
+  41 s -> 8.2 s (`2ffd8c917`). Offline search: 9.2 s -> 1.4 s (`c162289f5`).
+
+### Fixed (0.17.0 known issues)
+
+- Daemon write `null` strings (GH #62, `1810bb783`), settings with `HOME` unset
+  (GH #63, `b3e08c1bc`), and repair-test embedder identity (GH #64).
+- `ee import cass` no longer aborts the whole batch when a live session grows
+  between its reads; that session is refused for this run and picked up later
+  (GH #77, `b645122c9`).
+
+### Dependencies
+
+- FrankenSQLite 0.4.6 -> **0.4.10** (fixes the 0.4.7 strict read-only open
+  regression and bulk-insert corruption). Frankensearch 0.6.1 -> **0.7.1**,
+  franken-agent-detection 0.3.3 -> 0.3.8. fnx stays `=0.3.0`. See
+  [UPGRADE_LOG.md](UPGRADE_LOG.md).
+
+
+### Security
+
+- rustls 0.23.46 (RUSTSEC-2026-0346..0349): four low-severity TLS advisories
+  published 2026-10-14, covering Debug output of secrets, ECH, certificate
+  decompression memory use and a ServerHello downgrade check.
+
+### Security note (GH #71)
+
+- For each imported CASS line, ee stores an unsalted BLAKE3 hash of the
+  **raw** line next to the redacted excerpt (`cassSource.contentHash`, and the
+  reconciliation audit's `sourceContentHash`). The raw line includes the part
+  that redaction removed.
+- Someone holding the database or a backup can therefore test guesses of a
+  short redacted value offline, such as a phone number, a short password or an
+  email address.
+- Until a keyed commitment lands (tracked in #71), treat the ee data directory
+  and every ee backup as sensitive:
+  - `chmod 700 ~/.local/share/ee` and your backup directories;
+  - don't share or upload `ee.db`, its `-wal`/`-shm` files, or backups.
+- New store files are created owner-only (`0600`) and backups are staged in
+  `0700` directories. The `-wal`/`-shm` sidecars are not tightened.
+
+### Known issues
+
+- **Index rebuild on large stores (GH #78).** A large `ee import cass` can leave
+  the search index behind the database. Commands that read the index can then
+  be slow or wait on it, and `ee index rebuild` can be cancelled by its own
+  deadline (`cancelled`, exit 130). This release bounds rebuild planning and
+  hook-time waits (see Index publication). A resumable rebuild, and reads that
+  degrade rather than wait, are still open. Import in smaller batches
+  (`--limit`) and check `ee index status`.
+- **fnx 0.3.1 (GH #73).** ee stays on `fnx-* =0.3.0`. The 0.3.1 Louvain API
+  change is not integrated yet.
+- **CLI contract spawn timeouts (GH #72).** On heavily loaded hosts, some
+  real-binary contract tests exceed their 420 s spawn bound.
 
 ## [0.17.0] - 2026-10-02
 

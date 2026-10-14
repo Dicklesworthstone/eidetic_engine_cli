@@ -323,7 +323,7 @@ fn legacy_withholding_fixture(source: &str, excerpt: &str, classes: &[&str]) -> 
 }
 
 #[test]
-fn legacy_canonical_json_cannot_authenticate_unmarked_v017_normalization() {
+fn legacy_canonical_json_is_kept_only_while_its_source_is_byte_identical() {
     let canonical =
         json!({"type": "assistant", "content": "Release verification passed."}).to_string();
     let padded = format!(
@@ -333,7 +333,9 @@ fn legacy_canonical_json_cannot_authenticate_unmarked_v017_normalization() {
     assert!(padded.len() > super::super::ingestion::MAX_EXCERPT_BYTES);
     // Both an oversized source normalized by v0.17 and an originally compact
     // source produce this same clean stored record. The missing commitment
-    // cannot be reconstructed from that record or from the current source.
+    // cannot be reconstructed from that record, so a source that differs from
+    // it stays unverifiable. A source that is byte-for-byte the record leaves
+    // nothing unretained to authenticate, so the row is kept (#70).
     for original in [&padded, &canonical] {
         let (db, workspace, id, session, spans) = fixture(1, &[original]);
         assert_eq!(spans[0].excerpt, canonical);
@@ -343,29 +345,66 @@ fn legacy_canonical_json_cannot_authenticate_unmarked_v017_normalization() {
         let before = db.get_session(&id).unwrap();
         let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
         let jobs = db.list_search_index_jobs(&workspace, None).unwrap();
-        for observed in [&padded, &canonical] {
-            let incoming = vec![span(&session, 1, observed)];
-            let error = refresh_session(&db, &workspace, &id, &session, &incoming)
-                .err()
-                .unwrap();
-            assert!(
-                error
-                    .to_string()
-                    .contains("cass_refresh_history_unverifiable")
-            );
-            assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
-            assert_eq!(db.get_session(&id).unwrap(), before);
-            assert_eq!(
-                db.list_audit_entries(Some(&workspace), None).unwrap(),
-                audits
-            );
-            assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
-        }
+
+        let incoming = vec![span(&session, 1, &padded)];
+        let error = refresh_session(&db, &workspace, &id, &session, &incoming)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("cass_refresh_history_unverifiable")
+        );
+        assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+        assert_eq!(db.get_session(&id).unwrap(), before);
+        assert_eq!(
+            db.list_audit_entries(Some(&workspace), None).unwrap(),
+            audits
+        );
+        assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
+
+        let incoming = vec![span(&session, 1, &canonical)];
+        let report = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+        assert!(!report.changed);
+        assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+        assert_eq!(db.get_session(&id).unwrap(), before);
+        assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
     }
 }
 
 #[test]
-fn legacy_canonical_jsonl_cannot_authenticate_unmarked_stream_normalization() {
+fn v017_compact_json_session_keeps_importing_new_lines_after_upgrade() {
+    // #70: Claude Code and Codex transcript lines are compact JSON, so every
+    // line v0.17 imported is a canonical record with no source commitment.
+    // Refusing them froze each such session: lines appended after the v0.17
+    // import were never imported, and the refusal repeated on every run.
+    let first = json!({"type": "user", "content": "Run the release gate."}).to_string();
+    let (db, workspace, id, _, mut spans) = fixture(1, &[&first]);
+    let original_id = stable_evidence_id(&id, &spans[0].cass_span_id);
+    let old = historical_excerpt(&db, &original_id, &first, false, true);
+    assert!(!old.metadata_json.as_deref().unwrap().contains("cassSource"));
+    completed(&db, &stable_search_index_job_id(&workspace, &id));
+
+    let latest = discovered(2);
+    let added = json!({"type": "assistant", "content": "The gate passed."}).to_string();
+    spans[0] = span(&latest, 1, &first);
+    spans.push(span(&latest, 2, &added));
+    let report = refresh_session(&db, &workspace, &id, &latest, &spans).unwrap();
+    assert!(report.changed);
+    assert_eq!(report.added_lines, vec![2]);
+    assert!(report.index_job_id.is_some());
+    assert_eq!(db.get_evidence_span(&original_id).unwrap().unwrap(), old);
+    assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), 2);
+    let added_id = stable_evidence_id(&id, &spans[1].cass_span_id);
+    assert_eq!(
+        db.get_evidence_span(&added_id).unwrap().unwrap().excerpt,
+        spans[1].excerpt
+    );
+    assert_eq!(db.get_session(&id).unwrap().unwrap().message_count, 2);
+}
+
+#[test]
+fn legacy_canonical_jsonl_is_kept_only_while_its_source_is_byte_identical() {
     let canonical = [
         json!({"type": "assistant", "content": "Release verification passed."}).to_string(),
         json!({"type": "assistant", "content": "No new diagnostics were reported."}).to_string(),
@@ -376,7 +415,8 @@ fn legacy_canonical_jsonl_cannot_authenticate_unmarked_stream_normalization() {
         " ".repeat(super::super::ingestion::MAX_EXCERPT_BYTES)
     );
     // The producer on main before source commitments could normalize a whole
-    // JSONL window without a marker when its compact representation fit.
+    // JSONL window without a marker when its compact representation fit. A
+    // differing current source stays unverifiable; an identical one is kept.
     for original in [&padded, &canonical] {
         let (db, workspace, id, session, spans) = fixture(1, &[original]);
         assert_eq!(spans[0].excerpt, canonical);
@@ -385,24 +425,30 @@ fn legacy_canonical_jsonl_cannot_authenticate_unmarked_stream_normalization() {
         let before = db.get_session(&id).unwrap();
         let audits = db.list_audit_entries(Some(&workspace), None).unwrap();
         let jobs = db.list_search_index_jobs(&workspace, None).unwrap();
-        for observed in [&padded, &canonical] {
-            let incoming = vec![span(&session, 1, observed)];
-            let error = refresh_session(&db, &workspace, &id, &session, &incoming)
-                .err()
-                .unwrap();
-            assert!(
-                error
-                    .to_string()
-                    .contains("cass_refresh_history_unverifiable")
-            );
-            assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
-            assert_eq!(db.get_session(&id).unwrap(), before);
-            assert_eq!(
-                db.list_audit_entries(Some(&workspace), None).unwrap(),
-                audits
-            );
-            assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
-        }
+
+        let incoming = vec![span(&session, 1, &padded)];
+        let error = refresh_session(&db, &workspace, &id, &session, &incoming)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("cass_refresh_history_unverifiable")
+        );
+        assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+        assert_eq!(db.get_session(&id).unwrap(), before);
+        assert_eq!(
+            db.list_audit_entries(Some(&workspace), None).unwrap(),
+            audits
+        );
+        assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
+
+        let incoming = vec![span(&session, 1, &canonical)];
+        let report = refresh_session(&db, &workspace, &id, &session, &incoming).unwrap();
+        assert!(!report.changed);
+        assert_eq!(db.get_evidence_span(&evidence_id).unwrap().unwrap(), old);
+        assert_eq!(db.get_session(&id).unwrap(), before);
+        assert_eq!(db.list_search_index_jobs(&workspace, None).unwrap(), jobs);
     }
 
     // A clean, unmarked, noncanonical short window cannot be a canonical

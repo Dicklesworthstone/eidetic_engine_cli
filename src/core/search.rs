@@ -791,7 +791,7 @@ fn drop_stopword_only_lexical_hits(
     if user_floor_override == Some(0.0) {
         return;
     }
-    let query_terms = crate::core::ask::tokenize_for_ask(query)
+    let query_terms = stopword_filter_terms(query)
         .iter()
         .map(|token| light_stem(token).to_owned())
         .collect::<BTreeSet<_>>();
@@ -857,7 +857,7 @@ fn drop_stopword_only_lexical_hits(
                 text.push_str(extra);
             }
         }
-        crate::core::ask::tokenize_for_ask(&text)
+        stopword_filter_terms(&text)
             .iter()
             .any(|token| query_terms.contains(light_stem(token)))
     });
@@ -865,6 +865,26 @@ fn drop_stopword_only_lexical_hits(
     if filtered > 0 {
         degraded.push(SearchDegradation::lexical_stopword_only_filtered(filtered));
     }
+}
+
+/// Content words for the stopword-only filter, seen the way the lexical index
+/// sees them (#68). `tokenize_for_ask` keeps `_` inside a word and lowercases
+/// ASCII only, while the index splits `request_timeout` into `request` and
+/// `timeout` and lowercases all of Unicode. A hit the index matched on
+/// `request` must not be judged to share no content word with the query, so
+/// each underscore-joined token also contributes its parts, and both sides are
+/// lowercased fully. Adding terms can only keep more hits, never drop more.
+fn stopword_filter_terms(text: &str) -> Vec<String> {
+    let mut terms = crate::core::ask::tokenize_for_ask(&text.to_lowercase());
+    let parts = terms
+        .iter()
+        .filter(|token| token.contains('_'))
+        .flat_map(|token| crate::core::ask::tokenize_for_ask(&token.replace('_', " ")))
+        .collect::<Vec<_>>();
+    terms.extend(parts);
+    terms.sort();
+    terms.dedup();
+    terms
 }
 
 /// Strip one common English inflection so "builds"/"building"/"built"-style
@@ -28190,6 +28210,61 @@ mod tests {
             &mut degraded,
         );
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn stopword_filter_matches_terms_the_way_the_lexical_index_tokenizes() {
+        // #68: the index splits `request_timeout` on `_` and lowercases all of
+        // Unicode, so these hits matched content words of the query and must
+        // be kept; the stopword-only hit is still dropped.
+        let mut hits = vec![
+            stopword_probe_hit(
+                "mem_a",
+                ScoreSource::Lexical,
+                "request_timeout=30 for the proxy",
+                false,
+            ),
+            stopword_probe_hit(
+                "mem_b",
+                ScoreSource::Lexical,
+                "ÉTAPE de déploiement terminée",
+                false,
+            ),
+            stopword_probe_hit("ev_c", ScoreSource::Lexical, "How do I run it?", false),
+        ];
+        let mut degraded = Vec::new();
+        drop_stopword_only_lexical_hits(
+            "how do I raise the request timeout étape",
+            &mut hits,
+            EmbedBackend::HashFallback,
+            None,
+            None,
+            &mut degraded,
+        );
+        let kept = hits
+            .iter()
+            .map(|hit| hit.doc_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(kept, vec!["mem_a", "mem_b"]);
+
+        // And an underscore-joined query word still finds its spaced form.
+        let mut hits = vec![stopword_probe_hit(
+            "mem_d",
+            ScoreSource::Lexical,
+            "raise the request timeout to 30 s",
+            false,
+        )];
+        let mut degraded = Vec::new();
+        drop_stopword_only_lexical_hits(
+            "request_timeout",
+            &mut hits,
+            EmbedBackend::HashFallback,
+            None,
+            None,
+            &mut degraded,
+        );
+        assert_eq!(hits.len(), 1);
+        assert!(degraded.is_empty());
     }
 
     #[test]

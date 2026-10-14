@@ -1776,12 +1776,16 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.user.cass.enabled,
                 &layers.defaults.cass.enabled,
             ),
+            // `ee import cass` executes this path, so a repository's own
+            // `.ee/config.toml` must not choose it: a cloned repo could ship a
+            // `cass` of its own and point here (#67). Only the user config,
+            // the environment and the CLI may set it.
             binary: pick_field(
                 &mut sources,
                 CASS_BINARY_KEY,
                 &layers.cli.cass.binary,
                 &layers.environment.cass.binary,
-                &layers.project.cass.binary,
+                &None,
                 &layers.user.cass.binary,
                 &layers.defaults.cass.binary,
             ),
@@ -3032,9 +3036,9 @@ mod tests {
     };
     use crate::config::file::TaskLensConfig;
     use crate::config::{
-        CASS_SUBPROCESS_TIMEOUT_SECS_KEY, CacheConfig, CassConfig, ConfigFile, CurationConfig,
-        GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig,
-        GraphHealthConfig, GraphMemoryConfig, GraphPprConfig, HandoffConfig,
+        CASS_BINARY_KEY, CASS_SUBPROCESS_TIMEOUT_SECS_KEY, CacheConfig, CassConfig, ConfigFile,
+        CurationConfig, GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig,
+        GraphGomoryHuConfig, GraphHealthConfig, GraphMemoryConfig, GraphPprConfig, HandoffConfig,
         HandoffStaleThresholdConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig,
         PackConfig, PackL2CacheConfig, PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig,
         SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed, SecretDetectorConfig,
@@ -3662,6 +3666,49 @@ mod tests {
             &parsed.cass.subprocess_timeout_secs,
             &Some(240),
             "EE_CASS_TIMEOUT_SECS must map into cass.subprocess_timeout_secs",
+        )
+    }
+
+    #[test]
+    fn merge_cass_binary_ignores_the_project_layer() -> TestResult {
+        let project = ConfigFile {
+            cass: CassConfig {
+                binary: Some("/workspace/clone/tools/cass".to_string()),
+                ..CassConfig::default()
+            },
+            ..ConfigFile::default()
+        };
+        let mut layers = ConfigLayers::with_defaults(built_in_config(&expander()));
+        layers.project = project;
+        let merged = merge_config(&layers);
+        ensure_equal(
+            &merged.values.cass.binary.as_deref(),
+            &Some("cass"),
+            "a repository's .ee/config.toml must not choose the cass executable (#67)",
+        )?;
+        ensure_equal(
+            &merged.source(CASS_BINARY_KEY),
+            &Some(ConfigValueSource::Default),
+            "cass binary must never be attributed to the project layer",
+        )?;
+
+        layers.user = ConfigFile {
+            cass: CassConfig {
+                binary: Some("/opt/trusted/cass".to_string()),
+                ..CassConfig::default()
+            },
+            ..ConfigFile::default()
+        };
+        let merged = merge_config(&layers);
+        ensure_equal(
+            &merged.values.cass.binary.as_deref(),
+            &Some("/opt/trusted/cass"),
+            "the user config still chooses the cass executable",
+        )?;
+        ensure_equal(
+            &merged.source(CASS_BINARY_KEY),
+            &Some(ConfigValueSource::User),
+            "user source attribution",
         )
     }
 

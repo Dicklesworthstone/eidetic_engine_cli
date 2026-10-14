@@ -442,9 +442,24 @@ pub fn merged_workspace_config(
 /// An unreadable or malformed config yields `None` rather than an error: a
 /// capability probe and a discovery hint must degrade to the trusted-location
 /// allowlist, exactly as before this was wired, instead of failing the command.
+///
+/// Only the user config, the environment and the CLI can set it. A
+/// workspace's own `.ee/config.toml` is ignored for this key, because
+/// `ee import cass` executes the path (#67).
 #[must_use]
 pub fn cass_import_binary_override(workspace_root: &Path) -> Option<PathBuf> {
-    match merged_workspace_config(workspace_root) {
+    cass_import_binary_override_with_environment(workspace_root, &process_env())
+}
+
+fn cass_import_binary_override_with_environment(
+    workspace_root: &Path,
+    process_environment: &BTreeMap<String, std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let options = ConfigSurfaceOptions {
+        workspace_root: workspace_root.to_path_buf(),
+        config_path: None,
+    };
+    match merged_config_with_environment(&options, process_environment) {
         Ok(merged) => merged
             .values
             .cass
@@ -1325,7 +1340,7 @@ mod config_candidate_pool_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigSurfaceOptions, cass_import_binary_override,
+        ConfigSurfaceOptions, cass_import_binary_override_with_environment,
         ensure_config_write_path_is_regular_or_missing, get_config, graph_config_keys,
         merged_config_with_environment, publish_config_temp_file, set_config, show_config,
     };
@@ -1375,39 +1390,57 @@ mod tests {
         Ok(())
     }
 
-    /// bd-reality-core-convergence-1azkt.44. Both arms run against the PROJECT
-    /// layer, which outranks any `~/.config/ee/config.toml` this host happens
-    /// to carry, so neither assertion depends on the developer's home config.
+    /// bd-reality-core-convergence-1azkt.44 and #67. The user layer lives in a
+    /// temporary HOME passed as the environment, so no assertion depends on
+    /// the developer's real home config or on `EE_CASS_BINARY`.
     ///
     /// The positive and the negative are deliberately in one test: a resolver
     /// hard-wired to `None` fails the first assertion and one hard-wired to
     /// `Some` fails the second, so neither degenerate implementation is green.
     #[test]
-    fn cass_binary_override_is_read_from_config_and_blank_is_not_an_opt_in() -> TestResult {
+    fn cass_binary_override_is_read_from_user_config_never_from_the_workspace() -> TestResult {
         let temp = workspace()?;
-        let root = temp.path();
+        let root = temp.path().join("workspace");
+        let home = temp.path().join("home");
+        let user_config = home.join(".config").join("ee");
         fs::create_dir_all(root.join(".ee")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&user_config).map_err(|error| error.to_string())?;
+        let environment: BTreeMap<String, std::ffi::OsString> =
+            [("HOME".to_owned(), home.clone().into_os_string())].into();
 
         fs::write(
-            root.join(".ee").join("config.toml"),
+            user_config.join("config.toml"),
             "[cass]\nbinary = \"/opt/custom/bin/cass\"\n",
         )
         .map_err(|error| error.to_string())?;
         assert_eq!(
-            cass_import_binary_override(root),
+            cass_import_binary_override_with_environment(&root, &environment),
             Some(std::path::PathBuf::from("/opt/custom/bin/cass")),
-            "a configured [cass] binary must reach discovery verbatim"
+            "a [cass] binary in the user config must reach discovery verbatim"
+        );
+
+        // A cloned repository must not choose the executable `ee import cass`
+        // runs (#67): its own .ee/config.toml loses even to the user config.
+        fs::write(
+            root.join(".ee").join("config.toml"),
+            "[cass]\nbinary = \"/workspace/clone/tools/cass\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            cass_import_binary_override_with_environment(&root, &environment),
+            Some(std::path::PathBuf::from("/opt/custom/bin/cass")),
+            "a workspace [cass] binary must never replace the user's choice"
         );
 
         // Whitespace carries no operator intent, so it must not displace the
         // trusted-location allowlist with a path that can never validate.
         fs::write(
-            root.join(".ee").join("config.toml"),
+            user_config.join("config.toml"),
             "[cass]\nbinary = \"   \"\n",
         )
         .map_err(|error| error.to_string())?;
         assert_eq!(
-            cass_import_binary_override(root),
+            cass_import_binary_override_with_environment(&root, &environment),
             None,
             "a blank [cass] binary must fall through to trusted locations"
         );

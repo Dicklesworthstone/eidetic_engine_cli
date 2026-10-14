@@ -1769,7 +1769,9 @@ subprocess_timeout_secs = 30        # wall-clock budget per cass subprocess call
 # `~/.cargo/bin/cass` are excluded deliberately, so that a writable HOME cannot
 # make `ee` execute a planted binary. Point `binary` at an absolute path you
 # have consciously trusted (a bare `cass` is ignored — it names no location),
-# or set `EE_CASS_BINARY` for a single process. Either way the path is still
+# or set `EE_CASS_BINARY` for a single process. Only this user config, the
+# environment and the CLI may set it; a workspace's `.ee/config.toml` cannot.
+# Either way the path is still
 # checked: absolute, named `cass`, no symlinked component, and executable.
 # Without one of them, `ee import cass` reports `cass_unavailable` and names
 # the untrusted path it found.
@@ -2863,10 +2865,12 @@ Opt in explicitly with the absolute path the error reported. Either route
 works for `ee import cass`, `ee status` and `ee doctor` alike:
 
 ```bash
-# Durable: add it to this workspace's .ee/config.toml, or to
-# ~/.config/ee/config.toml to cover every workspace. There is no
-# `ee config set` key for this yet; edit the file.
-printf '[cass]\nbinary = "%s/.cargo/bin/cass"\n' "$HOME" >> .ee/config.toml
+# Durable: add it to your user config, ~/.config/ee/config.toml. A workspace's
+# own .ee/config.toml cannot set it: `ee import cass` executes this path, so a
+# cloned repository must not choose it (#67). There is no `ee config set` key
+# for this yet; edit the file.
+mkdir -p ~/.config/ee
+printf '[cass]\nbinary = "%s/.cargo/bin/cass"\n' "$HOME" >> ~/.config/ee/config.toml
 
 # Or for a single process
 EE_CASS_BINARY="$HOME/.cargo/bin/cass" ee import cass --workspace . --json
