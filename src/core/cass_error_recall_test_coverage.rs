@@ -18,6 +18,8 @@ mod plain;
 pub(super) mod pytest;
 #[path = "cass_error_recall_pytest_terminal/mod.rs"]
 pub(super) mod python;
+#[path = "cass_error_recall_sarif.rs"]
+pub(super) mod sarif;
 #[path = "cass_error_recall_structured_test_coverage.rs"]
 mod structured;
 
@@ -26,6 +28,7 @@ enum ExternalExecution {
     Node(node::Execution),
     Pytest(pytest::Execution),
     PytestTerminal(python::Execution),
+    Sarif(sarif::Execution),
 }
 
 enum ExternalReport {
@@ -43,6 +46,7 @@ impl ExternalExecution {
             Self::Node(execution) => execution.has_known_failures(),
             Self::Pytest(execution) => execution.has_known_failures(),
             Self::PytestTerminal(execution) => execution.has_known_failures(),
+            Self::Sarif(execution) => execution.has_known_failures(),
         }
     }
 
@@ -54,12 +58,19 @@ impl ExternalExecution {
             (Self::PytestTerminal(required), Self::PytestTerminal(proof)) => {
                 required.verified_by(proof)
             }
+            (Self::Sarif(required), Self::Sarif(proof)) => required.verified_by(proof),
             _ => false,
         }
     }
 }
 
 fn external_execution(text: &str) -> Result<Option<ExternalReport>, ()> {
+    if let Some(decoded) = sarif::decode(text)? {
+        return Ok(Some(ExternalReport::Tests {
+            allows_completion: decoded.output.allows_completion,
+            execution: ExternalExecution::Sarif(decoded.execution),
+        }));
+    }
     if let Some(decoded) = node::decode(text)? {
         return Ok(Some(ExternalReport::Tests {
             allows_completion: decoded.output.allows_completion,

@@ -12,6 +12,9 @@ use super::{
 mod lint;
 
 pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
+    if let Some(output) = super::super::test_coverage::sarif::inspect(text)? {
+        return Ok(Some(output));
+    }
     if let Some(output) = super::super::test_coverage::pytest::inspect(text)? {
         return Ok(Some(output));
     }
