@@ -11,8 +11,10 @@ use super::{
     MAX_SCANNED_OUTPUT_BYTES, MAX_TESTS, Subject, terminal,
 };
 
-const ERROR_SEPARATOR: &str = "======================================================================";
-const RUN_SEPARATOR: &str = "----------------------------------------------------------------------";
+const ERROR_SEPARATOR: &str =
+    "======================================================================";
+const RUN_SEPARATOR: &str =
+    "----------------------------------------------------------------------";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Status {
@@ -72,12 +74,13 @@ fn progress_status(status: &str) -> Option<Status> {
         "expected failure" => Status::ExpectedFailure,
         "unexpected success" => Status::UnexpectedSuccess,
         other
-            if other
-                .strip_prefix("skipped ")
-                .is_some_and(|reason| {
-                    (reason.starts_with('\'') && reason.ends_with('\''))
-                        || (reason.starts_with('"') && reason.ends_with('"'))
-                }) => Status::Skipped,
+            if other.strip_prefix("skipped ").is_some_and(|reason| {
+                (reason.starts_with('\'') && reason.ends_with('\''))
+                    || (reason.starts_with('"') && reason.ends_with('"'))
+            }) =>
+        {
+            Status::Skipped
+        }
         _ => return None,
     })
 }
@@ -207,8 +210,8 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             .strip_suffix(" ... ")
             .and_then(test_identity)
             .is_some();
-    let quiet = !visible_first.is_empty()
-        && visible_first.bytes().all(|byte| b".FEsxu".contains(&byte));
+    let quiet =
+        !visible_first.is_empty() && visible_first.bytes().all(|byte| b".FEsxu".contains(&byte));
     let headed = visible_first == ERROR_SEPARATOR || visible_first == RUN_SEPARATOR;
     // Dots and separators are ordinary output unless the producer's run line
     // is also present. A pytest footer does not select this decoder.
@@ -387,18 +390,24 @@ mod tests {
     fn report(cache: &str) -> String {
         let (detail, summary) = match cache {
             "FAIL" => (
-                format!("\n{ERROR_SEPARATOR}\nFAIL: {CACHE}\n{RUN_SEPARATOR}\nTraceback (most recent call last):\nAssertionError: private body\n"),
+                format!(
+                    "\n{ERROR_SEPARATOR}\nFAIL: {CACHE}\n{RUN_SEPARATOR}\nTraceback (most recent call last):\nAssertionError: private body\n"
+                ),
                 "FAILED (failures=1)",
             ),
             "ERROR" => (
-                format!("\n{ERROR_SEPARATOR}\nERROR: {CACHE}\n{RUN_SEPARATOR}\nTraceback (most recent call last):\nValueError: private body\n"),
+                format!(
+                    "\n{ERROR_SEPARATOR}\nERROR: {CACHE}\n{RUN_SEPARATOR}\nTraceback (most recent call last):\nValueError: private body\n"
+                ),
                 "FAILED (errors=1)",
             ),
             "skipped 'not exercised'" => (String::new(), "OK (skipped=1)"),
             "expected failure" => (String::new(), "OK (expected failures=1)"),
             _ => (String::new(), "OK"),
         };
-        format!("{CACHE} ... {cache}\n{CONTROL} ... ok\n{detail}\n{RUN_SEPARATOR}\nRan 2 tests in 0.001s\n\n{summary}\n")
+        format!(
+            "{CACHE} ... {cache}\n{CONTROL} ... ok\n{detail}\n{RUN_SEPARATOR}\nRan 2 tests in 0.001s\n\n{summary}\n"
+        )
     }
 
     fn decoded(text: &str) -> Decoded {
@@ -423,7 +432,10 @@ mod tests {
                 is_error: Some(false),
                 exit_code: Some(0),
             };
-            assert!(output.failed(), "native failure overrides optimistic wrapper");
+            assert!(
+                output.failed(),
+                "native failure overrides optimistic wrapper"
+            );
             assert!(!output.succeeded());
             assert_eq!(
                 failure_diagnostics(&output),
@@ -442,7 +454,11 @@ mod tests {
         }
         let unrelated =
             report("ok").replace(CACHE, "test_other (tests.test_cache.CacheTests.test_other)");
-        assert!(!failure.execution.verified_by(&decoded(&unrelated).execution));
+        assert!(
+            !failure
+                .execution
+                .verified_by(&decoded(&unrelated).execution)
+        );
         let quiet = format!("..\n{RUN_SEPARATOR}\nRan 2 tests in 0.001s\n\nOK\n");
         assert!(!decoded(&quiet).allows_completion);
         assert!(!failure.execution.verified_by(&decoded(&quiet).execution));
@@ -474,9 +490,7 @@ mod tests {
                 !matches!(super::super::decode(&malformed), Ok(Some(report)) if report.allows_completion)
             );
         }
-        assert!(
-            super::super::decode(&report("FAIL").replace("failures=1", "failures=0")).is_err()
-        );
+        assert!(super::super::decode(&report("FAIL").replace("failures=1", "failures=0")).is_err());
     }
 
     #[test]
@@ -500,11 +514,7 @@ mod tests {
         assert_ne!(subject(CACHE), super::super::subject(CACHE));
         assert!(decode("unrelated stdout").unwrap().is_none());
         assert!(decode("F\n1 failed in 0.01s\n").unwrap().is_none());
-        let too_large = format!(
-            "{}{}",
-            report("FAIL"),
-            "x".repeat(MAX_SCANNED_OUTPUT_BYTES)
-        );
+        let too_large = format!("{}{}", report("FAIL"), "x".repeat(MAX_SCANNED_OUTPUT_BYTES));
         assert!(decode(&too_large).is_err());
         let too_many_lines = format!("{}{}", report("FAIL"), "\n".repeat(MAX_LINES));
         assert!(decode(&too_many_lines).is_err());
@@ -608,7 +618,11 @@ mod tests {
         assert!(failure.failed);
         assert!(!failure.allows_completion);
         assert!(failure.execution.has_known_failures());
-        assert!(failure.execution.verified_by(&decoded(&report("ok")).execution));
+        assert!(
+            failure
+                .execution
+                .verified_by(&decoded(&report("ok")).execution)
+        );
         for result in ["OK", "NO TESTS RAN"] {
             let empty = format!("{RUN_SEPARATOR}\nRan 0 tests in 0.000s\n\n{result}\n");
             assert!(!decoded(&empty).allows_completion);
