@@ -117,10 +117,25 @@ whose rated speeds differ by 9%. Do not attribute a slow build to a cold
 directory without comparing crate COUNTS; if two runs compiled the same number
 of crates, the directory was not the variable.
 
-Since `rch exec` has no worker pinning, treat the slow case as the budget:
-`RCH_BUILD_TIMEOUT_SEC`/`RCH_TEST_TIMEOUT_SEC` at 18000, and **one cargo stage
-per `--job`** — a second `cargo test` stage needs the TEST profile, another
-dependency tier on top of whatever the first stage cost.
+Treat the slow case as the budget: `RCH_BUILD_TIMEOUT_SEC`/`RCH_TEST_TIMEOUT_SEC`
+at 18000, and **one cargo stage per `--job`** — a second `cargo test` stage needs
+the TEST profile, another dependency tier on top of whatever the first stage cost.
+
+**`rch exec` DOES have worker pinning: `--worker <ID>`**, "Execute on this exact
+worker; overrides environment/project preferences. Refuses local execution or a
+different worker when unavailable." This line said it did not until 2026-10-14,
+and that cost three dispatches: the scheduler re-picked one box that was
+refusing every job with `worker source namespace initialization refused (status
+73)` while reporting healthy with free slots, and a blind retry loop picked the
+same box again. Pin past a bad worker rather than retrying into it. Pinning also
+buys the warm target dir, since a `--job` reuses that worker's own directory.
+
+Pinning is not a capacity escape. A pinned request that cannot be admitted is
+refused whole — `[RCH-I001] requested worker set [...] refused (selection error:
+queue_timeout)`, exit 103 — because `--worker` declines to fall back. So pin to a
+worker you have just seen idle in `rch status`, and keep the retry for the 103.
+Admission is project-identity-keyed and capacity-blind (bd-0u3i2), so a free
+fleet does not imply an admissible one.
 
 ## Architecture
 
