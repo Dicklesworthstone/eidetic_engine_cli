@@ -8,18 +8,34 @@
 //! new or changed embedding inputs spend the inference allowance. V2 keeps its
 //! conservative shared vector/removal limit in the parent planner. Both paths
 //! still use the same private staging, tier finalization and publication fence.
+//! V3 inference scales with the corpus, not the legacy 256-document ceiling:
+//! bounded embedding/WAL batches can process a substantial import without
+//! re-embedding every unchanged survivor. The percentage, 8192-mutation and
+//! 32-MiB payload ceilings remain independent admission requirements.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::search::IndexableDocument;
 
 use super::{
-    Delta, EmbeddingReuse, IncrementalFallback, IncrementalFallbackReason, MAX_DELTA_DOCUMENTS,
-    MAX_DELTA_PERCENT, document_digest, embedding_input_digest, incremental_fallback,
+    Delta, EmbeddingReuse, IncrementalFallback, IncrementalFallbackReason, MAX_DELTA_PERCENT,
+    document_digest, embedding_input_digest, incremental_fallback,
 };
 
 const MAX_LEXICAL_DELTA_DOCUMENTS: usize = 8192;
 const MAX_LEXICAL_DELTA_BYTES: usize = 32 * 1024 * 1024;
+
+/// Batching bounds each inference/WAL operation; it need not bound the entire
+/// generation to 256 inputs. Keep the existing full-rebuild percentage policy
+/// and the shared mutation ceiling, including for very large source counts.
+/// An empty/tiny corpus retains its historical one-input progress allowance.
+fn vector_delta_limit(live_documents: usize, source_documents: usize) -> usize {
+    (live_documents
+        .max(source_documents)
+        .saturating_mul(MAX_DELTA_PERCENT)
+        / 100)
+        .clamp(1, MAX_LEXICAL_DELTA_DOCUMENTS)
+}
 
 #[derive(Default)]
 struct LexicalBudget {
@@ -76,15 +92,7 @@ fn diff_with_digest(
     identity: String,
     mut digest: impl FnMut(&IndexableDocument) -> String,
 ) -> Result<Delta, IncrementalFallback> {
-    let inference_limit = MAX_DELTA_DOCUMENTS
-        .min(
-            documents
-                .len()
-                .max(live.len())
-                .saturating_mul(MAX_DELTA_PERCENT)
-                / 100,
-        )
-        .max(1);
+    let inference_limit = vector_delta_limit(live.len(), documents.len());
     let mut inference_inputs = 0;
     let mut lexical = LexicalBudget::default();
     let mut current = BTreeSet::new();
@@ -135,7 +143,7 @@ fn diff_with_digest(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{DocDigests, embedder_identity, plan};
+    use super::super::{DocDigests, MAX_DELTA_DOCUMENTS, embedder_identity, plan};
     use super::*;
     use crate::search::{Embedder, HashEmbedder};
     use frankensearch::core::generation::EmbeddingIdentityBundleV1;
@@ -208,7 +216,9 @@ mod tests {
         let original = documents(2048);
         let mut changed = original[..1024].to_vec();
         retitle(&mut changed);
-        for document in &mut changed[..MAX_DELTA_DOCUMENTS] {
+        // 25% of the larger (2048-row) snapshot, not the legacy 256-row cap.
+        let inference_limit = 512;
+        for document in &mut changed[..inference_limit] {
             document.content.push_str(" repaired");
         }
         let delta = planned(&original, &changed).map_err(|error| error.detail)?;
@@ -219,9 +229,9 @@ mod tests {
                 .vector_upserts(IDENTITY)
                 .map_err(|error| error.detail)?
                 .len(),
-            MAX_DELTA_DOCUMENTS
+            inference_limit
         );
-        changed[MAX_DELTA_DOCUMENTS]
+        changed[inference_limit]
             .content
             .push_str(" one too many");
         assert_eq!(
@@ -253,7 +263,152 @@ mod tests {
         )
         .expect_err("full body rewrite");
         assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
-        assert_eq!(inspected, MAX_DELTA_DOCUMENTS + 1);
+        assert_eq!(inspected, 513);
+    }
+
+    #[test]
+    fn vector_allowance_scales_but_keeps_percentage_and_absolute_bounds() {
+        for (live, source, expected) in [
+            (0, 0, 1),
+            (0, 1, 1),
+            (8, 8, 2),
+            (1024, 1024, 256),
+            (2048, 1024, 512),
+            (3072, 4096, 1024),
+            (32_768, 32_768, 8192),
+            (usize::MAX, usize::MAX, 8192),
+        ] {
+            assert_eq!(vector_delta_limit(live, source), expected);
+            assert_eq!(vector_delta_limit(source, live), expected);
+        }
+    }
+
+    #[test]
+    fn large_import_keeps_exact_additions_rewrites_metadata_and_withdrawals() -> TestResult {
+        let original = documents(4096);
+        let mut current = original[128..].to_vec();
+        for document in &mut current[..128] {
+            document.content.push_str(" repaired");
+        }
+        retitle(&mut current[128..384]);
+        current.extend((4096..5120).map(|number| {
+            IndexableDocument::new(format!("mem_{number:05}"), format!("lesson {number}"))
+        }));
+        let delta = planned(&original, &current).map_err(|error| error.detail)?;
+        assert_eq!(delta.upserts.len(), 1408);
+        assert_eq!(delta.removals.len(), 128);
+        let vectors = delta.vector_upserts(IDENTITY).map_err(|error| error.detail)?;
+        assert_eq!(vectors.len(), 1152);
+        assert!(vectors.len() > MAX_DELTA_DOCUMENTS);
+        let expected_vectors: BTreeSet<_> = current[..128]
+            .iter()
+            .chain(current[3968..].iter())
+            .map(|document| document.id.as_str())
+            .collect();
+        assert_eq!(
+            vectors
+                .iter()
+                .map(|document| document.id.as_str())
+                .collect::<BTreeSet<_>>(),
+            expected_vectors
+        );
+        // Apply to an independent document-digest map, not planner counters.
+        let mut applied = super::super::digest_map(&original);
+        for id in &delta.removals {
+            applied.remove(id);
+        }
+        for document in &delta.upserts {
+            applied.insert(document.id.clone(), document_digest(document));
+        }
+        assert_eq!(applied, super::super::digest_map(&current));
+        assert!(delta.vector_upserts("different-producer").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn large_append_accepts_exact_percentage_and_refuses_the_next_input() -> TestResult {
+        let original = documents(3072);
+        let mut current = documents(4096);
+        let delta = planned(&original, &current).map_err(|error| error.detail)?;
+        assert_eq!(delta.upserts.len(), 1024);
+        assert!(delta.removals.is_empty());
+        current.push(IndexableDocument::new("mem_04096", "lesson 4096"));
+        let error = planned(&original, &current).expect_err("25% remains enforced");
+        assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
+        assert!(error.detail.contains("inference budget"));
+        Ok(())
+    }
+
+    #[test]
+    fn large_vector_intake_requires_v3_and_a_matching_producer() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let directory = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let stack = super::super::super::hash_fallback_embedder_stack();
+        let original = documents(2048);
+        let mut changed = original.clone();
+        for document in &mut changed[..512] {
+            document.content.push_str(" repaired");
+        }
+        let mut digests = DocDigests::new(&stack, &original);
+        digests.schema = super::super::DOC_DIGESTS_SCHEMA_V2.to_owned();
+        digests.embedding_inputs = None;
+        digests
+            .write(&directory)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            plan(&directory, &stack, &changed)
+                .expect_err("legacy limit")
+                .reason,
+            IncrementalFallbackReason::DeltaOverThreshold
+        );
+        DocDigests::new(&stack, &original)
+            .write(&directory)
+            .map_err(|error| error.to_string())?;
+        let delta = plan(&directory, &stack, &changed).map_err(|error| error.detail)?;
+        let identity = embedder_identity(&stack).ok_or("complete identity")?;
+        assert_eq!(
+            delta
+                .vector_upserts(&identity)
+                .map_err(|error| error.detail)?
+                .len(),
+            512
+        );
+        let mut digests = DocDigests::new(&stack, &original);
+        digests.embedder = Some("other-producer".to_owned());
+        digests
+            .write(&directory)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            plan(&directory, &stack, &changed)
+                .expect_err("identity changed")
+                .reason,
+            IncrementalFallbackReason::CorpusRevisionMismatch
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn expanded_intake_still_rejects_duplicate_ids_and_excess_payload() {
+        let original = documents(2048);
+        let mut changed = original.clone();
+        for document in &mut changed[..300] {
+            document.content.push_str(" repaired");
+        }
+        changed.push(changed[0].clone());
+        assert_eq!(
+            planned(&original, &changed)
+                .expect_err("duplicate after legacy bound")
+                .reason,
+            IncrementalFallbackReason::CorpusRevisionMismatch
+        );
+        changed.pop();
+        changed[299].content = "x".repeat(MAX_LEXICAL_DELTA_BYTES + 1);
+        let error = planned(&original, &changed).expect_err("payload is independently bounded");
+        assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
+        assert!(error.detail.contains("byte budget"));
     }
 
     #[test]
