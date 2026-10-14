@@ -16,7 +16,7 @@ The radar protects five contract surfaces from silent drift:
 | Agent-facing documentation references | `AGENTS.md`, `README.md`, `CLAUDE.md`, `docs/agent-ux/**/*.md`, `docs/external-derivation-operator.md`, `docs/agent_integration.md`, `docs/contract-drift-radar.md`, `docs/migration-guide.md` | Greps for stale envelope versions (`ee.response.v1`, `ee.error.v1`) when v2 ships, with allow-marker overrides for legacy prose. |
 | Embedded JSONC envelope examples | Same docs as above | Extracts ```json / ```jsonc fenced blocks containing `"schema":"ee.…"` and verifies the pinned schema id exists in the inventory. |
 | Degraded-code taxonomy | `docs/degraded_codes.md` vs `tests/fixtures/failure_modes/*.json` | Cross-checks every H2-headed code in the catalog against a per-code fixture. |
-| Dependency profile prose | `Cargo.toml`, `COMPREHENSIVE_PLAN.md`, `docs/dependency-contract-matrix.md`, `docs/dependency-research-notes.md` | Checks that current docs keep the accepted asupersync `0.3.3`, `default-features = false`, `tracing-integration` profile and do not revive stale `0.3.1`/`0.3.2` or default-feature guidance. |
+| Dependency profile prose | `Cargo.toml`, `COMPREHENSIVE_PLAN.md`, `docs/dependency-contract-matrix.md`, `docs/dependency-research-notes.md` | Reads the accepted asupersync profile OUT OF `Cargo.toml` — the exact pin plus `default-features = false` and `tracing-integration` — and checks those docs still state the same profile, so a pin bump cannot leave the prose behind. No version number is written down in this document on purpose; `Cargo.toml` is the only source of truth and anything else here would go stale silently, because this file is NOT in the set the check scans. |
 
 It does **not** replicate full JSON-schema validation — that is the
 Cargo-backed contract test
@@ -168,7 +168,10 @@ Triggered when a current dependency-contract source does not carry the accepted
 asupersync runtime profile:
 
 ```toml
-asupersync = { version = "0.3.3", default-features = false, features = ["tracing-integration"] }
+# Shape only. The accepted version is whatever `Cargo.toml` pins; copy it from
+# there rather than from this example, which cannot be kept current because this
+# document is not in the set the check scans.
+asupersync = { version = "=<the pin in Cargo.toml>", default-features = false, features = ["tracing-integration"] }
 ```
 
 The static radar checks the `Cargo.toml` dependency line,
@@ -197,8 +200,11 @@ features.
 
 **Fixes:**
 
-1. Replace the stale statement with the accepted `0.3.3` no-default
-   `tracing-integration` profile.
+1. Replace the stale statement with the accepted profile — the exact pin from
+   `Cargo.toml`, `default-features = false`, `tracing-integration`. Read the
+   version from `Cargo.toml`, not from this page: the detector flags EVERY
+   asupersync version in those docs except the one `Cargo.toml` pins, so a
+   number copied from here is exactly what it will reject.
 2. If the stale text is deliberately historical, move it to `docs/archive/` or
    make the historical context explicit in a non-current-facing document.
 
