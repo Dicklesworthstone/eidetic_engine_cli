@@ -296,6 +296,12 @@ Writes publish incremental index updates again, and packs rank all sources.
   [UPGRADE_LOG.md](UPGRADE_LOG.md).
 
 
+### Security
+
+- rustls 0.23.46 (RUSTSEC-2026-0346..0349): four low-severity TLS advisories
+  published 2026-10-14, covering Debug output of secrets, ECH, certificate
+  decompression memory use and a ServerHello downgrade check.
+
 ### Security note (GH #71)
 
 - For each imported CASS line, ee stores an unsalted BLAKE3 hash of the
