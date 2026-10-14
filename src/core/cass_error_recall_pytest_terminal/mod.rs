@@ -2,7 +2,8 @@
 //!
 //! Read test progress and the final short summary, never traceback frames,
 //! captured stdout, locals or assertion expansions. Quiet reports can supply
-//! fingerprints; only a complete named inventory can certify a repair. Exact
+//! fingerprints; executed-test repairs require a complete named inventory.
+//! Collection repairs require a later passing test from each failed module. Exact
 //! invocation/context and independent process completion remain caller-owned.
 //! Ordinary interpreter exceptions use that exact-invocation path, without
 //! pretending that a command failure supplies an executed-test inventory.
@@ -11,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES};
 
+mod collection;
 mod terminal;
 mod traceback;
 mod unittest;
@@ -55,6 +57,10 @@ pub(in crate::core::cass_error_recall) struct Execution {
     // Ordinary interpreter exceptions have no test inventory. They use the
     // caller's existing exact-command/context proof, never a fabricated test.
     command_failure: bool,
+    collection_failure: Option<collection::Requirement>,
+    // Only named pytest PASSED records populate these transient identities.
+    // unittest and interpreter output cannot certify pytest module collection.
+    passed_modules: BTreeSet<Subject>,
 }
 
 impl Execution {
@@ -63,10 +69,15 @@ impl Execution {
     }
 
     pub(super) fn has_known_failures(&self) -> bool {
-        self.complete && !self.failed.is_empty()
+        self.collection_failure.is_some() || (self.complete && !self.failed.is_empty())
     }
 
     pub(super) fn verified_by(&self, proof: &Self) -> bool {
+        if let Some(required) = &self.collection_failure {
+            return proof.complete
+                && proof.failed.is_empty()
+                && required.verified_by(&proof.passed_modules);
+        }
         self.has_known_failures()
             && proof.complete
             && self.inventory == proof.inventory
@@ -253,6 +264,11 @@ fn totals(line: &str) -> Option<Totals> {
 /// None is another producer. A recognized but incomplete report is not a
 /// green run. Damaged reports refuse the whole interpretation, not a prefix.
 pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
+    // A failed collector has no test inventory to compare. Keep this distinct
+    // from both an executed-test failure and a generic interpreter exception.
+    if let Some(report) = collection::decode(text)? {
+        return Ok(Some(report));
+    }
     // Both producers enter the same failure, fingerprint, proof and incident
     // card boundaries. Their test-subject hashes remain producer-separated.
     if let Some(report) = unittest::decode(text)? {
@@ -430,6 +446,11 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
             execution.failed.insert(name);
         } else if *status == Status::Passed {
             execution.passed.insert(name);
+            if let Some((module, _)) = node.split_once("::") {
+                execution
+                    .passed_modules
+                    .insert(collection::module_subject(module));
+            }
         }
     }
     execution.complete = !ambiguous
