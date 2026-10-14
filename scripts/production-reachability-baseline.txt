@@ -39,6 +39,28 @@
 # anchor_match_score, bead_affinity_score, stale_anchor_floor,
 # freshness_drift_multiplier) are NOT here: all five have production callers at
 # HEAD, which is consistent with the wiring recorded on that bead.
+#
+# ---------------------------------------------------------------------------
+# 2026-10-14: SHRANK from 9 to 7. The gate failed in its second direction --
+# "2 baselined entr(ies) are now reachable" -- which is the direction that
+# stops this file decaying into an ignore-list, working exactly as designed.
+#
+# Retired, both having earned it by the procedure above rather than by a sweep:
+#   fix_wal_checkpoint_pending            dispatch arm at doctor_fixers.rs:668
+#                                         ("wal_checkpoint_pending" => Some(..))
+#   fix_workspace_config_malformed_toml   dispatch arm at doctor_fixers.rs:672
+#
+# Checked against a negative control so the deletions rest on more than the
+# gate agreeing with itself: fix_snapshot_backup_owed, still listed below, has
+# no dispatch arm and its only non-definition references are inside the test
+# module. The gate discriminates.
+#
+# Note for whoever reads the 2026-10-05 block above: a grep OUTSIDE
+# doctor_fixers.rs finds no production caller for either retired entry -- the
+# three hits for fix_workspace_config_malformed_toml in src/core/doctor.rs are
+# all comments. The reachability is the INTRA-MODULE dispatch, which that block
+# already explains this gate counts as production. Do not "correct" this by
+# re-baselining them on the strength of an external grep.
 # ---------------------------------------------------------------------------
 fix_agent_coordination_stale_lease
 fix_beads_jsonl_drift
@@ -46,6 +68,4 @@ fix_graph_snapshot_stale
 fix_policy_safety_inconsistent
 fix_snapshot_backup_owed
 fix_state_file_permission_drift
-fix_wal_checkpoint_pending
 fix_workspace_config_atomic_rewrite
-fix_workspace_config_malformed_toml
