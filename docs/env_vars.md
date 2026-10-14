@@ -184,5 +184,6 @@ These names are read by compile-time Rust macros such as `option_env!` or
 | Name | Consumer | Controls | Notes |
 |---|---|---|---|
 | `EE_BUILD_TARGET` | `src/core/mod.rs` | Target triple reported in build/version provenance. | Missing or invalid values emit the `target_triple_unavailable` build-provenance degradation. |
+| `EE_FRANKEN_STACK` | `src/core/mod.rs` | Franken-stack sibling pins reported in build/version provenance, so a build names which engine it was built against and not only which commit. | Stamped by `build.rs` from `Cargo.lock`; do not set it by hand. An absent or empty stamp fails the test that requires it to name every sibling the crate links. |
 | `EE_RELEASE_CHANNEL` | `src/core/mod.rs` | Release channel label. | Accepted values are `stable`, `beta`, `nightly`, and `dev`; invalid values fall back to `dev` for debug builds and `stable` for release builds. |
 | `EE_TRACE_BEAD_ID` | tracing checkpoints | Compile-time bead id embedded in selected tracing events. | Set this before compilation for debug or verification builds that need a different static trace bead id. |

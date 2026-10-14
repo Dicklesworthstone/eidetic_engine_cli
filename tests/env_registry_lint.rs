@@ -16,8 +16,17 @@ const RAW_RUNTIME_EE_ENV_PATTERNS: [&str; 4] = [
     r#"env::var_os("EE_"#,
 ];
 const RAW_BUILD_TIME_EE_ENV_PATTERNS: [&str; 2] = [r#"option_env!("EE_"#, r#"env!("EE_"#];
-const ALLOWED_BUILD_TIME_EE_ENV_VARS: [&str; 3] =
-    ["EE_BUILD_TARGET", "EE_RELEASE_CHANNEL", "EE_TRACE_BEAD_ID"];
+const ALLOWED_BUILD_TIME_EE_ENV_VARS: [&str; 4] = [
+    "EE_BUILD_TARGET",
+    // Stamped by build.rs:73 via `cargo:rustc-env` from Cargo.lock, so the
+    // binary records WHICH sibling engine versions it was built against and not
+    // only which commit. Read with `option_env!` at src/core/mod.rs:264 for
+    // build provenance and again at :1234 by the test that asserts the stamp
+    // exists and names every linked sibling.
+    "EE_FRANKEN_STACK",
+    "EE_RELEASE_CHANNEL",
+    "EE_TRACE_BEAD_ID",
+];
 const README_WORKSPACE_HYGIENE_ENV_VARS: [&str; 4] = [
     "EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS",
     "EE_WORKSPACE_HYGIENE_GENERATED_PATTERNS",
