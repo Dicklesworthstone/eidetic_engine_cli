@@ -694,6 +694,19 @@ mod tests {
     fn finalized_vectors(directory: &Path) -> Result<BTreeMap<String, Vec<f32>>, String> {
         let index = crate::core::index::open_fast_vector_index_read_only(directory)
             .map_err(|error| error.detail)?;
+        finalized_vector_rows(&index)
+    }
+
+    fn finalized_quality_vectors(directory: &Path) -> Result<BTreeMap<String, Vec<f32>>, String> {
+        let index = crate::core::index::open_quality_vector_index_read_only(directory)
+            .map_err(|error| error.detail)?
+            .ok_or("expected a real quality tier")?;
+        finalized_vector_rows(&index)
+    }
+
+    fn finalized_vector_rows(
+        index: &frankensearch::VectorIndex,
+    ) -> Result<BTreeMap<String, Vec<f32>>, String> {
         assert_eq!(index.wal_record_count(), 0);
         assert_eq!(index.tombstone_count(), 0);
         (0..index.record_count())
@@ -851,5 +864,339 @@ mod tests {
     #[test]
     fn native_bulk_removal_can_finalize_an_empty_index_without_inference() -> TestResult {
         native_bulk_removal_case(0, 0)
+    }
+
+    fn generation_files(
+        root: &Path,
+    ) -> Result<BTreeMap<std::path::PathBuf, Vec<u8>>, String> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).map_err(|error| error.to_string())? {
+                let path = entry.map_err(|error| error.to_string())?.path();
+                let kind = std::fs::symlink_metadata(&path)
+                    .map_err(|error| error.to_string())?
+                    .file_type();
+                if kind.is_dir() {
+                    pending.push(path);
+                } else if kind.is_file() {
+                    files.insert(
+                        path.strip_prefix(root)
+                            .map_err(|error| error.to_string())?
+                            .to_path_buf(),
+                        std::fs::read(&path).map_err(|error| error.to_string())?,
+                    );
+                } else {
+                    return Err("unexpected special entry in native generation".to_owned());
+                }
+            }
+        }
+        Ok(files)
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    async fn assert_large_lexical_corpus(
+        cx: &asupersync::Cx,
+        directory: &Path,
+        expected: &[IndexableDocument],
+    ) -> TestResult {
+        use crate::search::LexicalRead;
+
+        let lexical = crate::search::TantivyIndex::open_read_only(&directory.join("lexical"))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            lexical.doc_count().map_err(|error| error.to_string())?,
+            expected.len()
+        );
+        let by_id: BTreeMap<_, _> = expected
+            .iter()
+            .map(|document| (document.id.as_str(), document))
+            .collect();
+        // Every planted term has a literal, independently known membership.
+        // Check changed bodies, changed titles, new rows and a true negative,
+        // not just the total number of documents returned by the writer.
+        for query in [
+            "lesson",
+            "repaired",
+            "updated",
+            "largeimportmarker",
+            "absentneedle",
+        ] {
+            let wanted: BTreeSet<_> = expected
+                .iter()
+                .filter(|document| {
+                    document.content.contains(query)
+                        || document
+                            .title
+                            .as_ref()
+                            .is_some_and(|title| title.contains(query))
+                })
+                .map(|document| document.id.as_str())
+                .collect();
+            let hits = lexical
+                .search(cx, query, expected.len() + 1)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                hits.len(),
+                wanted.len(),
+                "{query}: duplicates or missing rows"
+            );
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| hit.doc_id.as_str())
+                    .collect::<BTreeSet<_>>(),
+                wanted,
+                "{query}"
+            );
+            for hit in &hits {
+                let document = by_id
+                    .get(hit.doc_id.as_str())
+                    .ok_or("unexpected lexical ID")?;
+                for (key, value) in &document.metadata {
+                    assert_eq!(
+                        hit.metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.get(key.as_str()))
+                            .and_then(serde_json::Value::as_str),
+                        Some(value.as_str()),
+                        "{}: {key}",
+                        document.id
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Exercise the production publisher, its real lease/rollback, and both
+    /// native tiers. The DB supplies coordination, while the caller supplies a
+    /// typed source snapshot just as the real collector does. No fake vectors
+    /// or index writer can satisfy the comparisons with a fresh native build.
+    fn native_large_publication_case(two_tiers: bool, fail_commit_once: bool) -> TestResult {
+        use crate::core::index;
+        use crate::db::{CreateWorkspaceInput, DbConnection};
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(180), |cx| async move {
+            let _root = root;
+            let live = parent.join("index");
+            let rebuilt = parent.join("reference");
+            let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            db.migrate().map_err(|error| error.to_string())?;
+            let workspace = "wsp_01234567890123456789012345";
+            db.insert_workspace(
+                workspace,
+                &CreateWorkspaceInput {
+                    path: parent.to_string_lossy().into_owned(),
+                    name: Some("large delta publication".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            let lock = index::IndexPublishLockOwner::acquire(&cx, &db, workspace)
+                .map_err(|error| error.to_string())?;
+            let fast = Arc::new(CountingHash {
+                inner: HashEmbedder::default_256(),
+                inputs: AtomicUsize::new(0),
+            });
+            let quality = two_tiers.then(|| {
+                Arc::new(CountingHash {
+                    inner: HashEmbedder::jl_384(17),
+                    inputs: AtomicUsize::new(0),
+                })
+            });
+            let stack = crate::search::EmbedderStack::from_parts(
+                fast.clone(),
+                quality
+                    .as_ref()
+                    .map(|quality| quality.clone() as Arc<dyn Embedder>),
+            );
+            let mut original = documents(2048);
+            for (position, document) in original.iter_mut().enumerate() {
+                document
+                    .metadata
+                    .insert("origin".to_owned(), format!("source-{position}"));
+            }
+            index::publish_full_index_generation_with_stack(
+                &lock,
+                &live,
+                stack.clone(),
+                original.clone(),
+                7,
+                index::IndexDocumentCounts::memory_only(2048),
+                || Ok(()),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            assert_eq!(index::validated_index_generation(&live)?, 7);
+            let original_files = generation_files(&live)?;
+            let original_vectors = finalized_vectors(&live)?;
+            let original_quality = two_tiers
+                .then(|| finalized_quality_vectors(&live))
+                .transpose()?;
+
+            let mut current = original[32..].to_vec();
+            for document in &mut current[..128] {
+                document.content.push_str(" repaired");
+            }
+            retitle(&mut current[128..256]);
+            current.extend((2048..2432).map(|number| {
+                let mut document = IndexableDocument::new(
+                    format!("mem_{number:05}"),
+                    format!("lesson {number} largeimportmarker"),
+                );
+                document
+                    .metadata
+                    .insert("origin".to_owned(), format!("new-{number}"));
+                document
+            }));
+            assert_eq!(current.len(), 2400);
+            let count = index::IndexDocumentCounts::memory_only(2400);
+            let expected_inputs = 512;
+            let identity = embedder_identity(&stack).ok_or("complete stack identity")?;
+            let delta = plan(&live, &stack, &current).map_err(|error| error.detail)?;
+            assert_eq!(delta.upserts.len(), 640);
+            assert_eq!(delta.removals.len(), 32);
+            assert_eq!(
+                delta
+                    .vector_upserts(&identity)
+                    .map_err(|error| error.detail)?
+                    .len(),
+                expected_inputs
+            );
+
+            let reset_counts = || {
+                fast.inputs.store(0, Ordering::SeqCst);
+                if let Some(quality) = &quality {
+                    quality.inputs.store(0, Ordering::SeqCst);
+                }
+            };
+            let assert_counts = |expected| {
+                assert_eq!(fast.inputs.load(Ordering::SeqCst), expected);
+                if let Some(quality) = &quality {
+                    assert_eq!(quality.inputs.load(Ordering::SeqCst), expected);
+                }
+            };
+            let mut commit_calls = 0;
+            if fail_commit_once {
+                reset_counts();
+                let failed = index::publish_index_generation_preferring_delta(
+                    &lock,
+                    &live,
+                    stack.clone(),
+                    current.clone(),
+                    8,
+                    count,
+                    || {
+                        commit_calls += 1;
+                        Err(index::IndexRebuildError::Index(
+                            "injected commit refusal".to_owned(),
+                        ))
+                    },
+                )
+                .await;
+                assert!(failed.is_err());
+                assert_eq!(
+                    commit_calls, 1,
+                    "the complete staged delta must reach the commit tail"
+                );
+                assert_counts(expected_inputs);
+                assert_eq!(index::validated_index_generation(&live)?, 7);
+                assert_eq!(generation_files(&live)?, original_files);
+                assert_eq!(finalized_vectors(&live)?, original_vectors);
+                if let Some(expected) = &original_quality {
+                    assert_eq!(&finalized_quality_vectors(&live)?, expected);
+                }
+                #[cfg(feature = "lexical-bm25")]
+                assert_large_lexical_corpus(&cx, &live, &original).await?;
+            }
+
+            reset_counts();
+            let (_, kind) = index::publish_index_generation_preferring_delta(
+                &lock,
+                &live,
+                stack.clone(),
+                current.clone(),
+                8,
+                count,
+                || {
+                    commit_calls += 1;
+                    Ok(())
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            assert!(matches!(kind, index::PublishedGenerationKind::Delta));
+            assert_eq!(commit_calls, 1 + usize::from(fail_commit_once));
+            assert_counts(expected_inputs);
+            assert_eq!(index::validated_index_generation(&live)?, 8);
+            index::verify_published_tier_counts(&live, 2400, two_tiers)?;
+            let actual = finalized_vectors(&live)?;
+            let actual_quality = two_tiers
+                .then(|| finalized_quality_vectors(&live))
+                .transpose()?;
+            #[cfg(feature = "lexical-bm25")]
+            assert_large_lexical_corpus(&cx, &live, &current).await?;
+
+            // Reload the PUBLISHED digest map. A retry must not infer these
+            // inputs again or resurrect any withdrawn document identity.
+            let replay = plan(&live, &stack, &current).map_err(|error| error.detail)?;
+            assert!(replay.upserts.is_empty() && replay.removals.is_empty());
+            reset_counts();
+            let (_, kind) = index::publish_index_generation_preferring_delta(
+                &lock,
+                &live,
+                stack.clone(),
+                current.clone(),
+                9,
+                count,
+                || Ok(()),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            assert!(matches!(kind, index::PublishedGenerationKind::Delta));
+            assert_counts(0);
+            assert_eq!(index::validated_index_generation(&live)?, 9);
+            assert_eq!(finalized_vectors(&live)?, actual);
+            if let Some(expected) = &actual_quality {
+                assert_eq!(&finalized_quality_vectors(&live)?, expected);
+            }
+
+            let builder = index::IndexBuilder::new(&rebuilt).with_embedder_stack(stack.clone());
+            #[cfg(feature = "lexical-bm25")]
+            let builder = builder.with_tantivy_lexical();
+            builder
+                .add_documents(current.clone())
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            assert_eq!(actual, finalized_vectors(&rebuilt)?);
+            if let Some(expected) = actual_quality {
+                assert_eq!(expected, finalized_quality_vectors(&rebuilt)?);
+            }
+            #[cfg(feature = "lexical-bm25")]
+            assert_large_lexical_corpus(&cx, &rebuilt, &current).await?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn native_large_delta_publishes_without_reembedding_unchanged_documents() -> TestResult {
+        native_large_publication_case(false, false)
+    }
+
+    #[test]
+    fn native_large_delta_preserves_both_vector_tiers_and_lexical_membership() -> TestResult {
+        native_large_publication_case(true, false)
+    }
+
+    #[test]
+    fn native_large_delta_commit_failure_restores_the_live_generation_then_retries() -> TestResult {
+        native_large_publication_case(true, true)
     }
 }
