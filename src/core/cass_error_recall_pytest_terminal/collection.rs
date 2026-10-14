@@ -348,7 +348,7 @@ mod tests {
         let expected = diagnostic("tests/test_queue.py");
         for text in [full, quiet] {
             let decoded = python_decode(&text).unwrap().unwrap();
-            assert_eq!(decoded.diagnostics, [expected.clone()]);
+            assert_eq!(decoded.diagnostics, std::slice::from_ref(&expected));
             assert_eq!(structured_error_diagnostics(&text), decoded.diagnostics);
             assert!(
                 !decoded
