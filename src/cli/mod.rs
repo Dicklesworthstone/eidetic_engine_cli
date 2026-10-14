@@ -8498,6 +8498,20 @@ pub struct ConfigSetArgs {
     pub key: String,
 
     /// New scalar value.
+    ///
+    /// `allow_negative_numbers` so a negative value reaches the config
+    /// validator instead of dying in the parser. Without it
+    /// `ee config set graph.pack_dna.max_items -1` fails with "unexpected
+    /// argument '-1' found", wrapped in ee's own error envelope, and the
+    /// product's own refusal -- "Invalid value `-1` for
+    /// `graph.pack_dna.max_items`; expected a non-negative integer."
+    /// (src/core/config_surface.rs:1206) -- is unreachable from the CLI, so no
+    /// negative value can be set OR be properly rejected.
+    ///
+    /// `allow_negative_numbers` rather than `allow_hyphen_values`: the latter
+    /// would also let this positional swallow a following `--dry-run` as its
+    /// value, while this accepts only tokens that parse as negative numbers.
+    #[arg(allow_negative_numbers = true)]
     pub value: String,
 
     /// Config path to update. Defaults to <workspace>/.ee/config.toml.
