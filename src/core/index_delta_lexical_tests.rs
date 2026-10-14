@@ -422,3 +422,318 @@ fn fragmented_metadata_only_delta_does_not_reembed_the_corpus() -> TestResult {
 fn fragmented_mixed_delta_embeds_only_the_changed_input_and_matches_full_rebuild() -> TestResult {
     native_delta_case(true)
 }
+
+#[test]
+fn empty_removal_batch_checks_cancellation_without_opening_a_tier() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let missing = temp.path().join("absent-stage");
+    let mut checkpoints = 0;
+    assert_eq!(
+        delete_with_checkpoint(&missing, &[], || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .map_err(|error| error.detail)?,
+        0
+    );
+    assert_eq!(checkpoints, 1);
+    assert!(!missing.exists());
+    assert!(
+        delete_with_checkpoint(&missing, &[], || Err(failure("test", "cancelled"))).is_err()
+    );
+    assert!(!missing.exists());
+    Ok(())
+}
+
+async fn lexical_ids(cx: &asupersync::Cx, root: &Path, query: &str) -> TestResult<Vec<String>> {
+    let reader = crate::search::TantivyIndex::open_read_only(&root.join(LEXICAL_INDEX_SUBDIR))
+        .map_err(|error| error.to_string())?;
+    let mut ids = reader
+        .search(cx, query, 256)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|hit| hit.doc_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    ids.sort();
+    Ok(ids)
+}
+
+#[test]
+fn batched_removals_match_individual_deletes_with_less_native_commit_work() -> TestResult {
+    use crate::search::LexicalWrite;
+
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+        let live = root.join("live");
+        let staged = root.join("staged");
+        let individual = root.join("individual");
+        let _ = fragment(&live, &documents(24))?;
+        let pinned =
+            crate::search::TantivyIndex::open_read_only(&live.join(LEXICAL_INDEX_SUBDIR))
+                .map_err(|error| error.to_string())?;
+        let before = files(&live)?;
+        for copy in [&staged, &individual] {
+            std::fs::create_dir(copy).map_err(|error| error.to_string())?;
+            copy_generation(&live, copy).map_err(|error| error.to_string())?;
+        }
+        let mut removals = (0..16)
+            .map(|number| format!("mem_{number:03}"))
+            .collect::<Vec<_>>();
+        removals.extend([
+            "missing-id".to_owned(),
+            "mem_000".to_owned(),
+            // A query-looking ID is a literal term, never a Boolean deletion.
+            "mem_016 OR mem_017".to_owned(),
+        ]);
+        let staged_index = Index::open_in_dir(staged.join(LEXICAL_INDEX_SUBDIR))
+            .map_err(|error| error.to_string())?;
+        let before_opstamp = staged_index
+            .load_metas()
+            .map_err(|error| error.to_string())?
+            .opstamp;
+        assert_eq!(
+            delete_with_checkpoint(&staged, &removals, || Ok(())).map_err(|error| error.detail)?,
+            16
+        );
+        let batch_opstamp = staged_index
+            .load_metas()
+            .map_err(|error| error.to_string())?
+            .opstamp;
+        let old = crate::search::TantivyIndex::open(&individual.join(LEXICAL_INDEX_SUBDIR))
+            .map_err(|error| error.to_string())?;
+        for id in &removals {
+            old.delete_document(&cx, id)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        old.commit(&cx).await.map_err(|error| error.to_string())?;
+        let individual_opstamp = old
+            .index_handle()
+            .load_metas()
+            .map_err(|error| error.to_string())?
+            .opstamp;
+        drop(old);
+        // Compare native metadata from both actual write paths, rather than a
+        // counter reported by the new helper itself. No exact stamp increment
+        // is assumed: redundant commits must measurably advance it further.
+        assert!(batch_opstamp > before_opstamp);
+        assert!(batch_opstamp < individual_opstamp);
+        let expected = (16..24)
+            .map(|number| format!("mem_{number:03}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lexical_ids(&cx, &staged, "quartzmarker").await?,
+            expected
+        );
+        assert_eq!(
+            lexical_ids(&cx, &individual, "quartzmarker").await?,
+            expected
+        );
+        assert_eq!(inventory(&staged_index).map_err(|error| error.detail)?.1, 8);
+        assert_eq!(pinned.doc_count().map_err(|error| error.to_string())?, 24);
+        assert_eq!(
+            pinned
+                .search(&cx, "quartzmarker", 64)
+                .await
+                .map_err(|error| error.to_string())?
+                .len(),
+            24
+        );
+        assert_eq!(files(&live)?, before, "only private staging may change");
+        assert_eq!(
+            delete_with_checkpoint(&staged, &removals, || Ok(())).map_err(|error| error.detail)?,
+            0,
+            "an identical retry must not delete additional documents"
+        );
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?
+}
+
+#[test]
+fn cancellation_before_and_after_delete_commit_releases_the_writer() -> TestResult {
+    for after_commit in [false, true] {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let index = fragment(&root, &documents(8))?;
+        let removals = (0..4)
+            .map(|number| format!("mem_{number:03}"))
+            .collect::<Vec<_>>();
+        let mut calls = 0;
+        let mut reached = false;
+        let result = delete_with_checkpoint(&root, &removals, || {
+            calls += 1;
+            // At call 7 the first two terms have been queued but not committed.
+            // The other arm waits for native metadata to expose the real commit.
+            if (!after_commit && calls == 7) || (after_commit && inventory(&index)?.1 == 4) {
+                reached = true;
+                return Err(failure("test", "cancelled removal batch"));
+            }
+            Ok(())
+        });
+        assert!(reached, "the intended cancellation point must execute");
+        assert!(result.is_err());
+        assert_eq!(
+            inventory(&index).map_err(|error| error.detail)?.1,
+            if after_commit { 4 } else { 8 }
+        );
+        // Successful acquisition proves a failed attempt did not leave a
+        // worker owning staging while the publisher may discard or reuse it.
+        maintenance_writer(&index)
+            .map_err(|error| error.detail)?
+            .wait_merging_threads()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            delete_with_checkpoint(&root, &removals, || Ok(())).map_err(|error| error.detail)?,
+            if after_commit { 0 } else { 4 }
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn removal_batch_refuses_a_busy_writer_and_does_not_swallow_corruption() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let index = fragment(&root, &documents(3))?;
+    let removals = vec!["mem_000".to_owned()];
+    let writer = maintenance_writer(&index).map_err(|error| error.detail)?;
+    assert!(delete_with_checkpoint(&root, &removals, || Ok(())).is_err());
+    assert_eq!(inventory(&index).map_err(|error| error.detail)?.1, 3);
+    writer
+        .wait_merging_threads()
+        .map_err(|error| error.to_string())?;
+    let metadata = root.join(LEXICAL_INDEX_SUBDIR).join("meta.json");
+    std::fs::write(&metadata, b"{").map_err(|error| error.to_string())?;
+    let before = files(&root)?;
+    assert!(delete_with_checkpoint(&root, &removals, || Ok(())).is_err());
+    assert_eq!(files(&root)?, before);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn removal_batch_refuses_redirected_staging_without_touching_the_target() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let live = root.join("live");
+    let _ = fragment(&live, &documents(3))?;
+    let redirected = root.join("redirected");
+    std::fs::create_dir(&redirected).map_err(|error| error.to_string())?;
+    std::os::unix::fs::symlink(
+        live.join(LEXICAL_INDEX_SUBDIR),
+        redirected.join(LEXICAL_INDEX_SUBDIR),
+    )
+    .map_err(|error| error.to_string())?;
+    let before = files(&live)?;
+    assert!(
+        delete_with_checkpoint(&redirected, &["mem_000".to_owned()], || Ok(())).is_err()
+    );
+    assert_eq!(files(&live)?, before);
+    Ok(())
+}
+
+#[test]
+fn bulk_withdrawal_keeps_vector_reuse_and_matches_a_fresh_rebuild() -> TestResult {
+    for (remove_count, change_body) in [(48, false), (48, true), (64, false)] {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+            let live = root.join("live");
+            let staged = root.join("staged");
+            let rebuilt = root.join("rebuilt");
+            let observed = Arc::new(ObservedHash {
+                inner: HashEmbedder::default_256(),
+                inputs: AtomicUsize::new(0),
+            });
+            let stack = EmbedderStack::from_parts(observed.clone(), None);
+            let original = documents(64);
+            IndexBuilder::new(&live)
+                .with_embedder_stack(stack.clone())
+                .with_tantivy_lexical()
+                .add_documents(original.clone())
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            DocDigests::new(&stack, &original)
+                .write(&live)
+                .map_err(|error| error.to_string())?;
+            let before = files(&live)?;
+            let mut current = original[remove_count..].to_vec();
+            if change_body {
+                current[0].content = "changedquartzmarker replacement lesson".to_owned();
+            }
+            let delta = plan(&live, &stack, &current).map_err(|error| error.detail)?;
+            assert_eq!(delta.removals.len(), remove_count);
+            assert_eq!(delta.upserts.len(), usize::from(change_body));
+            std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
+            copy_generation(&live, &staged).map_err(|error| error.to_string())?;
+            observed.inputs.store(0, Ordering::SeqCst);
+            apply(&cx, &staged, &stack, &delta)
+                .await
+                .map_err(|error| error.detail)?;
+            assert_eq!(
+                observed.inputs.load(Ordering::SeqCst),
+                usize::from(change_body)
+            );
+            assert_eq!(files(&live)?, before);
+            // IndexBuilder deliberately rejects an empty input. Complete
+            // withdrawal must still leave real, readable empty tiers; check
+            // those directly rather than making an invalid reference build.
+            let empty = current.is_empty();
+            if empty {
+                assert!(finalized_vectors(&staged)?.is_empty());
+            } else {
+                IndexBuilder::new(&rebuilt)
+                    .with_embedder_stack(stack)
+                    .with_tantivy_lexical()
+                    .add_documents(current)
+                    .build(&cx)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(finalized_vectors(&staged)?, finalized_vectors(&rebuilt)?);
+            }
+            for query in [
+                "quartzmarker",
+                "changedquartzmarker",
+                "priortitlemarker",
+                "absentplanetmarker",
+            ] {
+                let actual = lexical_ids(&cx, &staged, query).await?;
+                if empty {
+                    assert!(actual.is_empty(), "withdrawn corpus must answer empty");
+                } else {
+                    assert_eq!(actual, lexical_ids(&cx, &rebuilt, query).await?);
+                }
+            }
+            let reader = crate::search::TantivyIndex::open_read_only(
+                &staged.join(LEXICAL_INDEX_SUBDIR),
+            )
+            .map_err(|error| error.to_string())?;
+            assert_eq!(
+                reader.doc_count().map_err(|error| error.to_string())?,
+                64 - remove_count
+            );
+            Ok(())
+        })
+        .map_err(|error| error.to_string())??;
+    }
+    Ok(())
+}

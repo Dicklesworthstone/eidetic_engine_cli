@@ -552,8 +552,9 @@ async fn apply_vector_delta(
 }
 
 /// Apply a planned delta to a staged copy: removals, then upserts, at most one
-/// corpus rewrite per vector tier and one lexical commit. Only the staging
-/// copy is opened for writing; the live generation is never mutated.
+/// corpus rewrite per vector tier and at most two lexical commits (one removal
+/// batch and one upsert batch). Only the staging copy is opened for writing;
+/// the live generation is never mutated.
 pub(super) async fn apply(
     cx: &asupersync::Cx,
     staging_dir: &Path,
@@ -588,10 +589,14 @@ pub(super) async fn apply(
         "selected identity-bound delta embedding inputs"
     );
 
-    // Maintenance belongs to the tier that needs it. A lexical merge must
-    // not invalidate an otherwise eligible metadata-only or small vector delta.
+    // Maintenance belongs to the tier that needs it. Withdraw source IDs
+    // before merging so compaction does not copy documents being removed.
+    // Both operations finish and join their private writers before tier upserts.
     #[cfg(feature = "lexical-bm25")]
-    lexical_maintenance::compact_if_needed(cx, staging_dir, MAX_LEXICAL_SEGMENTS)?;
+    {
+        lexical_maintenance::delete_documents(cx, staging_dir, &delta.removals)?;
+        lexical_maintenance::compact_if_needed(cx, staging_dir, MAX_LEXICAL_SEGMENTS)?;
+    }
 
     // A metadata-only change must not acquire vector writer locks or touch
     // vector bytes. The staging caller still validates every tier's counts
@@ -637,26 +642,23 @@ pub(super) async fn apply(
     #[cfg(feature = "lexical-bm25")]
     {
         batch::checkpoint(cx, "lexical")?;
-        let lexical = super::open_lexical_index(staging_dir)?;
-        for id in &delta.removals {
+        // Removals already committed before maintenance. A deletion-only or
+        // empty delta needs neither another writer nor an empty commit here.
+        if !delta.upserts.is_empty() {
+            let lexical = super::open_lexical_index(staging_dir)?;
+            for document in &delta.upserts {
+                batch::checkpoint(cx, "lexical")?;
+                lexical
+                    .index_document(cx, document)
+                    .await
+                    .map_err(|error| tier_error(format!("lexical upsert failed: {error}")))?;
+            }
             batch::checkpoint(cx, "lexical")?;
             lexical
-                .delete_document(cx, id)
+                .commit(cx)
                 .await
-                .map_err(|error| tier_error(format!("lexical delete failed: {error}")))?;
+                .map_err(|error| tier_error(format!("lexical commit failed: {error}")))?;
         }
-        for document in &delta.upserts {
-            batch::checkpoint(cx, "lexical")?;
-            lexical
-                .index_document(cx, document)
-                .await
-                .map_err(|error| tier_error(format!("lexical upsert failed: {error}")))?;
-        }
-        batch::checkpoint(cx, "lexical")?;
-        lexical
-            .commit(cx)
-            .await
-            .map_err(|error| tier_error(format!("lexical commit failed: {error}")))?;
         batch::checkpoint(cx, "lexical")?;
     }
     Ok(())

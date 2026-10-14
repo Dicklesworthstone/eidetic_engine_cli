@@ -1,4 +1,4 @@
-//! Compact only the copied lexical tier, never rebuild its embedding corpus.
+//! Maintain only the copied lexical tier, never rebuild its embedding corpus.
 //!
 //! Segment pressure is a lexical maintenance decision, not evidence that the
 //! vector producer or source revision changed. The caller owns an independent
@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use frankensearch::lexical_tantivy::tantivy_crate::{
-    Index, TantivyDocument,
+    Index, IndexWriter, TantivyDocument, Term,
     index::SegmentId,
     indexer::NoMergePolicy,
     tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer},
@@ -19,9 +19,9 @@ use super::{
     ensure_index_path_has_no_symlinks, incremental_fallback,
 };
 
-// One indexing worker is sufficient: this writer only merges committed
-// segments. Match the backend's shipping heap allowance, without spawning an
-// automatically sized indexing pool for maintenance.
+// One indexing worker is sufficient: these writers only merge committed
+// segments or delete exact ID terms. Match the backend's shipping heap
+// allowance without spawning an automatically sized pool for maintenance.
 const MERGE_WRITER_HEAP_BYTES: usize = 50_000_000;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -34,7 +34,7 @@ pub(super) struct Compaction {
 fn failure(operation: &str, error: impl std::fmt::Display) -> IncrementalFallback {
     incremental_fallback(
         IncrementalFallbackReason::TierUnavailable,
-        format!("lexical delta compaction {operation} failed: {error}"),
+        format!("lexical delta maintenance {operation} failed: {error}"),
     )
 }
 
@@ -56,6 +56,111 @@ fn inventory(index: &Index) -> Result<(Vec<SegmentId>, u64), IncrementalFallback
     Ok((ids, documents))
 }
 
+fn open_staged(
+    staging_dir: &Path,
+    checkpoint: &mut impl FnMut() -> Result<(), IncrementalFallback>,
+) -> Result<Index, IncrementalFallback> {
+    checkpoint()?;
+    let directory = staging_dir.join(LEXICAL_INDEX_SUBDIR);
+    ensure_index_path_has_no_symlinks(&directory, "maintain staged lexical index")
+        .map_err(|error| failure("path admission", error))?;
+    ensure_index_path_has_no_symlinks(&directory.join("meta.json"), "read staged lexical metadata")
+        .map_err(|error| failure("metadata admission", error))?;
+    checkpoint()?;
+    Index::open_in_dir(&directory).map_err(|error| failure("open", error))
+}
+
+fn maintenance_writer(index: &Index) -> Result<IndexWriter, IncrementalFallback> {
+    // Workers still resolve the named analyzer at construction. No documents
+    // are added here, so neither deletion nor compaction tokenizes source text
+    // or assigns ordinals. The adapter's ordinal sidecar remains unchanged.
+    index.tokenizers().register(
+        "frankensearch_default",
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(LowerCaser)
+            .build(),
+    );
+    let writer = index
+        .writer_with_num_threads::<TantivyDocument>(1, MERGE_WRITER_HEAP_BYTES)
+        .map_err(|error| failure("writer", error))?;
+    writer.set_merge_policy(Box::new(NoMergePolicy));
+    Ok(writer)
+}
+
+/// Commit all removals once, before the normal adapter opens for upserts.
+/// Its single-document delete API commits and reloads on every call; using it
+/// in the delta loop made N withdrawals perform N commits before finalization.
+/// Exact native ID terms need no document hydration or ordinal-table update.
+///
+/// Only this caller-owned staging copy changes. A cancelled or failed attempt
+/// is still discarded by the publisher, even if its private delete commit has
+/// completed. Every path after writer acquisition joins the backend workers.
+pub(super) fn delete_documents(
+    cx: &asupersync::Cx,
+    staging_dir: &Path,
+    removals: &[String],
+) -> Result<u64, IncrementalFallback> {
+    delete_with_checkpoint(staging_dir, removals, || batch::checkpoint(cx, "lexical"))
+}
+
+fn delete_with_checkpoint(
+    staging_dir: &Path,
+    removals: &[String],
+    mut checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
+) -> Result<u64, IncrementalFallback> {
+    if removals.is_empty() {
+        checkpoint()?;
+        return Ok(0);
+    }
+    let index = open_staged(staging_dir, &mut checkpoint)?;
+    let (segments, documents) = inventory(&index)?;
+    let id_field = index
+        .schema()
+        .get_field("id")
+        .map_err(|error| failure("delete ID field", error))?;
+    checkpoint()?;
+    let mut writer = maintenance_writer(&index)?;
+    let deleted = (|| {
+        checkpoint()?;
+        if inventory(&index)? != (segments, documents) {
+            return Err(failure(
+                "delete inventory",
+                "staged generation changed before writer acquisition",
+            ));
+        }
+        for id in removals {
+            checkpoint()?;
+            // This is an exact term, not a parsed query. Missing or repeated
+            // IDs retain the single-document API's idempotent semantics.
+            writer.delete_term(Term::from_field_text(id_field, id));
+        }
+        checkpoint()?;
+        writer
+            .commit()
+            .map_err(|error| failure("delete commit", error))?;
+        Ok(())
+    })();
+    let joined = writer
+        .wait_merging_threads()
+        .map_err(|error| failure("delete worker join", error));
+    checkpoint()?;
+    deleted?;
+    joined?;
+    let (_, after_documents) = inventory(&index)?;
+    checkpoint()?;
+    let removed = documents
+        .checked_sub(after_documents)
+        .filter(|removed| *removed <= removals.len() as u64)
+        .ok_or_else(|| failure("delete validation", "unexpected live-document count"))?;
+    tracing::debug!(
+        target: "ee::index",
+        requested_removals = removals.len(),
+        removed_documents = removed,
+        "committed staged lexical removals in one batch"
+    );
+    Ok(removed)
+}
+
 /// Runs before opening the staged lexical upsert writer. A tier at or below
 /// the threshold stays byte-for-byte unchanged and takes no writer lock.
 /// Above it, merge existing postings/stored fields using Tantivy itself. There
@@ -75,14 +180,7 @@ fn compact_with_checkpoint(
     max_segments: usize,
     mut checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
 ) -> Result<Compaction, IncrementalFallback> {
-    checkpoint()?;
-    let directory = staging_dir.join(LEXICAL_INDEX_SUBDIR);
-    ensure_index_path_has_no_symlinks(&directory, "compact staged lexical index")
-        .map_err(|error| failure("path admission", error))?;
-    ensure_index_path_has_no_symlinks(&directory.join("meta.json"), "read staged lexical metadata")
-        .map_err(|error| failure("metadata admission", error))?;
-    checkpoint()?;
-    let index = Index::open_in_dir(&directory).map_err(|error| failure("open", error))?;
+    let index = open_staged(staging_dir, &mut checkpoint)?;
     let (segments, documents) = inventory(&index)?;
     checkpoint()?;
     // A single segment cannot be reduced by merging; this also makes a zero
@@ -94,20 +192,7 @@ fn compact_with_checkpoint(
             documents,
         });
     }
-    // A merge writer still constructs Tantivy indexing workers. Supply the
-    // pinned adapter's documented SimpleTokenizer + LowerCaser equivalent so
-    // their initialization can resolve its named analyzer. No documents are
-    // added through this writer, so maintenance never re-tokenizes source text.
-    index.tokenizers().register(
-        "frankensearch_default",
-        TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(LowerCaser)
-            .build(),
-    );
-    let mut writer = index
-        .writer_with_num_threads::<TantivyDocument>(1, MERGE_WRITER_HEAP_BYTES)
-        .map_err(|error| failure("writer", error))?;
-    writer.set_merge_policy(Box::new(NoMergePolicy));
+    let mut writer = maintenance_writer(&index)?;
     // Once a writer exists, every exit joins its workers. In particular, a
     // cancellation after submitting a merge cannot leave a writer racing the
     // caller's staging cleanup or subsequent fallback. A filesystem/merge call
