@@ -1,7 +1,7 @@
 //! Dispatch complete external reports without interpreting nested examples.
 //!
-//! JavaScript test reports and lint/type-checker reports have separate typed
-//! validators. All of them retain the caller's independent completion gate.
+//! Test reports and lint/type-checker reports have separate typed validators.
+//! All of them retain the caller's independent completion gate.
 
 use super::{
     CanonicalDiagnostic, CompilerOutput, EslintCoverage, MAX_COMPILER_RECORDS,
@@ -12,6 +12,9 @@ use super::{
 mod lint;
 
 pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
+    if let Some(output) = super::super::test_coverage::pytest::inspect(text)? {
+        return Ok(Some(output));
+    }
     if let Some(output) = super::super::test_coverage::javascript::inspect(text)? {
         return Ok(Some(output));
     }
