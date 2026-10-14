@@ -16,10 +16,13 @@ mod structured;
 pub(super) mod javascript;
 #[path = "cass_error_recall_pytest.rs"]
 pub(super) mod pytest;
+#[path = "cass_error_recall_pytest_terminal/mod.rs"]
+pub(super) mod python;
 
 enum ExternalExecution {
     Javascript(javascript::Execution),
     Pytest(pytest::Execution),
+    PytestTerminal(python::Execution),
 }
 
 impl ExternalExecution {
@@ -27,6 +30,7 @@ impl ExternalExecution {
         match self {
             Self::Javascript(execution) => execution.has_known_failures(),
             Self::Pytest(execution) => execution.has_known_failures(),
+            Self::PytestTerminal(execution) => execution.has_known_failures(),
         }
     }
 
@@ -34,12 +38,21 @@ impl ExternalExecution {
         match (self, proof) {
             (Self::Javascript(required), Self::Javascript(proof)) => required.verified_by(proof),
             (Self::Pytest(required), Self::Pytest(proof)) => required.verified_by(proof),
+            (Self::PytestTerminal(required), Self::PytestTerminal(proof)) => {
+                required.verified_by(proof)
+            }
             _ => false,
         }
     }
 }
 
 fn external_execution(text: &str) -> Result<Option<(bool, ExternalExecution)>, ()> {
+    if let Some(decoded) = python::decode(text)? {
+        return Ok(Some((
+            decoded.allows_completion,
+            ExternalExecution::PytestTerminal(decoded.execution),
+        )));
+    }
     if let Some(decoded) = pytest::decode(text)? {
         return Ok(Some((
             decoded.output.allows_completion,
