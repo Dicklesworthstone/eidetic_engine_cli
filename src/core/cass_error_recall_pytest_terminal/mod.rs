@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES};
 
+mod terminal;
+
 const MAX_TESTS: usize = 1024;
 const MAX_LINES: usize = 4096;
 type Subject = [u8; 32];
@@ -205,7 +207,7 @@ fn totals(line: &str) -> Option<Totals> {
             }
             *seconds
         }
-        _ => return None,
+        _ => None?,
     };
     let seconds = seconds.strip_suffix('s')?;
     let seconds = seconds.parse::<f64>().ok()?;
@@ -243,19 +245,31 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
-    if banner(first) != Some("test session starts") && !quiet_progress(first) {
+    // Probe only the producer header before interpreting terminal controls.
+    // Unrelated colored compiler output must retain its existing decoder.
+    let visible_first = match terminal::normalize(first) {
+        Ok(first) => first,
+        Err(()) if first.contains("test session starts") => return Err(()),
+        Err(()) => return Ok(None),
+    };
+    let session_header = banner(&visible_first) == Some("test session starts");
+    if !session_header && !quiet_progress(&visible_first) {
         return Ok(None);
     }
     if text.len() > MAX_SCANNED_OUTPUT_BYTES || text.lines().count() > MAX_LINES {
         return Err(());
     }
-    // ANSI cursor motion and overprinting can change which report a human
-    // sees. Color/control-bearing output stays unproven rather than guessed.
-    if text
-        .chars()
-        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    let visible = terminal::normalize(text)?;
+    let text = visible.as_ref();
+    // A lone dot, F or x is ordinary stdout, not a claimed test report. Quiet
+    // mode needs either pytest's progress percentage or a report boundary.
+    if !session_header
+        && !visible_first.contains('[')
+        && !text.lines().any(|line| {
+            banner(line) == Some("short test summary info") || totals(line).is_some()
+        })
     {
-        return Err(());
+        return Ok(None);
     }
     let lines: Vec<_> = text.lines().collect();
     let first_index = lines
@@ -448,3 +462,6 @@ fn diagnostic(node: &str) -> CanonicalDiagnostic {
 #[cfg(test)]
 #[path = "cass_error_recall_pytest_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod store_tests;

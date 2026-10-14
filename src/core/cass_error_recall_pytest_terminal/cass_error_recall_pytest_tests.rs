@@ -281,7 +281,7 @@ fn malformed_trailing_data_control_codes_and_bounds_never_certify_success() {
         format!("{}unrecognized trailer\n", passed()),
         passed().replace("0.01s", "NaNs"),
         passed().replace("0.01s", "0.01s unexpected"),
-        passed().replace("PASSED", "\u{1b}[32mPASSED\u{1b}[0m"),
+        passed().replace("PASSED", "\u{1b}[2JPASSED"),
         format!("{}{}", passed(), " ".repeat(MAX_SCANNED_OUTPUT_BYTES)),
     ] {
         assert!(!output(text, 0).succeeded());
@@ -317,4 +317,38 @@ fn unrelated_text_json_and_existing_rust_failures_keep_their_interpretation() {
     }
     let rust = output("error[E0308]: mismatched types".to_owned(), 1);
     assert_eq!(failure_diagnostics(&rust)[0].layered_key().key, "rustc:E0308");
+}
+
+#[test]
+fn styled_terminal_reports_keep_fingerprints_and_exact_repair_subjects() {
+    let styled = |text: &str| {
+        text.lines()
+            .map(|line| format!("\u{1b}[1;32m{line}\u{1b}[0m"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let failure = styled(&failed());
+    assert_eq!(parsed(&failure).diagnostics, parsed(&failed()).diagnostics);
+    let required = Requirement::capture(&output(failure, 1), true);
+    assert!(required.is_verified_by(&Proof::capture(&output(styled(&passed()), 0))));
+    assert!(required.is_verified_by(&Proof::capture(&output(passed(), 0))));
+}
+
+#[test]
+fn standalone_progress_glyphs_do_not_claim_unrelated_stdout() {
+    for text in [".", "F", "x", "...\nordinary output", "\u{1b}[31mF\u{1b}[0m"] {
+        assert!(decode(text).expect("another producer").is_none());
+    }
+}
+
+#[test]
+fn overprinted_terminal_results_cannot_erase_a_failed_test() {
+    for text in [
+        passed().replace("PASSED", "FAILED\rPASSED"),
+        passed().replace("PASSED", "FAILED\u{8}PASSED"),
+        format!("{}\u{1b}[2J", passed()),
+    ] {
+        assert!(!output(text, 0).succeeded());
+    }
+    assert!(output(passed().replace('\n', "\r\n"), 0).succeeded());
 }
