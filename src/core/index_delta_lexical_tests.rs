@@ -731,7 +731,7 @@ fn bulk_withdrawal_keeps_vector_reuse_and_matches_a_fresh_rebuild() -> TestResul
                 reader.doc_count().map_err(|error| error.to_string())?,
                 64 - remove_count
             );
-            Ok(())
+            Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
     }
