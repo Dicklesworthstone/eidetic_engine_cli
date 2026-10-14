@@ -61,26 +61,48 @@ fn test_identity(text: &str) -> Option<&str> {
 fn progress(line: &str) -> Option<(&str, Status)> {
     let (description, status) = line.rsplit_once(" ... ")?;
     let node = test_identity(description)?;
-    let status = match status {
+    Some((node, progress_status(status)?))
+}
+
+fn progress_status(status: &str) -> Option<Status> {
+    Some(match status {
         "ok" => Status::Passed,
         "FAIL" => Status::Failed,
         "ERROR" => Status::Error,
         "expected failure" => Status::ExpectedFailure,
         "unexpected success" => Status::UnexpectedSuccess,
-        other if other.starts_with("skipped '") && other.ends_with('\'') => Status::Skipped,
+        other
+            if other
+                .strip_prefix("skipped ")
+                .is_some_and(|reason| {
+                    (reason.starts_with('\'') && reason.ends_with('\''))
+                        || (reason.starts_with('"') && reason.ends_with('"'))
+                }) => Status::Skipped,
         _ => return None,
-    };
-    Some((node, status))
+    })
 }
 
-fn error_header(line: &str) -> Option<(&str, Status)> {
+/// A failed subtest names its parent plus a display-only parameter suffix.
+/// Record the parent test's error class without interpreting Python repr or
+/// leaking parameters. A normal parent pass does not prove that exact subtest
+/// ran again: such reports deliberately have no complete proof inventory.
+fn error_header(line: &str) -> Option<(&str, Status, bool)> {
     for (prefix, status) in [
         ("FAIL: ", Status::Failed),
         ("ERROR: ", Status::Error),
         ("UNEXPECTED SUCCESS: ", Status::UnexpectedSuccess),
     ] {
         if let Some(description) = line.strip_prefix(prefix) {
-            return test_identity(description).map(|node| (node, status));
+            if let Some(node) = test_identity(description) {
+                return Some((node, status, true));
+            }
+            let boundary = description.find(") ")?;
+            let node = test_identity(&description[..=boundary])?;
+            let suffix = &description[boundary + 2..];
+            let subtest = !suffix.chars().any(char::is_control)
+                && ((suffix.starts_with('(') && suffix.ends_with(')'))
+                    || (suffix.starts_with('[') && suffix.ends_with([']', ')'])));
+            return subtest.then_some((node, status, false));
         }
     }
     None
@@ -179,7 +201,12 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         Ok(first) => first,
         Err(()) => return Ok(None),
     };
-    let verbose = progress(&visible_first).is_some();
+    let verbose = progress(&visible_first).is_some()
+        || test_identity(&visible_first).is_some()
+        || visible_first
+            .strip_suffix(" ... ")
+            .and_then(test_identity)
+            .is_some();
     let quiet = !visible_first.is_empty()
         && visible_first.bytes().all(|byte| b".FEsxu".contains(&byte));
     let headed = visible_first == ERROR_SEPARATOR || visible_first == RUN_SEPARATOR;
@@ -214,7 +241,27 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     let mut nodes = BTreeMap::<&str, Status>::new();
     let mut details = BTreeMap::<&str, Status>::new();
     let mut observed = [0_u64; 6];
+    let mut description = None;
     for (index, line) in lines.iter().enumerate() {
+        // TextTestRunner places the first docstring line between the test ID
+        // and its status. It is a single adjacent display line, never a new
+        // test identity, a diagnostic message or an independently trusted row.
+        if let Some((node, started_at)) = description.take() {
+            let displayed_status = line
+                .rsplit_once(" ... ")
+                .filter(|(text, _)| !text.trim().is_empty() && progress(line).is_none())
+                .and_then(|(_, status)| progress_status(status));
+            if let Some(status) = displayed_status
+                && started_at + 1 == index
+            {
+                if nodes.len() == MAX_TESTS || nodes.insert(node, status).is_some() {
+                    return Err(());
+                }
+                observed[status.index()] += 1;
+                continue;
+            }
+            ambiguous = true;
+        }
         if line.trim().is_empty() {
             continue;
         }
@@ -243,16 +290,22 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
                     return Err(());
                 }
                 observed[status.index()] += 1;
+            } else if let Some(node) = test_identity(line) {
+                description = Some((node, index));
             } else {
                 ambiguous = true;
             }
         }
         if index > 0 && lines[index - 1] == ERROR_SEPARATOR {
-            let Some((node, status)) = error_header(line) else {
+            let Some((node, status, complete_subject)) = error_header(line) else {
                 ambiguous = true;
                 continue;
             };
-            if details.len() == MAX_TESTS || details.insert(node, status).is_some() {
+            ambiguous |= !complete_subject;
+            if details.len() == MAX_TESTS && !details.contains_key(node) {
+                return Err(());
+            }
+            if details.insert(node, status).is_some() && complete_subject {
                 return Err(());
             }
         }
@@ -297,6 +350,7 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     }
     execution.complete = verbose
         && !ambiguous
+        && description.is_none()
         && ran_count == Some(nodes.len() as u64)
         && summary
             .as_ref()
@@ -464,5 +518,100 @@ mod tests {
                 .iter()
                 .all(|diagnostic| !diagnostic.message_template.contains(&credential))
         );
+    }
+
+    #[test]
+    fn multiline_descriptions_preserve_test_identity_not_docstring_text() {
+        let raw = report("FAIL")
+            .replacen(
+                &format!("{CACHE} ... FAIL"),
+                &format!("{CACHE}\nA private description of the cache. ... FAIL"),
+                1,
+            )
+            .replace(
+                &format!("FAIL: {CACHE}\n"),
+                &format!("FAIL: {CACHE}\nA private description of the cache.\n"),
+            );
+        let proof = report("ok").replacen(
+            &format!("{CACHE} ... ok"),
+            &format!("{CACHE}\nA changed description, not a changed test. ... ok"),
+            1,
+        );
+        let failure = decoded(&raw);
+        assert!(failure.execution.has_known_failures());
+        assert_eq!(failure.diagnostics, decoded(&report("FAIL")).diagnostics);
+        assert!(failure.execution.verified_by(&decoded(&proof).execution));
+        assert!(!failure.symptom.unwrap().contains("private description"));
+        // SGR colors and CRLF are rendering, not different test identities.
+        let styled = proof
+            .replace("ok", "\u{1b}[32mok\u{1b}[0m")
+            .replace('\n', "\r\n");
+        assert!(failure.execution.verified_by(&decoded(&styled).execution));
+    }
+
+    #[test]
+    fn missing_or_ambiguous_docstring_status_cannot_skip_a_test() {
+        for displayed in [
+            "A description without a status.",
+            "Extra line.\nA description. ... ok",
+            "\nA description. ... ok",
+            "test_other (tests.test_cache.CacheTests.test_other) ... ok",
+        ] {
+            let raw = report("ok").replacen(
+                &format!("{CACHE} ... ok"),
+                &format!("{CACHE}\n{displayed}"),
+                1,
+            );
+            assert!(
+                !matches!(super::super::decode(&raw), Ok(Some(report)) if report.allows_completion)
+            );
+        }
+    }
+
+    #[test]
+    fn subtest_failures_recall_the_parent_without_claiming_parameter_coverage() {
+        let secret = format!("ghp_{}", "Q".repeat(36));
+        let suffix = format!("(token='{secret}')");
+        let raw = report("FAIL")
+            .replacen(
+                &format!("{CACHE} ... FAIL"),
+                &format!("{CACHE} ... \n  {CACHE} {suffix} ... FAIL"),
+                1,
+            )
+            .replace(
+                &format!("FAIL: {CACHE}\n"),
+                &format!("FAIL: {CACHE} {suffix}\n"),
+            );
+        let failure = decoded(&raw);
+        assert!(failure.failed);
+        assert_eq!(failure.diagnostics, decoded(&report("FAIL")).diagnostics);
+        assert!(!failure.execution.has_known_failures());
+        assert!(
+            !failure
+                .execution
+                .verified_by(&decoded(&report("ok")).execution)
+        );
+        assert!(!failure.symptom.unwrap().contains(&secret));
+        let quiet = format!(
+            "F.\n{ERROR_SEPARATOR}\nFAIL: {CACHE} {suffix}\n{RUN_SEPARATOR}\nignored traceback\n{RUN_SEPARATOR}\nRan 2 tests in 0.001s\n\nFAILED (failures=1)\n"
+        );
+        assert_eq!(decoded(&quiet).diagnostics, failure.diagnostics);
+    }
+
+    #[test]
+    fn unexpected_success_is_a_failed_run_and_zero_tests_never_certify_repairs() {
+        let raw = report("FAIL")
+            .replace(" ... FAIL", " ... unexpected success")
+            .replace("FAIL: ", "UNEXPECTED SUCCESS: ")
+            .replace("failures=1", "unexpected successes=1");
+        let failure = decoded(&raw);
+        assert!(failure.failed);
+        assert!(!failure.allows_completion);
+        assert!(failure.execution.has_known_failures());
+        assert!(failure.execution.verified_by(&decoded(&report("ok")).execution));
+        for result in ["OK", "NO TESTS RAN"] {
+            let empty = format!("{RUN_SEPARATOR}\nRan 0 tests in 0.000s\n\n{result}\n");
+            assert!(!decoded(&empty).allows_completion);
+        }
     }
 }
