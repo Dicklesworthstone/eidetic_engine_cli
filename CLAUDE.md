@@ -134,8 +134,27 @@ Pinning is not a capacity escape. A pinned request that cannot be admitted is
 refused whole — `[RCH-I001] requested worker set [...] refused (selection error:
 queue_timeout)`, exit 103 — because `--worker` declines to fall back. So pin to a
 worker you have just seen idle in `rch status`, and keep the retry for the 103.
-Admission is project-identity-keyed and capacity-blind (bd-0u3i2), so a free
-fleet does not imply an admissible one.
+
+**Before retrying a 103 at all, cap the job with `-j N`.** A dispatch's core
+estimate must fit ONE worker's `total_slots`, and `rch status`'s fleet-wide
+"slots_available" cannot tell you whether it does. An unhostable request is
+refused as a bare `queue_timeout` — it took four dispatches on 2026-10-14 before
+one attempt finally reported the real condition:
+
+    [RCH-I003] requested worker set [...] refused (no_free_slots); '<worker>' has
+    2 total slot(s) but the request is estimated at 4 core(s); pass -j 2 (or
+    fewer), or request a larger worker
+
+Adding `-j 2` to the job's own cargo line — inside the dispatched command, never
+run locally, where `build` is a tripwire subcommand — was then admitted on the
+FIRST attempt, against the same fleet that had just refused the uncapped form
+three times. No amount of waiting fixes arithmetic; 17 free slots spread across
+workers do not host a 4-core request. See bd-qi3qx for the reporting defect.
+
+`rch diagnose -- <command>` prints the selection it WOULD make, including
+"Requested worker", "Effective worker" and the reason — it is the fastest way to
+see that affinity is routing you to a worker too small for the job, and it is
+what the I001 text tells you to run.
 
 ## Architecture
 
