@@ -905,7 +905,7 @@ fn pack_quality_executes_real_packs_independently_of_expected_answers() -> TestR
         &false,
         &format!(
             "non-volatile degradation comparison must not be vacuous; baseline codes were {:?}",
-            &baseline["actual_degradation_codes"]
+            baseline["actual_degradation_codes"]
         ),
     )?;
     ensure_equal(
