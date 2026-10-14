@@ -234,6 +234,13 @@ fi
 run_ee remember "Zebra hovercraft docking protocol: engage the magnetic clamps before docking." \
     --workspace "${WS}" --level procedural --kind rule --tags "docking" --json
 COVER_EXIT=$LAST_EXIT
+# The id of the memory that is SUPPOSED to close the gap. Printed in the
+# failure diagnosis because it is the only way to tell the two causes apart
+# without a code-reading session (bd-betm5): if this id appears in
+# nearestExistingEvidence the matcher SAW the memory and rejected it on
+# similarity or recency, and if it does not appear the memory was never
+# visible to the matcher at all. Those need opposite fixes.
+COVER_ID="$(jq -r '.data.memoryId // .data.memory_id // empty' "${LAST_STDOUT}" 2>/dev/null)"
 run_ee learn gaps --workspace "${WS}" --json
 G2="${LAST_STDOUT}"
 if [[ "${COVER_EXIT}" -eq 0 && "${LAST_EXIT}" -eq 0 ]] \
@@ -241,7 +248,7 @@ if [[ "${COVER_EXIT}" -eq 0 && "${LAST_EXIT}" -eq 0 ]] \
         "${G2}" >/dev/null 2>&1; then
     event remembered_demand_marks_cluster_covered pass
 else
-    event remembered_demand_marks_cluster_covered fail "cover=${COVER_EXIT} exit=${LAST_EXIT}; $(jq -c '[(.gaps // .data.gaps)[]? | {status, coveredBy}]' "${G2}" 2>/dev/null)"
+    event remembered_demand_marks_cluster_covered fail "cover=${COVER_EXIT} exit=${LAST_EXIT} remembered=${COVER_ID:-<none>}; $(jq -c '[(.gaps // .data.gaps)[]? | {status, coveredBy, lastSeenAt, nearestStatus: .nearestExistingEvidenceStatus, nearest: [(.nearestExistingEvidence // [])[] | {memoryId, reason}]}]' "${G2}" 2>/dev/null)"
 fi
 
 # --- trend: two steward snapshots around a fix show the direction ---------
