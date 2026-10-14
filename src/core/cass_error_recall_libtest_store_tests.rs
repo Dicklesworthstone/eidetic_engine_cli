@@ -157,7 +157,7 @@ fn libtest_failure_produces_exact_repair_card_proof_and_pack_context_without_cha
     expected.sort();
     assert!(recall.exact);
     assert_eq!(recall.helpful_repairs, expected);
-    assert_eq!(recall.proof_links, [episode.proof.clone()]);
+    assert_eq!(recall.proof_links, std::slice::from_ref(&episode.proof));
     let links = db.list_error_repair_links(WS, &canonical().layered_key().key)?;
     assert_eq!(links.len(), 3);
     assert!(

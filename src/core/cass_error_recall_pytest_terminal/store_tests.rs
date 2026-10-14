@@ -142,7 +142,7 @@ fn native_pytest_repair_is_cited_packable_and_idempotent_without_source_mutation
     assert!(recall.exact);
     assert!(recall.helpful_repairs.contains(&episode.repair));
     assert!(recall.helpful_repairs.contains(&card));
-    assert_eq!(recall.proof_links, [episode.proof.clone()]);
+    assert_eq!(recall.proof_links, std::slice::from_ref(&episode.proof));
     let links = episode
         .db
         .list_error_repair_links(WS, &diagnostic.layered_key().key)?;

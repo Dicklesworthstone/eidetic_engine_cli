@@ -277,7 +277,7 @@ fn javascript_sessions_persist_exact_repair_proof_and_packable_card_idempotently
         let recall = error_recall_report(&case.db, WS, &diagnostic)?;
         assert!(recall.exact);
         assert!(recall.helpful_repairs.contains(&case.repair));
-        assert_eq!(recall.proof_links, [case.proof.clone()]);
+        assert_eq!(recall.proof_links, std::slice::from_ref(&case.proof));
         let links = case
             .db
             .list_error_repair_links(WS, &diagnostic.layered_key().key)?;

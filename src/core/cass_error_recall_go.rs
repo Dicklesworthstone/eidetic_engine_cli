@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn build_output_can_interleave_but_never_supplies_success_by_itself() {
         let warning = json!({"Action":"build-output","ImportPath":"example.org/dependency","Output":"a compiler warning"});
-        let decoded = parsed(&[warning.clone()]);
+        let decoded = parsed(std::slice::from_ref(&warning));
         assert!(!decoded.failed);
         assert!(!decoded.allows_completion);
         let mut events = passing("example.org/cache");
