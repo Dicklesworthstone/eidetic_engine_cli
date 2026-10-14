@@ -18,12 +18,12 @@ Labels, fields and the coverage rule are defined in
 
 ## fm-workspace_config-config-toml-malformed
 
-- **Label:** NOT-DETECTED (pinned gap; NOT coverage)
-- **Severity:** P1. Scored P1 as `pop-config-malformed` in `docs/doctor/failure_mode_scores.jsonl`.
-- **Detector:** None. Doctor swallows `config.toml` parse errors (`workspace_config` returns `ConfigFile::parse(..).ok()`), so a workspace whose config cannot be parsed reports healthy. The config quarantine fixer exists but is never dispatched.
+- **Label:** COVERAGE (repair round trip). Upgraded from NOT-DETECTED under spec rule V6 on 2026-10-14 (bd-ooj2h), because the pinned-gap assertion started failing with "GAP no longer reproduces; the label is wrong, relabel it" — which is that assertion doing exactly what it was written to do on the day doctor learns to detect something.
+- **Severity:** P1. Scored P1 as `pop-config-malformed` in `docs/doctor/failure_mode_scores.jsonl`. Note that row lists BOTH this fixture and `fm-state_files-merge-conflict-markers`, i.e. two fixtures for one failure mode.
+- **Detector:** `workspace`, error code `EE-E101`, posture `blocked`. The previous entry said "None. Doctor swallows `config.toml` parse errors"; that is no longer true. Repair hint as emitted: "Fix the TOML syntax in the config file the error names, then re-run the command".
 - **Real trigger:** A valid comment-only `.ee/config.toml` that `ee search` accepts is moved into `.fixture_baseline/` and replaced by the same content plus invalid TOML (an unclosed `[search` table header and a key without a value). `ee search` then fails with an `ee.error.v2` envelope whose code is `configuration`.
-- **Repair:** None. Doctor finds nothing, so `--fix` dispatches nothing.
-- **Undo:** Not applicable. The config file is unchanged by `--fix`.
-- **Oracle:** `doctor_fixture_assert_pinned_gap` on `.ee/config.toml`: doctor healthy with an empty `actionable`, `--fix` reports 0 actions, and the config bytes are unchanged. The witness is `ee search` failing with `configuration`.
+- **Repair:** `quarantine_by_rename`, outcome `applied`, `status: completed_ok`, `actionCount: 1`, `guidanceOnlyFixerCount: 0`. The malformed config is renamed aside rather than deleted — RULE 1 and the doctor runtime contract both forbid doctor removing a file — and doctor then reports `healthy: true`, posture `ok`, empty `actionable`.
+- **Undo:** Applicable now. `--undo <run-id>` restores the damaged baseline, and the fixture asserts `EE-E101` returns afterwards, because `doctor_fixture_corrupt` writes `before.sha256` AFTER the damage, so the digest comparison alone would also be satisfied by a workspace that was never repaired.
+- **Oracle:** `doctor_fixture_assert` (the shared repair round trip) plus four assertions it does not make: detection before any repair, the fixer operation BY NAME, undo reporting `actionsUndone > 0`, and `EE-E101` returning after undo.
 - **Negative control:** The comment-only baseline config passes `ee search` and a healthy doctor report before it is broken.
-- **Pinned sha:** 02524267e, measured on its stamped release build on an RCH worker.
+- **Pinned sha:** oracle measured 2026-10-14 on an RCH worker against a binary that job built from `.rch-target/debug/ee`. The previous pin was 02524267e, whose behaviour this entry no longer describes.

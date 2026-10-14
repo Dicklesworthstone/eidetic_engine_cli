@@ -42,15 +42,15 @@ Labels, fields and the coverage rule are defined in
 
 ## fm-state_files-merge-conflict-markers
 
-- **Label:** NOT-DETECTED (pinned gap; NOT coverage)
-- **Severity:** P1. Scored P1 as `pop-config-malformed`: an unparseable config blocks search and pack until edited, but loses no data. Settled by execution (bd-2oh15 c9891/c9892) on a stamped 11f6e832e build: `status`, `remember` and `doctor` succeed on the conflicted workspace and only `search` fails (exit 2, `configuration`), so the failure does not block every command and P0 clause 2 does not apply. The manifest said P0 until then.
-- **Detector:** None. Doctor swallows `config.toml` parse errors.
+- **Label:** COVERAGE (repair round trip). Upgraded from NOT-DETECTED under spec rule V6 on 2026-10-14 (bd-ooj2h), after the pinned-gap assertion began failing with "GAP no longer reproduces; the label is wrong, relabel it".
+- **Severity:** P1. Scored P1 as `pop-config-malformed`: an unparseable config blocks search and pack until edited, but loses no data. Settled by execution (bd-2oh15 c9891/c9892) on a stamped 11f6e832e build: `status`, `remember` and `doctor` succeed on the conflicted workspace and only `search` fails (exit 2, `configuration`), so the failure does not block every command and P0 clause 2 does not apply. The manifest said P0 until then. NOTE: the `doctor` half of that 2026-09 finding is now stale — doctor reports this workspace as blocked, see Detector.
+- **Detector:** `workspace`, error code `EE-E101`, posture `blocked`, repair hint "Fix the TOML syntax in the config file the error names, then re-run the command". Conflict markers ARE invalid TOML, so this lands in the same detector as `fm-workspace_config-config-toml-malformed` and doctor reports the two IDENTICALLY — same check, code, posture and repair string. The two fixtures therefore now assert one observable and differ only in how `corrupt.sh` produces the damage; whether both should survive is an open question on bd-ooj2h.
 - **Real trigger:** A valid comment-only `.ee/config.toml` baseline is replaced by the same file wrapped in `<<<<<<<` / `=======` / `>>>>>>>` markers.
-- **Repair:** None. Doctor finds nothing, so `--fix` dispatches nothing.
-- **Undo:** Not applicable. The harness asserts the config file is unchanged by `--fix`.
-- **Oracle:** `doctor_fixture_assert_pinned_gap` on `.ee/config.toml`. The witness is `ee search`, which fails with an `ee.error.v2` envelope whose code is `configuration`.
+- **Repair:** `quarantine_by_rename`, outcome `applied`, `status: completed_ok`, `actionCount: 1`, `guidanceOnlyFixerCount: 0`; doctor then reports `healthy: true`, posture `ok`, empty `actionable`. The conflicted config is renamed aside, never deleted.
+- **Undo:** Applicable now. `--undo <run-id>` restores the damaged baseline and the fixture asserts `EE-E101` returns, which the digest comparison alone cannot establish.
+- **Oracle:** `doctor_fixture_assert` plus detection-before-repair, the fixer operation by name, `actionsUndone > 0`, and `EE-E101` after undo. The witness remains `ee search`, failing with an `ee.error.v2` envelope whose code is `configuration`.
 - **Negative control:** The comment-only baseline config passes `doctor_fixture_healthy_store` before the markers are written.
-- **Pinned sha:** 9188a0661, measured on the ab83e3f23 release binary.
+- **Pinned sha:** oracle measured 2026-10-14 on an RCH worker against a binary that job built. The previous pin was 9188a0661 on the ab83e3f23 release binary, whose behaviour this entry no longer describes.
 
 ## fm-state_files-jsonl-tombstone-drift
 
