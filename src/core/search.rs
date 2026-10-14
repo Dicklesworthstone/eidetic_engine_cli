@@ -15442,8 +15442,11 @@ mod tests {
             message.contains("deadline elapsed"),
             "an expired snapshot must say its deadline elapsed: {message}"
         );
+        // The old variant's exact rendering, not the bare word: the message
+        // now says "nothing is malformed", so asserting the word's absence
+        // reds on a working fix (measured, bd-vdmn4).
         assert!(
-            !message.to_ascii_lowercase().contains("malformed"),
+            !message.contains("returned malformed row"),
             "a timing condition must not be reported in the vocabulary of data corruption: {message}"
         );
         assert_eq!(pool.stats().active_pins, 0);

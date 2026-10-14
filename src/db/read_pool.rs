@@ -2147,8 +2147,13 @@ mod tests {
             rendered.contains("deadline elapsed"),
             "the cause must lead: {rendered}"
         );
+        // The needle is the PHRASE the old variant rendered, not the word.
+        // My first version asserted the absence of "malformed" and reded on
+        // this very message, because the message says "nothing is malformed"
+        // -- a guard that fires exactly when the fix is working. Do not
+        // "simplify" this back to the bare word.
         assert!(
-            !rendered.to_ascii_lowercase().contains("malformed"),
+            !rendered.contains("returned malformed row"),
             "a timing condition must not borrow the vocabulary of corruption: {rendered}"
         );
         assert!(
@@ -2205,7 +2210,7 @@ mod tests {
             "a pin inside its budget did not run late: {rendered}"
         );
         assert!(
-            !rendered.to_ascii_lowercase().contains("malformed"),
+            !rendered.contains("returned malformed row"),
             "a revocation is not corruption either: {rendered}"
         );
     }
@@ -2662,7 +2667,19 @@ mod tests {
         };
         assert_eq!(error.operation(), Some(DbOperation::Query));
         assert!(error.to_string().contains("snapshot pin"));
-        assert!(error.to_string().contains("poisoned"));
+        // Vocabulary updated with bd-vdmn4. This pin was force-poisoned by a
+        // drain while still INSIDE its budget, so the cause is Revoked, not a
+        // deadline -- which is the discriminator for deriving the cause from
+        // age instead of storing it.
+        assert!(matches!(
+            error,
+            DbError::ReadSnapshotUnavailable {
+                failure: ReadSnapshotFailure::Revoked,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("revoked it while draining"));
+        assert!(!error.to_string().contains("deadline elapsed"));
         assert!(pin.is_poisoned());
 
         drop(pin);
@@ -2710,7 +2727,16 @@ mod tests {
 
         assert_eq!(error.operation(), Some(DbOperation::Query));
         assert!(error.to_string().contains("snapshot pin"));
-        assert!(error.to_string().contains("poisoned"));
+        // Vocabulary updated with bd-vdmn4; force-poisoned inside its budget,
+        // so Revoked, same as the checked_connection sibling above.
+        assert!(matches!(
+            error,
+            DbError::ReadSnapshotUnavailable {
+                failure: ReadSnapshotFailure::Revoked,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("revoked it while draining"));
 
         let stats = pool.stats();
         assert_eq!(stats.active, 0);
@@ -2738,7 +2764,20 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.operation(), Some(DbOperation::Query));
-        assert!(error.to_string().contains("expired"));
+        // Vocabulary updated with bd-vdmn4: this refusal used to render
+        // "poisoned or expired" through the data-corruption variant. The
+        // subject of this test is unchanged -- an over-age pin refuses -- and
+        // it now also pins the typed cause, so it no longer rests on wording
+        // alone. `max_pin_duration` is ZERO here, so DeadlineElapsed is the
+        // correct cause and Revoked would be a derivation bug.
+        assert!(matches!(
+            error,
+            DbError::ReadSnapshotUnavailable {
+                failure: ReadSnapshotFailure::DeadlineElapsed,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("deadline elapsed"));
         assert!(pin.is_poisoned());
         assert_eq!(pool.stats().active_pins, 1);
         assert_eq!(pool.stats().expired_pins, 1);
