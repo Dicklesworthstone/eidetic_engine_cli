@@ -28,7 +28,7 @@
       "id": "fm-state_files-merge-conflict-markers",
       "severity": "P1",
       "subsystem": "state_files",
-      "label": "NOT-DETECTED",
+      "label": "REPAIR",
       "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {
@@ -126,7 +126,7 @@
       "id": "fm-workspace_config-config-toml-malformed",
       "severity": "P1",
       "subsystem": "workspace_config",
-      "label": "NOT-DETECTED",
+      "label": "REPAIR",
       "spec": "docs/doctor/repair-specs/workspace_config.md"
     },
     {
