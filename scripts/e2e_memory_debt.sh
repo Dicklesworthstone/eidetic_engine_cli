@@ -231,8 +231,13 @@ else
 fi
 
 # --- remembering the demand flips the cluster to likely_covered -----------
+# Production miss rows are hash-only by design. Bind the answer to the stable
+# gap id exactly as the suggested remember command does; no raw query text or
+# vector is persisted merely to make coverage possible.
+GAP_ID="$(jq -r '(.gaps // .data.gaps)[0].clusterId // empty' "${G}" 2>/dev/null)"
 run_ee remember "Zebra hovercraft docking protocol: engage the magnetic clamps before docking." \
-    --workspace "${WS}" --level procedural --kind rule --tags "docking" --json
+    --workspace "${WS}" --level procedural --kind rule \
+    --tags "docking,knowledge-gap:${GAP_ID}" --json
 COVER_EXIT=$LAST_EXIT
 # The id of the memory that is SUPPOSED to close the gap. Printed in the
 # failure diagnosis because it is the only way to tell the two causes apart
