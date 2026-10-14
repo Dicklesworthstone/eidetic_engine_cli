@@ -8,6 +8,10 @@ use super::{DbConnection, IndexRebuildError};
 use crate::db::DatabaseOpenMode;
 use crate::models::{MemoryAnchorSource, StoredMemoryAnchor, extract_precision_memory_anchors};
 
+#[cfg(feature = "lexical-bm25")]
+#[path = "index_source_measurement.rs"]
+mod measurement;
+
 /// Project the same complete corpus as publication, while borrowing the
 /// retrieval caller's snapshot. No nested transaction, anchor backfill, job
 /// transition, model load or on-disk index is permitted on this path.
@@ -184,7 +188,7 @@ fn live_source_rows_fit_with(
 }
 
 /// Preflight the complete source read before any row body, metadata sidecar,
-/// or projection is hydrated. Each aggregate returns integers only; summing
+/// or projection is hydrated. Each measurement returns integers only; summing
 /// individual UTF-8 lengths avoids first concatenating large SQL values.
 ///
 /// This is a conservative source-allocation estimate, not an RSS limit: allow
@@ -607,33 +611,57 @@ fn charge_source_rows(
     scope: &str,
     budget: &mut SourceReadBudget,
 ) -> Result<bool, IndexRebuildError> {
+    // Track the same remaining allowance as the accounting boundary without
+    // borrowing its mutable state inside the measurement callback. A partial
+    // sum is useful only when it already proves refusal; admitted totals must
+    // still cover the entire scope in the caller's unchanged snapshot.
+    let mut remaining = budget
+        .charged
+        .and_then(|used| budget.maximum.checked_sub(used))
+        .unwrap_or(0);
     charge_source_measurements(cx, budget, |stage| {
         // Identifiers/predicates come only from the fixed source inventory.
         // All queries return integers, never source bodies or truncated rows.
-        let mut params = vec![sqlmodel_core::Value::Text(workspace_id.to_owned())];
-        let sql = match stage {
+        match stage {
             SourceSizeStage::Rows { limit } => {
                 let limit = i64::try_from(limit).map_err(|_| {
                     IndexRebuildError::Index("invalid live source row ceiling".to_owned())
                 })?;
-                params.push(sqlmodel_core::Value::BigInt(limit));
-                format!(
-                    "SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE {scope} LIMIT ?2) bounded_source_rows"
-                )
+                let sizes = db.query(
+                    &format!(
+                        "SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE {scope} LIMIT ?2) bounded_source_rows"
+                    ),
+                    &[
+                        sqlmodel_core::Value::Text(workspace_id.to_owned()),
+                        sqlmodel_core::Value::BigInt(limit),
+                    ],
+                )?;
+                let rows = source_size_value(&sizes, 0)?;
+                remaining = remaining
+                    .saturating_sub(rows.saturating_mul(SourceReadBudget::ROW_OVERHEAD));
+                Ok(rows)
             }
             SourceSizeStage::Bytes => {
-                let lengths = source_length_expression(columns);
-                format!("SELECT coalesce(SUM({lengths}), 0) FROM {table} WHERE {scope}")
+                let bytes = measurement::sum(
+                    cx,
+                    db,
+                    workspace_id,
+                    table,
+                    &source_length_expression(columns),
+                    scope,
+                    remaining / SourceReadBudget::TEXT_COPIES,
+                )?;
+                remaining = remaining
+                    .saturating_sub(bytes.saturating_mul(SourceReadBudget::TEXT_COPIES));
+                Ok(bytes)
             }
             SourceSizeStage::Structure => {
                 let Some(structure) = source_structure_expression(columns) else {
                     return Ok(0);
                 };
-                format!("SELECT coalesce(SUM({structure}), 0) FROM {table} WHERE {scope}")
+                measurement::sum(cx, db, workspace_id, table, &structure, scope, remaining)
             }
-        };
-        let sizes = db.query(&sql, &params)?;
-        source_size_value(&sizes, 0)
+        }
     })
 }
 
