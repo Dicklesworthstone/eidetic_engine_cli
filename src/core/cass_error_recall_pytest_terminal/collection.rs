@@ -125,6 +125,12 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         .unwrap_or("");
     let first = match terminal::normalize(first) {
         Ok(first) => first,
+        // A damaged native header is not an unrelated producer. In particular,
+        // a quiet ERRORS header must not fall through to generic stdout merely
+        // because terminal erasure made its visible interpretation uncertain.
+        Err(()) if first.contains("test session starts") || first.contains("ERRORS") => {
+            return Err(());
+        }
         Err(()) => return Ok(None),
     };
     if !matches!(banner(&first), Some("test session starts" | "ERRORS")) {
@@ -171,6 +177,11 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         if totals(line).is_some() {
             return Err(());
         }
+        if interrupted.is_some() {
+            // Only the final summary may follow the collection interruption.
+            // Do not let an unknown later banner conceal extra output.
+            return Err(());
+        }
         if let Some(label) = banner(line) {
             match label {
                 "test session starts" if index == first_index => {}
@@ -199,9 +210,6 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             interrupted = Some(interrupted_count(line).ok_or(())?);
             in_summary = false;
             continue;
-        }
-        if interrupted.is_some() {
-            return Err(());
         }
         if !errors_seen
             && (line.starts_with("collected ") || line.starts_with("collecting ... collected "))
@@ -475,5 +483,244 @@ mod tests {
         let other = python_decode(&green(&[&other])).unwrap().unwrap();
         assert!(!decoded.execution.verified_by(&other.execution));
         assert!(python_decode(&failure.replace("ERRORS", "\u{1b}[2JERRORS")).is_err());
+    }
+
+    mod store {
+        use super::{green, report};
+        use crate::core::cass_error_recall::{
+            record_session_error_recall, structured_error_diagnostics,
+        };
+        use crate::core::error_diagnosis::{
+            error_recall_report, pack_error_recall_query_seed, recalled_repair_evidence,
+        };
+        use crate::db::{
+            CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
+            EvidenceProducerKind,
+        };
+        use serde_json::{Value, json};
+
+        type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+        const WS: &str = "wsp_01234567890123456789012345";
+        const COMMAND: &str = "pytest -v --color=no tests";
+        const MODULE: &str = "tests/test_queue.py";
+        const REPAIR: &str = "The pytest collection failed in tests/test_queue.py because Queue was imported from an obsolete module. I fixed tests/test_queue.py by importing Queue from queue_backend.";
+
+        fn id(number: u32) -> String {
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                9700 + u128::from(number),
+            ))
+            .to_string()
+        }
+
+        fn insert(
+            db: &DbConnection,
+            session: &str,
+            number: u32,
+            kind: &str,
+            role: &str,
+            block: Value,
+        ) -> TestResult {
+            let excerpt =
+                json!({"type":role,"message":{"role":role,"content":[block]}}).to_string();
+            db.insert_evidence_span(
+                &id(number),
+                &CreateEvidenceSpanInput {
+                    workspace_id: WS.to_owned(),
+                    session_id: session.to_owned(),
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("{session}:{number}"),
+                    span_kind: kind.to_owned(),
+                    start_line: number,
+                    end_line: number,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some(role.to_owned()),
+                    content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                    excerpt,
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )?;
+            Ok(())
+        }
+
+        fn episode(proof: &str, proof_command: &str) -> TestResult<(DbConnection, String)> {
+            let db = DbConnection::open_memory()?;
+            db.migrate()?;
+            db.insert_workspace(
+                WS,
+                &CreateWorkspaceInput {
+                    path: "/tmp/pytest-collection-recall".to_owned(),
+                    name: None,
+                },
+            )?;
+            let session =
+                crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(9690)).to_string();
+            db.insert_session(
+                &session,
+                &CreateSessionInput {
+                    workspace_id: WS.to_owned(),
+                    cass_session_id: "/sessions/pytest-collection.jsonl".to_owned(),
+                    source_path: None,
+                    agent_name: Some("claude_code".to_owned()),
+                    model: None,
+                    started_at: None,
+                    ended_at: None,
+                    message_count: 5,
+                    token_count: None,
+                    content_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"pytest-collection-recall").to_hex()
+                    ),
+                    metadata_json: None,
+                },
+            )?;
+            for (offset, (kind, role, block)) in [
+                (
+                    "tool_call",
+                    "assistant",
+                    json!({"type":"tool_use","id":"failed","name":"Bash",
+                        "input":{"command":COMMAND}}),
+                ),
+                (
+                    "tool_result",
+                    "user",
+                    json!({"type":"tool_result","tool_use_id":"failed",
+                        "content":report(&[MODULE], false),"is_error":true}),
+                ),
+                ("message", "assistant", json!({"type":"text","text":REPAIR})),
+                (
+                    "tool_call",
+                    "assistant",
+                    json!({"type":"tool_use","id":"retry","name":"Bash",
+                        "input":{"command":proof_command}}),
+                ),
+                (
+                    "tool_result",
+                    "user",
+                    json!({"type":"tool_result","tool_use_id":"retry",
+                        "content":proof,"is_error":false}),
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                insert(&db, &session, u32::try_from(offset + 1)?, kind, role, block)?;
+            }
+            Ok((db, session))
+        }
+
+        #[test]
+        fn collection_repair_populates_cited_recall_only_after_the_module_executes() -> TestResult {
+            let good = green(&[MODULE]);
+            let skipped = good.replace("PASSED", "SKIPPED").replace("1 passed", "1 skipped");
+            let (db, session) = episode(&skipped, COMMAND)?;
+            let first = record_session_error_recall(&db, WS, &session)?;
+            assert_eq!(first.failures_seen, 1);
+            assert_eq!(first.resolved_failures, 0);
+            assert_eq!(first.repair_links_recorded, 0);
+            assert_eq!(first.incident_cards_recorded, 0);
+            let diagnostic = structured_error_diagnostics(&report(&[MODULE], true))
+                .into_iter()
+                .next()
+                .ok_or("collection fingerprint")?;
+            let recalled = error_recall_report(&db, WS, &diagnostic)?;
+            assert!(recalled.exact);
+            assert!(recalled.helpful_repairs.is_empty() && recalled.proof_links.is_empty());
+            insert(
+                &db,
+                &session,
+                6,
+                "tool_call",
+                "assistant",
+                json!({"type":"tool_use","id":"verified","name":"Bash",
+                    "input":{"command":COMMAND}}),
+            )?;
+            insert(
+                &db,
+                &session,
+                7,
+                "tool_result",
+                "user",
+                json!({"type":"tool_result","tool_use_id":"verified",
+                    "content":good,"is_error":false}),
+            )?;
+            let before = db.list_evidence_spans_for_session(&session)?;
+            let result = record_session_error_recall(&db, WS, &session)?;
+            assert_eq!(result.failures_seen, 1);
+            assert_eq!(result.fingerprints_recorded, 1);
+            assert_eq!(result.resolved_failures, 1);
+            assert_eq!(result.repair_links_recorded, 2);
+            assert_eq!(result.incident_cards_recorded, 1);
+            let card = crate::core::incident_card::incident_card_id(WS, &id(2));
+            let recalled = error_recall_report(&db, WS, &diagnostic)?;
+            assert!(recalled.helpful_repairs.contains(&id(3)));
+            assert!(recalled.helpful_repairs.contains(&card));
+            assert_eq!(recalled.proof_links, [id(7)]);
+            let links = db.list_error_repair_links(WS, &diagnostic.layered_key().key)?;
+            assert_eq!(links.len(), 3);
+            let failure_id = id(2);
+            assert!(
+                links
+                    .iter()
+                    .all(|link| link.evidence_ref.as_deref() == Some(failure_id.as_str()))
+            );
+            let evidence = recalled_repair_evidence(&db, WS, &recalled)?;
+            assert!(evidence.iter().any(|item| {
+                item.evidence_id == card
+                    && item.role == "incident_card"
+                    && item
+                        .text
+                        .as_deref()
+                        .is_some_and(|text| text.contains("Fix:"))
+            }));
+            assert!(evidence.iter().all(|item| {
+                item.text
+                    .as_deref()
+                    .is_none_or(|text| !text.contains("private traceback sentinel"))
+            }));
+            let seed = pack_error_recall_query_seed(&db, WS, &diagnostic)?;
+            assert!(seed.contains("prior fix:") && seed.contains("queue_backend"));
+            for original in before {
+                let after = db
+                    .get_evidence_span(&original.id)?
+                    .ok_or("source preserved")?;
+                assert_eq!(after.excerpt, original.excerpt);
+                assert_eq!(after.content_hash, original.content_hash);
+                assert_eq!(
+                    after.canonical_provenance_uri(),
+                    original.canonical_provenance_uri()
+                );
+            }
+            let rerun = record_session_error_recall(&db, WS, &session)?;
+            assert_eq!(rerun.incident_cards_recorded, 0);
+            assert_eq!(
+                db.list_error_repair_links(WS, &diagnostic.layered_key().key)?
+                    .len(),
+                3
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn collection_recall_does_not_credit_unrelated_or_unexecuted_success() -> TestResult {
+            let good = green(&[MODULE]);
+            for (proof, command) in [
+                (good.replace(MODULE, "other/test_queue.py"), COMMAND),
+                (good.replace("=== 1 passed in 0.01s ===", ""), COMMAND),
+                (". [100%]\n1 passed in 0.01s\n".to_owned(), COMMAND),
+                (good.clone(), "pytest -v --color=no other"),
+                (format!("{good}Process exited with code 1\n"), COMMAND),
+            ] {
+                let (db, session) = episode(&proof, command)?;
+                let result = record_session_error_recall(&db, WS, &session)?;
+                assert_eq!(result.failures_seen, 1);
+                assert_eq!(result.resolved_failures, 0);
+                assert_eq!(result.repair_links_recorded, 0);
+                assert_eq!(result.incident_cards_recorded, 0);
+            }
+            Ok(())
+        }
     }
 }
