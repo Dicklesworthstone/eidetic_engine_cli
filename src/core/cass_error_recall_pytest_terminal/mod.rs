@@ -1,4 +1,4 @@
-//! Native pytest terminal reports, without a pytest plugin or JSON reporter.
+//! Native Python test reports, without a pytest plugin or JSON reporter.
 //!
 //! Read test progress and the final short summary, never traceback frames,
 //! captured stdout, locals or assertion expansions. Quiet reports can supply
@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES};
 
 mod terminal;
+mod unittest;
 
 const MAX_TESTS: usize = 1024;
 const MAX_LINES: usize = 4096;
@@ -242,6 +243,11 @@ fn totals(line: &str) -> Option<Totals> {
 /// None is another producer. A recognized but incomplete report is not a
 /// green run. Damaged reports refuse the whole interpretation, not a prefix.
 pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
+    // Both producers enter the same failure, fingerprint, proof and incident
+    // card boundaries. Their test-subject hashes remain producer-separated.
+    if let Some(report) = unittest::decode(text)? {
+        return Ok(Some(report));
+    }
     let first = text
         .lines()
         .find(|line| !line.trim().is_empty())
