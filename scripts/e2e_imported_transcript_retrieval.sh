@@ -117,6 +117,13 @@ TRANSCRIPT_PHRASE="the retry budget collapsed because the backoff jitter seed wa
 TARGET_MARKER="jitter"
 DISTRACTOR_MARKER="descaling"
 DISTRACTOR_PHRASE="the descaling cycle stalled because the boiler thermistor was reading in fahrenheit"
+# Leak canary. bd-16imy's second acceptance bullet requires that denied or
+# redacted material must not leak, and the first version of this fixture
+# contained no secrets at all -- so every assertion could pass while leakage
+# went unobserved. This token lives on line 5 of the DISTRACTOR transcript and
+# must never appear in a search result or a pack item, including when the
+# query is aimed straight at it.
+SECRET_CANARY="sk-proj-transcriptleak-e2e-canary-000000000000000000"
 
 # WHY TWO SESSIONS, AND WHY NOT AN ABSENCE ASSERTION.
 #
@@ -175,7 +182,7 @@ JSON
   {"line":2,"content":"{\"role\":\"assistant\",\"content\":\"Root cause: the descaling cycle stalled because the boiler thermistor was reading in fahrenheit.\"}","highlighted":true},
   {"line":3,"content":"{\"role\":\"assistant\",\"content\":\"Fix: convert the thermistor reading to celsius before the descaling pump engages.\"}","highlighted":false},
   {"line":4,"content":"{\"role\":\"user\",\"content\":\"Verified: a full descaling cycle completed and the cup volume recovered.\"}","highlighted":false},
-  {"line":5,"content":"{\"role\":\"user\",\"content\":\"Nothing sensitive in this transcript either.\"}","highlighted":false}
+  {"line":5,"content":"{\"role\":\"user\",\"content\":\"The machine telemetry token is sk-proj-transcriptleak-e2e-canary-000000000000000000 so keep it out of any summary.\"}","highlighted":false}
 ],"total_lines":5}
 JSON
     else
@@ -325,6 +332,39 @@ if [[ "${PACKED_BODY_OK}" != "0" ]]; then
     event packed_evidence_body_is_the_transcript_line pass
 else
     event packed_evidence_body_is_the_transcript_line fail "no packed evidence item's content contained '${TARGET_MARKER}'; contents=$(jq -c '[(.data.pack.items // [])[]? | select((.entityKind // "") == "evidence_span") | (.content // "")[0:90]]' "${PACK_OUT}" 2>/dev/null | head -c 400)"
+fi
+
+# --- 7. LEAK CANARY: bd-16imy's "denied/redacted material must not leak" ---
+#
+# The canary sits on line 5 of the distractor transcript. Two surfaces are
+# checked, and the query is aimed STRAIGHT AT the secret, because a leak that
+# only appears when someone searches for the token is still a leak -- and a
+# query about espresso would not have exercised it.
+run_ee search "${SECRET_CANARY}" --workspace "${WS}" --json
+LEAK_SEARCH_OUT="${LAST_STDOUT}"
+if ! grep -qF "${SECRET_CANARY}" "${LEAK_SEARCH_OUT}" 2>/dev/null; then
+    event secret_canary_absent_from_search pass
+else
+    event secret_canary_absent_from_search fail "the imported secret token appears verbatim in search output; hits=$(jq -c '[(.data.results // [])[]? | .docId]' "${LEAK_SEARCH_OUT}" 2>/dev/null)"
+fi
+
+run_ee pack "${SECRET_CANARY}" --workspace "${WS}" --json
+LEAK_PACK_OUT="${LAST_STDOUT}"
+if ! grep -qF "${SECRET_CANARY}" "${LEAK_PACK_OUT}" 2>/dev/null; then
+    event secret_canary_absent_from_pack pass
+else
+    event secret_canary_absent_from_pack fail "the imported secret token appears verbatim in pack output; items=$(jq -c '[(.data.pack.items // [])[]? | {entityKind, evidenceSpanId}]' "${LEAK_PACK_OUT}" 2>/dev/null | head -c 300)"
+fi
+
+# The canary must be absent because it was WITHHELD, not because the whole
+# distractor session failed to index. Without this control the two assertions
+# above would pass just as happily on an empty corpus, which is the shape that
+# makes an absence claim worthless (measured the hard way earlier in this very
+# script's history).
+if [[ "${DISTRACTOR_TOP}" == *"${DISTRACTOR_MARKER}"* ]]; then
+    event leak_control_distractor_session_is_indexed pass
+else
+    event leak_control_distractor_session_is_indexed fail "the distractor session is not retrievable, so the canary's absence above is unmeasured rather than proof of redaction"
 fi
 
 printf 'imported transcript retrieval e2e: %s steps, %s failures; root %s\n' \
