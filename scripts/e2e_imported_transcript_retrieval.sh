@@ -224,12 +224,37 @@ else
     event import_persists_sessions_and_spans fail "exit ${LAST_EXIT}; sessions=$(jq -c '.data.sessionsImported' "${IMPORT_OUT}" 2>/dev/null) spans=$(jq -c '.data.spansImported' "${IMPORT_OUT}" 2>/dev/null) degraded=$(jq -c '[(.degraded // [])[] | .code]' "${IMPORT_OUT}" 2>/dev/null) stderr=$(head -c 240 "${LAST_STDERR}" 2>/dev/null | tr '\n' ' ')"
 fi
 
+SPANS_IMPORTED="$(jq -r '.data.spansImported // 0' "${IMPORT_OUT}" 2>/dev/null || echo 0)"
+
 # --- 3. publish the derived index -----------------------------------------
 run_ee index rebuild --workspace "${WS}" --json
+INDEX_OUT="${LAST_STDOUT}"
+EVIDENCE_INDEXED="$(jq -r '.data.evidenceIndexed // .data.evidence_indexed // 0' "${INDEX_OUT}" 2>/dev/null || echo 0)"
 if [[ "${LAST_EXIT}" -eq 0 ]]; then
-    event index_rebuild_ok pass "evidence=$(jq -c '.data.evidenceIndexed // .data.evidence_indexed' "${LAST_STDOUT}" 2>/dev/null)"
+    event index_rebuild_ok pass "evidence=${EVIDENCE_INDEXED}"
 else
-    event index_rebuild_ok fail "index rebuild exit ${LAST_EXIT}: $(head -c 200 "${LAST_STDOUT}")"
+    event index_rebuild_ok fail "index rebuild exit ${LAST_EXIT}: $(head -c 200 "${INDEX_OUT}")"
+fi
+
+# bd-16imy's FIFTH bullet: "Import/index job accounting and index generation
+# truthfully cover the new documents." Until now this suite asserted the
+# rebuild merely EXITED 0, which is not accounting.
+#
+# Measured on two dispatched runs before this assertion existed: a
+# single-session corpus reported evidence=5 and the two-session corpus
+# reported evidence=10, i.e. exactly one indexed document per imported span.
+# So equality is the real claim, and a drift either way is informative --
+# fewer means the index does not cover every span (the bullet fails), more
+# means documents are being counted that no import produced.
+#
+# The canary span is deliberately included in this count: a secret-bearing
+# line is WITHHELD at projection time (its content becomes a withheld marker)
+# but it is still a document, so excluding it would be a different defect and
+# this assertion would catch that too.
+if [[ "${EVIDENCE_INDEXED}" == "${SPANS_IMPORTED}" && "${EVIDENCE_INDEXED}" != "0" ]]; then
+    event index_accounting_covers_every_imported_span pass "spans=${SPANS_IMPORTED} indexed=${EVIDENCE_INDEXED}"
+else
+    event index_accounting_covers_every_imported_span fail "accounting does not cover the corpus: spansImported=${SPANS_IMPORTED} evidenceIndexed=${EVIDENCE_INDEXED}; import=$(jq -c '{sessionsImported: .data.sessionsImported, spansImported: .data.spansImported}' "${IMPORT_OUT}" 2>/dev/null); index=$(jq -c '{evidenceIndexed: (.data.evidenceIndexed // .data.evidence_indexed), generation: (.data.generation // .data.indexGeneration)}' "${INDEX_OUT}" 2>/dev/null)"
 fi
 
 # Content of the TOP-ranked evidence hit, which is what a discriminating
