@@ -302,6 +302,12 @@ pub(super) fn refresh_session(
 /// can prove retained source evidence. A complete excerpt cannot attest to any
 /// serialization normalization done before it was stored; never relabel it as
 /// an import-time raw commitment. A lossy projection cannot prove source identity.
+///
+/// The one exception is a canonical-JSON legacy excerpt whose current source
+/// line is byte-for-byte the retained excerpt (#70): there are no unretained
+/// bytes left to authenticate, so the row is kept rather than freezing the
+/// session. A canonical excerpt whose current source differs stays
+/// unverifiable.
 fn retained_source_proof(
     row: &StoredEvidenceSpan,
     span: &CassViewSpanForImport,
@@ -334,11 +340,23 @@ fn retained_source_proof(
             return Err(refusal("cass_refresh_history_changed"));
         }
         "captured_source_commitment"
-    } else if complete_legacy_excerpt(row) {
-        if retained_hash != observed_hash || row.excerpt.len() != span.source_bytes {
-            return Err(refusal("cass_refresh_history_changed"));
+    } else if intact_clean_legacy_excerpt(row) {
+        let identical = retained_hash == observed_hash && row.excerpt.len() == span.source_bytes;
+        if !legacy_excerpt_may_be_normalized_json(&row.excerpt) {
+            if !identical {
+                return Err(refusal("cass_refresh_history_changed"));
+            }
+            "retained_complete_excerpt"
+        } else if identical {
+            // The record may be a v0.17 normalization of a padded original, so
+            // it proves nothing about an older source. But today's source line
+            // is exactly these bytes, so every byte the row stands for is
+            // retained: keep it instead of refusing every v0.17-imported
+            // compact JSON transcript line (#70).
+            "retained_identical_canonical_excerpt"
+        } else {
+            return Err(refusal("cass_refresh_history_unverifiable"));
         }
-        "retained_complete_excerpt"
     } else if let Some(digest) = legacy_withheld_source_digest(row) {
         if digest != observed_hash {
             return Err(refusal("cass_refresh_history_changed"));
@@ -353,7 +371,7 @@ fn retained_source_proof(
     Ok((row.excerpt != span.excerpt || row.content_hash != span.content_hash).then_some(proof))
 }
 
-fn complete_legacy_excerpt(row: &StoredEvidenceSpan) -> bool {
+fn intact_clean_legacy_excerpt(row: &StoredEvidenceSpan) -> bool {
     row.secret_redaction_status == "clean"
         && serde_json::from_str::<Vec<String>>(&row.redaction_classes_json)
             .is_ok_and(|classes| classes.is_empty())
@@ -362,7 +380,6 @@ fn complete_legacy_excerpt(row: &StoredEvidenceSpan) -> bool {
         && row.excerpt.len() < super::ingestion::MAX_EXCERPT_BYTES - 3
         && !row.excerpt.contains("[REDACTED:")
         && !row.excerpt.contains("[TRUNCATED]")
-        && !legacy_excerpt_may_be_normalized_json(&row.excerpt)
 }
 
 fn legacy_excerpt_may_be_normalized_json(excerpt: &str) -> bool {
@@ -371,7 +388,8 @@ fn legacy_excerpt_may_be_normalized_json(excerpt: &str) -> bool {
     // later producers also normalized object streams joined by newlines.
     // Those records retained semantic content but did not retain source bytes.
     // An already-canonical original is indistinguishable, so neither may
-    // confer a complete-source proof without an independent commitment.
+    // confer a complete-source proof of an older source without an independent
+    // commitment; only a byte-identical current source can keep it (#70).
     if !excerpt.starts_with('{') {
         return false;
     }
