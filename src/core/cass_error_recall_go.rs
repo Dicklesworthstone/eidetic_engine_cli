@@ -21,11 +21,17 @@ enum TestState {
     Passed,
     Failed,
     Skipped,
+    // Go can terminate benchmark runs at the package boundary rather than
+    // emitting an individual pass. This state alone does not assert success.
+    BenchmarkFinished,
 }
 
 impl TestState {
     fn terminal(self) -> bool {
-        matches!(self, Self::Passed | Self::Failed | Self::Skipped)
+        matches!(
+            self,
+            Self::Passed | Self::Failed | Self::Skipped | Self::BenchmarkFinished
+        )
     }
 }
 
@@ -72,6 +78,37 @@ enum Record {
 
 fn identity(value: &str) -> bool {
     !value.trim().is_empty() && !value.chars().any(char::is_control)
+}
+
+/// Go's benchmark entry-point spelling, including sub-benchmarks and CPU
+/// suffixes. Do not normalize a name: proof must bind the exact source subject.
+/// In particular, TestCache/BenchmarkInner is an ordinary test, not a benchmark.
+fn benchmark_name(name: &str) -> bool {
+    name.strip_prefix("Benchmark")
+        .is_some_and(|suffix| suffix.chars().next().is_none_or(|ch| !ch.is_lowercase()))
+}
+
+/// Modern test2json streams can emit benchmark run markers without individual
+/// terminal markers. A package terminal closes those lifecycles, but only a
+/// package pass supplies positive coverage. Ordinary tests still require their
+/// own pass/fail/skip events, and printed timing lines never supply authority.
+fn finish_benchmarks(
+    name: &str,
+    package: &mut Package,
+    coverage: &mut GoTestCoverage,
+    skipped: &BTreeSet<[u8; 32]>,
+    passed: bool,
+) {
+    for (test, state) in &mut package.tests {
+        if *state != TestState::Running || !benchmark_name(test) {
+            continue;
+        }
+        *state = TestState::BenchmarkFinished;
+        let subject = commitment(name, Some(test));
+        if passed && !skipped.contains(&subject) {
+            coverage.passed_tests.insert(subject);
+        }
+    }
 }
 
 fn commitment(package: &str, test: Option<&str>) -> [u8; 32] {
@@ -212,14 +249,23 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         let failed_diagnostic = match event.action.as_str() {
             "run" => {
                 let name = test.ok_or(())?;
-                if package.tests.get(name).is_some_and(|state| !state.terminal()) {
+                if package.tests.get(name).is_some_and(|state| {
+                    !state.terminal()
+                        && !(*state == TestState::Running && benchmark_name(name))
+                }) {
                     return Err(());
                 }
+                // Benchmark calibration/count runs need not have intervening
+                // terminal events. A repeated ordinary test run is still bad.
                 package.tests.insert(name.to_owned(), TestState::Running);
                 None
             }
             "pause" | "cont" => {
-                let state = package.tests.get_mut(test.ok_or(())?).ok_or(())?;
+                let name = test.ok_or(())?;
+                if benchmark_name(name) {
+                    return Err(());
+                }
+                let state = package.tests.get_mut(name).ok_or(())?;
                 let (expected, next) = if event.action == "pause" {
                     (TestState::Running, TestState::Paused)
                 } else {
@@ -248,19 +294,29 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
                 }
                 None
             }
-            "pass" | "fail" | "skip" => {
+            "pass" | "fail" | "skip" | "bench" => {
                 let failed = event.action == "fail";
                 let state = match event.action.as_str() {
-                    "pass" => TestState::Passed,
+                    "pass" | "bench" => TestState::Passed,
                     "fail" => TestState::Failed,
                     _ => TestState::Skipped,
                 };
                 if let Some(name) = test {
-                    let current = package.tests.get_mut(name).ok_or(())?;
-                    if *current != TestState::Running {
+                    let benchmark = benchmark_name(name);
+                    if event.action == "bench" && !benchmark {
                         return Err(());
                     }
-                    *current = state;
+                    // Legacy benchmark streams have no run marker. Repeated
+                    // bench/fail/skip terminals represent separate iterations;
+                    // failure and skipped coverage remain sticky across them.
+                    match package.tests.get(name).copied() {
+                        Some(TestState::Running) => {}
+                        Some(previous)
+                            if benchmark && previous.terminal() && event.action != "pass" => {}
+                        None if benchmark && event.action != "pass" => {}
+                        _ => return Err(()),
+                    }
+                    package.tests.insert(name.to_owned(), state);
                     let subject = commitment(&event.package, Some(name));
                     if failed {
                         coverage.failed_tests.insert(subject);
@@ -272,6 +328,18 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
                         coverage.passed_tests.remove(&subject);
                     }
                 } else {
+                    if event.action == "bench" {
+                        return Err(());
+                    }
+                    if matches!(event.action.as_str(), "pass" | "fail") {
+                        finish_benchmarks(
+                            &event.package,
+                            package,
+                            &mut coverage,
+                            &skipped_tests,
+                            event.action == "pass",
+                        );
+                    }
                     // A package may fail while tests are still running after
                     // a panic. Preserve the failure but not complete coverage.
                     if event.action != "fail"
@@ -305,8 +373,7 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
                     }
                 })
             }
-            // Benchmark summaries and future actions need their own coverage
-            // semantics; they cannot borrow ordinary test success authority.
+            // Unknown producer actions cannot supply completion authority.
             _ => return Err(()),
         };
         if let Some(diagnostic) = failed_diagnostic {
@@ -318,8 +385,8 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         && packages.values().all(|package| {
             package.terminal && package.tests.values().all(|state| state.terminal())
         });
-    // A package pass with no executed tests (including cached summary-only
-    // reports) cannot prove that an earlier failed test actually passed.
+    // A package pass with no executed subjects (including cached summary-only
+    // reports) cannot prove that an earlier failed test or benchmark passed.
     output.allows_completion =
         coverage.complete && !output.failed && !coverage.passed_tests.is_empty();
     output.go_test_coverage = Some(coverage);
@@ -473,7 +540,7 @@ mod tests {
             json!({"Action":"cont","Package":"a","Test":"missing"}),
             json!({"Action":"pass","Package":"a","Test":"missing"}),
             json!({"Action":"output","Package":"a"}),
-            json!({"Action":"bench","Package":"a","Test":"BenchmarkX"}),
+            json!({"Action":"bench","Package":"a","Test":"TestNotABenchmark"}),
             json!({"Action":"fail","Package":"a","Elapsed":-1}),
             json!({"Action":"pass","Package":"a","FailedBuild":"b"}),
             json!({"Action":"output","Package":"a","Output":"ok","OutputType":"unknown"}),
@@ -602,6 +669,136 @@ mod tests {
             let complete_prefix = format!("{}\n{text}", stream(&passing("a")));
             assert!(inspect(&complete_prefix).is_err());
         }
+    }
+
+    #[test]
+    fn modern_benchmark_runs_finish_at_the_package_boundary() {
+        // Event shape reproduced with Go 1.23.2: benchmarks have run events
+        // and timing output but no individual pass/bench terminal.
+        let events = [
+            json!({"Action":"start","Package":"a"}),
+            json!({"Action":"run","Package":"a","Test":"TestCache"}),
+            json!({"Action":"pass","Package":"a","Test":"TestCache"}),
+            json!({"Action":"run","Package":"a","Test":"BenchmarkCache"}),
+            json!({"Action":"run","Package":"a","Test":"BenchmarkCache"}),
+            json!({"Action":"output","Package":"a","Test":"BenchmarkCache","Output":"PRIVATE_BENCHMARK_OUTPUT"}),
+            json!({"Action":"run","Package":"a","Test":"BenchmarkNested"}),
+            json!({"Action":"run","Package":"a","Test":"BenchmarkNested/small"}),
+            json!({"Action":"pass","Package":"a"}),
+        ];
+        let decoded = parsed(&events);
+        assert!(!decoded.failed);
+        assert!(decoded.allows_completion);
+        assert!(decoded.diagnostics.is_empty());
+        let coverage = decoded.go_test_coverage.expect("coverage");
+        assert!(coverage.complete);
+        let expected: BTreeSet<_> = [
+            "TestCache",
+            "BenchmarkCache",
+            "BenchmarkNested",
+            "BenchmarkNested/small",
+        ]
+        .into_iter()
+        .map(|name| commitment("a", Some(name)))
+        .collect();
+        assert_eq!(coverage.passed_tests, expected);
+        let output = ToolOutput {
+            text: stream(&events),
+            ..ToolOutput::default()
+        };
+        assert!(!output.succeeded(), "still needs independent process completion");
+        assert!(ToolOutput { exit_code: Some(0), ..output }.succeeded());
+    }
+
+    #[test]
+    fn legacy_benchmark_terminals_need_no_run_and_preserve_exact_identity() {
+        let events = [
+            json!({"Action":"start","Package":"a"}),
+            json!({"Action":"output","Package":"a","Test":"BenchmarkCache-8","Output":"benchmark log"}),
+            json!({"Action":"bench","Package":"a","Test":"BenchmarkCache-8"}),
+            json!({"Action":"bench","Package":"a","Test":"BenchmarkCache-8"}),
+            json!({"Action":"pass","Package":"a"}),
+        ];
+        let decoded = parsed(&events);
+        assert!(decoded.allows_completion);
+        let coverage = decoded.go_test_coverage.expect("coverage");
+        assert_eq!(coverage.passed_tests.len(), 1);
+        assert!(coverage.passed_tests.contains(&commitment("a", Some("BenchmarkCache-8"))));
+        assert!(!coverage.passed_tests.contains(&commitment("a", Some("BenchmarkCache"))));
+        assert!(!coverage.passed_tests.contains(&commitment("a", Some("TestCache"))));
+        assert!(!coverage.passed_tests.contains(&commitment("b", Some("BenchmarkCache-8"))));
+    }
+
+    #[test]
+    fn benchmark_failures_survive_successful_iterations_and_other_benchmarks() {
+        for with_run in [false, true] {
+            let mut events = vec![json!({"Action":"start","Package":"a"})];
+            if with_run {
+                events.push(json!({"Action":"run","Package":"a","Test":"BenchmarkCache"}));
+            }
+            events.extend([
+                json!({"Action":"fail","Package":"a","Test":"BenchmarkCache"}),
+                json!({"Action":"bench","Package":"a","Test":"BenchmarkCache"}),
+                json!({"Action":"run","Package":"a","Test":"BenchmarkOther"}),
+                json!({"Action":"fail","Package":"a"}),
+            ]);
+            let decoded = parsed(&events);
+            assert!(decoded.failed);
+            assert!(!decoded.allows_completion);
+            assert_eq!(decoded.diagnostics.len(), 1);
+            assert_eq!(structured_error_diagnostics(&stream(&events)), decoded.diagnostics);
+            let coverage = decoded.go_test_coverage.expect("coverage");
+            assert!(coverage.complete);
+            assert!(coverage.failed_tests.contains(&commitment("a", Some("BenchmarkCache"))));
+            assert!(!coverage.passed_tests.contains(&commitment("a", Some("BenchmarkOther"))));
+            *events.last_mut().expect("terminal") = json!({"Action":"pass","Package":"a"});
+            assert!(inspect(&stream(&events)).is_err(), "failure cannot become a clean pass");
+        }
+    }
+
+    #[test]
+    fn benchmark_output_skips_and_incomplete_runs_do_not_manufacture_proof() {
+        for middle in [
+            vec![json!({"Action":"output","Package":"a","Test":"BenchmarkCache","Output":"PASS BenchmarkCache"})],
+            vec![json!({"Action":"skip","Package":"a","Test":"BenchmarkCache"})],
+            vec![
+                json!({"Action":"skip","Package":"a","Test":"BenchmarkCache"}),
+                json!({"Action":"run","Package":"a","Test":"BenchmarkCache"}),
+            ],
+        ] {
+            let mut events = vec![json!({"Action":"start","Package":"a"})];
+            events.extend(middle);
+            events.push(json!({"Action":"pass","Package":"a"}));
+            let decoded = parsed(&events);
+            assert!(!decoded.allows_completion);
+            assert!(decoded.go_test_coverage.expect("coverage").passed_tests.is_empty());
+        }
+        let incomplete = parsed(&[
+            json!({"Action":"start","Package":"a"}),
+            json!({"Action":"run","Package":"a","Test":"BenchmarkCache"}),
+        ]);
+        assert!(!incomplete.allows_completion);
+        assert!(!incomplete.go_test_coverage.expect("coverage").complete);
+        for name in ["TestCache", "TestCache/BenchmarkInner", "Benchmarker"] {
+            let events = [
+                json!({"Action":"start","Package":"a"}),
+                json!({"Action":"run","Package":"a","Test":name}),
+                json!({"Action":"pass","Package":"a"}),
+            ];
+            assert!(inspect(&stream(&events)).is_err(), "not a benchmark: {name}");
+        }
+        for action in ["pause", "cont"] {
+            let events = [
+                json!({"Action":"start","Package":"a"}),
+                json!({"Action":"run","Package":"a","Test":"BenchmarkCache"}),
+                json!({"Action":action,"Package":"a","Test":"BenchmarkCache"}),
+            ];
+            assert!(inspect(&stream(&events)).is_err());
+        }
+        assert!(inspect(&stream(&[
+            json!({"Action":"start","Package":"a"}),
+            json!({"Action":"bench","Package":"a"}),
+        ])).is_err());
     }
 
     #[test]
