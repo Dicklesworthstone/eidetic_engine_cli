@@ -1694,10 +1694,33 @@ fn prepare_evidence_counts_for_rebuild(db: &DbConnection, workspace_id: &str) {
     }
 }
 
+/// Default wall-clock budget for an explicit full index rebuild.
+///
+/// Large CASS stores can legitimately exceed the old five-minute hard-coded
+/// request budget (GH #78). Keep a generous bounded default for cancellation
+/// hygiene, while allowing an operator to raise it without recompiling ee.
+pub const DEFAULT_INDEX_REBUILD_TIMEOUT_SECS: u64 = 3_600;
+/// Upper bound accepted from `EE_INDEX_REBUILD_TIMEOUT_SECONDS`.
+pub const MAX_INDEX_REBUILD_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
+
+fn normalized_index_rebuild_timeout_secs(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(|seconds| seconds.min(MAX_INDEX_REBUILD_TIMEOUT_SECS))
+        .unwrap_or(DEFAULT_INDEX_REBUILD_TIMEOUT_SECS)
+}
+
+fn index_rebuild_timeout() -> Duration {
+    let raw = crate::config::env_registry::read(
+        crate::config::env_registry::EnvVar::IndexRebuildTimeoutSeconds,
+    );
+    Duration::from_secs(normalized_index_rebuild_timeout_secs(raw.as_deref()))
+}
+
 pub fn rebuild_index(
     options: &IndexRebuildOptions,
 ) -> Result<IndexRebuildReport, IndexRebuildError> {
-    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+    crate::core::run_cli_with_cx(index_rebuild_timeout(), |cx| async move {
         rebuild_index_with_cx(&cx, options).await
     })
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
@@ -25359,5 +25382,37 @@ mod rollback_durability_tests {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod index_rebuild_timeout_override_tests {
+    use super::{
+        DEFAULT_INDEX_REBUILD_TIMEOUT_SECS, MAX_INDEX_REBUILD_TIMEOUT_SECS,
+        normalized_index_rebuild_timeout_secs,
+    };
+
+    #[test]
+    fn index_rebuild_timeout_override_is_positive_bounded_and_recoverable() {
+        assert_eq!(
+            normalized_index_rebuild_timeout_secs(None),
+            DEFAULT_INDEX_REBUILD_TIMEOUT_SECS
+        );
+        assert_eq!(normalized_index_rebuild_timeout_secs(Some("900")), 900);
+        assert_eq!(
+            normalized_index_rebuild_timeout_secs(Some(" 7200 ")),
+            7_200
+        );
+        for invalid in ["", "0", "-1", "not-a-number"] {
+            assert_eq!(
+                normalized_index_rebuild_timeout_secs(Some(invalid)),
+                DEFAULT_INDEX_REBUILD_TIMEOUT_SECS,
+                "{invalid:?}"
+            );
+        }
+        assert_eq!(
+            normalized_index_rebuild_timeout_secs(Some("999999999")),
+            MAX_INDEX_REBUILD_TIMEOUT_SECS
+        );
     }
 }

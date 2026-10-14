@@ -179,6 +179,8 @@ pub enum EnvVar {
     IndexDir,
     /// `EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS`
     IndexPublishLockRetryAttempts,
+    /// `EE_INDEX_REBUILD_TIMEOUT_SECONDS`
+    IndexRebuildTimeoutSeconds,
     /// `EE_JSON`
     Json,
     /// `EE_JOURNAL_ENABLED`
@@ -391,6 +393,7 @@ impl EnvVar {
             Self::HookMode,
             Self::IndexDir,
             Self::IndexPublishLockRetryAttempts,
+            Self::IndexRebuildTimeoutSeconds,
             Self::Json,
             Self::JournalEnabled,
             Self::JournalRetentionDays,
@@ -531,6 +534,7 @@ impl EnvVar {
             Self::HookMode => "EE_HOOK_MODE",
             Self::IndexDir => "EE_INDEX_DIR",
             Self::IndexPublishLockRetryAttempts => "EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS",
+            Self::IndexRebuildTimeoutSeconds => "EE_INDEX_REBUILD_TIMEOUT_SECONDS",
             Self::Json => "EE_JSON",
             Self::JournalEnabled => "EE_JOURNAL_ENABLED",
             Self::JournalRetentionDays => "EE_JOURNAL_RETENTION_DAYS",
@@ -772,6 +776,9 @@ impl EnvVar {
             Self::IndexPublishLockRetryAttempts => {
                 "Override index publish advisory-lock retry attempts."
             }
+            Self::IndexRebuildTimeoutSeconds => {
+                "Override the wall-clock budget for an explicit full index rebuild."
+            }
             Self::Json => "Request JSON output from renderer auto-detection.",
             Self::JournalEnabled => "Enable or disable append-only agent journal capture.",
             Self::JournalRetentionDays => {
@@ -989,6 +996,7 @@ impl EnvVar {
             Self::WriteGroupCommitMaxInflightBytes => Some("4194304"),
             Self::WorkspaceCloseDrainTimeoutSeconds => Some("5"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
+            Self::IndexRebuildTimeoutSeconds => Some("3600"),
             Self::JournalEnabled => Some("true"),
             Self::JournalRetentionDays => Some("14"),
             Self::CurationAutoPromoteConfidenceFloor => Some("0.80"),
@@ -1145,7 +1153,8 @@ impl EnvVar {
             | Self::WorkspaceCloseDrainTimeoutSeconds
             | Self::DisableAdaptive
             | Self::DisableRememberSearchNeighbors
-            | Self::IndexPublishLockRetryAttempts => "tuning",
+            | Self::IndexPublishLockRetryAttempts
+            | Self::IndexRebuildTimeoutSeconds => "tuning",
             Self::JournalRetentionDays => "tuning",
             Self::ScienceBackendPath => "integration",
             Self::ShardFanoutEnabled => "storage",
