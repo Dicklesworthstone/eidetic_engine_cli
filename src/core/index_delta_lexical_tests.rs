@@ -26,7 +26,11 @@ fn files(root: &Path) -> TestResult<BTreeMap<std::path::PathBuf, Vec<u8>>> {
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
-            if entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+            if entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_dir()
+            {
                 pending.push(entry.path());
             } else {
                 result.insert(
@@ -63,9 +67,15 @@ fn fragment(root: &Path, documents: &[IndexableDocument]) -> TestResult<Index> {
     );
     let schema = index.schema();
     let id = schema.get_field("id").map_err(|error| error.to_string())?;
-    let content = schema.get_field("content").map_err(|error| error.to_string())?;
-    let title = schema.get_field("title").map_err(|error| error.to_string())?;
-    let metadata = schema.get_field("metadata_json").map_err(|error| error.to_string())?;
+    let content = schema
+        .get_field("content")
+        .map_err(|error| error.to_string())?;
+    let title = schema
+        .get_field("title")
+        .map_err(|error| error.to_string())?;
+    let metadata = schema
+        .get_field("metadata_json")
+        .map_err(|error| error.to_string())?;
     let ordinal = schema.get_field("ord").ok();
     let mut writer = index
         .writer_with_num_threads::<TantivyDocument>(1, MERGE_WRITER_HEAP_BYTES)
@@ -110,7 +120,10 @@ fn documents(count: usize) -> Vec<IndexableDocument> {
 #[test]
 fn maintenance_reads_active_segments_and_takes_no_writer_below_the_threshold() -> TestResult {
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let root = root.path().canonicalize().map_err(|error| error.to_string())?;
+    let root = root
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let index = fragment(&root, &documents(3))?;
     let active = inventory(&index).map_err(|error| error.detail)?.0.len();
     assert_eq!(active, 3);
@@ -147,10 +160,16 @@ fn maintenance_reads_active_segments_and_takes_no_writer_below_the_threshold() -
 #[test]
 fn real_fragmentation_merges_without_changing_live_documents_and_is_idempotent() -> TestResult {
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let root = root.path().canonicalize().map_err(|error| error.to_string())?;
+    let root = root
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let count = MAX_LEXICAL_SEGMENTS + 1;
     let index = fragment(&root, &documents(count))?;
-    assert_eq!(inventory(&index).map_err(|error| error.detail)?.0.len(), count);
+    assert_eq!(
+        inventory(&index).map_err(|error| error.detail)?.0.len(),
+        count
+    );
     let report = compact_with_checkpoint(&root, MAX_LEXICAL_SEGMENTS, || Ok(()))
         .map_err(|error| error.detail)?;
     assert_eq!(report.segments_before, count);
@@ -167,7 +186,10 @@ fn real_fragmentation_merges_without_changing_live_documents_and_is_idempotent()
 #[test]
 fn missing_or_corrupt_metadata_is_not_a_zero_segment_success() -> TestResult {
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let root = root.path().canonicalize().map_err(|error| error.to_string())?;
+    let root = root
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     assert!(compact_with_checkpoint(&root, MAX_LEXICAL_SEGMENTS, || Ok(())).is_err());
     assert!(!root.join(LEXICAL_INDEX_SUBDIR).exists());
     std::fs::create_dir(root.join(LEXICAL_INDEX_SUBDIR)).map_err(|error| error.to_string())?;
@@ -182,7 +204,10 @@ fn missing_or_corrupt_metadata_is_not_a_zero_segment_success() -> TestResult {
 #[test]
 fn cancellation_after_merge_joins_workers_and_releases_the_staged_writer() -> TestResult {
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let root = root.path().canonicalize().map_err(|error| error.to_string())?;
+    let root = root
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let index = fragment(&root, &documents(MAX_LEXICAL_SEGMENTS + 1))?;
     let before = files(&root)?;
     let stopped = compact_with_checkpoint(&root, MAX_LEXICAL_SEGMENTS, || {
@@ -250,8 +275,8 @@ impl Embedder for ObservedHash {
 }
 
 fn finalized_vectors(root: &Path) -> TestResult<BTreeMap<String, Vec<f32>>> {
-    let index = crate::core::index::open_fast_vector_index_read_only(root)
-        .map_err(|error| error.detail)?;
+    let index =
+        crate::core::index::open_fast_vector_index_read_only(root).map_err(|error| error.detail)?;
     assert_eq!(index.wal_record_count(), 0);
     assert_eq!(index.tombstone_count(), 0);
     (0..index.record_count())
@@ -271,7 +296,10 @@ fn finalized_vectors(root: &Path) -> TestResult<BTreeMap<String, Vec<f32>>> {
 
 fn native_delta_case(change_body: bool) -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let root = temp.path().canonicalize().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
         let live = root.join("live");
         let staged = root.join("staged");
@@ -311,7 +339,10 @@ fn native_delta_case(change_body: bool) -> TestResult {
         apply(&cx, &staged, &stack, &delta)
             .await
             .map_err(|error| error.detail)?;
-        assert_eq!(observed.inputs.load(Ordering::SeqCst), usize::from(change_body));
+        assert_eq!(
+            observed.inputs.load(Ordering::SeqCst),
+            usize::from(change_body)
+        );
         assert_eq!(
             files(&live)?,
             before,
@@ -319,8 +350,7 @@ fn native_delta_case(change_body: bool) -> TestResult {
         );
         if !change_body {
             assert_eq!(
-                std::fs::read(staged.join("vector.fast.idx"))
-                    .map_err(|error| error.to_string())?,
+                std::fs::read(staged.join("vector.fast.idx")).map_err(|error| error.to_string())?,
                 before[Path::new("vector.fast.idx")]
             );
         }

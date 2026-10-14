@@ -8,7 +8,8 @@
 use std::path::Path;
 
 use frankensearch::lexical_tantivy::tantivy_crate::{
-    Index, SegmentId, TantivyDocument, indexer::NoMergePolicy,
+    Index, SegmentId, TantivyDocument,
+    indexer::NoMergePolicy,
     tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer},
 };
 
@@ -63,7 +64,9 @@ pub(super) fn compact_if_needed(
     staging_dir: &Path,
     max_segments: usize,
 ) -> Result<Compaction, IncrementalFallback> {
-    compact_with_checkpoint(staging_dir, max_segments, || batch::checkpoint(cx, "lexical"))
+    compact_with_checkpoint(staging_dir, max_segments, || {
+        batch::checkpoint(cx, "lexical")
+    })
 }
 
 fn compact_with_checkpoint(
