@@ -104,6 +104,8 @@ mod e2e_graph_pagerank_tombstoned;
 mod e2e_graph_path;
 #[path = "../e2e_graph_snapshot_refresh_validators.rs"]
 mod e2e_graph_snapshot_refresh_validators;
+#[path = "../e2e_imported_transcript_script.rs"]
+mod e2e_imported_transcript_script;
 #[path = "../e2e_insights_json_stream_mutex.rs"]
 mod e2e_insights_json_stream_mutex;
 #[path = "../e2e_jsonl_export_field_validation.rs"]
