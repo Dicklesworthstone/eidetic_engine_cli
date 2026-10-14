@@ -153,7 +153,12 @@ if [[ "${TRUST_A}" == "human_explicit" || "${TRUST_A}" == "agent_validated" ]]; 
         "${LAST_STDOUT}" >/dev/null 2>&1; then
         event twin_promotion_plans_merge_not_duplicate pass
     else
-        event twin_promotion_plans_merge_not_duplicate fail "exit ${LAST_EXIT}; no merge_into action: $(head -c 250 "${LAST_STDOUT}")"
+        # Print the actions the plan DID carry rather than the first 250 bytes
+        # of the envelope. The truncated form cut off before the action list,
+        # so the diagnosis could not distinguish "planned a duplicate",
+        # "planned nothing" and "planned a merge under a different key"
+        # (bd-c4eoq).
+        event twin_promotion_plans_merge_not_duplicate fail "exit ${LAST_EXIT}; no merge_into action; actions=$(jq -c '[.. | objects | select(has("action")) | .action]' "${LAST_STDOUT}" 2>/dev/null); decision=$(jq -c '[.. | objects | select(has("decision")) | .decision]' "${LAST_STDOUT}" 2>/dev/null)"
     fi
 
     # Outcome backflow: harmful feedback against the promoted global row,
@@ -201,7 +206,13 @@ if [[ "${LAST_EXIT}" -eq 0 && -n "${GLOBAL_ID}" ]]; then
         "${LAST_STDOUT}" >/dev/null 2>&1; then
         event remember_global_rule_indexed pass
     else
-        event remember_global_rule_indexed fail "global write did not report an indexed derived asset: $(head -c 250 "${LAST_STDOUT}")"
+        # Print the two fields the assertion keys on. `head -c 250` truncated
+        # the envelope before `indexStatus`, so a run could not tell "the
+        # fields are absent" from "the status is queued/not_scheduled" --
+        # which need different fixes, since `remember_index_status` maps a
+        # completed inline reconcile to "indexed" and a deferred job to
+        # something else (bd-c4eoq).
+        event remember_global_rule_indexed fail "global write did not report an indexed derived asset: indexStatus=$(jq -c '.data.indexStatus' "${LAST_STDOUT}" 2>/dev/null) indexJobId=$(jq -c '.data.indexJobId' "${LAST_STDOUT}" 2>/dev/null) degraded=$(jq -c '[(.degraded // [])[] | .code]' "${LAST_STDOUT}" 2>/dev/null)"
     fi
 else
     event remember_global_rule_indexed fail "exit ${LAST_EXIT}; id=${GLOBAL_ID}"
@@ -238,7 +249,11 @@ HAS_DISABLED_CODE="$(jq -r '[.degraded[]? , .data.degraded[]? | select(.code == 
 if [[ "${GLOBAL_HITS_C}" == "0" && "${HAS_DISABLED_CODE}" != "0" ]]; then
     event participate_false_isolated_and_honest pass
 elif [[ "${GLOBAL_HITS_C}" == "0" ]]; then
-    event participate_false_isolated_and_honest fail "isolated but no global_lane_disabled degraded entry"
+    # Name what WAS emitted. The lane is skipped silently on the default
+    # memory scope because the abstention is gated on an explicit
+    # MemoryScope::Global request, so the useful evidence is the list of codes
+    # that did appear (bd-c4eoq).
+    event participate_false_isolated_and_honest fail "isolated but no global_lane_disabled degraded entry; codes=$(jq -c '[(.degraded // [])[]? , (.data.degraded // [])[]? | .code]' "${LAST_STDOUT}" 2>/dev/null)"
 else
     event participate_false_isolated_and_honest fail "global rows leaked into participate=false workspace (${GLOBAL_HITS_C})"
 fi
