@@ -319,16 +319,31 @@ fn cass_session_source_path(value: &JsonValue) -> Option<&str> {
         .and_then(JsonValue::as_str)
 }
 
+/// Collect the memory ids present among the pack's items.
+///
+/// Items WITHOUT a `memoryId` are skipped rather than rejected, because not
+/// every pack item is memory-backed. An imported CASS evidence span carries no
+/// `memoryId` BY DESIGN -- `src/pack/binary.rs:872` pins that an evidence item
+/// has none, bd-16imy's acceptance requires hydration "without inventing
+/// MemoryIds", and that project's own e2e asserts the absence
+/// (`evidence_items_carry_no_synthetic_memory_id`). This flow imports CASS at
+/// step `02_setup_import_cass`, so its pack legitimately contains such items,
+/// and the previous `map(...).ok_or_else(...)` form failed the whole scenario
+/// with "context item missing memoryId" the moment the evidence lane started
+/// hydrating. That read as an Appendix C regression and was a collision between
+/// this helper's universal expectation and a deliberate product contract.
+///
+/// Skipping does not weaken the caller: it asserts that one of two SPECIFIC
+/// memory ids appears, so an empty or memory-free list still fails.
 fn context_memory_ids(value: &JsonValue) -> Result<Vec<String>, String> {
-    json_array(value, "/data/pack/items", "context")?
+    Ok(json_array(value, "/data/pack/items", "context")?
         .iter()
-        .map(|item| {
+        .filter_map(|item| {
             item.get("memoryId")
                 .and_then(JsonValue::as_str)
                 .map(str::to_owned)
-                .ok_or_else(|| "context item missing memoryId".to_owned())
         })
-        .collect()
+        .collect())
 }
 
 fn ensure_context_items_have_provenance(value: &JsonValue) -> TestResult {
