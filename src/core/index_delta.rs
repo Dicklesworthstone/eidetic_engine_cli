@@ -146,11 +146,19 @@ impl Delta {
         if reuse.inputs.is_empty() {
             return Ok(Cow::Borrowed(&self.upserts));
         }
+        // V3 admits thousands of metadata updates and withdrawals together.
+        // Index removal membership once, preserving the use-time remove/re-add
+        // guard without comparing every upsert with every removed ID.
+        let removed_ids = self
+            .removals
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
         Ok(Cow::Owned(
             self.upserts
                 .iter()
                 .filter(|document| {
-                    self.removals.contains(&document.id)
+                    removed_ids.contains(document.id.as_str())
                         || reuse.inputs.get(&document.id) != Some(&embedding_input_digest(document))
                 })
                 .cloned()
@@ -281,10 +289,26 @@ impl DocDigests {
     pub(super) fn write(&self, generation_dir: &Path) -> Result<(), IndexRebuildError> {
         let path = generation_dir.join(DOC_DIGESTS_FILE);
         ensure_index_path_has_no_symlinks(&path, "write index document digests")?;
-        let bytes = serde_json::to_vec(self).map_err(|error| {
+        let file = std::fs::File::create(&path).map_err(|error| {
+            IndexRebuildError::Index(format!("Failed to write index document digests: {error}"))
+        })?;
+        self.write_to(file)
+    }
+
+    /// The maps already own the corpus's digest strings. Do not allocate a
+    /// second, corpus-sized serialized buffer just to write staging metadata.
+    /// This is not publication: the caller's existing durability barrier and
+    /// admission checks still own the resulting private generation.
+    fn write_to(&self, writer: impl std::io::Write) -> Result<(), IndexRebuildError> {
+        use std::io::Write;
+
+        let mut writer = std::io::BufWriter::with_capacity(16 * 1024, writer);
+        serde_json::to_writer(&mut writer, self).map_err(|error| {
             IndexRebuildError::Index(format!("Failed to encode index document digests: {error}"))
         })?;
-        std::fs::write(&path, bytes).map_err(|error| {
+        // BufWriter's Drop ignores errors. A failed final flush must prevent
+        // the publisher from accepting this generation, even for tiny maps.
+        writer.flush().map_err(|error| {
             IndexRebuildError::Index(format!("Failed to write index document digests: {error}"))
         })
     }
@@ -1751,5 +1775,121 @@ mod tests {
     #[test]
     fn mixed_metadata_and_body_intake_embeds_only_the_changed_body() -> TestResult {
         native_input_reuse_case(true)
+    }
+
+    #[test]
+    fn bulk_reuse_selection_matches_the_linear_reference_after_plan_mutations() -> TestResult {
+        let identity = "selection-test-identity";
+        let original = (0..4096)
+            .map(|number| doc(&format!("mem_{number:04}"), "unchanged input"))
+            .collect::<Vec<_>>();
+        let mut delta = Delta {
+            upserts: original[..2048].to_vec(),
+            removals: original[2048..]
+                .iter()
+                .map(|document| document.id.clone())
+                .collect(),
+            reuse: Some(EmbeddingReuse {
+                identity: identity.to_owned(),
+                inputs: original
+                    .iter()
+                    .map(|document| (document.id.clone(), embedding_input_digest(document)))
+                    .collect(),
+            }),
+        };
+        assert!(
+            delta
+                .vector_upserts(identity)
+                .map_err(|error| error.detail)?
+                .is_empty()
+        );
+        delta.upserts[0].content.push_str(" changed after planning");
+        delta.upserts[1].id = "new-identity".to_owned();
+        delta.upserts[2].title = Some("metadata only".to_owned());
+        delta
+            .removals
+            .extend([original[3].id.clone(), original[3].id.clone()]);
+        delta.upserts.reverse();
+        let reuse = delta.reuse.as_ref().ok_or("reuse commitments")?;
+        let expected = delta
+            .upserts
+            .iter()
+            .filter(|document| {
+                delta.removals.contains(&document.id)
+                    || reuse.inputs.get(&document.id) != Some(&embedding_input_digest(document))
+            })
+            .map(document_digest)
+            .collect::<Vec<_>>();
+        let selected = delta.vector_upserts(identity).map_err(|error| error.detail)?;
+        assert_eq!(selected.len(), 3);
+        assert_eq!(
+            selected.iter().map(document_digest).collect::<Vec<_>>(),
+            expected
+        );
+        assert!(delta.vector_upserts("changed-producer").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_digest_files_preserve_wire_bytes_for_empty_small_and_large_maps() -> TestResult {
+        let stack = super::super::hash_fallback_embedder_stack();
+        for count in [0, 1, 4096] {
+            let documents = (0..count)
+                .map(|number| doc(&format!("mem_{number:04}_資料"), "exact source text\n"))
+                .collect::<Vec<_>>();
+            let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let digests = DocDigests::new(&stack, &documents);
+            digests
+                .write(directory.path())
+                .map_err(|error| error.to_string())?;
+            let actual = std::fs::read(directory.path().join(DOC_DIGESTS_FILE))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                actual,
+                serde_json::to_vec(&digests).map_err(|error| error.to_string())?
+            );
+            let decoded = read_digests(directory.path()).map_err(|error| error.detail)?;
+            assert_eq!(decoded.documents, digests.documents);
+            assert_eq!(decoded.embedding_inputs, digests.embedding_inputs);
+            assert_eq!(decoded.embedder, digests.embedder);
+            assert_eq!(decoded.schema, digests.schema);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn digest_serialization_propagates_buffer_drain_and_underlying_flush_failures() {
+        struct FailingWriter {
+            fail_write: bool,
+        }
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.fail_write {
+                    Err(std::io::Error::other("injected digest write failure"))
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("injected digest flush failure"))
+            }
+        }
+        let stack = super::super::hash_fallback_embedder_stack();
+        for count in [0, 4096] {
+            let documents = (0..count)
+                .map(|number| doc(&format!("mem_{number:04}"), "source"))
+                .collect::<Vec<_>>();
+            let digests = DocDigests::new(&stack, &documents);
+            for fail_write in [false, true] {
+                let error = digests
+                    .write_to(FailingWriter { fail_write })
+                    .expect_err("every I/O failure must reject staging metadata");
+                assert!(error.to_string().contains(if fail_write {
+                    "injected digest write failure"
+                } else {
+                    "injected digest flush failure"
+                }));
+            }
+        }
     }
 }
