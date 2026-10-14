@@ -190,6 +190,20 @@ fn run_step_with_env(
     let start = Instant::now();
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     command.args(&spec.args);
+    // Prohibit network downloads for every step. On a host without the local
+    // embedding model cached, ee's first embedding call prints a one-time
+    // notice to STDERR -- "ee is downloading the local embedding model
+    // potion-multilingual-128M (506.4 MB) once into the private ee model
+    // registry. Set EE_EMBED_DOWNLOAD=off to prohibit network downloads" --
+    // and the Appendix C contract this test enforces requires stderr to be
+    // EMPTY on success. So the step failed with "stderr was not empty" while
+    // its own stdout reported success:true and a completed import, which reads
+    // as a product defect and is really an uncached model.
+    //
+    // The notice names this exact remedy, and 37 other test files already set
+    // it. Set BEFORE the caller's envs so a step that deliberately exercises
+    // download behaviour can still override it.
+    command.env("EE_EMBED_DOWNLOAD", "off");
     for (key, value) in envs {
         command.env(key, value);
     }
