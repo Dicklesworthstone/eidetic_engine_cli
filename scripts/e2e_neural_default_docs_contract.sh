@@ -171,7 +171,20 @@ assert_file_contains "catalog_neural_local_trigger" "docs/degraded_codes.md" "de
 step "env_contract" "assert env knobs do not point operators at no-op model path"
 assert_file_contains "env_foreign_embedding_presence_only" "docs/env_vars.md" "values are never displayed, never passed to Frankensearch, and never used for"
 assert_file_contains "env_model_path_fault_injection" "docs/env_vars.md" "Not a user-facing model loader or model-selection knob"
-assert_file_contains "env_embed_model_dir_real_loader" "docs/env_vars.md" 'Pre-populate this directory with `potion-multilingual-128M/`'
+# This assertion used to be the single literal
+#   'Pre-populate this directory with `potion-multilingual-128M/`'
+# which 21b9e6555 (2026-08-09, "fix(search): honor verified model registry
+# paths") removed from docs/env_vars.md when EE_EMBED_MODEL_DIR grew a second
+# supported layout. The docs got MORE accurate and this gate went red, and has
+# been red ever since -- a stale expected literal, not a documentation gap.
+#
+# Replaced with three assertions rather than one, so the gate is strictly
+# stronger than the sentence it lost: both supported layouts must be named by
+# path, AND the air-gapped pre-populate instruction must still be present. The
+# old single literal could not have caught a doc that dropped either layout.
+assert_file_contains "env_embed_model_dir_registry_layout" "docs/env_vars.md" 'models/model2vec/potion-multilingual-128M/'
+assert_file_contains "env_embed_model_dir_legacy_layout" "docs/env_vars.md" 'models/potion-multilingual-128M/'
+assert_file_contains "env_embed_model_dir_real_loader" "docs/env_vars.md" 'Pre-populate either supported layout'
 
 step "fixture_contract" "assert the locked failure fixture still names the public fault-injection route"
 assert_jq_file "fixture_schema_valid" "tests/fixtures/failure_modes/embed_model_unavailable.json" '.schema == "ee.failure_mode_fixture.v1" and .code == "embed_model_unavailable"'
