@@ -277,21 +277,40 @@ if [ "$violation_count" -gt 0 ]; then
   verdict="fail"
 fi
 
-summary_json="$(jq -cn \
-  --argjson scannedFileCount "$scanned_count" \
-  --argjson violationCount "$violation_count" \
-  --argjson skippedCount "$skipped_count" \
-  --argjson scannedPaths "$scanned_paths_json" \
-  '{scannedFileCount:$scannedFileCount,violationCount:$violationCount,skippedCount:$skippedCount,scannedPaths:$scannedPaths}')"
+# THE BIG ARRAYS GO THROUGH FILES, NOT argv. `--all` scans every tracked Rust
+# file, and passing that path list as a single `--argjson` argument exceeded
+# ARG_MAX: the mode died with "/usr/bin/jq: Argument list too long" and could
+# not run at all at this repository's size. Only the fixture-scoped golden
+# harness (scripts/panic_helper_radar_golden.sh) ever exercised this script, and
+# its fixture is small, so the ceiling went unnoticed.
+#
+# `--slurpfile` reads a whole JSON document from a path and binds it as a
+# one-element array, hence the `[0]` on each. The report is built in ONE jq
+# call: the previous two-stage form embedded the path list inside
+# `$summary_json` and then passed THAT through argv, so splitting only the
+# first stage would have moved the same limit one line down.
+scanned_paths_file="$(mktemp "${TMPDIR:-/tmp}/panic-radar-paths.XXXXXX")"
+violations_file="$(mktemp "${TMPDIR:-/tmp}/panic-radar-violations.XXXXXX")"
+skipped_file="$(mktemp "${TMPDIR:-/tmp}/panic-radar-skipped.XXXXXX")"
+trap 'rm -f "$scanned_paths_file" "$violations_file" "$skipped_file"' EXIT
+printf '%s' "$scanned_paths_json" >"$scanned_paths_file"
+printf '%s' "$violations_json" >"$violations_file"
+printf '%s' "$skipped_json" >"$skipped_file"
 
 report="$(jq -cn \
   --arg schema "ee.panic_helper_radar.v1" \
   --arg generatedAt "$GENERATED_AT" \
   --arg verdict "$verdict" \
-  --argjson summary "$summary_json" \
-  --argjson violations "$violations_json" \
-  --argjson skipped "$skipped_json" \
-  '{schema:$schema,generatedAt:$generatedAt,verdict:$verdict,summary:$summary,violations:$violations,skipped:$skipped}')"
+  --argjson scannedFileCount "$scanned_count" \
+  --argjson violationCount "$violation_count" \
+  --argjson skippedCount "$skipped_count" \
+  --slurpfile scannedPaths "$scanned_paths_file" \
+  --slurpfile violations "$violations_file" \
+  --slurpfile skipped "$skipped_file" \
+  '{schema:$schema,generatedAt:$generatedAt,verdict:$verdict,
+    summary:{scannedFileCount:$scannedFileCount,violationCount:$violationCount,
+             skippedCount:$skippedCount,scannedPaths:$scannedPaths[0]},
+    violations:$violations[0],skipped:$skipped[0]}')"
 
 if [ -n "$OUTPUT_PATH" ]; then
   case "$OUTPUT_PATH" in
