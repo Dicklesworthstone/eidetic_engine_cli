@@ -71,9 +71,12 @@ fn assertion_tally(stdout: &str) -> (usize, usize) {
     (passed, failed)
 }
 
-/// The script asserted this many times on 2026-10-14. The floor below is lower
-/// on purpose; see the module comment.
-const OBSERVED_ASSERTION_COUNT: usize = 14;
+/// The script asserted this many times on 2026-10-14, MEASURED on a worker run
+/// (`SCRIPT_RC=0`, 15 assert_result events, 0 failures) rather than counted from
+/// the source. It went 14 -> 15 when `evidence_items_carry_why` was added, and
+/// it moves only when a run earns it. The floor below is lower on purpose; see
+/// the module comment.
+const OBSERVED_ASSERTION_COUNT: usize = 15;
 const MINIMUM_ASSERTION_COUNT: usize = 10;
 
 #[test]
