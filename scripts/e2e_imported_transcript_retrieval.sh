@@ -361,24 +361,47 @@ fi
 
 # --- 7. LEAK CANARY: bd-16imy's "denied/redacted material must not leak" ---
 #
-# The canary sits on line 5 of the distractor transcript. Two surfaces are
-# checked, and the query is aimed STRAIGHT AT the secret, because a leak that
-# only appears when someone searches for the token is still a leak -- and a
-# query about espresso would not have exercised it.
-run_ee search "${SECRET_CANARY}" --workspace "${WS}" --json
+# THE QUERY IS DELIBERATELY BENIGN, and the first version of this check was
+# wrong for the opposite reason.
+#
+# That version searched for the SECRET ITSELF, reasoning that a leak which only
+# surfaces when someone searches for the token is still a leak. Measured
+# 2026-10-14, both arms "failed" -- and they would have failed on a perfectly
+# redacted store, because `ee search` echoes the caller's query back in its
+# response (`"query": &self.query`, src/core/search.rs:4043 and :4336) and
+# `ee pack` does the same through `query_observation_json`. Putting the secret
+# in the query guarantees the secret is in the response. The check could not
+# distinguish a leak from an echo, so it proved nothing in either direction.
+#
+# The question that matters is whether STORED transcript content leaks. So the
+# query is the distractor's benign marker, which demonstrably retrieves that
+# session (the symmetric assertion above passes on it), and the canary must be
+# absent from what comes back.
+run_ee search "${DISTRACTOR_MARKER}" --workspace "${WS}" --json
 LEAK_SEARCH_OUT="${LAST_STDOUT}"
 if ! grep -qF "${SECRET_CANARY}" "${LEAK_SEARCH_OUT}" 2>/dev/null; then
     event secret_canary_absent_from_search pass
 else
-    event secret_canary_absent_from_search fail "the imported secret token appears verbatim in search output; hits=$(jq -c '[(.data.results // [])[]? | .docId]' "${LEAK_SEARCH_OUT}" 2>/dev/null)"
+    event secret_canary_absent_from_search fail "a benign query retrieved the imported secret token verbatim; hits=$(jq -c '[(.data.results // [])[]? | .docId]' "${LEAK_SEARCH_OUT}" 2>/dev/null)"
 fi
 
-run_ee pack "${SECRET_CANARY}" --workspace "${WS}" --json
+run_ee pack "${DISTRACTOR_PHRASE}" --workspace "${WS}" --json
 LEAK_PACK_OUT="${LAST_STDOUT}"
 if ! grep -qF "${SECRET_CANARY}" "${LEAK_PACK_OUT}" 2>/dev/null; then
     event secret_canary_absent_from_pack pass
 else
-    event secret_canary_absent_from_pack fail "the imported secret token appears verbatim in pack output; items=$(jq -c '[(.data.pack.items // [])[]? | {entityKind, evidenceSpanId}]' "${LEAK_PACK_OUT}" 2>/dev/null | head -c 300)"
+    event secret_canary_absent_from_pack fail "a benign pack request carried the imported secret token verbatim; items=$(jq -c '[(.data.pack.items // [])[]? | {entityKind, evidenceSpanId}]' "${LEAK_PACK_OUT}" 2>/dev/null | head -c 300)"
+fi
+
+# Positive control for the canary itself: the benign query must actually reach
+# the distractor session's content, or "the secret is absent" is just an
+# observation about an empty result set. Asserting the marker IS present in
+# the same response that the secret must be absent from makes the pair
+# meaningful.
+if grep -qF "${DISTRACTOR_MARKER}" "${LEAK_SEARCH_OUT}" 2>/dev/null; then
+    event leak_probe_reached_the_distractor_content pass
+else
+    event leak_probe_reached_the_distractor_content fail "the benign query returned nothing containing '${DISTRACTOR_MARKER}', so the canary's absence above is unmeasured"
 fi
 
 # The canary must be absent because it was WITHHELD, not because the whole
