@@ -47,7 +47,9 @@ fn over_limit(detail: &str) -> IncrementalFallback {
     incremental_fallback(IncrementalFallbackReason::DeltaOverThreshold, detail)
 }
 
-fn document_payload_bytes(document: &IndexableDocument) -> usize {
+/// Shared by planning and bounded lexical write batches. Counts UTF-8 payload
+/// across every indexed field; it is not a provider-allocation or RSS estimate.
+pub(super) fn document_payload_bytes(document: &IndexableDocument) -> usize {
     document.metadata.iter().fold(
         document
             .id

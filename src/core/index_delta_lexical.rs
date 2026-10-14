@@ -7,6 +7,8 @@
 
 use std::path::Path;
 
+use crate::search::IndexableDocument;
+
 use frankensearch::lexical_tantivy::tantivy_crate::{
     Index, IndexWriter, TantivyDocument, Term,
     index::SegmentId,
@@ -16,13 +18,51 @@ use frankensearch::lexical_tantivy::tantivy_crate::{
 
 use super::{
     IncrementalFallback, IncrementalFallbackReason, LEXICAL_INDEX_SUBDIR, batch,
-    ensure_index_path_has_no_symlinks, incremental_fallback,
+    ensure_index_path_has_no_symlinks, incremental_fallback, metadata::document_payload_bytes,
 };
 
 // One indexing worker is sufficient: these writers only merge committed
 // segments or delete exact ID terms. Match the backend's shipping heap
 // allowance without spawning an automatically sized pool for maintenance.
 const MERGE_WRITER_HEAP_BYTES: usize = 50_000_000;
+
+const MAX_UPSERT_BATCH_DOCUMENTS: usize = 128;
+const MAX_UPSERT_BATCH_PAYLOAD_BYTES: usize = 256 * 1024;
+
+/// Borrow bounded slices for the adapter's native batch writer. The planner
+/// and writer share payload accounting, including IDs, titles and metadata;
+/// bounding only body text misses the point of a metadata-only refresh.
+/// Nothing is cloned, normalized, deduplicated or reordered. A single large
+/// document is passed through unchanged, alone, to guarantee progress.
+///
+/// These limits bound work between the caller's cancellation checkpoints,
+/// not provider allocations or total RSS. The caller still commits once after
+/// all batches and must abandon the entire private stage on any failure.
+pub(super) fn upsert_batches(
+    mut documents: &[IndexableDocument],
+) -> impl Iterator<Item = &[IndexableDocument]> {
+    std::iter::from_fn(move || {
+        if documents.is_empty() {
+            return None;
+        }
+        let mut count = 0;
+        let mut bytes = 0_usize;
+        for document in documents.iter().take(MAX_UPSERT_BATCH_DOCUMENTS) {
+            let payload = document_payload_bytes(document);
+            if count > 0
+                && (bytes > MAX_UPSERT_BATCH_PAYLOAD_BYTES
+                    || payload > MAX_UPSERT_BATCH_PAYLOAD_BYTES.saturating_sub(bytes))
+            {
+                break;
+            }
+            count += 1;
+            bytes = bytes.saturating_add(payload);
+        }
+        let (batch, remaining) = documents.split_at(count);
+        documents = remaining;
+        Some(batch)
+    })
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct Compaction {

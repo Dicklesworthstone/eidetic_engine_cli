@@ -737,3 +737,314 @@ fn bulk_withdrawal_keeps_vector_reuse_and_matches_a_fresh_rebuild() -> TestResul
     }
     Ok(())
 }
+
+#[test]
+fn native_upsert_batches_borrow_in_order_and_bound_each_writer_call() {
+    let original = documents(8192);
+    let mut offset = 0;
+    let mut calls = 0;
+    for batch in upsert_batches(&original) {
+        assert_eq!(batch.len(), MAX_UPSERT_BATCH_DOCUMENTS);
+        assert!(std::ptr::eq(batch.as_ptr(), original[offset..].as_ptr()));
+        assert!(
+            batch.iter().map(document_payload_bytes).sum::<usize>()
+                <= MAX_UPSERT_BATCH_PAYLOAD_BYTES
+        );
+        offset += batch.len();
+        calls += 1;
+    }
+    assert_eq!(offset, original.len());
+    assert_eq!(calls, 64);
+    assert_eq!(upsert_batches(&[]).count(), 0);
+}
+
+#[test]
+fn upsert_byte_boundary_counts_every_document_field_including_metadata_keys() {
+    for field in ["id", "body", "title", "metadata_key", "metadata_value"] {
+        let mut full = IndexableDocument::new("", "");
+        let payload = "x".repeat(MAX_UPSERT_BATCH_PAYLOAD_BYTES);
+        match field {
+            "id" => full.id = payload,
+            "body" => full.content = payload,
+            "title" => full.title = Some(payload),
+            "metadata_key" => {
+                full.metadata.insert(payload, String::new());
+            }
+            _ => {
+                full.metadata.insert(String::new(), payload);
+            }
+        }
+        assert_eq!(document_payload_bytes(&full), MAX_UPSERT_BATCH_PAYLOAD_BYTES);
+        let documents = [full, IndexableDocument::new("next", "quartzmarker")];
+        assert_eq!(
+            upsert_batches(&documents)
+                .map(|batch| batch.len())
+                .collect::<Vec<_>>(),
+            [1, 1],
+            "{field} must spend the same allowance as body text"
+        );
+    }
+}
+
+#[test]
+fn upsert_payload_uses_utf8_bytes_and_the_exact_inclusive_limit() {
+    let mut first = IndexableDocument::new("é", "資料").with_title("🏴");
+    first.metadata.insert("clé".to_owned(), "値".to_owned());
+    let bytes = "é".len() + "資料".len() + "🏴".len() + "clé".len() + "値".len();
+    assert_eq!(document_payload_bytes(&first), bytes);
+    let second = IndexableDocument::new(
+        "",
+        "x".repeat(MAX_UPSERT_BATCH_PAYLOAD_BYTES - bytes),
+    );
+    let source = [first, second, IndexableDocument::new("last", "")];
+    let batches = upsert_batches(&source).collect::<Vec<_>>();
+    assert_eq!(
+        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+        [2, 1]
+    );
+    assert_eq!(
+        batches[0].iter().map(document_payload_bytes).sum::<usize>(),
+        MAX_UPSERT_BATCH_PAYLOAD_BYTES
+    );
+    assert_eq!(batches[0][0].content, "資料");
+}
+
+#[test]
+fn oversized_upserts_are_unchanged_singletons_and_never_swallow_the_next_row() {
+    let source = [
+        IndexableDocument::new("small", "first"),
+        IndexableDocument::new("large", "資料".repeat(MAX_UPSERT_BATCH_PAYLOAD_BYTES / 3)),
+        IndexableDocument::new("small", "last"),
+    ];
+    let batches = upsert_batches(&source).collect::<Vec<_>>();
+    assert_eq!(
+        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+        [1, 1, 1]
+    );
+    for (index, batch) in batches.into_iter().enumerate() {
+        assert!(std::ptr::eq(&batch[0], &source[index]));
+    }
+    let empty_follower = [source[1].clone(), IndexableDocument::new("", "")];
+    assert_eq!(
+        upsert_batches(&empty_follower)
+            .map(|batch| batch.len())
+            .collect::<Vec<_>>(),
+        [1, 1],
+        "an oversized row stays alone even when the following payload is empty"
+    );
+}
+
+#[test]
+fn zero_payload_rows_still_obey_the_row_cap_and_duplicate_ids_stay_in_order() {
+    let mut source = (0..MAX_UPSERT_BATCH_DOCUMENTS + 1)
+        .map(|_| IndexableDocument::new("", ""))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        upsert_batches(&source)
+            .map(|batch| batch.len())
+            .collect::<Vec<_>>(),
+        [MAX_UPSERT_BATCH_DOCUMENTS, 1]
+    );
+    source[0] = IndexableDocument::new("repeated", "first body");
+    source[MAX_UPSERT_BATCH_DOCUMENTS] = IndexableDocument::new("repeated", "last body");
+    let retained = upsert_batches(&source)
+        .flatten()
+        .filter(|document| document.id == "repeated")
+        .map(|document| document.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(retained, ["first body", "last body"]);
+}
+
+#[test]
+fn large_metadata_withdrawal_plan_retains_use_time_replacement_checks() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let stack = EmbedderStack::from_parts(Arc::new(HashEmbedder::default_256()), None);
+    let original = documents(4096);
+    DocDigests::new(&stack, &original)
+        .write(&root)
+        .map_err(|error| error.to_string())?;
+    let mut current = original[..2048].to_vec();
+    for document in &mut current {
+        document.title = Some("updatedtitlemarker".to_owned());
+    }
+    let mut delta = plan(&root, &stack, &current).map_err(|error| error.detail)?;
+    assert_eq!(delta.upserts.len(), 2048);
+    assert_eq!(delta.removals.len(), 2048);
+    let identity = super::super::embedder_identity(&stack).ok_or("complete identity")?;
+    assert!(
+        delta
+            .vector_upserts(&identity)
+            .map_err(|error| error.detail)?
+            .is_empty()
+    );
+    // A remove+re-add after planning is not an unchanged vector, even when its
+    // body bytes match. The membership index must keep that use-time guard.
+    delta.removals.push(current[3].id.clone());
+    let vectors = delta
+        .vector_upserts(&identity)
+        .map_err(|error| error.detail)?;
+    assert_eq!(vectors.len(), 1);
+    assert_eq!(vectors[0].id, current[3].id);
+    Ok(())
+}
+
+fn native_bulk_upsert_case(mixed: bool) -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+        let live = root.join("live");
+        let staged = root.join("staged");
+        let rebuilt = root.join("rebuilt");
+        let observed = Arc::new(ObservedHash {
+            inner: HashEmbedder::default_256(),
+            inputs: AtomicUsize::new(0),
+        });
+        let stack = EmbedderStack::from_parts(observed.clone(), None);
+        let original = documents(MAX_UPSERT_BATCH_DOCUMENTS * 2 + 17);
+        IndexBuilder::new(&live)
+            .with_embedder_stack(stack.clone())
+            .with_tantivy_lexical()
+            .add_documents(original.clone())
+            .build(&cx)
+            .await
+            .map_err(|error| error.to_string())?;
+        DocDigests::new(&stack, &original)
+            .write(&live)
+            .map_err(|error| error.to_string())?;
+        let before = files(&live)?;
+        std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
+        copy_generation(&live, &staged).map_err(|error| error.to_string())?;
+
+        // An empty delta at low segment pressure is a read-only operation on
+        // each tier. Holding the actual writer would fail an accidental reopen.
+        let native = Index::open_in_dir(staged.join(LEXICAL_INDEX_SUBDIR))
+            .map_err(|error| error.to_string())?;
+        assert!(inventory(&native).map_err(|error| error.detail)?.0.len() <= MAX_LEXICAL_SEGMENTS);
+        let held = maintenance_writer(&native).map_err(|error| error.detail)?;
+        let staged_before = files(&staged)?;
+        let empty = plan(&live, &stack, &original).map_err(|error| error.detail)?;
+        apply(&cx, &staged, &stack, &empty)
+            .await
+            .map_err(|error| error.detail)?;
+        assert_eq!(files(&staged)?, staged_before);
+        held.wait_merging_threads()
+            .map_err(|error| error.to_string())?;
+
+        let removed = if mixed { 16 } else { 0 };
+        let mut current = original[removed..].to_vec();
+        for document in &mut current {
+            document.title = Some("updatedtitlemarker".to_owned());
+            document
+                .metadata
+                .insert("revision".to_owned(), "2".to_owned());
+            document
+                .metadata
+                .insert("padding".to_owned(), "é".repeat(2048));
+        }
+        if mixed {
+            current[0].content = "changedquartzmarker replacement lesson".to_owned();
+            current.extend((0..9).map(|number| {
+                IndexableDocument::new(
+                    format!("new_{number}"),
+                    format!("newquartzmarker new lesson {number}"),
+                )
+                .with_title("updatedtitlemarker")
+            }));
+        }
+        let delta = plan(&live, &stack, &current).map_err(|error| error.detail)?;
+        assert_eq!(delta.removals.len(), removed);
+        assert_eq!(delta.upserts.len(), current.len());
+        assert!(upsert_batches(&delta.upserts).count() > 2);
+        observed.inputs.store(0, Ordering::SeqCst);
+        apply(&cx, &staged, &stack, &delta)
+            .await
+            .map_err(|error| error.detail)?;
+        assert_eq!(
+            observed.inputs.load(Ordering::SeqCst),
+            if mixed { 10 } else { 0 }
+        );
+        assert_eq!(files(&live)?, before);
+        if !mixed {
+            assert_eq!(
+                std::fs::read(staged.join("vector.fast.idx")).map_err(|error| error.to_string())?,
+                before[Path::new("vector.fast.idx")]
+            );
+        }
+        IndexBuilder::new(&rebuilt)
+            .with_embedder_stack(stack)
+            .with_tantivy_lexical()
+            .add_documents(current.clone())
+            .build(&cx)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(finalized_vectors(&staged)?, finalized_vectors(&rebuilt)?);
+        for query in [
+            "quartzmarker",
+            "updatedtitlemarker",
+            "priortitlemarker",
+            "changedquartzmarker",
+            "newquartzmarker",
+            "absentplanetmarker",
+        ] {
+            let mut results = Vec::new();
+            for directory in [&staged, &rebuilt] {
+                let reader = crate::search::TantivyIndex::open_read_only(
+                    &directory.join(LEXICAL_INDEX_SUBDIR),
+                )
+                .map_err(|error| error.to_string())?;
+                assert_eq!(
+                    reader.doc_count().map_err(|error| error.to_string())?,
+                    current.len()
+                );
+                let hits = reader
+                    .search(&cx, query, current.len() + 1)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .map(|hit| (hit.doc_id, hit.metadata))
+                    .collect::<BTreeMap<_, _>>();
+                if query == "updatedtitlemarker" {
+                    assert_eq!(hits.len(), current.len());
+                    for document in current
+                        .iter()
+                        .filter(|document| !document.id.starts_with("new_"))
+                    {
+                        let metadata = hits
+                            .get(document.id.as_str())
+                            .and_then(Option::as_ref)
+                            .ok_or("updated metadata missing after batched write")?;
+                        assert_eq!(metadata["revision"], "2");
+                        assert_eq!(
+                            metadata["padding"].as_str(),
+                            document.metadata.get("padding").map(String::as_str)
+                        );
+                    }
+                }
+                if matches!(query, "priortitlemarker" | "absentplanetmarker") {
+                    assert!(hits.is_empty());
+                }
+                results.push(hits);
+            }
+            assert_eq!(results[0], results[1], "query {query}");
+        }
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?
+}
+
+#[test]
+fn bulk_metadata_upserts_preserve_all_fields_without_vector_inference() -> TestResult {
+    native_bulk_upsert_case(false)
+}
+
+#[test]
+fn mixed_batched_upserts_and_withdrawals_match_a_fresh_rebuild() -> TestResult {
+    native_bulk_upsert_case(true)
+}

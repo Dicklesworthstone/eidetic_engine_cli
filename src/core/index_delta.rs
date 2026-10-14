@@ -576,9 +576,9 @@ async fn apply_vector_delta(
 }
 
 /// Apply a planned delta to a staged copy: removals, then upserts, at most one
-/// corpus rewrite per vector tier and at most two lexical commits (one removal
-/// batch and one upsert batch). Only the staging copy is opened for writing;
-/// the live generation is never mutated.
+/// corpus rewrite per vector tier and at most two explicit lexical commits
+/// (one removal batch and one upsert batch). Only the staging copy is opened
+/// for writing; the live generation is never mutated.
 pub(super) async fn apply(
     cx: &asupersync::Cx,
     staging_dir: &Path,
@@ -670,18 +670,19 @@ pub(super) async fn apply(
         // empty delta needs neither another writer nor an empty commit here.
         if !delta.upserts.is_empty() {
             let lexical = super::open_lexical_index(staging_dir)?;
-            for document in &delta.upserts {
+            for documents in lexical_maintenance::upsert_batches(&delta.upserts) {
                 batch::checkpoint(cx, "lexical")?;
-                lexical
-                    .index_document(cx, document)
-                    .await
-                    .map_err(|error| tier_error(format!("lexical upsert failed: {error}")))?;
+                let result = lexical.index_documents(cx, documents).await;
+                // Cancellation wins even if a backend finishes a batch without
+                // observing the caller's Cx. Never proceed to another batch or
+                // a commit after interruption; the private stage is discarded.
+                batch::checkpoint(cx, "lexical")?;
+                result.map_err(|error| tier_error(format!("lexical upsert failed: {error}")))?;
             }
             batch::checkpoint(cx, "lexical")?;
-            lexical
-                .commit(cx)
-                .await
-                .map_err(|error| tier_error(format!("lexical commit failed: {error}")))?;
+            let result = lexical.commit(cx).await;
+            batch::checkpoint(cx, "lexical")?;
+            result.map_err(|error| tier_error(format!("lexical commit failed: {error}")))?;
         }
         batch::checkpoint(cx, "lexical")?;
     }
