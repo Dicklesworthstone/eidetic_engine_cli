@@ -1,0 +1,118 @@
+{
+  "created": 0.0,
+  "duration": 0.0,
+  "exitcode": 0,
+  "root": "/fixture/pytest",
+  "environment": {},
+  "summary": {
+    "passed": 3,
+    "total": 3,
+    "collected": 3
+  },
+  "collectors": [
+    {
+      "nodeid": "",
+      "outcome": "passed",
+      "result": [
+        {
+          "nodeid": "test_collect_repair.py",
+          "type": "Module"
+        },
+        {
+          "nodeid": "test_collect_control.py",
+          "type": "Module"
+        }
+      ]
+    },
+    {
+      "nodeid": "test_collect_repair.py::TestCache",
+      "outcome": "passed",
+      "result": [
+        {
+          "nodeid": "test_collect_repair.py::TestCache::test_normalized",
+          "type": "Function",
+          "lineno": 1
+        },
+        {
+          "nodeid": "test_collect_repair.py::TestCache::test_empty",
+          "type": "Function",
+          "lineno": 4
+        }
+      ]
+    },
+    {
+      "nodeid": "test_collect_repair.py",
+      "outcome": "passed",
+      "result": [
+        {
+          "nodeid": "test_collect_repair.py::TestCache",
+          "type": "Class"
+        }
+      ]
+    },
+    {
+      "nodeid": "test_collect_control.py",
+      "outcome": "passed",
+      "result": [
+        {
+          "nodeid": "test_collect_control.py::test_independent_control",
+          "type": "Function",
+          "lineno": 0
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "nodeid": "test_collect_repair.py::TestCache::test_normalized",
+      "lineno": 1,
+      "outcome": "passed",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "passed"
+      }
+    },
+    {
+      "nodeid": "test_collect_repair.py::TestCache::test_empty",
+      "lineno": 4,
+      "outcome": "passed",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "passed"
+      }
+    },
+    {
+      "nodeid": "test_collect_control.py::test_independent_control",
+      "lineno": 0,
+      "outcome": "passed",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "passed"
+      }
+    }
+  ]
+}

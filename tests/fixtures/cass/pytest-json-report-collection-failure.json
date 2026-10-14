@@ -1,0 +1,44 @@
+{
+  "created": 0.0,
+  "duration": 0.0,
+  "exitcode": 2,
+  "root": "/fixture/pytest",
+  "environment": {},
+  "summary": {
+    "total": 0,
+    "collected": 1
+  },
+  "collectors": [
+    {
+      "nodeid": "",
+      "outcome": "passed",
+      "result": [
+        {
+          "nodeid": "test_collect_repair.py",
+          "type": "Module"
+        },
+        {
+          "nodeid": "test_collect_control.py",
+          "type": "Module"
+        }
+      ]
+    },
+    {
+      "nodeid": "test_collect_repair.py",
+      "outcome": "failed",
+      "result": []
+    },
+    {
+      "nodeid": "test_collect_control.py",
+      "outcome": "passed",
+      "result": [
+        {
+          "nodeid": "test_collect_control.py::test_independent_control",
+          "type": "Function",
+          "lineno": 0
+        }
+      ]
+    }
+  ],
+  "tests": []
+}

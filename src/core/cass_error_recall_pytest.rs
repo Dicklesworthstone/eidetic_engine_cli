@@ -15,6 +15,9 @@ use super::super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED
 const MAX_RESULTS: usize = 1024;
 type Subject = [u8; 32];
 
+#[path = "cass_error_recall_pytest_collection.rs"]
+mod collection;
+
 fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
     serde::de::IgnoredAny::deserialize(deserializer)?;
     Ok(true)
@@ -107,6 +110,12 @@ struct Crash {
 struct Collector {
     nodeid: String,
     outcome: String,
+    result: Option<Vec<CollectedNode>>,
+}
+
+#[derive(Deserialize)]
+struct CollectedNode {
+    nodeid: String,
 }
 
 #[derive(Default)]
@@ -115,20 +124,30 @@ pub(super) struct Execution {
     inventory: BTreeSet<Subject>,
     failed: BTreeSet<Subject>,
     passed: BTreeSet<Subject>,
+    failed_collectors: BTreeSet<Subject>,
+    executed_collectors: BTreeSet<Subject>,
+    collection_only: bool,
     complete: bool,
 }
 
 impl Execution {
     pub(super) fn has_known_failures(&self) -> bool {
-        self.complete && !self.failed.is_empty()
+        (self.complete && !self.failed.is_empty())
+            || (self.collection_only && !self.failed_collectors.is_empty())
     }
 
     pub(super) fn verified_by(&self, proof: &Self) -> bool {
-        self.has_known_failures()
-            && proof.complete
-            && self.root == proof.root
-            && self.inventory == proof.inventory
-            && self.failed.is_subset(&proof.passed)
+        if !self.has_known_failures() || !proof.complete || self.root != proof.root {
+            return false;
+        }
+        if self.collection_only {
+            // Collection failed before test execution, so there is no selected
+            // test inventory to compare. Each failed collector must explicitly
+            // own a normally passing descendant in the clean retry instead.
+            self.failed_collectors.is_subset(&proof.executed_collectors)
+        } else {
+            self.inventory == proof.inventory && self.failed.is_subset(&proof.passed)
+        }
     }
 }
 
@@ -201,6 +220,7 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     };
     let mut output = CompilerOutput::default();
     let mut keys = BTreeSet::new();
+    let mut unlocated_collection_failure = false;
     if let Some(collectors) = &report.collectors {
         if collectors.len() > MAX_RESULTS {
             return Err(());
@@ -216,6 +236,11 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             match collector.outcome.as_str() {
                 "failed" => {
                     execution.complete = false;
+                    if valid_identity(&collector.nodeid) {
+                        execution.failed_collectors.insert(commitment("collector", &collector.nodeid));
+                    } else {
+                        unlocated_collection_failure = true;
+                    }
                     retain(&mut output, &mut keys, "collection", "collection failed");
                 }
                 "passed" | "skipped" => {}
@@ -307,6 +332,19 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         // --json-report-summary intentionally has no subject inventory.
         execution.complete = false;
     }
+    // A normal collection abort uses exit 2 and may have discovered unrelated
+    // tests without running them. Only the observed failed collectors can be
+    // covered; mixed executions, summary-only runs and unidentified root errors
+    // remain unproven. Existing test-failure inventory rules are unchanged.
+    execution.collection_only = matches!(report.exitcode, 1 | 2)
+        && total == 0
+        && report.tests.as_ref().is_some_and(Vec::is_empty)
+        && !execution.failed_collectors.is_empty()
+        && !unlocated_collection_failure;
+    execution.executed_collectors = collection::executed_collectors(
+        report.collectors.as_deref().unwrap_or(&[]),
+        &execution.passed,
+    )?;
     output.failed |= report.exitcode != 0 || report.summary.failed > 0 || report.summary.error > 0;
     output.allows_completion = !output.failed && execution.complete && !execution.passed.is_empty();
     Ok(Some(Decoded { output, execution }))
@@ -335,3 +373,7 @@ mod tests;
 #[cfg(test)]
 #[path = "cass_error_recall_pytest_native_tests.rs"]
 mod native_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_pytest_collection_tests.rs"]
+mod collection_tests;
