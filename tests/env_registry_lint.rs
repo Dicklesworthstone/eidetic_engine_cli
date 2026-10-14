@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use ee::config::EnvVar;
 
 type TestResult = Result<(), String>;
 
@@ -24,6 +27,86 @@ const README_WORKSPACE_HYGIENE_ENV_VARS: [&str; 4] = [
 const README_OBSOLETE_WORKSPACE_HYGIENE_ENV_VARS: [&str; 2] = [
     "EE_WORKSPACE_HYGIENE_SECRET_PATTERNS",
     "EE_WORKSPACE_HYGIENE_IGNORE_PATTERNS",
+];
+
+/// Registered variables that no production code reads, and why each is absent.
+///
+/// The other guards here enforce one direction only: a raw `EE_*` read must go
+/// through the registry (`production_code_uses_env_registry_for_ee_vars`), and
+/// `docs/env_vars.md` must list every registered name
+/// (`tests/env_vars_doc_coverage.rs`). Nothing enforced the converse -- that a
+/// registered, documented name is read by anything -- so a variable could be
+/// registered, documented with a present-tense description of what it
+/// "controls", and honored by nobody. That gap becomes a false statement to a
+/// harness in `ee capabilities`, whose `envOverrides` block publishes every
+/// registered variable under the claim that ee "honors" it, with
+/// `controls: var.description()` (`write_capabilities_env_overrides_block` in
+/// src/output/mod.rs).
+///
+/// Measured 2026-10-14: 11 of 131 registered variables had no production read.
+/// The reasons differ in kind and the distinction is the point -- most name a
+/// subsystem that has no production caller at all, which is a different defect
+/// from a knob someone forgot to plumb -- so each entry carries its own.
+///
+/// An entry is not permission to leave a variable unread. The test fails both
+/// ways: an unread variable missing from this list fails, and an entry that
+/// becomes read fails until it is removed. Wiring one up forces its deletion.
+const REGISTERED_WITHOUT_PRODUCTION_READ: [(&str, &str); 11] = [
+    (
+        "EE_AUDIT_LANE_BATCH_MAX",
+        "audit lane has no production caller: the only AuditLane::new sits in the \
+         #[cfg(test)] module of src/core/memory.rs, and production emits through \
+         emit_with_direct_fallback instead",
+    ),
+    (
+        "EE_AUDIT_LANE_CAPACITY",
+        "same unspawned audit lane; DEFAULT_AUDIT_LANE_CAPACITY in src/core/audit_lane.rs \
+         is the only capacity any queue is built with",
+    ),
+    (
+        "EE_AUDIT_LANE_FLUSH_MS",
+        "same unspawned audit lane; no production flush loop exists to bound",
+    ),
+    (
+        "EE_CURATION_AUTO_PROMOTE_CONFIDENCE_FLOOR",
+        "docs/env_vars.md calls it a reserved contract; `ee curate auto-promote` exposes \
+         --min-confidence-episodic and --min-confidence-semantic, and one floor does not \
+         map onto both without deciding which it overrides",
+    ),
+    (
+        "EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN",
+        "`ee curate auto-promote --max-per-run` is live with default_value_t = 10, matching \
+         this variable's documented default; honoring the documented precedence (explicit \
+         flag > env > default) needs an Option field, because default_value_t cannot \
+         distinguish an explicit 10 from a defaulted one, and that moves --help goldens",
+    ),
+    (
+        "EE_CURATION_DERIVED_PREVIEW_LIMIT",
+        "documented as reserved for derived-candidate preview and reject ergonomics",
+    ),
+    (
+        "EE_EXPERIMENTAL_TRIAD",
+        "documented compatibility no-op, retained so spike-era scripts keep running; this \
+         one is deliberate and expected to stay listed",
+    ),
+    (
+        "EE_MESH_DISCOVERY_CACHE_TTL_SECONDS",
+        "DEFAULT_DISCOVERY_CACHE_TTL_SECONDS in src/mesh/discovery_cache.rs is the only TTL \
+         any decision uses; nothing reads the override",
+    ),
+    (
+        "EE_REFLECTION_REQUEST_SHOW_SOURCE_LIMIT",
+        "documented as a downstream contract that paths 'should' report, not one they do",
+    ),
+    (
+        "EE_REFLECTION_SOURCE_BUDGET_BYTES",
+        "same reflection contract; no propose or ingest path reads the budget",
+    ),
+    (
+        "EE_WORKSPACE_CLOSE_DRAIN_TIMEOUT_S",
+        "drain_snapshot_pins in src/db/read_pool.rs has no caller outside that file's \
+         #[cfg(test)] module, so no production workspace-close wait exists to bound",
+    ),
 ];
 
 fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) -> TestResult {
@@ -131,6 +214,102 @@ fn allowed_build_time_ee_vars_are_documented() -> TestResult {
         }
     }
     Ok(())
+}
+
+#[test]
+fn registered_env_vars_are_read_by_production_code() -> TestResult {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let src = root.join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src, &mut files)?;
+    if files.is_empty() {
+        return Err("no .rs files under src/: the scan cannot observe any read".to_owned());
+    }
+
+    // Comment-stripped, whitespace-free code for every src file EXCEPT the
+    // registry, which spells all 131 names and every variant and so would
+    // match each one as its own reader.
+    let mut code = Vec::new();
+    for file in &files {
+        let relative = file
+            .strip_prefix(&root)
+            .map_err(|error| format!("strip {}: {error}", file.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative == ALLOWED_RAW_ENV_FILE {
+            continue;
+        }
+        let content = fs::read_to_string(file)
+            .map_err(|error| format!("read {}: {error}", file.display()))?;
+        code.push(
+            content
+                .lines()
+                .map(compact_code_line)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+
+    let is_read = |token: &str| code.iter().any(|text| text.contains(token));
+
+    // POSITIVE CONTROL, run through the same containment scan that produces the
+    // verdict. A variable known to be read must come out read. Without it an
+    // empty or wrongly-stripped corpus reports every variable as unread, and
+    // because the verdict is a set comparison that failure would land as "every
+    // allowlist entry is correctly unread" -- a pass. The scan must be shown
+    // capable of seeing a read before its claim that it saw none means anything.
+    let control = format!("{:?}", EnvVar::DaemonMaxInflight);
+    if !is_read(&control) {
+        return Err(format!(
+            "positive control failed: {control} is read via env_registry::read in \
+             src/daemon/server.rs, but this scan did not see it, so its unread set is void"
+        ));
+    }
+
+    // A variant is the read path (`env_registry::read(EnvVar::Variant)`); the
+    // literal is checked too, for a name reached some other way.
+    let unread: BTreeSet<String> = EnvVar::all()
+        .iter()
+        .filter(|var| !is_read(&format!("{var:?}")) && !is_read(var.name()))
+        .map(|var| var.name().to_owned())
+        .collect();
+    let registered: BTreeSet<String> = EnvVar::all()
+        .iter()
+        .map(|var| var.name().to_owned())
+        .collect();
+    let allowlisted: BTreeSet<String> = REGISTERED_WITHOUT_PRODUCTION_READ
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+
+    let mut failures = Vec::new();
+    for name in allowlisted.difference(&registered) {
+        failures.push(format!(
+            "{name} is in REGISTERED_WITHOUT_PRODUCTION_READ but is not a registered EnvVar \
+             name -- fix the spelling or drop the entry"
+        ));
+    }
+    for name in unread.difference(&allowlisted) {
+        failures.push(format!(
+            "{name} is registered and documented, and `ee capabilities` advertises what it \
+             controls, but nothing in src/ reads it: wire it up, or add it to \
+             REGISTERED_WITHOUT_PRODUCTION_READ with the reason"
+        ));
+    }
+    for name in allowlisted.difference(&unread) {
+        if registered.contains(name) {
+            failures.push(format!(
+                "{name} is read by production code now: remove it from \
+                 REGISTERED_WITHOUT_PRODUCTION_READ so the list keeps meaning something"
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 #[test]
