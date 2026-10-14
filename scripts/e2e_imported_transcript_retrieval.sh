@@ -344,6 +344,29 @@ else
     event evidence_items_carry_provenance fail "no evidence_span item carried the full span/session/line-range/revision set; items=$(jq -c '[(.data.pack.items // [])[]? | select((.entityKind // "") == "evidence_span") | {evidenceSpanId, sessionId, entityRevision, startLine, endLine}]' "${PACK_OUT}" 2>/dev/null | head -c 400)"
 fi
 
+# bd-16imy's acceptance says the pack must hydrate imported evidence "with
+# why/provenance", and until now this script asserted only the provenance half.
+# `PackEvidenceItem` carries a `why: String` (src/pack/mod.rs:5988) which the
+# native path populates, so the field is not aspirational -- it was simply
+# unasserted, which is how an acceptance bullet passes review while half of it
+# goes unmeasured.
+#
+# Requires a NON-EMPTY why on every evidence item rather than on at least one.
+# An "at least one" form would pass a pack that explained a single item and
+# left the rest bare, which is the failure a reader would actually hit.
+EVIDENCE_TOTAL="$(jq -r '[(.data.pack.items // [])[]?
+       | select((.entityKind // "") == "evidence_span")] | length' \
+    "${PACK_OUT}" 2>/dev/null || echo 0)"
+EVIDENCE_WITH_WHY="$(jq -r '[(.data.pack.items // [])[]?
+       | select((.entityKind // "") == "evidence_span")
+       | select(((.why // "") | length) > 0)] | length' \
+    "${PACK_OUT}" 2>/dev/null || echo 0)"
+if [[ "${EVIDENCE_TOTAL}" != "0" && "${EVIDENCE_WITH_WHY}" == "${EVIDENCE_TOTAL}" ]]; then
+    event evidence_items_carry_why pass "with_why=${EVIDENCE_WITH_WHY}/${EVIDENCE_TOTAL}"
+else
+    event evidence_items_carry_why fail "expected every evidence item to carry a non-empty why; with_why=${EVIDENCE_WITH_WHY} of ${EVIDENCE_TOTAL}; whys=$(jq -c '[(.data.pack.items // [])[]? | select((.entityKind // "") == "evidence_span") | .why]' "${PACK_OUT}" 2>/dev/null | head -c 400)"
+fi
+
 # The content a reader actually pays tokens for must be the TRANSCRIPT line,
 # not an envelope or a placeholder. Measured: the item's content was
 # "assistant: Root cause: the retry budget collapsed because the backoff
