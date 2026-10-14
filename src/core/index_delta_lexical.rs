@@ -8,7 +8,8 @@
 use std::path::Path;
 
 use frankensearch::lexical_tantivy::tantivy_crate::{
-    Index, SegmentId, TantivyDocument,
+    Index, TantivyDocument,
+    index::SegmentId,
     indexer::NoMergePolicy,
     tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer},
 };
