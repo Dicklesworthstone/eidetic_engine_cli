@@ -7084,3 +7084,22 @@ mod tests {
             limit: 5,
             topic: Some("rollback_cluster".to_owned()),
             min_expected_value: 0.0,
+            max_attention_tokens: 900,
+            max_runtime_seconds: 180,
+            safety_boundary: ExperimentSafetyBoundary::DryRunOnly,
+        });
+        let error = result.expect_err("audit failure must roll back the proposal");
+        assert!(
+            error.message().contains("learning audit failure"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            connection
+                .list_curation_candidates(&workspace_id, Some("rule"), None, None)
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        );
+        connection.close().map_err(|e| e.to_string())
+    }
+}
