@@ -444,7 +444,10 @@ fn reachable_causal_subgraph(graph: &DiGraph, source: &str) -> GraphResult<DiGra
                     source: format!("missing edge attributes for {current} -> {successor}"),
                 })?;
             scoped
-                .add_edge_with_attrs(current.clone(), successor.to_owned(), attrs)
+                // `add_edge_with_attrs` takes `impl AsRef<str>` and `successor`
+                // is already a `&str`, so `to_owned()` only allocated a String
+                // for the callee to borrow back.
+                .add_edge_with_attrs(current.clone(), successor, attrs)
                 .map_err(|error| GraphError::GraphEngine {
                     operation: "project reachable causal evidence",
                     source: error.to_string(),

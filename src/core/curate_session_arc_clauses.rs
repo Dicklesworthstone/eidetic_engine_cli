@@ -124,10 +124,10 @@ fn bare_counter_report(lower: &str) -> bool {
         }
     }
     let result_header = lower.starts_with("test result:") || lower.starts_with("test results:");
-    if !has_result || !(has_count || result_header || lower.contains([':', '='])) {
-        return false;
-    }
-    true
+    // Stated positively rather than as the double negation clippy's
+    // `needless_bool` help suggests: a result word is required, and it must be
+    // accompanied by a count, a `test result:` header, or key/value punctuation.
+    has_result && (has_count || result_header || lower.contains([':', '=']))
 }
 
 /// Labeled Jest/Vitest summaries are counters, not independent observations.

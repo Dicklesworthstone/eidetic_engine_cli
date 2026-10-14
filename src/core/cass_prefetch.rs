@@ -1712,13 +1712,23 @@ impl<P: SpeculativePrefetch> CassPrefetchCoordinator<P> {
         let Some(position) = batch.warmed.iter().position(|warmed| warmed == &requested) else {
             return;
         };
-        let drained = {
-            let batch = self
-                .pending
-                .get_mut(&key)
-                .expect("the batch was just observed under this key");
-            batch.warmed.remove(position);
-            batch.warmed.is_empty()
+        // The second lookup exists because the immutable borrow above has to
+        // end before any `&mut self` call, not because the entry might be
+        // gone. It is still resolved WITHOUT `expect`: a panic here would turn
+        // an invariant the borrow checker cannot see into a process abort on a
+        // prefetch bookkeeping path, and `expect_used` is denied in library
+        // code for exactly that reason (Cargo.toml [lints.clippy]).
+        let drained = match self.pending.get_mut(&key) {
+            Some(batch) => {
+                batch.warmed.remove(position);
+                batch.warmed.is_empty()
+            }
+            // Unreachable in practice: the batch was observed under this key a
+            // few lines above and nothing in between removes it. `false`
+            // leaves the entry in place and still records the hit, which is
+            // what the reachable path does when a batch has warmed topics
+            // left.
+            None => false,
         };
         if drained {
             self.pending.remove(&key);
