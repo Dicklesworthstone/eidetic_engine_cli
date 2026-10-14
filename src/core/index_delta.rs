@@ -15,9 +15,9 @@
 //! a changed digest is an upsert, a missing id a removal. A change made by any
 //! write path, with or without an index job, is therefore always visible, and
 //! a generation without digests (or built by another embedder) simply takes
-//! the full rebuild. Large deltas, accumulated lexical segments and any staging
-//! failure also fall back to the full rebuild, which remains the compaction
-//! step.
+//! the full rebuild. Large vector deltas and staging failures also fall back.
+//! Lexical segment pressure is compacted independently on the staged copy,
+//! without sending unchanged documents through either embedding model.
 //!
 //! V2 binds both tiers to complete immutable embedding identities. V3 also
 //! records exact embedding inputs, allowing metadata-only changes to update
@@ -48,6 +48,10 @@ mod batch;
 #[path = "index_delta_metadata.rs"]
 mod metadata;
 
+#[cfg(feature = "lexical-bm25")]
+#[path = "index_delta_lexical.rs"]
+mod lexical_maintenance;
+
 #[path = "index_staging_copy.rs"]
 mod staging_copy;
 
@@ -63,8 +67,9 @@ const EMBEDDING_INPUT_DOMAIN: &[u8] = b"ee.index.embedding_input.v1\0";
 const MAX_DELTA_DOCUMENTS: usize = 256;
 /// Above this share of the corpus (percent) a vector rebuild is preferred.
 const MAX_DELTA_PERCENT: usize = 25;
-/// Each delta commit adds a lexical segment; past this many the next write
-/// takes a full rebuild, which compacts them.
+/// Past this many active lexical segments, compact the staged lexical tier
+/// before applying the next delta. Vector inference keeps its own budget.
+#[cfg(any(test, feature = "lexical-bm25"))]
 const MAX_LEXICAL_SEGMENTS: usize = 32;
 
 /// Files that belong to one generation's admission state, never to its tiers.
@@ -356,17 +361,6 @@ pub(super) fn plan(
             "live generation has no matching complete embedding identity; a full rebuild is required",
         ));
     }
-    // Compaction is already owed: do not hash or clone the source corpus just
-    // to arrive at the same full-build decision after computing its delta.
-    let segments = lexical_segment_count(live_dir);
-    if segments > MAX_LEXICAL_SEGMENTS {
-        return Err(incremental_fallback(
-            IncrementalFallbackReason::DeltaOverThreshold,
-            format!(
-                "{segments} lexical segments exceed {MAX_LEXICAL_SEGMENTS}; a full rebuild compacts them"
-            ),
-        ));
-    }
     if let Some(inputs) = live.embedding_inputs.as_ref() {
         metadata::diff(&live.documents, inputs, documents, identity)
     } else {
@@ -427,28 +421,6 @@ fn diff_documents(
         removals,
         ..Delta::default()
     })
-}
-
-#[cfg(feature = "lexical-bm25")]
-fn lexical_segment_count(generation_dir: &Path) -> usize {
-    std::fs::read_dir(generation_dir.join(LEXICAL_INDEX_SUBDIR))
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_str()
-                        .is_some_and(|name| name.ends_with(".idx"))
-                })
-                .count()
-        })
-        .unwrap_or(0)
-}
-
-#[cfg(not(feature = "lexical-bm25"))]
-fn lexical_segment_count(_generation_dir: &Path) -> usize {
-    0
 }
 
 /// Copy the live generation's tier files into an empty private staging
@@ -615,6 +587,11 @@ pub(super) async fn apply(
         vector_upserts = vector_upserts.len(),
         "selected identity-bound delta embedding inputs"
     );
+
+    // Maintenance belongs to the tier that needs it. A lexical merge must
+    // not invalidate an otherwise eligible metadata-only or small vector delta.
+    #[cfg(feature = "lexical-bm25")]
+    lexical_maintenance::compact_if_needed(cx, staging_dir, MAX_LEXICAL_SEGMENTS)?;
 
     // A metadata-only change must not acquire vector writer locks or touch
     // vector bytes. The staging caller still validates every tier's counts
@@ -1174,7 +1151,6 @@ mod tests {
             std::fs::write(lexical.join(format!("{segment}.idx")), b"unused")
                 .map_err(|error| error.to_string())?;
         }
-        assert_eq!(lexical_segment_count(live.path()), 0);
         assert!(plan(live.path(), &stack, &documents).is_ok());
         Ok(())
     }
