@@ -8,16 +8,16 @@
 use super::failure_diagnostics;
 use super::{MAX_SCANNED_OUTPUT_BYTES, ToolOutput, compiler};
 
-#[path = "cass_error_recall_plain_test_coverage.rs"]
-mod plain;
-#[path = "cass_error_recall_structured_test_coverage.rs"]
-mod structured;
 #[path = "cass_error_recall_js_tests.rs"]
 pub(super) mod javascript;
+#[path = "cass_error_recall_plain_test_coverage.rs"]
+mod plain;
 #[path = "cass_error_recall_pytest.rs"]
 pub(super) mod pytest;
 #[path = "cass_error_recall_pytest_terminal/mod.rs"]
 pub(super) mod python;
+#[path = "cass_error_recall_structured_test_coverage.rs"]
+mod structured;
 
 enum ExternalExecution {
     Javascript(javascript::Execution),
@@ -73,8 +73,8 @@ impl Requirement {
     pub(super) fn capture(output: &ToolOutput, process_complete: bool) -> Self {
         match external_execution(&output.text) {
             Ok(Some((_, execution))) => {
-                let required = (process_complete && execution.has_known_failures())
-                    .then_some(execution);
+                let required =
+                    (process_complete && execution.has_known_failures()).then_some(execution);
                 return Self(structured::Requirement::Unproven, required);
             }
             Err(()) => return Self(structured::Requirement::Unproven, None),
@@ -82,7 +82,9 @@ impl Requirement {
         }
         Self(
             match plain::project(output) {
-                Ok(Some(projected)) => structured::Requirement::capture(&projected, process_complete),
+                Ok(Some(projected)) => {
+                    structured::Requirement::capture(&projected, process_complete)
+                }
                 Ok(None) => structured::Requirement::capture(output, process_complete),
                 Err(()) => structured::Requirement::Unproven,
             },

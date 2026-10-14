@@ -1,6 +1,8 @@
 use super::*;
-use crate::core::cass_error_recall::{ToolOutput, failure_diagnostics, structured_error_diagnostics};
 use crate::core::cass_error_recall::test_coverage::{Proof, Requirement};
+use crate::core::cass_error_recall::{
+    ToolOutput, failure_diagnostics, structured_error_diagnostics,
+};
 use serde_json::{Value, json};
 
 fn report(outcome: &str) -> Value {
@@ -39,11 +41,17 @@ fn report(outcome: &str) -> Value {
 }
 
 fn output(value: &Value) -> ToolOutput {
-    ToolOutput { text: value.to_string(), is_error: Some(false), exit_code: Some(0) }
+    ToolOutput {
+        text: value.to_string(),
+        is_error: Some(false),
+        exit_code: Some(0),
+    }
 }
 
 fn parsed(value: &Value) -> Decoded {
-    decode(&value.to_string()).expect("valid pytest report").expect("pytest family")
+    decode(&value.to_string())
+        .expect("valid pytest report")
+        .expect("pytest family")
 }
 
 fn verifies(failure: &Value, success: &Value) -> bool {
@@ -57,13 +65,24 @@ fn pytest_failed_call_reaches_both_cass_and_public_diagnostic_paths() {
     assert!(decoded.output.failed);
     assert!(!decoded.output.allows_completion);
     assert_eq!(decoded.output.diagnostics.len(), 1);
-    assert_eq!(failure_diagnostics(&output(&value)), decoded.output.diagnostics);
-    assert_eq!(structured_error_diagnostics(&value.to_string()), decoded.output.diagnostics);
+    assert_eq!(
+        failure_diagnostics(&output(&value)),
+        decoded.output.diagnostics
+    );
+    assert_eq!(
+        structured_error_diagnostics(&value.to_string()),
+        decoded.output.diagnostics
+    );
     assert!(output(&value).failed());
     assert!(!output(&value).succeeded());
     let public = format!("{:?}", decoded.output.diagnostics).to_ascii_lowercase();
     assert!(public.contains("pytest call:"));
-    for private in ["private_", "/workspace/project", "test_lookup", "test_cache.py"] {
+    for private in [
+        "private_",
+        "/workspace/project",
+        "test_lookup",
+        "test_cache.py",
+    ] {
         assert!(!public.contains(private));
     }
 }
@@ -82,7 +101,10 @@ fn pytest_setup_and_teardown_errors_have_distinct_reusable_fingerprints() {
         assert_eq!(decoded.output.diagnostics.len(), 1);
         assert!(verifies(value, &report("passed")));
     }
-    assert_ne!(parsed(&setup).output.diagnostics, parsed(&teardown).output.diagnostics);
+    assert_ne!(
+        parsed(&setup).output.diagnostics,
+        parsed(&teardown).output.diagnostics
+    );
     // A failed teardown cannot be concealed by a passed call or optimistic exit.
     teardown["exitcode"] = json!(0);
     assert!(!output(&teardown).succeeded());
@@ -110,8 +132,20 @@ fn pytest_expected_failures_skips_and_unexpected_passes_do_not_verify_repairs() 
 fn pytest_reports_need_independent_process_completion() {
     let success = report("passed");
     assert!(output(&success).succeeded());
-    assert!(!ToolOutput { text: success.to_string(), ..ToolOutput::default() }.succeeded());
-    assert!(!ToolOutput { exit_code: Some(1), ..output(&success) }.succeeded());
+    assert!(
+        !ToolOutput {
+            text: success.to_string(),
+            ..ToolOutput::default()
+        }
+        .succeeded()
+    );
+    assert!(
+        !ToolOutput {
+            exit_code: Some(1),
+            ..output(&success)
+        }
+        .succeeded()
+    );
     for exitcode in 1..=5 {
         let mut value = success.clone();
         value["exitcode"] = json!(exitcode);
@@ -138,7 +172,10 @@ fn pytest_summary_only_empty_and_fail_fast_runs_never_prove_coverage() {
     assert_eq!(parsed(&stopped).output.diagnostics.len(), 1);
     assert!(!verifies(&stopped, &report("passed")));
     let mut incomplete = failure.clone();
-    incomplete["tests"][0].as_object_mut().unwrap().remove("teardown");
+    incomplete["tests"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("teardown");
     assert!(!verifies(&incomplete, &report("passed")));
 }
 
@@ -154,7 +191,11 @@ fn pytest_collection_errors_veto_an_otherwise_clean_retry() {
     assert_eq!(decoded.output.diagnostics.len(), 1);
     assert!(!output(&value).succeeded());
     assert!(!verifies(&report("failed"), &value));
-    assert!(!format!("{:?}", decoded.output.diagnostics).to_lowercase().contains("private_traceback"));
+    assert!(
+        !format!("{:?}", decoded.output.diagnostics)
+            .to_lowercase()
+            .contains("private_traceback")
+    );
 }
 
 #[test]
@@ -163,9 +204,18 @@ fn pytest_retry_binds_root_node_ids_parameters_and_complete_selected_inventory()
     assert!(verifies(&failure, &report("passed")));
     for (pointer, replacement) in [
         ("/root", json!("/workspace/other")),
-        ("/tests/0/nodeid", json!("tests/test_cache.py::test_lookup[raw]")),
-        ("/tests/0/nodeid", json!("tests/Test_cache.py::test_lookup[normalized]")),
-        ("/tests/0/nodeid", json!("tests/test_other.py::test_lookup[normalized]")),
+        (
+            "/tests/0/nodeid",
+            json!("tests/test_cache.py::test_lookup[raw]"),
+        ),
+        (
+            "/tests/0/nodeid",
+            json!("tests/Test_cache.py::test_lookup[normalized]"),
+        ),
+        (
+            "/tests/0/nodeid",
+            json!("tests/test_other.py::test_lookup[normalized]"),
+        ),
     ] {
         let mut success = report("passed");
         *success.pointer_mut(pointer).unwrap() = replacement;
@@ -182,16 +232,28 @@ fn pytest_retry_binds_root_node_ids_parameters_and_complete_selected_inventory()
 fn pytest_all_failed_subjects_remain_guarded_beyond_the_display_cap() {
     let many = |failed: bool, skip_last: bool| {
         let mut value = report(if failed { "failed" } else { "passed" });
-        let tests = (0..6).map(|index| {
-            let status = if failed { "failed" } else if skip_last && index == 5 { "skipped" } else { "passed" };
-            let mut test = report(status)["tests"][0].clone();
-            test["nodeid"] = json!(format!("tests/test_cache.py::test_lookup[{index}]"));
-            test
-        }).collect::<Vec<_>>();
+        let tests = (0..6)
+            .map(|index| {
+                let status = if failed {
+                    "failed"
+                } else if skip_last && index == 5 {
+                    "skipped"
+                } else {
+                    "passed"
+                };
+                let mut test = report(status)["tests"][0].clone();
+                test["nodeid"] = json!(format!("tests/test_cache.py::test_lookup[{index}]"));
+                test
+            })
+            .collect::<Vec<_>>();
         value["tests"] = json!(tests);
-        value["summary"] = if failed { json!({"collected":6,"total":6,"failed":6}) }
-            else if skip_last { json!({"collected":6,"total":6,"passed":5,"skipped":1}) }
-            else { json!({"collected":6,"total":6,"passed":6}) };
+        value["summary"] = if failed {
+            json!({"collected":6,"total":6,"failed":6})
+        } else if skip_last {
+            json!({"collected":6,"total":6,"passed":5,"skipped":1})
+        } else {
+            json!({"collected":6,"total":6,"passed":6})
+        };
         value
     };
     let failure = many(true, false);
@@ -242,14 +304,24 @@ fn pytest_duplicate_fields_and_trailing_data_never_salvage_a_valid_prefix() {
     let valid = report("passed").to_string();
     for text in [
         valid.replacen("\"exitcode\":0", "\"exitcode\":1,\"exitcode\":0", 1),
-        valid.replacen("\"outcome\":\"passed\"", "\"outcome\":\"failed\",\"outcome\":\"passed\"", 1),
+        valid.replacen(
+            "\"outcome\":\"passed\"",
+            "\"outcome\":\"failed\",\"outcome\":\"passed\"",
+            1,
+        ),
         format!("{valid} {valid}"),
         format!("{valid}\noutput truncated"),
         valid[..valid.len() - 1].to_owned(),
         "{\"exitcode\":null,\"tests\":null}".to_owned(),
     ] {
         assert!(decode(&text).is_err());
-        assert!(!ToolOutput { text, ..output(&report("passed")) }.succeeded());
+        assert!(
+            !ToolOutput {
+                text,
+                ..output(&report("passed"))
+            }
+            .succeeded()
+        );
     }
 }
 
@@ -259,17 +331,34 @@ fn pytest_learning_keeps_privacy_boundaries_and_source_sized_limits() {
     let secret = format!("ghp_{}", "Q".repeat(36));
     value["tests"][0]["call"]["crash"]["message"] = json!(format!("api_key={secret}"));
     let diagnostics = parsed(&value).output.diagnostics;
-    assert!(!format!("{diagnostics:?}").to_lowercase().contains(&secret.to_lowercase()));
+    assert!(
+        !format!("{diagnostics:?}")
+            .to_lowercase()
+            .contains(&secret.to_lowercase())
+    );
     let text = value.to_string();
-    let exact = format!("{text}{}", " ".repeat(MAX_SCANNED_OUTPUT_BYTES - text.len()));
+    let exact = format!(
+        "{text}{}",
+        " ".repeat(MAX_SCANNED_OUTPUT_BYTES - text.len())
+    );
     assert!(decode(&exact).is_ok());
     assert!(decode(&format!("{exact} ")).is_err());
-    for field in ["schema", "reason", "$message_type", "testResults", "generalDiagnostics", "results"] {
+    for field in [
+        "schema",
+        "reason",
+        "$message_type",
+        "testResults",
+        "generalDiagnostics",
+        "results",
+    ] {
         let mut mixed = report("passed");
         mixed[field] = Value::Null;
         assert!(decode(&mixed.to_string()).is_err());
     }
-    for value in [json!({"example":report("failed")}), json!({"schema":"ee.response.v2","success":true})] {
+    for value in [
+        json!({"example":report("failed")}),
+        json!({"schema":"ee.response.v2","success":true}),
+    ] {
         assert!(decode(&value.to_string()).unwrap().is_none());
     }
 }
@@ -284,7 +373,13 @@ fn pytest_partial_poll_requirements_cannot_downgrade_to_generic_command_success(
     requirement.refresh(&failed, true);
     assert!(requirement.is_verified_by(&proof));
     for text in ["{}", "unrelated output", "{"] {
-        requirement.refresh(&ToolOutput { text:text.into(), ..ToolOutput::default() }, true);
+        requirement.refresh(
+            &ToolOutput {
+                text: text.into(),
+                ..ToolOutput::default()
+            },
+            true,
+        );
         assert!(requirement.is_guarded());
         assert!(!requirement.is_verified_by(&proof));
     }

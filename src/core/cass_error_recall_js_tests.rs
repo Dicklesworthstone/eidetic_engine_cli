@@ -100,7 +100,9 @@ fn time(value: f64) -> bool {
 }
 
 /// Diagnostic and coverage consumers use the same complete-document validator.
-pub(in crate::core::cass_error_recall) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
+pub(in crate::core::cass_error_recall) fn inspect(
+    text: &str,
+) -> Result<Option<CompilerOutput>, ()> {
     decode(text).map(|decoded| decoded.map(|decoded| decoded.output))
 }
 
@@ -185,7 +187,10 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         complete: !report.was_interrupted
             && report.num_runtime_error_test_suites == 0
             && report.num_pending_test_suites == 0
-            && !report.snapshot.as_ref().is_some_and(|snapshot| snapshot.failure),
+            && !report
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.failure),
         ..Execution::default()
     };
     let mut counts = [0_u64; 4];
@@ -306,10 +311,12 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         || report.num_failed_test_suites > 0
         || report.was_interrupted
         || report.num_runtime_error_test_suites > 0
-        || report.snapshot.as_ref().is_some_and(|snapshot| snapshot.failure);
-    output.allows_completion = !output.failed
-        && report.num_passed_tests > 0
-        && report.num_pending_test_suites == 0;
+        || report
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.failure);
+    output.allows_completion =
+        !output.failed && report.num_passed_tests > 0 && report.num_pending_test_suites == 0;
     Ok(Some(Decoded { output, execution }))
 }
 

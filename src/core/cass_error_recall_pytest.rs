@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 
 use serde::Deserialize;
 
-use super::compiler::CompilerOutput;
 use super::super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES};
+use super::compiler::CompilerOutput;
 
 const MAX_RESULTS: usize = 1024;
 type Subject = [u8; 32];
@@ -81,7 +81,14 @@ struct Summary {
 
 impl Summary {
     fn outcomes(&self) -> [u64; 6] {
-        [self.passed, self.failed, self.error, self.skipped, self.xfailed, self.xpassed]
+        [
+            self.passed,
+            self.failed,
+            self.error,
+            self.skipped,
+            self.xfailed,
+            self.xpassed,
+        ]
     }
 }
 
@@ -174,7 +181,9 @@ fn valid_identity(value: &str) -> bool {
     !value.trim().is_empty() && !value.chars().any(char::is_control)
 }
 
-pub(in crate::core::cass_error_recall) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
+pub(in crate::core::cass_error_recall) fn inspect(
+    text: &str,
+) -> Result<Option<CompilerOutput>, ()> {
     decode(text).map(|decoded| decoded.map(|decoded| decoded.output))
 }
 
@@ -207,9 +216,16 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     {
         return Err(());
     }
-    let total = report.summary.outcomes().into_iter()
+    let total = report
+        .summary
+        .outcomes()
+        .into_iter()
         .try_fold(0_u64, |sum, count| sum.checked_add(count).ok_or(()))?;
-    let selected = report.summary.collected.checked_sub(report.summary.deselected).ok_or(())?;
+    let selected = report
+        .summary
+        .collected
+        .checked_sub(report.summary.deselected)
+        .ok_or(())?;
     if total != report.summary.total || total > selected {
         return Err(());
     }
@@ -237,7 +253,9 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
                 "failed" => {
                     execution.complete = false;
                     if valid_identity(&collector.nodeid) {
-                        execution.failed_collectors.insert(commitment("collector", &collector.nodeid));
+                        execution
+                            .failed_collectors
+                            .insert(commitment("collector", &collector.nodeid));
                     } else {
                         unlocated_collection_failure = true;
                     }
@@ -271,11 +289,18 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
                 _ => return Err(()),
             };
             counts[category] += 1;
-            let stages = [test.setup.as_ref(), test.call.as_ref(), test.teardown.as_ref()];
+            let stages = [
+                test.setup.as_ref(),
+                test.call.as_ref(),
+                test.teardown.as_ref(),
+            ];
             for stage in stages.into_iter().flatten() {
                 if !valid_time(stage.duration)
                     || !matches!(stage.outcome.as_str(), "passed" | "failed" | "skipped")
-                    || stage.crash.as_ref().is_some_and(|crash| crash.message.trim().is_empty())
+                    || stage
+                        .crash
+                        .as_ref()
+                        .is_some_and(|crash| crash.message.trim().is_empty())
                     || (stage.outcome == "passed" && stage.crash.is_some())
                 {
                     return Err(());
@@ -289,29 +314,45 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             if test.call.is_some() && !stage_is(0, "passed") {
                 return Err(());
             }
-            execution.complete &= test.setup.is_some() && test.teardown.is_some()
+            execution.complete &= test.setup.is_some()
+                && test.teardown.is_some()
                 && (!stage_is(0, "passed") || test.call.is_some());
             match category {
-                0 | 5 if stages.into_iter().flatten().any(|stage| stage.outcome != "passed") => {
+                0 | 5
+                    if stages
+                        .into_iter()
+                        .flatten()
+                        .any(|stage| stage.outcome != "passed") =>
+                {
                     return Err(());
                 }
                 1 if !stage_is(1, "failed") || stage_is(2, "failed") => return Err(()),
                 2 if !stage_is(0, "failed") && !stage_is(2, "failed") => return Err(()),
-                3 | 4 if !stages.into_iter().flatten().any(|stage| stage.outcome == "skipped") =>
+                3 | 4
+                    if !stages
+                        .into_iter()
+                        .flatten()
+                        .any(|stage| stage.outcome == "skipped") =>
                 {
                     return Err(());
                 }
                 _ => {}
             }
-            if category == 0 && stages.into_iter().all(|stage| {
-                stage.is_some_and(|stage| stage.outcome == "passed")
-            }) {
+            if category == 0
+                && stages
+                    .into_iter()
+                    .all(|stage| stage.is_some_and(|stage| stage.outcome == "passed"))
+            {
                 execution.passed.insert(subject);
             }
             // A teardown skip/xfail can overwrite pytest's aggregate outcome
             // after the call failed. Failed phases still own diagnostics and
             // subject requirements; a later benign label cannot erase them.
-            if stages.into_iter().flatten().any(|stage| stage.outcome == "failed") {
+            if stages
+                .into_iter()
+                .flatten()
+                .any(|stage| stage.outcome == "failed")
+            {
                 execution.failed.insert(subject);
                 for (name, stage) in ["setup", "call", "teardown"].into_iter().zip(stages) {
                     if let Some(stage) = stage.filter(|stage| stage.outcome == "failed") {
@@ -319,7 +360,10 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
                             &mut output,
                             &mut keys,
                             name,
-                            stage.crash.as_ref().map_or("test stage failed", |crash| crash.message.as_str()),
+                            stage
+                                .crash
+                                .as_ref()
+                                .map_or("test stage failed", |crash| crash.message.as_str()),
                         );
                     }
                 }
@@ -351,7 +395,10 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
 }
 
 fn retain(output: &mut CompilerOutput, keys: &mut BTreeSet<String>, stage: &str, message: &str) {
-    let first = message.lines().find(|line| !line.trim().is_empty()).unwrap_or("test stage failed");
+    let first = message
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("test stage failed");
     let safe = crate::policy::redact_secret_like_content(first).content;
     let diagnostic = CanonicalDiagnostic {
         tool: crate::core::error_recall::DiagnosticTool::Shell,
@@ -361,7 +408,9 @@ fn retain(output: &mut CompilerOutput, keys: &mut BTreeSet<String>, stage: &str,
         )),
     };
     output.failed = true;
-    if keys.insert(diagnostic.layered_key().key) && output.diagnostics.len() < MAX_DIAGNOSTICS_PER_FAILURE {
+    if keys.insert(diagnostic.layered_key().key)
+        && output.diagnostics.len() < MAX_DIAGNOSTICS_PER_FAILURE
+    {
         output.diagnostics.push(diagnostic);
     }
 }

@@ -53,7 +53,10 @@ fn episode(proof: &str, proof_command: &str) -> TestResult<Episode> {
             ended_at: None,
             message_count: 5,
             token_count: None,
-            content_hash: format!("blake3:{}", blake3::hash(b"pytest-terminal-recall").to_hex()),
+            content_hash: format!(
+                "blake3:{}",
+                blake3::hash(b"pytest-terminal-recall").to_hex()
+            ),
             metadata_json: None,
         },
     )?;
@@ -125,7 +128,9 @@ fn episode(proof: &str, proof_command: &str) -> TestResult<Episode> {
 #[test]
 fn native_pytest_repair_is_cited_packable_and_idempotent_without_source_mutation() -> TestResult {
     let episode = episode(&report("PASSED", "1 passed"), COMMAND)?;
-    let before = episode.db.list_evidence_spans_for_session(&episode.session)?;
+    let before = episode
+        .db
+        .list_evidence_spans_for_session(&episode.session)?;
     let result = record_session_error_recall(&episode.db, WS, &episode.session)?;
     assert_eq!(result.failures_seen, 1);
     assert_eq!(result.resolved_failures, 1);
@@ -142,17 +147,25 @@ fn native_pytest_repair_is_cited_packable_and_idempotent_without_source_mutation
         .db
         .list_error_repair_links(WS, &diagnostic.layered_key().key)?;
     assert_eq!(links.len(), 3);
-    assert!(links.iter().all(|link| {
-        link.evidence_ref.as_deref() == Some(episode.failure.as_str())
-    }));
+    assert!(
+        links
+            .iter()
+            .all(|link| { link.evidence_ref.as_deref() == Some(episode.failure.as_str()) })
+    );
     let evidence = recalled_repair_evidence(&episode.db, WS, &recall)?;
     assert!(evidence.iter().any(|item| {
-        item.evidence_id == card && item.role == "incident_card"
-            && item.text.as_deref().is_some_and(|text| text.contains("Fix:"))
+        item.evidence_id == card
+            && item.role == "incident_card"
+            && item
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("Fix:"))
     }));
-    assert!(evidence.iter().any(|item| {
-        item.evidence_id == episode.proof && item.text.is_none()
-    }));
+    assert!(
+        evidence
+            .iter()
+            .any(|item| { item.evidence_id == episode.proof && item.text.is_none() })
+    );
     let query = pack_error_recall_query_seed(&episode.db, WS, &diagnostic)?;
     assert!(query.contains("prior fix:"));
     assert!(query.contains("fresh queue"));
@@ -163,12 +176,18 @@ fn native_pytest_repair_is_cited_packable_and_idempotent_without_source_mutation
             .ok_or("missing source")?;
         assert_eq!(after.excerpt, source.excerpt);
         assert_eq!(after.content_hash, source.content_hash);
-        assert_eq!(after.canonical_provenance_uri(), source.canonical_provenance_uri());
+        assert_eq!(
+            after.canonical_provenance_uri(),
+            source.canonical_provenance_uri()
+        );
     }
     let rerun = record_session_error_recall(&episode.db, WS, &episode.session)?;
     assert_eq!(rerun.incident_cards_recorded, 0);
     assert_eq!(
-        episode.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?.len(),
+        episode
+            .db
+            .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+            .len(),
         3
     );
     Ok(())

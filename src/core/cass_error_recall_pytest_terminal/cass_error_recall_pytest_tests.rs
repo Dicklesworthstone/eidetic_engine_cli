@@ -1,5 +1,5 @@
-use super::*;
 use super::super::{Proof, Requirement};
+use super::*;
 use crate::core::cass_error_recall::{
     ToolOutput, failure_diagnostics, structured_error_diagnostics,
 };
@@ -12,7 +12,9 @@ fn verbose(results: &[(&str, &str)], counts: &str) -> String {
     for (node, status) in results {
         text.push_str(&format!("{node} {status} [100%]\n"));
     }
-    text.push_str(&format!("\n================ {counts} in 0.01s ================\n"));
+    text.push_str(&format!(
+        "\n================ {counts} in 0.01s ================\n"
+    ));
     text
 }
 
@@ -51,7 +53,10 @@ fn native_failure_flows_through_import_and_public_diagnostic_decoder() {
             .message_template
             .starts_with("pytest test failure ")
     );
-    assert_eq!(failure_diagnostics(&output(text.clone(), 1)), decoded.diagnostics);
+    assert_eq!(
+        failure_diagnostics(&output(text.clone(), 1)),
+        decoded.diagnostics
+    );
     assert_eq!(structured_error_diagnostics(&text), decoded.diagnostics);
     let optimistic = output(text, 0);
     assert!(optimistic.failed());
@@ -87,7 +92,10 @@ fn pytest_footer_is_not_independent_process_completion() {
 #[test]
 fn omitted_renamed_or_other_file_tests_cannot_verify_a_repair() {
     let required = Requirement::capture(&output(failed(), 1), true);
-    for node in ["tests/test_queue.py::test_other", "other/test_queue.py::test_drain"] {
+    for node in [
+        "tests/test_queue.py::test_other",
+        "other/test_queue.py::test_drain",
+    ] {
         let proof = Proof::capture(&output(verbose(&[(node, "PASSED")], "1 passed"), 0));
         assert!(!required.is_verified_by(&proof), "{node}");
     }
@@ -100,7 +108,11 @@ fn skipping_xfailing_or_xpassing_the_failed_subject_is_not_a_repair() {
         ("tests/test_queue.py::test_other", "PASSED"),
     ];
     let required = Requirement::capture(&output(verbose(&nodes, "1 failed, 1 passed"), 1), true);
-    for (status, counter) in [("SKIPPED", "skipped"), ("XFAIL", "xfailed"), ("XPASS", "xpassed")] {
+    for (status, counter) in [
+        ("SKIPPED", "skipped"),
+        ("XFAIL", "xfailed"),
+        ("XPASS", "xpassed"),
+    ] {
         let text = verbose(
             &[(nodes[0].0, status), (nodes[1].0, "PASSED")],
             &format!("1 passed, 1 {counter}"),
@@ -213,7 +225,10 @@ fn contradictory_or_duplicate_terminal_reports_never_certify_success() {
     for text in [
         failed().replace("1 failed in", "1 passed in"),
         format!("{}{}", passed(), passed()),
-        format!("{}\n================ 1 passed in 0.02s ================", passed()),
+        format!(
+            "{}\n================ 1 passed in 0.02s ================",
+            passed()
+        ),
         passed().replace("1 passed in", "1 passed, 1 passed in"),
     ] {
         assert!(!output(text, 0).succeeded());
@@ -291,8 +306,14 @@ fn malformed_trailing_data_control_codes_and_bounds_never_certify_success() {
 #[test]
 fn native_long_duration_and_deselected_collection_are_supported() {
     let text = passed()
-        .replace("collected 1 items", "collected 4 items / 3 deselected / 1 selected")
-        .replace("1 passed in 0.01s", "1 passed, 3 deselected in 64.01s (0:01:04)");
+        .replace(
+            "collected 1 items",
+            "collected 4 items / 3 deselected / 1 selected",
+        )
+        .replace(
+            "1 passed in 0.01s",
+            "1 passed, 3 deselected in 64.01s (0:01:04)",
+        );
     assert!(parsed(&text).allows_completion);
 }
 
@@ -300,7 +321,9 @@ fn native_long_duration_and_deselected_collection_are_supported() {
 fn source_secrets_are_redacted_before_persistent_fingerprints_and_symptoms() {
     let secret = "sk-proj-ABCDEF1234567890ABCDEF1234567890";
     let node = format!("tests/test_queue.py::test_drain[api_key={secret}]");
-    let text = format!("F [100%]\n================ short test summary info ================\nFAILED {node} - RuntimeError: api_key={secret}\n1 failed in 0.01s\n");
+    let text = format!(
+        "F [100%]\n================ short test summary info ================\nFAILED {node} - RuntimeError: api_key={secret}\n1 failed in 0.01s\n"
+    );
     let decoded = parsed(&text);
     assert!(!format!("{:?}", decoded.diagnostics).contains(secret));
     assert!(!decoded.symptom.unwrap().contains(secret));
@@ -316,7 +339,10 @@ fn unrelated_text_json_and_existing_rust_failures_keep_their_interpretation() {
         assert!(decode(text).expect("unrelated producer").is_none());
     }
     let rust = output("error[E0308]: mismatched types".to_owned(), 1);
-    assert_eq!(failure_diagnostics(&rust)[0].layered_key().key, "rustc:E0308");
+    assert_eq!(
+        failure_diagnostics(&rust)[0].layered_key().key,
+        "rustc:E0308"
+    );
 }
 
 #[test]
@@ -336,7 +362,13 @@ fn styled_terminal_reports_keep_fingerprints_and_exact_repair_subjects() {
 
 #[test]
 fn standalone_progress_glyphs_do_not_claim_unrelated_stdout() {
-    for text in [".", "F", "x", "...\nordinary output", "\u{1b}[31mF\u{1b}[0m"] {
+    for text in [
+        ".",
+        "F",
+        "x",
+        "...\nordinary output",
+        "\u{1b}[31mF\u{1b}[0m",
+    ] {
         assert!(decode(text).expect("another producer").is_none());
     }
 }

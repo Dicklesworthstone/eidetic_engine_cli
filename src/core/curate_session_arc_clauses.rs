@@ -1044,7 +1044,11 @@ mod tests {
 
     #[test]
     fn runner_header_extension_preserves_legacy_label_first_failure_counters() {
-        for report in ["tests failed: 1", "tests: failures=1", "tests: errors: unknown"] {
+        for report in [
+            "tests failed: 1",
+            "tests: failures=1",
+            "tests: errors: unknown",
+        ] {
             assert_eq!(report_window_veto(report), Some(true), "{report}");
             let source = format!("{FAILURE}\n{REPAIR}\n{report}");
             assert!(super::super::inline_pair(&source).is_none(), "{report}");
@@ -1119,7 +1123,10 @@ mod tests {
                 ("Tests: 1 failed, 21 passed, 22 total", true),
                 ("Test Files 1 failed | 2 passed (3)", true),
                 ("Tests: 21 passed, 21 total\nTime: 1.423 s", false),
-                ("Tests 21 passed (21)\nStart at 09:32:53\nDuration 1s (tests 125ms)", false),
+                (
+                    "Tests 21 passed (21)\nStart at 09:32:53\nDuration 1s (tests 125ms)",
+                    false,
+                ),
             ] {
                 let repair = "Fixed src/api.rs by restoring the guard.";
                 let mut spans = vec![
@@ -1127,11 +1134,8 @@ mod tests {
                     span("repair", 2, repair),
                     span("report", 3, report),
                 ];
-                let rows = super::super::sequence::candidates(
-                    &session.workspace_id,
-                    &session,
-                    &spans,
-                );
+                let rows =
+                    super::super::sequence::candidates(&session.workspace_id, &session, &spans);
                 assert_eq!(rows.len(), if veto { 0 } else { 2 }, "{report}");
                 for row in &rows {
                     let arc = row.session_arc.as_ref().expect("source-backed pair");

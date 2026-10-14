@@ -35,7 +35,9 @@ pub(super) fn normalize(text: &str) -> Result<Cow<'_, str>, ()> {
             return Err(());
         }
         let codes = &parameters[..end];
-        if !codes.bytes().all(|byte| byte.is_ascii_digit() || byte == b';')
+        if !codes
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b';')
             || codes
                 .split(';')
                 .any(|code| !code.is_empty() && code.parse::<u8>().is_err())
@@ -65,10 +67,7 @@ mod tests {
     fn style_sequences_preserve_literal_text_without_concatenating_lines() {
         let styled = "\u{1b}[1mλ\u{1b}[0m\n\u{1b}[38;5;123mPASSED\u{1b}[m";
         assert_eq!(normalize(styled).unwrap(), "λ\nPASSED");
-        assert_eq!(
-            normalize("\u{1b}[38;2;2;3;4mRGB\u{1b}[0m").unwrap(),
-            "RGB"
-        );
+        assert_eq!(normalize("\u{1b}[38;2;2;3;4mRGB\u{1b}[0m").unwrap(), "RGB");
     }
 
     #[test]

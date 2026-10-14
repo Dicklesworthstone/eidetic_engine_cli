@@ -227,15 +227,14 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
                 && (event.action != "fail"
                     || !event.test.is_empty()
                     || !identity(&event.failed_build)))
-            || (event.action != "output" && (event.output.is_some() || !event.output_type.is_empty()))
+            || (event.action != "output"
+                && (event.output.is_some() || !event.output_type.is_empty()))
         {
             return Err(());
         }
         if event.action == "start" {
             if !event.test.is_empty()
-                || packages
-                    .insert(event.package, Package::default())
-                    .is_some()
+                || packages.insert(event.package, Package::default()).is_some()
             {
                 return Err(());
             }
@@ -250,8 +249,7 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
             "run" => {
                 let name = test.ok_or(())?;
                 if package.tests.get(name).is_some_and(|state| {
-                    !state.terminal()
-                        && !(*state == TestState::Running && benchmark_name(name))
+                    !state.terminal() && !(*state == TestState::Running && benchmark_name(name))
                 }) {
                     return Err(());
                 }
@@ -343,8 +341,7 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
                     // A package may fail while tests are still running after
                     // a panic. Preserve the failure but not complete coverage.
                     if event.action != "fail"
-                        && (package.failed
-                            || package.tests.values().any(|state| !state.terminal()))
+                        && (package.failed || package.tests.values().any(|state| !state.terminal()))
                     {
                         return Err(());
                     }
@@ -444,10 +441,21 @@ mod tests {
         assert!(decoded.failed);
         assert!(!decoded.allows_completion);
         assert_eq!(decoded.diagnostics.len(), 1);
-        assert!(decoded.diagnostics[0].message_template.starts_with("go test failure:"));
+        assert!(
+            decoded.diagnostics[0]
+                .message_template
+                .starts_with("go test failure:")
+        );
         assert!(!format!("{:?}", decoded.diagnostics).contains("private_output_sentinel"));
-        assert_eq!(structured_error_diagnostics(&stream(&events)), decoded.diagnostics);
-        let optimistic = ToolOutput { text: stream(&events), is_error: Some(false), exit_code: Some(0) };
+        assert_eq!(
+            structured_error_diagnostics(&stream(&events)),
+            decoded.diagnostics
+        );
+        let optimistic = ToolOutput {
+            text: stream(&events),
+            is_error: Some(false),
+            exit_code: Some(0),
+        };
         assert_eq!(failure_diagnostics(&optimistic), decoded.diagnostics);
         assert!(optimistic.failed());
         assert!(!optimistic.succeeded());
@@ -479,8 +487,14 @@ mod tests {
         assert!(coverage.complete);
         assert_eq!(coverage.passed_tests.len(), 2);
         assert_eq!(coverage.passed_packages.len(), 2);
-        assert_ne!(commitment("a", Some("TestCache")), commitment("b", Some("TestCache")));
-        assert_ne!(commitment("a", Some("TestCache")), commitment("a", Some("testCache")));
+        assert_ne!(
+            commitment("a", Some("TestCache")),
+            commitment("b", Some("TestCache"))
+        );
+        assert_ne!(
+            commitment("a", Some("TestCache")),
+            commitment("a", Some("testCache"))
+        );
         assert_ne!(commitment("a", None), commitment("a", Some("a")));
     }
 
@@ -500,7 +514,8 @@ mod tests {
         assert_eq!(coverage.failed_tests.len(), 1);
         assert_eq!(coverage.passed_tests.len(), 1);
         assert!(!decoded.allows_completion);
-        *events.last_mut().expect("terminal") = json!({"Action":"pass","Package":"example.org/cache"});
+        *events.last_mut().expect("terminal") =
+            json!({"Action":"pass","Package":"example.org/cache"});
         assert!(inspect(&stream(&events)).is_err());
     }
 
@@ -508,12 +523,24 @@ mod tests {
     fn incomplete_empty_and_skipped_reports_never_supply_test_proof() {
         for events in [
             vec![json!({"Action":"start","Package":"a"})],
-            vec![json!({"Action":"start","Package":"a"}), json!({"Action":"skip","Package":"a"})],
-            vec![json!({"Action":"start","Package":"a"}), json!({"Action":"pass","Package":"a"})],
+            vec![
+                json!({"Action":"start","Package":"a"}),
+                json!({"Action":"skip","Package":"a"}),
+            ],
+            vec![
+                json!({"Action":"start","Package":"a"}),
+                json!({"Action":"pass","Package":"a"}),
+            ],
         ] {
             let decoded = parsed(&events);
             assert!(!decoded.allows_completion);
-            assert!(decoded.go_test_coverage.expect("coverage").passed_tests.is_empty());
+            assert!(
+                decoded
+                    .go_test_coverage
+                    .expect("coverage")
+                    .passed_tests
+                    .is_empty()
+            );
         }
         let mut events = failed();
         events.pop();
@@ -531,7 +558,8 @@ mod tests {
             format!("{valid}\n{{"),
             format!("{valid}\n{{\"reason\":\"build-finished\",\"success\":true}}"),
             format!("{valid}\n{{\"Action\":\"pass\",\"Package\":\"example.org/cache\"}}"),
-            "{\"Action\":\"start\",\"Package\":\"a\"} {\"Action\":\"skip\",\"Package\":\"a\"}".to_owned(),
+            "{\"Action\":\"start\",\"Package\":\"a\"} {\"Action\":\"skip\",\"Package\":\"a\"}"
+                .to_owned(),
         ] {
             assert!(inspect(&bad).is_err(), "{bad}");
         }
@@ -545,7 +573,14 @@ mod tests {
             json!({"Action":"pass","Package":"a","FailedBuild":"b"}),
             json!({"Action":"output","Package":"a","Output":"ok","OutputType":"unknown"}),
         ] {
-            assert!(inspect(&stream(&[json!({"Action":"start","Package":"a"}), event.clone()])).is_err(), "{event}");
+            assert!(
+                inspect(&stream(&[
+                    json!({"Action":"start","Package":"a"}),
+                    event.clone()
+                ]))
+                .is_err(),
+                "{event}"
+            );
         }
     }
 
@@ -577,7 +612,14 @@ mod tests {
         assert!(inspect(&stream(&events)).is_ok());
         events.insert(1, json!({"Action":"output","Package":"a","Output":""}));
         assert!(inspect(&stream(&events)).is_err());
-        assert!(inspect(&format!("{}{}", stream(&failed()), " ".repeat(MAX_SCANNED_OUTPUT_BYTES))).is_err());
+        assert!(
+            inspect(&format!(
+                "{}{}",
+                stream(&failed()),
+                " ".repeat(MAX_SCANNED_OUTPUT_BYTES)
+            ))
+            .is_err()
+        );
     }
 
     fn build_failure() -> Vec<Value> {
@@ -604,15 +646,17 @@ mod tests {
         assert!(decoded.failed);
         assert!(!decoded.allows_completion);
         assert_eq!(decoded.diagnostics.len(), 1);
-        assert!(decoded.diagnostics[0].message_template.starts_with("go build failure:"));
+        assert!(
+            decoded.diagnostics[0]
+                .message_template
+                .starts_with("go build failure:")
+        );
         assert!(!format!("{:?}", decoded.diagnostics).contains("private_build_log_sentinel"));
         let coverage = decoded.go_test_coverage.expect("coverage");
         assert!(coverage.complete);
         assert_eq!(coverage.failed_packages.len(), 1);
         assert!(coverage.failed_tests.is_empty());
-        let standalone = parsed(&[
-            json!({"Action":"build-fail","ImportPath":"example.org/cache"}),
-        ]);
+        let standalone = parsed(&[json!({"Action":"build-fail","ImportPath":"example.org/cache"})]);
         assert!(standalone.failed);
         assert_eq!(standalone.diagnostics.len(), 1);
         assert!(!standalone.go_test_coverage.expect("coverage").complete);
@@ -620,7 +664,10 @@ mod tests {
 
     #[test]
     fn build_identity_needs_an_explicit_link_not_a_similar_package_name() {
-        for link in ["example.org/cache", "example.org/other [example.org/cache.test]"] {
+        for link in [
+            "example.org/cache",
+            "example.org/other [example.org/cache.test]",
+        ] {
             let mut events = build_failure();
             events.last_mut().expect("package failure")["FailedBuild"] = json!(link);
             let decoded = parsed(&events);
@@ -650,7 +697,13 @@ mod tests {
         };
         assert!(parsed(&events).allows_completion);
         assert!(!output.succeeded());
-        assert!(ToolOutput { exit_code: Some(0), ..output }.succeeded());
+        assert!(
+            ToolOutput {
+                exit_code: Some(0),
+                ..output
+            }
+            .succeeded()
+        );
     }
 
     #[test]
@@ -706,8 +759,17 @@ mod tests {
             text: stream(&events),
             ..ToolOutput::default()
         };
-        assert!(!output.succeeded(), "still needs independent process completion");
-        assert!(ToolOutput { exit_code: Some(0), ..output }.succeeded());
+        assert!(
+            !output.succeeded(),
+            "still needs independent process completion"
+        );
+        assert!(
+            ToolOutput {
+                exit_code: Some(0),
+                ..output
+            }
+            .succeeded()
+        );
     }
 
     #[test]
@@ -723,10 +785,26 @@ mod tests {
         assert!(decoded.allows_completion);
         let coverage = decoded.go_test_coverage.expect("coverage");
         assert_eq!(coverage.passed_tests.len(), 1);
-        assert!(coverage.passed_tests.contains(&commitment("a", Some("BenchmarkCache-8"))));
-        assert!(!coverage.passed_tests.contains(&commitment("a", Some("BenchmarkCache"))));
-        assert!(!coverage.passed_tests.contains(&commitment("a", Some("TestCache"))));
-        assert!(!coverage.passed_tests.contains(&commitment("b", Some("BenchmarkCache-8"))));
+        assert!(
+            coverage
+                .passed_tests
+                .contains(&commitment("a", Some("BenchmarkCache-8")))
+        );
+        assert!(
+            !coverage
+                .passed_tests
+                .contains(&commitment("a", Some("BenchmarkCache")))
+        );
+        assert!(
+            !coverage
+                .passed_tests
+                .contains(&commitment("a", Some("TestCache")))
+        );
+        assert!(
+            !coverage
+                .passed_tests
+                .contains(&commitment("b", Some("BenchmarkCache-8")))
+        );
     }
 
     #[test]
@@ -746,20 +824,36 @@ mod tests {
             assert!(decoded.failed);
             assert!(!decoded.allows_completion);
             assert_eq!(decoded.diagnostics.len(), 1);
-            assert_eq!(structured_error_diagnostics(&stream(&events)), decoded.diagnostics);
+            assert_eq!(
+                structured_error_diagnostics(&stream(&events)),
+                decoded.diagnostics
+            );
             let coverage = decoded.go_test_coverage.expect("coverage");
             assert!(coverage.complete);
-            assert!(coverage.failed_tests.contains(&commitment("a", Some("BenchmarkCache"))));
-            assert!(!coverage.passed_tests.contains(&commitment("a", Some("BenchmarkOther"))));
+            assert!(
+                coverage
+                    .failed_tests
+                    .contains(&commitment("a", Some("BenchmarkCache")))
+            );
+            assert!(
+                !coverage
+                    .passed_tests
+                    .contains(&commitment("a", Some("BenchmarkOther")))
+            );
             *events.last_mut().expect("terminal") = json!({"Action":"pass","Package":"a"});
-            assert!(inspect(&stream(&events)).is_err(), "failure cannot become a clean pass");
+            assert!(
+                inspect(&stream(&events)).is_err(),
+                "failure cannot become a clean pass"
+            );
         }
     }
 
     #[test]
     fn benchmark_output_skips_and_incomplete_runs_do_not_manufacture_proof() {
         for middle in [
-            vec![json!({"Action":"output","Package":"a","Test":"BenchmarkCache","Output":"PASS BenchmarkCache"})],
+            vec![
+                json!({"Action":"output","Package":"a","Test":"BenchmarkCache","Output":"PASS BenchmarkCache"}),
+            ],
             vec![json!({"Action":"skip","Package":"a","Test":"BenchmarkCache"})],
             vec![
                 json!({"Action":"skip","Package":"a","Test":"BenchmarkCache"}),
@@ -771,7 +865,13 @@ mod tests {
             events.push(json!({"Action":"pass","Package":"a"}));
             let decoded = parsed(&events);
             assert!(!decoded.allows_completion);
-            assert!(decoded.go_test_coverage.expect("coverage").passed_tests.is_empty());
+            assert!(
+                decoded
+                    .go_test_coverage
+                    .expect("coverage")
+                    .passed_tests
+                    .is_empty()
+            );
         }
         let incomplete = parsed(&[
             json!({"Action":"start","Package":"a"}),
@@ -785,7 +885,10 @@ mod tests {
                 json!({"Action":"run","Package":"a","Test":name}),
                 json!({"Action":"pass","Package":"a"}),
             ];
-            assert!(inspect(&stream(&events)).is_err(), "not a benchmark: {name}");
+            assert!(
+                inspect(&stream(&events)).is_err(),
+                "not a benchmark: {name}"
+            );
         }
         for action in ["pause", "cont"] {
             let events = [
@@ -795,10 +898,13 @@ mod tests {
             ];
             assert!(inspect(&stream(&events)).is_err());
         }
-        assert!(inspect(&stream(&[
-            json!({"Action":"start","Package":"a"}),
-            json!({"Action":"bench","Package":"a"}),
-        ])).is_err());
+        assert!(
+            inspect(&stream(&[
+                json!({"Action":"start","Package":"a"}),
+                json!({"Action":"bench","Package":"a"}),
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
@@ -823,75 +929,132 @@ mod tests {
         use crate::core::cass_error_recall::record_session_error_recall;
         use crate::core::error_diagnosis::error_recall_report;
         use crate::db::{
-            CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput,
-            DbConnection, EvidenceProducerKind,
+            CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
+            EvidenceProducerKind,
         };
 
         const WS: &str = "wsp_01234567890123456789012345";
         let db = DbConnection::open_memory()?;
         db.migrate()?;
-        db.insert_workspace(WS, &CreateWorkspaceInput {
-            path: "/tmp/cass-go-build-recall".to_owned(),
-            name: None,
-        })?;
-        let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x60_2000)).to_string();
-        db.insert_session(&session, &CreateSessionInput {
-            workspace_id: WS.to_owned(),
-            cass_session_id: "/sessions/go-build.jsonl".to_owned(),
-            source_path: None,
-            agent_name: Some("claude_code".to_owned()),
-            model: None,
-            started_at: None,
-            ended_at: None,
-            message_count: 0,
-            token_count: None,
-            content_hash: format!("blake3:{}", blake3::hash(b"go-build").to_hex()),
-            metadata_json: None,
-        })?;
-        let append = |number: u32, kind: &str, role: &str, record: Value|
-            -> Result<String, crate::db::DbError> {
-            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x60_2000 + u128::from(number))).to_string();
+        db.insert_workspace(
+            WS,
+            &CreateWorkspaceInput {
+                path: "/tmp/cass-go-build-recall".to_owned(),
+                name: None,
+            },
+        )?;
+        let session =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x60_2000)).to_string();
+        db.insert_session(
+            &session,
+            &CreateSessionInput {
+                workspace_id: WS.to_owned(),
+                cass_session_id: "/sessions/go-build.jsonl".to_owned(),
+                source_path: None,
+                agent_name: Some("claude_code".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 0,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(b"go-build").to_hex()),
+                metadata_json: None,
+            },
+        )?;
+        let append = |number: u32,
+                      kind: &str,
+                      role: &str,
+                      record: Value|
+         -> Result<String, crate::db::DbError> {
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x60_2000 + u128::from(number),
+            ))
+            .to_string();
             let excerpt = record.to_string();
-            db.insert_evidence_span(&id, &CreateEvidenceSpanInput {
-                workspace_id: WS.to_owned(), session_id: session.clone(),
-                memory_id: None, producer_kind: EvidenceProducerKind::CassImport,
-                cass_span_id: format!("go-build:{number}"), span_kind: kind.to_owned(),
-                start_line: number, end_line: number, start_byte: None, end_byte: None,
-                role: Some(role.to_owned()),
-                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
-                excerpt, metadata_json: None, inherited_redaction_classes: Vec::new(),
-            })?;
+            db.insert_evidence_span(
+                &id,
+                &CreateEvidenceSpanInput {
+                    workspace_id: WS.to_owned(),
+                    session_id: session.clone(),
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("go-build:{number}"),
+                    span_kind: kind.to_owned(),
+                    start_line: number,
+                    end_line: number,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some(role.to_owned()),
+                    content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                    excerpt,
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )?;
             Ok(id)
         };
-        let call = |number, id| append(number, "tool_call", "assistant", json!({
-            "type":"assistant","message":{"role":"assistant","content":[{
-                "type":"tool_use","id":id,"name":"Bash","input":{"command":"go test -json ./..."}
-            }]}
-        }));
-        let result = |number, id, output: String, is_error| append(number, "tool_result", "user", json!({
-            "type":"user","message":{"role":"user","content":[{
-                "type":"tool_result","tool_use_id":id,"content":output,"is_error":is_error
-            }]}
-        }));
+        let call = |number, id| {
+            append(
+                number,
+                "tool_call",
+                "assistant",
+                json!({
+                    "type":"assistant","message":{"role":"assistant","content":[{
+                        "type":"tool_use","id":id,"name":"Bash","input":{"command":"go test -json ./..."}
+                    }]}
+                }),
+            )
+        };
+        let result = |number, id, output: String, is_error| {
+            append(
+                number,
+                "tool_result",
+                "user",
+                json!({
+                    "type":"user","message":{"role":"user","content":[{
+                        "type":"tool_result","tool_use_id":id,"content":output,"is_error":is_error
+                    }]}
+                }),
+            )
+        };
         call(1, "failure")?;
         let failing = build_failure();
         let diagnostic = parsed(&failing).diagnostics.remove(0);
         let failure_id = result(2, "failure", stream(&failing), true)?;
-        let repair_id = append(3, "message", "assistant", json!({
-            "type":"assistant","message":{"role":"assistant","content":[{
-                "type":"text","text":"Fixed the cache build failure by adding the missing Cache type in cache.go."
-            }]}
-        }))?;
+        let repair_id = append(
+            3,
+            "message",
+            "assistant",
+            json!({
+                "type":"assistant","message":{"role":"assistant","content":[{
+                    "type":"text","text":"Fixed the cache build failure by adding the missing Cache type in cache.go."
+                }]}
+            }),
+        )?;
         call(4, "wrong-retry")?;
-        let wrong = result(5, "wrong-retry", stream(&passing("example.org/other")), false)?;
+        let wrong = result(
+            5,
+            "wrong-retry",
+            stream(&passing("example.org/other")),
+            false,
+        )?;
         let report = record_session_error_recall(&db, WS, &session)?;
         assert_eq!(report.failures_seen, 1);
         assert_eq!(report.resolved_failures, 0);
         assert_eq!(report.incident_cards_recorded, 0);
-        assert!(error_recall_report(&db, WS, &diagnostic)?.helpful_repairs.is_empty());
+        assert!(
+            error_recall_report(&db, WS, &diagnostic)?
+                .helpful_repairs
+                .is_empty()
+        );
 
         call(6, "valid-retry")?;
-        let proof = result(7, "valid-retry", stream(&passing("example.org/cache")), false)?;
+        let proof = result(
+            7,
+            "valid-retry",
+            stream(&passing("example.org/cache")),
+            false,
+        )?;
         let report = record_session_error_recall(&db, WS, &session)?;
         assert_eq!(report.resolved_failures, 1);
         assert_eq!(report.incident_cards_recorded, 1);
@@ -901,7 +1064,10 @@ mod tests {
         assert!(!recall.proof_links.contains(&wrong));
         let card = crate::core::incident_card::incident_card_id(WS, &failure_id);
         assert!(db.get_search_admitted_evidence_span(&card, WS)?.is_some());
-        assert_eq!(record_session_error_recall(&db, WS, &session)?.incident_cards_recorded, 0);
+        assert_eq!(
+            record_session_error_recall(&db, WS, &session)?.incident_cards_recorded,
+            0
+        );
         Ok(())
     }
 }

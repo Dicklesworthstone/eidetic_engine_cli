@@ -509,8 +509,16 @@ mod tests {
             events.push(json!({"Action":action,"Package":package,"Test":name,"Elapsed":0.01}));
         }
         let failed = results.iter().any(|(_, action)| *action == "fail");
-        events.push(json!({"Action":if failed {"fail"} else {"pass"},"Package":package,"Elapsed":0.1}));
-        output(events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"))
+        events.push(
+            json!({"Action":if failed {"fail"} else {"pass"},"Package":package,"Elapsed":0.1}),
+        );
+        output(
+            events
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     }
 
     #[test]
@@ -522,12 +530,18 @@ mod tests {
             go_suite("example.org/other", &[("TestCache", "pass")]),
             go_suite("example.org/cache", &[("TestOther", "pass")]),
             go_suite("example.org/cache", &[("testCache", "pass")]),
-            go_suite("example.org/cache", &[("TestCache", "skip"), ("TestOther", "pass")]),
+            go_suite(
+                "example.org/cache",
+                &[("TestCache", "skip"), ("TestOther", "pass")],
+            ),
         ] {
             assert!(passed.succeeded());
             assert!(!requirement.is_verified_by(&Proof::capture(&passed)));
         }
-        let passed = go_suite("example.org/cache", &[("TestOther", "pass"), ("TestCache", "pass")]);
+        let passed = go_suite(
+            "example.org/cache",
+            &[("TestOther", "pass"), ("TestCache", "pass")],
+        );
         assert!(passed.succeeded());
         assert!(requirement.is_verified_by(&Proof::capture(&passed)));
     }
@@ -554,7 +568,10 @@ mod tests {
     fn go_coverage_cannot_cross_report_families_or_ignore_process_failure() {
         let failed = go_suite("example.org/cache", &[("TestCache", "fail")]);
         let required = Requirement::capture(&failed, true);
-        for passed in [output(suite(&[("TestCache", "ok")])), lint(&[("TestCache", false)], false)] {
+        for passed in [
+            output(suite(&[("TestCache", "ok")])),
+            lint(&[("TestCache", false)], false),
+        ] {
             assert!(passed.succeeded());
             assert!(!required.is_verified_by(&Proof::capture(&passed)));
         }
@@ -575,15 +592,24 @@ mod tests {
     fn a_skipped_repeat_cannot_inherit_an_earlier_pass_of_the_same_test() {
         let required = Requirement::capture(&go_suite("a", &[("TestCache", "fail")]), true);
         for results in [
-            [("TestCache", "pass"), ("TestCache", "skip"), ("Other", "pass")],
-            [("TestCache", "skip"), ("TestCache", "pass"), ("Other", "pass")],
+            [
+                ("TestCache", "pass"),
+                ("TestCache", "skip"),
+                ("Other", "pass"),
+            ],
+            [
+                ("TestCache", "skip"),
+                ("TestCache", "pass"),
+                ("Other", "pass"),
+            ],
         ] {
             let passed = go_suite("a", &results);
             assert!(passed.succeeded());
             assert!(!required.is_verified_by(&Proof::capture(&passed)));
         }
-        assert!(required.is_verified_by(&Proof::capture(&go_suite("a", &[
-            ("TestCache", "pass"), ("TestCache", "pass")
-        ]))));
+        assert!(required.is_verified_by(&Proof::capture(&go_suite(
+            "a",
+            &[("TestCache", "pass"), ("TestCache", "pass")]
+        ))));
     }
 }

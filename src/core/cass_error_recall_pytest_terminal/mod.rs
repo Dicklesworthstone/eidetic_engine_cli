@@ -97,9 +97,7 @@ fn progress_tail(tail: &str) -> bool {
 
 fn quiet_progress(line: &str) -> bool {
     let (marks, tail) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
-    !marks.is_empty()
-        && marks.bytes().all(|byte| b".FEsxX".contains(&byte))
-        && progress_tail(tail)
+    !marks.is_empty() && marks.bytes().all(|byte| b".FEsxX".contains(&byte)) && progress_tail(tail)
 }
 
 fn test_node(node: &str) -> bool {
@@ -159,7 +157,10 @@ fn selected_count(line: &str) -> Option<u64> {
     match rest.as_slice() {
         [] => Some(total),
         [deselected, selected] => {
-            let excluded = deselected.strip_suffix(" deselected")?.parse::<u64>().ok()?;
+            let excluded = deselected
+                .strip_suffix(" deselected")?
+                .parse::<u64>()
+                .ok()?;
             let selected = selected.strip_suffix(" selected")?.parse::<u64>().ok()?;
             (excluded.checked_add(selected) == Some(total)).then_some(selected)
         }
@@ -265,9 +266,9 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
     // mode needs either pytest's progress percentage or a report boundary.
     if !session_header
         && !visible_first.contains('[')
-        && !text.lines().any(|line| {
-            banner(line) == Some("short test summary info") || totals(line).is_some()
-        })
+        && !text
+            .lines()
+            .any(|line| banner(line) == Some("short test summary info") || totals(line).is_some())
     {
         return Ok(None);
     }
@@ -424,7 +425,9 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
     let failed = !failures.is_empty() || footer.as_ref().is_some_and(Totals::failed);
     let allows_completion = execution.complete
         && !failed
-        && footer.as_ref().is_some_and(|footer| footer.get("passed") > 0);
+        && footer
+            .as_ref()
+            .is_some_and(|footer| footer.get("passed") > 0);
     let symptom = failures.first_key_value().map(|(node, (_, message))| {
         crate::policy::redact_secret_like_content(&format!("pytest failure in {node}: {message}"))
             .content
