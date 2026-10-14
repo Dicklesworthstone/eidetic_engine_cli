@@ -112,17 +112,37 @@ run_ee() {
 # written through `ee remember`, which is the whole point: a pass means
 # imported content became retrievable, not that an explicit memory did.
 TRANSCRIPT_PHRASE="the retry budget collapsed because the backoff jitter seed was shared across shards"
-# The planted negative. A suite that returned imported evidence for ANY query
-# would satisfy the positive assertion while proving nothing, so this phrase
-# -- absent from the transcript and from the store -- must NOT surface it.
-ABSENT_PHRASE="marsupial telemetry quorum rebalancing"
+# Distinctive single words from each session, used to identify WHICH session a
+# hit came from without needing span ids.
+TARGET_MARKER="jitter"
+DISTRACTOR_MARKER="descaling"
+DISTRACTOR_PHRASE="the descaling cycle stalled because the boiler thermistor was reading in fahrenheit"
 
-# `ee` rejects any EE_CASS_BINARY whose file name is not exactly `cass`.
+# WHY TWO SESSIONS, AND WHY NOT AN ABSENCE ASSERTION.
+#
+# The first version of this script imported ONE session and asserted that a
+# phrase absent from the transcript returned zero evidence hits. Measured
+# 2026-10-14 on an RCH worker, that planted negative FAILED and saved the
+# script from being vacuous: the target phrase returned 5 evidence hits and
+# the absent phrase ("marsupial telemetry quorum rebalancing") returned the
+# SAME 5, plus a session document. On a single-topic corpus this search
+# returns everything, so "the transcript phrase returns imported evidence"
+# would have passed for any string whatsoever.
+#
+# An absence assertion cannot be repaired by rewording, because the response
+# is not wrong to offer low-ranked candidates. The discriminating question is
+# whether retrieval puts the RIGHT span first. So the corpus now holds two
+# unrelated sessions and the assertions are symmetric: each query must rank
+# its own session's content at the top evidence hit. A search that returns
+# everything in a fixed order fails one of the two by construction, which an
+# absence check could never detect.
 CASS_DIR="${ROOT}/fakebin"
 CASS_BIN="${CASS_DIR}/cass"
 SESSION_PATH="${ROOT}/cass-session-transcript.jsonl"
+DISTRACTOR_PATH="${ROOT}/cass-session-distractor.jsonl"
 mkdir -p "${CASS_DIR}"
 : >"${SESSION_PATH}"
+: >"${DISTRACTOR_PATH}"
 
 cat >"${CASS_BIN}" <<FAKECASS
 #!/bin/sh
@@ -132,6 +152,7 @@ case "\$cmd" in
   sessions)
     printf '%s' '{"sessions":['
     printf '%s' '{"path":"${SESSION_PATH}","workspace":"${WS}","agent":"codex","started_at":"2026-06-18T09:00:00Z","ended_at":"2026-06-18T09:25:00Z","message_count":5,"token_count":480,"content_hash":"blake3:imported-transcript-e2e-session"}'
+    printf '%s' ',{"path":"${DISTRACTOR_PATH}","workspace":"${WS}","agent":"claude","started_at":"2026-06-18T11:00:00Z","ended_at":"2026-06-18T11:20:00Z","message_count":5,"token_count":455,"content_hash":"blake3:imported-transcript-e2e-distractor"}'
     printf '%s\n' ']}'
     ;;
   view)
@@ -147,6 +168,16 @@ case "\$cmd" in
   {"line":5,"content":"{\"role\":\"user\",\"content\":\"Nothing sensitive in this transcript.\"}","highlighted":false}
 ],"total_lines":5}
 JSON
+    elif [ "\$source_path" = "${DISTRACTOR_PATH}" ]; then
+      cat <<'JSON'
+{"path":"DISTRACTOR_PATH_PLACEHOLDER","target_line":2,"context":3,"lines":[
+  {"line":1,"content":"{\"role\":\"user\",\"content\":\"The cafe espresso machine stopped pulling a full cup this morning.\"}","highlighted":false},
+  {"line":2,"content":"{\"role\":\"assistant\",\"content\":\"Root cause: the descaling cycle stalled because the boiler thermistor was reading in fahrenheit.\"}","highlighted":true},
+  {"line":3,"content":"{\"role\":\"assistant\",\"content\":\"Fix: convert the thermistor reading to celsius before the descaling pump engages.\"}","highlighted":false},
+  {"line":4,"content":"{\"role\":\"user\",\"content\":\"Verified: a full descaling cycle completed and the cup volume recovered.\"}","highlighted":false},
+  {"line":5,"content":"{\"role\":\"user\",\"content\":\"Nothing sensitive in this transcript either.\"}","highlighted":false}
+],"total_lines":5}
+JSON
     else
       echo "unexpected cass view path: \$source_path" >&2
       exit 64
@@ -158,9 +189,11 @@ JSON
     ;;
 esac
 FAKECASS
-# The heredoc above is quoted so the transcript JSON survives verbatim; put the
-# real session path into the one line that needs it.
-sed -i.bak "s#SESSION_PATH_PLACEHOLDER#${SESSION_PATH}#" "${CASS_BIN}" && rm -f "${CASS_BIN}.bak"
+# The inner heredocs are quoted so the transcript JSON survives verbatim; put
+# the real session paths into the two lines that need them.
+sed -i.bak -e "s#SESSION_PATH_PLACEHOLDER#${SESSION_PATH}#" \
+    -e "s#DISTRACTOR_PATH_PLACEHOLDER#${DISTRACTOR_PATH}#" "${CASS_BIN}" \
+    && rm -f "${CASS_BIN}.bak"
 chmod 755 "${CASS_BIN}"
 
 # --- 1. workspace ---------------------------------------------------------
@@ -171,11 +204,11 @@ else
     event init_ok fail "init exit ${LAST_EXIT}: $(head -c 200 "${LAST_STDOUT}")"
 fi
 
-# --- 2. import the fixture session ----------------------------------------
-EE_CASS_BINARY="${CASS_BIN}" run_ee --workspace "${WS}" import cass --limit 1 --json
+# --- 2. import both fixture sessions --------------------------------------
+EE_CASS_BINARY="${CASS_BIN}" run_ee --workspace "${WS}" import cass --limit 2 --json
 IMPORT_OUT="${LAST_STDOUT}"
 if [[ "${LAST_EXIT}" -eq 0 ]] \
-    && jq -e '(.data.sessionsImported // 0) >= 1 and (.data.spansImported // 0) >= 1' \
+    && jq -e '(.data.sessionsImported // 0) >= 2 and (.data.spansImported // 0) >= 2' \
         "${IMPORT_OUT}" >/dev/null 2>&1; then
     event import_persists_sessions_and_spans pass
 else
@@ -192,24 +225,42 @@ else
     event index_rebuild_ok fail "index rebuild exit ${LAST_EXIT}: $(head -c 200 "${LAST_STDOUT}")"
 fi
 
-# --- 4. THE HEADLINE: a transcript-only phrase is retrievable -------------
+# Content of the TOP-ranked evidence hit, which is what a discriminating
+# retrieval claim actually rests on. Rank is read from result order, the same
+# order a caller consumes.
+top_evidence_content() {
+    jq -r '[(.data.results // [])[]? | select((.docId // "") | startswith("ev_"))]
+           | .[0] | ((.content // .contentPreview // .content_preview // "") | ascii_downcase)' \
+        "$1" 2>/dev/null
+}
+evidence_hit_count() {
+    jq -r '[(.data.results // [])[]? | select((.docId // "") | startswith("ev_"))] | length' \
+        "$1" 2>/dev/null || echo 0
+}
+
+# --- 4. THE HEADLINE: the target phrase ranks ITS OWN span first -----------
 run_ee search "${TRANSCRIPT_PHRASE}" --workspace "${WS}" --json
 SEARCH_OUT="${LAST_STDOUT}"
-EVIDENCE_HITS="$(jq -r '[(.data.results // [])[]? | select((.docId // "") | startswith("ev_"))] | length' "${SEARCH_OUT}" 2>/dev/null || echo 0)"
-if [[ "${LAST_EXIT}" -eq 0 && "${EVIDENCE_HITS}" != "0" ]]; then
-    event transcript_phrase_returns_imported_evidence pass "evidence_hits=${EVIDENCE_HITS}"
+TARGET_HITS="$(evidence_hit_count "${SEARCH_OUT}")"
+TARGET_TOP="$(top_evidence_content "${SEARCH_OUT}")"
+if [[ "${LAST_EXIT}" -eq 0 && "${TARGET_HITS}" != "0" && "${TARGET_TOP}" == *"${TARGET_MARKER}"* ]]; then
+    event transcript_phrase_ranks_its_own_span_first pass "evidence_hits=${TARGET_HITS}"
 else
-    event transcript_phrase_returns_imported_evidence fail "exit ${LAST_EXIT}; evidence_hits=${EVIDENCE_HITS}; docIds=$(jq -c '[(.data.results // [])[]? | .docId]' "${SEARCH_OUT}" 2>/dev/null); degraded=$(jq -c '[(.degraded // [])[] | .code]' "${SEARCH_OUT}" 2>/dev/null)"
+    event transcript_phrase_ranks_its_own_span_first fail "exit ${LAST_EXIT}; hits=${TARGET_HITS}; top content lacked '${TARGET_MARKER}'; top=$(printf '%s' "${TARGET_TOP}" | head -c 160); docIds=$(jq -c '[(.data.results // [])[]? | .docId]' "${SEARCH_OUT}" 2>/dev/null); degraded=$(jq -c '[(.degraded // [])[] | .code]' "${SEARCH_OUT}" 2>/dev/null)"
 fi
 
-# --- 5. the planted negative ---------------------------------------------
-run_ee search "${ABSENT_PHRASE}" --workspace "${WS}" --json
-ABSENT_OUT="${LAST_STDOUT}"
-ABSENT_HITS="$(jq -r '[(.data.results // [])[]? | select((.docId // "") | startswith("ev_"))] | length' "${ABSENT_OUT}" 2>/dev/null || echo -1)"
-if [[ "${ABSENT_HITS}" == "0" ]]; then
-    event absent_phrase_returns_no_evidence pass
+# --- 5. THE DISCRIMINATOR: the other phrase ranks the OTHER span first ----
+# This replaces an absence assertion that was measurably vacuous (see the
+# comment above the fixture). Two symmetric positives cannot both pass unless
+# retrieval actually responds to the query: a search that returns every span
+# in a fixed order satisfies at most one of them.
+run_ee search "${DISTRACTOR_PHRASE}" --workspace "${WS}" --json
+DISTRACTOR_OUT="${LAST_STDOUT}"
+DISTRACTOR_TOP="$(top_evidence_content "${DISTRACTOR_OUT}")"
+if [[ "${LAST_EXIT}" -eq 0 && "${DISTRACTOR_TOP}" == *"${DISTRACTOR_MARKER}"* ]]; then
+    event distractor_phrase_ranks_its_own_span_first pass
 else
-    event absent_phrase_returns_no_evidence fail "a phrase absent from the transcript surfaced ${ABSENT_HITS} evidence hit(s), so the positive assertion above is not discriminating; docIds=$(jq -c '[(.data.results // [])[]? | .docId]' "${ABSENT_OUT}" 2>/dev/null)"
+    event distractor_phrase_ranks_its_own_span_first fail "retrieval does not discriminate between two unrelated imported sessions, so the assertion above proves nothing about query relevance; top content lacked '${DISTRACTOR_MARKER}'; top=$(printf '%s' "${DISTRACTOR_TOP}" | head -c 160); docIds=$(jq -c '[(.data.results // [])[]? | .docId]' "${DISTRACTOR_OUT}" 2>/dev/null)"
 fi
 
 # --- 6. pack hydration with provenance and no invented MemoryId ----------
@@ -234,11 +285,46 @@ fi
 
 # Provenance has to NAME the stored transcript lines; a hydrated item with no
 # traceable source would satisfy the count assertion while defeating the point.
-PROVENANCE_OK="$(jq -r '[(.data.pack.items // [])[]? | select((.entityKind // "") == "evidence_span") | select(((.provenanceUri // .provenance.uri // "") | length) > 0)] | length' "${PACK_OUT}" 2>/dev/null || echo 0)"
+#
+# The fields below are the ACTUAL representation, read off a measured run on
+# 2026-10-14 rather than assumed. My first version asserted a
+# `provenanceUri`/`provenance.uri` string and failed -- not because provenance
+# was missing, but because an evidence item carries it STRUCTURALLY:
+#
+#   {"rank":1,"entityKind":"evidence_span","evidenceSpanId":"ev_...",
+#    "entityRevision":"blake3:...","sessionId":"sess_...","startLine":2,
+#    "endLine":2,"section":"evidence","content":"assistant: Root cause: ..."}
+#
+# which locates the exact stored lines more precisely than a URI would. The
+# assertion now requires the span id, the session id, a line range and the
+# entity revision together, because any one of them alone would not let a
+# reader find the source.
+PROVENANCE_OK="$(jq -r '[(.data.pack.items // [])[]?
+       | select((.entityKind // "") == "evidence_span")
+       | select(((.evidenceSpanId // "") | startswith("ev_"))
+                and ((.sessionId // "") | startswith("sess_"))
+                and ((.entityRevision // "") | length) > 0
+                and (.startLine != null) and (.endLine != null))] | length' \
+    "${PACK_OUT}" 2>/dev/null || echo 0)"
 if [[ "${PROVENANCE_OK}" != "0" ]]; then
-    event evidence_items_carry_provenance pass "with_provenance=${PROVENANCE_OK}"
+    event evidence_items_carry_provenance pass "with_full_provenance=${PROVENANCE_OK}"
 else
-    event evidence_items_carry_provenance fail "no evidence_span item exposed a provenance uri; items=$(jq -c '[(.data.pack.items // [])[]? | select((.entityKind // "") == "evidence_span")]' "${PACK_OUT}" 2>/dev/null | head -c 400)"
+    event evidence_items_carry_provenance fail "no evidence_span item carried the full span/session/line-range/revision set; items=$(jq -c '[(.data.pack.items // [])[]? | select((.entityKind // "") == "evidence_span") | {evidenceSpanId, sessionId, entityRevision, startLine, endLine}]' "${PACK_OUT}" 2>/dev/null | head -c 400)"
+fi
+
+# The content a reader actually pays tokens for must be the TRANSCRIPT line,
+# not an envelope or a placeholder. Measured: the item's content was
+# "assistant: Root cause: the retry budget collapsed because the backoff
+# jitter seed was shared across shards." -- so assert the marker survives into
+# the packed body.
+PACKED_BODY_OK="$(jq -r --arg m "${TARGET_MARKER}" '[(.data.pack.items // [])[]?
+       | select((.entityKind // "") == "evidence_span")
+       | select(((.content // "") | ascii_downcase) | contains($m))] | length' \
+    "${PACK_OUT}" 2>/dev/null || echo 0)"
+if [[ "${PACKED_BODY_OK}" != "0" ]]; then
+    event packed_evidence_body_is_the_transcript_line pass
+else
+    event packed_evidence_body_is_the_transcript_line fail "no packed evidence item's content contained '${TARGET_MARKER}'; contents=$(jq -c '[(.data.pack.items // [])[]? | select((.entityKind // "") == "evidence_span") | (.content // "")[0:90]]' "${PACK_OUT}" 2>/dev/null | head -c 400)"
 fi
 
 printf 'imported transcript retrieval e2e: %s steps, %s failures; root %s\n' \
