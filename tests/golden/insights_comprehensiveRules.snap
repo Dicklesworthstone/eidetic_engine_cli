@@ -1,0 +1,59 @@
+---
+source: src/cli/insights/mod.rs
+assertion: comprehensiveRules insight section ranks stored procedural rules by real provenance coverage and reuse evidence, never by placeholder constants
+schema:
+  item: ee.insights.comprehensive_rule.v1
+  output: ee.insights.v1
+contracts:
+  - load_comprehensive_rule_inputs reads list_procedural_rules for the resolved workspace id, then get_rule_source_memory_ids and get_rule_tags per rule; an unresolved workspace, absent database or absent workspace id each yield zero inputs rather than an error
+  - a rule is admitted only when comprehensive_rule_has_real_signal holds: non-empty source_memory_ids, or any positive/negative feedback count above zero, or any validation pass/contradiction above zero, or last_applied_at or last_validated_at present, or protected
+  - rules whose confidence, utility or importance is not finite are dropped before ranking
+  - rankingScore is 0.30*confidence + 0.25*utility + 0.20*importance + 0.06*min(provenanceCount,8) + 0.025*min(positiveFeedbackCount,12) + 0.04*min(validationPasses,12) + 0.025*maturityRank + 0.05 when protected, less 0.035*min(negativeFeedbackCount,12) and 0.05*min(validationContradictions,12), floored at 0.0
+  - maturityRank is validated=5, candidate=4, draft=3, deprecated=2, superseded=1, anything else=0
+  - ordering is rankingScore descending, then source_memory_ids length descending, validation_passes descending, positive_feedback_count descending, updated_at descending, and ruleId ascending as the total-order tiebreak
+  - rank is the 1-based position after that ordering
+  - nextCommand per item is `ee rule show <ruleId> --workspace . --json`
+  - honest empty section returned when no rule carries real signal; the section is never placeholder-backed and emits no retired_section_unavailable degradation
+  - evidence includes source=procedural_rules and algorithm=rule_provenance_reuse_rank
+evidence:
+  - ComprehensiveRuleInsightInput.rule
+  - ComprehensiveRuleInsightInput.source_memory_ids
+  - ComprehensiveRuleInsightInput.tags
+  - item.rank
+  - item.ruleId
+  - item.content
+  - item.maturity
+  - item.scope
+  - item.scopePattern
+  - item.trustClass
+  - item.protected
+  - item.confidence
+  - item.utility
+  - item.importance
+  - item.sourceMemoryIds
+  - item.provenanceCount
+  - item.positiveFeedbackCount
+  - item.negativeFeedbackCount
+  - item.validationPasses
+  - item.validationContradictions
+  - item.lastAppliedAt
+  - item.lastValidatedAt
+  - item.updatedAt
+  - item.tags
+  - item.rankingScore
+  - item.rankingBasis.formula
+  - item.rankingBasis.maturityRank
+  - item.rankingBasis.provenanceCount
+  - item.rankingBasis.feedbackCount
+  - item.rankingBasis.validationEvidenceCount
+  - item.interpretation
+  - item.nextCommand
+  - item.evidence.schema
+  - item.evidence.source
+  - item.evidence.algorithm
+  - item.evidence.sourceMemoryCount
+  - item.evidence.feedbackCount
+  - item.evidence.validationEvidenceCount
+verified_by:
+  - cargo test --lib comprehensive_rules_section_reads_real_rule_provenance -- --nocapture
+  - cargo test --lib selected_comprehensive_rules_does_not_emit_placeholder_degradation -- --nocapture
