@@ -45,9 +45,9 @@ mod test_coverage;
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
-/// V7 adds native pytest fingerprints and executed-test proof coverage. It also
-/// reconsiders older sessions for the Go/Jest decoders introduced after V6.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v7";
+/// V8 adds native Node TAP fingerprints and exact named-test retry coverage,
+/// reconsidering already imported sessions without changing their source rows.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v8";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -878,11 +878,18 @@ impl ToolOutput {
     /// Failure and completion are distinct: unrecognized stdout is neither.
     fn failed(&self) -> bool {
         outcome::failed(self)
+            || test_coverage::node::decode(&self.text)
+                .is_ok_and(|decoded| decoded.is_some_and(|decoded| decoded.output.failed))
             || test_coverage::python::decode(&self.text)
                 .is_ok_and(|decoded| decoded.is_some_and(|decoded| decoded.failed))
     }
 
     fn succeeded(&self) -> bool {
+        match test_coverage::node::decode(&self.text) {
+            Ok(Some(decoded)) if !decoded.output.allows_completion => return false,
+            Err(()) => return false,
+            _ => {}
+        }
         match test_coverage::python::decode(&self.text) {
             Ok(Some(decoded)) if !decoded.allows_completion => return false,
             Err(()) => return false,
@@ -1079,6 +1086,11 @@ fn content_text(value: &Value) -> Option<String> {
 /// class and record nothing. Messages are secret-redacted before they are
 /// canonicalized, and only masked signatures are ever stored.
 pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnostic> {
+    match test_coverage::node::decode(&output.text) {
+        Ok(Some(decoded)) => return decoded.output.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     match test_coverage::python::decode(&output.text) {
         Ok(Some(decoded)) => return decoded.diagnostics,
         Err(()) => return Vec::new(),
@@ -1169,6 +1181,11 @@ fn stable_error_code(code: &str) -> bool {
 /// diagnostic that CASS import records. Public readers can reuse this before
 /// their free-text fallback, so imported errors and later logs share a key.
 pub(crate) fn structured_error_diagnostics(text: &str) -> Vec<CanonicalDiagnostic> {
+    match test_coverage::node::decode(text) {
+        Ok(Some(decoded)) => return decoded.output.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     match test_coverage::python::decode(text) {
         Ok(Some(decoded)) => return decoded.diagnostics,
         Err(()) => return Vec::new(),
@@ -1366,6 +1383,17 @@ fn structured_output_allows_completion(text: &str) -> bool {
 /// error (with the `-->` location that follows it), else the first failing
 /// test or panic. Secret-redacted; never the whole log.
 fn symptom_line(output: &ToolOutput) -> Option<String> {
+    match test_coverage::node::decode(&output.text) {
+        Ok(Some(decoded)) => {
+            return decoded
+                .output
+                .diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.message_template.clone());
+        }
+        Err(()) => return None,
+        Ok(None) => {}
+    }
     match test_coverage::python::decode(&output.text) {
         Ok(Some(decoded)) => return decoded.symptom,
         Err(()) => return None,
