@@ -382,6 +382,35 @@ else
     event packed_evidence_body_is_the_transcript_line fail "no packed evidence item's content contained '${TARGET_MARKER}'; contents=$(jq -c '[(.data.pack.items // [])[]? | select((.entityKind // "") == "evidence_span") | (.content // "")[0:90]]' "${PACK_OUT}" 2>/dev/null | head -c 400)"
 fi
 
+# bd-16imy's bullet 4 says the pack hydrates imported evidence into a
+# "deterministic section". Nothing asserted the DETERMINISTIC half, so pack the
+# same phrase again and require the evidence section to be identical.
+#
+# Compared field by field rather than as whole envelopes, because the response
+# legitimately varies between runs (pack id, timing) while the SECTION must not.
+# The fields are the item's real representation, read off a measured run: rank,
+# evidenceSpanId, entityRevision, sessionId, startLine, endLine, section and
+# content. `jq -S` sorts keys so a key-order change cannot read as a difference.
+#
+# THE NON-EMPTY GUARD IS THE POINT. An earlier version of this bullet's
+# assertion compared run 2 to run 1 and nothing else, and a bead comment
+# correctly recorded that it "WOULD HAVE PASSED IDENTICALLY ON AN EMPTY PACK OR
+# ON THE WRONG 100" -- a criterion that cannot fail is not evidence. So this
+# fails when the section is empty, which makes equality meaningful.
+PACK_SECTION_FILTER='[(.data.pack.items // [])[]?
+       | select((.entityKind // "") == "evidence_span")
+       | {rank, evidenceSpanId, entityRevision, sessionId, startLine, endLine, section, content}]'
+PACK_SECTION_1="$(jq -S -c "${PACK_SECTION_FILTER}" "${PACK_OUT}" 2>/dev/null || echo 'ERR1')"
+run_ee pack "${TRANSCRIPT_PHRASE}" --workspace "${WS}" --json
+PACK_OUT_REPEAT="${LAST_STDOUT}"
+PACK_SECTION_2="$(jq -S -c "${PACK_SECTION_FILTER}" "${PACK_OUT_REPEAT}" 2>/dev/null || echo 'ERR2')"
+PACK_SECTION_COUNT="$(jq -r 'length' <<<"${PACK_SECTION_1}" 2>/dev/null || echo 0)"
+if [[ "${LAST_EXIT}" -eq 0 && "${PACK_SECTION_COUNT}" != "0" && "${PACK_SECTION_1}" == "${PACK_SECTION_2}" ]]; then
+    event pack_evidence_section_is_deterministic pass "items=${PACK_SECTION_COUNT} identical across two packs"
+else
+    event pack_evidence_section_is_deterministic fail "exit ${LAST_EXIT}; items=${PACK_SECTION_COUNT}; first=$(head -c 300 <<<"${PACK_SECTION_1}"); second=$(head -c 300 <<<"${PACK_SECTION_2}")"
+fi
+
 # --- 7. LEAK CANARY: bd-16imy's "denied/redacted material must not leak" ---
 #
 # THE QUERY IS DELIBERATELY BENIGN, and the first version of this check was

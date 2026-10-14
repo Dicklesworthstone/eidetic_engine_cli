@@ -72,11 +72,22 @@ fn assertion_tally(stdout: &str) -> (usize, usize) {
 }
 
 /// The script asserted this many times on 2026-10-14, MEASURED on a worker run
-/// (`SCRIPT_RC=0`, 15 assert_result events, 0 failures) rather than counted from
-/// the source. It went 14 -> 15 when `evidence_items_carry_why` was added, and
-/// it moves only when a run earns it. The floor below is lower on purpose; see
-/// the module comment.
-const OBSERVED_ASSERTION_COUNT: usize = 15;
+/// rather than counted from the source. It went 14 -> 15 when
+/// `evidence_items_carry_why` was added, and 15 -> 16 when
+/// `pack_evidence_section_is_deterministic` was added for bd-16imy's bullet 4
+/// ("deterministic section"), earned by a direct run reporting
+/// `SCRIPT_RC=0 SCRIPT_SECONDS=39`, `assert_result passes: 16`, `fails: 0`,
+/// with that event carrying `items=1 identical across two packs`.
+///
+/// Counted from a DIRECT run of the script, deliberately. Running it through
+/// this harness cannot establish the count: the harness captures the script
+/// with `Command::output()`, so a passing run prints nothing and a single
+/// `event` block that never executed would leave failures at 0 and look exactly
+/// like a pass. The floor below catches a mass skip, not one skipped event.
+///
+/// It moves only when a run earns it. The floor is lower on purpose; see the
+/// module comment.
+const OBSERVED_ASSERTION_COUNT: usize = 16;
 const MINIMUM_ASSERTION_COUNT: usize = 10;
 
 #[test]
