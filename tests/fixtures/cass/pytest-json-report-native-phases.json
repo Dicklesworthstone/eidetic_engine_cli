@@ -1,0 +1,203 @@
+{
+  "created": 0.0,
+  "duration": 0.0,
+  "exitcode": 1,
+  "root": "/fixture/pytest",
+  "environment": {},
+  "summary": {
+    "passed": 1,
+    "failed": 1,
+    "error": 2,
+    "skipped": 1,
+    "xfailed": 1,
+    "xpassed": 1,
+    "total": 7,
+    "collected": 7
+  },
+  "collectors": [
+    {
+      "nodeid": "",
+      "outcome": "passed",
+      "result": [
+        {
+          "nodeid": "test_native_phases.py",
+          "type": "Module"
+        }
+      ]
+    },
+    {
+      "nodeid": "test_native_phases.py",
+      "outcome": "passed",
+      "result": [
+        {
+          "nodeid": "test_native_phases.py::test_pass",
+          "type": "Function",
+          "lineno": 11
+        },
+        {
+          "nodeid": "test_native_phases.py::test_call_failure",
+          "type": "Function",
+          "lineno": 14
+        },
+        {
+          "nodeid": "test_native_phases.py::test_setup_failure",
+          "type": "Function",
+          "lineno": 17
+        },
+        {
+          "nodeid": "test_native_phases.py::test_teardown_failure",
+          "type": "Function",
+          "lineno": 20
+        },
+        {
+          "nodeid": "test_native_phases.py::test_skipped",
+          "type": "Function",
+          "lineno": 23
+        },
+        {
+          "nodeid": "test_native_phases.py::test_expected_failure",
+          "type": "Function",
+          "lineno": 27
+        },
+        {
+          "nodeid": "test_native_phases.py::test_unexpected_pass",
+          "type": "Function",
+          "lineno": 31
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "nodeid": "test_native_phases.py::test_pass",
+      "lineno": 11,
+      "outcome": "passed",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "passed"
+      }
+    },
+    {
+      "nodeid": "test_native_phases.py::test_call_failure",
+      "lineno": 14,
+      "outcome": "failed",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "failed",
+        "crash": {
+          "path": "test_native_phases.py",
+          "lineno": 16,
+          "message": "AssertionError: cache value mismatch\nassert False"
+        }
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "passed"
+      }
+    },
+    {
+      "nodeid": "test_native_phases.py::test_setup_failure",
+      "lineno": 17,
+      "outcome": "error",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "failed",
+        "crash": {
+          "path": "test_native_phases.py",
+          "lineno": 5,
+          "message": "RuntimeError: cache configuration missing"
+        }
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "passed"
+      }
+    },
+    {
+      "nodeid": "test_native_phases.py::test_teardown_failure",
+      "lineno": 20,
+      "outcome": "error",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "failed",
+        "crash": {
+          "path": "test_native_phases.py",
+          "lineno": 10,
+          "message": "RuntimeError: cache handle was not closed"
+        }
+      }
+    },
+    {
+      "nodeid": "test_native_phases.py::test_skipped",
+      "lineno": 23,
+      "outcome": "skipped",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "skipped"
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "passed"
+      }
+    },
+    {
+      "nodeid": "test_native_phases.py::test_expected_failure",
+      "lineno": 27,
+      "outcome": "xfailed",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "skipped",
+        "crash": {
+          "path": "test_native_phases.py",
+          "lineno": 30,
+          "message": "assert False"
+        }
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "passed"
+      }
+    },
+    {
+      "nodeid": "test_native_phases.py::test_unexpected_pass",
+      "lineno": 31,
+      "outcome": "xpassed",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "passed"
+      }
+    }
+  ]
+}

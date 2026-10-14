@@ -1,0 +1,115 @@
+{
+  "created": 0.0,
+  "duration": 0.0,
+  "exitcode": 1,
+  "root": "/fixture/pytest",
+  "environment": {},
+  "summary": {
+    "skipped": 1,
+    "xfailed": 1,
+    "passed": 1,
+    "total": 3,
+    "collected": 3
+  },
+  "collectors": [
+    {
+      "nodeid": "",
+      "outcome": "passed",
+      "result": [
+        {
+          "nodeid": "test_finalizer_mask.py",
+          "type": "Module"
+        }
+      ]
+    },
+    {
+      "nodeid": "test_finalizer_mask.py",
+      "outcome": "passed",
+      "result": [
+        {
+          "nodeid": "test_finalizer_mask.py::test_failure_before_skip",
+          "type": "Function",
+          "lineno": 12
+        },
+        {
+          "nodeid": "test_finalizer_mask.py::test_failure_before_xfail",
+          "type": "Function",
+          "lineno": 15
+        },
+        {
+          "nodeid": "test_finalizer_mask.py::test_control",
+          "type": "Function",
+          "lineno": 18
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "nodeid": "test_finalizer_mask.py::test_failure_before_skip",
+      "lineno": 12,
+      "outcome": "skipped",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "failed",
+        "crash": {
+          "path": "test_finalizer_mask.py",
+          "lineno": 14,
+          "message": "AssertionError: cache result was wrong\nassert False"
+        }
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "skipped"
+      }
+    },
+    {
+      "nodeid": "test_finalizer_mask.py::test_failure_before_xfail",
+      "lineno": 15,
+      "outcome": "xfailed",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "failed",
+        "crash": {
+          "path": "test_finalizer_mask.py",
+          "lineno": 17,
+          "message": "AssertionError: widget result was wrong\nassert False"
+        }
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "skipped",
+        "crash": {
+          "path": "test_finalizer_mask.py",
+          "lineno": 11,
+          "message": "_pytest.outcomes.XFailed: cleanup expected to fail"
+        }
+      }
+    },
+    {
+      "nodeid": "test_finalizer_mask.py::test_control",
+      "lineno": 18,
+      "outcome": "passed",
+      "setup": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "call": {
+        "duration": 0.0,
+        "outcome": "passed"
+      },
+      "teardown": {
+        "duration": 0.0,
+        "outcome": "passed"
+      }
+    }
+  ]
+}

@@ -272,8 +272,7 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
                 }
                 1 if !stage_is(1, "failed") || stage_is(2, "failed") => return Err(()),
                 2 if !stage_is(0, "failed") && !stage_is(2, "failed") => return Err(()),
-                3 | 4 if !stages.into_iter().flatten().any(|stage| stage.outcome == "skipped")
-                    || stages.into_iter().flatten().any(|stage| stage.outcome == "failed") =>
+                3 | 4 if !stages.into_iter().flatten().any(|stage| stage.outcome == "skipped") =>
                 {
                     return Err(());
                 }
@@ -284,7 +283,10 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             }) {
                 execution.passed.insert(subject);
             }
-            if matches!(category, 1 | 2) {
+            // A teardown skip/xfail can overwrite pytest's aggregate outcome
+            // after the call failed. Failed phases still own diagnostics and
+            // subject requirements; a later benign label cannot erase them.
+            if stages.into_iter().flatten().any(|stage| stage.outcome == "failed") {
                 execution.failed.insert(subject);
                 for (name, stage) in ["setup", "call", "teardown"].into_iter().zip(stages) {
                     if let Some(stage) = stage.filter(|stage| stage.outcome == "failed") {
@@ -329,3 +331,7 @@ fn retain(output: &mut CompilerOutput, keys: &mut BTreeSet<String>, stage: &str,
 #[cfg(test)]
 #[path = "cass_error_recall_pytest_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_pytest_native_tests.rs"]
+mod native_tests;
