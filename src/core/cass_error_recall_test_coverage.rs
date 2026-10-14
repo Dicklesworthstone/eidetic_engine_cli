@@ -28,6 +28,14 @@ enum ExternalExecution {
     PytestTerminal(python::Execution),
 }
 
+enum ExternalReport {
+    CommandFailure,
+    Tests {
+        allows_completion: bool,
+        execution: ExternalExecution,
+    },
+}
+
 impl ExternalExecution {
     fn has_known_failures(&self) -> bool {
         match self {
@@ -51,30 +59,34 @@ impl ExternalExecution {
     }
 }
 
-fn external_execution(text: &str) -> Result<Option<(bool, ExternalExecution)>, ()> {
+fn external_execution(text: &str) -> Result<Option<ExternalReport>, ()> {
     if let Some(decoded) = node::decode(text)? {
-        return Ok(Some((
-            decoded.output.allows_completion,
-            ExternalExecution::Node(decoded.execution),
-        )));
+        return Ok(Some(ExternalReport::Tests {
+            allows_completion: decoded.output.allows_completion,
+            execution: ExternalExecution::Node(decoded.execution),
+        }));
     }
     if let Some(decoded) = python::decode(text)? {
-        return Ok(Some((
-            decoded.allows_completion,
-            ExternalExecution::PytestTerminal(decoded.execution),
-        )));
+        // A command-level interpreter exception is not a test report with
+        // missing inventory. Preserve the existing exact-invocation proof
+        // path; refresh still cannot downgrade an already guarded test run.
+        if decoded.execution.is_command_failure() {
+            return Ok(Some(ExternalReport::CommandFailure));
+        }
+        return Ok(Some(ExternalReport::Tests {
+            allows_completion: decoded.allows_completion,
+            execution: ExternalExecution::PytestTerminal(decoded.execution),
+        }));
     }
     if let Some(decoded) = pytest::decode(text)? {
-        return Ok(Some((
-            decoded.output.allows_completion,
-            ExternalExecution::Pytest(decoded.execution),
-        )));
+        return Ok(Some(ExternalReport::Tests {
+            allows_completion: decoded.output.allows_completion,
+            execution: ExternalExecution::Pytest(decoded.execution),
+        }));
     }
-    Ok(javascript::decode(text)?.map(|decoded| {
-        (
-            decoded.output.allows_completion,
-            ExternalExecution::Javascript(decoded.execution),
-        )
+    Ok(javascript::decode(text)?.map(|decoded| ExternalReport::Tests {
+        allows_completion: decoded.output.allows_completion,
+        execution: ExternalExecution::Javascript(decoded.execution),
     }))
 }
 
@@ -83,7 +95,10 @@ pub(super) struct Requirement(structured::Requirement, Option<ExternalExecution>
 impl Requirement {
     pub(super) fn capture(output: &ToolOutput, process_complete: bool) -> Self {
         match external_execution(&output.text) {
-            Ok(Some((_, execution))) => {
+            Ok(Some(ExternalReport::CommandFailure)) => {
+                return Self(structured::Requirement::Other, None);
+            }
+            Ok(Some(ExternalReport::Tests { execution, .. })) => {
                 let required =
                     (process_complete && execution.has_known_failures()).then_some(execution);
                 return Self(structured::Requirement::Unproven, required);
@@ -109,7 +124,18 @@ impl Requirement {
 
     pub(super) fn refresh(&mut self, output: &ToolOutput, process_complete: bool) {
         match external_execution(&output.text) {
-            Ok(Some((_, execution))) => {
+            Ok(Some(ExternalReport::CommandFailure)) => {
+                // Do not parse rendered source code as a second test report,
+                // or downgrade an earlier test requirement on a later poll.
+                self.0 = if self.is_guarded() {
+                    structured::Requirement::Unproven
+                } else {
+                    structured::Requirement::Other
+                };
+                self.1 = None;
+                return;
+            }
+            Ok(Some(ExternalReport::Tests { execution, .. })) => {
                 self.0 = structured::Requirement::Unproven;
                 self.1 = (process_complete && execution.has_known_failures()).then_some(execution);
                 return;
@@ -152,7 +178,11 @@ impl Proof {
             return Self::default();
         }
         match external_execution(&output.text) {
-            Ok(Some((allows_completion, execution))) => {
+            Ok(Some(ExternalReport::CommandFailure)) => return Self::default(),
+            Ok(Some(ExternalReport::Tests {
+                allows_completion,
+                execution,
+            })) => {
                 return Self(
                     structured::Proof::default(),
                     allows_completion.then_some(execution),

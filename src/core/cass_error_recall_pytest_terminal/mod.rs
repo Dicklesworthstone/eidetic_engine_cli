@@ -1,15 +1,18 @@
-//! Native Python test reports, without a pytest plugin or JSON reporter.
+//! Native Python failures, without a pytest plugin or JSON reporter.
 //!
 //! Read test progress and the final short summary, never traceback frames,
 //! captured stdout, locals or assertion expansions. Quiet reports can supply
 //! fingerprints; only a complete named inventory can certify a repair. Exact
 //! invocation/context and independent process completion remain caller-owned.
+//! Ordinary interpreter exceptions use that exact-invocation path, without
+//! pretending that a command failure supplies an executed-test inventory.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES};
 
 mod terminal;
+mod traceback;
 mod unittest;
 
 const MAX_TESTS: usize = 1024;
@@ -49,9 +52,16 @@ pub(in crate::core::cass_error_recall) struct Execution {
     failed: BTreeSet<Subject>,
     passed: BTreeSet<Subject>,
     complete: bool,
+    // Ordinary interpreter exceptions have no test inventory. They use the
+    // caller's existing exact-command/context proof, never a fabricated test.
+    command_failure: bool,
 }
 
 impl Execution {
+    pub(super) fn is_command_failure(&self) -> bool {
+        self.command_failure
+    }
+
     pub(super) fn has_known_failures(&self) -> bool {
         self.complete && !self.failed.is_empty()
     }
@@ -257,11 +267,11 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
     let visible_first = match terminal::normalize(first) {
         Ok(first) => first,
         Err(()) if first.contains("test session starts") => return Err(()),
-        Err(()) => return Ok(None),
+        Err(()) => return Ok(traceback::inspect(text)),
     };
     let session_header = banner(&visible_first) == Some("test session starts");
     if !session_header && !quiet_progress(&visible_first) {
-        return Ok(None);
+        return Ok(traceback::inspect(text));
     }
     if text.len() > MAX_SCANNED_OUTPUT_BYTES || text.lines().count() > MAX_LINES {
         return Err(());
@@ -276,7 +286,7 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
             .lines()
             .any(|line| banner(line) == Some("short test summary info") || totals(line).is_some())
     {
-        return Ok(None);
+        return Ok(traceback::inspect(text));
     }
     let lines: Vec<_> = text.lines().collect();
     let first_index = lines
