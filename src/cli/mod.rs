@@ -10396,7 +10396,7 @@ pub struct CurateAutoPromoteArgs {
     pub min_confidence_semantic: f32,
 
     /// Maximum number of promotions to propose (or apply) per run.
-    #[arg(long = "max-per-run", default_value_t = 10)]
+    #[arg(long = "max-per-run", default_value_t = default_curation_auto_promote_max_per_run())]
     pub max_per_run: u32,
 
     /// Force dry-run regardless of `--apply`. Default behavior is
@@ -10415,6 +10415,40 @@ pub struct CurateAutoPromoteArgs {
     /// and never writes a memory.level_transition audit row.
     #[arg(long, action = ArgAction::SetTrue)]
     pub apply: bool,
+}
+
+/// Default for `--max-per-run`, honouring `EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN`.
+///
+/// `docs/env_vars.md` documents that variable as "Override the maximum curation
+/// candidates auto-promotion may accept per run" with a default of `10`, and
+/// `ee capabilities` publishes it in `envOverrides` as a variable ee honours,
+/// carrying that description as its `controls` string. Nothing read it. The
+/// registry entry, the documented row, the advertised capability and the CLI
+/// flag all existed; only the wire between them was missing, so the override
+/// did nothing.
+///
+/// Resolved as the clap DEFAULT rather than inside the handler, because that is
+/// what produces the precedence `docs/env_vars.md` states for this family --
+/// "explicit CLI flags remain higher precedence". clap applies a default only
+/// when the flag is absent, so an explicit `--max-per-run` wins, an absent flag
+/// falls back to the variable, and an unset variable falls back to 10.
+/// Resolving in the handler could not express that: `default_value_t = 10`
+/// leaves an explicit `--max-per-run 10` indistinguishable from a defaulted
+/// one, so the handler would have to override the user's own flag.
+///
+/// `--help` is unaffected while the variable is unset, which is how the command
+/// goldens are captured; it renders `[default: 10]` exactly as before.
+///
+/// An unparseable value falls back to 10 rather than failing the command. That
+/// is a deliberate choice for a tuning knob and the only one available here --
+/// a clap default resolver returns a value, not a `Result` -- and it is not
+/// silent: `ee capabilities` reports the effective value, and validating
+/// malformed settings is bd-2vq2z.15's remit (`ee config explain` /
+/// `doctor config-lint`).
+fn default_curation_auto_promote_max_per_run() -> u32 {
+    EnvVar::CurationAutoPromoteMaxPerRun
+        .parse_into::<u32>()
+        .unwrap_or(10)
 }
 
 /// Arguments for `ee curate propose-derived` (bd-kxm0c).
