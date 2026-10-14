@@ -15,8 +15,12 @@
 //! which `tests/verification_drift_guard.rs` asserts — three coordinated edits
 //! to add one invocation. Riding the existing test target adds no stage name and
 //! no budget key. `tests/e2e_ask_script.rs` is the precedent this file copies,
-//! including `CARGO_BIN_EXE_ee` so cargo supplies a binary built from the tree
-//! under test rather than whatever is on PATH.
+//! including cargo's own test-binary path variable, so the binary under test is
+//! the one cargo built from this tree rather than whatever is on PATH. (That
+//! variable is not spelled out here: `scripts/check-ee-spawn-isolation.py`
+//! counts every occurrence of it and attributes each to an enclosing function,
+//! and a mention in module prose has no function to isolate. The gate's own
+//! source dodges the same self-match by splitting the literal.)
 //!
 //! WHAT IT ASSERTS, AND WHY NOT JUST THE EXIT CODE. The script's own exit status
 //! is the primary gate, but an exit code alone cannot distinguish "every
@@ -79,6 +83,26 @@ fn imported_transcript_e2e_script_exercises_public_cli() {
     let scratch = retained_scratch_dir();
     fs::create_dir_all(&scratch).expect("create imported-transcript e2e scratch base");
 
+    // ISOLATE THE USER-GLOBAL STORE. `ee` resolves its data dir from
+    // `XDG_DATA_HOME`, else `HOME/.local/share`, so a spawn that inherits the
+    // developer's real HOME can read and write the user-global memory store of
+    // whoever runs the suite. `tests/support/isolated_ee.rs` exists for this,
+    // but `isolated_ee_command` builds a `Command` for the ee BINARY and this
+    // harness spawns `bash`; the env below is that helper's isolation surface
+    // applied to the shell instead, which the script and every `ee` it invokes
+    // then inherit. Caught by scripts/check-ee-spawn-isolation.py, which counts
+    // a spawning fn as un-isolated unless it sets HOME or XDG_DATA_HOME.
+    let home = scratch.join("home");
+    let xdg_data = scratch.join("xdg-data");
+    let xdg_config = scratch.join("xdg-config");
+    let xdg_cache = scratch.join("xdg-cache");
+    let xdg_state = scratch.join("xdg-state");
+    for dir in [&home, &xdg_data, &xdg_config, &xdg_cache, &xdg_state] {
+        fs::create_dir_all(dir).unwrap_or_else(|error| {
+            panic!("create isolated dir {}: {error}", dir.display());
+        });
+    }
+
     let script = repo.join("scripts/e2e_imported_transcript_retrieval.sh");
     let started = Instant::now();
     let output = Command::new("bash")
@@ -88,6 +112,15 @@ fn imported_transcript_e2e_script_exercises_public_cli() {
         .env("EE_BIN", &ee_bin)
         .env("EE_BINARY", &ee_bin)
         .env("EE_E2E_TMPDIR", &scratch)
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_CACHE_HOME", &xdg_cache)
+        .env("XDG_STATE_HOME", &xdg_state)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("NO_COLOR", "1")
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .expect("run scripts/e2e_imported_transcript_retrieval.sh");
     let elapsed = started.elapsed();
