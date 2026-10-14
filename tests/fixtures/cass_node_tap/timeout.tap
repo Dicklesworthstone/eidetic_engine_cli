@@ -1,0 +1,20 @@
+TAP version 13
+# Subtest: deadline
+not ok 1 - deadline
+  ---
+  duration_ms: 5.5206
+  type: 'test'
+  location: '/mnt/data/node-tap-probe/timeout.test.cjs:2:1'
+  failureType: 'testTimeoutFailure'
+  error: 'test timed out after 5ms'
+  code: 'ERR_TEST_FAILURE'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 0
+# fail 0
+# cancelled 1
+# skipped 0
+# todo 0
+# duration_ms 81.232461

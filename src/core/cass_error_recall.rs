@@ -45,9 +45,9 @@ mod test_coverage;
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
-/// V8 adds native Node TAP fingerprints and exact named-test retry coverage,
+/// V9 adds hierarchical Node TAP coverage, including nested suites and subtests,
 /// reconsidering already imported sessions without changing their source rows.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v8";
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v9";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -232,7 +232,7 @@ impl InFlightInvocation {
         let overflow =
             self.output.text.len().saturating_add(chunk.text.len()) > MAX_SCANNED_OUTPUT_BYTES;
         self.output_truncated |= overflow;
-        let veto = self.output.failed() || chunk.failed() || overflow;
+        let previous_failure = self.output.failed();
         let mut end = chunk
             .text
             .len()
@@ -243,6 +243,15 @@ impl InFlightInvocation {
         // Chunks are contiguous stdout/stderr, not separate messages. Inserting
         // a newline could conceal a failure/instruction split across reads.
         self.output.text.push_str(&chunk.text[..end]);
+        // A chunk may begin inside TAP's quoted diagnostics, including an
+        // expected TODO failure. Select the family after joining the prefix
+        // (the header itself can span polls), not from an isolated chunk.
+        let chunk_failed = if self.output.text.trim_start().starts_with("TAP version") {
+            chunk.metadata_failed()
+        } else {
+            chunk.failed()
+        };
+        let veto = previous_failure || chunk_failed || overflow;
         self.output.is_error = if veto { Some(true) } else { chunk.is_error };
         self.output.exit_code = chunk.exit_code;
     }
@@ -875,20 +884,36 @@ pub(crate) struct ToolOutput {
 }
 
 impl ToolOutput {
+    fn metadata_failed(&self) -> bool {
+        self.is_error == Some(true) || self.exit_code.is_some_and(|code| code != 0)
+    }
+
     /// Failure and completion are distinct: unrecognized stdout is neither.
     fn failed(&self) -> bool {
+        match test_coverage::node::decode(&self.text) {
+            Ok(Some(decoded)) => return self.metadata_failed() || decoded.output.failed,
+            // A partial native diagnostic is data, not generic shell stderr.
+            // Completion still fails closed until the whole report validates.
+            Err(()) => return self.metadata_failed(),
+            Ok(None) => {}
+        }
         outcome::failed(self)
-            || test_coverage::node::decode(&self.text)
-                .is_ok_and(|decoded| decoded.is_some_and(|decoded| decoded.output.failed))
             || test_coverage::python::decode(&self.text)
                 .is_ok_and(|decoded| decoded.is_some_and(|decoded| decoded.failed))
     }
 
     fn succeeded(&self) -> bool {
         match test_coverage::node::decode(&self.text) {
-            Ok(Some(decoded)) if !decoded.output.allows_completion => return false,
+            Ok(Some(decoded)) => {
+                // Exit-looking lines inside TAP comments/YAML cannot supply
+                // process completion. Codex wrappers are already decoded into
+                // exit_code; Claude supplies an explicit tool result status.
+                return decoded.output.allows_completion
+                    && (self.is_error == Some(false) || self.exit_code == Some(0))
+                    && outcome::succeeded(self);
+            }
             Err(()) => return false,
-            _ => {}
+            Ok(None) => {}
         }
         match test_coverage::python::decode(&self.text) {
             Ok(Some(decoded)) if !decoded.allows_completion => return false,
