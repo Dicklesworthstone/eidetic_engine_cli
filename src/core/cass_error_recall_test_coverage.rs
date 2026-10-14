@@ -84,10 +84,12 @@ fn external_execution(text: &str) -> Result<Option<ExternalReport>, ()> {
             execution: ExternalExecution::Pytest(decoded.execution),
         }));
     }
-    Ok(javascript::decode(text)?.map(|decoded| ExternalReport::Tests {
-        allows_completion: decoded.output.allows_completion,
-        execution: ExternalExecution::Javascript(decoded.execution),
-    }))
+    Ok(
+        javascript::decode(text)?.map(|decoded| ExternalReport::Tests {
+            allows_completion: decoded.output.allows_completion,
+            execution: ExternalExecution::Javascript(decoded.execution),
+        }),
+    )
 }
 
 pub(super) struct Requirement(structured::Requirement, Option<ExternalExecution>);

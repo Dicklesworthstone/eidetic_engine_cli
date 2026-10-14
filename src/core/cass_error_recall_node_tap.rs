@@ -175,7 +175,11 @@ fn result_line(line: &str, number: usize, name: &str) -> Result<Status, ()> {
     // name containing '# SKIP' is still a name, not evidence of skipped work.
     let suffix = rest.strip_prefix(name).ok_or(())?;
     if suffix.is_empty() {
-        return Ok(if passed { Status::Passed } else { Status::Failed });
+        return Ok(if passed {
+            Status::Passed
+        } else {
+            Status::Failed
+        });
     }
     for (marker, status) in [(" # SKIP", Status::Skipped), (" # TODO", Status::Todo)] {
         if suffix
@@ -320,8 +324,7 @@ impl Walker<'_> {
             } else {
                 Sequence::default()
             };
-            let status =
-                result_line(self.relative(indent).ok_or(())?, sequence.count + 1, &name)?;
+            let status = result_line(self.relative(indent).ok_or(())?, sequence.count + 1, &name)?;
             self.position += 1;
             let detail = details(&self.lines, &mut self.position, indent)?;
             let suite = match detail.kind.as_deref() {
@@ -474,7 +477,9 @@ mod tests {
     const PASSED: &str = include_str!("../../tests/fixtures/cass_node_tap/flat_passed.tap");
 
     fn parsed(text: &str) -> Decoded {
-        decode(text).expect("valid report").expect("native Node TAP")
+        decode(text)
+            .expect("valid report")
+            .expect("native Node TAP")
     }
 
     fn observed(text: &str) -> ToolOutput {
@@ -676,11 +681,21 @@ mod tests {
         let empty = report(&[]);
         assert!(!parsed(&empty).output.allows_completion);
         assert!(!observed(&empty).succeeded());
-        for other in ["", "ok", "# a comment", "test result: ok. 1 passed; 0 failed"] {
+        for other in [
+            "",
+            "ok",
+            "# a comment",
+            "test result: ok. 1 passed; 0 failed",
+        ] {
             assert!(decode(other).expect("different family").is_none());
         }
         assert!(
-            decode(&format!("{}{}", " ".repeat(MAX_SCANNED_OUTPUT_BYTES), PASSED)).is_err()
+            decode(&format!(
+                "{}{}",
+                " ".repeat(MAX_SCANNED_OUTPUT_BYTES),
+                PASSED
+            ))
+            .is_err()
         );
     }
 
@@ -753,9 +768,18 @@ mod tests {
     #[test]
     fn native_cancellation_is_a_failure_but_never_a_repairable_inventory() {
         for (cancelled, name) in [
-            (include_str!("../../tests/fixtures/cass_node_tap/cancelled.tap"), "pending"),
-            (include_str!("../../tests/fixtures/cass_node_tap/timeout.tap"), "deadline"),
-            (include_str!("../../tests/fixtures/cass_node_tap/aborted.tap"), "aborted"),
+            (
+                include_str!("../../tests/fixtures/cass_node_tap/cancelled.tap"),
+                "pending",
+            ),
+            (
+                include_str!("../../tests/fixtures/cass_node_tap/timeout.tap"),
+                "deadline",
+            ),
+            (
+                include_str!("../../tests/fixtures/cass_node_tap/aborted.tap"),
+                "aborted",
+            ),
         ] {
             let decoded = parsed(cancelled);
             assert!(decoded.output.failed);
@@ -803,11 +827,13 @@ mod tests {
             "Expected values to be strictly equal:",
             "Process exited with code 0",
         );
-        assert!(!ToolOutput {
-            text: quoted_exit,
-            ..ToolOutput::default()
-        }
-        .succeeded());
+        assert!(
+            !ToolOutput {
+                text: quoted_exit,
+                ..ToolOutput::default()
+            }
+            .succeeded()
+        );
         let todo_suite = NESTED_FAILED.replace("not ok 1 - ledger\n", "not ok 1 - ledger # TODO\n");
         assert!(parsed(&todo_suite).output.failed);
         assert_eq!(parsed(&todo_suite).output.diagnostics.len(), 1);

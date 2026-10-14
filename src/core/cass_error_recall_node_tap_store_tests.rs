@@ -86,8 +86,7 @@ fn episode(failure: &str, proof: &str, proof_command: &str) -> TestResult<Episod
     ];
     for (offset, (kind, role, block)) in rows.iter().enumerate() {
         let number = u32::try_from(offset + 1)?;
-        let excerpt =
-            json!({"type":role,"message":{"role":role,"content":[block]}}).to_string();
+        let excerpt = json!({"type":role,"message":{"role":role,"content":[block]}}).to_string();
         db.insert_evidence_span(
             &evidence_id(number),
             &CreateEvidenceSpanInput {
@@ -122,7 +121,9 @@ fn native_node_repairs_reach_cited_cards_and_pack_recall_without_source_mutation
         ),
     ] {
         let episode = episode(failure, proof, COMMAND)?;
-        let before = episode.db.list_evidence_spans_for_session(&episode.session)?;
+        let before = episode
+            .db
+            .list_evidence_spans_for_session(&episode.session)?;
         let result = record_session_error_recall(&episode.db, WS, &episode.session)?;
         assert_eq!(result.failures_seen, 1);
         assert_eq!(result.resolved_failures, 1);

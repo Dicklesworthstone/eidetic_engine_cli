@@ -8,8 +8,8 @@
 use std::collections::BTreeSet;
 
 use super::{
-    CanonicalDiagnostic, Decoded, Execution, MAX_DIAGNOSTICS_PER_FAILURE,
-    MAX_SCANNED_OUTPUT_BYTES, terminal,
+    CanonicalDiagnostic, Decoded, Execution, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES,
+    terminal,
 };
 
 const HEADER: &str = "Traceback (most recent call last):";
@@ -44,7 +44,11 @@ fn exception_line(line: &str) -> bool {
         || name.ends_with("Exception")
         || matches!(
             name,
-            "KeyboardInterrupt" | "SystemExit" | "GeneratorExit" | "StopIteration" | "StopAsyncIteration"
+            "KeyboardInterrupt"
+                | "SystemExit"
+                | "GeneratorExit"
+                | "StopIteration"
+                | "StopAsyncIteration"
         )
 }
 
@@ -57,7 +61,9 @@ fn frame(line: &str) -> bool {
     };
     let (number, function) = position
         .split_once(", in ")
-        .map_or((position, None), |(number, function)| (number, Some(function)));
+        .map_or((position, None), |(number, function)| {
+            (number, Some(function))
+        });
     !path.is_empty()
         && !number.is_empty()
         && number.bytes().all(|byte| byte.is_ascii_digit())
@@ -108,9 +114,7 @@ fn summaries(text: &str) -> Option<Vec<&str>> {
                 if frames > MAX_FRAMES {
                     return None;
                 }
-            } else if section_frames > 0
-                && (line.starts_with("    ") || repeated_frames(line))
-            {
+            } else if section_frames > 0 && (line.starts_with("    ") || repeated_frames(line)) {
                 // The interpreter indents rendered source and locals. Never
                 // scan their text for exception types or instruction snippets.
             } else {
@@ -206,7 +210,9 @@ mod tests {
     };
 
     fn traceback(summary: &str) -> String {
-        format!("{HEADER}\n  File \"/private/project/task.py\", line 7, in <module>\n    private_source_sentinel()\n    ~~~~~~~~~~~~~~~~~~~~~~~^^\n{summary}\n")
+        format!(
+            "{HEADER}\n  File \"/private/project/task.py\", line 7, in <module>\n    private_source_sentinel()\n    ~~~~~~~~~~~~~~~~~~~~~~~^^\n{summary}\n"
+        )
     }
 
     #[test]
@@ -250,7 +256,10 @@ mod tests {
             text.replace("ValueError", "\u{1b}[31mValueError\u{1b}[0m"),
         ] {
             assert_eq!(
-                super::super::decode(&rendered).unwrap().unwrap().diagnostics,
+                super::super::decode(&rendered)
+                    .unwrap()
+                    .unwrap()
+                    .diagnostics,
                 expected
             );
         }
