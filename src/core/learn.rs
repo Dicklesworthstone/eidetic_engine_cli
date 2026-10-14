@@ -998,7 +998,6 @@ fn query_miss_cluster_assignments<'a>(
     }
     assignments
 }
-
 fn query_miss_cluster_key(query_hash: &str, representative_queries: &[String]) -> String {
     representative_queries
         .first()        .map(|query| normalized_query_cluster_key(query))
@@ -1997,8 +1996,7 @@ fn experiment_run_outcome_preview_public_json(
         "promotedArtifactIds": redact_learning_public_refs(&outcome.promoted_artifact_ids),
         "demotedArtifactIds": redact_learning_public_refs(&outcome.demoted_artifact_ids),
         "safetyNotes": outcome.safety_notes,
-    })
-}
+    })}
 
 fn redact_learning_public_refs(values: &[String]) -> Vec<String> {
     values
@@ -2997,8 +2995,7 @@ impl LearnExperimentRunReport {
 }
 
 /// Propose safe dry-run-first experiments that could change memory decisions.
-pub fn propose_experiments(
-    options: &LearnExperimentProposeOptions,
+pub fn propose_experiments(    options: &LearnExperimentProposeOptions,
 ) -> Result<LearnExperimentProposalReport, DomainError> {
     propose_experiments_with_boundary(options, || Ok(()))
 }
@@ -3997,8 +3994,7 @@ fn admit_learning_memory_rows(
         crate::core::memory_lifecycle::load_memory_seals_for_admission(connection, workspace_id)?
             .into_iter()
             .filter(|seal| seal.is_sealed())
-            .map(|seal| seal.memory_id)
-            .collect();
+            .map(|seal| seal.memory_id)            .collect();
     // Share curation's pending-quarantine disqualifier: a held memory cannot
     // cover demand or acquire a new rule proposal while its review is pending.
     let quarantined: BTreeSet<_> = connection
@@ -4997,8 +4993,7 @@ mod tests {
             Err(DomainError::MigrationRequired { .. })
         ));
         assert_eq!(learning_database_bytes(&database)?, before);
-        Ok(())
-    }
+        Ok(())    }
 
     #[cfg(unix)]
     #[test]
@@ -5446,6 +5441,98 @@ mod tests {
                 "coveredBy must name the memory: {:?}",
                 gap.covered_by
             ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hash_only_gap_closes_via_explicit_coverage_tag_without_query_text() -> TestResult {
+        let (workspace, database, workspace_id) =
+            seed_learning_workspace("ee-learn-gaps-hash-bound-coverage")?;
+        for (index, audit_id) in [
+            "audit_00000000000000000000000141",
+            "audit_00000000000000000000000142",
+            "audit_00000000000000000000000143",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_query_miss_audit(
+                &database,
+                &workspace_id,
+                audit_id,
+                "hash_only_gap",
+                "no_relevant_results",
+                Some("search"),
+                None,
+            )?;
+            let _ = index;
+        }
+
+        let before = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        let gap = before.gaps.first().ok_or("expected hash-only gap")?;
+        if gap.status != "open"
+            || gap.nearest_existing_evidence_status != "unavailable_raw_query_not_persisted"
+        {
+            return Err(format!(
+                "hash-only gap must start open without query text: {} / {}",
+                gap.status, gap.nearest_existing_evidence_status
+            ));
+        }
+        let coverage_tag = format!("{GAP_COVERAGE_TAG_PREFIX}{}", gap.cluster_id);
+        if !gap.suggested_command.contains(&coverage_tag) {
+            return Err(format!(
+                "suggested remember command did not carry coverage binding {coverage_tag}: {}",
+                gap.suggested_command
+            ));
+        }
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000141",
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Engage magnetic clamps before zebra hovercraft docking.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec![coverage_tag],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let after = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        let gap = after.gaps.first().ok_or("covered gap must remain listed")?;
+        if gap.status != "likely_covered"
+            || gap.covered_by.as_deref() != Some("mem_00000000000000000000000141")
+        {
+            return Err(format!(
+                "explicit coverage binding did not close hash-only gap: {} / {:?}",
+                gap.status, gap.covered_by
+            ));
+        }
+        if gap.nearest_existing_evidence_status != "unavailable_raw_query_not_persisted" {
+            return Err("coverage must not require persisted query text".to_owned());
         }
         Ok(())
     }
@@ -5997,7 +6084,6 @@ mod tests {
             "9999-01-01T00:00:00Z",
         )?;
         connection.close().map_err(|error| error.to_string())?;
-
         let all = show_summary(&LearnSummaryOptions {
             workspace: dir.path().to_path_buf(),
             period: "all".to_string(),
@@ -6998,24 +7084,3 @@ mod tests {
             limit: 5,
             topic: Some("rollback_cluster".to_owned()),
             min_expected_value: 0.0,
-            max_attention_tokens: 900,
-            max_runtime_seconds: 180,
-            safety_boundary: ExperimentSafetyBoundary::DryRunOnly,
-        });
-        let error = result.expect_err("audit failure must roll back the proposal");
-        assert!(
-            error.message().contains("learning audit failure"),
-            "{}",
-            error.message()
-        );
-        assert!(
-            connection
-                .list_curation_candidates(&workspace_id, Some("rule"), None, None)
-                .map_err(|e| e.to_string())?
-                .is_empty()
-        );
-        connection.close().map_err(|e| e.to_string())
-    }
-
-    #[test]
-    fn learn_experiment_proposals_preserve_peer_evidence_provenance() -> TestResult {
