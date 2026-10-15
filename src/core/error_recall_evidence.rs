@@ -13,10 +13,7 @@ use std::collections::BTreeSet;
 use crate::db::{DbConnection, HydratedEvidenceSpan, Result};
 use crate::models::EvidenceId;
 
-use super::{ErrorRecallReport, RECALLED_REPAIR_TEXT_CHARS, RecalledRepairEvidence, memory};
-
-#[path = "error_recall_feedback.rs"]
-mod feedback;
+use super::{ErrorRecallReport, RECALLED_REPAIR_TEXT_CHARS, RecalledRepairEvidence, feedback, memory};
 
 const HYDRATION_BATCH: usize = 128;
 
@@ -359,3 +356,7 @@ mod tests {
 #[cfg(test)]
 #[path = "error_recall_feedback_tests.rs"]
 mod feedback_tests;
+
+#[cfg(test)]
+#[path = "error_recall_pack_feedback_tests.rs"]
+mod pack_feedback_tests;

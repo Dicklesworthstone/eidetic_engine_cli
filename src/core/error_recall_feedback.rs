@@ -63,3 +63,49 @@ pub(super) fn harmful_targets(
     }
     Ok(harmful)
 }
+
+/// Select the existing bounded positive-repair window after excluding exact
+/// harmful observations. Filtering after LIMIT would allow a rejected prefix
+/// to hide every useful target. Never materialize the whole link history or
+/// any source body to make this decision. Both sides use the fingerprint/
+/// kind/outcome/target lookup shape; rejected index entries may still need to
+/// be scanned, so the output limit is not a constant-total-work guarantee.
+///
+/// The legacy history selector remains unchanged for diagnostic consumers.
+/// Preserve its 128-byte projection and exact aliases, including embedded NUL.
+/// An oversized target becomes an empty, inadmissible sentinel, not a prefix.
+pub(super) fn pack_targets(
+    connection: &DbConnection,
+    workspace_id: &str,
+    fingerprint_key: &str,
+    limit: u32,
+) -> Result<Vec<String>> {
+    if limit > super::PACK_RECALL_TARGET_LIMIT {
+        return Err(unavailable());
+    }
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let rows = connection
+        .query(
+            "SELECT CASE WHEN length(CAST(h.target_id AS BLOB)) <= 128 THEN h.target_id ELSE '' END FROM error_repair_links AS h WHERE h.workspace_id = ?1 AND h.fingerprint_key = ?2 AND h.link_kind = 'repair' AND h.outcome = 'helpful' AND NOT EXISTS (SELECT 1 FROM error_repair_links AS n WHERE n.workspace_id = ?1 AND n.fingerprint_key = ?2 AND n.link_kind = 'repair' AND n.outcome = 'harmful' AND n.target_id = h.target_id) ORDER BY h.target_id ASC LIMIT ?3",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(fingerprint_key.to_owned()),
+                Value::Integer(i64::from(limit)),
+            ],
+        )
+        .map_err(|_| unavailable())?;
+    if rows.len() > limit as usize {
+        return Err(unavailable());
+    }
+    rows.into_iter()
+        .map(|row| {
+            row.get(0)
+                .and_then(Value::as_str)
+                .filter(|id| id.len() <= 128)
+                .map(str::to_owned)
+                .ok_or_else(unavailable)
+        })
+        .collect()
+}

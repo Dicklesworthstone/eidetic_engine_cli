@@ -31,6 +31,9 @@ mod near;
 #[path = "error_recall_evidence.rs"]
 mod evidence;
 
+#[path = "error_recall_feedback.rs"]
+mod feedback;
+
 #[path = "error_recall_memory.rs"]
 mod memory;
 
@@ -300,7 +303,13 @@ impl ErrorRecallReport {
             "error recall {recall_status} fingerprint:{} layer:{} derived:{}",
             self.fingerprint_key, self.layer, self.derived_document
         );
+        // Keep both outcomes in the structured history, but do not present a
+        // conflicted target as unqualified positive advice in derived text.
+        let harmful: BTreeSet<_> = self.harmful_repairs.iter().map(String::as_str).collect();
         for repair in &self.helpful_repairs {
+            if harmful.contains(repair.as_str()) {
+                continue;
+            }
             seed.push_str(" helpful_repair:");
             seed.push_str(repair);
         }
@@ -378,8 +387,12 @@ const PACK_RECALL_QUERY_BYTES: usize = 4096;
 /// Build the bounded error-recall expansion used by `ee pack --error-log`.
 ///
 /// A common fingerprint can have repairs from thousands of imported sessions.
-/// Interactive packing reads at most 32 helpful targets through the existing
-/// fingerprint index, then hydrates only that window. Within it, admitted
+/// Interactive packing returns at most 32 uncontested helpful targets through
+/// the fingerprint index, then hydrates only that window. Harmful observations
+/// for the exact workspace/error/target exclude a repair before LIMIT; a long
+/// rejected prefix cannot crowd out later useful repairs. This bounds returned
+/// rows and hydration, not the index entries skipped during selection.
+/// Within the selected window, admitted
 /// incident cards precede raw repair turns, with canonical id order breaking
 /// ties. Current native memory repairs, then native procedural-rule repairs,
 /// fill the remaining excerpt slots under the same shared query budget.
@@ -412,7 +425,8 @@ pub fn pack_error_recall_query_seed(
     let outcome = diagnose_error(connection, workspace_id, canonical)?;
     let metadata = ErrorRecallReport::from_outcome(&fingerprint, &outcome).query_seed();
     let mut seed = bounded_pack_recall_text(&metadata, PACK_RECALL_METADATA_BYTES);
-    let targets = connection.list_helpful_error_repair_target_ids(
+    let targets = feedback::pack_targets(
+        connection,
         workspace_id,
         &outcome.fingerprint_key,
         PACK_RECALL_TARGET_LIMIT,
@@ -550,6 +564,8 @@ const RECALLED_REPAIR_TEXT_CHARS: usize = 400;
 /// 128-ID batches. Repairs cross normal search admission; proof locators
 /// require a live session in the same workspace, without exposing proof text.
 /// Targets that are not canonical evidence ids remain with their own readers.
+/// Conflicted repairs are withheld using current feedback in the same source
+/// snapshot. Structured helpful/harmful history is preserved, not rewritten.
 /// The complete report is preserved rather than cut to the pack limit.
 ///
 /// # Errors
