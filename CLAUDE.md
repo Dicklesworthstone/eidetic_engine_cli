@@ -133,7 +133,29 @@ buys the warm target dir, since a `--job` reuses that worker's own directory.
 Pinning is not a capacity escape. A pinned request that cannot be admitted is
 refused whole — `[RCH-I001] requested worker set [...] refused (selection error:
 queue_timeout)`, exit 103 — because `--worker` declines to fall back. So pin to a
-worker you have just seen idle in `rch status`, and keep the retry for the 103.
+worker you have just seen idle in `rch status`.
+
+**TWO DIFFERENT 103s, and only one is worth retrying.** Read the failure class
+before the retry loop runs, because they are indistinguishable by exit code:
+
+| refusal | meaning | action |
+|---|---|---|
+| `(selection error: queue_timeout)` | transient: nothing free right now | retry is appropriate |
+| `(no_free_slots)` naming a core estimate | ARITHMETIC: the request cannot fit that worker | retrying is useless; change `-j` or drop the pin |
+
+Measured 2026-10-14: a `-j 2` job pinned to a worker that had since shrunk from
+3 slots to 1 was refused five times by a retry loop, roughly six minutes spent
+on a request that could never be admitted. The refusal named its own fix every
+time:
+
+    [RCH-I003] requested worker set [vmi1152480] refused (no_free_slots);
+    'vmi1152480' has 1 total slot(s) but the request is estimated at 2 core(s);
+    pass -j 1 (or fewer), or request a larger worker
+
+Slots hot-reload, so a worker that hosted `-j 2` an hour ago may not now. A
+retry loop that re-sends an unchanged pinned request is the blind-retry
+anti-pattern this file already warns about, one layer down: it picks the same
+box because you told it to.
 
 **Before retrying a 103 at all, cap the job with `-j N`.** A dispatch's core
 estimate must fit ONE worker's `total_slots`, and `rch status`'s fleet-wide
