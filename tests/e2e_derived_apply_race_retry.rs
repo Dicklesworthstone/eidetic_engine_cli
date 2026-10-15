@@ -426,18 +426,52 @@ fn candidate_id_from_propose(
         })
 }
 
+/// Pick an unlinked evidence span that `propose-derived` will actually accept.
+///
+/// PREFERS an ADMITTED span. `propose-derived` revalidates admission and
+/// refuses with "source evidence is missing or not admitted by the current
+/// evidence-security policy" (src/core/curate.rs:8306) when
+/// `get_derivation_admitted_evidence_span` returns None, and
+/// `row_admission_verdict` requires `search_eligibility` and
+/// `pack_eligibility` to be `admitted` for a `cass_import` producer. An import
+/// legitimately quarantines some records -- a sibling flow on this shard
+/// observed `quarantineReasons {"record_kind:metadata": 1}` -- so "first
+/// unlinked" could hand the command a span it is correct to refuse.
+///
+/// That predicate predates the verdict: `row_admission_verdict` arrived in
+/// e013e2afc (2026-10-07, "decide admission once at write time"), and this
+/// selector was written 2026-05-24.
+///
+/// Falls back to the previous behaviour when the projection does not carry the
+/// eligibility columns, so a narrower `db inspect` cannot turn this into "no
+/// span found" -- the fallback keeps whatever the old code would have picked.
 fn first_unlinked_evidence_span_id(inspect: &Value, log_path: &Path) -> Result<String, String> {
-    inspect
+    let rows = inspect
         .pointer("/data/report/rows")
         .and_then(Value::as_array)
-        .and_then(|rows| {
-            rows.iter().find_map(|row| {
-                let values = row.get("values")?;
-                let id = values.get("id")?.as_str()?;
-                let memory_id_is_null = values.get("memory_id").is_none_or(Value::is_null);
-                memory_id_is_null.then(|| id.to_owned())
-            })
+        .ok_or_else(|| {
+            format!(
+                "db inspect evidence_spans exposed no rows array; JSONL artifact: {}",
+                log_path.display()
+            )
+        })?;
+
+    let unlinked = |values: &Value| values.get("memory_id").is_none_or(Value::is_null);
+    let admitted = |values: &Value| {
+        values.get("search_eligibility").and_then(Value::as_str) == Some("admitted")
+            && values.get("pack_eligibility").and_then(Value::as_str) == Some("admitted")
+    };
+
+    let pick = |want_admitted: bool| {
+        rows.iter().find_map(|row| {
+            let values = row.get("values")?;
+            let id = values.get("id")?.as_str()?;
+            (unlinked(values) && (!want_admitted || admitted(values))).then(|| id.to_owned())
         })
+    };
+
+    pick(true)
+        .or_else(|| pick(false))
         .ok_or_else(|| {
             format!(
                 "db inspect evidence_spans did not expose an unlinked evidence span; JSONL artifact: {}",
