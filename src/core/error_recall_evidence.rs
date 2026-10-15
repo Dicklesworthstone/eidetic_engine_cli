@@ -1,7 +1,7 @@
 //! Batch hydration for complete error-recall evidence reports.
 //!
-//! The report may enumerate a long repair history, but each read owns at most
-//! 128 hydrated spans and their live sessions. Canonical target identities are
+//! The report may enumerate a long repair history. Final presentation hydrates
+//! at most 128 spans per batch. Canonical target identities are
 //! deduplicated before I/O. Repairs cross normal search admission; quarantined
 //! proof bodies are never rendered. Output is still complete, not silently
 //! truncated to the interactive pack limit. Conflicted repairs are withheld

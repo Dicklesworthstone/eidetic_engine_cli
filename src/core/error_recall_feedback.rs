@@ -22,7 +22,7 @@ const FEEDBACK_BATCH: usize = 128;
 fn unavailable() -> DbError {
     DbError::MalformedRow {
         operation: DbOperation::Query,
-        message: "Could not verify repair feedback; positive guidance withheld".to_owned(),
+        message: "Could not verify repair feedback or source proof; positive guidance withheld".to_owned(),
     }
 }
 
@@ -69,53 +69,76 @@ pub(super) fn harmful_targets(
     Ok(harmful)
 }
 
-/// Select the existing bounded positive-repair window after excluding exact
-/// harmful observations. Filtering after LIMIT would allow a rejected prefix
-/// to hide every useful target. Never materialize the whole link history or
-/// any source body to make this decision. Both sides use the fingerprint/
-/// kind/outcome/target lookup shape; rejected index entries may still need to
-/// be scanned, so the output limit is not a constant-total-work guarantee.
+/// Select up to the existing target budget after feedback and live proof checks.
+/// Page metadata in canonical order, refilling only slots refused by the gate.
+/// The server retains the raw target ordering key; only a bounded link ID crosses
+/// the cursor boundary, so an oversized target never has to be hydrated to page.
+/// One gate reuses bounded per-session verdicts throughout this source snapshot.
 ///
-/// Current CASS-derived claims also require a valid source-backed failure/repair
-/// arc. This initial window is not refilled after proof refusals.
-/// The legacy history selector remains unchanged for diagnostic consumers.
-/// Preserve its 128-byte projection and exact aliases, including embedded NUL.
-/// An oversized target becomes an empty, inadmissible sentinel, not a prefix.
+/// Diagnostic history and the legacy 128-byte target projection stay unchanged.
+/// Empty sentinels and exact aliases retain their old sampling semantics. Total
+/// index scans and source interpretation are not constant work or a latency SLO.
 pub(super) fn pack_targets(
     connection: &DbConnection,
     workspace_id: &str,
     fingerprint_key: &str,
     limit: u32,
 ) -> Result<Vec<String>> {
+    let mut gate = Gate::new(connection, workspace_id, fingerprint_key);
+    pack_targets_with(connection, workspace_id, fingerprint_key, limit, |ids| gate.withheld(ids))
+}
+
+fn pack_targets_with(
+    connection: &DbConnection,
+    workspace_id: &str,
+    fingerprint_key: &str,
+    limit: u32,
+    mut withheld: impl FnMut(&[&str]) -> Result<BTreeSet<String>>,
+) -> Result<Vec<String>> {
     if limit > super::PACK_RECALL_TARGET_LIMIT {
         return Err(unavailable());
     }
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let rows = connection
-        .query(
-            "SELECT CASE WHEN length(CAST(h.target_id AS BLOB)) <= 128 THEN h.target_id ELSE '' END FROM error_repair_links AS h WHERE h.workspace_id = ?1 AND h.fingerprint_key = ?2 AND h.link_kind = 'repair' AND h.outcome = 'helpful' AND NOT EXISTS (SELECT 1 FROM error_repair_links AS n WHERE n.workspace_id = ?1 AND n.fingerprint_key = ?2 AND n.link_kind = 'repair' AND n.outcome = 'harmful' AND n.target_id = h.target_id) ORDER BY h.target_id ASC LIMIT ?3",
+    let mut output = Vec::new();
+    let mut after = String::new();
+    while output.len() < limit as usize {
+        let remaining = limit as usize - output.len();
+        let rows = connection.query(
+            "SELECT CASE WHEN length(CAST(h.target_id AS BLOB)) <= 128 THEN h.target_id ELSE '' END, CASE WHEN length(CAST(h.link_id AS BLOB)) <= 128 THEN h.link_id ELSE '' END FROM error_repair_links AS h WHERE h.workspace_id = ?1 AND h.fingerprint_key = ?2 AND h.link_kind = 'repair' AND h.outcome = 'helpful' AND (?4 = '' OR h.target_id > (SELECT c.target_id FROM error_repair_links AS c WHERE c.workspace_id = ?1 AND c.fingerprint_key = ?2 AND c.link_id = ?4) OR (h.target_id = (SELECT c.target_id FROM error_repair_links AS c WHERE c.workspace_id = ?1 AND c.fingerprint_key = ?2 AND c.link_id = ?4) AND h.link_id > ?4)) AND NOT EXISTS (SELECT 1 FROM error_repair_links AS n WHERE n.workspace_id = ?1 AND n.fingerprint_key = ?2 AND n.link_kind = 'repair' AND n.outcome = 'harmful' AND n.target_id = h.target_id) ORDER BY h.target_id ASC, h.link_id ASC LIMIT ?3",
             &[
                 Value::Text(workspace_id.to_owned()),
                 Value::Text(fingerprint_key.to_owned()),
-                Value::Integer(i64::from(limit)),
+                Value::Integer(i64::try_from(remaining).map_err(|_| unavailable())?),
+                Value::Text(after.clone()),
             ],
-        )
-        .map_err(|_| unavailable())?;
-    if rows.len() > limit as usize {
-        return Err(unavailable());
+        ).map_err(|_| unavailable())?;
+        if rows.is_empty() {
+            break;
+        }
+        if rows.len() > remaining {
+            return Err(unavailable());
+        }
+        let page_complete = rows.len() == remaining;
+        let mut targets = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let target = row.get(0).and_then(Value::as_str)
+                .filter(|id| id.len() <= 128).ok_or_else(unavailable)?;
+            let cursor = row.get(1).and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 128).ok_or_else(unavailable)?;
+            if cursor == after {
+                return Err(unavailable());
+            }
+            targets.push(target.to_owned());
+            after = cursor.to_owned();
+        }
+        let refs: Vec<_> = targets.iter().map(String::as_str).collect();
+        let rejected = withheld(&refs)?;
+        if rejected.iter().any(|id| !refs.contains(&id.as_str())) {
+            return Err(unavailable());
+        }
+        output.extend(targets.into_iter().filter(|id| !rejected.contains(id)));
+        if !page_complete {
+            break;
+        }
     }
-    let targets = rows.into_iter()
-        .map(|row| {
-            row.get(0)
-                .and_then(Value::as_str)
-                .filter(|id| id.len() <= 128)
-                .map(str::to_owned)
-                .ok_or_else(unavailable)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let refs: Vec<_> = targets.iter().map(String::as_str).collect();
-    let withheld = Gate::new(connection, workspace_id, fingerprint_key).withheld(&refs)?;
-    Ok(targets.into_iter().filter(|id| !withheld.contains(id)).collect())
+    Ok(output)
 }

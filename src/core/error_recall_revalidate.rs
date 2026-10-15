@@ -37,6 +37,8 @@ pub(in crate::core::error_diagnosis) struct Gate<'a> {
     // Only verdicts are cached, never transcript bodies. Bounded eviction can
     // cause a later reread; it must not turn a valid claim into a refusal.
     sessions: BTreeMap<String, BTreeSet<Claim>>,
+    #[cfg(test)]
+    source_reads: usize,
 }
 
 impl<'a> Gate<'a> {
@@ -50,6 +52,8 @@ impl<'a> Gate<'a> {
             workspace,
             fingerprint,
             sessions: BTreeMap::new(),
+            #[cfg(test)]
+            source_reads: 0,
         }
     }
 
@@ -137,6 +141,8 @@ impl<'a> Gate<'a> {
         }
         if !self.sessions.contains_key(session) {
             let claims = session_claims(self.connection, self.workspace, self.fingerprint, session)?;
+            #[cfg(test)]
+            { self.source_reads += 1; }
             if self.sessions.len() == MAX_CACHED_SESSIONS {
                 self.sessions.pop_first();
             }
@@ -178,13 +184,13 @@ fn session_claims(
     if row_count == 0 || row_count > MAX_SOURCE_ROWS || byte_count > MAX_SOURCE_BYTES {
         return Ok(BTreeSet::new());
     }
-    let Some(session) = connection.get_session(session_id)? else {
+    let Some(session) = connection.get_session(session_id).map_err(|_| unavailable())? else {
         return Ok(BTreeSet::new());
     };
     if session.id != session_id || session.workspace_id != workspace {
         return Ok(BTreeSet::new());
     }
-    let stored = connection.list_evidence_spans_for_session(session_id)?;
+    let stored = connection.list_evidence_spans_for_session(session_id).map_err(|_| unavailable())?;
     if stored.len() != row_count
         || stored.iter().fold(0_usize, |sum, span| sum.saturating_add(source_bytes(span))) != byte_count
     {
