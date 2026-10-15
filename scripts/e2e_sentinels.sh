@@ -135,7 +135,18 @@ step "remember a sentinel-backed contract-shaped fact"
 mem="$(ee_json remember \
     "The demo.v1 schema defines the memoryId field." \
     --workspace "$WS" --level procedural --kind fact \
-    --sentinel "json_schema_contains_field:docs/schemas/demo.v1.json#memoryId" \
+    `# The selector is a DOTTED PATH FROM THE ROOT, not a field name to search` \
+    `# for. json_has_dotted_field (src/core/sentinel.rs:347) walks each segment` \
+    `# with .get(), and its own unit test pins that: "schema.json#a.b" against` \
+    `# {"a":{"b":1}} is Satisfied. The fixture seeded at line 47 declares the` \
+    `# field under "properties", so "#memoryId" asked for a ROOT key that never` \
+    `# existed and the sentinel was Unsatisfied from the start.` \
+    `#` \
+    `# That broke BOTH paired assertions, in opposite ways: step 13 ("passes` \
+    `# while the field is present") failed, and step 14 ("fails once the field` \
+    `# is absent") passed VACUOUSLY -- the status was already "fail" before` \
+    `# anything was removed, so it proved nothing about removal.` \
+    --sentinel "json_schema_contains_field:docs/schemas/demo.v1.json#properties.memoryId" \
     --json)"
 assert_jq "$mem" '.success == true' "remember succeeds"
 mem_id="$(printf '%s' "$mem" | jq -r '.data.memory_id // empty')"
