@@ -78,9 +78,14 @@ impl Execution {
                 && proof.failed.is_empty()
                 && required.verified_by(&proof.passed_modules);
         }
+        // Named Python subjects include their module/class/parameter identity,
+        // unlike an anonymous libtest suite whose inventory is its identity.
+        // A repair may add regressions, but cannot remove original subjects or
+        // turn a failing test into a skip. Keep the whole retry failure-free.
         self.has_known_failures()
             && proof.complete
-            && self.inventory == proof.inventory
+            && proof.failed.is_empty()
+            && self.inventory.is_subset(&proof.inventory)
             && self.failed.is_subset(&proof.passed)
     }
 }
@@ -505,3 +510,6 @@ mod tests;
 
 #[cfg(test)]
 mod store_tests;
+
+#[cfg(test)]
+mod growth_tests;

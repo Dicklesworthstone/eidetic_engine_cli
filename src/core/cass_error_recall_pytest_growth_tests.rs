@@ -36,9 +36,7 @@ fn output(report: &Value) -> ToolOutput {
     ToolOutput {
         text: report.to_string(),
         is_error: Some(false),
-        exit_code: report["exitcode"]
-            .as_i64()
-            .and_then(|code| i32::try_from(code).ok()),
+        exit_code: report["exitcode"].as_i64(),
     }
 }
 
