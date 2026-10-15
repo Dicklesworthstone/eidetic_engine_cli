@@ -13,6 +13,9 @@ use super::super::{
 };
 use super::{failure_signal, inline_candidates_from_message, resolution_signal, text};
 
+#[path = "curate_session_arc_boundary.rs"]
+mod boundary;
+
 #[path = "curate_session_arc_dedup.rs"]
 mod dedup;
 
@@ -104,6 +107,9 @@ pub(super) fn candidates(
             // interleaved failure just because CASS grouped that work into one
             // window. Unnamed or overlapping subjects remain causal barriers.
             retain_disjoint_failures(&mut pending, message.as_ref());
+            // A completed inline episode must not swallow a later unfinished
+            // failure just because both were captured in this source window.
+            boundary::retain_tail(&mut pending, span, message.as_ref());
             continue;
         }
         let topic = review_topic_key(message.as_ref());
