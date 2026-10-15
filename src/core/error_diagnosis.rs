@@ -34,6 +34,9 @@ mod evidence;
 #[path = "error_recall_memory.rs"]
 mod memory;
 
+#[path = "error_recall_rules.rs"]
+mod rules;
+
 /// Persist (or refresh) the error fingerprint for a canonicalized diagnostic,
 /// linking the failing error class into the truth store so recall can later find
 /// it (ADR-0057 writer). Returns the stored row. Redaction-safe: stores the
@@ -378,7 +381,8 @@ const PACK_RECALL_QUERY_BYTES: usize = 4096;
 /// Interactive packing reads at most 32 helpful targets through the existing
 /// fingerprint index, then hydrates only that window. Within it, admitted
 /// incident cards precede raw repair turns, with canonical id order breaking
-/// ties. Current native memory repairs fill the remaining excerpt slots.
+/// ties. Current native memory repairs, then native procedural-rule repairs,
+/// fill the remaining excerpt slots under the same shared query budget.
 /// This is a deterministic bounded sample, not a history-wide recency ranking.
 /// The complete diagnostic report remains available separately via
 /// [`error_recall_report`].
@@ -387,6 +391,9 @@ const PACK_RECALL_QUERY_BYTES: usize = 4096;
 /// Native memory bodies require current workspace, lifecycle, seal and review
 /// authority, then complete-source screening before excerpting. Canonical
 /// memory ids remain locator-only hints without granting admission authority.
+/// Native rules require their own lifecycle, review and lineage admission;
+/// no source-memory surrogate is invented, and path-scoped rules need explicit
+/// task targets that this error-only expansion does not supply.
 /// One snapshot covers every read; a caller-owned transaction stays owned by
 /// its caller. Proof locators and arbitrary link metadata never become text.
 /// The final expansion is at most 4096 UTF-8 bytes and four distinct excerpts.
@@ -412,6 +419,7 @@ pub fn pack_error_recall_query_seed(
     )?;
     let mut evidence_ids = Vec::new();
     let mut memory_ids = Vec::new();
+    let mut rule_ids = Vec::new();
     for target in &targets {
         if target
             .parse::<crate::models::EvidenceId>()
@@ -423,6 +431,11 @@ pub fn pack_error_recall_query_seed(
             .is_ok_and(|id| id.to_string() == *target)
         {
             memory_ids.push(target.as_str());
+        } else if target
+            .parse::<crate::models::RuleId>()
+            .is_ok_and(|id| id.to_string() == *target)
+        {
+            rule_ids.push(target.as_str());
         }
     }
     let mut evidence = connection.get_evidence_spans_with_sessions(&evidence_ids)?;
@@ -464,6 +477,18 @@ pub fn pack_error_recall_query_seed(
     for memory_id in memory_ids.into_iter().take(PACK_RECALL_EXCERPT_LIMIT) {
         if !expanded_memories.contains(memory_id) {
             append_pack_recall_fragment(&mut seed, " helpful_repair:", memory_id);
+        }
+    }
+    if excerpts.len() < PACK_RECALL_EXCERPT_LIMIT {
+        for (id, text) in rules::read(connection, workspace_id, &rule_ids, reference_time)? {
+            if excerpts.len() == PACK_RECALL_EXCERPT_LIMIT {
+                break;
+            }
+            if !excerpts.insert(text.clone()) {
+                continue;
+            }
+            append_pack_recall_fragment(&mut seed, " helpful_repair:", &id);
+            append_pack_recall_fragment(&mut seed, "\nprior fix: ", &text);
         }
     }
     snapshot.finish()?;
