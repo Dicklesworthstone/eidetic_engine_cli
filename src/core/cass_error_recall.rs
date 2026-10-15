@@ -229,29 +229,34 @@ struct InFlightInvocation {
 
 impl InFlightInvocation {
     fn append(&mut self, chunk: ToolOutput) {
+        // Once bytes have been omitted, do not splice a later poll into the
+        // retained prefix (including a gap left by a truncated UTF-8 scalar).
+        let remaining = if self.output_truncated {
+            0
+        } else {
+            MAX_SCANNED_OUTPUT_BYTES.saturating_sub(self.output.text.len())
+        };
         let overflow =
             self.output.text.len().saturating_add(chunk.text.len()) > MAX_SCANNED_OUTPUT_BYTES;
         self.output_truncated |= overflow;
-        let previous_failure = self.output.failed();
-        let mut end = chunk
-            .text
-            .len()
-            .min(MAX_SCANNED_OUTPUT_BYTES.saturating_sub(self.output.text.len()));
+        // A poll boundary is not a record or line boundary. In particular,
+        // "Exit code " is not a malformed terminal status until the process
+        // finishes, and a chunk beginning inside JSON/TAP/nextest captured
+        // output cannot be interpreted as standalone shell stderr. Latch
+        // only independent metadata; the retained complete byte stream owns
+        // diagnostic and completion interpretation at each observation.
+        let previous_failure = self.output.metadata_failed();
+        let mut end = chunk.text.len().min(remaining);
         while !chunk.text.is_char_boundary(end) {
             end -= 1;
         }
         // Chunks are contiguous stdout/stderr, not separate messages. Inserting
         // a newline could conceal a failure/instruction split across reads.
         self.output.text.push_str(&chunk.text[..end]);
-        // A chunk may begin inside TAP's quoted diagnostics, including an
-        // expected TODO failure. Select the family after joining the prefix
-        // (the header itself can span polls), not from an isolated chunk.
-        let chunk_failed = if self.output.text.trim_start().starts_with("TAP version") {
-            chunk.metadata_failed()
-        } else {
-            chunk.failed()
-        };
-        let veto = previous_failure || chunk_failed || overflow;
+        // Real nonzero exits and tool-level errors cannot be undone by a
+        // later optimistic poll. Text failures remain in the buffer and must
+        // pass the existing whole-report validators before any repair credit.
+        let veto = previous_failure || chunk.metadata_failed() || overflow;
         self.output.is_error = if veto { Some(true) } else { chunk.is_error };
         self.output.exit_code = chunk.exit_code;
     }
@@ -1534,3 +1539,7 @@ mod write_tests;
 #[cfg(test)]
 #[path = "cass_error_recall_libtest_store_tests.rs"]
 mod libtest_store_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_stream_tests.rs"]
+mod stream_tests;
