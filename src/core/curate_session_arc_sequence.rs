@@ -11,7 +11,7 @@ use super::super::{
     ReviewSessionCandidate, StoredEvidenceSpan, StoredSession, build_session_arc_candidate_pair,
     review_topic_key, session_arc_span_order,
 };
-use super::{failure_signal, inline_candidates, resolution_signal, text};
+use super::{failure_signal, inline_candidates_from_message, resolution_signal, text};
 
 struct PendingFailure<'a> {
     source: &'a StoredEvidenceSpan,
@@ -85,7 +85,7 @@ pub(super) fn candidates(
             pending.clear();
             continue;
         };
-        let inline = inline_candidates(workspace_id, session, std::slice::from_ref(span));
+        let inline = inline_candidates_from_message(workspace_id, session, span, message.as_ref());
         if !inline.is_empty() {
             // A contradicted window cannot supply a verified inline lesson
             // either. Keep its bytes intact and abstain, rather than assign a
@@ -159,10 +159,7 @@ pub(super) fn candidates(
 /// repair cannot make an anonymous failure independent of an older episode.
 /// Retained failures require an explicit resource match on their eventual
 /// repair; markers, coarse topics and pronouns cannot jump across completed work.
-fn retain_disjoint_failures(
-    pending: &mut BTreeMap<FailureKey, PendingFailure<'_>>,
-    message: &str,
-) {
+fn retain_disjoint_failures(pending: &mut BTreeMap<FailureKey, PendingFailure<'_>>, message: &str) {
     if pending.is_empty() {
         return;
     }
@@ -437,13 +434,12 @@ fn append_pairs(
     emitted: &mut BTreeSet<String>,
     candidates: Vec<ReviewSessionCandidate>,
 ) {
-    // Builders emit anti-pattern/rule pairs in order. Deduplicate both or
-    // neither, preserving content-bound IDs and reciprocal metadata.
-    //
-    // `as_chunks::<2>().0` is the complete-pairs half, so a trailing odd
-    // candidate is still dropped exactly as `chunks_exact(2)` dropped it
-    // (bd-4aw2d: clippy::chunks_exact_to_as_chunks, the last lib blocker).
-    for pair in candidates.as_chunks::<2>().0 {
+    // Consume complete owned pairs so accepting a lesson does not clone its
+    // content and full provenance package. As before, discard an odd tail and
+    // deduplicate both endpoints or neither, preserving reciprocal identities.
+    let mut candidates = candidates.into_iter();
+    while let (Some(left), Some(right)) = (candidates.next(), candidates.next()) {
+        let pair = [left, right];
         if pair
             .iter()
             .any(|candidate| emitted.contains(&candidate.candidate_id))
@@ -452,7 +448,7 @@ fn append_pairs(
         }
         for candidate in pair {
             emitted.insert(candidate.candidate_id.clone());
-            output.push(candidate.clone());
+            output.push(candidate);
         }
     }
 }
@@ -464,3 +460,7 @@ mod tests;
 #[cfg(test)]
 #[path = "curate_session_arc_interleaving_tests.rs"]
 mod interleaving_tests;
+
+#[cfg(test)]
+#[path = "curate_session_arc_sequence_cost_tests.rs"]
+mod cost_tests;
