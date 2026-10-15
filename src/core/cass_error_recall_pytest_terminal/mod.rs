@@ -81,12 +81,14 @@ impl Execution {
         // Named Python subjects include their module/class/parameter identity,
         // unlike an anonymous libtest suite whose inventory is its identity.
         // A repair may add regressions, but cannot remove original subjects or
-        // turn a failing test into a skip. Keep the whole retry failure-free.
+        // turn a previously passing or failing test into a skip/expected
+        // outcome. Inventory membership is not execution coverage.
         self.has_known_failures()
             && proof.complete
             && proof.failed.is_empty()
             && self.inventory.is_subset(&proof.inventory)
             && self.failed.is_subset(&proof.passed)
+            && self.passed.is_subset(&proof.passed)
     }
 }
 
