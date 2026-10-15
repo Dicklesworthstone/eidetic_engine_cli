@@ -118,15 +118,15 @@ mod tests {
                 "evidenceSpanId":"ev_a"
             })),
             Ok(PackSelectionIdentity::Native {
-                kind: kind.expect("native branches always have a kind"),
-                entity_id,
+                kind: "evidence_span",
+                entity_id: "ev_a",
             })
         );
         assert_eq!(
             classify(&json!({"entityKind":"rule", "entityId":"rul_a"})),
             Ok(PackSelectionIdentity::Native {
-                kind: kind.expect("native branches always have a kind"),
-                entity_id,
+                kind: "rule",
+                entity_id: "rul_a",
             })
         );
     }
