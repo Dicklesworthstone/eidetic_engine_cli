@@ -347,7 +347,10 @@
         "freshness"
       ],
       "oneOf": [
-        { "required": ["memoryId"] },
+        {
+          "required": ["memoryId"],
+          "not": { "required": ["entityKind"] }
+        },
         {
           "required": ["entityKind", "entityId", "evidenceSpanId", "entityRevision"],
           "properties": { "entityKind": { "const": "evidence_span" } },
