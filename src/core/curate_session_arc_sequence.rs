@@ -96,11 +96,21 @@ pub(super) fn candidates(
             continue;
         };
         let inline = inline_candidates_from_message(workspace_id, session, span, message.as_ref());
-        if !inline.is_empty() {
+        if !inline.is_empty() || boundary::straddles_episodes(message.as_ref()) {
             // A contradicted window cannot supply a verified inline lesson
             // either. Keep its bytes intact and abstain, rather than assign a
             // later report to one of several possible repairs inside it.
             if !trailer_veto {
+                // The opening repair may complete an earlier window before
+                // this window starts its own next (possibly unfinished) work.
+                let prefix = boundary::prefix_pairs(
+                    workspace_id,
+                    session,
+                    &mut pending,
+                    span,
+                    message.as_ref(),
+                );
+                append_pairs(&mut output, &mut emitted, prefix);
                 append_pairs(&mut output, &mut emitted, inline);
             }
             // Completed work on another named subject must not erase an
@@ -125,26 +135,17 @@ pub(super) fn candidates(
             if let Some(key) = key
                 && let Some(failure) = pending.remove(&key)
             {
-                let pair_topic = if key.0 != "noise" && key.0 == topic {
-                    key.0
-                } else {
-                    review_topic_key(&format!("{} {}", failure.message, message))
-                };
-                // Only the display projection changes. Provenance still binds
-                // the complete original stored records, including JSON escapes.
-                let mut failure_source = failure.source.clone();
-                failure_source.excerpt = failure.message.into_owned();
-                let mut repair_source = span.clone();
-                repair_source.excerpt = message.into_owned();
                 append_pairs(
                     &mut output,
                     &mut emitted,
-                    build_session_arc_candidate_pair(
+                    boundary::build_pair(
                         workspace_id,
                         session,
-                        &pair_topic,
-                        &failure_source,
-                        &repair_source,
+                        failure,
+                        key.0,
+                        span,
+                        message,
+                        &topic,
                     ),
                 );
             }
