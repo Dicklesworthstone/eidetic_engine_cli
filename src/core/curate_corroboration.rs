@@ -89,7 +89,8 @@ impl ReviewCorroboration {
 
     fn confidence(&self) -> f32 {
         match self.sessions.len() {
-            0 | 1 => 0.6,
+            0 => 0.0,
+            1 => 0.6,
             2 => 0.7,
             _ => 0.8,
         }
@@ -502,7 +503,7 @@ pub(super) fn score_candidates(
                 .collect::<Vec<_>>()
                 .join("; ");
             if proof.sessions.is_empty() {
-                candidate.reason.push_str(" Single-session heuristic only: complete corroboration could not be established under the admission and read bounds.");
+                candidate.reason.push_str(" Abstaining: the anchor session could not be verified as complete corroboration under the admission and read bounds.");
             } else {
                 candidate.reason.push_str(&format!(
                     " Bounded exact corroboration: {} independently identified session(s), heuristic confidence {:.2}; not a calibrated probability or exhaustive consensus. {}",
@@ -672,10 +673,15 @@ pub(super) fn validate_draft(
         .as_ref()
         .filter(|proof| proof.recorded())
     else {
-        if candidate.candidate_type == CandidateType::CreateDerivedMemory.as_str()
+        let unverified_review_score = candidate.corroboration.is_some()
             && [candidate.confidence, candidate.proposed_confidence]
                 .into_iter()
-                .any(|score| !score.is_finite() || score > 0.6)
+                .any(|score| !score.is_finite() || score > 0.0);
+        if candidate.candidate_type == CandidateType::CreateDerivedMemory.as_str()
+            && (unverified_review_score
+                || [candidate.confidence, candidate.proposed_confidence]
+                    .into_iter()
+                    .any(|score| !score.is_finite() || score > 0.6))
         {
             // This draft type is emitted only by the review-session producer.
             // Historical rows return before draft insertion and keep their
