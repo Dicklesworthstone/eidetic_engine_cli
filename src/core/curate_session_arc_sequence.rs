@@ -5,13 +5,17 @@
 //! never changes an evidence ID, hash, source locator, or durable excerpt.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use super::super::{
     ReviewSessionCandidate, StoredEvidenceSpan, StoredSession, build_session_arc_candidate_pair,
     review_topic_key, session_arc_span_order,
 };
 use super::{failure_signal, inline_candidates_from_message, resolution_signal, text};
+
+#[path = "curate_session_arc_subject_index.rs"]
+mod subject_index;
+use subject_index::PendingFailures;
 
 struct PendingFailure<'a> {
     source: &'a StoredEvidenceSpan,
@@ -76,7 +80,7 @@ pub(super) fn candidates(
 
     let mut output = Vec::new();
     let mut emitted = BTreeSet::new();
-    let mut pending = BTreeMap::<FailureKey, PendingFailure<'_>>::new();
+    let mut pending = PendingFailures::default();
     for (span, message, trailer_veto) in observation_groups(ordered.into_iter()) {
         let Some(message) = message else {
             // Do not establish a causal link across a record whose conversation
@@ -159,7 +163,7 @@ pub(super) fn candidates(
 /// repair cannot make an anonymous failure independent of an older episode.
 /// Retained failures require an explicit resource match on their eventual
 /// repair; markers, coarse topics and pronouns cannot jump across completed work.
-fn retain_disjoint_failures(pending: &mut BTreeMap<FailureKey, PendingFailure<'_>>, message: &str) {
+fn retain_disjoint_failures(pending: &mut PendingFailures<'_>, message: &str) {
     if pending.is_empty() {
         return;
     }
@@ -172,14 +176,7 @@ fn retain_disjoint_failures(pending: &mut BTreeMap<FailureKey, PendingFailure<'_
         }
         observed.extend(resources);
     }
-    pending.retain(|(_, resources), failure| {
-        let independent =
-            !resources.is_empty() && !observed.is_empty() && resources.is_disjoint(&observed);
-        if independent {
-            failure.requires_resource_match = true;
-        }
-        independent
-    });
+    pending.retain_disjoint(&observed);
 }
 
 /// A topic is only a coarse hint. Concrete source identities keep interleaved
@@ -188,19 +185,21 @@ fn retain_disjoint_failures(pending: &mut BTreeMap<FailureKey, PendingFailure<'_
 pub(super) type FailureKey = (String, BTreeSet<String>);
 
 fn matching_failure(
-    pending: &BTreeMap<FailureKey, PendingFailure<'_>>,
+    pending: &PendingFailures<'_>,
     topic: &str,
     message: &str,
     repair: &StoredEvidenceSpan,
     resources: &BTreeSet<String>,
 ) -> Option<FailureKey> {
-    let eligible: Vec<_> = pending
-        .iter()
-        .filter(|(key, failure)| {
+    let eligible = pending.eligible(
+        topic,
+        resources,
+        message.to_ascii_lowercase().contains("fix:"),
+        |key, failure| {
             precedes(failure.source, repair)
                 && (!failure.requires_resource_match || !resources.is_disjoint(&key.1))
-        })
-        .collect();
+        },
+    );
     let subjects: Vec<_> = eligible.iter().map(|(key, _)| *key).collect();
     let anchored = subjects.iter().any(|key| !resources.is_disjoint(&key.1));
     if !anchored && message.to_ascii_lowercase().contains("fix:") {
