@@ -103,7 +103,7 @@ LEARN_CMD="cargo test --test quartz_ledger"
 LEARN_STDERR="Error: database is locked (SQLITE_BUSY) on fixtures/quartz.db"
 LEARN_PACK_QUERY="fix the flaky quartz-ledger integration shard"
 CONCURRENT_WRITERS=6
-PROBE_USER_AGENT="OpenAI File Downloader, XaiImageApiFetch/1.0"
+PROBE_USER_AGENT="ee-release-probe (+https://github.com/Dicklesworthstone/eidetic_engine_cli)"
 
 # Run one ee command, capturing stdout to <cap>/<name>.json and the exit code
 # to <cap>/<name>.exit. stderr goes to <cap>/<name>.stderr.
