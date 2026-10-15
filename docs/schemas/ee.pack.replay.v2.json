@@ -353,12 +353,16 @@
         },
         {
           "required": ["entityKind", "entityId", "evidenceSpanId", "entityRevision"],
-          "properties": { "entityKind": { "const": "evidence_span" } },
+          "properties": {
+            "entityKind": { "const": "evidence_span" }
+          },
           "not": { "required": ["memoryId"] }
         },
         {
           "required": ["entityKind", "entityId", "entityRevision"],
-          "properties": { "entityKind": { "const": "rule" } },
+          "properties": {
+            "entityKind": { "const": "rule" }
+          },
           "not": { "required": ["memoryId"] }
         }
       ],
@@ -376,31 +380,6 @@
         },
         "estimatedTokens": { "type": "integer", "minimum": 1 },
         "scores": { "$ref": "#/$defs/scores" },
-        "attemptFamilyMultiplicity": { "$ref": "#/$defs/attemptFamilyMultiplicity" },
-        "why": { "$ref": "#/$defs/textRecord" },
-        "diversityKeyHash": { "$ref": "#/$defs/blake3Hash" },
-        "trustClass": {
-          "type": "string",
-          "enum": [
-            "human_explicit",
-            "peer_human_attested",
-            "agent_validated",
-            "agent_assertion",
-            "cass_evidence",
-            "legacy_import"
-          ]
-        },
-        "trustSubclass": { "type": ["string", "null"] },
-        "provenance": { "$ref": "#/$defs/provenance" },
-        "redactionClasses": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
-        },
-        "freshness": { "const": "unavailable" }
-      }
-    },
-    "scores": { "$ref": "#/$defs/scores" },
         "attemptFamilyMultiplicity": { "$ref": "#/$defs/attemptFamilyMultiplicity" },
         "why": { "$ref": "#/$defs/textRecord" },
         "diversityKeyHash": { "$ref": "#/$defs/blake3Hash" },
