@@ -10,6 +10,8 @@ use super::{MAX_SCANNED_OUTPUT_BYTES, ToolOutput, compiler};
 
 #[path = "cass_error_recall_js_tests.rs"]
 pub(super) mod javascript;
+#[path = "cass_error_recall_nextest.rs"]
+pub(super) mod nextest;
 #[path = "cass_error_recall_node_tap.rs"]
 pub(super) mod node;
 #[path = "cass_error_recall_plain_test_coverage.rs"]
@@ -25,6 +27,7 @@ mod structured;
 
 enum ExternalExecution {
     Javascript(javascript::Execution),
+    Nextest(nextest::Execution),
     Node(node::Execution),
     Pytest(pytest::Execution),
     PytestTerminal(python::Execution),
@@ -43,6 +46,7 @@ impl ExternalExecution {
     fn has_known_failures(&self) -> bool {
         match self {
             Self::Javascript(execution) => execution.has_known_failures(),
+            Self::Nextest(execution) => execution.has_known_failures(),
             Self::Node(execution) => execution.has_known_failures(),
             Self::Pytest(execution) => execution.has_known_failures(),
             Self::PytestTerminal(execution) => execution.has_known_failures(),
@@ -53,6 +57,7 @@ impl ExternalExecution {
     fn verified_by(&self, proof: &Self) -> bool {
         match (self, proof) {
             (Self::Javascript(required), Self::Javascript(proof)) => required.verified_by(proof),
+            (Self::Nextest(required), Self::Nextest(proof)) => required.verified_by(proof),
             (Self::Node(required), Self::Node(proof)) => required.verified_by(proof),
             (Self::Pytest(required), Self::Pytest(proof)) => required.verified_by(proof),
             (Self::PytestTerminal(required), Self::PytestTerminal(proof)) => {
@@ -65,6 +70,12 @@ impl ExternalExecution {
 }
 
 fn external_execution(text: &str) -> Result<Option<ExternalReport>, ()> {
+    if let Some(decoded) = nextest::decode(text)? {
+        return Ok(Some(ExternalReport::Tests {
+            allows_completion: decoded.allows_completion,
+            execution: ExternalExecution::Nextest(decoded.execution),
+        }));
+    }
     if let Some(decoded) = sarif::decode(text)? {
         return Ok(Some(ExternalReport::Tests {
             allows_completion: decoded.output.allows_completion,

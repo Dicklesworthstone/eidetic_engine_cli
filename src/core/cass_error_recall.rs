@@ -45,9 +45,9 @@ mod test_coverage;
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
-/// V9 adds hierarchical Node TAP coverage, including nested suites and subtests,
+/// V10 adds native nextest failures and binary-qualified test coverage,
 /// reconsidering already imported sessions without changing their source rows.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v9";
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v10";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -890,6 +890,11 @@ impl ToolOutput {
 
     /// Failure and completion are distinct: unrecognized stdout is neither.
     fn failed(&self) -> bool {
+        match test_coverage::nextest::decode(&self.text) {
+            Ok(Some(decoded)) => return self.metadata_failed() || decoded.failed,
+            Err(()) => return self.metadata_failed(),
+            Ok(None) => {}
+        }
         match test_coverage::node::decode(&self.text) {
             Ok(Some(decoded)) => return self.metadata_failed() || decoded.output.failed,
             // A partial native diagnostic is data, not generic shell stderr.
@@ -903,6 +908,16 @@ impl ToolOutput {
     }
 
     fn succeeded(&self) -> bool {
+        match test_coverage::nextest::decode(&self.text) {
+            Ok(Some(decoded)) => {
+                // Captured test stdout cannot supply the process exit.
+                return decoded.allows_completion
+                    && (self.is_error == Some(false) || self.exit_code == Some(0))
+                    && outcome::succeeded(self);
+            }
+            Err(()) => return false,
+            Ok(None) => {}
+        }
         match test_coverage::node::decode(&self.text) {
             Ok(Some(decoded)) => {
                 // Exit-looking lines inside TAP comments/YAML cannot supply
@@ -1111,6 +1126,11 @@ fn content_text(value: &Value) -> Option<String> {
 /// class and record nothing. Messages are secret-redacted before they are
 /// canonicalized, and only masked signatures are ever stored.
 pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnostic> {
+    match test_coverage::nextest::decode(&output.text) {
+        Ok(Some(decoded)) => return decoded.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     match test_coverage::node::decode(&output.text) {
         Ok(Some(decoded)) => return decoded.output.diagnostics,
         Err(()) => return Vec::new(),
@@ -1206,6 +1226,11 @@ fn stable_error_code(code: &str) -> bool {
 /// diagnostic that CASS import records. Public readers can reuse this before
 /// their free-text fallback, so imported errors and later logs share a key.
 pub(crate) fn structured_error_diagnostics(text: &str) -> Vec<CanonicalDiagnostic> {
+    match test_coverage::nextest::decode(text) {
+        Ok(Some(decoded)) => return decoded.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     match test_coverage::node::decode(text) {
         Ok(Some(decoded)) => return decoded.output.diagnostics,
         Err(()) => return Vec::new(),
@@ -1408,6 +1433,16 @@ fn structured_output_allows_completion(text: &str) -> bool {
 /// error (with the `-->` location that follows it), else the first failing
 /// test or panic. Secret-redacted; never the whole log.
 fn symptom_line(output: &ToolOutput) -> Option<String> {
+    match test_coverage::nextest::decode(&output.text) {
+        Ok(Some(decoded)) => {
+            return decoded
+                .diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.message_template.clone());
+        }
+        Err(()) => return None,
+        Ok(None) => {}
+    }
     match test_coverage::node::decode(&output.text) {
         Ok(Some(decoded)) => {
             return decoded
