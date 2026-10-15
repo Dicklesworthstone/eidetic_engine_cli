@@ -11,7 +11,10 @@ use serde_json::Value as JsonValue;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PackSelectionIdentity<'a> {
     Memory(&'a str),
-    Native,
+    Native {
+        kind: &'a str,
+        entity_id: &'a str,
+    },
 }
 
 /// Classify one selected item from an already integrity-verified pack ledger.
@@ -62,21 +65,26 @@ pub(crate) fn classify(item: &JsonValue) -> Result<PackSelectionIdentity<'_>, &'
             if item.get("evidenceSpanId").and_then(JsonValue::as_str) != Some(entity_id) {
                 return Err("contained conflicting native evidence identities");
             }
-            Ok(PackSelectionIdentity::Native)
+            Ok(PackSelectionIdentity::Native {
+                kind: "evidence_span",
+                entity_id,
+            })
         }
         Some("rule") => {
             if memory_id.is_some() || item.get("evidenceSpanId").is_some() {
                 return Err("contained conflicting native rule identities");
             }
-            if item
+            let Some(entity_id) = item
                 .get("entityId")
                 .and_then(JsonValue::as_str)
                 .filter(|value| !value.is_empty())
-                .is_none()
-            {
+            else {
                 return Err("omitted the native rule entity id");
-            }
-            Ok(PackSelectionIdentity::Native)
+            };
+            Ok(PackSelectionIdentity::Native {
+                kind: "rule",
+                entity_id,
+            })
         }
         Some(_) => Err("contained an unsupported entityKind"),
     }
@@ -109,11 +117,17 @@ mod tests {
                 "entityId":"ev_a",
                 "evidenceSpanId":"ev_a"
             })),
-            Ok(PackSelectionIdentity::Native)
+            Ok(PackSelectionIdentity::Native {
+                kind: kind.expect("native branches always have a kind"),
+                entity_id,
+            })
         );
         assert_eq!(
             classify(&json!({"entityKind":"rule", "entityId":"rul_a"})),
-            Ok(PackSelectionIdentity::Native)
+            Ok(PackSelectionIdentity::Native {
+                kind: kind.expect("native branches always have a kind"),
+                entity_id,
+            })
         );
     }
 

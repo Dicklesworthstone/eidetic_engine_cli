@@ -818,7 +818,7 @@ fn ingest_pack_reads(
                 Ok(crate::core::pack_selection_identity::PackSelectionIdentity::Memory(memory_id)) => {
                     memory_id
                 }
-                Ok(crate::core::pack_selection_identity::PackSelectionIdentity::Native) => continue,
+                Ok(crate::core::pack_selection_identity::PackSelectionIdentity::Native { .. }) => continue,
                 Err(message) => {
                     return Err(DomainError::Storage {
                         message: format!("Verified pack selection evidence {message}."),

@@ -517,7 +517,7 @@ fn verified_packed_memory_ids(
                 crate::core::pack_selection_identity::PackSelectionIdentity::Memory(memory_id) => {
                     packed_memory_ids.insert(memory_id.to_owned());
                 }
-                crate::core::pack_selection_identity::PackSelectionIdentity::Native => {}
+                crate::core::pack_selection_identity::PackSelectionIdentity::Native { .. } => {}
             }
         }
     }

@@ -874,9 +874,18 @@ fn pack_ledger_item_evidence_refs(
         .into_iter()
         .flatten()
         .filter_map(|item| {
-            let memory_id = item.get("memoryId").and_then(Value::as_str)?;
+            let identity = crate::core::pack_selection_identity::classify(item).ok()?;
+            let stable_id = match identity {
+                crate::core::pack_selection_identity::PackSelectionIdentity::Memory(memory_id) => {
+                    format!("{}:{memory_id}", record.id)
+                }
+                crate::core::pack_selection_identity::PackSelectionIdentity::Native {
+                    kind,
+                    entity_id,
+                } => format!("{}:{kind}:{entity_id}", record.id),
+            };
             Some(
-                AttestationEvidenceRef::new("pack_item", format!("{}:{memory_id}", record.id))
+                AttestationEvidenceRef::new("pack_item", stable_id)
                     .with_schema(crate::db::PACK_REPLAY_LEDGER_SCHEMA_V1)
                     .with_content_hash(value_hash(item)),
             )
@@ -1224,6 +1233,40 @@ mod tests {
         assert!(canonical.contains("memory.content"));
         assert!(canonical.contains("memory.provenance_chain"));
         assert!(canonical.contains("audit_log"));
+    }
+
+    #[test]
+    fn pack_attestation_retains_native_rule_and_evidence_selection_identity() {
+        let record = stored_pack_with_secret();
+        let ledger = db::ParsedPackLedger::trusted_for_test(json!({
+            "selectedItems": [
+                {"memoryId":"mem_attest_000000000000000001"},
+                {
+                    "entityKind":"evidence_span",
+                    "entityId":"ev_attest_000000000000000001",
+                    "evidenceSpanId":"ev_attest_000000000000000001"
+                },
+                {
+                    "entityKind":"rule",
+                    "entityId":"rul_attest_000000000000000001"
+                }
+            ]
+        }));
+        let refs = pack_ledger_item_evidence_refs(&record, &ledger);
+        assert_eq!(refs.len(), 3);
+        let ids = refs.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "pack_attest_000000000000000001:mem_attest_000000000000000001",
+                "pack_attest_000000000000000001:evidence_span:ev_attest_000000000000000001",
+                "pack_attest_000000000000000001:rule:rul_attest_000000000000000001",
+            ]
+        );
+        assert!(refs.iter().all(|entry| {
+            entry.schema.as_deref() == Some(crate::db::PACK_REPLAY_LEDGER_SCHEMA_V1)
+                && entry.content_hash.is_some()
+        }));
     }
 
     #[test]
