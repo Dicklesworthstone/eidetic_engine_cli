@@ -1118,8 +1118,9 @@ mod runtime_tests {
                 let mut model = BoundProbe::new(IdentityFault::ForeignOutput(stage), native);
                 model.cancel_at = stage;
                 let caller = Cx::for_testing();
-                let error = evaluate_with_prepared_model(&request, &rows, &model, Some(caller.clone()))
-                    .unwrap_err();
+                let error =
+                    evaluate_with_prepared_model(&request, &rows, &model, Some(caller.clone()))
+                        .unwrap_err();
                 assert!(caller.checkpoint().is_err());
                 assert!(error.to_string().contains("cancelled"));
                 assert!(!error.to_string().contains("PRIVATE-IDENTITY"));

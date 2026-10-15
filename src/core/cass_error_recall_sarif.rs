@@ -229,7 +229,10 @@ fn canonical(tool: &str, rule: &str, message: &str) -> CanonicalDiagnostic {
     }
 }
 
-fn rule_for<'a>(finding: &'a Finding, driver: &'a Driver) -> Result<(&'a str, Option<&'a Rule>), ()> {
+fn rule_for<'a>(
+    finding: &'a Finding,
+    driver: &'a Driver,
+) -> Result<(&'a str, Option<&'a Rule>), ()> {
     if finding.rule {
         return Err(());
     }
@@ -467,7 +470,10 @@ fn subject_for(
     };
     let physical = location.physical_location.as_ref()?;
     let artifact = &physical.artifact_location;
-    let uri = artifact.uri.as_deref().filter(|uri| !uri.trim().is_empty())?;
+    let uri = artifact
+        .uri
+        .as_deref()
+        .filter(|uri| !uri.trim().is_empty())?;
     if has_bases || artifact.uri_base_id || artifact.index {
         return None;
     }

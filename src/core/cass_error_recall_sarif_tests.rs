@@ -143,7 +143,10 @@ fn omission_suppression_and_baseline_absence_never_mean_fixed() {
     let required = decoded(&failed()).execution;
     let mut variants = vec![report(Vec::new())];
     for (field, value) in [
-        ("suppressions", json!([{"kind": "external", "status": "accepted"}])),
+        (
+            "suppressions",
+            json!([{"kind": "external", "status": "accepted"}]),
+        ),
         ("baselineState", json!("absent")),
         ("kind", json!("notApplicable")),
         ("kind", json!("open")),
@@ -198,16 +201,22 @@ fn changed_scope_and_unresolved_locations_withhold_proof() {
         ("/runs/0/tool/driver/name", json!("other-analyzer")),
         ("/runs/0/tool/driver/version", json!("1.0.1")),
         ("/runs/0/results/0/ruleId", json!("other-rule")),
-        ("/runs/0/results/0/locations/0/physicalLocation/artifactLocation/uri", json!("other/cache.rs")),
-        ("/runs/0/results/0/locations/0/physicalLocation/region/startLine", json!(11)),
+        (
+            "/runs/0/results/0/locations/0/physicalLocation/artifactLocation/uri",
+            json!("other/cache.rs"),
+        ),
+        (
+            "/runs/0/results/0/locations/0/physicalLocation/region/startLine",
+            json!(11),
+        ),
     ] {
         let mut value_report = passed();
         *value_report.pointer_mut(pointer).unwrap() = value;
         assert!(!required.verified_by(&decoded(&value_report).execution));
     }
     let mut unresolved = passed();
-    unresolved["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
-        ["uriBaseId"] = json!("%SRCROOT%");
+    unresolved["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uriBaseId"] =
+        json!("%SRCROOT%");
     assert!(!required.verified_by(&decoded(&unresolved).execution));
     unresolved = passed();
     unresolved["runs"][0]["originalUriBaseIds"] = json!({});
@@ -223,13 +232,24 @@ fn every_failed_subject_must_be_rechecked_even_beyond_diagnostic_cap() {
         .map(|index| finding("fail", &format!("rule-{index}"), "src/cache.rs", index + 1))
         .collect();
     let required = decoded(&report(failures));
-    assert_eq!(required.output.diagnostics.len(), MAX_DIAGNOSTICS_PER_FAILURE);
+    assert_eq!(
+        required.output.diagnostics.len(),
+        MAX_DIAGNOSTICS_PER_FAILURE
+    );
     let mut passes: Vec<_> = (0..6)
         .map(|index| finding("pass", &format!("rule-{index}"), "src/cache.rs", index + 1))
         .collect();
-    assert!(required.execution.verified_by(&decoded(&report(passes.clone())).execution));
+    assert!(
+        required
+            .execution
+            .verified_by(&decoded(&report(passes.clone())).execution)
+    );
     passes.pop();
-    assert!(!required.execution.verified_by(&decoded(&report(passes)).execution));
+    assert!(
+        !required
+            .execution
+            .verified_by(&decoded(&report(passes)).execution)
+    );
 }
 
 #[test]
@@ -263,7 +283,10 @@ fn unsuccessful_or_missing_invocations_and_notifications_veto_completion() {
         assert!(!required.verified_by(&parsed.execution));
     }
     let mut value = passed();
-    value["runs"][0].as_object_mut().unwrap().remove("invocations");
+    value["runs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("invocations");
     assert!(!decoded(&value).output.allows_completion);
 }
 
@@ -273,8 +296,16 @@ fn malformed_or_unsupported_reports_cannot_salvage_a_valid_prefix() {
     for text in [
         format!("{valid}\n{{}}"),
         format!("{valid}\n{{"),
-        valid.replacen("\"version\":\"2.1.0\"", "\"version\":\"2.1.0\",\"version\":\"2.1.0\"", 1),
-        valid.replacen("\"level\":\"error\"", "\"level\":\"error\",\"level\":\"none\"", 1),
+        valid.replacen(
+            "\"version\":\"2.1.0\"",
+            "\"version\":\"2.1.0\",\"version\":\"2.1.0\"",
+            1,
+        ),
+        valid.replacen(
+            "\"level\":\"error\"",
+            "\"level\":\"error\",\"level\":\"none\"",
+            1,
+        ),
     ] {
         assert!(decode(&text).is_err());
         assert!(structured_error_diagnostics(&text).is_empty());
@@ -295,7 +326,11 @@ fn malformed_or_unsupported_reports_cannot_salvage_a_valid_prefix() {
     assert!(decode(&mismatch.to_string()).is_err());
     for field in ["externalPropertyFileReferences", "policies"] {
         let mut external = failed();
-        external["runs"][0][field] = if field == "policies" { json!([{}]) } else { json!({}) };
+        external["runs"][0][field] = if field == "policies" {
+            json!([{}])
+        } else {
+            json!({})
+        };
         assert!(decode(&external.to_string()).is_err());
     }
     let mut override_report = failed();
@@ -309,14 +344,21 @@ fn bounded_input_and_late_invalid_records_fail_as_a_whole() {
     let padded = format!("{valid:width$}", width = MAX_SCANNED_OUTPUT_BYTES);
     assert!(decode(&padded).is_ok());
     assert!(decode(&format!("{padded} ")).is_err());
-    let too_many = report(vec![finding("fail", "resource-leak", "src/cache.rs", 1); MAX_RECORDS]);
+    let too_many = report(vec![
+        finding("fail", "resource-leak", "src/cache.rs", 1);
+        MAX_RECORDS
+    ]);
     assert!(decode(&too_many.to_string()).is_err());
     let mut rows: Vec<_> = (0..6)
         .map(|index| finding("fail", &format!("rule-{index}"), "src/cache.rs", index + 1))
         .collect();
     rows[5]["level"] = json!("invalid");
     assert!(decode(&report(rows).to_string()).is_err());
-    assert!(decode(r#"{"schema":"some.other.report","results":[]}"#).unwrap().is_none());
+    assert!(
+        decode(r#"{"schema":"some.other.report","results":[]}"#)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -330,8 +372,10 @@ fn secondary_coordinates_are_not_discarded_when_matching_subjects() {
     proof["runs"][0]["results"][0]["kind"] = json!("pass");
     proof["runs"][0]["results"][0]["level"] = json!("none");
     assert!(required.verified_by(&decoded(&proof).execution));
-    proof["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"] = json!(11);
+    proof["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startLine"] =
+        json!(11);
     assert!(!required.verified_by(&decoded(&proof).execution));
-    proof["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["byteOffset"] = json!(u64::MAX);
+    proof["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["byteOffset"] =
+        json!(u64::MAX);
     assert!(!required.verified_by(&decoded(&proof).execution));
 }

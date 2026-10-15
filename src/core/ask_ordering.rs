@@ -61,9 +61,7 @@ pub(super) fn compatible(left: &str, right: &str) -> bool {
 fn claim(text: &str) -> Option<OrderingClaim> {
     let text = text.trim();
     let text = text.strip_suffix('.').unwrap_or(text).trim_end();
-    if text.len() > MAX_ORDERING_BYTES
-        || text.chars().any(char::is_control)
-        || text.contains("``")
+    if text.len() > MAX_ORDERING_BYTES || text.chars().any(char::is_control) || text.contains("``")
     {
         return None;
     }
@@ -120,9 +118,10 @@ fn claim(text: &str) -> Option<OrderingClaim> {
     if words.iter().any(|word| word.eq_ignore_ascii_case("then")) {
         // Combining before/after with then is not an unambiguous linear list.
         // Quoted relation words are part of command identity, not delimiters.
-        if words.iter().any(|word| {
-            word.eq_ignore_ascii_case("before") || word.eq_ignore_ascii_case("after")
-        }) {
+        if words
+            .iter()
+            .any(|word| word.eq_ignore_ascii_case("before") || word.eq_ignore_ascii_case("after"))
+        {
             return None;
         }
         return sequence(&words[1..]);
@@ -627,7 +626,10 @@ mod tests {
             "Run deploy --prod then verify.",
             "Run verify then deploy --stage.",
         ));
-        assert!(!conflicts("Run alpha then run beta.", "Run beta then alpha."));
+        assert!(!conflicts(
+            "Run alpha then run beta.",
+            "Run beta then alpha."
+        ));
     }
 
     #[test]

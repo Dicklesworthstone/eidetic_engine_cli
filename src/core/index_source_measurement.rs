@@ -48,7 +48,10 @@ pub(super) fn sum(
         )?;
         rows.iter()
             .map(|row| {
-                let id = row.get(0).and_then(Value::as_i64).ok_or_else(invalid_page)?;
+                let id = row
+                    .get(0)
+                    .and_then(Value::as_i64)
+                    .ok_or_else(invalid_page)?;
                 let charge = row
                     .get(1)
                     .and_then(Value::as_i64)
@@ -93,7 +96,9 @@ fn sum_pages_with(
             return Ok(total);
         }
         // Include negative rowids and zero, and never wrap at the upper bound.
-        next = last.and_then(|id| id.checked_add(1)).ok_or_else(invalid_page)?;
+        next = last
+            .and_then(|id| id.checked_add(1))
+            .ok_or_else(invalid_page)?;
     }
 }
 
@@ -186,10 +191,7 @@ mod tests {
             .is_err()
         );
         assert_eq!(calls, 2);
-        assert!(
-            sum_pages_with(&cx, u64::MAX, |_| Ok(vec![(0, u64::MAX), (1, 1)]))
-                .is_err()
-        );
+        assert!(sum_pages_with(&cx, u64::MAX, |_| Ok(vec![(0, u64::MAX), (1, 1)])).is_err());
     }
 
     #[test]

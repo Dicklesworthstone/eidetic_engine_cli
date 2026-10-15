@@ -25399,10 +25399,7 @@ mod index_rebuild_timeout_override_tests {
             DEFAULT_INDEX_REBUILD_TIMEOUT_SECS
         );
         assert_eq!(normalized_index_rebuild_timeout_secs(Some("900")), 900);
-        assert_eq!(
-            normalized_index_rebuild_timeout_secs(Some(" 7200 ")),
-            7_200
-        );
+        assert_eq!(normalized_index_rebuild_timeout_secs(Some(" 7200 ")), 7_200);
         for invalid in ["", "0", "-1", "not-a-number"] {
             assert_eq!(
                 normalized_index_rebuild_timeout_secs(Some(invalid)),

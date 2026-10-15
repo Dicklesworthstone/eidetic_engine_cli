@@ -1821,7 +1821,9 @@ mod tests {
             })
             .map(document_digest)
             .collect::<Vec<_>>();
-        let selected = delta.vector_upserts(identity).map_err(|error| error.detail)?;
+        let selected = delta
+            .vector_upserts(identity)
+            .map_err(|error| error.detail)?;
         assert_eq!(selected.len(), 3);
         assert_eq!(
             selected.iter().map(document_digest).collect::<Vec<_>>(),

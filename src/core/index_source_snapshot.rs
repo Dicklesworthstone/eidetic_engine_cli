@@ -637,8 +637,8 @@ fn charge_source_rows(
                     ],
                 )?;
                 let rows = source_size_value(&sizes, 0)?;
-                remaining = remaining
-                    .saturating_sub(rows.saturating_mul(SourceReadBudget::ROW_OVERHEAD));
+                remaining =
+                    remaining.saturating_sub(rows.saturating_mul(SourceReadBudget::ROW_OVERHEAD));
                 Ok(rows)
             }
             SourceSizeStage::Bytes => {
@@ -651,8 +651,8 @@ fn charge_source_rows(
                     scope,
                     remaining / SourceReadBudget::TEXT_COPIES,
                 )?;
-                remaining = remaining
-                    .saturating_sub(bytes.saturating_mul(SourceReadBudget::TEXT_COPIES));
+                remaining =
+                    remaining.saturating_sub(bytes.saturating_mul(SourceReadBudget::TEXT_COPIES));
                 Ok(bytes)
             }
             SourceSizeStage::Structure => {

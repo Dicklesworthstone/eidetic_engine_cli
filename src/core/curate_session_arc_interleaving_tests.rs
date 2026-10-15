@@ -4,7 +4,8 @@ use super::tests::{endpoints, marked_span, mine, span};
 
 const FAILURE: &str = "Failure arc: cargo test src/api.rs failed.";
 const REPAIR: &str = "Fix: cargo test src/api.rs passed after restoring the guard.";
-const OTHER_EPISODE: &str = "cargo test src/ui.rs failed.\nFixed src/ui.rs by preserving the state.";
+const OTHER_EPISODE: &str =
+    "cargo test src/ui.rs failed.\nFixed src/ui.rs by preserving the state.";
 
 #[test]
 fn independent_inline_work_preserves_exact_interleaved_lesson() {
@@ -17,7 +18,10 @@ fn independent_inline_work_preserves_exact_interleaved_lesson() {
         let before = sources.clone();
         let rows = mine(&sources);
         assert_eq!(rows.len(), 4);
-        assert_eq!(endpoints(&rows), [("other", "other"), ("failure", "repair")]);
+        assert_eq!(
+            endpoints(&rows),
+            [("other", "other"), ("failure", "repair")]
+        );
         assert_eq!(sources, before);
         let mut reversed = sources.clone();
         reversed.reverse();
@@ -40,7 +44,10 @@ fn independent_inline_work_preserves_exact_interleaved_lesson() {
         }
         let expected = mine(&[sources[0].clone(), sources[2].clone()]);
         for row in expected {
-            assert!(rows.contains(&row), "existing candidate identity must survive");
+            assert!(
+                rows.contains(&row),
+                "existing candidate identity must survive"
+            );
         }
     }
 }
@@ -62,7 +69,10 @@ fn retained_failures_require_named_repairs_not_markers_topics_or_pronouns() {
             assert_eq!(endpoints(&mine(&sources)), [("other", "other")]);
             sources.push(marked_span("repair", 4, REPAIR, structured));
             let rows = mine(&sources);
-            assert_eq!(endpoints(&rows), [("other", "other"), ("failure", "repair")]);
+            assert_eq!(
+                endpoints(&rows),
+                [("other", "other"), ("failure", "repair")]
+            );
             assert!(
                 rows.iter()
                     .all(|row| row.source_ids.iter().all(|id| id != "weak"))

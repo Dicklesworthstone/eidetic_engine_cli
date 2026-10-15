@@ -179,8 +179,7 @@ fn session_arc_process_trailers_cannot_turn_a_failed_retry_into_a_repair() {
 fn session_arc_later_independent_process_failure_keeps_an_earlier_lesson() {
     let failure = "cargo test src/api.rs failed.";
     let repair = "Fixed src/api.rs by restoring the guard.";
-    let body =
-        format!("{failure}\n{repair}\nThe lint command for src/ui.rs exited with code 1.");
+    let body = format!("{failure}\n{repair}\nThe lint command for src/ui.rs exited with code 1.");
     let rows = mine(&[span("combined", 1, &body)]);
     assert_eq!(rows.len(), 2);
     for row in rows {
@@ -817,12 +816,7 @@ fn session_arc_msvc_diagnostic_punctuation_keeps_the_named_file() {
     }
 }
 
-pub(super) fn marked_span(
-    id: &str,
-    line: u32,
-    body: &str,
-    structured: bool,
-) -> StoredEvidenceSpan {
+pub(super) fn marked_span(id: &str, line: u32, body: &str, structured: bool) -> StoredEvidenceSpan {
     let excerpt = if structured {
         serde_json::json!({
             "type": "assistant",
@@ -867,8 +861,7 @@ fn session_arc_explicit_markers_cannot_bridge_disjoint_sources() {
             assert!(mine(&sources).is_empty(), "{failure} / {repair}");
             assert_eq!(sources, before);
             assert!(mine(&[sources[1].clone(), sources[0].clone()]).is_empty());
-            let combined =
-                marked_span("combined", 10, &format!("{failure}\n{repair}"), structured);
+            let combined = marked_span("combined", 10, &format!("{failure}\n{repair}"), structured);
             assert!(mine(&[combined]).is_empty());
         }
     }

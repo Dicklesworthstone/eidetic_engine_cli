@@ -231,9 +231,7 @@ mod tests {
                 .len(),
             inference_limit
         );
-        changed[inference_limit]
-            .content
-            .push_str(" one too many");
+        changed[inference_limit].content.push_str(" one too many");
         assert_eq!(
             planned(&original, &changed)
                 .expect_err("inference budget")
@@ -297,7 +295,9 @@ mod tests {
         let delta = planned(&original, &current).map_err(|error| error.detail)?;
         assert_eq!(delta.upserts.len(), 1408);
         assert_eq!(delta.removals.len(), 128);
-        let vectors = delta.vector_upserts(IDENTITY).map_err(|error| error.detail)?;
+        let vectors = delta
+            .vector_upserts(IDENTITY)
+            .map_err(|error| error.detail)?;
         assert_eq!(vectors.len(), 1152);
         assert!(vectors.len() > MAX_DELTA_DOCUMENTS);
         let expected_vectors: BTreeSet<_> = current[..128]
@@ -866,9 +866,7 @@ mod tests {
         native_bulk_removal_case(0, 0)
     }
 
-    fn generation_files(
-        root: &Path,
-    ) -> Result<BTreeMap<std::path::PathBuf, Vec<u8>>, String> {
+    fn generation_files(root: &Path) -> Result<BTreeMap<std::path::PathBuf, Vec<u8>>, String> {
         let mut files = BTreeMap::new();
         let mut pending = vec![root.to_path_buf()];
         while let Some(directory) = pending.pop() {

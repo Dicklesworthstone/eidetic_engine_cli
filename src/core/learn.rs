@@ -1000,7 +1000,8 @@ fn query_miss_cluster_assignments<'a>(
 }
 fn query_miss_cluster_key(query_hash: &str, representative_queries: &[String]) -> String {
     representative_queries
-        .first()        .map(|query| normalized_query_cluster_key(query))
+        .first()
+        .map(|query| normalized_query_cluster_key(query))
         .filter(|key| !key.is_empty())
         .map(|key| format!("query:{key}"))
         .unwrap_or_else(|| format!("hash:{query_hash}"))
@@ -1091,8 +1092,9 @@ fn learn_gap_cluster(
         match &top_hit {
             Some((memory_id, created_at, similarity))
                 if *similarity >= LIKELY_COVERED_SIMILARITY
-                    && DateTime::parse_from_rfc3339(created_at)
-                        .is_ok_and(|created| created.with_timezone(&Utc) > cluster.last_seen_at) =>
+                    && DateTime::parse_from_rfc3339(created_at).is_ok_and(|created| {
+                        created.with_timezone(&Utc) > cluster.last_seen_at
+                    }) =>
             {
                 (
                     "likely_covered".to_owned(),
@@ -1996,7 +1998,8 @@ fn experiment_run_outcome_preview_public_json(
         "promotedArtifactIds": redact_learning_public_refs(&outcome.promoted_artifact_ids),
         "demotedArtifactIds": redact_learning_public_refs(&outcome.demoted_artifact_ids),
         "safetyNotes": outcome.safety_notes,
-    })}
+    })
+}
 
 fn redact_learning_public_refs(values: &[String]) -> Vec<String> {
     values
@@ -2995,7 +2998,8 @@ impl LearnExperimentRunReport {
 }
 
 /// Propose safe dry-run-first experiments that could change memory decisions.
-pub fn propose_experiments(    options: &LearnExperimentProposeOptions,
+pub fn propose_experiments(
+    options: &LearnExperimentProposeOptions,
 ) -> Result<LearnExperimentProposalReport, DomainError> {
     propose_experiments_with_boundary(options, || Ok(()))
 }
@@ -3019,7 +3023,8 @@ fn propose_experiments_with_boundary(
         })?;
 
     let mut durable_proposals = Vec::new();
-    for cluster in clusters        .iter()
+    for cluster in clusters
+        .iter()
         .filter(|cluster| cluster.is_non_trivial())
         .filter(|cluster| cluster.expected_value() >= options.min_expected_value)
     {
@@ -3994,7 +3999,8 @@ fn admit_learning_memory_rows(
         crate::core::memory_lifecycle::load_memory_seals_for_admission(connection, workspace_id)?
             .into_iter()
             .filter(|seal| seal.is_sealed())
-            .map(|seal| seal.memory_id)            .collect();
+            .map(|seal| seal.memory_id)
+            .collect();
     // Share curation's pending-quarantine disqualifier: a held memory cannot
     // cover demand or acquire a new rule proposal while its review is pending.
     let quarantined: BTreeSet<_> = connection
@@ -4017,7 +4023,8 @@ fn admit_learning_memory_rows(
                 && crate::policy::redact_secret_like_content(&memory.content)
                     .redacted_reasons
                     .is_empty()
-        })        .map(|memory| (memory.id.clone(), memory))
+        })
+        .map(|memory| (memory.id.clone(), memory))
         .collect())
 }
 
@@ -4993,7 +5000,8 @@ mod tests {
             Err(DomainError::MigrationRequired { .. })
         ));
         assert_eq!(learning_database_bytes(&database)?, before);
-        Ok(())    }
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
@@ -5015,7 +5023,8 @@ mod tests {
         std::os::unix::fs::symlink(workspace.path(), &alias).map_err(|error| error.to_string())?;
         let before = learning_database_bytes(&database)?;
         assert_eq!(
-            load_learning_snapshot(&alias)                .map_err(|error| error.to_string())?
+            load_learning_snapshot(&alias)
+                .map_err(|error| error.to_string())?
                 .workspace_id,
             workspace_id
         );
@@ -6105,7 +6114,8 @@ mod tests {
             .map_err(|error| error.message())?;
 
             assert_eq!(report.summary.period, period);
-            assert_eq!(report.summary.candidates_proposed, 1);            assert_eq!(report.summary.rules_learned, 1);
+            assert_eq!(report.summary.candidates_proposed, 1);
+            assert_eq!(report.summary.rules_learned, 1);
         }
 
         Ok(())
