@@ -2,31 +2,51 @@
 //!
 //! Bag-of-words agreement is not agreement about execution order: `Run A
 //! before B` and `Run B before A` have exactly the same terms. Recognize only
-//! complete, unqualified Run/Execute instructions with one before/after edge.
-//! This is neither a shell parser nor a general dependency inference engine.
-//! Unknown prose, conditions, programs and multiple constraints need an
-//! explicit contradiction edge. Parsing never changes quoted evidence.
+//! complete, unqualified Run/Execute instructions with one before/after edge
+//! or a bounded `A then B then C` sequence. A sequence entails the order of
+//! every pair of its steps, not just adjacent steps. Partial agreement cannot
+//! corroborate the rest of a procedure. This is neither a shell parser nor a
+//! general dependency inference engine: conditions, programs, loops and mixed
+//! relation syntax still need an explicit contradiction edge. Parsing never
+//! changes the evidence text or citation offsets.
 
 #[path = "ask_command_literals.rs"]
 mod literals;
 
+const MAX_ORDERING_BYTES: usize = 8 * 1024;
+const MAX_SEQUENCE_COMMANDS: usize = 8;
+
 #[derive(Debug, Eq, PartialEq)]
 struct OrderingClaim {
-    before: String,
-    after: String,
+    // Canonical execution order, independent of before/after/then spelling.
+    // Commands retain case, arguments and whitespace inside quoted bodies.
+    operations: Vec<String>,
 }
 
-/// The same two operations in opposite order are incompatible requirements.
+/// Any shared pair in opposite order is an incompatible requirement, including
+/// non-adjacent steps. A pair absent from either claim supplies no constraint.
 /// Negation inside a quoted command or an option is not English negation;
 /// actual prohibitions and qualified instructions are rejected by the parser.
 pub(super) fn conflicts(left: &str, right: &str) -> bool {
     let (Some(left), Some(right)) = (claim(left), claim(right)) else {
         return false;
     };
-    left.before == right.after && left.after == right.before
+    left.operations.iter().enumerate().any(|(index, before)| {
+        let Some(right_before) = right.operations.iter().position(|step| step == before) else {
+            return false;
+        };
+        left.operations[index + 1..].iter().any(|after| {
+            right
+                .operations
+                .iter()
+                .position(|step| step == after)
+                .is_some_and(|right_after| right_after < right_before)
+        })
+    })
 }
 
-/// Known ordering requirements corroborate only the same ordered pair.
+/// Known ordering requirements corroborate only the same complete sequence.
+/// Agreeing with one edge of a longer procedure does not support its other steps.
 /// In particular, an unparsed or conditional near-duplicate must not lift a
 /// recognized unconditional instruction across the answer confidence floor.
 /// Unparsed ordering prose still has to agree on command and code literals.
@@ -41,7 +61,10 @@ pub(super) fn compatible(left: &str, right: &str) -> bool {
 fn claim(text: &str) -> Option<OrderingClaim> {
     let text = text.trim();
     let text = text.strip_suffix('.').unwrap_or(text).trim_end();
-    if text.chars().any(char::is_control) || text.contains("``") {
+    if text.len() > MAX_ORDERING_BYTES
+        || text.chars().any(char::is_control)
+        || text.contains("``")
+    {
         return None;
     }
     let words = words(text)?;
@@ -65,7 +88,6 @@ fn claim(text: &str) -> Option<OrderingClaim> {
                     | "because"
                     | "except"
                     | "otherwise"
-                    | "then"
                     | "and"
                     | "or"
                     | "either"
@@ -95,6 +117,21 @@ fn claim(text: &str) -> Option<OrderingClaim> {
     }) {
         return None;
     }
+    if words.iter().any(|word| word.eq_ignore_ascii_case("then")) {
+        // Combining before/after with then is not an unambiguous linear list.
+        // Quoted relation words are part of command identity, not delimiters.
+        if words.iter().any(|word| {
+            word.eq_ignore_ascii_case("before") || word.eq_ignore_ascii_case("after")
+        }) {
+            return None;
+        }
+        return sequence(&words[1..]);
+    }
+    // Commas are admitted only immediately before an explicit sequence edge.
+    // Do not broaden the original single-edge grammar to arbitrary lists.
+    if words.contains(&",") {
+        return None;
+    }
     let mut relations = words.iter().enumerate().filter(|(_, word)| {
         word.eq_ignore_ascii_case("before") || word.eq_ignore_ascii_case("after")
     });
@@ -121,11 +158,43 @@ fn claim(text: &str) -> Option<OrderingClaim> {
     } else {
         (right, left)
     };
-    Some(OrderingClaim { before, after })
+    Some(OrderingClaim {
+        operations: vec![before, after],
+    })
 }
 
-/// Split at whitespace outside matching single, double or inline-code quotes.
-/// A quoted `before` is an argument, not an edge. Escape sequences, shell
+/// Parse an explicit sequence without interpreting shell syntax or inventing
+/// omitted verbs. `run` in a later command remains an executable, just as it
+/// does in a before/after operand. Repeated commands may describe a retry loop;
+/// they are not a total order and therefore grant no ordering inference.
+fn sequence(words: &[&str]) -> Option<OrderingClaim> {
+    let mut segments = words
+        .split(|word| word.eq_ignore_ascii_case("then"))
+        .peekable();
+    let mut operations = Vec::new();
+    while let Some(segment) = segments.next() {
+        if operations.len() == MAX_SEQUENCE_COMMANDS {
+            return None;
+        }
+        let segment = if segments.peek().is_some() && segment.last() == Some(&",") {
+            &segment[..segment.len() - 1]
+        } else {
+            segment
+        };
+        if segment.contains(&",") {
+            return None;
+        }
+        let operation = command(segment)?;
+        if operations.contains(&operation) {
+            return None;
+        }
+        operations.push(operation);
+    }
+    (operations.len() >= 2).then_some(OrderingClaim { operations })
+}
+
+/// Split at whitespace and commas outside matching single, double or inline-code quotes.
+/// Quoted `before`, `after`, `then` and commas remain arguments. Escape sequences, shell
 /// operators and multiline/code-fence syntax deliberately grant no inference.
 fn words(text: &str) -> Option<Vec<&str>> {
     let mut words = Vec::new();
@@ -147,10 +216,17 @@ fn words(text: &str) -> Option<Vec<&str>> {
             }
             continue;
         }
+        if character == ',' {
+            if let Some(start) = start.take() {
+                words.push(&text[start..index]);
+            }
+            words.push(&text[index..index + 1]);
+            continue;
+        }
         start.get_or_insert(index);
         match character {
             '\'' | '"' | '`' => quote = Some(character),
-            ';' | '|' | '&' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | '!' | '?' => {
+            ';' | '|' | '&' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | '!' | '?' => {
                 return None;
             }
             _ => {}
@@ -481,5 +557,235 @@ mod tests {
             ],
         );
         assert!(!report.conflict_detected);
+    }
+
+    #[test]
+    fn explicit_sequences_share_the_existing_before_after_contract() {
+        assert!(compatible(FORWARD, "Run cargo fmt then cargo test."));
+        assert!(compatible(
+            FORWARD,
+            "Execute `cargo fmt`, then `cargo test`."
+        ));
+        assert!(conflicts(FORWARD, "Run cargo test then cargo fmt."));
+        assert!(compatible(
+            "Run cargo fmt then cargo test then cargo build.",
+            "Execute `cargo fmt`, THEN `cargo test`, then `cargo build`.",
+        ));
+    }
+
+    #[test]
+    fn nonadjacent_steps_can_contradict_a_sequence() {
+        let sequence = "Run cargo fmt then cargo test then cargo build.";
+        for opposition in [
+            "Run cargo build before cargo fmt.",
+            "Run cargo fmt after cargo build.",
+            "Run cargo build then cargo fmt.",
+            "Run cargo fmt then cargo build then cargo test.",
+        ] {
+            assert!(conflicts(sequence, opposition), "{opposition}");
+            assert!(conflicts(opposition, sequence), "{opposition}");
+            assert!(!compatible(sequence, opposition), "{opposition}");
+        }
+    }
+
+    #[test]
+    fn partial_sequence_agreement_cannot_corroborate_unshared_steps() {
+        let sequence = "Run cargo fmt then cargo test then cargo build.";
+        for partial in [
+            FORWARD,
+            "Run cargo fmt before cargo build.",
+            "Run cargo test then cargo build.",
+            "Run cargo fmt then cargo test then cargo clippy.",
+        ] {
+            assert!(!conflicts(sequence, partial), "{partial}");
+            assert!(!conflicts(partial, sequence), "{partial}");
+            assert!(!compatible(sequence, partial), "{partial}");
+            assert!(!compatible(partial, sequence), "{partial}");
+        }
+        // A path through an operation absent from the other claim is not a
+        // contradiction, even when the English task descriptions overlap.
+        assert!(!conflicts("Run alpha then beta.", "Run beta then gamma."));
+    }
+
+    #[test]
+    fn sequence_delimiters_inside_quotes_are_not_edges() {
+        assert!(conflicts(
+            "Run `printf 'then, before, after'` then cargo test.",
+            "Run cargo test then `printf 'then, before, after'`.",
+        ));
+        assert!(conflicts(
+            "Run echo 'then, before' then verify --no-cache.",
+            "Run verify --no-cache before echo 'then, before'.",
+        ));
+        assert!(claim("Run `alpha then beta`.").is_none());
+        assert!(!conflicts(
+            "Run `echo  x` then Test.",
+            "Run Test then `echo x`.",
+        ));
+        assert!(!conflicts("Run Build then Test.", "Run test then build."));
+        assert!(!conflicts(
+            "Run deploy --prod then verify.",
+            "Run verify then deploy --stage.",
+        ));
+        assert!(!conflicts("Run alpha then run beta.", "Run beta then alpha."));
+    }
+
+    #[test]
+    fn ambiguous_or_qualified_sequences_do_not_grant_inference() {
+        for text in [
+            "Run alpha then beta if ready.",
+            "Run alpha then beta unless blocked.",
+            "Run alpha then beta in production.",
+            "Run alpha then beta or gamma.",
+            "Run alpha and then beta.",
+            "Run alpha then never beta.",
+            "Run alpha then beta before gamma.",
+            "Run alpha after beta then gamma.",
+            "Run alpha, beta then gamma.",
+            "Run alpha, then, beta.",
+            "Run alpha,, then beta.",
+            "Run alpha then beta,.",
+            "Run then beta.",
+            "Run alpha then.",
+            "Run alpha then then beta.",
+            "Run alpha then alpha.",
+            "Run alpha then beta then alpha.",
+            "Run `alpha` then alpha.",
+            "Run alpha then beta; gamma.",
+            "Run alpha then beta | gamma.",
+            "Run alpha then beta && gamma.",
+            "Run alpha then beta\ngamma.",
+            "Run alpha then `beta.",
+            "Run alpha then ``beta``.",
+        ] {
+            assert!(claim(text).is_none(), "must not infer from {text:?}");
+            assert!(!conflicts(text, "Run beta then alpha."));
+            assert!(!compatible(text, "Run alpha then beta."));
+        }
+    }
+
+    #[test]
+    fn sequence_limits_refuse_the_whole_claim_not_a_truncated_prefix() {
+        let operations = (0..MAX_SEQUENCE_COMMANDS)
+            .map(|index| format!("step_{index}"))
+            .collect::<Vec<_>>();
+        let at_limit = format!("Run {}.", operations.join(" then "));
+        assert_eq!(claim(&at_limit).unwrap().operations, operations);
+        let over_limit = format!("Run {} then extra.", operations.join(" then "));
+        assert!(claim(&over_limit).is_none());
+        let padding = "x".repeat(MAX_ORDERING_BYTES - "Run  then beta".len());
+        let at_bytes = format!("Run {padding} then beta.");
+        assert!(claim(&at_bytes).is_some());
+        assert!(claim(&format!("Run {padding}x then beta.")).is_none());
+        let unicode = "資料".repeat(MAX_ORDERING_BYTES / 3);
+        assert!(claim(&format!("Run {unicode} then beta.")).is_none());
+    }
+
+    #[test]
+    fn sequence_pair_conflicts_match_an_independent_graph_cycle_oracle() {
+        fn chains(prefix: &mut Vec<usize>, output: &mut Vec<Vec<usize>>) {
+            if prefix.len() >= 2 {
+                output.push(prefix.clone());
+            }
+            for next in 0..4 {
+                if !prefix.contains(&next) {
+                    prefix.push(next);
+                    chains(prefix, output);
+                    prefix.pop();
+                }
+            }
+        }
+        fn text(chain: &[usize]) -> String {
+            format!(
+                "Run {}.",
+                chain
+                    .iter()
+                    .map(|index| format!("cmd_{index}"))
+                    .collect::<Vec<_>>()
+                    .join(" then ")
+            )
+        }
+        let mut cases = Vec::new();
+        chains(&mut Vec::new(), &mut cases);
+        assert_eq!(cases.len(), 60);
+        for left in &cases {
+            for right in &cases {
+                let mut reachable = [[false; 4]; 4];
+                for chain in [left, right] {
+                    for edge in chain.windows(2) {
+                        reachable[edge[0]][edge[1]] = true;
+                    }
+                }
+                for via in 0..4 {
+                    for from in 0..4 {
+                        for to in 0..4 {
+                            let path = reachable[from][via] && reachable[via][to];
+                            reachable[from][to] |= path;
+                        }
+                    }
+                }
+                let cycle = (0..4).any(|index| reachable[index][index]);
+                let (left_text, right_text) = (text(left), text(right));
+                assert_eq!(
+                    conflicts(&left_text, &right_text),
+                    cycle,
+                    "{left:?} / {right:?}"
+                );
+                assert_eq!(compatible(&left_text, &right_text), left == right);
+            }
+        }
+    }
+
+    #[test]
+    fn reversed_sequences_do_not_receive_corroboration_credit() {
+        let forward = "Run cargo fmt then cargo test then cargo build.";
+        let reverse = "Run cargo build then cargo test then cargo fmt.";
+        assert_eq!(tokenize_for_ask(forward), tokenize_for_ask(reverse));
+        let clusters = cluster_spans(&[span("a", forward), span("b", reverse)]);
+        assert_eq!(clusters.len(), 2);
+        assert!(
+            clusters
+                .iter()
+                .all(|span| span.score.to_bits() == 0.52_f32.to_bits())
+        );
+    }
+
+    #[test]
+    fn public_ask_keeps_conflicting_sequence_citations_exact_and_deterministic() {
+        let forward = "Run cargo fmt then cargo test then cargo build.";
+        let reverse = "Run cargo build then cargo test then cargo fmt.";
+        let request = AskRequest {
+            question: forward.to_owned(),
+            max_evidence: 1,
+            ..AskRequest::default()
+        };
+        let mut candidates = [candidate("a", forward), candidate("b", reverse)];
+        let report = evaluate_ask(&request, &candidates);
+        assert!(!report.abstained && report.conflict_detected);
+        assert!(!report.extractiveness_violated);
+        assert!(report.answer_text.is_none() && report.citations.is_empty());
+        assert_eq!(report.confidence_components.corroboration, 1.0);
+        let sides = report.sides.as_ref().unwrap();
+        assert_eq!(sides.len(), 2);
+        assert_eq!(sides[1].label, "ordering_alternative");
+        for side in sides {
+            for citation in &side.citations {
+                let original = candidates
+                    .iter()
+                    .find(|candidate| candidate.memory_id == citation.memory_id)
+                    .unwrap();
+                assert_eq!(citation.text, original.content);
+                assert_eq!(citation.provenance_uri, original.provenance_uri);
+                assert_eq!(
+                    &original.content[citation.byte_start..citation.byte_end],
+                    citation.text,
+                );
+            }
+        }
+        candidates.reverse();
+        assert_eq!(
+            ask_data_json(&report),
+            ask_data_json(&evaluate_ask(&request, &candidates))
+        );
     }
 }
