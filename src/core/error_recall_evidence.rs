@@ -6,7 +6,8 @@
 //! proof bodies are never rendered. Output is still complete, not silently
 //! truncated to the interactive pack limit. Conflicted repairs are withheld
 //! before body hydration, without erasing their diagnostic history. One source
-//! snapshot covers feedback and evidence across every batch.
+//! snapshot covers feedback, CASS proof revalidation and final evidence hydration.
+//! Revalidation reads only the bounded source sessions behind selected claims.
 
 use std::collections::BTreeSet;
 
@@ -53,6 +54,7 @@ fn read_with(
         return Ok(Vec::new());
     }
     let snapshot = memory::Snapshot::begin_or_borrow(connection)?;
+    let mut gate = feedback::Gate::new(connection, workspace_id, &report.fingerprint_key);
     let mut ids = repairs.union(&proofs).copied();
     let mut cards = Vec::new();
     let mut turns = Vec::new();
@@ -67,17 +69,12 @@ fn read_with(
             .copied()
             .filter(|id| repairs.contains(id))
             .collect();
-        let harmful = feedback::harmful_targets(
-            connection,
-            workspace_id,
-            &report.fingerprint_key,
-            &repair_ids,
-        )?;
+        let withheld = gate.withheld(&repair_ids)?;
         // An independent proof remains inspectable as a locator, never a
-        // positive repair body. Otherwise do not load withheld sources at all.
+        // positive repair body. Withheld targets do not enter final text hydration.
         let admitted: Vec<_> = batch
             .into_iter()
-            .filter(|id| !harmful.contains(*id) || proofs.contains(id))
+            .filter(|id| !withheld.contains(*id) || proofs.contains(id))
             .collect();
         if admitted.is_empty() {
             continue;
@@ -85,7 +82,7 @@ fn read_with(
         for row in hydrate(&admitted)? {
             let span = &row.span;
             if repairs.contains(span.id.as_str())
-                && !harmful.contains(&span.id)
+                && !withheld.contains(&span.id)
                 && row.is_search_admitted(workspace_id)
             {
                 let is_card = span.is_derived_incident_card();

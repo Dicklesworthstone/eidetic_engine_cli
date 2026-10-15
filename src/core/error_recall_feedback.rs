@@ -12,6 +12,11 @@ use sqlmodel_core::Value;
 
 use crate::db::{DbConnection, DbError, DbOperation, Result};
 
+#[path = "error_recall_revalidate.rs"]
+mod revalidate;
+
+pub(super) use revalidate::Gate;
+
 const FEEDBACK_BATCH: usize = 128;
 
 fn unavailable() -> DbError {
@@ -71,6 +76,8 @@ pub(super) fn harmful_targets(
 /// kind/outcome/target lookup shape; rejected index entries may still need to
 /// be scanned, so the output limit is not a constant-total-work guarantee.
 ///
+/// Current CASS-derived claims also require a valid source-backed failure/repair
+/// arc. This initial window is not refilled after proof refusals.
 /// The legacy history selector remains unchanged for diagnostic consumers.
 /// Preserve its 128-byte projection and exact aliases, including embedded NUL.
 /// An oversized target becomes an empty, inadmissible sentinel, not a prefix.
@@ -99,7 +106,7 @@ pub(super) fn pack_targets(
     if rows.len() > limit as usize {
         return Err(unavailable());
     }
-    rows.into_iter()
+    let targets = rows.into_iter()
         .map(|row| {
             row.get(0)
                 .and_then(Value::as_str)
@@ -107,5 +114,8 @@ pub(super) fn pack_targets(
                 .map(str::to_owned)
                 .ok_or_else(unavailable)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    let refs: Vec<_> = targets.iter().map(String::as_str).collect();
+    let withheld = Gate::new(connection, workspace_id, fingerprint_key).withheld(&refs)?;
+    Ok(targets.into_iter().filter(|id| !withheld.contains(id)).collect())
 }
