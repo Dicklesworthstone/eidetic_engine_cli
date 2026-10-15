@@ -378,3 +378,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "index_delta_growth_native_tests.rs"]
+mod native_tests;
