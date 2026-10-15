@@ -93,7 +93,7 @@ fn large_deletion_only_and_empty_final_stores_need_no_inference() {
 }
 
 #[test]
-fn even_one_changed_input_or_new_identity_keeps_the_mixed_mutation_limit() {
+fn survivor_rewrites_stay_conservative_while_new_identities_receive_fresh_vectors() {
     let original = documents(10_000);
     for new_identity in [false, true] {
         let mut current = original[..9000].to_vec();
@@ -104,12 +104,35 @@ fn even_one_changed_input_or_new_identity_keeps_the_mixed_mutation_limit() {
         } else {
             current[8999].content.push(' ');
         }
-        assert!(try_plan(&digests(&original), &inputs(&original), &current, IDENTITY.to_owned())
-            .expect("not inference-free").is_none());
-        let error = super::super::super::diff(
+        // The ordinary mixed planner still refuses both >8192-operation
+        // cases. The new lane changes only the proof for absent identities,
+        // not this old mutation ceiling or reuse of an existing changed input.
+        let ordinary = super::super::super::planning::diff_with_digest(
             &digests(&original), &inputs(&original), &current, IDENTITY.to_owned(),
-        ).expect_err("do not expand the ordinary mixed allowance");
-        assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
+            document_digest,
+        ).expect_err("ordinary mixed allowance is unchanged");
+        assert_eq!(ordinary.reason, IncrementalFallbackReason::DeltaOverThreshold);
+        let result = super::super::super::diff(
+            &digests(&original), &inputs(&original), &current, IDENTITY.to_owned(),
+        );
+        if new_identity {
+            let delta = result.expect("bounded rolling intake");
+            assert_eq!(delta.upserts.len(), 9000);
+            assert_eq!(delta.removals.len(), 1001);
+            let vectors = delta.vector_upserts(IDENTITY).expect("same producer");
+            assert_eq!(vectors.len(), 1);
+            assert_eq!(vectors[0].id, "new-document");
+            assert_eq!(vectors[0].content, original[8999].content);
+            let mut applied = digests(&original);
+            for id in &delta.removals { assert!(applied.remove(id).is_some()); }
+            applied.extend(digests(&delta.upserts));
+            assert_eq!(applied, digests(&current));
+        } else {
+            assert!(try_plan(&digests(&original), &inputs(&original), &current, IDENTITY.to_owned())
+                .expect("an old input was rewritten").is_none());
+            assert_eq!(result.expect_err("no bulk allowance for old input rewrites").reason,
+                IncrementalFallbackReason::DeltaOverThreshold);
+        }
     }
 }
 
