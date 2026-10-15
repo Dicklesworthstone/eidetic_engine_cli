@@ -17,6 +17,9 @@ use super::{
     embedding_input_digest, incremental_fallback, over_limit, vector_delta_limit,
 };
 
+#[path = "index_delta_maintenance.rs"]
+mod maintenance;
+
 struct GrowthBudget {
     total: append::AppendBudget,
     existing: usize,
@@ -56,6 +59,12 @@ pub(super) fn try_plan(
     documents: &[IndexableDocument],
     identity: String,
 ) -> Result<Option<Delta>, IncrementalFallback> {
+    // The dispatcher reaches this fallback only after ordinary V3 limits.
+    // A non-growing archive has a separate, inference-free maintenance lane;
+    // any actual input rewrite still keeps the ordinary refusal unchanged.
+    if documents.len() <= live.len() {
+        return maintenance::try_plan(live, inputs, documents, identity);
+    }
     // Preserve the already-tested pure-append path. A changed old document
     // makes it stop early; it never produces a partial delta to combine here.
     if let Some(delta) = append::try_plan(live, documents, identity.clone())? {

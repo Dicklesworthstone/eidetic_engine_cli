@@ -14,6 +14,9 @@
 //! percentage, 8192-mutation and 32-MiB payload ceilings. Growing imports may
 //! separate new inputs from bounded old-corpus changes, without using growth
 //! to dilute the retained-input rewrite percentage or re-embedding metadata.
+//! Non-growing bulk maintenance has the same stronger input-equality proof:
+//! metadata refreshes and withdrawals may share the bulk mutation budget only
+//! when every surviving identity and embedding input remain unchanged.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -92,9 +95,10 @@ pub(super) fn diff(
 ) -> Result<Delta, IncrementalFallback> {
     match diff_with_digest(live, inputs, documents, identity.clone(), document_digest) {
         Err(error) if error.reason == IncrementalFallbackReason::DeltaOverThreshold => {
-            // Percentage is a rewrite-cost heuristic, not proof that existing
-            // vectors need inference again. Bulk growth has separate existing-
-            // corpus mutation/rewrite limits, with one shared payload budget.
+            // Thresholds are rewrite-cost heuristics, not proof that existing
+            // vectors need inference again. The fallback distinguishes growing
+            // intake from inference-free maintenance of a non-growing corpus.
+            // Both share bounded mutations and preserve use-time input checks.
             match growth::try_plan(live, inputs, documents, identity)? {
                 Some(delta) => Ok(delta),
                 None => Err(error),
@@ -455,12 +459,23 @@ mod tests {
                 .is_empty()
         );
         retitle(&mut changed[MAX_LEXICAL_DELTA_DOCUMENTS..]);
+        // The ordinary mixed-mutation ceiling is unchanged. Only the stronger
+        // inference-free fallback can accept the complete metadata refresh.
         assert_eq!(
-            planned(&original, &changed)
-                .expect_err("lexical budget")
-                .reason,
+            diff_with_digest(
+                &super::super::digest_map(&original),
+                &inputs(&original),
+                &changed,
+                IDENTITY.to_owned(),
+                document_digest,
+            )
+            .expect_err("ordinary lexical budget")
+            .reason,
             IncrementalFallbackReason::DeltaOverThreshold
         );
+        let maintenance = planned(&original, &changed).map_err(|error| error.detail)?;
+        assert_eq!(maintenance.upserts.len(), original.len());
+        assert!(maintenance.vector_upserts(IDENTITY).map_err(|error| error.detail)?.is_empty());
         Ok(())
     }
 
@@ -587,6 +602,7 @@ mod tests {
         for retained in [0, 1, 128, 768, 1024] {
             let delta = planned(&original, &original[..retained]).map_err(|error| error.detail)?;
             assert!(delta.upserts.is_empty());
+            assert_eq!(delta.removals.len(), original.len() - retained);
             assert_eq!(
                 delta.removals,
                 original[retained..]
@@ -609,7 +625,16 @@ mod tests {
         let original = documents(MAX_LEXICAL_DELTA_DOCUMENTS + 8);
         let delta = planned(&original, &original[..8]).map_err(|error| error.detail)?;
         assert_eq!(delta.removals.len(), MAX_LEXICAL_DELTA_DOCUMENTS);
-        assert!(planned(&original, &original[..7]).is_err());
+        assert!(diff_with_digest(
+            &super::super::digest_map(&original),
+            &inputs(&original),
+            &original[..7],
+            IDENTITY.to_owned(),
+            document_digest,
+        ).is_err());
+        let maintenance = planned(&original, &original[..7]).map_err(|error| error.detail)?;
+        assert_eq!(maintenance.removals.len(), MAX_LEXICAL_DELTA_DOCUMENTS + 1);
+        assert!(maintenance.upserts.is_empty());
 
         let mut changed = original[..9].to_vec();
         retitle(&mut changed[..1]);
@@ -618,11 +643,21 @@ mod tests {
         assert_eq!(delta.upserts.len(), 1);
         retitle(&mut changed[1..2]);
         assert_eq!(
-            planned(&original, &changed)
-                .expect_err("removals and upserts cannot each claim the whole budget")
-                .reason,
+            diff_with_digest(
+                &super::super::digest_map(&original),
+                &inputs(&original),
+                &changed,
+                IDENTITY.to_owned(),
+                document_digest,
+            )
+            .expect_err("removals and upserts share the ordinary mutation budget")
+            .reason,
             IncrementalFallbackReason::DeltaOverThreshold
         );
+        let maintenance = planned(&original, &changed).map_err(|error| error.detail)?;
+        assert_eq!(maintenance.removals.len(), MAX_LEXICAL_DELTA_DOCUMENTS - 1);
+        assert_eq!(maintenance.upserts.len(), 2);
+        assert!(maintenance.vector_upserts(IDENTITY).map_err(|error| error.detail)?.is_empty());
         Ok(())
     }
 
