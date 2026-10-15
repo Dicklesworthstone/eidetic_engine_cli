@@ -27,10 +27,31 @@ const TEST_ID: &str = "derived_apply_race_retry";
 const SOURCE_A_BODY: &str = "bd-2ri4f source A says derived apply must keep evidence provenance.";
 const SOURCE_B_BODY: &str = "bd-2ri4f source B says losing candidates must recover cleanly.";
 const EVIDENCE_BODY: &str = "bd-2ri4f shared evidence span consumed by one derived memory only.";
-const DERIVED_A_BODY: &str = "bd-2ri4f derived memory A wins the evidence race.";
-const DERIVED_B_BODY: &str = "bd-2ri4f derived memory B loses the evidence race.";
-const DERIVED_REJECTED_BODY: &str =
-    "bd-17bob rejected derived memory must not create mutation artifacts.";
+// These bodies must clear the candidate SPECIFICITY gate, which is why they
+// name commands and files rather than describing themselves in the abstract.
+// `ee curate validate` rejects a proposal whose content scores below
+// `DEFAULT_SPECIFICITY_MIN` with `candidate_too_generic`, and the earlier
+// one-line bodies scored 0.1850 against a 0.4500 threshold:
+//
+//   "candidate proposed content failed specificity (score 0.1850, threshold
+//    0.4500): below_specificity_threshold, candidate_too_generic"
+//   repair: "Add concrete commands, files, error codes, ..."
+//
+// That gate is right and the fixture was weak: "derived memory A wins the
+// evidence race" carries no concrete anchor. The structural signals the scorer
+// looks for are listed on `SpecificityStructuralSignals` (src/curate/mod.rs:6510)
+// -- inline command, file path, error code, metric threshold, technology name
+// -- so each body now names the command it is about and the files that exercise
+// it. The claims are about THIS test, so enriching them invents nothing.
+const DERIVED_A_BODY: &str = "bd-2ri4f: candidate A and candidate B derive from the same evidence \
+     span, so `ee curate apply` admits candidate A first and candidate B must retry; exercised by \
+     tests/e2e_derived_apply_race_retry.rs against src/core/curate.rs.";
+const DERIVED_B_BODY: &str = "bd-2ri4f: candidate B loses the apply race for one shared evidence \
+     span, so `ee curate validate` must still report it before `ee curate apply` retries; \
+     exercised by tests/e2e_derived_apply_race_retry.rs against src/core/curate.rs.";
+const DERIVED_REJECTED_BODY: &str = "bd-17bob: a rejected derived candidate must leave no mutation \
+     artifacts, so `ee curate reject` is terminal and a later `ee curate apply` must refuse it; \
+     exercised by tests/e2e_derived_apply_race_retry.rs against src/core/curate.rs.";
 
 #[derive(Debug)]
 struct CommandRun {
@@ -731,10 +752,21 @@ fn rejected_derived_candidate_is_terminal_and_leaves_no_mutation_artifacts() -> 
         ),
     )?;
     assert_success(&reject, "reject derived candidate", &log_path)?;
+    // `/data/mutation/toStatus`, not `/data/toStatus`. The review response nests
+    // the transition under a `mutation` object (`"mutation": report.mutation`,
+    // src/output/mod.rs:18475), so the flat pointer resolved to nothing and the
+    // comparison failed against a payload that said exactly what was wanted:
+    //
+    //   "mutation":{"fromStatus":"pending","toStatus":"rejected",
+    //               "fromReviewState":"new","toReviewState":"rejected",...}
+    //
+    // The nested path is the established one -- e2e_north_star_distillation.rs:644
+    // and e2e_appendix_c_agent_flow.rs:1094,:1177 all read it -- so this test was
+    // the outlier rather than the product having moved the field.
     ensure(
         reject
             .json
-            .pointer("/data/toStatus")
+            .pointer("/data/mutation/toStatus")
             .and_then(Value::as_str)
             == Some("rejected"),
         format!(
@@ -743,10 +775,14 @@ fn rejected_derived_candidate_is_terminal_and_leaves_no_mutation_artifacts() -> 
         ),
         &log_path,
     )?;
+    // Also nested under `mutation`, for the same reason as `toStatus` above:
+    // the review response carries the whole transition in one object, and
+    // `auditId` sits beside `reviewedAt`, `reviewedBy` and
+    // `mergedIntoCandidateId` there rather than at the top of `data`.
     ensure(
         reject
             .json
-            .pointer("/data/auditId")
+            .pointer("/data/mutation/auditId")
             .and_then(Value::as_str)
             .is_some(),
         format!(
