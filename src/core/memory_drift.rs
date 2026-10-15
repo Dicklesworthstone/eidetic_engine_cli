@@ -1902,18 +1902,29 @@ fn validated_recent_pack_record(
         return Err(("pack_item_ledger_count_mismatch", finding_id.clone()));
     }
 
-    let mut ranked_ids = Vec::with_capacity(selected_items.len());
+    let memory_ids = ranked_memory_ids(selected_items, &finding_id)?;
+
+    Ok(ValidatedRecentPackRecord {
+        selected_at,
+        memory_ids,
+    })
+}
+
+fn ranked_memory_ids(
+    selected_items: &[serde_json::Value],
+    finding_id: &Option<String>,
+) -> Result<Vec<String>, (&'static str, Option<String>)> {
+    let mut ranked_memories = Vec::with_capacity(selected_items.len());
+    let mut ranks = BTreeSet::new();
+    let mut identities = BTreeSet::new();
+
     for item in selected_items {
-        let memory_id = item
-            .get("memoryId")
-            .and_then(serde_json::Value::as_str)
-            .filter(|memory_id| !memory_id.trim().is_empty())
-            .ok_or_else(|| {
-                (
-                    "pack_item_ledger_selected_item_malformed",
-                    finding_id.clone(),
-                )
-            })?;
+        let identity = crate::core::pack_selection_identity::classify(item).map_err(|_| {
+            (
+                "pack_item_ledger_selected_item_malformed",
+                finding_id.clone(),
+            )
+        })?;
         let rank = item
             .get("rank")
             .and_then(serde_json::Value::as_u64)
@@ -1924,28 +1935,30 @@ fn validated_recent_pack_record(
                     finding_id.clone(),
                 )
             })?;
-        ranked_ids.push((rank, memory_id.to_owned()));
-    }
-    ranked_ids.sort();
-    let distinct_ranks = ranked_ids
-        .iter()
-        .map(|(rank, _)| *rank)
-        .collect::<BTreeSet<_>>();
-    let distinct_ids = ranked_ids
-        .iter()
-        .map(|(_, memory_id)| memory_id.as_str())
-        .collect::<BTreeSet<_>>();
-    if distinct_ranks.len() != ranked_ids.len() || distinct_ids.len() != ranked_ids.len() {
-        return Err(("pack_item_ledger_selected_item_ambiguous", finding_id));
+        if !ranks.insert(rank) {
+            return Err(("pack_item_ledger_selected_item_ambiguous", finding_id.clone()));
+        }
+
+        let identity_key = match identity {
+            crate::core::pack_selection_identity::PackSelectionIdentity::Memory(memory_id) => {
+                ranked_memories.push((rank, memory_id.to_owned()));
+                format!("memory:{memory_id}")
+            }
+            crate::core::pack_selection_identity::PackSelectionIdentity::Native {
+                kind,
+                entity_id,
+            } => format!("{kind}:{entity_id}"),
+        };
+        if !identities.insert(identity_key) {
+            return Err(("pack_item_ledger_selected_item_ambiguous", finding_id.clone()));
+        }
     }
 
-    Ok(ValidatedRecentPackRecord {
-        selected_at,
-        memory_ids: ranked_ids
-            .into_iter()
-            .map(|(_, memory_id)| memory_id)
-            .collect(),
-    })
+    ranked_memories.sort();
+    Ok(ranked_memories
+        .into_iter()
+        .map(|(_, memory_id)| memory_id)
+        .collect())
 }
 
 fn recent_pack_record_binding_mismatches(parsed: &ParsedPackLedger) -> Vec<&str> {
@@ -5272,6 +5285,45 @@ mod tests {
         assert!(!message.contains("workspace write-lock"));
         assert!(MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.contains("ee doctor --json"));
         assert!(!MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.contains("advisory-lock"));
+    }
+
+    #[test]
+    fn mixed_native_pack_items_validate_without_becoming_memory_drift_targets() {
+        let selected = vec![
+            serde_json::json!({
+                "entityKind": "evidence_span",
+                "entityId": "ev_native",
+                "evidenceSpanId": "ev_native",
+                "rank": 1
+            }),
+            serde_json::json!({
+                "memoryId": "mem_target",
+                "rank": 2
+            }),
+            serde_json::json!({
+                "entityKind": "rule",
+                "entityId": "rul_native",
+                "rank": 3
+            }),
+        ];
+        assert_eq!(
+            ranked_memory_ids(&selected, &None).expect("mixed typed selection"),
+            vec!["mem_target".to_owned()]
+        );
+
+        let mut duplicate_rank = selected.clone();
+        duplicate_rank[2]["rank"] = serde_json::json!(2);
+        assert!(matches!(
+            ranked_memory_ids(&duplicate_rank, &None),
+            Err(("pack_item_ledger_selected_item_ambiguous", _))
+        ));
+
+        let mut fabricated_alias = selected;
+        fabricated_alias[0]["memoryId"] = serde_json::json!("mem_fake");
+        assert!(matches!(
+            ranked_memory_ids(&fabricated_alias, &None),
+            Err(("pack_item_ledger_selected_item_malformed", _))
+        ));
     }
 
     #[test]
