@@ -340,3 +340,6 @@ fn bulk_growth_requires_v3_complete_inputs_and_the_actual_producer() -> TestResu
     }
     Ok(())
 }
+
+#[path = "index_delta_maintenance_native_tests.rs"]
+mod maintenance;

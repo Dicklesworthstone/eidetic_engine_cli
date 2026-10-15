@@ -18,7 +18,9 @@
 //! metadata refreshes and withdrawals may share the bulk mutation budget only
 //! when every surviving identity and embedding input remain unchanged.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use crate::search::IndexableDocument;
 
@@ -32,6 +34,10 @@ mod append;
 
 #[path = "index_delta_growth.rs"]
 mod growth;
+
+#[path = "index_delta_planning.rs"]
+mod planning;
+use planning::diff_with_digest;
 
 const MAX_LEXICAL_DELTA_DOCUMENTS: usize = 8192;
 const MAX_LEXICAL_DELTA_BYTES: usize = 32 * 1024 * 1024;
@@ -106,62 +112,6 @@ pub(super) fn diff(
         }
         result => result,
     }
-}
-
-fn diff_with_digest(
-    live: &BTreeMap<String, String>,
-    inputs: &BTreeMap<String, String>,
-    documents: &[IndexableDocument],
-    identity: String,
-    mut digest: impl FnMut(&IndexableDocument) -> String,
-) -> Result<Delta, IncrementalFallback> {
-    let inference_limit = vector_delta_limit(live.len(), documents.len());
-    let mut inference_inputs = 0;
-    let mut lexical = LexicalBudget::default();
-    let mut current = BTreeSet::new();
-    let mut upserts = Vec::new();
-    let mut reusable = BTreeMap::new();
-    for document in documents {
-        if !current.insert(document.id.as_str()) {
-            return Err(incremental_fallback(
-                IncrementalFallbackReason::CorpusRevisionMismatch,
-                "source snapshot contains duplicate document identities",
-            ));
-        }
-        if live.get(&document.id) == Some(&digest(document)) {
-            continue;
-        }
-        lexical.admit(document_payload_bytes(document))?;
-        let input = embedding_input_digest(document);
-        if live.contains_key(&document.id) && inputs.get(&document.id) == Some(&input) {
-            reusable.insert(document.id.clone(), input);
-        } else {
-            if inference_inputs == inference_limit {
-                return Err(over_limit("vector delta exceeds the inference budget"));
-            }
-            inference_inputs += 1;
-        }
-        upserts.push(document);
-    }
-    let mut removals = Vec::new();
-    for id in live.keys().filter(|id| !current.contains(id.as_str())) {
-        // No embedding is produced for a removal. Charging it as inference
-        // forced large session withdrawals to re-embed every surviving row.
-        // Still charge each operation and its complete ID before cloning it;
-        // deletions and upserts share one finite mutation allowance. The
-        // existing apply path finalizes each vector tier at most once, using
-        // vacuum for deletion-only work and compaction when upserts add WAL.
-        lexical.admit(id.len())?;
-        removals.push(id.clone());
-    }
-    Ok(Delta {
-        upserts: upserts.into_iter().cloned().collect(),
-        removals,
-        reuse: Some(EmbeddingReuse {
-            identity,
-            inputs: reusable,
-        }),
-    })
 }
 
 #[cfg(test)]
