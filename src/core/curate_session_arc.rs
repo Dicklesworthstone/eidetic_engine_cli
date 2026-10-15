@@ -20,6 +20,21 @@ pub(super) fn sequence_candidates(
 /// A failure and its repair may live in one imported CASS window. Keep the
 /// original evidence ID, hash, and complete locator: sentence boundaries in an
 /// excerpt are not transcript line boundaries and must not invent provenance.
+///
+/// Raw-span entry point, reached only by tests since 245e2cf3c. Production
+/// comes in through `inline_candidates_from_message`, which reuses the body
+/// sequence observation grouping already decoded rather than decoding the
+/// envelope a second time. Nothing was stranded by that move: the single
+/// production caller (`sequence.rs`) always passed
+/// `std::slice::from_ref(span)`, so this multi-span loop and the cross-span
+/// `seen_ids` set it maintains never saw more than one span. Both entry points
+/// share `append_inline_candidates`, so the behavior under test is the
+/// behavior that ships.
+///
+/// The gate is load-bearing, not decoration: without it the plain `--lib`
+/// target has no caller, and `cargo clippy --locked --all-targets -- -D
+/// warnings` fails the lint lane on `dead_code`.
+#[cfg(test)]
 pub(super) fn inline_candidates(
     workspace_id: &str,
     session: &StoredSession,
