@@ -258,3 +258,6 @@ fn source_reads_borrow_the_callers_transaction_without_committing_or_rolling_it_
 
 #[path = "error_recall_revalidate_paging_tests.rs"]
 mod paging;
+
+#[path = "error_recall_revalidate_batch_tests.rs"]
+mod batching;

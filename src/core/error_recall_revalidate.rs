@@ -4,6 +4,8 @@
 //! the current session interpreter for the exact failure/error/target tuple.
 //! Manual feedback is not reclassified; no link, card or source row is changed.
 //! The caller owns one read snapshot spanning this gate and final hydration.
+//! Failure owners are batched; each referenced session is interpreted at most
+//! once per batch even when target ordering interleaves many source sessions.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,6 +41,8 @@ pub(in crate::core::error_diagnosis) struct Gate<'a> {
     sessions: BTreeMap<String, BTreeSet<Claim>>,
     #[cfg(test)]
     source_reads: usize,
+    #[cfg(test)]
+    ownership_reads: usize,
 }
 
 impl<'a> Gate<'a> {
@@ -54,6 +58,8 @@ impl<'a> Gate<'a> {
             sessions: BTreeMap::new(),
             #[cfg(test)]
             source_reads: 0,
+            #[cfg(test)]
+            ownership_reads: 0,
         }
     }
 
@@ -96,6 +102,7 @@ impl<'a> Gate<'a> {
         if rows.len() > FEEDBACK_BATCH {
             return Err(unavailable());
         }
+        let mut claims = BTreeSet::new();
         for row in rows {
             let target = row.get(0).and_then(Value::as_str).ok_or_else(unavailable)?;
             if !selected.contains(target) {
@@ -115,41 +122,108 @@ impl<'a> Gate<'a> {
                 withheld.insert(target.to_owned());
                 continue;
             }
-            let claim = Claim { failure: failure.to_owned(), target: target.to_owned(), card };
-            if !self.verified(&claim)? {
-                // Monotone across repeated source rows: one contradictory
-                // observation cannot be repaired by a convenient later twin.
-                withheld.insert(target.to_owned());
-            }
+            claims.insert(Claim { failure: failure.to_owned(), target: target.to_owned(), card });
         }
+        // A malformed twin has already refused this target. Do not spend
+        // source I/O on another row that cannot reverse that decision.
+        claims.retain(|claim| !withheld.contains(&claim.target));
+        self.verify_batch(claims, &mut withheld)?;
         Ok(withheld)
     }
 
-    fn verified(&mut self, claim: &Claim) -> Result<bool> {
-        // Resolve ownership without loading a potentially large failing body.
-        let rows = self.connection.query(
-            "SELECT CASE WHEN length(CAST(session_id AS BLOB)) <= 128 THEN session_id ELSE '' END FROM evidence_spans WHERE workspace_id = ?1 AND id = ?2",
-            &[Value::Text(self.workspace.to_owned()), Value::Text(claim.failure.clone())],
-        ).map_err(|_| unavailable())?;
-        if rows.len() > 1 {
-            return Err(unavailable());
+    /// Resolve at most one batch of exact failure owners without reading their
+    /// bodies. Group claims before interpreting sessions: target order can
+    /// interleave more source sessions than the cross-batch cache can retain.
+    /// Increasing that cache would hide, rather than remove, the repeated work.
+    fn verify_batch(
+        &mut self,
+        claims: BTreeSet<Claim>,
+        withheld: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        if claims.is_empty() {
+            return Ok(());
         }
-        let Some(row) = rows.first() else { return Ok(false); };
-        let session = row.get(0).and_then(Value::as_str).ok_or_else(unavailable)?;
-        if session.is_empty() {
-            return Ok(false);
+        let failures: BTreeSet<_> = claims.iter().map(|claim| claim.failure.as_str()).collect();
+        let owners = self.failure_owners(&failures)?;
+        let mut groups = BTreeMap::<String, BTreeSet<Claim>>::new();
+        for claim in claims {
+            if let Some(session) = owners.get(&claim.failure) {
+                groups.entry(session.clone()).or_default().insert(claim);
+            } else {
+                withheld.insert(claim.target);
+            }
         }
-        if !self.sessions.contains_key(session) {
-            let claims = session_claims(self.connection, self.workspace, self.fingerprint, session)?;
+        // Consume every warm verdict before a new group can evict it. This
+        // preserves useful cache hits even when a missing session sorts first.
+        groups.retain(|session, pending| {
+            let Some(known) = self.sessions.get(session) else {
+                return true;
+            };
+            withhold_unknown(pending, known, withheld);
+            false
+        });
+        for (session, pending) in groups {
+            let known = session_claims(self.connection, self.workspace, self.fingerprint, &session)?;
             #[cfg(test)]
             { self.source_reads += 1; }
+            withhold_unknown(&pending, &known, withheld);
             if self.sessions.len() == MAX_CACHED_SESSIONS {
                 self.sessions.pop_first();
             }
-            self.sessions.insert(session.to_owned(), claims);
+            self.sessions.insert(session, known);
         }
-        Ok(self.sessions.get(session).is_some_and(|claims| claims.contains(claim)))
+        Ok(())
     }
+
+    fn failure_owners(&mut self, failures: &BTreeSet<&str>) -> Result<BTreeMap<String, String>> {
+        if failures.len() > FEEDBACK_BATCH || failures.iter().any(|id| !canonical_evidence(id)) {
+            return Err(unavailable());
+        }
+        if failures.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = (2..2 + failures.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, CASE WHEN length(CAST(session_id AS BLOB)) <= 128 THEN session_id ELSE '' END FROM evidence_spans WHERE workspace_id = ?1 AND id IN ({placeholders}) ORDER BY id ASC LIMIT {}",
+            FEEDBACK_BATCH + 1,
+        );
+        let mut parameters = vec![Value::Text(self.workspace.to_owned())];
+        parameters.extend(failures.iter().map(|id| Value::Text((*id).to_owned())));
+        #[cfg(test)]
+        { self.ownership_reads += 1; }
+        let rows = self.connection.query(&sql, &parameters).map_err(|_| unavailable())?;
+        if rows.len() > failures.len() {
+            return Err(unavailable());
+        }
+        let mut seen = BTreeSet::new();
+        let mut owners = BTreeMap::new();
+        for row in rows {
+            let failure = row.get(0).and_then(Value::as_str).ok_or_else(unavailable)?;
+            let session = row.get(1).and_then(Value::as_str).ok_or_else(unavailable)?;
+            if !failures.contains(failure) || !seen.insert(failure.to_owned()) || session.len() > 128 {
+                return Err(unavailable());
+            }
+            if !session.is_empty() {
+                owners.insert(failure.to_owned(), session.to_owned());
+            }
+        }
+        Ok(owners)
+    }
+}
+
+// Refusals are monotone across all groups, including distinct claims for the
+// same target. One convenient source can never restore a contradicted twin.
+fn withhold_unknown(
+    pending: &BTreeSet<Claim>,
+    known: &BTreeSet<Claim>,
+    withheld: &mut BTreeSet<String>,
+) {
+    withheld.extend(pending.iter()
+        .filter(|claim| !known.contains(*claim))
+        .map(|claim| claim.target.clone()));
 }
 
 fn canonical_evidence(id: &str) -> bool {
