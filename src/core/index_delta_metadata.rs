@@ -11,8 +11,9 @@
 //! V3 inference scales with the corpus, not the legacy 256-document ceiling:
 //! bounded embedding/WAL batches can process a substantial import without
 //! re-embedding every unchanged survivor. Mixed mutations retain independent
-//! percentage, 8192-mutation and 32-MiB payload ceilings. Proven pure appends
-//! may use the separate bounded import lane without relaxing rewrite policy.
+//! percentage, 8192-mutation and 32-MiB payload ceilings. Growing imports may
+//! separate new inputs from bounded old-corpus changes, without using growth
+//! to dilute the retained-input rewrite percentage or re-embedding metadata.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,6 +26,9 @@ use super::{
 
 #[path = "index_delta_append.rs"]
 mod append;
+
+#[path = "index_delta_growth.rs"]
+mod growth;
 
 const MAX_LEXICAL_DELTA_DOCUMENTS: usize = 8192;
 const MAX_LEXICAL_DELTA_BYTES: usize = 32 * 1024 * 1024;
@@ -89,9 +93,9 @@ pub(super) fn diff(
     match diff_with_digest(live, inputs, documents, identity.clone(), document_digest) {
         Err(error) if error.reason == IncrementalFallbackReason::DeltaOverThreshold => {
             // Percentage is a rewrite-cost heuristic, not proof that existing
-            // vectors need inference again. Only exact append-only growth may
-            // use the import lane; all other sources retain this same refusal.
-            match append::try_plan(live, documents, identity)? {
+            // vectors need inference again. Bulk growth has separate existing-
+            // corpus mutation/rewrite limits, with one shared payload budget.
+            match growth::try_plan(live, inputs, documents, identity)? {
                 Some(delta) => Ok(delta),
                 None => Err(error),
             }
@@ -543,11 +547,12 @@ mod tests {
             2
         );
         changed.push(IndexableDocument::new("new_2", &original[0].content));
+        // Growth gets its own intake allowance; equal text still requires
+        // every new document identity to receive a vector.
+        let delta = planned(&original, &changed).map_err(|error| error.detail)?;
         assert_eq!(
-            planned(&original, &changed)
-                .expect_err("new IDs spend vector budget")
-                .reason,
-            IncrementalFallbackReason::DeltaOverThreshold
+            delta.vector_upserts(IDENTITY).map_err(|error| error.detail)?.len(),
+            3
         );
         Ok(())
     }

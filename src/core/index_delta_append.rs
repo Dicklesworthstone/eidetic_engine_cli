@@ -20,21 +20,21 @@ use super::{
 // The retained delta is bounded separately: at most 64K new document objects
 // and the SAME 32-MiB payload ceiling as ordinary V3 intake. This is not an RSS
 // bound, nor permission to bypass the publisher's storage/request budgets.
-const MAX_APPEND_DOCUMENTS: usize = 65_536;
+pub(super) const MAX_APPEND_DOCUMENTS: usize = 65_536;
 
 #[derive(Default)]
-struct AppendBudget {
+pub(super) struct AppendBudget {
     documents: usize,
     bytes: usize,
 }
 
 impl AppendBudget {
-    fn admit(&mut self, bytes: usize) -> Result<(), IncrementalFallback> {
+    pub(super) fn admit(&mut self, bytes: usize) -> Result<(), IncrementalFallback> {
         if self.documents >= MAX_APPEND_DOCUMENTS {
-            return Err(over_limit("append-only delta exceeds the document budget"));
+            return Err(over_limit("bulk intake exceeds the document budget"));
         }
         if bytes > MAX_LEXICAL_DELTA_BYTES.saturating_sub(self.bytes) {
-            return Err(over_limit("append-only delta exceeds the document-payload byte budget"));
+            return Err(over_limit("bulk intake exceeds the document-payload byte budget"));
         }
         self.documents += 1;
         self.bytes += bytes;
@@ -103,7 +103,7 @@ fn collect_appends<'a>(
         return Ok(None);
     };
     if added > MAX_APPEND_DOCUMENTS {
-        return Err(over_limit("append-only delta exceeds the document budget"));
+        return Err(over_limit("bulk intake exceeds the document budget"));
     }
     let mut seen = BTreeSet::new();
     let mut retained = 0_usize;
