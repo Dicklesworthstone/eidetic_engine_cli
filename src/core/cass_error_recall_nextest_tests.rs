@@ -207,3 +207,6 @@ fn input_and_inventory_budgets_fail_closed_without_saving_a_prefix() {
 
 #[path = "cass_error_recall_nextest_store_tests.rs"]
 mod store;
+
+#[path = "cass_error_recall_nextest_fail_fast_tests.rs"]
+mod fail_fast;

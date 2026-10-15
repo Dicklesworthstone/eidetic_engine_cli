@@ -37,10 +37,12 @@ struct Selection {
 #[derive(Default)]
 pub(in crate::core::cass_error_recall) struct Execution {
     selection: Option<Selection>,
+    profile: Option<Subject>,
     inventory: BTreeSet<Subject>,
     failed: BTreeSet<Subject>,
     passed: BTreeSet<Subject>,
     complete: bool,
+    full_inventory: bool,
 }
 
 impl Execution {
@@ -51,9 +53,17 @@ impl Execution {
     pub(super) fn verified_by(&self, proof: &Self) -> bool {
         self.has_known_failures()
             && proof.complete
+            && proof.full_inventory
+            && self.profile == proof.profile
             && proof.failed.is_empty()
             && self.selection == proof.selection
-            && self.inventory == proof.inventory
+            && (if self.full_inventory {
+                self.inventory == proof.inventory
+            } else {
+                // Fail-fast leaves selected tests unstarted. The retry must
+                // run the whole same selection and retain every observed ID.
+                self.inventory.is_subset(&proof.inventory)
+            })
             && self.failed.is_subset(&proof.passed)
     }
 }
@@ -190,6 +200,8 @@ fn test_result<'a>(
 #[derive(Clone, Copy)]
 struct Summary {
     ran: usize,
+    selected: Option<usize>,
+    slow_passed: Option<usize>,
     passed: usize,
     failed: usize,
     skipped: usize,
@@ -198,10 +210,27 @@ struct Summary {
 fn summary(body: &str) -> Result<Summary, ()> {
     let rest = timed_body(body, false, false)?;
     let (run, counters) = rest.split_once(" run: ").ok_or(())?;
-    let ran = number_with_unit(run, "test", "tests")?;
+    let (ran, selected) = if let Some((ran, total)) = run.split_once('/') {
+        let ran = count(ran)?;
+        let total = number_with_unit(total, "test", "tests")?;
+        if ran == 0 || ran >= total || total > MAX_TESTS {
+            return Err(());
+        }
+        (ran, Some(total))
+    } else {
+        (number_with_unit(run, "test", "tests")?, None)
+    };
     let mut counts = BTreeMap::new();
+    let mut slow_passed = None;
     for counter in counters.split(", ") {
-        let (number, name) = counter.split_once(' ').ok_or(())?;
+        let (number, mut name) = counter.split_once(' ').ok_or(())?;
+        if let Some(slow) = name.strip_prefix("passed (") {
+            let slow = count(slow.strip_suffix(" slow)").ok_or(())?)?;
+            if slow == 0 || slow > count(number)? || slow_passed.replace(slow).is_some() {
+                return Err(());
+            }
+            name = "passed";
+        }
         if !matches!(name, "passed" | "failed" | "skipped")
             || counts.insert(name, count(number)?).is_some()
         {
@@ -216,6 +245,8 @@ fn summary(body: &str) -> Result<Summary, ()> {
     }
     Ok(Summary {
         ran,
+        selected,
+        slow_passed,
         passed,
         failed,
         skipped,
@@ -240,15 +271,12 @@ fn diagnostic(binary: &str, name: &str) -> CanonicalDiagnostic {
     super::super::from_cargo(None, &format!("nextest test failure {key} {safe}"))
 }
 
-fn is_run_id(line: &str) -> bool {
-    let Some((id, profile)) = line
+fn run_profile(line: &str) -> Option<&str> {
+    let (id, profile) = line
         .trim_start_matches(' ')
-        .strip_prefix("Nextest run ID ")
-        .and_then(|rest| rest.split_once(" with nextest profile: "))
-    else {
-        return false;
-    };
-    id.len() == 36
+        .strip_prefix("Nextest run ID ")?
+        .split_once(" with nextest profile: ")?;
+    (id.len() == 36
         && id.bytes().enumerate().all(|(index, byte)| {
             if [8, 13, 18, 23].contains(&index) {
                 byte == b'-'
@@ -257,16 +285,58 @@ fn is_run_id(line: &str) -> bool {
             }
         })
         && !profile.is_empty()
-        && !profile.chars().any(char::is_whitespace)
+        && !profile.chars().any(char::is_whitespace))
+    .then_some(profile)
+}
+
+/// A finished fail-fast run is distinct from a signal, global timeout or
+/// killed test run. Do not accept arbitrary reasons after "Cancelling".
+fn fail_fast_notice(body: &str, selected: Selection) -> Result<(), ()> {
+    let tail = body.strip_prefix("due to test failure").ok_or(())?;
+    if tail.is_empty() || tail == ":" {
+        return Ok(());
+    }
+    let running = tail
+        .strip_prefix(": ")
+        .and_then(|tail| tail.strip_suffix(" still running"))
+        .ok_or(())?;
+    let running = number_with_unit(running, "test", "tests")?;
+    (running <= selected.tests).then_some(()).ok_or(())
+}
+
+fn fail_fast_warning(line: &str, selected: Selection, summary: Summary) -> Result<(), ()> {
+    let body = line.strip_prefix("warning: ").ok_or(())?;
+    let (counts, advice) = body
+        .split_once(" tests were not run due to test failure")
+        .ok_or(())?;
+    if !matches!(
+        advice,
+        ""
+            | " (run with --no-fail-fast to run all tests)"
+            | " (run with --no-fail-fast to run all tests, or run with --max-fail)"
+    ) {
+        return Err(());
+    }
+    let (unstarted, total) = counts.split_once('/').ok_or(())?;
+    let unstarted = count(unstarted)?;
+    (unstarted > 0
+        && count(total)? == selected.tests
+        && summary.ran.checked_add(unstarted) == Some(selected.tests))
+    .then_some(())
+    .ok_or(())
 }
 
 /// None selects another family. A recognized but damaged nextest report is
 /// Err, not permission to harvest its nested libtest stdout as independent
 /// proof. Incomplete named runs can supply diagnostics, never completion.
 pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
-    let recognized = text.contains("Nextest run ID ")
-        || text.lines().any(|line| {
-            line.contains("Starting ") && line.contains(" across ") && line.contains(" binar")
+    // Real nextest styling can occur between "run" and " ID", and after
+    // "Starting". Probe bounded words before the conservative SGR decoder;
+    // requiring unstyled whitespace here silently misses colorized reports.
+    let prefix = super::super::bounded(text);
+    let recognized = prefix.contains("Nextest run")
+        || prefix.lines().any(|line| {
+            line.contains("Starting") && line.contains("across") && line.contains("binar")
         });
     if !recognized {
         return Ok(None);
@@ -276,13 +346,16 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
     }
     let visible = terminal::normalize(text)?;
     let mut selected = None;
-    let mut run_id = false;
+    let mut profile = None;
     let mut ended = None;
     let mut capture = false;
     let mut seen_capture = false;
     let mut separator = false;
     let mut nodes = BTreeMap::<(&str, &str), Status>::new();
     let mut final_nodes = BTreeSet::new();
+    let mut slow_nodes = BTreeSet::new();
+    let mut cancelled = false;
+    let mut warned = false;
     for line in visible.lines() {
         if line.trim().is_empty() {
             continue;
@@ -293,8 +366,13 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
             continue;
         }
         if selected.is_none() {
-            if is_run_id(line) && !run_id {
-                run_id = true;
+            if let Some(name) = run_profile(line) {
+                if profile
+                    .replace(*blake3::hash(name.as_bytes()).as_bytes())
+                    .is_some()
+                {
+                    return Err(());
+                }
                 continue;
             }
             if let Some(("Starting", body)) = producer_row(line) {
@@ -304,7 +382,7 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
             }
             // Only ordinary Cargo progress can precede the nextest producer.
             // Warning bodies, quoted examples and mixed command logs abstain.
-            if !run_id
+            if profile.is_none()
                 && producer_row(line)
                     .is_some_and(|(label, _)| matches!(label, "Compiling" | "Finished"))
             {
@@ -313,12 +391,25 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
             return Err(());
         }
         let selected = selected.ok_or(())?;
-        if matches!(line.trim(), "stdout ---" | "stderr ---" | "stdout ───" | "stderr ───") {
+        if matches!(
+            line.trim(),
+            "stdout ---" | "stderr ---" | "stdout ───" | "stderr ───"
+        ) {
             capture = true;
             seen_capture = true;
             continue;
         }
         if let Some((label, body)) = producer_row(line) {
+            if label == "Cancelling" {
+                if cancelled || ended.is_some() {
+                    return Err(());
+                }
+                fail_fast_notice(body, selected)?;
+                cancelled = true;
+                capture = false;
+                separator = false;
+                continue;
+            }
             if label == "Summary" {
                 if ended.is_some() || !separator {
                     return Err(());
@@ -327,18 +418,30 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
                 capture = false;
                 continue;
             }
-            if matches!(label, "PASS" | "FAIL" | "TIMEOUT" | "ABORT" | "LEAK-FAIL" | "SKIP" | "SLOW") {
+            if matches!(
+                label,
+                "PASS" | "FAIL" | "TIMEOUT" | "ABORT" | "LEAK-FAIL" | "SKIP" | "SLOW"
+            ) {
                 let (binary, name, status) = test_result(label, body, selected)?;
                 if ended.is_some() {
                     // Final status listings repeat results, not executions.
-                    if nodes.get(&(binary, name)) != Some(&status)
+                    let expected = if status == Status::Slow {
+                        slow_nodes.insert((binary, name));
+                        Status::Passed
+                    } else {
+                        status
+                    };
+                    if nodes.get(&(binary, name)) != Some(&expected)
                         || !final_nodes.insert((binary, name))
                     {
                         return Err(());
                     }
-                } else if status != Status::Slow
-                    && (nodes.len() == MAX_TESTS || nodes.insert((binary, name), status).is_some())
-                {
+                } else if status == Status::Slow {
+                    if slow_nodes.len() == MAX_TESTS || nodes.contains_key(&(binary, name)) {
+                        return Err(());
+                    }
+                    slow_nodes.insert((binary, name));
+                } else if nodes.len() == MAX_TESTS || nodes.insert((binary, name), status).is_some() {
                     return Err(());
                 }
                 capture = false;
@@ -349,6 +452,14 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
         if capture && line.starts_with("    ") {
             continue;
         }
+        if line.starts_with("warning: ") {
+            if !cancelled || warned {
+                return Err(());
+            }
+            fail_fast_warning(line, selected, ended.ok_or(())?)?;
+            warned = true;
+            continue;
+        }
         if ended.is_some_and(|summary| summary.failed > 0) && line == "error: test run failed" {
             continue;
         }
@@ -356,6 +467,7 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
     }
     let mut execution = Execution {
         selection: selected,
+        profile,
         ..Execution::default()
     };
     let mut diagnostics = Vec::new();
@@ -380,7 +492,17 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
     }
     if let Some(summary) = ended {
         let selected = selected.ok_or(())?;
-        if summary.ran != selected.tests
+        let full_inventory = summary.ran == selected.tests;
+        let slow_passed = slow_nodes
+            .iter()
+            .filter(|node| nodes.get(*node) == Some(&Status::Passed))
+            .count();
+        if slow_nodes.iter().any(|node| !nodes.contains_key(node))
+            || summary.slow_passed.is_some_and(|count| count != slow_passed)
+            || summary.selected.is_some_and(|total| total != selected.tests)
+            || (summary.selected.is_none() && !full_inventory)
+            || (!full_inventory && (!cancelled || summary.failed == 0))
+            || (cancelled && summary.failed == 0)
             || summary.ran != execution.inventory.len()
             || summary.passed != execution.passed.len()
             || summary.failed != execution.failed.len()
@@ -390,9 +512,12 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
             return Err(());
         }
         execution.complete = true;
+        execution.full_inventory = full_inventory;
     }
     let failed = !execution.failed.is_empty();
     let allows_completion = execution.complete
+        && execution.full_inventory
+        && !cancelled
         && !failed
         && !execution.inventory.is_empty()
         && !seen_capture;

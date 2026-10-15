@@ -10,10 +10,18 @@ use serde_json::json;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 const WS: &str = "wsp_01234567890123456789012345";
-const COMMAND: &str = "cargo nextest run --no-fail-fast";
+const COMMAND: &str = "cargo nextest run";
 const REPAIR: &str = "The cache round_trip test failed because writes were not flushed. I fixed round_trip by flushing pending cache writes before reads in src/cache.rs.";
 
 fn episode(proof: &str, proof_command: &str) -> Result<(DbConnection, String, Vec<String>), Box<dyn std::error::Error>> {
+    episode_with_failure(&failed().text, proof, proof_command)
+}
+
+fn episode_with_failure(
+    failure: &str,
+    proof: &str,
+    proof_command: &str,
+) -> Result<(DbConnection, String, Vec<String>), Box<dyn std::error::Error>> {
     let connection = DbConnection::open_memory()?;
     connection.migrate()?;
     connection.insert_workspace(WS, &CreateWorkspaceInput {
@@ -30,7 +38,7 @@ fn episode(proof: &str, proof_command: &str) -> Result<(DbConnection, String, Ve
     })?;
     let rows = [
         ("tool_call", "assistant", json!({"type":"tool_use","id":"fail","name":"Bash","input":{"command":COMMAND}})),
-        ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"fail","content":failed().text,"is_error":true})),
+        ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"fail","content":failure,"is_error":true})),
         ("message", "assistant", json!({"type":"text","text":REPAIR})),
         ("tool_call", "assistant", json!({"type":"tool_use","id":"verify","name":"Bash","input":{"command":proof_command}})),
         ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"verify","content":proof,"is_error":false})),
@@ -108,5 +116,23 @@ fn changed_commands_or_missing_subjects_keep_real_store_failures_unresolved() ->
         assert!(recall.helpful_repairs.is_empty());
         assert!(recall.proof_links.is_empty());
     }
+    Ok(())
+}
+
+#[test]
+fn default_fail_fast_run_records_the_repair_only_after_a_complete_native_retry() -> TestResult {
+    let failure = super::fail_fast::failure_report();
+    let retry = super::fail_fast::retry_report();
+    let (db, session, ids) = episode_with_failure(&failure, &retry, COMMAND)?;
+    let report = record_session_error_recall(&db, WS, &session)?;
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.repair_links_recorded, 2);
+    assert_eq!(report.incident_cards_recorded, 1);
+    let diagnostic = structured_error_diagnostics(&failure).remove(0);
+    let recall = error_recall_report(&db, WS, &diagnostic)?;
+    assert!(recall.helpful_repairs.contains(&ids[2]));
+    assert_eq!(recall.proof_links, vec![ids[4].clone()]);
+    assert!(pack_error_recall_query_seed(&db, WS, &diagnostic)?.contains("flushing"));
     Ok(())
 }
