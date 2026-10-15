@@ -87,6 +87,8 @@ impl StructuralGraphInput {
 /// is byte-stable regardless of input order. Links cannot expand the supplied
 /// live-memory set or bypass the shared mesh policy. Filtering precedes
 /// canonical selection, so a denied parallel link cannot hide an allowed one.
+/// Conflicting observations of one link ID are withheld together; equivalent
+/// repeated rows are deduplicated without changing their canonical attributes.
 #[must_use]
 pub fn build_structural_graph_input(
     memories: &[StoredMemory],
@@ -99,29 +101,13 @@ pub fn build_structural_graph_input(
         graph.add_node((*id).to_owned());
     }
 
-    // Deterministic processing order: canonical endpoint pair, then link
-    // id, so reversed/duplicate links always resolve identically.
-    let mut ordered: Vec<&StoredMemoryLink> = links
-        .iter()
-        .filter(|link| admission::link_is_admitted(link, &workspaces))
-        .collect();
-    ordered.sort_by(|left, right| {
-        canonical_pair(left)
-            .cmp(&canonical_pair(right))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-
-    let mut edges: Vec<StructuralGraphEdge> = Vec::new();
+    // Reconcile repeated source IDs before admission, then retain one visible
+    // representative per canonical pair. Conflicting versions of one source
+    // cannot select attributes or visibility by their input order.
+    let ordered = admission::canonical_links(links, &workspaces);
+    let mut edges: Vec<StructuralGraphEdge> = Vec::with_capacity(ordered.len());
     for link in ordered {
         let (a, b) = canonical_pair(link);
-        if a == b {
-            // Self-links carry no structural membership signal.
-            continue;
-        }
-        if edges.last().is_some_and(|edge| edge.a == a && edge.b == b) {
-            // Duplicate or reversed of the previous canonical edge.
-            continue;
-        }
         let mut attrs = AttrMap::new();
         attrs.insert(
             "weight".to_owned(),
@@ -300,3 +286,7 @@ mod tests {
 #[cfg(test)]
 #[path = "structural_admission_tests.rs"]
 mod admission_tests;
+
+#[cfg(test)]
+#[path = "structural_sources_tests.rs"]
+mod source_tests;
