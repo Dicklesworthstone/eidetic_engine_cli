@@ -98,6 +98,7 @@ pub mod model;
 pub mod orient;
 pub mod outcome;
 pub mod ownership_snapshot;
+pub(crate) mod pack_selection_identity;
 pub mod path_safety;
 pub mod perf_forensics;
 pub mod perf_live;
