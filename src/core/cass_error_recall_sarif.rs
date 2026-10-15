@@ -21,6 +21,9 @@ use crate::core::error_recall::{CanonicalDiagnostic, DiagnosticTool, canonical_m
 #[path = "cass_error_recall_sarif_context.rs"]
 mod context;
 
+#[path = "cass_error_recall_sarif_locations.rs"]
+mod locations;
+
 const MAX_RECORDS: usize = 256;
 
 type Subject = [u8; 32];
@@ -85,8 +88,10 @@ struct Run {
     invocations: Option<Vec<Invocation>>,
     #[serde(default, deserialize_with = "present")]
     external_property_file_references: bool,
-    #[serde(default, deserialize_with = "present")]
-    original_uri_base_ids: bool,
+    #[serde(default, deserialize_with = "context::unique_map")]
+    original_uri_base_ids: BTreeMap<String, locations::ArtifactLocation>,
+    #[serde(default)]
+    artifacts: Vec<locations::Artifact>,
     column_kind: Option<String>,
     #[serde(default)]
     policies: Vec<Value>,
@@ -174,18 +179,8 @@ struct Location {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PhysicalLocation {
-    artifact_location: ArtifactLocation,
+    artifact_location: locations::ArtifactLocation,
     region: Option<Region>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ArtifactLocation {
-    uri: Option<String>,
-    #[serde(default, deserialize_with = "present")]
-    uri_base_id: bool,
-    #[serde(default, deserialize_with = "present")]
-    index: bool,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +313,12 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         {
             return Err(());
         }
+        let locations = locations::Locations {
+            artifacts: &run.artifacts,
+            bases: &run.original_uri_base_ids,
+        };
+        charge(&mut remaining, run.artifacts.len())?;
+        charge(&mut remaining, run.original_uri_base_ids.len())?;
         let driver = &run.tool.driver;
         charge(&mut remaining, driver.rules.len())?;
         let mut rule_ids = BTreeSet::new();
@@ -342,7 +343,7 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
                 if !invocation.rule_configuration_overrides.is_empty() {
                     return Err(());
                 }
-                let scope = invocation.scope.key(&mut remaining)?;
+                let scope = invocation.scope.key(&locations, &mut remaining)?;
                 run_complete &= invocation.execution_successful && scope.is_some();
                 execution.invocation_scope = scope;
                 for notification in invocation
@@ -421,7 +422,7 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
                 &finding,
                 driver,
                 id,
-                run.original_uri_base_ids,
+                &locations,
                 run.column_kind.as_deref().unwrap_or("utf16CodeUnits"),
             );
             if failed {
@@ -467,7 +468,7 @@ fn subject_for(
     finding: &Finding,
     driver: &Driver,
     rule: &str,
-    has_bases: bool,
+    locations: &locations::Locations<'_>,
     column_kind: &str,
 ) -> Option<Subject> {
     if !matches!(column_kind, "utf16CodeUnits" | "unicodeCodePoints") {
@@ -479,14 +480,7 @@ fn subject_for(
         return None;
     };
     let physical = location.physical_location.as_ref()?;
-    let artifact = &physical.artifact_location;
-    let uri = artifact
-        .uri
-        .as_deref()
-        .filter(|uri| !uri.trim().is_empty())?;
-    if has_bases || artifact.uri_base_id || artifact.index {
-        return None;
-    }
+    let resolved = locations.resolve(&physical.artifact_location)?;
     let region = physical.region.as_ref()?;
     if [
         region.start_line,
@@ -553,7 +547,7 @@ fn subject_for(
             driver.version.as_deref().unwrap_or(""),
             driver.semantic_version.as_deref().unwrap_or(""),
             rule,
-            uri,
+            &resolved.uri,
             column_kind,
             &coordinates,
         ],
@@ -567,3 +561,7 @@ mod tests;
 #[cfg(test)]
 #[path = "cass_error_recall_sarif_context_tests.rs"]
 mod context_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_sarif_locations_tests.rs"]
+mod locations_tests;

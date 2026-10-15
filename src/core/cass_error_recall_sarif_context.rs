@@ -6,21 +6,28 @@
 
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
+use std::marker::PhantomData;
 
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use super::locations::{ArtifactLocation, Locations, Resolved};
 use super::{Subject, charge, present};
 
 /// Missing metadata retains the existing outer-invocation contract. Explicit
 /// unknown metadata is not proof. Preserve this distinction instead of
 /// letting a null overwrite an observed value or alias an empty argument list.
-#[derive(Default, Serialize)]
-enum Reported<T> {
-    #[default]
+#[derive(Serialize)]
+pub(super) enum Reported<T> {
     Missing,
     Unknown,
     Value(T),
+}
+
+impl<T> Default for Reported<T> {
+    fn default() -> Self {
+        Self::Missing
+    }
 }
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Reported<T> {
@@ -41,77 +48,44 @@ struct Environment(BTreeMap<String, String>);
 
 impl<'de> Deserialize<'de> for Environment {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct EnvironmentVisitor;
-        impl<'de> Visitor<'de> for EnvironmentVisitor {
-            type Value = Environment;
+        unique_map(deserializer).map(Self)
+    }
+}
 
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a map of unique environment names to string values")
-            }
+/// Object key order is not identity, but duplicate keys are ambiguous. Share
+/// the same original-byte guard between environments and URI-base tables.
+pub(super) fn unique_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<String, T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct UniqueMapVisitor<T>(PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for UniqueMapVisitor<T> {
+        type Value = BTreeMap<String, T>;
 
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut values = BTreeMap::new();
-                while let Some((name, value)) = map.next_entry::<String, String>()? {
-                    match values.entry(name) {
-                        Entry::Vacant(entry) => {
-                            entry.insert(value);
-                        }
-                        Entry::Occupied(_) => {
-                            return Err(serde::de::Error::custom("duplicate environment name"));
-                        }
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an object with unique property names")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut values = BTreeMap::new();
+            while let Some((name, value)) = map.next_entry::<String, T>()? {
+                match values.entry(name) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(value);
+                    }
+                    Entry::Occupied(_) => {
+                        return Err(serde::de::Error::custom("duplicate property name"));
                     }
                 }
-                Ok(Environment(values))
             }
+            Ok(values)
         }
-        deserializer.deserialize_map(EnvironmentVisitor)
     }
+    deserializer.deserialize_map(UniqueMapVisitor(PhantomData))
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LiteralLocation {
-    uri: Option<String>,
-    // Referenced executable/working-directory locations need a resolver.
-    // Presence, including null, cannot silently mean an inline literal URI.
-    #[serde(default, deserialize_with = "present")]
-    uri_base_id: bool,
-    #[serde(default, deserialize_with = "present")]
-    index: bool,
-}
-
-impl LiteralLocation {
-    fn admitted(&self, absolute: bool) -> bool {
-        !self.uri_base_id
-            && !self.index
-            && self.uri.as_deref().is_some_and(|uri| {
-                !uri.is_empty()
-                    && !uri
-                        .chars()
-                        .any(|ch| ch.is_whitespace() || ch.is_control() || ch == '\\')
-                    && (!absolute || absolute_uri(uri))
-            })
-    }
-}
-
-/// Recognize a literal URI scheme, not a local path. Do not normalize, decode,
-/// join paths or resolve symlinks: exact bytes deliberately under-approximate
-/// equivalence. In particular, different analysis roots must never collapse.
-fn absolute_uri(uri: &str) -> bool {
-    let Some((scheme, rest)) = uri.split_once(':') else {
-        return false;
-    };
-    !rest.is_empty()
-        && scheme
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphabetic)
-        && scheme
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
-}
-
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct InvocationScope {
     #[serde(default)]
@@ -121,18 +95,22 @@ pub(super) struct InvocationScope {
     #[serde(default)]
     environment_variables: Reported<Environment>,
     #[serde(default)]
-    executable_location: Reported<LiteralLocation>,
+    executable_location: Reported<ArtifactLocation>,
     #[serde(default)]
-    working_directory: Reported<LiteralLocation>,
+    working_directory: Reported<ArtifactLocation>,
     #[serde(default)]
-    response_files: Reported<Vec<LiteralLocation>>,
+    response_files: Reported<Vec<ArtifactLocation>>,
     // A pathname alone cannot bind bytes consumed through standard input.
     #[serde(default, deserialize_with = "present")]
     stdin: bool,
 }
 
 impl InvocationScope {
-    pub(super) fn key(&self, remaining: &mut usize) -> Result<Option<Subject>, ()> {
+    pub(super) fn key(
+        &self,
+        locations: &Locations<'_>,
+        remaining: &mut usize,
+    ) -> Result<Option<Subject>, ()> {
         if let Reported::Value(arguments) = &self.arguments {
             charge(remaining, arguments.len())?;
         }
@@ -145,20 +123,10 @@ impl InvocationScope {
         if self.command_line.is_unknown()
             || self.arguments.is_unknown()
             || self.environment_variables.is_unknown()
-            || self.executable_location.is_unknown()
-            || self.working_directory.is_unknown()
             || self.response_files.is_unknown()
             || self.stdin
             || matches!(&self.command_line, Reported::Value(command) if command.trim().is_empty())
             || matches!(&self.response_files, Reported::Value(files) if !files.is_empty())
-            || matches!(
-                &self.executable_location,
-                Reported::Value(location) if !location.admitted(false)
-            )
-            || matches!(
-                &self.working_directory,
-                Reported::Value(location) if !location.admitted(true)
-            )
         {
             return Ok(None);
         }
@@ -167,11 +135,43 @@ impl InvocationScope {
         // ordering immaterial without erasing duplicate keys at ingestion.
         // Transient run fields (timestamps, exit status, process ID) are not
         // scope: a later successful invocation must be able to verify a failure.
-        let encoded = serde_json::to_vec(self).map_err(|_| ())?;
+        let (Ok(executable), Ok(directory)) = (
+            execution_location(&self.executable_location, locations, false),
+            execution_location(&self.working_directory, locations, true),
+        ) else {
+            return Ok(None);
+        };
+        let encoded = serde_json::to_vec(&(
+            &self.command_line,
+            &self.arguments,
+            &self.environment_variables,
+            executable,
+            directory,
+            matches!(&self.response_files, Reported::Value(_)),
+        ))
+        .map_err(|_| ())?;
         let mut hash = blake3::Hasher::new();
-        hash.update(b"ee.sarif.invocation.v1\0");
+        hash.update(b"ee.sarif.invocation.v2\0");
         hash.update(&(encoded.len() as u64).to_le_bytes());
         hash.update(&encoded);
         Ok(Some(*hash.finalize().as_bytes()))
+    }
+}
+
+fn execution_location(
+    location: &Reported<ArtifactLocation>,
+    locations: &Locations<'_>,
+    absolute: bool,
+) -> Result<Reported<Resolved>, ()> {
+    match location {
+        Reported::Missing => Ok(Reported::Missing),
+        Reported::Unknown => Err(()),
+        Reported::Value(location) => {
+            let resolved = locations.resolve(location).ok_or(())?;
+            if absolute && !resolved.absolute {
+                return Err(());
+            }
+            Ok(Reported::Value(resolved))
+        }
     }
 }

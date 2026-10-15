@@ -6,7 +6,7 @@ use crate::core::cass_error_recall::{
 };
 use serde_json::json;
 
-fn finding(kind: &str, rule: &str, uri: &str, line: u64) -> Value {
+pub(super) fn finding(kind: &str, rule: &str, uri: &str, line: u64) -> Value {
     json!({
         "ruleId": rule,
         "kind": kind,
@@ -19,7 +19,7 @@ fn finding(kind: &str, rule: &str, uri: &str, line: u64) -> Value {
     })
 }
 
-fn report(results: Vec<Value>) -> Value {
+pub(super) fn report(results: Vec<Value>) -> Value {
     json!({
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
@@ -34,21 +34,21 @@ fn report(results: Vec<Value>) -> Value {
     })
 }
 
-fn failed() -> Value {
+pub(super) fn failed() -> Value {
     report(vec![finding("fail", "resource-leak", "src/cache.rs", 12)])
 }
 
-fn passed() -> Value {
+pub(super) fn passed() -> Value {
     report(vec![finding("pass", "resource-leak", "src/cache.rs", 12)])
 }
 
-fn decoded(value: &Value) -> Decoded {
+pub(super) fn decoded(value: &Value) -> Decoded {
     decode(&value.to_string())
         .expect("valid SARIF subset")
         .expect("SARIF report")
 }
 
-fn output(value: &Value, exit_code: Option<i64>) -> ToolOutput {
+pub(super) fn output(value: &Value, exit_code: Option<i64>) -> ToolOutput {
     ToolOutput {
         text: value.to_string(),
         is_error: None,
@@ -220,7 +220,8 @@ fn changed_scope_and_unresolved_locations_withhold_proof() {
     assert!(!required.verified_by(&decoded(&unresolved).execution));
     unresolved = passed();
     unresolved["runs"][0]["originalUriBaseIds"] = json!({});
-    assert!(!required.verified_by(&decoded(&unresolved).execution));
+    // An unused table cannot change the identity of an inline location.
+    assert!(required.verified_by(&decoded(&unresolved).execution));
     unresolved = passed();
     unresolved["runs"][0]["results"][0]["locations"] = json!([]);
     assert!(!required.verified_by(&decoded(&unresolved).execution));
