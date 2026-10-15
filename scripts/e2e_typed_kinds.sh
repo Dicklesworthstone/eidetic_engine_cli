@@ -116,10 +116,24 @@ assert_search_omits_memory "$bare_search" "$bare_id" \
 e2e_log_note "typed_fields memory=$bare_id kind=failure bare_body=no_typed_fields_expected"
 
 step "decision supersedes field creates a typed graph projection edge"
+# `manual://`, not `decision://`. There is no `decision` provenance scheme:
+# ACCEPTED_PROVENANCE_SCHEMES (src/models/provenance.rs:51) lists 33 of them
+# and that is not one, so `ee remember` rejected both calls in this step with
+# a `usage` error and NO `data` object at all. That is why the assertion
+# reported `.data.kind` and `.data.persisted` as absent rather than wrong --
+# and why all SIX failures in this script traced to these two lines: the empty
+# `base_decision_id` propagated into the superseding body, the search had no
+# memory to return, and `graph path` was handed empty arguments.
+#
+# The scheme is provenance only. What this step actually exercises -- the
+# typed projection -- keys off `--kind decision` and the `Supersedes:` field in
+# the body, neither of which this change touches. The three `bench-run://`
+# sources elsewhere in this script were always passing, which is the control:
+# same script, same harness, scheme the only variable.
 base_decision_out="$(ee_json --workspace "$WS" remember \
     "Decision: keep local cache as the baseline for typed graph edge tests." \
     --level semantic --kind decision \
-    --source "decision://typed-kinds/base" \
+    --source "manual://typed-kinds/base" \
     --json)"
 assert_jq "$base_decision_out" '.success == true and .data.kind == "decision" and .data.persisted == true' \
     "base decision memory persisted"
@@ -128,7 +142,7 @@ base_decision_id="$(memory_id_from_remember "$base_decision_out")"
 superseding_body="Options: local cache or RCH remote. Chosen: RCH remote. Rationale: avoids local Cargo. Supersedes: ${base_decision_id}."
 decision_out="$(ee_json --workspace "$WS" remember "$superseding_body" \
     --level semantic --kind decision \
-    --source "decision://typed-kinds/superseding" \
+    --source "manual://typed-kinds/superseding" \
     --json)"
 assert_jq "$decision_out" '.success == true and .data.kind == "decision" and .data.persisted == true' \
     "superseding decision memory persisted"

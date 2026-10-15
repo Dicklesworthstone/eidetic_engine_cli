@@ -62,7 +62,7 @@ old_policy="$(
         --level procedural \
         --kind rule \
         --tags timeline,audit \
-        --source "test://bd-2vq2z.16/old-policy" \
+        --source "manual://bd-2vq2z.16/old-policy" \
         --valid-from "2026-05-01T00:00:00Z" \
         --valid-to "2026-05-03T00:00:00Z" \
         --json
@@ -73,7 +73,7 @@ new_policy="$(
         --level procedural \
         --kind rule \
         --tags timeline,audit \
-        --source "test://bd-2vq2z.16/new-policy" \
+        --source "manual://bd-2vq2z.16/new-policy" \
         --valid-from "2026-05-03T00:00:00Z" \
         --json
 )"
@@ -83,7 +83,7 @@ decision="$(
         --level procedural \
         --kind decision \
         --tags timeline,decision \
-        --source "test://bd-2vq2z.16/decision" \
+        --source "manual://bd-2vq2z.16/decision" \
         --valid-from "2026-05-02T00:00:00Z" \
         --json
 )"

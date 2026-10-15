@@ -239,7 +239,7 @@ if ee_has_global_tier_cli; then
             --global \
             --level procedural \
             --kind rule \
-            --source "test://bd-2vq2z.13/global-rule" \
+            --source "manual://bd-2vq2z.13/global-rule" \
             --json
     )"
     assert_jq "$remember_global" '.schema == "ee.response.v2" and .success == true' \
@@ -260,7 +260,7 @@ if ee_has_global_tier_cli; then
             --workspace "$WS_B" \
             --level procedural \
             --kind rule \
-            --source "test://bd-2vq2z.13/workspace-conflict" \
+            --source "manual://bd-2vq2z.13/workspace-conflict" \
             --json
     )"
     assert_jq "$remember_conflict" '.schema == "ee.response.v2" and .success == true' \
@@ -286,7 +286,7 @@ if ee_has_global_tier_cli; then
         or ([.. | objects | select(((.databasePath? // \"\") | contains(\"/global/ee.db\")))] | length) >= 1
     " "default pack identifies the separate user-global store"
     assert_jq "$pack_default" '
-        ([.. | objects | select(((.uri? // "") == "test://bd-2vq2z.13/global-rule"))] | length) >= 1
+        ([.. | objects | select(((.uri? // "") == "manual://bd-2vq2z.13/global-rule"))] | length) >= 1
         or ((.data.pack.text // "") | contains("remote RCH verification"))
     ' "default pack includes the remembered global rule with provenance"
     assert_jq "$pack_default" '
@@ -316,7 +316,7 @@ if ee_has_global_tier_cli; then
     # would read as a pass. So prove the local rule survived first; the negative
     # then has something to be negative about.
     assert_jq "$pack_no_global" '
-        ([.. | objects | select(((.uri? // "") == "test://bd-2vq2z.13/workspace-conflict"))] | length) >= 1
+        ([.. | objects | select(((.uri? // "") == "manual://bd-2vq2z.13/workspace-conflict"))] | length) >= 1
         or ((.data.pack.text // "") | contains("wait for central verify"))
     ' "precondition: --no-global still selects the workspace-tier rule, so the exclusion below is not an empty pack"
     assert_jq "$pack_no_global" '
@@ -432,7 +432,7 @@ if ee_has_timeline_cli; then
             --level procedural \
             --kind rule \
             --tags reach,timeline,audit \
-            --source "test://bd-2vq2z.22/timeline-old-policy" \
+            --source "manual://bd-2vq2z.22/timeline-old-policy" \
             --valid-from "2026-05-01T00:00:00Z" \
             --valid-to "2026-05-03T00:00:00Z" \
             --json
@@ -443,7 +443,7 @@ if ee_has_timeline_cli; then
             --level procedural \
             --kind rule \
             --tags reach,timeline,audit \
-            --source "test://bd-2vq2z.22/timeline-new-policy" \
+            --source "manual://bd-2vq2z.22/timeline-new-policy" \
             --valid-from "2026-05-03T00:00:00Z" \
             --json
     )"
@@ -453,7 +453,7 @@ if ee_has_timeline_cli; then
             --level procedural \
             --kind decision \
             --tags reach,timeline,decision \
-            --source "test://bd-2vq2z.22/timeline-decision" \
+            --source "manual://bd-2vq2z.22/timeline-decision" \
             --valid-from "2026-05-02T00:00:00Z" \
             --json
     )"
@@ -529,7 +529,7 @@ if [ "$GAP_MODE" != "none" ]; then
             --level procedural \
             --kind "$capture_kind" \
             --tags reach,gaps,captured \
-            --source "test://bd-2vq2z.17/captured-gap" \
+            --source "manual://bd-2vq2z.17/captured-gap" \
             --json
     )"
     assert_jq "$captured_gap" '.schema == "ee.response.v2" and .success == true' \
