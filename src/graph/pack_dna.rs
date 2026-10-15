@@ -7,7 +7,7 @@ use serde::{Serialize, Serializer};
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
-use crate::graph::algorithms::{DEFAULT_FOREGROUND_BUDGET, current_or_testing_cx, run_with_budget};
+use crate::graph::algorithms::{check_cancelled, current_or_testing_cx};
 use crate::graph::health::detect_louvain_communities;
 use crate::graph::{GraphError, GraphResult, MemoryGraphProjection};
 use crate::models::MemoryId;
@@ -17,6 +17,9 @@ use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 pub use crate::models::PACK_DNA_SCHEMA_V1;
 pub const DEFAULT_PACK_DNA_EGO_RADIUS: usize = 2;
 pub const DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT: usize = 10;
+
+#[path = "pack_dna_progress.rs"]
+mod progress;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PackDnaInput {
@@ -145,20 +148,7 @@ pub fn compute_pack_dna_with_cx<Caps: 'static>(
     projection: &MemoryGraphProjection,
     input: &PackDnaInput,
 ) -> GraphResult<PackDna> {
-    let cx_for_worker = cx.clone();
-    let directed = projection.graph.clone();
-    let snapshot_version = projection.snapshot_version;
-    let input = input.clone();
-    run_with_budget(cx, "pack_dna", DEFAULT_FOREGROUND_BUDGET, move || {
-        let undirected = undirected_from_directed(&directed)?;
-        compute_pack_dna_unbudgeted(
-            &cx_for_worker,
-            &directed,
-            &undirected,
-            &input,
-            snapshot_version,
-        )
-    })?
+    progress::compute(cx, projection, input)
 }
 
 fn compute_pack_dna_unbudgeted<Caps>(
@@ -167,9 +157,10 @@ fn compute_pack_dna_unbudgeted<Caps>(
     undirected: &Graph,
     input: &PackDnaInput,
     snapshot_version: u64,
+    before_ppr: impl FnOnce(PackDnaInputSummary, &[PackDnaPartialResult]) -> GraphResult<()>,
 ) -> GraphResult<PackDna> {
     let (summary, partial_results) =
-        compute_pack_dna_partial_results(cx, directed, undirected, input)?;
+        compute_pack_dna_partial_results(cx, directed, undirected, input, before_ppr)?;
     merge_pack_dna_partial_results(snapshot_version, summary, partial_results)
 }
 
@@ -252,34 +243,56 @@ fn compute_pack_dna_partial_results<Caps>(
     directed: &DiGraph,
     undirected: &Graph,
     input: &PackDnaInput,
+    before_ppr: impl FnOnce(PackDnaInputSummary, &[PackDnaPartialResult]) -> GraphResult<()>,
 ) -> GraphResult<(PackDnaInputSummary, Vec<PackDnaPartialResult>)> {
+    check_cancelled(cx, "pack_dna")?;
     let pack_ids = valid_memory_ids(&input.pack_memory_ids, directed);
     let query_seed_weights = valid_seed_weights(&input.query_seed_weights, directed);
     let trust_anchors = pack_dna_trust_anchors(input, directed);
     let dominator = dominant_voronoi_anchor(undirected, &pack_ids, &trust_anchors);
+    check_cancelled(cx, "pack_dna")?;
     let community_of_mass = pack_community_of_mass(undirected, &pack_ids);
+    check_cancelled(cx, "pack_dna")?;
     let ego_subgraph = dominator
         .as_ref()
         .and_then(|anchor| anchor.memory_id.parse::<MemoryId>().ok())
         .map(|anchor| pack_dna_ego_subgraph(undirected, anchor, input.ego_radius));
-    let ppr_neighbors =
-        pack_dna_ppr_neighbors(cx, directed, &query_seed_weights, input.ppr_neighbor_limit)?;
     let degraded = pack_dna_degradations(dominator.as_ref());
-
-    Ok((
-        PackDnaInputSummary {
-            pack_memory_count: pack_ids.len(),
-            query_seed_count: query_seed_weights.len(),
-            trust_anchor_count: trust_anchors.len(),
-        },
-        vec![
-            PackDnaPartialResult::VoronoiDominator(dominator),
-            PackDnaPartialResult::CommunityOfMass(community_of_mass),
-            PackDnaPartialResult::EgoSubgraph(ego_subgraph),
-            PackDnaPartialResult::PprNeighbors(ppr_neighbors),
-            PackDnaPartialResult::Degraded(degraded),
-        ],
-    ))
+    let summary = PackDnaInputSummary {
+        pack_memory_count: pack_ids.len(),
+        query_seed_count: query_seed_weights.len(),
+        trust_anchor_count: trust_anchors.len(),
+    };
+    let mut partial_results = vec![
+        PackDnaPartialResult::VoronoiDominator(dominator),
+        PackDnaPartialResult::CommunityOfMass(community_of_mass),
+        PackDnaPartialResult::EgoSubgraph(ego_subgraph),
+        PackDnaPartialResult::Degraded(degraded),
+    ];
+    check_cancelled(cx, "pack_dna")?;
+    // Commit only complete topology results from this invocation. An absent
+    // optional PPR computation needs no checkpoint or unavailable warning.
+    if !query_seed_weights.is_empty() && input.ppr_neighbor_limit != 0 {
+        before_ppr(summary, &partial_results)?;
+        check_cancelled(cx, "pack_dna")?;
+    }
+    let (ppr_neighbors, warning) = progress::finish_neighbors(pack_dna_ppr_neighbors(
+        cx,
+        directed,
+        &query_seed_weights,
+        input.ppr_neighbor_limit,
+    ))?;
+    check_cancelled(cx, "pack_dna")?;
+    if let Some(warning) = warning {
+        for partial in &mut partial_results {
+            if let PackDnaPartialResult::Degraded(entries) = partial {
+                entries.push(warning);
+                break;
+            }
+        }
+    }
+    partial_results.push(PackDnaPartialResult::PprNeighbors(ppr_neighbors));
+    Ok((summary, partial_results))
 }
 
 fn merge_pack_dna_partial_results(
@@ -675,9 +688,14 @@ mod tests {
             vec![mem(1), mem(4)],
         );
         let cx = current_or_testing_cx();
-        let (summary, partial_results) =
-            compute_pack_dna_partial_results(&cx, &directed, &undirected, &input)
-                .map_err(|error| error.to_string())?;
+        let (summary, partial_results) = compute_pack_dna_partial_results(
+            &cx,
+            &directed,
+            &undirected,
+            &input,
+            |_, _| Ok(()),
+        )
+        .map_err(|error| error.to_string())?;
 
         let serial = merge_pack_dna_partial_results(
             projection.snapshot_version,
