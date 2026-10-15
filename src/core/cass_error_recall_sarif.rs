@@ -18,6 +18,9 @@ use super::super::MAX_DIAGNOSTICS_PER_FAILURE;
 use super::{MAX_SCANNED_OUTPUT_BYTES, compiler};
 use crate::core::error_recall::{CanonicalDiagnostic, DiagnosticTool, canonical_message_template};
 
+#[path = "cass_error_recall_sarif_context.rs"]
+mod context;
+
 const MAX_RECORDS: usize = 256;
 
 type Subject = [u8; 32];
@@ -28,16 +31,21 @@ pub(super) struct Execution {
     passed: BTreeSet<Subject>,
     complete: bool,
     unlocated_failure: bool,
+    invocation_scope: Option<Subject>,
 }
 
 impl Execution {
     pub(super) fn has_known_failures(&self) -> bool {
-        self.complete && !self.unlocated_failure && !self.failed.is_empty()
+        self.complete
+            && self.invocation_scope.is_some()
+            && !self.unlocated_failure
+            && !self.failed.is_empty()
     }
 
     pub(super) fn verified_by(&self, proof: &Self) -> bool {
         self.has_known_failures()
             && proof.complete
+            && self.invocation_scope == proof.invocation_scope
             && proof.failed.is_empty()
             && !proof.unlocated_failure
             && self.failed.is_subset(&proof.passed)
@@ -116,10 +124,10 @@ struct Configuration {
 #[serde(rename_all = "camelCase")]
 struct Invocation {
     execution_successful: bool,
-    // Without resolving the reported working directory, a relative URI could
-    // name a different file despite an unchanged outer invocation.
-    #[serde(default, deserialize_with = "present")]
-    working_directory: bool,
+    // The outer tool invocation may merely print a saved report. Preserve the
+    // analyzer's own arguments, environment and execution root as well.
+    #[serde(flatten)]
+    scope: context::InvocationScope,
     #[serde(default)]
     tool_execution_notifications: Vec<Notification>,
     #[serde(default)]
@@ -334,7 +342,9 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
                 if !invocation.rule_configuration_overrides.is_empty() {
                     return Err(());
                 }
-                run_complete &= invocation.execution_successful && !invocation.working_directory;
+                let scope = invocation.scope.key(&mut remaining)?;
+                run_complete &= invocation.execution_successful && scope.is_some();
+                execution.invocation_scope = scope;
                 for notification in invocation
                     .tool_execution_notifications
                     .iter()
@@ -553,3 +563,7 @@ fn subject_for(
 #[cfg(test)]
 #[path = "cass_error_recall_sarif_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_sarif_context_tests.rs"]
+mod context_tests;
