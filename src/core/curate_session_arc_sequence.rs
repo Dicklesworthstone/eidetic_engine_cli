@@ -13,6 +13,9 @@ use super::super::{
 };
 use super::{failure_signal, inline_candidates_from_message, resolution_signal, text};
 
+#[path = "curate_session_arc_dedup.rs"]
+mod dedup;
+
 #[path = "curate_session_arc_subject_index.rs"]
 mod subject_index;
 use subject_index::PendingFailures;
@@ -155,7 +158,7 @@ pub(super) fn candidates(
             );
         }
     }
-    output
+    dedup::retain_distinct_pairs(output)
 }
 
 /// Keep only failures whose concrete subjects are disjoint from the complete

@@ -3,12 +3,12 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use super::*;
 use super::super::tests::{endpoints, mine, span};
 use super::super::{
-    StoredEvidenceSpan, matching_failure, matching_subject, precedes,
-    refers_to_previous_failure, session_arc_span_order,
+    StoredEvidenceSpan, matching_failure, matching_subject, precedes, refers_to_previous_failure,
+    session_arc_span_order,
 };
+use super::*;
 use std::borrow::Cow;
 
 fn key(topic: &str, resources: &[&str]) -> FailureKey {
@@ -136,8 +136,8 @@ fn indexed_matcher_agrees_with_full_scan_across_ambiguous_and_ineligible_subject
     ];
     let mut state = 0x81a2_37d9_u64;
     let mut next = || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        state >> 32
+        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        usize::try_from(state >> 32).expect("32-bit generator value")
     };
     for _ in 0..32 {
         let mut sources: Vec<_> = (0..32_u32)
@@ -150,11 +150,11 @@ fn indexed_matcher_agrees_with_full_scan_across_ambiguous_and_ineligible_subject
         let mut index = PendingFailures::default();
         for source in &sources {
             let key = key(
-                topics[(next() % 3) as usize],
-                &resource_sets[(next() % 5) as usize],
+                topics[next() % 3],
+                &resource_sets[next() % 5],
             );
-            let mut row = failure(source, next() % 2 == 0);
-            row.requires_resource_match = next() % 3 == 0;
+            let mut row = failure(source, next().is_multiple_of(2));
+            row.requires_resource_match = next().is_multiple_of(3);
             index.insert(key, row);
         }
         assert_consistent(&index);

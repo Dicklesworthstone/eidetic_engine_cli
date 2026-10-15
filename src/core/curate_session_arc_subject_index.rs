@@ -90,13 +90,13 @@ impl<'a> PendingFailures<'a> {
     /// checks. The predicate is the original matcher's eligibility test.
     /// A resource posting alone never proves eligibility: overlapping source
     /// ranges, repeated IDs and future failures still cannot be antecedents.
-    pub(super) fn eligible<'s>(
-        &'s self,
+    pub(super) fn eligible(
+        &self,
         topic: &str,
         resources: &BTreeSet<String>,
         include_marked: bool,
         mut admits: impl FnMut(&FailureKey, &PendingFailure<'a>) -> bool,
-    ) -> Vec<(&'s FailureKey, &'s PendingFailure<'a>)> {
+    ) -> Vec<(&FailureKey, &PendingFailure<'a>)> {
         let mut keys = BTreeSet::new();
         for resource in resources {
             if let Some(postings) = self.resources.get(resource) {
