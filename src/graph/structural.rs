@@ -19,14 +19,17 @@ use serde::Serialize;
 
 use crate::db::{StoredMemory, StoredMemoryLink};
 
+#[path = "structural_admission.rs"]
+mod admission;
+
 /// Evidence schema id stamped on structural-section items built from
 /// this adapter.
 pub const STRUCTURAL_GRAPH_EVIDENCE_SCHEMA: &str = "ee.insights.structural_graph.v1";
 /// The only graph type this adapter projects.
 pub const STRUCTURAL_GRAPH_TYPE: &str = "memory_links";
-/// Filter posture: the insights loader supplies workspace-scoped,
-/// tombstone-filtered memories and links; the adapter additionally
-/// canonicalizes undirected duplicates.
+/// Filter posture: only live, unambiguous supplied memories become nodes.
+/// Links must connect admitted endpoints in the same workspace and satisfy
+/// the shared mesh-visibility policy before undirected canonicalization.
 pub const STRUCTURAL_GRAPH_FILTER_POSTURE: &str =
     "workspace_scoped_tombstone_filtered_canonical_undirected";
 
@@ -49,7 +52,7 @@ pub struct StructuralGraphInput {
     /// Undirected projection with the shared edge-attr conventions; pass
     /// to `fnx_algorithms::k_core` / `compute_k_truss` directly.
     pub graph: Graph,
-    /// Every workspace memory id is a node (isolated memories count:
+    /// Every admitted workspace memory id is a node (isolated memories count:
     /// core/truss number 0 is a real finding, not missing data).
     pub node_count: usize,
     /// Canonical undirected edge count after dedup.
@@ -81,7 +84,9 @@ impl StructuralGraphInput {
 /// and reversed links collapse onto one canonical `(min, max)` edge —
 /// links are processed in a deterministic order (canonical pair, then
 /// link id) and the first canonical occurrence wins, so the projection
-/// is byte-stable regardless of input order.
+/// is byte-stable regardless of input order. Links cannot expand the supplied
+/// live-memory set or bypass the shared mesh policy. Filtering precedes
+/// canonical selection, so a denied parallel link cannot hide an allowed one.
 #[must_use]
 pub fn build_structural_graph_input(
     memories: &[StoredMemory],
@@ -89,16 +94,17 @@ pub fn build_structural_graph_input(
     snapshot_version: Option<u64>,
 ) -> StructuralGraphInput {
     let mut graph = Graph::strict();
-    let mut node_ids: Vec<&str> = memories.iter().map(|memory| memory.id.as_str()).collect();
-    node_ids.sort_unstable();
-    node_ids.dedup();
-    for id in &node_ids {
+    let workspaces = admission::live_memory_workspaces(memories);
+    for id in workspaces.keys() {
         graph.add_node((*id).to_owned());
     }
 
     // Deterministic processing order: canonical endpoint pair, then link
     // id, so reversed/duplicate links always resolve identically.
-    let mut ordered: Vec<&StoredMemoryLink> = links.iter().collect();
+    let mut ordered: Vec<&StoredMemoryLink> = links
+        .iter()
+        .filter(|link| admission::link_is_admitted(link, &workspaces))
+        .collect();
     ordered.sort_by(|left, right| {
         canonical_pair(left)
             .cmp(&canonical_pair(right))
@@ -151,7 +157,7 @@ pub fn build_structural_graph_input(
     }
 
     StructuralGraphInput {
-        node_count: node_ids.len(),
+        node_count: graph.node_count(),
         edge_count: edges.len(),
         edges,
         graph,
@@ -172,7 +178,7 @@ fn canonical_pair(link: &StoredMemoryLink) -> (&str, &str) {
 mod tests {
     use super::*;
 
-    fn memory(id: &str) -> StoredMemory {
+    pub(super) fn memory(id: &str) -> StoredMemory {
         StoredMemory {
             id: id.to_owned(),
             workspace_id: "wsp_structural00000000000001".to_owned(),
@@ -199,7 +205,7 @@ mod tests {
         }
     }
 
-    fn link(id: &str, src: &str, dst: &str) -> StoredMemoryLink {
+    pub(super) fn link(id: &str, src: &str, dst: &str) -> StoredMemoryLink {
         StoredMemoryLink {
             id: id.to_owned(),
             src_memory_id: src.to_owned(),
@@ -290,3 +296,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "structural_admission_tests.rs"]
+mod admission_tests;
