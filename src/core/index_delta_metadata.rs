@@ -10,8 +10,9 @@
 //! still use the same private staging, tier finalization and publication fence.
 //! V3 inference scales with the corpus, not the legacy 256-document ceiling:
 //! bounded embedding/WAL batches can process a substantial import without
-//! re-embedding every unchanged survivor. The percentage, 8192-mutation and
-//! 32-MiB payload ceilings remain independent admission requirements.
+//! re-embedding every unchanged survivor. Mixed mutations retain independent
+//! percentage, 8192-mutation and 32-MiB payload ceilings. Proven pure appends
+//! may use the separate bounded import lane without relaxing rewrite policy.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,6 +22,9 @@ use super::{
     Delta, EmbeddingReuse, IncrementalFallback, IncrementalFallbackReason, MAX_DELTA_PERCENT,
     document_digest, embedding_input_digest, incremental_fallback,
 };
+
+#[path = "index_delta_append.rs"]
+mod append;
 
 const MAX_LEXICAL_DELTA_DOCUMENTS: usize = 8192;
 const MAX_LEXICAL_DELTA_BYTES: usize = 32 * 1024 * 1024;
@@ -82,7 +86,18 @@ pub(super) fn diff(
     documents: &[IndexableDocument],
     identity: String,
 ) -> Result<Delta, IncrementalFallback> {
-    diff_with_digest(live, inputs, documents, identity, document_digest)
+    match diff_with_digest(live, inputs, documents, identity.clone(), document_digest) {
+        Err(error) if error.reason == IncrementalFallbackReason::DeltaOverThreshold => {
+            // Percentage is a rewrite-cost heuristic, not proof that existing
+            // vectors need inference again. Only exact append-only growth may
+            // use the import lane; all other sources retain this same refusal.
+            match append::try_plan(live, documents, identity)? {
+                Some(delta) => Ok(delta),
+                None => Err(error),
+            }
+        }
+        result => result,
+    }
 }
 
 fn diff_with_digest(
@@ -326,16 +341,27 @@ mod tests {
     }
 
     #[test]
-    fn large_append_accepts_exact_percentage_and_refuses_the_next_input() -> TestResult {
+    fn large_append_uses_the_import_lane_after_the_ordinary_percentage_limit() -> TestResult {
         let original = documents(3072);
         let mut current = documents(4096);
         let delta = planned(&original, &current).map_err(|error| error.detail)?;
         assert_eq!(delta.upserts.len(), 1024);
         assert!(delta.removals.is_empty());
         current.push(IndexableDocument::new("mem_04096", "lesson 4096"));
-        let error = planned(&original, &current).expect_err("25% remains enforced");
+        let error = diff_with_digest(
+            &super::super::digest_map(&original),
+            &inputs(&original),
+            &current,
+            IDENTITY.to_owned(),
+            document_digest,
+        )
+        .expect_err("ordinary rewrite percentage remains enforced");
         assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
         assert!(error.detail.contains("inference budget"));
+        let delta = planned(&original, &current).map_err(|error| error.detail)?;
+        assert_eq!(delta.upserts.len(), 1025);
+        assert!(delta.removals.is_empty());
+        assert_eq!(super::super::digest_map(&delta.upserts), super::super::digest_map(&current[3072..]));
         Ok(())
     }
 
