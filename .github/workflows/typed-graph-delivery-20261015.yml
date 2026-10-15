@@ -1,106 +1,15 @@
-name: Typed graph delivery 20261015
+name: Typed graph delivery 20261015 (retired)
 
+# No Actions run was created for this one-time transport. Its graph patches
+# were not applied by this workflow; the retained conversation bundle and
+# immutable Git blobs preserve them separately from committed product code.
+# Retired without deletion: no push trigger, write permission or delivery code.
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/typed-graph-delivery-20261015.yml]
   workflow_dispatch:
-
-permissions:
-  contents: write
-
-concurrency:
-  group: typed-graph-delivery-20261015
-  cancel-in-progress: false
-
+permissions: {}
 jobs:
-  deliver:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+  retired:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: main
-          fetch-depth: 1
-      - name: Apply reviewed source and publish two non-forced main commits
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REPOSITORY" = Dicklesworthstone/eidetic_engine_cli
-          test "$(git branch --show-current)" = main
-          test -z "$(git status --porcelain)"
-          test "$(git rev-parse HEAD:src/cli/mod.rs)" = e019f445d87345216fb61f8471de7aeb7a1f9f9e
-          test "$(git rev-parse HEAD:src/graph/mod.rs)" = 9fe0c7c0b188408fffe01975d460aaafa58f9109
-          test "$(git rev-parse HEAD:scripts/e2e_typed_kinds.sh)" = 326125d6ec418d66512b007d444e11c421789782
-          git config user.name 'Jeff Emanuel'
-          git config user.email '35050222+Dicklesworthstone@users.noreply.github.com'
-          scratch="$RUNNER_TEMP/typed-graph-delivery-20261015"
-          mkdir -p "$scratch"
-          fetch_blob() {
-            local sha="$1" destination="$2"
-            test ! -e "$destination"
-            gh api "repos/$GITHUB_REPOSITORY/git/blobs/$sha" --jq .content | base64 --decode > "$destination"
-            test "$(git hash-object "$destination")" = "$sha"
-          }
-          fetch_blob cb24c89e7beffda23a49801b1b203d1c1de7eb53 src/graph/typed_read.rs
-          fetch_blob d302bc90649e189ca8dc06f9d8fb2a7bb73b71d6 src/graph/typed_read_bounded.rs
-          fetch_blob af2c018b63dd2fe67f425dc564f8071a2ecae33c src/graph/typed_read_bounded_tests.rs
-          fetch_blob 8d1aa14d4d1b0145ae008d68217a7049745fc472 src/graph/typed_read_snapshot_tests.rs
-          fetch_blob 62af50c0b1fc4cfd2aaaa40a2089c26c9c356f6d "$scratch/integration.patch"
-          fetch_blob cb22e45d0e38916fc800bc4b6e5562770f0c2384 "$scratch/snapshot.patch"
-          fetch_blob a2d767a314ef190294717a78184968888b9b8f52 "$scratch/e2e.patch"
-          git apply --check --whitespace=error "$scratch/integration.patch"
-          git apply --whitespace=error "$scratch/integration.patch"
-          git apply --check --whitespace=error "$scratch/snapshot.patch"
-          git apply --whitespace=error "$scratch/snapshot.patch"
-          git diff --check
-          validation='Full-checkout patch application and blob integrity passed. Cargo tests, compilation and Clippy were not run. Nightly rustfmt was unavailable.'
-          if rustup toolchain install nightly --profile minimal --component rustfmt; then
-            rustup run nightly rustfmt --version
-            for source in src/graph/typed_read.rs src/graph/typed_read_bounded.rs src/graph/typed_read_bounded_tests.rs src/graph/typed_read_snapshot_tests.rs; do
-              rustup run nightly rustfmt --edition 2024 --config skip_children=true "$source"
-              rustup run nightly rustfmt --edition 2024 --config skip_children=true --check "$source"
-            done
-            for source in src/cli/mod.rs src/graph/mod.rs; do
-              rustup run nightly rustfmt --edition 2024 --config skip_children=true --emit stdout "$source" > /dev/null
-            done
-            validation='Full-checkout patch application and blob integrity passed. New modules formatted and all changed Rust files syntax-parsed with nightly rustfmt. Cargo compilation/tests and Clippy were not run; no native behavioral or performance claim.'
-          fi
-          git diff --check
-          git add -- src/cli/mod.rs src/graph/mod.rs src/graph/typed_read.rs src/graph/typed_read_bounded.rs src/graph/typed_read_bounded_tests.rs src/graph/typed_read_snapshot_tests.rs
-          printf '%s\n' src/cli/mod.rs src/graph/mod.rs src/graph/typed_read.rs src/graph/typed_read_bounded.rs src/graph/typed_read_bounded_tests.rs src/graph/typed_read_snapshot_tests.rs | sort > "$scratch/expected-source-paths"
-          git diff --cached --name-only | sort > "$scratch/actual-source-paths"
-          diff -u "$scratch/expected-source-paths" "$scratch/actual-source-paths"
-          git commit -m 'feat(graph): connect bounded typed relationships to coherent CLI reads' -m 'Advance bd-3tofq: reuse canonical typed relationships in paths, explanations, graph algorithms and suggestion inputs. Preserve stored-edge precedence, typed provenance and f32 thresholds. Pin one source snapshot across links, endpoint liveness and typed rows. Finite source budgets lazily merge canonical failure-family streams instead of materializing every pair. Add 24 native regressions including migrated-store snapshot and bounded-reader cases. No synthetic durable links, schema, dependency, model or index changes.' -m "$validation" -m 'Independent retained Python reference checks passed, including 600 randomized projection comparisons and five SQLite transaction cases. Those are not Rust or FrankenSQLite execution. Source scans/sorting remain; unlimited requests retain full derivation. No bead closure.'
-          git push origin HEAD:refs/heads/main
-          printf 'PRODUCTION_COMMIT=%s\n' "$(git rev-parse HEAD)"
-          git apply --check --whitespace=error "$scratch/e2e.patch"
-          git apply --whitespace=error "$scratch/e2e.patch"
-          bash -n scripts/e2e_typed_kinds.sh
-          git diff --check
-          # Retain an inert receipt rather than deleting the one-time transport.
-          cat > .github/workflows/typed-graph-delivery-20261015.yml <<'RECEIPT'
-          name: Typed graph delivery 20261015 (retired)
-          # Reviewed typed graph integration and public CLI assertions delivered.
-          # No Cargo compilation or native test execution is claimed.
-          on:
-            workflow_dispatch:
-          permissions: {}
-          jobs:
-            retired:
-              if: ${{ false }}
-              runs-on: ubuntu-latest
-              steps:
-                - run: echo 'This one-time delivery is retired.'
-          RECEIPT
-          git add -- scripts/e2e_typed_kinds.sh .github/workflows/typed-graph-delivery-20261015.yml
-          printf '%s\n' .github/workflows/typed-graph-delivery-20261015.yml scripts/e2e_typed_kinds.sh | sort > "$scratch/expected-e2e-paths"
-          git diff --cached --name-only | sort > "$scratch/actual-e2e-paths"
-          diff -u "$scratch/expected-e2e-paths" "$scratch/actual-e2e-paths"
-          git commit -m 'test(graph): exercise typed relationships through the public CLI' -m 'Extend the existing typed-kinds harness with eleven assertions covering supersedes direction, provenance, exact threshold boundaries, filtering, zero source budget, honest source counts and reciprocal failure-family relationships. Full-checkout patch application, whitespace and bash syntax passed. Retained positive/negative jq fixture checks passed locally; the native public CLI suite was not executed. Retire the scoped delivery transport without deleting it.'
-          git push origin HEAD:refs/heads/main
-          printf 'E2E_COMMIT=%s\n' "$(git rev-parse HEAD)"
-          test -z "$(git status --porcelain)"
+      - run: echo 'This delivery is retired without execution.'
