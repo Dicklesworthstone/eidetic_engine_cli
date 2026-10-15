@@ -45,9 +45,10 @@ mod test_coverage;
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
-/// V10 adds native nextest failures and binary-qualified test coverage,
-/// reconsidering already imported sessions without changing their source rows.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v10";
+/// V11 makes streamed output independent of poll boundaries and requires a
+/// completed failed invocation before a later retry can verify its repair.
+/// Imports reconsider older derivations without changing source identities.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v11";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -192,6 +193,9 @@ impl FailureArc {
 
 struct PendingFailure {
     index: usize,
+    /// The failed process has finished with its whole output retained. Early
+    /// fingerprints are useful, but cannot yet authorize a repair or card.
+    complete: bool,
     failure_id: String,
     attempt_id: String,
     family: CommandFamily,
@@ -562,11 +566,11 @@ pub(crate) fn session_failure_arcs(
                 failure
                     .test_requirement
                     .refresh(&observed.output, observed.complete);
-                if failure.test_requirement.is_guarded() {
-                    // Do not credit a retry launched before the failed
-                    // invocation's final observation, or narration before it.
-                    failure.index = index;
-                }
+                // This ordering belongs to every command family, not only
+                // test inventories. A compiler can still be emitting errors
+                // while another invocation has already returned successfully.
+                failure.complete = observed.complete;
+                failure.index = index;
             }
             let diagnostics = if observed.new_failure {
                 failure_diagnostics(&observed.output)
@@ -595,6 +599,7 @@ pub(crate) fn session_failure_arcs(
             }
             pending.push(PendingFailure {
                 index,
+                complete: observed.complete,
                 failure_id: span.id.clone(),
                 attempt_id: spans[observed.call_index].id.clone(),
                 symptom: symptom_line(&observed.output),
@@ -635,7 +640,8 @@ fn resolve_pending(
     };
     let mut still_pending = Vec::with_capacity(pending.len());
     for failure in pending.drain(..) {
-        if !family.verifies(&failure.family)
+        if !failure.complete
+            || !family.verifies(&failure.family)
             || !failure.test_requirement.is_verified_by(&test_proof)
         {
             still_pending.push(failure);
@@ -1543,3 +1549,7 @@ mod libtest_store_tests;
 #[cfg(test)]
 #[path = "cass_error_recall_stream_tests.rs"]
 mod stream_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_stream_store_tests.rs"]
+mod stream_store_tests;
