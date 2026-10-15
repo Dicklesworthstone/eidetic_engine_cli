@@ -10,9 +10,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use super::{
-    CanonicalDiagnostic, CompilerOutput, GoTestCoverage, MAX_COMPILER_RECORDS,
-    MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES,
+    CanonicalDiagnostic, CompilerOutput, GoTestCoverage, MAX_DIAGNOSTICS_PER_FAILURE,
+    MAX_SCANNED_OUTPUT_BYTES,
 };
+
+// test2json emits lifecycle and output events, not one record per diagnostic.
+// A normal 100-test report already exceeds the compiler's 256-record budget.
+// Bound this producer independently while keeping the shared 64 KiB byte cap,
+// complete-stream validation, and four-diagnostic display cap unchanged.
+const MAX_GO_RECORDS: usize = 1024;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum TestState {
@@ -144,6 +150,11 @@ fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D:
 /// A selected stream is all-or-nothing: bad trailing records, duplicates,
 /// unknown actions, mixed producers and over-budget input cannot be ignored.
 pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
+    // Bound even family probing: direct callers must not deserialize an
+    // oversized first record before discovering that this is a Go stream.
+    if text.len() > MAX_SCANNED_OUTPUT_BYTES {
+        return Err(());
+    }
     if !text.trim_start().starts_with('{') {
         return Ok(None);
     }
@@ -164,9 +175,6 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     if !family.action && !family.package && !family.import_path {
         return Ok(None);
     }
-    if text.len() > MAX_SCANNED_OUTPUT_BYTES {
-        return Err(());
-    }
     let mut packages = BTreeMap::<String, Package>::new();
     let mut coverage = GoTestCoverage::default();
     let mut output = CompilerOutput::default();
@@ -179,7 +187,7 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     let mut count = 0;
     while let Some(event) = records.next() {
         let event = event.map_err(|_| ())?;
-        if count == MAX_COMPILER_RECORDS {
+        if count == MAX_GO_RECORDS {
             return Err(());
         }
         let end = records.byte_offset();
@@ -606,7 +614,7 @@ mod tests {
         }
         events.push(json!({"Action":"fail","Package":"a"}));
         assert!(parsed(&events).failed);
-        while events.len() < MAX_COMPILER_RECORDS {
+        while events.len() < MAX_GO_RECORDS {
             events.insert(1, json!({"Action":"output","Package":"a","Output":""}));
         }
         assert!(inspect(&stream(&events)).is_ok());
@@ -1071,3 +1079,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "cass_error_recall_go_intake_tests.rs"]
+mod intake_tests;
