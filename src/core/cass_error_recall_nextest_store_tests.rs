@@ -136,3 +136,6 @@ fn default_fail_fast_run_records_the_repair_only_after_a_complete_native_retry()
     assert!(pack_error_recall_query_seed(&db, WS, &diagnostic)?.contains("flushing"));
     Ok(())
 }
+
+#[path = "cass_error_recall_nextest_growth_tests.rs"]
+mod growth;

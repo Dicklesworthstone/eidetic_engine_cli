@@ -56,14 +56,21 @@ impl Execution {
             && proof.full_inventory
             && self.profile == proof.profile
             && proof.failed.is_empty()
-            && self.selection == proof.selection
-            && (if self.full_inventory {
-                self.inventory == proof.inventory
-            } else {
-                // Fail-fast leaves selected tests unstarted. The retry must
-                // run the whole same selection and retain every observed ID.
-                self.inventory.is_subset(&proof.inventory)
+            && self.selection.zip(proof.selection).is_some_and(|(before, after)| {
+                before == after
+                    || (self.full_inventory
+                        && after.tests > before.tests
+                        && after.binaries >= before.binaries
+                        && after.skipped == before.skipped)
             })
+            // A repair commonly adds regression tests, possibly in a new
+            // binary. Complete inventories bind every original executed ID,
+            // so a clean superset preserves coverage without requiring equal
+            // test counts. Changed filtering or fewer binaries still abstain.
+            // Fail-fast has unknown unstarted subjects: keep its exact
+            // selection contract rather than guessing which new tests replace
+            // them. Every observed subject must survive in either case.
+            && self.inventory.is_subset(&proof.inventory)
             && self.failed.is_subset(&proof.passed)
     }
 }
