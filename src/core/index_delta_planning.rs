@@ -53,25 +53,33 @@ fn diff_with_checkpoint(
                 "source snapshot contains duplicate document identities",
             ));
         }
-        let actual_digest = digest(document);
-        checkpoint()?;
-        if live.get(&document.id) == Some(&actual_digest) {
-            continue;
+        // Absence from the identity map already proves this row is new.
+        // Hashing its body/title/metadata cannot change that decision, and
+        // input equality cannot reuse a vector belonging to a different ID.
+        let existing = live.get(&document.id);
+        if let Some(expected) = existing {
+            let actual_digest = digest(document);
+            checkpoint()?;
+            if *expected == actual_digest {
+                continue;
+            }
         }
         let bytes = document_payload_bytes(document);
         checkpoint()?;
         lexical.admit(bytes)?;
-        let input = embedding_input_digest(document);
-        checkpoint()?;
-        let reusable = if live.contains_key(&document.id) && inputs.get(&document.id) == Some(&input) {
-            Some(input)
+        let reusable = if existing.is_some() {
+            let input = embedding_input_digest(document);
+            checkpoint()?;
+            (inputs.get(&document.id) == Some(&input)).then_some(input)
         } else {
+            None
+        };
+        if reusable.is_none() {
             if inference_inputs == inference_limit {
                 return Err(over_limit("vector delta exceeds the inference budget"));
             }
             inference_inputs += 1;
-            None
-        };
+        }
         changes.push((document, reusable));
     }
     let mut withdrawn = Vec::new();
@@ -118,3 +126,7 @@ fn diff_with_checkpoint(
 #[cfg(test)]
 #[path = "index_delta_planning_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "index_delta_planning_work_tests.rs"]
+mod work_tests;

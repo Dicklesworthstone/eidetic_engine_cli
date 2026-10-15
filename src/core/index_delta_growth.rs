@@ -59,19 +59,31 @@ pub(super) fn try_plan(
     documents: &[IndexableDocument],
     identity: String,
 ) -> Result<Option<Delta>, IncrementalFallback> {
+    try_plan_with_digest(live, inputs, documents, identity, document_digest)
+}
+
+fn try_plan_with_digest(
+    live: &BTreeMap<String, String>,
+    inputs: &BTreeMap<String, String>,
+    documents: &[IndexableDocument],
+    identity: String,
+    digest: impl FnMut(&IndexableDocument) -> String,
+) -> Result<Option<Delta>, IncrementalFallback> {
     // The dispatcher reaches this fallback only after ordinary V3 limits.
     // A non-growing archive has a separate, inference-free maintenance lane;
     // any actual input rewrite still keeps the ordinary refusal unchanged.
     if documents.len() <= live.len() {
         return maintenance::try_plan(live, inputs, documents, identity);
     }
-    // Preserve the already-tested pure-append path. A changed old document
-    // makes it stop early; it never produces a partial delta to combine here.
-    if let Some(delta) = append::try_plan(live, documents, identity.clone())? {
-        return Ok(Some(delta));
+    // An empty baseline is append-only by construction. For a nonempty
+    // baseline, use the complete growth collector directly: it also handles
+    // pure appends, without first rehashing old rows in a speculative append
+    // pass that a late metadata refresh or withdrawal can invalidate.
+    if live.is_empty() && inputs.is_empty() {
+        return append::try_plan(live, documents, identity);
     }
     let request = asupersync::Cx::current();
-    plan_with_checkpoint(live, inputs, documents, identity, || {
+    plan_with_digest(live, inputs, documents, identity, digest, || {
         if let Some(cx) = &request {
             super::super::batch::checkpoint(cx, "bulk growth planning")?;
         }
@@ -86,11 +98,23 @@ fn invalid_identity_map() -> IncrementalFallback {
     )
 }
 
+#[cfg(test)]
 fn plan_with_checkpoint(
     live: &BTreeMap<String, String>,
     inputs: &BTreeMap<String, String>,
     documents: &[IndexableDocument],
     identity: String,
+    checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
+) -> Result<Option<Delta>, IncrementalFallback> {
+    plan_with_digest(live, inputs, documents, identity, document_digest, checkpoint)
+}
+
+fn plan_with_digest(
+    live: &BTreeMap<String, String>,
+    inputs: &BTreeMap<String, String>,
+    documents: &[IndexableDocument],
+    identity: String,
+    mut digest: impl FnMut(&IndexableDocument) -> String,
     mut checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
 ) -> Result<Option<Delta>, IncrementalFallback> {
     checkpoint()?;
@@ -124,9 +148,9 @@ fn plan_with_checkpoint(
             ));
         }
         let reusable = if let Some(expected) = live.get(&document.id) {
-            let digest = document_digest(document);
+            let actual = digest(document);
             checkpoint()?;
-            if *expected == digest {
+            if *expected == actual {
                 continue;
             }
             let expected_input = inputs.get(&document.id).ok_or_else(invalid_identity_map)?;
@@ -391,3 +415,7 @@ mod tests {
 #[cfg(test)]
 #[path = "index_delta_growth_native_tests.rs"]
 mod native_tests;
+
+#[cfg(test)]
+#[path = "index_delta_growth_work_tests.rs"]
+mod work_tests;
