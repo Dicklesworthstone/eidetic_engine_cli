@@ -18,6 +18,8 @@ pub use crate::models::PACK_DNA_SCHEMA_V1;
 pub const DEFAULT_PACK_DNA_EGO_RADIUS: usize = 2;
 pub const DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT: usize = 10;
 
+#[path = "pack_dna_neighbors.rs"]
+mod neighbors;
 #[path = "pack_dna_progress.rs"]
 mod progress;
 
@@ -561,18 +563,7 @@ fn pack_dna_ppr_neighbors<Caps>(
         query_seed_weights,
         Default::default(),
     )?;
-    let mut neighbors = scores
-        .into_iter()
-        .filter(|(memory_id, score)| !seed_ids.contains(memory_id) && score.is_finite())
-        .map(|(memory_id, score)| PackDnaPprNeighbor {
-            memory_id: memory_id.to_string(),
-            score,
-        })
-        .collect::<Vec<_>>();
-    sort_by_ulid_payload_or_lexical(&mut neighbors, |neighbor| neighbor.memory_id.as_str());
-    neighbors.sort_by(|left, right| right.score.total_cmp(&left.score));
-    neighbors.truncate(limit);
-    Ok(neighbors)
+    neighbors::select(cx, scores, &seed_ids, limit)
 }
 
 #[cfg(test)]
