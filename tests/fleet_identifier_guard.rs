@@ -398,15 +398,21 @@ fn tracked_files(root: &Path) -> Option<Vec<PathBuf>> {
 /// gate does when it prints "NOT A MEASUREMENT" beside its own zero.
 struct ScanReport {
     source: &'static str,
+    /// Whether this scan could see `.beads/issues.jsonl`, which holds every
+    /// violation this guard has ever actually had. False on the filesystem-walk
+    /// fallback, where `.beads` is outside `WALKED_DOT_DIRECTORIES`. The guard
+    /// FAILS CLOSED on false rather than reporting a green it cannot support.
+    scanned_tracker: bool,
     files_scanned: usize,
     violations: Vec<Violation>,
 }
 
 fn scan(root: &Path) -> ScanReport {
-    let (mut files, source) = match tracked_files(root) {
+    let (mut files, source, scanned_tracker) = match tracked_files(root) {
         Some(tracked) => (
             tracked,
             "git ls-files (includes tracked dot-directory files)",
+            true,
         ),
         None => {
             let mut walked = Vec::new();
@@ -415,6 +421,7 @@ fn scan(root: &Path) -> ScanReport {
                 walked,
                 "filesystem walk -- git unavailable, so .beads/ and every other \
                  dot-directory outside WALKED_DOT_DIRECTORIES were NOT scanned",
+                false,
             )
         }
     };
@@ -455,6 +462,7 @@ fn scan(root: &Path) -> ScanReport {
                 if violations.len() >= 200 {
                     return ScanReport {
                         source,
+                        scanned_tracker,
                         files_scanned,
                         violations,
                     };
@@ -464,6 +472,7 @@ fn scan(root: &Path) -> ScanReport {
     }
     ScanReport {
         source,
+        scanned_tracker,
         files_scanned,
         violations,
     }
@@ -474,9 +483,30 @@ fn no_private_fleet_identifiers_are_published() {
     let root = repository_root();
     let ScanReport {
         source,
+        scanned_tracker,
         files_scanned,
         violations,
     } = scan(&root);
+    // FAIL CLOSED when the scan could not reach `.beads/issues.jsonl`.
+    //
+    // bd-42puv measured 1149 of 4869 bead records carrying a fleet identifier
+    // and ZERO other tracked files carrying one. So a run that skips the
+    // tracker is not a smaller measurement of the published set, it is a
+    // measurement of everything except where the problem is, and it returns
+    // GREEN. Honestly reporting the smaller denominator -- which this guard
+    // already did -- documents the hole without closing it; the pass still
+    // reads as a clean bill of health to anyone scanning results.
+    //
+    // A green that nothing could have made red is worse than a red. This
+    // assertion is what gives the one below a population to be true about.
+    assert!(
+        scanned_tracker,
+        "fleet identifier scan could not read the tracker, so a pass here would \
+         be vacuous: {source}. Run this guard on a lane where `git ls-files` \
+         works: the --clean-overlay lane materialises the committed tree with no \
+         .git, and bd-3ghvw measured that `rch exec --job` ships none either, so \
+         BOTH remote lanes hit the fallback."
+    );
     assert!(
         violations.is_empty(),
         "private fleet identifiers found in {} place(s) across {} file(s), scanned via {}; \
