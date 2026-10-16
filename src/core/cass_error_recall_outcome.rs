@@ -68,7 +68,102 @@ pub(super) fn failed(output: &ToolOutput) -> bool {
                         };
                         count.is_empty() || count.bytes().any(|byte| byte != b'0')
                     }))
+                || runner_report_failed(&line)
         })
+}
+
+/// A shell pipeline can exit zero after its test runner failed. Recognize
+/// complete runner reports rather than searching arbitrary prose for `failed`.
+/// This is a veto only: a passing summary never supplies completion authority.
+fn runner_report_failed(line: &str) -> bool {
+    let mut body = line.trim();
+    if body == "fail" || body.starts_with("fail\t") {
+        return true;
+    }
+    if let Some(rest) = body.strip_prefix("not ok ")
+        && rest.split_whitespace().next().is_some_and(decimal_count)
+    {
+        return true;
+    }
+    if let Some(fields) = body.strip_prefix("failed (").and_then(|s| s.strip_suffix(')')) {
+        return !fields.is_empty()
+            && fields.split(',').all(|field| {
+                field.trim().split_once('=').is_some_and(|(name, count)| {
+                    matches!(name.trim(), "failures" | "errors" | "skipped")
+                        && decimal_count(count.trim())
+                })
+            });
+    }
+    if body.starts_with("===") {
+        if !body.ends_with("===") {
+            return false;
+        }
+        body = body.trim_matches('=').trim();
+    }
+    for header in ["test suites", "test files", "snapshots", "tests"] {
+        if let Some(rest) = body.strip_prefix(header) {
+            if let Some(rest) = rest.strip_prefix(':') {
+                body = rest.trim();
+                break;
+            }
+            if rest.starts_with(char::is_whitespace) {
+                body = rest.trim();
+                break;
+            }
+        }
+    }
+    if let Some((counts, elapsed)) = body.rsplit_once(" in ") {
+        if !runner_duration(elapsed) {
+            return false;
+        }
+        body = counts.trim_end();
+    }
+    if let Some((counts, total)) = body.rsplit_once('(') {
+        if !total.strip_suffix(')').is_some_and(|total| decimal_count(total.trim())) {
+            return false;
+        }
+        body = counts.trim_end();
+    }
+    let mut failure = false;
+    for field in body.split([',', ';', '|']) {
+        let mut words = field.split_whitespace();
+        let Some(count) = words.next().filter(|count| decimal_count(count)) else {
+            return false;
+        };
+        let Some(outcome) = words.next() else {
+            return false;
+        };
+        let failed = match outcome {
+            "failed" | "failing" | "fail" | "failure" | "failures" | "error" | "errors" => true,
+            "passed" | "passing" | "pass" | "skipped" | "pending" | "todo" | "total"
+            | "ignored" | "deselected" | "warning" | "warnings" => false,
+            _ => return false,
+        };
+        if words.next().is_some() {
+            return false;
+        }
+        // Counts are decimal strings, not machine integers. Huge failure
+        // counters must not overflow into an absent or zero observation.
+        failure |= failed && count.bytes().any(|byte| byte != b'0');
+    }
+    failure
+}
+
+fn decimal_count(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn runner_duration(text: &str) -> bool {
+    let number = ["milliseconds", "seconds", "ms", "s"]
+        .iter()
+        .find_map(|unit| text.trim().strip_suffix(*unit).map(str::trim));
+    let Some(number) = number else {
+        return false;
+    };
+    let mut parts = number.split('.');
+    parts.next().is_some_and(decimal_count)
+        && parts.next().is_none_or(decimal_count)
+        && parts.next().is_none()
 }
 
 pub(super) fn succeeded(output: &ToolOutput) -> bool {
@@ -399,5 +494,79 @@ mod tests {
         }
         let no_status = codex_output(&json!({"output": "all green"})).expect("stdout");
         assert!(!succeeded(&no_status));
+    }
+
+    #[test]
+    fn cross_language_failures_override_successful_tool_and_shell_status() {
+        for text in [
+            "================ 1 failed, 21 passed in 0.03s ================",
+            "1 error, 21 passed in 125ms",
+            "Ran 22 tests in 0.003s\nFAILED (failures=1, errors=0)",
+            "Test Suites: 1 failed, 2 passed, 3 total",
+            "Tests: 1 failed, 21 passed, 22 total",
+            "Test Files 1 failed | 2 passed (3)",
+            "Tests 1 failed | 21 passed (22)",
+            "Snapshots: 1 failed, 2 passed, 3 total",
+            "21 passing (20ms)\n1 failing",
+            "21 pass\n1 fail",
+            "FAIL\texample.test/cache\t0.031s",
+            "TAP version 13\nnot ok 2 - cache reload\n1..2",
+            "999999999999999999999999999 failed, 1 passed",
+        ] {
+            let result = ToolOutput {
+                is_error: Some(false),
+                exit_code: Some(0),
+                ..output(text)
+            };
+            assert!(failed(&result), "lost runner failure: {text}");
+            assert!(!succeeded(&result), "false repair proof: {text}");
+            assert_eq!(result.text, text, "classification rewrote evidence");
+        }
+    }
+
+    #[test]
+    fn successful_runner_reports_still_require_explicit_completion() {
+        for text in [
+            "================ 22 passed in 0.03s ================",
+            "0 failed, 22 passed in 125ms",
+            "000 errors, 22 passed",
+            "Ran 22 tests in 0.003s\nOK",
+            "Test Suites: 0 failed, 3 passed, 3 total",
+            "Test Files 3 passed (3)",
+            "Tests 000 failed | 22 passed (22)",
+            "Snapshots: 3 passed, 3 total",
+            "21 pass\n0 fail",
+            "TAP version 13\nok 1 - reload\n1..1",
+        ] {
+            assert!(!failed(&output(text)), "false failure: {text}");
+            assert!(!succeeded(&output(text)), "stdout granted authority: {text}");
+            assert!(succeeded(&ToolOutput {
+                exit_code: Some(0),
+                ..output(text)
+            }), "lost valid completed run: {text}");
+        }
+    }
+
+    #[test]
+    fn report_grammar_does_not_reinterpret_prose_or_examples() {
+        for text in [
+            "the previous run had 1 failed test",
+            "1 failed in src/other.rs",
+            "1 failed, then cargo test passed",
+            "Tests: 1 failed (quoted example)",
+            "Tests: 1 failed | run repair.sh",
+            "testsuite: 1 failed",
+            "Test Files 1 failed (3) trailing qualification",
+            "\"1 failed\"",
+            "not okay 2",
+            "not ok cache reload",
+            "failed (fix=1)",
+            "=== 1 failed",
+            "-1 failed",
+            "1e9 failed",
+            "1 failed in unknowns",
+        ] {
+            assert!(!runner_report_failed(&text.to_ascii_lowercase()), "{text}");
+        }
     }
 }
