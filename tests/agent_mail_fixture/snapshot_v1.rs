@@ -117,10 +117,8 @@ pub fn declared_snapshot_v1(
     })];
     let thread_rows: Vec<Value> = Vec::new();
 
-    // `health_level`, `semantic_readiness`, `durability_state` and `recovery`
-    // are omitted rather than set to null: they are optional, but an EXPLICIT
-    // null is rejected (swarm_brief.rs:8195-8204). Any of them being present
-    // and non-green would also force `fallback_active`.
+    // Successful health probes must include their outputs. Optional semantic
+    // readiness and recovery stay absent; explicit null is not valid v1 evidence.
     let snapshot = json!({
         "schema": "ee.agent_mail.snapshot.v1",
         "generated_at": Utc::now().to_rfc3339(),
@@ -131,6 +129,8 @@ pub fn declared_snapshot_v1(
         "source_commands": source_commands,
         "command_statuses": command_statuses,
         "fallback_active": false,
+        "health_level": "green",
+        "durability_state": "ok",
         "am_agents_list_ok": true,
         "summary": {
             "agent_count": agent_rows.len(),
@@ -147,6 +147,8 @@ pub fn declared_snapshot_v1(
         "threads": thread_rows,
     });
 
-    serde_json::to_string_pretty(&snapshot)
-        .map_err(|error| format!("serialize agent mail snapshot fixture: {error}"))
+    let encoded = serde_json::to_string_pretty(&snapshot)
+        .map_err(|error| format!("serialize agent mail snapshot fixture: {error}"))?;
+    ee::core::swarm_brief::parse_agent_mail_snapshot_json(&encoded)?;
+    Ok(encoded)
 }

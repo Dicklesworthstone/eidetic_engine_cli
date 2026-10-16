@@ -96,6 +96,7 @@ fn build_capsule_with_seeds() -> Result<CapsuleFixture, String> {
         machine_salt_path: None,
         redaction_level: RedactionLevel::Standard,
         command_timeout_ms: ee::core::swarm_brief::DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+        agent_mail: Default::default(),
     })
     .map_err(|error| format!("create_handoff: {error:?}"))?;
 
@@ -120,6 +121,7 @@ fn base_resume_options(fixture: &CapsuleFixture) -> ResumeOptions {
         require_fresh: false,
         insecure_skip_hmac: false,
         machine_salt_path: None,
+        agent_mail: Default::default(),
     }
 }
 

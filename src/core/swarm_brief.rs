@@ -2043,6 +2043,17 @@ pub struct AgentMailSnapshotFileAdapter;
 
 impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
     fn collect(&self, options: &SwarmBriefCollectOptions) -> SwarmBriefSourceOutput {
+        self.collect_with_project_key(options, None)
+    }
+}
+
+impl AgentMailSnapshotFileAdapter {
+    /// An explicit expected identity is caller input, never inferred from the snapshot.
+    pub(crate) fn collect_with_project_key(
+        &self,
+        options: &SwarmBriefCollectOptions,
+        expected_project_key: Option<&str>,
+    ) -> SwarmBriefSourceOutput {
         let provenance = SwarmBriefSourceProvenance::local_probe();
         let Some(path) = &options.agent_mail_snapshot_path else {
             let (message, repair) =
@@ -2070,9 +2081,10 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
             Ok(contents) => match parse_agent_mail_snapshot_json(&contents) {
                 Ok(mut snapshot) => {
                     let decision_now = Utc::now();
-                    match validate_agent_mail_snapshot_workspace_binding(
+                    match validate_agent_mail_snapshot_project_binding(
                         &contents,
                         &options.workspace,
+                        expected_project_key,
                     )
                     .and_then(|()| {
                         agent_mail_snapshot_freshness_assessment(&contents, decision_now)
@@ -3034,6 +3046,14 @@ pub fn collect_swarm_brief(
     options: &SwarmBriefCollectOptions,
     runner: &impl SwarmBriefCommandRunner,
 ) -> SwarmBriefReport {
+    collect_swarm_brief_with_agent_mail_binding(options, runner, None)
+}
+
+pub(crate) fn collect_swarm_brief_with_agent_mail_binding(
+    options: &SwarmBriefCollectOptions,
+    runner: &impl SwarmBriefCommandRunner,
+    expected_project_key: Option<&str>,
+) -> SwarmBriefReport {
     let mut report = SwarmBriefReport::empty(&options.workspace);
     collect_selected_source(
         &mut report,
@@ -3061,7 +3081,7 @@ pub fn collect_swarm_brief(
         options,
         SwarmBriefSourceKind::AgentMail,
         SwarmBriefSourceProvenance::local_probe(),
-        || AgentMailSnapshotFileAdapter.collect(options),
+        || AgentMailSnapshotFileAdapter.collect_with_project_key(options, expected_project_key),
     );
     collect_selected_source(
         &mut report,
@@ -3324,7 +3344,7 @@ fn qos_resource_pressure_hints(
     hints
 }
 
-fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOutput) {
+pub(crate) fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOutput) {
     report.degraded.extend(output.snapshot.degraded.clone());
     report.sources.push(output.snapshot);
     match output.contribution {
@@ -7957,7 +7977,7 @@ fn agent_mail_snapshot_v1_timestamp_is_valid(value: &str) -> bool {
     DateTime::parse_from_rfc3339(value).is_ok()
 }
 
-fn agent_mail_snapshot_project_key_is_valid(value: &str) -> bool {
+pub(crate) fn agent_mail_snapshot_project_key_is_valid(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|digest| {
         digest.len() == 64
             && digest
@@ -8011,9 +8031,20 @@ fn validate_agent_mail_snapshot_workspace_binding(
     input: &str,
     workspace: &Path,
 ) -> Result<(), String> {
+    validate_agent_mail_snapshot_project_binding(input, workspace, None)
+}
+
+fn validate_agent_mail_snapshot_project_binding(
+    input: &str,
+    workspace: &Path,
+    expected_project_key: Option<&str>,
+) -> Result<(), String> {
     let value = serde_json::from_str::<Value>(input)
         .map_err(|error| format!("Agent Mail snapshot JSON could not be parsed: {error}"))?;
     if value.get("schema").and_then(Value::as_str) != Some(AGENT_MAIL_SNAPSHOT_SCHEMA_V1) {
+        if expected_project_key.is_some() {
+            return Err("An explicit Agent Mail project binding requires a declared ee.agent_mail.snapshot.v1 snapshot".to_owned());
+        }
         return Ok(());
     }
     let actual = value
@@ -8022,10 +8053,14 @@ fn validate_agent_mail_snapshot_workspace_binding(
         .ok_or_else(|| {
             format!("declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} project_key is missing")
         })?;
-    let expected = agent_mail_snapshot_project_key_for_workspace(workspace)?;
+    let expected = match expected_project_key {
+        Some(key) if agent_mail_snapshot_project_key_is_valid(key) => key.to_owned(),
+        Some(_) => return Err("Expected Agent Mail project key must be sha256: followed by 64 lowercase hexadecimal digits".to_owned()),
+        None => agent_mail_snapshot_project_key_for_workspace(workspace)?,
+    };
     if actual != expected {
         return Err(format!(
-            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} project_key does not match the requested workspace"
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} project_key does not match the requested workspace or explicit project binding"
         ));
     }
     Ok(())
