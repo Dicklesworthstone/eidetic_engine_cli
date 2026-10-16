@@ -107,7 +107,7 @@ fn pack_targets_with(
             &[
                 Value::Text(workspace_id.to_owned()),
                 Value::Text(fingerprint_key.to_owned()),
-                Value::Integer(i64::try_from(remaining).map_err(|_| unavailable())?),
+                Value::BigInt(i64::try_from(remaining).map_err(|_| unavailable())?),
                 Value::Text(after.clone()),
             ],
         ).map_err(|_| unavailable())?;
