@@ -113,12 +113,71 @@ fn canonical_fixture_path(path: &Path, label: &str) -> Result<PathBuf, String> {
     })
 }
 
+/// True when `path` or any ancestor contains a `.git` entry.
+///
+/// bd-b3bhh: `ee status` reports `scopeKind: "subproject"` for a workspace
+/// nested inside a repository, and that answer is CORRECT. The status contract
+/// snapshot was recorded standalone, so the fixture has to sit outside any
+/// repository or the snapshot becomes a statement about where the suite ran.
+fn has_git_ancestor(path: &Path) -> bool {
+    path.ancestors()
+        .any(|ancestor| ancestor.join(".git").exists())
+}
+
+/// A base directory for fixture artifacts that is NOT inside a git repository.
+///
+/// The default temp dir is not safe to assume here. On the RCH lane `TMPDIR`
+/// points at `.rch-tmp/` INSIDE the synced checkout, so `tempfile` lands the
+/// fixture under a repository and `ee status` correctly switches to
+/// `subproject` scope, gains a `repositoryRoot`/`repositoryFingerprint`, and
+/// emits a `workspace_selected_differs_from_discovered` diagnostic. None of
+/// that is a product defect and none of it can be scrubbed away, because
+/// `scopeKind` legitimately changes VALUE and `diagnostics` legitimately gains
+/// an entry. The fixture's location is the thing that has to change.
+///
+/// Candidates are tried in order and the first one outside a repository wins.
+/// If every candidate is inside one, this FAILS LOUDLY rather than silently
+/// recording a nested shape: inverting the snapshot would simply move the bug
+/// onto anyone whose temp dir is outside a repository.
+fn repo_free_artifact_base() -> Result<PathBuf, String> {
+    let mut candidates = vec![std::env::temp_dir()];
+    for fallback in ["/tmp", "/var/tmp"] {
+        let path = PathBuf::from(fallback);
+        if path.is_dir() && !candidates.iter().any(|existing| existing == &path) {
+            candidates.push(path);
+        }
+    }
+
+    let mut rejected = Vec::new();
+    for candidate in candidates {
+        if has_git_ancestor(&candidate) {
+            rejected.push(candidate.display().to_string());
+        } else {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "every candidate artifact base is inside a git repository, so the status \
+         contract would record a `subproject` scope that belongs to this machine \
+         rather than to the product (bd-b3bhh). Rejected: {}. Point TMPDIR at a \
+         directory outside any checkout.",
+        rejected.join(", ")
+    ))
+}
+
 fn unique_artifact_dir(prefix: &str) -> Result<PathBuf, String> {
+    let base = repo_free_artifact_base()?;
     tempfile::Builder::new()
         .prefix(&format!("{prefix}-"))
-        .tempdir()
+        .tempdir_in(&base)
         .map(tempfile::TempDir::keep)
-        .map_err(|error| format!("failed to create {prefix} artifact directory: {error}"))
+        .map_err(|error| {
+            format!(
+                "failed to create {prefix} artifact directory under {}: {error}",
+                base.display()
+            )
+        })
 }
 
 fn assert_graph_surface_snapshot(name: &str, value: Value) {
@@ -463,6 +522,21 @@ fn build_search_index(
 fn run_ee_at(binary: &Path, workspace: &Path, args: &[String]) -> Result<Output, String> {
     Command::new(binary)
         .args(args)
+        // bd-b3bhh, second half. Without this the child inherits cargo's
+        // working directory -- the repository -- and `ee` discovers the
+        // REPOSITORY's workspace from the cwd while `--workspace` selects the
+        // fixture's. That disagreement is reported honestly, as a
+        // `workspace_selected_differs_from_discovered` warning carrying
+        // `conflictingRoot: [REPO]`, and it landed in the committed contract
+        // as a diagnostics entry that exists only because of where the suite
+        // was launched.
+        //
+        // Moving the fixture out of the repository (see repo_free_artifact_base)
+        // fixed scopeKind, repositoryRoot and subprojectPath but NOT this: the
+        // cwd is a second, independent channel for the same class of defect.
+        // Running from inside the fixture makes selected and discovered agree
+        // by construction, on any machine.
+        .current_dir(workspace)
         .env("EE_EMBED_DOWNLOAD", "off")
         .env(
             "EE_EMBED_MODEL_DIR",
@@ -1723,5 +1797,90 @@ fn live_package_version_assertion_rejects_a_foreign_version() -> TestResult {
         );
     }
     println!("foreign version correctly rejected");
+    Ok(())
+}
+
+/// Positive control for bd-b3bhh's relocation of the contract fixture.
+///
+/// `unique_artifact_dir` now refuses a base that sits inside a git repository,
+/// so `status_json_contract` records a STANDALONE workspace again. That fix
+/// would be indistinguishable from the product quietly losing subproject
+/// detection, and a snapshot cannot tell the difference: both show
+/// `scopeKind: "standalone"`.
+///
+/// So this asserts the other half directly. A workspace genuinely nested under
+/// a repository must still report `subproject`. If someone "fixes" a future
+/// scope red by weakening detection, the contract snapshot stays green and
+/// THIS goes red.
+#[test]
+fn nested_workspace_still_reports_subproject_scope() -> TestResult {
+    let base = repo_free_artifact_base()?;
+    let root = tempfile::Builder::new()
+        .prefix("json-contract-nested-control-")
+        .tempdir_in(&base)
+        .map(tempfile::TempDir::keep)
+        .map_err(|error| format!("failed to create nested control directory: {error}"))?;
+
+    // A bare `.git` directory is enough for upward discovery: the scope
+    // classifier asks whether a repository root was FOUND, not whether it is a
+    // healthy checkout (src/config/workspace.rs, workspace_scope_from_repository_root).
+    fs::create_dir_all(root.join(".git"))
+        .map_err(|error| format!("failed to create synthetic repository root: {error}"))?;
+
+    let workspace = root.join("nested").join("workspace");
+    fs::create_dir_all(workspace.join(".runtime"))
+        .map_err(|error| format!("failed to create nested workspace: {error}"))?;
+
+    // Guard the guard: if this directory is not actually inside a repository,
+    // the assertion below would pass for the wrong reason.
+    if !has_git_ancestor(&workspace) {
+        return Err(format!(
+            "nested control workspace {} has no git ancestor, so it cannot test \
+             subproject detection",
+            workspace.display()
+        ));
+    }
+
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+    let workspace_arg = workspace.display().to_string();
+
+    let init_args = vec![
+        "--json".to_string(),
+        "--workspace".to_string(),
+        workspace_arg.clone(),
+        "init".to_string(),
+    ];
+    parse_ee_json_output(run_ee_at(&binary, &workspace, &init_args)?, &init_args)?;
+
+    let status_args = vec![
+        "--json".to_string(),
+        "--workspace".to_string(),
+        workspace_arg,
+        "status".to_string(),
+    ];
+    let status = parse_ee_json_output(run_ee_at(&binary, &workspace, &status_args)?, &status_args)?;
+
+    let scope_kind = status
+        .pointer("/data/workspace/scopeKind")
+        .or_else(|| status.pointer("/data/scopeKind"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "status response carried no scopeKind; payload keys: {:?}",
+                status
+                    .get("data")
+                    .and_then(Value::as_object)
+                    .map(|map| map.keys().cloned().collect::<Vec<_>>())
+            )
+        })?;
+
+    if scope_kind != "subproject" {
+        return Err(format!(
+            "a workspace nested under a repository reported scopeKind {scope_kind:?}, \
+             expected \"subproject\"; subproject detection may have regressed"
+        ));
+    }
+
+    println!("nested workspace correctly reported subproject scope");
     Ok(())
 }
