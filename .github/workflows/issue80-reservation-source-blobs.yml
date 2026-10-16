@@ -1,0 +1,57 @@
+name: Issue 80 reservation source blobs
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/issue80-reservation-source-blobs.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Apply exact reviewed patch and publish unreferenced blobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: Dicklesworthstone/eidetic_engine_cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init source
+          cd source
+          git remote add origin https://github.com/Dicklesworthstone/eidetic_engine_cli.git
+          git fetch --depth=1 origin a7a572358c20cd037af4ebe03924b33f46431849
+          git checkout --detach FETCH_HEAD
+          gh api repos/$GH_REPO/git/blobs/cbf5767099b26981378a5f494dad0f25d721708d > "$RUNNER_TEMP/issue80-patch.json"
+          python3 - <<'PY'
+          import base64, json, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          value = json.loads((root / 'issue80-patch.json').read_text())
+          assert value['encoding'] == 'base64'
+          (root / 'issue80.patch').write_bytes(base64.b64decode(value['content']))
+          PY
+          test "$(git hash-object "$RUNNER_TEMP/issue80.patch")" = cbf5767099b26981378a5f494dad0f25d721708d
+          git apply --unidiff-zero --check "$RUNNER_TEMP/issue80.patch"
+          git apply --unidiff-zero "$RUNNER_TEMP/issue80.patch"
+          git diff --check
+          python3 - <<'PY'
+          import base64, json, os, pathlib, subprocess
+          expected = {
+              'src/core/handoff.rs': 'b97e0c13559844e693e480bbae95b5aa6e09f532',
+              'src/core/swarm_brief.rs': '0688df52c1f531912dddcea893ee44b51be43bf6',
+              'src/output/mod.rs': '02ee0b3e0cebdb458403145734e88c496cd5d069',
+          }
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          assert set(changed) == set(expected), changed
+          for name, sha in expected.items():
+              actual = subprocess.check_output(['git', 'hash-object', name], text=True).strip()
+              assert actual == sha, (name, actual, sha)
+              payload = json.dumps({'encoding': 'base64', 'content': base64.b64encode(pathlib.Path(name).read_bytes()).decode('ascii')})
+              result = subprocess.run(['gh', 'api', 'repos/' + os.environ['GH_REPO'] + '/git/blobs', '--method', 'POST', '--input', '-'], input=payload, text=True, capture_output=True, check=True)
+              assert json.loads(result.stdout)['sha'] == sha
+              print(name + ' ' + sha)
+          PY
