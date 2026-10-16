@@ -17,6 +17,11 @@ use crate::models::{
 };
 use crate::search::SpeedMode;
 
+#[path = "impact_graph.rs"]
+mod graph_neighbors;
+
+pub use graph_neighbors::ImpactGraphPhase;
+
 pub const IMPACT_SCHEMA_V1: &str = "ee.impact.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +80,7 @@ pub struct ImpactReport {
     pub fallback_count: usize,
     pub fallback_status: ImpactFallbackStatus,
     pub fallback_report: Option<SearchReport>,
+    pub graph_phase: ImpactGraphPhase,
     pub scope_stats: MemoryScopeStats,
     pub elapsed_ms: f64,
 }
@@ -88,12 +94,14 @@ pub struct ImpactResult {
     pub memory: ImpactMemorySummary,
     pub anchor: Option<ImpactAnchorSummary>,
     pub fallback_hit: Option<serde_json::Value>,
+    pub graph_path: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImpactMatchType {
     ExactAnchor,
     SearchFallback,
+    GraphNeighbor,
 }
 
 impl ImpactMatchType {
@@ -102,6 +110,7 @@ impl ImpactMatchType {
         match self {
             Self::ExactAnchor => "exact_anchor",
             Self::SearchFallback => "search_fallback",
+            Self::GraphNeighbor => "graph_neighbor",
         }
     }
 }
@@ -180,11 +189,7 @@ impl ImpactReport {
                     "status": self.fallback_status.as_str(),
                     "resultCount": self.fallback_count,
                 },
-                "graphNeighbors": {
-                    "status": "not_available",
-                    "resultCount": 0,
-                    "reason": "anchor_graph_projection_not_wired_for_impact_yet",
-                },
+                "graphNeighbors": self.graph_phase.data_json(),
             },
             "scopeStats": self.scope_stats.data_json(),
             "results": self.results.iter().map(ImpactResult::data_json).collect::<Vec<_>>(),
@@ -233,6 +238,9 @@ impl ImpactResult {
             }
             if let Some(hit) = &self.fallback_hit {
                 object.insert("fallbackHit".to_owned(), hit.clone());
+            }
+            if let Some(path) = &self.graph_path {
+                object.insert("graphPath".to_owned(), path.clone());
             }
         }
         value
@@ -406,6 +414,20 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
         }
     }
 
+    // ADR 0056: exact anchors, then ordinary search, then source-backed
+    // anchor-proximity neighbors. An optional graph failure must not discard
+    // the independently usable results from the first two phases.
+    let (graph_results, graph_phase) = graph_neighbors::read(
+        &connection,
+        &workspace_id,
+        &scope_context,
+        &mut scope_stats,
+        &surface,
+        &seen_memory_ids,
+        limit.saturating_sub(exact_results.len()),
+    );
+    exact_results.extend(graph_results);
+
     for (index, result) in exact_results.iter_mut().enumerate() {
         result.rank = index + 1;
     }
@@ -419,6 +441,7 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
         fallback_count,
         fallback_status,
         fallback_report,
+        graph_phase,
         scope_stats,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     })
@@ -480,6 +503,7 @@ fn exact_impact_results(
             memory: ImpactMemorySummary::from_memory(&memory),
             anchor: anchor.as_ref().map(ImpactAnchorSummary::from_anchor),
             fallback_hit: None,
+            graph_path: None,
         });
         if results.len() >= limit {
             break;
@@ -533,6 +557,7 @@ fn append_fallback_results(
             memory: ImpactMemorySummary::from_memory(&memory),
             anchor: None,
             fallback_hit: rendered_by_memory_id.get(memory_id).cloned(),
+            graph_path: None,
         });
         *fallback_count = fallback_count.saturating_add(1);
     }
