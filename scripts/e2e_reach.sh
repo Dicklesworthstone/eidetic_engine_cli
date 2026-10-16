@@ -91,17 +91,64 @@ gap_missing_kind_count() {
     ' 2>/dev/null || printf '%s\n' "0"
 }
 
+# `.expectedMemoryKind`, not the whole element.
+#
+# This used to select the missingKinds OBJECT and then squeeze it through
+# `tr -cd 'a-z0-9_-'`, which flattened the entire JSON record into one ~200
+# character token:
+#
+#     kindanti_patternexpectedmemorykindanti-patternexpectedlevelprocedural...
+#
+# instead of `anti-pattern`. That token was then handed to `--kind`, and
+# `ee remember` ACCEPTS an arbitrary kind string, so the capture reported
+# success while storing a memory of a nonsense kind that could never satisfy
+# the gap spec. The "gap capture memory stores" assertion passed throughout,
+# which is why the only visible symptom was the count refusing to drop.
 first_missing_kind() {
     local json="$1"
     local kind
     kind="$(printf '%s' "$json" | jq -r '
-        first(.. | objects | select(has("missingKinds")) | .missingKinds[]?) // "rule"
+        first(.. | objects | select(has("missingKinds")) | .missingKinds[]?)
+        | (.expectedMemoryKind // .kind // "rule")
     ' 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
     if [ -n "$kind" ]; then
         printf '%s\n' "$kind"
     else
         printf '%s\n' "rule"
     fi
+}
+
+# The level the report ASKS for, rather than a hardcoded guess. A gap spec is
+# satisfied only by a pack item in its expected section, and section placement
+# follows the memory's level, so capturing at the wrong level cannot close the
+# gap no matter what the content says.
+first_missing_level() {
+    local json="$1"
+    local level
+    level="$(printf '%s' "$json" | jq -r '
+        first(.. | objects | select(has("missingKinds")) | .missingKinds[]?)
+        | (.expectedLevel // "procedural")
+    ' 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z')"
+    if [ -n "$level" ]; then
+        printf '%s\n' "$level"
+    else
+        printf '%s\n' "procedural"
+    fi
+}
+
+# The content the report itself offers for this kind. `content_satisfies_gap_spec`
+# (src/pack/mod.rs:3255) requires one of the spec's marker terms to appear in the
+# memory's text, and those terms are not exposed in the JSON -- but the capture
+# template the report hands back is written to contain them. Using the product's
+# own template is therefore the only way for this fixture to satisfy the spec
+# without hardcoding a copy of the marker list.
+capture_template_body() {
+    local json="$1" kind="$2"
+    printf '%s' "$json" | jq -r --arg kind "$kind" '
+        (first(.. | objects | select(has("captureTemplates")) | .captureTemplates[]?
+               | select(((.memoryKind // .kind // "") | ascii_downcase) == $kind))
+         | (.contentTemplate // "")) // ""
+    ' 2>/dev/null
 }
 
 assert_number_lt() {
@@ -523,10 +570,19 @@ if [ "$GAP_MODE" != "none" ]; then
 
     before_missing_count="$(gap_missing_kind_count "$gap_before")"
     capture_kind="$(first_missing_kind "$gap_before")"
+    capture_level="$(first_missing_level "$gap_before")"
+    capture_body="$(capture_template_body "$gap_before" "$capture_kind")"
+    # Assert the precondition instead of falling back to invented prose. A
+    # capture whose text carries none of the spec's marker terms cannot close
+    # the gap, and the resulting unchanged count would read as a product
+    # failure rather than as this fixture guessing.
+    assert_eq "$([ -n "$capture_body" ] && printf 'present' || printf 'absent')" \
+        "present" \
+        "gap report supplies a capture template for ${capture_kind}"
     captured_gap="$(
-        ee_json remember "Reach gap capture: $GAP_TASK now has an explicit $capture_kind memory with provenance." \
+        ee_json remember "${capture_body} Captured while verifying ${GAP_TASK}." \
             --workspace "$WS" \
-            --level procedural \
+            --level "$capture_level" \
             --kind "$capture_kind" \
             --tags reach,gaps,captured \
             --source "manual://bd-2vq2z.17/captured-gap" \
@@ -534,6 +590,13 @@ if [ "$GAP_MODE" != "none" ]; then
     )"
     assert_jq "$captured_gap" '.schema == "ee.response.v2" and .success == true' \
         "gap capture memory stores"
+    CAPTURE_KIND="$capture_kind" assert_jq "$captured_gap" '.data.kind == env.CAPTURE_KIND' \
+        "gap capture stores the kind the report asked for"
+    # The gap report is computed from an ASSEMBLED PACK
+    # (explain_coverage_gap(task, pack), src/pack/mod.rs:3185), and pack
+    # selection is retrieval-backed, so a memory that is not in the published
+    # index cannot satisfy a spec no matter how well it matches.
+    ee_json index rebuild --workspace "$WS" --json >/dev/null
 
     gap_after="$(run_gap_report "$GAP_MODE" "$GAP_TASK" "$WS")"
     log_event "gap_report_after_capture" \
