@@ -11,26 +11,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sqlmodel_core::Value;
 
-use crate::core::cass_error_recall::{CASS_ERROR_RECALL_ACTOR, session_failure_arcs};
-use crate::core::incident_card::{INCIDENT_CARD_ACTOR, draft_incident_card};
-use crate::db::{DbConnection, Result, StoredEvidenceSpan};
+use crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR;
+use crate::core::incident_card::INCIDENT_CARD_ACTOR;
+use crate::core::incident_card::proof::{self, Claim};
+#[cfg(test)]
+use crate::core::incident_card::draft_incident_card;
+#[cfg(test)]
+use crate::core::incident_card::proof::MAX_SOURCE_BYTES;
+use crate::db::{DbConnection, Result};
 use crate::models::EvidenceId;
 
 use super::{FEEDBACK_BATCH, harmful_targets, unavailable};
 
-// These bound interpreter input, not total query work or process RSS. Large
-// or malformed source sessions cannot establish positive advice in this lane.
-const MAX_SOURCE_ROWS: usize = 4096;
-const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CACHED_SESSIONS: usize = 4;
-const MAX_CLAIMS: usize = MAX_SOURCE_ROWS * 4;
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct Claim {
-    failure: String,
-    target: String,
-    card: bool,
-}
 
 pub(in crate::core::error_diagnosis) struct Gate<'a> {
     connection: &'a DbConnection,
@@ -230,78 +223,15 @@ fn canonical_evidence(id: &str) -> bool {
     id.parse::<EvidenceId>().is_ok_and(|parsed| parsed.to_string() == id)
 }
 
-fn source_bytes(span: &StoredEvidenceSpan) -> usize {
-    span.excerpt.len().saturating_add(span.metadata_json.as_deref().map_or(0, str::len))
-}
-
 fn session_claims(
     connection: &DbConnection,
     workspace: &str,
     fingerprint: &str,
     session_id: &str,
 ) -> Result<BTreeSet<Claim>> {
-    // Count bytes before hydration. Include derived rows in this accounting:
-    // they are inspected for exact card identity, never fed back as sources.
-    let rows = connection.query(
-        "SELECT CAST(COUNT(*) AS TEXT), CAST(COALESCE(SUM(length(CAST(excerpt AS BLOB)) + length(CAST(COALESCE(metadata_json, '') AS BLOB))), 0) AS TEXT) FROM evidence_spans WHERE session_id = ?1",
-        &[Value::Text(session_id.to_owned())],
-    ).map_err(|_| unavailable())?;
-    if rows.len() != 1 {
-        return Err(unavailable());
-    }
-    let count = |index| -> Result<usize> {
-        rows[0].get(index).and_then(Value::as_str)
-            .and_then(|value| value.parse().ok()).ok_or_else(unavailable)
-    };
-    let row_count = count(0)?;
-    let byte_count = count(1)?;
-    if row_count == 0 || row_count > MAX_SOURCE_ROWS || byte_count > MAX_SOURCE_BYTES {
-        return Ok(BTreeSet::new());
-    }
-    let Some(session) = connection.get_session(session_id).map_err(|_| unavailable())? else {
-        return Ok(BTreeSet::new());
-    };
-    if session.id != session_id || session.workspace_id != workspace {
-        return Ok(BTreeSet::new());
-    }
-    let stored = connection.list_evidence_spans_for_session(session_id).map_err(|_| unavailable())?;
-    if stored.len() != row_count
-        || stored.iter().fold(0_usize, |sum, span| sum.saturating_add(source_bytes(span))) != byte_count
-    {
-        return Err(unavailable());
-    }
-    let (cards, sources): (Vec<_>, Vec<_>) = stored.into_iter()
-        .partition(StoredEvidenceSpan::is_derived_incident_card);
-    let cards: BTreeMap<_, _> = cards.into_iter().map(|card| (card.id.clone(), card)).collect();
-    let mut claims = BTreeSet::new();
-    for arc in session_failure_arcs(workspace, &session, &sources) {
-        if !arc.diagnostics.iter().any(|diagnostic| diagnostic.layered_key().key == fingerprint) {
-            continue;
-        }
-        let Some(resolution) = &arc.resolution else { continue; };
-        for target in &resolution.repair_ids {
-            claims.insert(Claim { failure: arc.failure_id.clone(), target: target.clone(), card: false });
-        }
-        if let Some(draft) = draft_incident_card(workspace, session_id, &sources, &arc)
-            && cards.get(&draft.id).is_some_and(|card| {
-                // Same deterministic ID does not prove that old card text
-                // describes today's valid arc. Never rewrite it on a read.
-                card.workspace_id == workspace && card.session_id == session_id
-                    && card.cass_span_id == draft.input.cass_span_id
-                    && card.start_line == draft.input.start_line
-                    && card.end_line == draft.input.end_line
-                    && card.excerpt == draft.input.excerpt
-                    && card.content_hash == draft.input.content_hash
-                    && card.metadata_json == draft.input.metadata_json
-            })
-        {
-            claims.insert(Claim { failure: arc.failure_id, target: draft.id, card: true });
-        }
-        if claims.len() > MAX_CLAIMS {
-            return Ok(BTreeSet::new());
-        }
-    }
-    Ok(claims)
+    proof::session_proofs(connection, workspace, Some(fingerprint), session_id)
+        .map(|proofs| proofs.claims)
+        .map_err(|_| unavailable())
 }
 
 #[cfg(test)]

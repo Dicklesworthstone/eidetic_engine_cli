@@ -24,6 +24,9 @@
 //!   the failing span as `evidence_ref`, so error recall surfaces it and
 //!   `ee why` can name its sources.
 
+#[path = "incident_card_proof.rs"]
+pub(crate) mod proof;
+
 use std::collections::BTreeSet;
 
 use crate::core::cass_error_recall::FailureArc;

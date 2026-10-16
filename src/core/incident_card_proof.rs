@@ -1,0 +1,214 @@
+//! Current-source proof shared by historical recall and ordinary answers.
+//!
+//! A stored card is derived text, not a permanent certificate. Interpret the
+//! original transcript once per referenced session, excluding every reserved
+//! card row. Neither a helpful link nor absence of one grants proof authority.
+//! Callers keep these reads inside their existing source snapshot; this module
+//! never starts a transaction, changes history, or invokes a model or index.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use sqlmodel_core::Value;
+
+use super::{IncidentCardDraft, draft_incident_card};
+use crate::core::cass_error_recall::session_failure_arcs;
+use crate::db::{DbConnection, DbError, DbOperation, Result, StoredEvidenceSpan};
+use crate::models::{EvidenceId, SessionId};
+
+// Interpreter-input limits, not a total-query-work or process-RSS promise.
+pub(crate) const MAX_SOURCE_ROWS: usize = 4096;
+pub(crate) const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CLAIMS: usize = MAX_SOURCE_ROWS * 4;
+
+type CardSignature = [u8; 32];
+
+fn unavailable() -> DbError {
+    DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: "Could not verify incident sources; derived guidance withheld".to_owned(),
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct Claim {
+    pub(crate) failure: String,
+    pub(crate) target: String,
+    pub(crate) card: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct SessionProofs {
+    pub(crate) claims: BTreeSet<Claim>,
+    cards: BTreeMap<String, CardSignature>,
+}
+
+/// The reserved locator survives an altered prefix, kind or role. Such a row
+/// must not turn into ordinary transcript evidence or feed its own derivation.
+fn requires_proof(span: &StoredEvidenceSpan) -> bool {
+    span.is_derived_incident_card() || span.cass_span_id.starts_with("ee-incident-card:")
+}
+
+/// Equality includes optional source-memory and byte coordinates: extra lineage
+/// cannot be smuggled onto a genuine deterministic card ID.
+fn matches_draft(card: &StoredEvidenceSpan, draft: &IncidentCardDraft) -> bool {
+    card.is_derived_incident_card()
+        && card.id == draft.id
+        && card.workspace_id == draft.input.workspace_id
+        && card.session_id == draft.input.session_id
+        && card.cass_span_id == draft.input.cass_span_id
+        && card.memory_id == draft.input.memory_id
+        && card.start_line == draft.input.start_line
+        && card.end_line == draft.input.end_line
+        && card.start_byte == draft.input.start_byte
+        && card.end_byte == draft.input.end_byte
+        && card.excerpt == draft.input.excerpt
+        && card.content_hash == draft.input.content_hash
+        && card.metadata_json == draft.input.metadata_json
+}
+
+/// Commit to the exact admitted row, not just its ID or declared content hash.
+/// The source reader still owns live admission. Signatures are transient and
+/// never replace a source hash, citation revision, or durable provenance.
+fn card_signature(span: &StoredEvidenceSpan) -> Result<CardSignature> {
+    let bytes = serde_json::to_vec(&(
+        &span.id, &span.workspace_id, &span.session_id, &span.cass_span_id,
+        &span.producer_kind, &span.span_kind, &span.role, &span.memory_id,
+        span.start_line, span.end_line, &span.start_byte, &span.end_byte,
+        &span.excerpt, &span.content_hash, &span.metadata_json,
+    )).map_err(|_| unavailable())?;
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"ee.incident_card.reader_proof.v1\0");
+    hash.update(&bytes);
+    Ok(*hash.finalize().as_bytes())
+}
+
+/// Compact checks for a caller's already admitted candidate set. This retains
+/// IDs and fixed-size commitments, never another copy of the card bodies. Group
+/// by session before checking, so interleaved visitor pages cannot thrash a
+/// bounded transcript cache. Additional storage scales with selected cards;
+/// each referenced session is loaded at most once and released immediately.
+#[derive(Default)]
+pub(crate) struct CardChecks {
+    sessions: BTreeMap<String, BTreeMap<String, CardSignature>>,
+    refused: BTreeSet<String>,
+}
+
+impl CardChecks {
+    pub(crate) fn observe(&mut self, span: &StoredEvidenceSpan) -> Result<()> {
+        if !requires_proof(span) {
+            return Ok(());
+        }
+        if !span.is_derived_incident_card()
+            || source_bytes(span) > MAX_SOURCE_BYTES
+            || !span.id.parse::<EvidenceId>().is_ok_and(|id| id.to_string() == span.id)
+            || !span.session_id.parse::<SessionId>().is_ok_and(|id| id.to_string() == span.session_id)
+        {
+            self.refused.insert(span.id.clone());
+            return Ok(());
+        }
+        let signature = card_signature(span)?;
+        let cards = self.sessions.entry(span.session_id.clone()).or_default();
+        if cards.insert(span.id.clone(), signature).is_some_and(|prior| prior != signature) {
+            self.refused.insert(span.id.clone());
+        }
+        Ok(())
+    }
+
+    /// Missing, foreign, over-budget or unproved sessions refuse only their
+    /// cards. Storage failures return an error, never a partially checked set.
+    pub(crate) fn withheld(
+        self,
+        connection: &DbConnection,
+        workspace: &str,
+    ) -> Result<BTreeSet<String>> {
+        self.withheld_with(|session| session_proofs(connection, workspace, None, session))
+    }
+
+    fn withheld_with(
+        self,
+        mut load: impl FnMut(&str) -> Result<SessionProofs>,
+    ) -> Result<BTreeSet<String>> {
+        let mut refused = self.refused;
+        for (session, pending) in self.sessions {
+            let known = load(&session)?;
+            for (id, signature) in pending {
+                if known.cards.get(&id) != Some(&signature) {
+                    refused.insert(id);
+                }
+            }
+        }
+        Ok(refused)
+    }
+}
+
+pub(crate) fn source_bytes(span: &StoredEvidenceSpan) -> usize {
+    span.excerpt.len().saturating_add(span.metadata_json.as_deref().map_or(0, str::len))
+}
+
+pub(crate) fn session_proofs(
+    connection: &DbConnection,
+    workspace: &str,
+    fingerprint: Option<&str>,
+    session_id: &str,
+) -> Result<SessionProofs> {
+    // Count bytes before hydration. Include derived rows in this accounting:
+    // they are inspected for exact card identity, never fed back as sources.
+    let rows = connection.query(
+        "SELECT CAST(COUNT(*) AS TEXT), CAST(COALESCE(SUM(length(CAST(excerpt AS BLOB)) + length(CAST(COALESCE(metadata_json, '') AS BLOB))), 0) AS TEXT) FROM evidence_spans WHERE session_id = ?1",
+        &[Value::Text(session_id.to_owned())],
+    ).map_err(|_| unavailable())?;
+    if rows.len() != 1 {
+        return Err(unavailable());
+    }
+    let count = |index| -> Result<usize> {
+        rows[0].get(index).and_then(Value::as_str)
+            .and_then(|value| value.parse().ok()).ok_or_else(unavailable)
+    };
+    let row_count = count(0)?;
+    let byte_count = count(1)?;
+    if row_count == 0 || row_count > MAX_SOURCE_ROWS || byte_count > MAX_SOURCE_BYTES {
+        return Ok(SessionProofs::default());
+    }
+    let Some(session) = connection.get_session(session_id).map_err(|_| unavailable())? else {
+        return Ok(SessionProofs::default());
+    };
+    if session.id != session_id || session.workspace_id != workspace {
+        return Ok(SessionProofs::default());
+    }
+    let stored = connection.list_evidence_spans_for_session(session_id).map_err(|_| unavailable())?;
+    if stored.len() != row_count
+        || stored.iter().fold(0_usize, |sum, span| sum.saturating_add(source_bytes(span))) != byte_count
+    {
+        return Err(unavailable());
+    }
+    let (cards, sources): (Vec<_>, Vec<_>) = stored.into_iter()
+        .partition(requires_proof);
+    let cards: BTreeMap<_, _> = cards.into_iter().map(|card| (card.id.clone(), card)).collect();
+    let mut proofs = SessionProofs::default();
+    for arc in session_failure_arcs(workspace, &session, &sources) {
+        if fingerprint.is_some_and(|key| {
+            !arc.diagnostics.iter().any(|diagnostic| diagnostic.layered_key().key == key)
+        }) {
+            continue;
+        }
+        let Some(resolution) = &arc.resolution else { continue; };
+        for target in &resolution.repair_ids {
+            proofs.claims.insert(Claim { failure: arc.failure_id.clone(), target: target.clone(), card: false });
+        }
+        if let Some(draft) = draft_incident_card(workspace, session_id, &sources, &arc)
+            && cards.get(&draft.id).is_some_and(|card| matches_draft(card, &draft))
+        {
+            let card = cards.get(&draft.id).ok_or_else(unavailable)?;
+            proofs.cards.insert(draft.id.clone(), card_signature(card)?);
+            proofs.claims.insert(Claim { failure: arc.failure_id, target: draft.id, card: true });
+        }
+        if proofs.claims.len() > MAX_CLAIMS {
+            return Ok(SessionProofs::default());
+        }
+    }
+    Ok(proofs)
+}
+
+#[cfg(test)]
+#[path = "incident_card_proof_tests.rs"]
+pub(crate) mod tests;

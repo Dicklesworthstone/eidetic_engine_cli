@@ -75,6 +75,11 @@ pub(super) fn append_evidence(
         .filter(|candidate| MemoryId::from_str(&candidate.memory_id).is_ok())
         .map(|candidate| candidate.memory_id.clone())
         .collect();
+    // Stage new sources until all derived-card claims have been checked. A
+    // source-query failure cannot leave an unchecked card in the caller's set.
+    let mut evidence_candidates = Vec::new();
+    let mut evidence_sources = std::collections::BTreeMap::new();
+    let mut card_checks = crate::core::incident_card::proof::CardChecks::default();
     connection
         .visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |span| {
             let Ok(id) = EvidenceId::from_str(&span.id) else {
@@ -143,11 +148,18 @@ pub(super) fn append_evidence(
                 kind: "evidence".to_owned(),
                 team_provenance: None,
             };
-            native_sources.insert(candidate.memory_id.clone(), source);
-            candidates.push(candidate);
+            card_checks.observe(&span)?;
+            evidence_sources.insert(candidate.memory_id.clone(), source);
+            evidence_candidates.push(candidate);
             Ok(())
         })
         .map_err(|_| super::corpus_storage_error())?;
+    let withheld = card_checks.withheld(connection, workspace_id)
+        .map_err(|_| super::corpus_storage_error())?;
+    evidence_candidates.retain(|candidate| !withheld.contains(&candidate.memory_id));
+    evidence_sources.retain(|id, _| !withheld.contains(id));
+    candidates.extend(evidence_candidates);
+    native_sources.extend(evidence_sources);
     Ok(())
 }
 
@@ -502,3 +514,7 @@ mod provenance_tests {
 #[cfg(test)]
 #[path = "ask_joined_evidence_read_tests.rs"]
 mod joined_evidence_read_tests;
+
+#[cfg(test)]
+#[path = "ask_incident_card_tests.rs"]
+mod incident_card_tests;
