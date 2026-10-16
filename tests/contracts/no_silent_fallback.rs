@@ -3460,13 +3460,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "An optional clause in a provenance sentence. matched_through absent means the phrase \" through its source turn N\" is omitted from the why-string; no error exists on this path and nothing is fabricated in its place. The surrounding sentence is assembled from values already validated by the caller.",
     ),
     allowed_in(
-        "NSF-CORE-PACK-INCIDENT-CARD-PREFERENCE",
-        "src/core/context.rs",
-        "prefer_incident_cards",
-        "incident_card_spans_for_sessions(&sessions)",
-        "WEAKEST JUSTIFICATION IN THIS BATCH, and flagged as such rather than dressed up. prefer_incident_cards is TOTAL by signature -- it returns a plain Vec and takes no degraded channel -- so it cannot report a lookup failure even in principle. The default is at least consistent with that contract: no cards available to prefer, the original candidates survive untouched, so the pack is less curated rather than wrong and nothing is fabricated or wrongly admitted. But the signature's totality is arguably the thing to FIX rather than to justify, especially since the caller does hold a degraded channel. Filed as bd-p42mq.",
-    ),
-    allowed_in(
         "NSF-POLICY-DOWNLOAD-SHELL-PROGRAM",
         "src/policy/mod.rs",
         "download_executed_by_shell",

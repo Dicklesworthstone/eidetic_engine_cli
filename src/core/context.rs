@@ -14738,6 +14738,7 @@ fn collect_direct_evidence_pack_candidates(
         filters,
         &request.query,
         candidates,
+        degraded,
     );
     collapse_duplicate_evidence(&mut candidates, degraded);
     if rejected_live_admission > 0 {
@@ -15042,6 +15043,7 @@ fn prefer_incident_cards(
     filters: &crate::models::QueryFilters,
     query: &str,
     candidates: Vec<DirectEvidencePackCandidate>,
+    degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<DirectEvidencePackCandidate> {
     let sessions = candidates
         .iter()
@@ -15050,22 +15052,122 @@ fn prefer_incident_cards(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+
     let mut cards = if sessions.is_empty() {
         Vec::new()
     } else {
-        connection
-            .incident_card_spans_for_sessions(&sessions)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|row| {
-                workspace_ids.iter().any(|id| id == &row.span.workspace_id)
-                    && row.is_direct_pack_admitted(&row.span.workspace_id)
-                    && direct_evidence_matches_filters(&row.span, filters)
-            })
-            .map(|row| row.span)
-            .collect::<Vec<_>>()
+        match connection.incident_card_spans_for_sessions(&sessions) {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| {
+                    workspace_ids.iter().any(|id| id == &row.span.workspace_id)
+                        && row.is_direct_pack_admitted(&row.span.workspace_id)
+                        && direct_evidence_matches_filters(&row.span, filters)
+                })
+                .map(|row| row.span)
+                .collect::<Vec<_>>(),
+            Err(_) => {
+                push_degradation(
+                    degraded,
+                    "context_evidence_hit_unhydrated",
+                    ContextResponseSeverity::Low,
+                    "Incident-card preference could not read its live source rows; original transcript candidates were retained.".to_owned(),
+                    Some("ee doctor --json".to_owned()),
+                );
+                Vec::new()
+            }
+        }
     };
-    // Narrowest covering card first, so nested ranges resolve to the tightest.
+
+    let direct_ids = candidates
+        .iter()
+        .filter(|candidate| candidate.incident_card)
+        .map(|candidate| candidate.item.evidence_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let direct_refs = direct_ids.iter().copied().collect::<Vec<_>>();
+    let mut refused = BTreeSet::new();
+    let direct_spans = if direct_refs.is_empty() {
+        Vec::new()
+    } else {
+        match connection.get_evidence_spans_with_sessions(&direct_refs) {
+            Ok(rows) => {
+                let found = rows
+                    .iter()
+                    .map(|row| row.span.id.as_str())
+                    .collect::<BTreeSet<_>>();
+                refused.extend(
+                    direct_ids
+                        .iter()
+                        .filter(|id| !found.contains(*id))
+                        .map(|id| (*id).to_owned()),
+                );
+                rows.into_iter().map(|row| row.span).collect::<Vec<_>>()
+            }
+            Err(_) => {
+                refused.extend(direct_ids.iter().map(|id| (*id).to_owned()));
+                push_degradation(
+                    degraded,
+                    "context_evidence_hit_unhydrated",
+                    ContextResponseSeverity::Low,
+                    "Direct incident-card hits could not be reloaded for current-source verification and were withheld.".to_owned(),
+                    Some("ee doctor --json".to_owned()),
+                );
+                Vec::new()
+            }
+        }
+    };
+
+    let mut proof_spans = cards.clone();
+    proof_spans.extend(direct_spans);
+    proof_spans.sort_by(|left, right| left.id.cmp(&right.id));
+    proof_spans.dedup_by(|left, right| left.id == right.id);
+    let mut checks =
+        BTreeMap::<String, crate::core::incident_card::proof::CardChecks>::new();
+    let mut ids_by_workspace = BTreeMap::<String, BTreeSet<String>>::new();
+    for span in &proof_spans {
+        ids_by_workspace
+            .entry(span.workspace_id.clone())
+            .or_default()
+            .insert(span.id.clone());
+        let check = checks.entry(span.workspace_id.clone()).or_default();
+        if check.observe(span).is_err() {
+            refused.insert(span.id.clone());
+        }
+    }
+    for (workspace, check) in checks {
+        match check.withheld(connection, &workspace) {
+            Ok(withheld) => refused.extend(withheld),
+            Err(_) => {
+                refused.extend(
+                    ids_by_workspace
+                        .get(&workspace)
+                        .into_iter()
+                        .flat_map(|ids| ids.iter().cloned()),
+                );
+                push_degradation(
+                    degraded,
+                    "context_evidence_hit_unhydrated",
+                    ContextResponseSeverity::Low,
+                    "Incident-card current-source verification was unavailable; derived cards from that source were withheld while ordinary transcript evidence remained eligible.".to_owned(),
+                    Some("ee doctor --json".to_owned()),
+                );
+            }
+        }
+    }
+    if !refused.is_empty() {
+        push_degradation(
+            degraded,
+            "context_evidence_hit_unhydrated",
+            ContextResponseSeverity::Low,
+            format!(
+                "Withheld {} derived incident card candidate(s) because current failure/repair/retry proof did not validate.",
+                refused.len()
+            ),
+            None,
+        );
+    }
+    cards.retain(|card| !refused.contains(&card.id));
+
     cards.sort_by(|left, right| {
         (left.end_line - left.start_line)
             .cmp(&(right.end_line - right.start_line))
@@ -15074,13 +15176,16 @@ fn prefer_incident_cards(
     let mut seen = BTreeSet::new();
     let mut preferred = Vec::with_capacity(candidates.len());
     for candidate in &candidates {
-        if candidate.incident_card {
+        if candidate.incident_card && !refused.contains(&candidate.item.evidence_id) {
             seen.insert(candidate.item.evidence_id.clone());
         }
     }
     let mut emitted = BTreeSet::new();
     for candidate in candidates {
         if candidate.incident_card {
+            if refused.contains(&candidate.item.evidence_id) {
+                continue;
+            }
             if emitted.insert(candidate.item.evidence_id.clone()) {
                 preferred.push(candidate);
             }
@@ -15096,7 +15201,6 @@ fn prefer_incident_cards(
             continue;
         };
         if seen.contains(&card.id) {
-            // The card itself matched; its source turn adds nothing.
             continue;
         }
         if !emitted.insert(card.id.clone()) {
