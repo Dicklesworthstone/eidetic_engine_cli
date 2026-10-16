@@ -41,8 +41,10 @@ use crate::core::support_bundle::{
     render_shadow_policy_summary_for_handoff, shadow_policy_summary_evidence_id,
 };
 use crate::core::swarm_brief::{
-    DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, SwarmBriefCollectOptions,
-    SystemSwarmBriefCommandRunner, all_swarm_brief_sources, collect_swarm_brief,
+    AgentMailSnapshotFileAdapter, DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+    SwarmBriefCollectOptions, SwarmBriefSourceKind, SwarmBriefSourceStatus,
+    SystemSwarmBriefCommandRunner, agent_mail_snapshot_project_key_for_workspace,
+    all_swarm_brief_sources, collect_swarm_brief_with_agent_mail_binding,
     collect_swarm_incident_summary, collect_swarm_replay_summary,
     render_swarm_brief_summary_for_handoff, render_swarm_incident_summary_for_handoff,
     render_swarm_replay_summary_for_handoff, summarize_swarm_brief_report,
@@ -107,13 +109,19 @@ const HANDOFF_MACHINE_SALT_FILE: &str = "handoff_machine_salt";
 fn collect_handoff_coordination_summaries(
     workspace: &Path,
     command_timeout_ms: u64,
+    agent_mail: &HandoffAgentMailOptions,
     runner: &impl super::swarm_brief::SwarmBriefCommandRunner,
-) -> (serde_json::Value, serde_json::Value) {
+) -> (serde_json::Value, serde_json::Value, CapsuleSection) {
     let mut options = SwarmBriefCollectOptions::for_workspace(workspace);
+    options.agent_mail_snapshot_path = Some(agent_mail.snapshot_path(workspace));
     options.include_rch = true;
     options.enabled_sources = all_swarm_brief_sources();
     options.command_timeout_ms = command_timeout_ms.max(1);
-    let report = collect_swarm_brief(&options, runner);
+    let report = collect_swarm_brief_with_agent_mail_binding(
+        &options,
+        runner,
+        agent_mail.project_key.as_deref(),
+    );
     let mut summary = summarize_swarm_brief_report(&report);
     redact_support_bundle_swarm_brief_summary(&mut summary);
     // All capsule sections describe one observation. Recollecting the same
@@ -131,7 +139,80 @@ fn collect_handoff_coordination_summaries(
     (
         summary,
         environment_attestation_summary_from_report(&attestation),
+        agent_mail_reservation_section(workspace, agent_mail, &report, false),
     )
+}
+
+/// Snapshot input and an independently supplied expected Agent Mail identity.
+#[derive(Clone, Debug, Default)]
+pub struct HandoffAgentMailOptions {
+    /// Explicit snapshot path; otherwise use the workspace's default snapshot.
+    pub snapshot: Option<PathBuf>,
+    /// Redacted `sha256:` identity emitted by the snapshot producer. This is
+    /// an explicit assertion of the workspace-to-mail-project mapping.
+    pub project_key: Option<String>,
+}
+
+impl HandoffAgentMailOptions {
+    fn snapshot_path(&self, workspace: &Path) -> PathBuf {
+        self.snapshot
+            .clone()
+            .unwrap_or_else(|| workspace.join(".ee/agent-mail-snapshot.json"))
+    }
+}
+
+fn agent_mail_reservation_section(
+    workspace: &Path,
+    input: &HandoffAgentMailOptions,
+    report: &super::swarm_brief::SwarmBriefReport,
+    resuming: bool,
+) -> CapsuleSection {
+    let source = report
+        .sources
+        .iter()
+        .find(|source| source.source == SwarmBriefSourceKind::AgentMail);
+    let verified = source.is_some_and(|source| {
+        source.status == SwarmBriefSourceStatus::Ready && source.freshness.state == "current"
+    });
+    let project_key = match input.project_key.as_deref() {
+        Some(key) if super::swarm_brief::agent_mail_snapshot_project_key_is_valid(key) => {
+            Some(key.to_owned())
+        }
+        Some(_) => None,
+        None => agent_mail_snapshot_project_key_for_workspace(workspace).ok(),
+    };
+    let evidence_id = swarm_brief_summary_evidence_id(&summarize_swarm_brief_report(report));
+    // Counts are observations, not proof that unobserved files are unreserved.
+    // Unknown/stale/degraded input must never turn into a verified empty set.
+    let content = serde_json::json!({
+        "status": if verified { "verified_at_observation" } else { "unverified" },
+        "authoritativeAtObservation": verified,
+        "currentReservationCount": if verified { Some(report.file_reservations.len()) } else { None },
+        "observedReservationCount": report.file_reservations.len(),
+        "sourceStatus": source.map(|source| source.status.as_str()).unwrap_or("unavailable"),
+        "freshness": source.map(|source| &source.freshness),
+        "expectedProjectKey": project_key,
+        "binding": if input.project_key.is_some() { "explicit_project_key" } else { "canonical_workspace" },
+        "snapshotInput": if input.snapshot.is_some() { "explicit" } else { "workspace_default" },
+        "historical": !resuming,
+        "reservationDetailsTruncated": report.file_reservations.len() > 256,
+        "reservations": report.file_reservations.iter().take(256).map(|reservation| serde_json::json!({
+            "pathHash": sha256_hex(reservation.path_pattern.as_bytes()),
+            "holderHash": sha256_hex(reservation.holder.as_bytes()),
+            "exclusive": reservation.exclusive,
+            "expiresAt": reservation.expires_at.as_deref().and_then(parse_rfc3339_timestamp).map(|time| time.to_rfc3339()),
+        })).collect::<Vec<_>>(),
+        "degradedCodes": source.map(|source| source.degraded.iter().map(|entry| &entry.code).collect::<Vec<_>>()).unwrap_or_default(),
+        "guidance": "Snapshot evidence only; regenerate and validate current Agent Mail reservations before editing or claiming work. Unverified evidence does not establish an empty reservation set.",
+    });
+    CapsuleSection::new("agent_mail_reservations", "Agent Mail Reservation Evidence")
+        .with_content(crate::core::serialize_pretty_or_error(&content))
+        .with_confidence(if verified {
+            EvidenceConfidence::Verified
+        } else {
+            EvidenceConfidence::Unknown
+        })
+        .with_evidence(vec![evidence_id])
 }
 
 /// Hard upper bound on the byte length of a handoff capsule file or key
@@ -489,6 +570,8 @@ pub struct PreviewOptions {
     pub task_frame_id: Option<String>,
     /// Deadline for each optional source command; bounded pipe cleanup follows.
     pub command_timeout_ms: u64,
+    /// Agent Mail snapshot selection and independently asserted project binding.
+    pub agent_mail: HandoffAgentMailOptions,
 }
 
 impl Default for PreviewOptions {
@@ -500,6 +583,7 @@ impl Default for PreviewOptions {
             include_estimates: true,
             task_frame_id: None,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         }
     }
 }
@@ -664,6 +748,8 @@ pub struct CreateOptions {
     pub redaction_level: RedactionLevel,
     /// Deadline for each optional source command; bounded pipe cleanup follows.
     pub command_timeout_ms: u64,
+    /// Agent Mail snapshot selection and independently asserted project binding.
+    pub agent_mail: HandoffAgentMailOptions,
 }
 
 impl Default for CreateOptions {
@@ -679,6 +765,7 @@ impl Default for CreateOptions {
             machine_salt_path: None,
             redaction_level: RedactionLevel::Standard,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         }
     }
 }
@@ -977,6 +1064,8 @@ pub struct ResumeOptions {
     /// Test/embedding override for the machine salt path. CLI callers
     /// leave this unset and use the platform default.
     pub machine_salt_path: Option<PathBuf>,
+    /// Fresh reservation evidence to check separately from capsule history.
+    pub agent_mail: HandoffAgentMailOptions,
 }
 
 impl Default for ResumeOptions {
@@ -993,6 +1082,7 @@ impl Default for ResumeOptions {
             require_fresh: false,
             insecure_skip_hmac: false,
             machine_salt_path: None,
+            agent_mail: HandoffAgentMailOptions::default(),
         }
     }
 }
@@ -1456,6 +1546,7 @@ fn strip_swarm_diagnostic_section_content_by_id(value: &mut serde_json::Value) {
                 section_id,
                 Some(
                     "swarm_brief_summary"
+                        | "agent_mail_reservations"
                         | "swarm_incident_summary"
                         | "swarm_replay_summary"
                         | "pack_replay_summary"
@@ -3711,12 +3802,29 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         token_estimate: actions_section.token_estimate,
     });
 
-    let (swarm_brief_summary, environment_attestation_summary) =
+    let (swarm_brief_summary, environment_attestation_summary, reservations) =
         collect_handoff_coordination_summaries(
             &options.workspace,
             options.command_timeout_ms,
+            &options.agent_mail,
             &SystemSwarmBriefCommandRunner,
         );
+    if reservations.confidence == EvidenceConfidence::Unknown {
+        report.degradations.push(
+            DegradationInfo::new("agent_mail_unavailable", "Agent Mail reservation evidence is unavailable or unverified; zero observed rows does not establish that no reservations exist.")
+                .with_next_action("Generate a fresh snapshot with scripts/agent_mail_snapshot.sh and pass --agent-mail-snapshot; use --agent-mail-project-key only for an explicitly bound shared project."),
+        );
+    }
+    report
+        .evidence_ids
+        .extend(reservations.evidence_ids.clone());
+    report.planned_sections.push(PlannedSection {
+        id: reservations.id,
+        title: reservations.title,
+        confidence: reservations.confidence.as_str().to_owned(),
+        evidence_count: reservations.evidence_ids.len(),
+        token_estimate: reservations.token_estimate,
+    });
     let swarm_brief_evidence = vec![swarm_brief_summary_evidence_id(&swarm_brief_summary)];
     let swarm_brief_section = CapsuleSection::new("swarm_brief_summary", "Swarm Brief Summary")
         .with_content(render_swarm_brief_summary_for_handoff(&swarm_brief_summary))
@@ -4053,12 +4161,17 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     }
     report.task_frame = task_frame_json.clone();
 
-    let (swarm_brief_summary, environment_attestation_summary) =
+    let (swarm_brief_summary, environment_attestation_summary, reservations) =
         collect_handoff_coordination_summaries(
             &options.workspace,
             options.command_timeout_ms,
+            &options.agent_mail,
             &SystemSwarmBriefCommandRunner,
         );
+    report.evidence_count = report
+        .evidence_count
+        .saturating_add(reservations.evidence_ids.len());
+    sections.push(reservations);
     let swarm_brief_evidence = vec![swarm_brief_summary_evidence_id(&swarm_brief_summary)];
     sections.push(
         CapsuleSection::new("swarm_brief_summary", "Swarm Brief Summary")
@@ -4621,6 +4734,31 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         add_swarm_brief_summary_to_resume(&mut report, &summary);
     }
 
+    // HMAC-authenticated capsule evidence is historical. Never use its project
+    // identity as implicit authority for a new workspace's live reservation read.
+    let mut live_options = SwarmBriefCollectOptions::for_workspace(&options.workspace);
+    live_options.agent_mail_snapshot_path =
+        Some(options.agent_mail.snapshot_path(&options.workspace));
+    let output = AgentMailSnapshotFileAdapter
+        .collect_with_project_key(&live_options, options.agent_mail.project_key.as_deref());
+    let mut live_report = super::swarm_brief::SwarmBriefReport::empty(&options.workspace);
+    super::swarm_brief::apply_source_output(&mut live_report, output);
+    let reservations =
+        agent_mail_reservation_section(&options.workspace, &options.agent_mail, &live_report, true);
+    if reservations.confidence == EvidenceConfidence::Unknown {
+        report.degradations.push(
+            DegradationInfo::new("agent_mail_unavailable", "Current Agent Mail reservations are unverified; the capsule's reservation evidence is historical, not an authoritative empty set.")
+                .with_next_action("Regenerate the Agent Mail snapshot and resume with --agent-mail-snapshot and the expected project binding."),
+        );
+    }
+    report.next_actions.push(
+        NextAction::new(
+            0,
+            "Check current Agent Mail reservation evidence before editing or claiming work.",
+        )
+        .with_reason(reservations.content),
+    );
+
     report.swarm_incident_summary = capsule
         .get("swarm_incident_summary")
         .cloned()
@@ -4693,6 +4831,12 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
                 .unwrap_or("");
 
             match section_id {
+                "agent_mail_reservations" => {
+                    report.next_actions.push(
+                        NextAction::new(2, "Review historical reservation evidence captured in the capsule.")
+                            .with_reason(format!("Historical only; not revalidated by capsule integrity: {section_content}")),
+                    );
+                }
                 "objective" if report.current_objective.is_none() => {
                     report.current_objective = Some(section_content.to_owned());
                 }
@@ -6073,8 +6217,12 @@ memories_revised = 3
         let observed = ObservedRunner {
             calls: RefCell::new(Vec::new()),
         };
-        let (brief, attestation) =
-            collect_handoff_coordination_summaries(dir.path(), 2_000, &observed);
+        let (brief, attestation, _) = collect_handoff_coordination_summaries(
+            dir.path(),
+            2_000,
+            &HandoffAgentMailOptions::default(),
+            &observed,
+        );
         assert_eq!(
             brief
                 .pointer("/counts/recentCommitCount")
@@ -6151,6 +6299,7 @@ memories_revised = 3
             machine_salt_path: Some(machine_salt_path.clone()),
             redaction_level: RedactionLevel::Standard,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
 
@@ -6209,6 +6358,7 @@ memories_revised = 3
             include_estimates: true,
             task_frame_id: None,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         ensure(preview.active_focus.is_some(), "preview includes focus")?;
@@ -6232,6 +6382,7 @@ memories_revised = 3
             machine_salt_path: None,
             redaction_level: RedactionLevel::Standard,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         ensure(create.active_focus.is_some(), "create includes focus")?;
@@ -6248,6 +6399,7 @@ memories_revised = 3
             require_fresh: false,
             insecure_skip_hmac: false,
             machine_salt_path: None,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         ensure(resume.active_focus.is_some(), "resume includes focus")?;
@@ -6374,6 +6526,7 @@ memories_revised = 3
             machine_salt_path: None,
             redaction_level: RedactionLevel::Standard,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         let created = create
@@ -6407,6 +6560,7 @@ memories_revised = 3
             require_fresh: false,
             insecure_skip_hmac: false,
             machine_salt_path: None,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         ensure_equal(
@@ -6462,6 +6616,7 @@ memories_revised = 3
             include_estimates: true,
             task_frame_id: Some(frame_id.clone()),
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         ensure(preview.task_frame.is_some(), "preview includes task frame")?;
@@ -6485,6 +6640,7 @@ memories_revised = 3
             machine_salt_path: None,
             redaction_level: RedactionLevel::Standard,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         ensure(create.task_frame.is_some(), "create includes task frame")?;
@@ -6507,6 +6663,7 @@ memories_revised = 3
             require_fresh: false,
             insecure_skip_hmac: false,
             machine_salt_path: None,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         ensure(resume.task_frame.is_some(), "resume includes task frame")?;
@@ -6564,6 +6721,7 @@ memories_revised = 3
             include_estimates: true,
             task_frame_id: Some(frame_id.clone()),
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         let preview_text = serde_json::to_string(&preview.to_json())
@@ -6585,6 +6743,7 @@ memories_revised = 3
             machine_salt_path: None,
             redaction_level: RedactionLevel::Standard,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         let create_text = serde_json::to_string(&create.to_json())
@@ -6616,6 +6775,7 @@ memories_revised = 3
             require_fresh: false,
             insecure_skip_hmac: false,
             machine_salt_path: None,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         let resume_text = serde_json::to_string(&resume.to_json())
@@ -6668,6 +6828,7 @@ memories_revised = 3
             machine_salt_path,
             redaction_level: RedactionLevel::Standard,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         Ok(output)
@@ -6694,6 +6855,7 @@ memories_revised = 3
                 machine_salt_path: None,
                 redaction_level: RedactionLevel::Standard,
                 command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+                agent_mail: HandoffAgentMailOptions::default(),
             }),
             "create handoff through symlinked parent",
         )
@@ -6755,6 +6917,7 @@ memories_revised = 3
             machine_salt_path: Some(machine_salt_dir),
             redaction_level: RedactionLevel::Standard,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         }) {
             Ok(report) => return Err(format!("unexpected handoff report: {report:?}")),
             Err(error) => error,
@@ -6787,6 +6950,7 @@ memories_revised = 3
                 require_fresh: false,
                 insecure_skip_hmac: false,
                 machine_salt_path: None,
+                agent_mail: HandoffAgentMailOptions::default(),
             }),
             "resume symlinked handoff capsule",
         )?;
@@ -6849,6 +7013,7 @@ memories_revised = 3
             require_fresh: false,
             insecure_skip_hmac: false,
             machine_salt_path: None,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         ensure(
@@ -6927,6 +7092,7 @@ memories_revised = 3
             require_fresh: false,
             insecure_skip_hmac: false,
             machine_salt_path: None,
+            agent_mail: HandoffAgentMailOptions::default(),
         }) {
             Ok(_) => panic!("unsigned capsule should fail closed"),
             Err(error) => error,
@@ -6973,6 +7139,7 @@ memories_revised = 3
                 require_fresh: false,
                 insecure_skip_hmac: false,
                 machine_salt_path: None,
+                agent_mail: HandoffAgentMailOptions::default(),
             }) {
                 Ok(_) => panic!("tampered capsule should fail closed"),
                 Err(error) => error,
@@ -7015,6 +7182,7 @@ memories_revised = 3
             require_fresh: false,
             insecure_skip_hmac: false,
             machine_salt_path: None,
+            agent_mail: HandoffAgentMailOptions::default(),
         }) {
             Ok(_) => panic!("tampered capsule should fail closed"),
             Err(error) => error,
@@ -7080,6 +7248,7 @@ memories_revised = 3
             require_fresh: false,
             insecure_skip_hmac: true,
             machine_salt_path: None,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         let degradation = report
@@ -7114,6 +7283,7 @@ memories_revised = 3
             require_fresh: false,
             insecure_skip_hmac: false,
             machine_salt_path: Some(resume_salt),
+            agent_mail: HandoffAgentMailOptions::default(),
         }) {
             Ok(_) => panic!("strict capsule should fail when machine salt is missing"),
             Err(error) => error,
@@ -7174,6 +7344,7 @@ memories_revised = 3
             require_fresh: false,
             insecure_skip_hmac: false,
             machine_salt_path: None,
+            agent_mail: HandoffAgentMailOptions::default(),
         })
         .map_err(|error| error.message())?;
         ensure_equal(
@@ -7532,6 +7703,7 @@ memories_revised = 3
             include_estimates: true,
             task_frame_id: None,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         };
 
         let result = preview_handoff(&options);
@@ -7597,6 +7769,7 @@ memories_revised = 3
             include_estimates: true,
             task_frame_id: None,
             command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            agent_mail: HandoffAgentMailOptions::default(),
         };
 
         let report = preview_handoff(&options).map_err(|error| error.message())?;

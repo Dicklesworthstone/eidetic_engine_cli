@@ -30,6 +30,56 @@ Use `--json` for stdout. Use `--output` to write a snapshot file; plain
 `--output` is quiet, and `--json --output` writes the same
 `ee.agent_mail.snapshot.v1` snapshot to stdout and to the file.
 
+### Handoff reservation evidence
+
+`ee handoff create`, `preview`, and `resume` read the workspace's
+`.ee/agent-mail-snapshot.json` by default. Override it with
+`--agent-mail-snapshot <path>`. This is a local snapshot read, not a live Agent
+Mail query: run the producer immediately before capturing or resuming work.
+
+```bash
+scripts/agent_mail_snapshot.sh --project "$PWD" --agent "$AGENT_NAME" \
+  --output "$PWD/.ee/agent-mail-snapshot.json"
+ee handoff preview --workspace "$PWD" --json
+ee handoff create --workspace "$PWD" --out handoff.json --json
+ee handoff resume handoff.json --workspace "$PWD" --json
+```
+
+For a shared mail project whose canonical identity differs from the checkout,
+explicitly pass `--agent-mail-project-key sha256:<64 lowercase hex digits>` on
+each handoff command. Obtain that expected identity from the intended project's
+producer output and independently verify the workspace-to-project mapping. The
+flag asserts that mapping; it does not discover or authenticate it. Do not copy
+an unknown snapshot's key merely to suppress a mismatch. Without this flag the
+snapshot must match the canonical checkout path. With it, a declared v1
+snapshot must match the supplied key exactly. Legacy evidence cannot satisfy an
+explicit project binding. Neither a capsule nor a default-path snapshot silently
+changes the expected project identity.
+
+The `agent_mail_reservations` capsule section carries bounded, redacted evidence:
+source status, observation freshness, expected project hash, binding method,
+observed count, hashed reservation paths and holders, exclusivity, and expiration.
+At most 256 reservation details are included; `reservationDetailsTruncated` marks
+larger sets while counts cover all observed rows. Expired leases are excluded.
+`currentReservationCount` is null when evidence is missing, malformed, stale,
+future-dated, legacy, mismatched, or otherwise degraded. Such evidence has
+`authoritativeAtObservation: false` and unknown section confidence. A verified
+empty snapshot is distinguishable from an unavailable reservation source.
+
+The ordinary swarm summary's `activeReservationCount` is an observed-row count;
+it never independently proves that no files are reserved. Inspect source status
+and the reservation evidence section before interpreting it. Preview reports the
+section's confidence and emits `agent_mail_unavailable` when it cannot verify
+reservations. Creation retains the source's degradation codes in its summary and
+records the unknown posture in the signed capsule.
+
+Resume verifies capsule integrity, preserves its historical reservation evidence,
+then reads the selected current snapshot again with the same validation, freshness,
+and expiry rules. Its next actions (also rendered into the prompt fragment) contain
+the current evidence separately from historical evidence. Resume does not acquire,
+renew, or restore leases in Agent Mail, and a signed capsule does not make old
+leases current. Refresh reservations before editing or claiming work.
+
 ```bash
 SNAPSHOT_PATH=/private/tmp/ee-agent-mail-snapshot.json
 COORDINATION_PATH=/private/tmp/ee-coordination-snapshot.json

@@ -6200,9 +6200,32 @@ pub struct HandoffCompletionAuditArgs {
     pub evidence_json: Option<PathBuf>,
 }
 
+/// Snapshot inputs shared by handoff capture and resume.
+#[derive(Clone, Debug, Default, Eq, clap::Args, PartialEq)]
+pub struct HandoffAgentMailArgs {
+    /// Validated redacted snapshot; defaults to <workspace>/.ee/agent-mail-snapshot.json.
+    #[arg(long, value_name = "PATH")]
+    pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// Expected sha256:<digest> identity for an explicitly bound shared Agent Mail project.
+    #[arg(long, value_name = "SHA256")]
+    pub agent_mail_project_key: Option<String>,
+}
+
+impl HandoffAgentMailArgs {
+    fn collect_options(&self) -> crate::core::handoff::HandoffAgentMailOptions {
+        crate::core::handoff::HandoffAgentMailOptions {
+            snapshot: self.agent_mail_snapshot.clone(),
+            project_key: self.agent_mail_project_key.clone(),
+        }
+    }
+}
+
 /// Arguments for `ee handoff preview`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct HandoffPreviewArgs {
+    #[command(flatten)]
+    pub agent_mail: HandoffAgentMailArgs,
     /// Filter evidence since this time or run ID.
     #[arg(long, value_name = "REF")]
     pub since: Option<String>,
@@ -6223,6 +6246,8 @@ pub struct HandoffPreviewArgs {
 /// Arguments for `ee handoff create`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct HandoffCreateArgs {
+    #[command(flatten)]
+    pub agent_mail: HandoffAgentMailArgs,
     /// Output path for the capsule.
     #[arg(long, short = 'o', value_name = "PATH")]
     pub out: PathBuf,
@@ -6271,6 +6296,8 @@ pub struct HandoffInspectArgs {
 /// Arguments for `ee handoff resume`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct HandoffResumeArgs {
+    #[command(flatten)]
+    pub agent_mail: HandoffAgentMailArgs,
     /// Path to the capsule file, or "latest".
     #[arg(value_name = "PATH")]
     pub path: String,
@@ -14359,6 +14386,7 @@ where
                     include_estimates: args.estimates,
                     task_frame_id: None,
                     command_timeout_ms: args.command_timeout_ms,
+                    agent_mail: args.agent_mail.collect_options(),
                 };
                 match preview_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -14404,6 +14432,7 @@ where
                     machine_salt_path: None,
                     redaction_level: redaction.level,
                     command_timeout_ms: args.command_timeout_ms,
+                    agent_mail: args.agent_mail.collect_options(),
                 };
                 match create_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -14480,6 +14509,7 @@ where
                     require_fresh: args.require_fresh,
                     insecure_skip_hmac: args.insecure_skip_hmac,
                     machine_salt_path: None,
+                    agent_mail: args.agent_mail.collect_options(),
                 };
                 match resume_handoff(&options) {
                     Ok(report) => match cli.renderer() {
