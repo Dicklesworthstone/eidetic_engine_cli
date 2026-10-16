@@ -71822,8 +71822,8 @@ mod tests {
     use crate::cass::CassImportError;
     use crate::config::MeshCommandMode;
     use crate::core::impact::{
-        IMPACT_SCHEMA_V1, ImpactFallbackStatus, ImpactMatchType, ImpactMemorySummary, ImpactReport,
-        ImpactResolvedSurface, ImpactResult,
+        IMPACT_SCHEMA_V1, ImpactFallbackStatus, ImpactGraphPhase, ImpactMatchType,
+        ImpactMemorySummary, ImpactReport, ImpactResolvedSurface, ImpactResult,
     };
     use crate::core::index::IndexRebuildError;
     use crate::core::lab::{InterventionType, SwapRevisionMode};
@@ -94875,11 +94875,20 @@ mod tests {
                 },
                 anchor: None,
                 fallback_hit: None,
+                graph_path: None,
             }],
             exact_anchor_count: 1,
             fallback_count: 0,
             fallback_status: ImpactFallbackStatus::SkippedLimitFilled,
             fallback_report: None,
+            graph_phase: ImpactGraphPhase {
+                status: "skipped_limit_filled",
+                reason: None,
+                result_count: 0,
+                source_rows: 0,
+                paths_examined: 0,
+                truncated: false,
+            },
             scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
             elapsed_ms: 1.0,
         };
