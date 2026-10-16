@@ -37072,6 +37072,88 @@ fn graph_algorithm_input(
             })?;
     }
 
+    // bd-3tofq: project typed-field edges beside the explicit memory_links.
+    // The derivation already existed and is unit-tested
+    // (projection_derives_decision_supersedes_typed_edge), but only
+    // `build_memory_graph` called it and none of THESE surfaces do, so
+    // `ee graph path` answered `no_path` for a decision's `supersedes` edge
+    // that the store had in fact recorded.
+    //
+    // Three semantics are matched to the graph module's own projection rather
+    // than invented here:
+    //   * an EXPLICIT link wins. `add_typed_projection_edge` skips a pair the
+    //     graph already holds, so this does too, and a derived edge never
+    //     overwrites a curated link's attributes.
+    //   * attributes come from `typed_projection_edge_attrs`, so a typed edge
+    //     is marked `source = "typed_fields"` wherever it is projected.
+    //   * min_weight / min_confidence apply exactly as they do to links. The
+    //     mesh-visibility check does NOT, because a typed edge is derived
+    //     locally from a memory's own fields and carries no mesh metadata.
+    //
+    // Tombstones differ, in the safe direction: the typed-edge row query
+    // filters `tombstoned_at IS NULL` unconditionally, so --include-tombstoned
+    // widens LINKS only and can never resurrect a tombstoned memory here.
+    let typed_edges = crate::graph::typed_memory_graph_edges(&conn, None).map_err(|error| {
+        DomainError::Graph {
+            message: format!("Failed to derive typed-field graph edges: {error}"),
+            repair: Some("Inspect typed memory fields with `ee doctor --json`.".to_string()),
+        }
+    })?;
+    for edge in &typed_edges {
+        if options
+            .min_weight
+            .is_some_and(|min_weight| edge.weight < f64::from(min_weight))
+            || options
+                .min_confidence
+                .is_some_and(|min_confidence| edge.confidence < f64::from(min_confidence))
+        {
+            continue;
+        }
+        let attrs = crate::graph::typed_projection_edge_attrs(edge);
+        if !directed.has_edge(&edge.src_memory_id, &edge.dst_memory_id) {
+            directed
+                .add_edge_with_attrs(
+                    edge.src_memory_id.clone(),
+                    edge.dst_memory_id.clone(),
+                    attrs.clone(),
+                )
+                .map_err(|error| DomainError::Graph {
+                    message: format!("Failed to build typed graph projection: {error}"),
+                    repair: Some(
+                        "Inspect typed memory fields with `ee doctor --json`.".to_string(),
+                    ),
+                })?;
+        }
+        if !edge.directed && !directed.has_edge(&edge.dst_memory_id, &edge.src_memory_id) {
+            directed
+                .add_edge_with_attrs(
+                    edge.dst_memory_id.clone(),
+                    edge.src_memory_id.clone(),
+                    attrs.clone(),
+                )
+                .map_err(|error| DomainError::Graph {
+                    message: format!("Failed to build reciprocal typed projection: {error}"),
+                    repair: Some(
+                        "Inspect typed memory fields with `ee doctor --json`.".to_string(),
+                    ),
+                })?;
+        }
+        if !undirected.has_edge(&edge.src_memory_id, &edge.dst_memory_id) {
+            undirected
+                .add_edge_with_attrs(
+                    edge.src_memory_id.clone(),
+                    edge.dst_memory_id.clone(),
+                    attrs,
+                )
+                .map_err(|error| DomainError::Graph {
+                    message: format!("Failed to build undirected typed projection: {error}"),
+                    repair: Some(
+                        "Inspect typed memory fields with `ee doctor --json`.".to_string(),
+                    ),
+                })?;
+        }
+    }
+
     fn graph_link_attrs(link: &crate::db::StoredMemoryLink) -> AttrMap {
         let mut attrs = AttrMap::new();
         attrs.insert(

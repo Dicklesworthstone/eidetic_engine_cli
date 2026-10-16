@@ -1268,17 +1268,23 @@ struct TypedMemoryGraphRow {
     fields: BTreeMap<String, String>,
 }
 
+/// An edge derived from a memory's typed fields rather than from a row in
+/// `memory_links`, e.g. a decision's `supersedes`.
+///
+/// `pub(crate)` so the CLI's algorithm surfaces can project these alongside
+/// explicit links (bd-3tofq); before that they were visible only to
+/// `build_memory_graph`, which those surfaces do not call.
 #[derive(Debug, Clone, PartialEq)]
-struct TypedMemoryGraphEdge {
+pub(crate) struct TypedMemoryGraphEdge {
     edge_id: String,
-    src_memory_id: String,
-    dst_memory_id: String,
+    pub(crate) src_memory_id: String,
+    pub(crate) dst_memory_id: String,
     relation: String,
     typed_field: String,
     typed_value_hash: String,
-    weight: f64,
-    confidence: f64,
-    directed: bool,
+    pub(crate) weight: f64,
+    pub(crate) confidence: f64,
+    pub(crate) directed: bool,
     evidence_count: u32,
     contribution_score: f64,
 }
@@ -2206,7 +2212,10 @@ fn graph_projection_edge_attrs(link: &StoredMemoryLink) -> AttrMap {
     attrs
 }
 
-fn typed_projection_edge_attrs(edge: &TypedMemoryGraphEdge) -> AttrMap {
+/// Canonical attribute shape for a typed-field edge. Shared with the CLI's
+/// algorithm surfaces (bd-3tofq) so a typed edge carries the same
+/// `source = "typed_fields"` marking wherever it is projected.
+pub(crate) fn typed_projection_edge_attrs(edge: &TypedMemoryGraphEdge) -> AttrMap {
     let mut attrs = AttrMap::new();
     attrs.insert("weight".to_string(), CgseValue::Float(edge.weight));
     attrs.insert("confidence".to_string(), CgseValue::Float(edge.confidence));
@@ -2269,7 +2278,13 @@ fn add_typed_projection_edge(
         })
 }
 
-fn typed_memory_graph_edges(
+/// Load the typed-field-derived edges for a workspace scope.
+///
+/// `pub(crate)` for the CLI's algorithm surfaces (bd-3tofq). Note that the
+/// underlying row query filters `tombstoned_at IS NULL` unconditionally, so
+/// these edges never carry a tombstoned memory even when a caller opted into
+/// tombstoned LINKS.
+pub(crate) fn typed_memory_graph_edges(
     conn: &DbConnection,
     workspace_filter: Option<&BTreeSet<String>>,
 ) -> GraphResult<Vec<TypedMemoryGraphEdge>> {
