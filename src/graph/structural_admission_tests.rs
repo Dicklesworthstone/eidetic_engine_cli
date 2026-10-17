@@ -254,20 +254,44 @@ fn denied_edges_cannot_invent_a_structural_triangle() {
         None,
     );
     assert_eq!(crate::graph::health::compute_k_truss(&full.graph).max_k, 3);
-    closing.metadata_json = Some(
-        "{\"workspaceScopeDecision\":\"deny\",\"cachedMaterialId\":\"hidden\"}".to_owned(),
-    );
+    closing.metadata_json =
+        Some("{\"workspaceScopeDecision\":\"deny\",\"cachedMaterialId\":\"hidden\"}".to_owned());
     let filtered = build_structural_graph_input(
         &memories,
         &[open[0].clone(), open[1].clone(), closing],
         None,
     );
-    assert_consistent(
-        &filtered,
-        &["a", "b", "c"],
-        &[("a", "b"), ("b", "c")],
+    assert_consistent(&filtered, &["a", "b", "c"], &[("a", "b"), ("b", "c")]);
+    // Assert on MEMBERSHIP, not on max_k.
+    //
+    // `compute_k_truss` searches k >= 3 and floors `max_k` at 3, the bottom of
+    // that range; it signals "no truss" by returning EMPTY `member_counts` and
+    // `top_memories_at_k`. Two tests in src/graph/health.rs pin that
+    // deliberately -- `k_truss_report_handles_empty_graph` and
+    // `k_truss_report_does_not_promote_path_without_triangles` both assert
+    // max_k == 3 for graphs containing no triangle at all.
+    //
+    // So `max_k < 3` could never hold, and this test was born red against an
+    // established contract rather than catching a defect. Changing the floor to
+    // satisfy it reds both of those tests instead, which is how the contract
+    // was confirmed.
+    //
+    // The claim this test exists to make is that a DENIED edge cannot invent a
+    // triangle, and emptiness is exactly that claim. `assert_consistent` above
+    // has already established the graph is the 2-edge path, so this is not
+    // vacuous: if the denied edge were admitted, a-b-c-a would close and
+    // member_counts would carry a k=3 entry.
+    let truss = crate::graph::health::compute_k_truss(&filtered.graph);
+    assert!(
+        truss.member_counts.is_empty(),
+        "a denied edge must not create any k-truss, got {:?}",
+        truss.member_counts
     );
-    assert!(crate::graph::health::compute_k_truss(&filtered.graph).max_k < 3);
+    assert!(
+        truss.top_memories_at_k.is_empty(),
+        "a denied edge must not promote any memory into a truss, got {:?}",
+        truss.top_memories_at_k
+    );
 }
 
 #[test]

@@ -107,6 +107,14 @@ pub fn compute_k_truss(graph: &Graph) -> KTrussReport {
         }
     }
 
+    // The 3 floor is DELIBERATE and pinned by two tests below:
+    // `k_truss_report_handles_empty_graph` and
+    // `k_truss_report_does_not_promote_path_without_triangles` both assert
+    // max_k == 3 with EMPTY member_counts and top_memories_at_k. The loop only
+    // evaluates k >= 3, so 3 is the floor of the range it searched, and
+    // emptiness -- not max_k -- is how this report says "no truss found".
+    // Read those two fields together; max_k alone cannot distinguish "a real
+    // 3-truss" from "nothing at or above k=3".
     let max_k = max_by_memory.values().copied().max().unwrap_or(3);
     let mut top_memories_at_k = max_by_memory
         .into_iter()
