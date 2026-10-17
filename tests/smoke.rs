@@ -8313,7 +8313,8 @@ fn remember_cotag_threshold_separates_applied_links_from_staged_suggestions() ->
         sub_auto.is_empty(),
         format!(
             "a 1-of-4 overlap scores 0.65 and must NOT be auto-linked; auto_links: {}",
-            serde_json::to_string(sub_auto).unwrap_or_default()
+            serde_json::to_string(sub_auto)
+                .unwrap_or_else(|error| format!("<unserializable: {error}>"))
         ),
     )?;
     ensure(
@@ -8326,7 +8327,8 @@ fn remember_cotag_threshold_separates_applied_links_from_staged_suggestions() ->
             "a sub-threshold neighbour must be STAGED as co_tag with evidence_count 1 and never \
              applied; staged {} suggestion(s): {}",
             sub_suggested.len(),
-            serde_json::to_string(sub_suggested).unwrap_or_default()
+            serde_json::to_string(sub_suggested)
+                .unwrap_or_else(|error| format!("<unserializable: {error}>"))
         ),
     )?;
 
@@ -8345,7 +8347,8 @@ fn remember_cotag_threshold_separates_applied_links_from_staged_suggestions() ->
         !supra_auto.is_empty(),
         format!(
             "a 3-of-4 overlap scores 0.85 and must BE auto-linked; suggested instead: {}",
-            serde_json::to_string(supra_suggested).unwrap_or_default()
+            serde_json::to_string(supra_suggested)
+                .unwrap_or_else(|error| format!("<unserializable: {error}>"))
         ),
     )?;
 
