@@ -5869,7 +5869,7 @@ mod tests {
         use std::io::Write as _;
         OpenOptions::new().append(true).open(&path)
             .map_err(|error| error.to_string())?
-            .write_all(b"{\\\"status\\\":\\\"interrupted")
+            .write_all(b"{\"status\":\"interrupted")
             .map_err(|error| error.to_string())?;
         let status = daemon_status_report(temp.path(), &[JobType::HealthCheck], 5)?;
         ensure(status.open_job_count, 1, "valid preceding row preserved")?;
