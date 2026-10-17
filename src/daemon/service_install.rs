@@ -154,7 +154,7 @@ pub fn render_unit_body_for_workspace(
 "#
         )),
         DaemonServiceKind::SystemdUser => Some(format!(
-            "[Unit]\nDescription=ee team/mesh steward daemon\nAfter=default.target\n\n[Service]\nType=simple\nExecStart={binary} daemon --foreground --job team_steward --job decay_sweep --job health_check\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
+            "[Unit]\nDescription=ee team/mesh steward daemon\nAfter=default.target\n\n[Service]\nType=simple\nExecStart={binary} daemon --foreground --once --workspace {systemd_workspace} --job team_steward --job decay_sweep --job health_check\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
         )),
         DaemonServiceKind::WindowsUserTask => Some(render_windows_task_xml(ee_binary, workspace)),
         DaemonServiceKind::Unsupported => None,
