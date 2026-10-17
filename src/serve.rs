@@ -2752,15 +2752,6 @@ pub fn record_daemon_foreground_start(
 ) -> Result<DaemonRunPlan, String> {
     trace_serve_localhost("input", 0, &[]);
     let table_path = daemon_job_table_path(workspace_path);
-    if options.dry_run {
-        trace_serve_localhost("response", 0, &[]);
-        return Ok(DaemonRunPlan {
-            run_id: "dry-run".to_owned(),
-            table_path,
-            rows: Vec::new(),
-        });
-    }
-
     // Reject invalid requests before any allocation, journal creation or mutation.
     // The steward enforces the same limits at execution time.
     if options.workspace.trim().is_empty() {
@@ -2774,6 +2765,15 @@ pub fn record_daemon_foreground_start(
     }
     if options.job_types.is_empty() {
         return Err("Daemon foreground mode requires at least one steward job type".to_owned());
+    }
+
+    if options.dry_run {
+        trace_serve_localhost("response", 0, &[]);
+        return Ok(DaemonRunPlan {
+            run_id: "dry-run".to_owned(),
+            table_path,
+            rows: Vec::new(),
+        });
     }
 
     let recorded_at = Utc::now().to_rfc3339();
