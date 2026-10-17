@@ -5834,6 +5834,50 @@ mod tests {
         )
     }
 
+    #[test]
+    fn invalid_large_tick_plan_never_creates_journal() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = DaemonForegroundOptions::new(temp.path().to_string_lossy().into_owned());
+        options.tick_limit = 1_000_000;
+        options.job_types = vec![JobType::HealthCheck];
+        ensure(record_daemon_foreground_start(temp.path(), &options).is_err(), true, "large ticks refused")?;
+        ensure(daemon_job_table_path(temp.path()).exists(), false, "no invalid plan persisted")?;
+        options.tick_limit = 1000;
+        options.interval_ms = crate::steward::MAX_DAEMON_FOREGROUND_INTERVAL_MS + 1;
+        ensure(record_daemon_foreground_start(temp.path(), &options).is_err(), true, "interval rejected")?;
+        ensure(daemon_job_table_path(temp.path()).exists(), false, "no invalid interval plan persisted")
+    }
+
+    #[test]
+    fn future_ticks_are_not_materialized_at_start() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = DaemonForegroundOptions::new(temp.path().to_string_lossy().into_owned());
+        options.tick_limit = crate::steward::MAX_DAEMON_FOREGROUND_TICK_LIMIT;
+        options.job_types = vec![JobType::HealthCheck];
+        let plan = record_daemon_foreground_start(temp.path(), &options)?;
+        ensure(plan.rows.len(), 1, "only current tick planned")?;
+        ensure(load_daemon_job_rows(temp.path())?.len(), 1, "bounded journal rows")
+    }
+
+    #[test]
+    fn torn_final_journal_row_does_not_hide_valid_status_or_recovery() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = DaemonForegroundOptions::new(temp.path().to_string_lossy().into_owned());
+        options.job_types = vec![JobType::HealthCheck];
+        let _ = record_daemon_foreground_start(temp.path(), &options)?;
+        let path = daemon_job_table_path(temp.path());
+        use std::io::Write as _;
+        OpenOptions::new().append(true).open(&path)
+            .map_err(|error| error.to_string())?
+            .write_all(b"{\\\"status\\\":\\\"interrupted")
+            .map_err(|error| error.to_string())?;
+        let status = daemon_status_report(temp.path(), &[JobType::HealthCheck], 5)?;
+        ensure(status.open_job_count, 1, "valid preceding row preserved")?;
+        let recovered = recover_orphaned_daemon_jobs(temp.path(), "restart")?;
+        ensure(recovered.open_jobs_cancelled, 1, "orphan recovered")?;
+        ensure(daemon_status_report(temp.path(), &[JobType::HealthCheck], 5)?.open_job_count, 0, "status after repair")
+    }
+
     #[cfg(unix)]
     #[test]
     fn daemon_job_table_rejects_symlinked_ee_directory_before_write() -> TestResult {
