@@ -244,3 +244,51 @@ Run `./scripts/verify.sh` before pushing. It is the broadest check available
 here, but nothing enforces it and it is **not** congruent with the hosted CI
 gates — several of those are disabled, so a green run is necessary, not
 sufficient. It does gate rustfmt (Rustfmt Conformance, added in `453291c25`).
+
+### Two ways a test run reports success having verified NOTHING
+
+Both exit 0, both print `ok.`, and both have cost this project hours. Neither is
+detectable from the exit code, so **read the denominator, never the status.**
+
+**1. A multi-target run stops at the first failing target (bd-dwe8f).** Cargo
+runs targets in order and stops at the first failure. The lib target carries
+chronic failures, so in
+
+```bash
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+    cargo test --locked --lib --test contracts     # contracts NEVER RUNS
+```
+
+the second target is silently never reached, while the command reads as a
+*broader* check than a single-target run. Measured across three jobs at three
+bases: zero `Running` lines for a contracts target hash in every log. That
+voided five certifications in one night. Dispatch the gate target on its own, or
+pass `--no-fail-fast` when you genuinely want both.
+
+**2. `--exact` matches the FULL module path, and a zero-match run says `ok.`**
+A test pulled into a suite by `#[path]` lives under the *including* module, so
+`tests/contracts/resume_schema.rs` inside `tests/contracts.rs` gives ids like
+`resume_schema::<name>`. A bare name under `--exact` matches nothing and prints
+
+```text
+test result: ok. 0 passed; 0 failed; 0 ignored; 1507 filtered out
+```
+
+with exit 0. Measured 2026-10-17: that cost a 56-minute release-profile dispatch
+and produced no verdict. Prefer a long unique substring and omit `--exact`, so a
+module rename degrades to a correct match instead of to silence.
+
+**The defence is an assertion inside the job, not a habit.** Both traps are
+invisible for as long as the dispatch takes, so have the job grade itself and
+exit nonzero:
+
+```bash
+RESULT=$(grep -a '^test result:' out.txt | tail -1)
+P=$(echo "$RESULT" | sed -n 's/.* \([0-9]*\) passed.*/\1/p')
+F=$(echo "$RESULT" | sed -n 's/.* \([0-9]*\) failed.*/\1/p')
+grep -qa 'Running .*<target>' out.txt || { echo 'VERDICT=NONE no Running line'; exit 91; }
+test $(( ${P:-0} + ${F:-0} )) -eq <N filters> || { echo 'VERDICT=NONE'; exit 90; }
+```
+
+`Running` proves the target executed; `passed + failed` proves which tests did.
+`filtered out` is not part of that sum.
