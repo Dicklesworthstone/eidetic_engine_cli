@@ -10,7 +10,10 @@ import argparse
 import hashlib
 import http.client
 import json
+import math
 import os
+import stat
+import tempfile
 import re
 import shlex
 import shutil
@@ -344,6 +347,68 @@ def validate_output_path(label: str, value: str | None) -> int:
         file=sys.stderr,
     )
     return 2
+
+
+def atomic_write_output(path: Path, text: str) -> None:
+    """Publish complete private JSON without following an output symlink."""
+    if first_symlink_component(path) is not None:
+        raise ValueError("snapshot output traverses a symlink")
+    if os.name == "nt":
+        if path.exists() and not path.is_file():
+            raise ValueError("snapshot output is not a regular file")
+        descriptor, temporary = tempfile.mkstemp(prefix=".agent-mail-", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if first_symlink_component(path) is not None:
+                raise ValueError("snapshot output traverses a symlink")
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return
+
+    # Pin every ancestor by directory descriptor. A path swapped during a slow
+    # Mail query must not redirect publication through a newly planted symlink.
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent = os.open(absolute.anchor, flags)
+    temporary = None
+    try:
+        for component in absolute.parent.parts[1:]:
+            child = os.open(component, flags, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        try:
+            current = os.stat(absolute.name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            current = None
+        if current is not None and not stat.S_ISREG(current.st_mode):
+            raise ValueError("snapshot output is not a regular file")
+        candidate = ".agent-mail-" + os.urandom(16).hex() + ".tmp"
+        descriptor = os.open(
+            candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600, dir_fd=parent,
+        )
+        temporary = candidate
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, absolute.name, src_dir_fd=parent, dst_dir_fd=parent)
+        temporary = None
+        os.fsync(parent)
+    finally:
+        try:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(parent)
 
 
 def run_json_command(argv: list[str], timeout_sec: float) -> dict[str, Any]:
@@ -1177,7 +1242,11 @@ def build_snapshot_output(
     agent: str,
     commands: list[dict[str, Any]],
     thread_limit: int,
+    *,
+    generated_at: str | None = None,
 ) -> dict[str, Any]:
+    if generated_at is not None and not rfc3339_timestamp_valid(generated_at):
+        raise ValueError("snapshot observation time must be RFC 3339")
     prepared = prepare_snapshot_commands(commands)
     commands[:] = prepared
     agents_cmd, reservations_cmd, inbox_cmd, status_cmd, health_cmd, durability_cmd = commands[:6]
@@ -1199,7 +1268,7 @@ def build_snapshot_output(
     fallback_active = bool(degraded) or health_requires_fallback(health)
     output = {
         "schema": AGENT_MAIL_SNAPSHOT_SCHEMA,
-        "generated_at": utc_now(),
+        "generated_at": generated_at if generated_at is not None else utc_now(),
         "project_key": workspace_project_key(project),
         "agent_name": redact_text(agent),
         "redaction_status": REDACTION_STATUS,
@@ -1250,6 +1319,136 @@ def assert_absent(rendered: str, forbidden: list[str]) -> None:
     for needle in forbidden:
         if needle in rendered:
             raise AssertionError(f"snapshot leaked forbidden text: {needle}")
+
+
+def run_publication_self_test(healthy_commands: Any) -> None:
+    import contextlib
+    import io
+    import threading
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory(prefix="ee-mail-publication-") as directory:
+        root = Path(directory).resolve()
+        destination = root / "snapshot.json"
+        atomic_write_output(destination, '{"generation":0}\n')
+        if os.name == "posix":
+            assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+        failures = []
+        stop = threading.Event()
+
+        def read_snapshots() -> None:
+            while not stop.is_set():
+                try:
+                    value = json.loads(destination.read_text(encoding="utf-8"))
+                    assert type(value["generation"]) is int
+                except Exception as error:
+                    failures.append(type(error).__name__)
+                    return
+
+        reader = threading.Thread(target=read_snapshots)
+        if os.name == "posix":
+            reader.start()
+        try:
+            for generation in range(1, 25):
+                atomic_write_output(destination, json.dumps({"generation": generation}) + "\n")
+        finally:
+            stop.set()
+            if reader.ident is not None:
+                reader.join(timeout=5)
+                assert not reader.is_alive()
+        assert not failures, failures
+        original = destination.read_bytes()
+        for operation in ("replace", "fsync"):
+            with patch.object(os, operation, side_effect=OSError("injected publication failure")):
+                try:
+                    atomic_write_output(destination, '{"generation":99}\n')
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("failed publication was accepted")
+            assert destination.read_bytes() == original
+            assert not list(root.glob(".agent-mail-*.tmp"))
+        if os.name == "posix":
+            collision = root / (".agent-mail-" + "00" * 16 + ".tmp")
+            collision.write_text("belongs to another writer", encoding="utf-8")
+            with patch.object(os, "urandom", return_value=bytes(16)):
+                try:
+                    atomic_write_output(destination, "must not replace another writer")
+                except FileExistsError:
+                    pass
+                else:
+                    raise AssertionError("temporary-name collision was accepted")
+            assert collision.read_text(encoding="utf-8") == "belongs to another writer"
+            link = root / "snapshot-link.json"
+            link.symlink_to(destination)
+            parent_link = root / "parent-link"
+            parent_link.symlink_to(root, target_is_directory=True)
+            for target in (link, parent_link / "snapshot.json"):
+                try:
+                    atomic_write_output(target, "must not overwrite the symlink target")
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("symlink publication was accepted")
+            assert destination.read_bytes() == original
+
+        observed = "2026-10-17T00:00:00Z"
+        completed = "2026-10-17T00:10:00Z"
+        value = build_snapshot_output(root, "AzureElm", healthy_commands(), 10, generated_at=observed)
+        assert value["generated_at"] == observed
+        try:
+            build_snapshot_output(root, "AzureElm", healthy_commands(), 10, generated_at="invalid")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid observation time was accepted")
+
+        def arguments(**overrides: Any) -> argparse.Namespace:
+            values = dict(
+                self_test=False, project=str(root), agent="AzureElm", am_bin="am",
+                inbox_limit=20, thread_limit=10, timeout_sec=1.0,
+                output=str(destination), coordination_output=str(root / "coordination.json"),
+                json=True, stdout=False,
+            )
+            values.update(overrides)
+            return argparse.Namespace(**values)
+
+        for companion, expected_status in ((root / "coordination.json", 0), (root / "missing" / "coordination.json", 3)):
+            commands = healthy_commands()
+            calls = []
+
+            def command(argv: list[str], timeout: float) -> dict[str, Any]:
+                calls.append("probe")
+                result = dict(commands[len(calls) - 2])
+                result["argv"] = argv
+                return result
+
+            def clock() -> str:
+                calls.append("clock")
+                return observed if len(calls) == 1 else completed
+
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch.dict(globals(), {
+                "parse_args": lambda: arguments(coordination_output=str(companion)),
+                "utc_now": clock,
+                "run_json_command": command,
+                "run_health_probe": lambda path, timeout: dict(commands[4 if path == HEALTH_PATH else 5]),
+            }), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = main()
+            assert calls[0] == "clock", calls
+            assert status == expected_status, (status, stderr.getvalue())
+            if expected_status == 0:
+                published = destination.read_text(encoding="utf-8")
+                assert stdout.getvalue() == published
+                assert json.loads(published)["generated_at"] == observed
+                assert json.loads(companion.read_text(encoding="utf-8"))["captured_at"] == observed
+            else:
+                assert stdout.getvalue() == ""
+                assert "publication failed" in stderr.getvalue()
+
+        for timeout in (float("nan"), float("inf"), -float("inf"), 0.0):
+            with patch.dict(globals(), {"parse_args": lambda: arguments(timeout_sec=timeout)}), contextlib.redirect_stderr(io.StringIO()):
+                assert main() == 2
 
 
 def run_self_test() -> int:
@@ -1679,6 +1878,8 @@ def run_self_test() -> int:
         "both the threaded and the unthreaded message must be represented"
     )
 
+    run_publication_self_test(healthy_commands)
+
     rendered = json.dumps({"snapshot": output, "coordination": coordination}, sort_keys=True)
     recovery_rendered = json.dumps(recovery_output, sort_keys=True)
     assert_absent(
@@ -1761,8 +1962,8 @@ def main() -> int:
     if args.inbox_limit < 0 or args.thread_limit < 0:
         print("agent_mail_snapshot: limits must be non-negative", file=sys.stderr)
         return 2
-    if args.timeout_sec <= 0:
-        print("agent_mail_snapshot: --timeout-sec must be positive", file=sys.stderr)
+    if not math.isfinite(args.timeout_sec) or args.timeout_sec <= 0:
+        print("agent_mail_snapshot: --timeout-sec must be finite and positive", file=sys.stderr)
         return 2
     if args.output and args.coordination_output:
         if Path(args.output).resolve() == Path(args.coordination_output).resolve():
@@ -1778,6 +1979,9 @@ def main() -> int:
     if coordination_path_error:
         return coordination_path_error
 
+    # Conservatively age every observation from before collection begins, not
+    # after later probes finish. Slow probes must not renew reservation evidence.
+    generated_at = utc_now()
     am_bin = args.am_bin
     commands = [
         run_json_command([am_bin, "agents", "list", "--project", str(project), "--json"], args.timeout_sec),
@@ -1788,28 +1992,35 @@ def main() -> int:
         run_health_probe(DURABILITY_PATH, args.timeout_sec),
     ]
 
-    output = build_snapshot_output(project, agent, commands, args.thread_limit)
+    output = build_snapshot_output(
+        project, agent, commands, args.thread_limit, generated_at=generated_at,
+    )
     agents_cmd, reservations_cmd, inbox_cmd, status_cmd = commands[:4]
 
     rendered = json.dumps(output, sort_keys=True, separators=(",", ":")) + "\n"
     write_stdout = args.json or args.stdout or not args.output
-    if args.output:
-        Path(args.output).write_text(rendered, encoding="utf-8")
+    try:
+        if args.output:
+            atomic_write_output(Path(args.output), rendered)
+        if args.coordination_output:
+            coordination = coordination_snapshot(
+                output,
+                agents_cmd,
+                reservations_cmd,
+                inbox_cmd,
+                status_cmd,
+                project,
+            )
+            rendered_coordination = (
+                json.dumps(coordination, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            atomic_write_output(Path(args.coordination_output), rendered_coordination)
+    except (OSError, ValueError) as error:
+        print(f"agent_mail_snapshot: snapshot publication failed ({type(error).__name__})", file=sys.stderr)
+        return 3
+    # Do not print a success-shaped snapshot before a requested file write fails.
     if write_stdout:
         sys.stdout.write(rendered)
-    if args.coordination_output:
-        coordination = coordination_snapshot(
-            output,
-            agents_cmd,
-            reservations_cmd,
-            inbox_cmd,
-            status_cmd,
-            project,
-        )
-        rendered_coordination = (
-            json.dumps(coordination, sort_keys=True, separators=(",", ":")) + "\n"
-        )
-        Path(args.coordination_output).write_text(rendered_coordination, encoding="utf-8")
     return 0
 
 
