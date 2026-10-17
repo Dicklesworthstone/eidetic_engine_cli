@@ -242,7 +242,7 @@ pub fn plan_daemon_service(
     confirm: bool,
 ) -> DaemonServicePlan {
     let unit_path = default_unit_path(kind, home);
-    let unit_body = render_unit_body(kind, ee_binary);
+    let unit_body = render_unit_body_for_workspace(kind, ee_binary, home);
     let already_installed = unit_path.as_ref().is_some_and(|path| path.is_file());
     let next_commands = match kind {
         DaemonServiceKind::Launchd => {
