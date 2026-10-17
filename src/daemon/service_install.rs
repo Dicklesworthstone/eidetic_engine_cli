@@ -111,17 +111,30 @@ pub fn render_unit_body(kind: DaemonServiceKind, ee_binary: &Path) -> Option<Str
     render_unit_body_for_workspace(kind, ee_binary, Path::new("."))
 }
 
-/// Render a service with an explicitly pinned workspace.
+/// Render a service with an explicitly pinned workspace. Paths are literal
+/// supervisor arguments, never shell fragments or environment substitutions.
+/// Refuse unrepresentable text rather than installing a different lossy path.
 #[must_use]
 pub fn render_unit_body_for_workspace(
     kind: DaemonServiceKind,
     ee_binary: &Path,
     workspace: &Path,
 ) -> Option<String> {
-    let binary = ee_binary.display();
-    let workspace_text = workspace.to_string_lossy();
-    let xml_workspace = xml_escape(&workspace_text);
-    let systemd_workspace = workspace_text.replace('%', "%%");
+    let binary_text = service_path_text(ee_binary)?;
+    let workspace_text = service_path_text(workspace)?;
+    // systemd rejects these in argv[0] even after valid unit-file unquoting.
+    // Ordinary arguments do not share that executable-name restriction.
+    if kind == DaemonServiceKind::SystemdUser
+        && binary_text.chars().any(|ch| {
+            ch < ' ' || matches!(ch, '\u{7f}' | '\\' | '\'' | '"')
+        })
+    {
+        return None;
+    }
+    let binary = xml_escape(binary_text);
+    let xml_workspace = xml_escape(workspace_text);
+    let systemd_binary = systemd_argument(binary_text);
+    let systemd_workspace = systemd_argument(workspace_text);
     match kind {
         DaemonServiceKind::Launchd => Some(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -154,11 +167,42 @@ pub fn render_unit_body_for_workspace(
 "#
         )),
         DaemonServiceKind::SystemdUser => Some(format!(
-            "[Unit]\nDescription=ee team/mesh steward daemon\nAfter=default.target\n\n[Service]\nType=simple\nExecStart={binary} daemon --foreground --once --workspace {systemd_workspace} --job team_steward --job decay_sweep --job health_check\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
+            "[Unit]\nDescription=ee team/mesh steward daemon\nAfter=default.target\n\n[Service]\nType=simple\nExecStart=:{systemd_binary} daemon --foreground --once --workspace {systemd_workspace} --job team_steward --job decay_sweep --job health_check\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
         )),
         DaemonServiceKind::WindowsUserTask => Some(render_windows_task_xml(ee_binary, workspace)),
         DaemonServiceKind::Unsupported => None,
     }
+}
+
+fn service_path_text(path: &Path) -> Option<&str> {
+    let text = path.to_str()?;
+    // XML 1.0 cannot represent the excluded controls or U+FFFE/U+FFFF.
+    // Newline, tab and CR are legal and encoded explicitly on every platform.
+    (!text.is_empty()
+        && text.chars().all(|ch| {
+            matches!(ch, '\t' | '\n' | '\r')
+                || (ch >= ' ' && !matches!(ch, '\u{fffe}' | '\u{ffff}'))
+        }))
+    .then_some(text)
+}
+
+/// systemd is not a shell: C-style quoting and percent specifiers are separate
+/// parsing layers. ExecStart's ':' prefix disables dollar expansion entirely.
+fn systemd_argument(value: &str) -> String {
+    let mut result = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => result.push_str("\\\\"),
+            '"' => result.push_str("\\\""),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            '%' => result.push_str("%%"),
+            ch => result.push(ch),
+        }
+    }
+    result.push('"');
+    result
 }
 
 fn xml_escape(value: &str) -> String {
@@ -167,10 +211,21 @@ fn xml_escape(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\r', "&#13;")
+        .replace('\n', "&#10;")
+        .replace('\t', "&#9;")
 }
 
 fn windows_command_path(path: &Path) -> String {
     let text = path.to_string_lossy();
+    // Stripping only the verbatim prefix turns a UNC executable into the
+    // relative path 'UNC\server\share'. Preserve its network-root identity.
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        return xml_escape(&format!(r"\\{unc}"));
+    }
+    if let Some(unc) = text.strip_prefix("//?/UNC/") {
+        return xml_escape(&format!("//{unc}"));
+    }
     let trimmed = text
         .strip_prefix(r"\\?\")
         .or_else(|| text.strip_prefix("//?/"))
@@ -178,9 +233,37 @@ fn windows_command_path(path: &Path) -> String {
     xml_escape(trimmed)
 }
 
+/// Task Scheduler stores Arguments as one Windows command line. Quote before
+/// XML escaping; trailing backslashes must not escape the closing delimiter.
+fn windows_argument(value: &str) -> String {
+    let mut result = String::from("\"");
+    let mut backslashes = 0;
+    for ch in value.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        let escapes = if ch == '"' {
+            backslashes * 2 + 1
+        } else {
+            backslashes
+        };
+        result.extend(std::iter::repeat_n('\\', escapes));
+        result.push(ch);
+        backslashes = 0;
+    }
+    result.extend(std::iter::repeat_n('\\', backslashes * 2));
+    result.push('"');
+    result
+}
+
 fn render_windows_task_xml(ee_binary: &Path, workspace: &Path) -> String {
     let command = windows_command_path(ee_binary);
-    let xml_workspace = xml_escape(&workspace.to_string_lossy());
+    let xml_workspace = xml_escape(&windows_argument(&workspace.to_string_lossy()));
+    // --once is intentionally bounded. The supervisor, not an unbounded CLI
+    // report, owns repetition after installation and subsequent user logons.
+    // Omitting Duration means indefinite repetition. IgnoreNew prevents two
+    // triggers from running concurrent stewards; no catch-up queue is created.
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -189,8 +272,19 @@ fn render_windows_task_xml(ee_binary: &Path, workspace: &Path) -> String {
     <Description>ee team/mesh steward daemon</Description>
   </RegistrationInfo>
   <Triggers>
+    <RegistrationTrigger>
+      <Enabled>true</Enabled>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </RegistrationTrigger>
     <LogonTrigger>
       <Enabled>true</Enabled>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
     </LogonTrigger>
   </Triggers>
   <Principals>
@@ -225,7 +319,7 @@ fn render_windows_task_xml(ee_binary: &Path, workspace: &Path) -> String {
   <Actions Context="Author">
     <Exec>
       <Command>{command}</Command>
-      <Arguments>daemon --foreground --once --workspace &quot;{xml_workspace}&quot; --job team_steward --job decay_sweep --job health_check</Arguments>
+      <Arguments>daemon --foreground --once --workspace {xml_workspace} --job team_steward --job decay_sweep --job health_check</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -651,6 +745,158 @@ mod tests {
     use super::*;
 
     #[test]
+    fn systemd_paths_are_literal_single_arguments_not_unit_or_environment_syntax() {
+        let binary = Path::new("/opt/ee tools/$release%h/ee");
+        let workspace = Path::new("/work/資料 \"quoted\"\\${HOME}%h\nExecStart=/bin/false\r\t");
+        let body = render_unit_body_for_workspace(
+            DaemonServiceKind::SystemdUser,
+            binary,
+            workspace,
+        )
+        .expect("literal paths");
+        assert!(body.contains("ExecStart=:\"/opt/ee tools/$release%%h/ee\" daemon"));
+        assert!(body.contains(
+            "--workspace \"/work/資料 \\\"quoted\\\"\\\\${HOME}%%h\\nExecStart=/bin/false\\r\\t\" --job"
+        ));
+        assert_eq!(body.lines().filter(|line| line.starts_with("ExecStart=")).count(), 1);
+        assert!(body.contains("Restart=always\nRestartSec=5\n"));
+    }
+
+    #[test]
+    fn launchd_escapes_binary_and_workspace_without_changing_argument_boundaries() {
+        let body = render_unit_body_for_workspace(
+            DaemonServiceKind::Launchd,
+            Path::new("/opt/ee & <tools>/ee"),
+            Path::new("/work/資料 \"quoted\"\r\n\t&%${HOME}"),
+        )
+        .expect("XML paths");
+        assert!(body.contains("<string>/opt/ee &amp; &lt;tools&gt;/ee</string>"));
+        assert!(body.contains(
+            "<string>/work/資料 &quot;quoted&quot;&#13;&#10;&#9;&amp;%${HOME}</string>"
+        ));
+        assert_eq!(body.matches("<string>--workspace</string>").count(), 1);
+        assert!(body.contains("<key>KeepAlive</key>\n  <true/>"));
+    }
+
+    #[test]
+    fn windows_arguments_escape_quotes_and_trailing_backslashes_before_xml() {
+        for (input, expected) in [
+            ("", "\"\""),
+            ("資料 space", "\"資料 space\""),
+            (r"C:\work", "\"C:\\work\""),
+            (r"C:\work\", "\"C:\\work\\\\\""),
+            ("a\"b", "\"a\\\"b\""),
+            ("a\\\"b", "\"a\\\\\\\"b\""),
+        ] {
+            assert_eq!(windows_argument(input), expected, "{input:?}");
+        }
+        let body = render_unit_body_for_workspace(
+            DaemonServiceKind::WindowsUserTask,
+            Path::new(r"C:\tools\ee.exe"),
+            Path::new(r"C:\work & projects\"),
+        )
+        .expect("Windows workspace");
+        assert!(body.contains(
+            r"--workspace &quot;C:\work &amp; projects\\&quot; --job team_steward"
+        ));
+    }
+
+    #[test]
+    fn windows_verbatim_unc_executable_keeps_its_network_root() {
+        for (path, expected) in [
+            (r"\\?\C:\tools\ee.exe", r"C:\tools\ee.exe"),
+            (r"\\?\UNC\server\ee tools\ee.exe", r"\\server\ee tools\ee.exe"),
+            ("//?/UNC/server/ee tools/ee.exe", "//server/ee tools/ee.exe"),
+            (r"\\server\share & tools\ee.exe", r"\\server\share &amp; tools\ee.exe"),
+        ] {
+            assert_eq!(windows_command_path(Path::new(path)), expected);
+        }
+    }
+
+    #[test]
+    fn windows_steward_repeats_after_registration_and_logon_without_overlap() {
+        let body = render_unit_body_for_workspace(
+            DaemonServiceKind::WindowsUserTask,
+            Path::new(r"C:\ee\ee.exe"),
+            Path::new(r"C:\project"),
+        )
+        .expect("scheduled steward");
+        for trigger in ["RegistrationTrigger", "LogonTrigger"] {
+            let section = body
+                .split_once(&format!("<{trigger}>"))
+                .expect("trigger")
+                .1
+                .split_once(&format!("</{trigger}>"))
+                .expect("closed trigger")
+                .0;
+            assert!(section.contains("<Enabled>true</Enabled>"));
+            assert!(section.contains("<Interval>PT1M</Interval>"));
+            assert!(section.contains("<StopAtDurationEnd>false</StopAtDurationEnd>"));
+            assert!(!section.contains("<Duration>"));
+        }
+        assert!(body.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+        assert!(body.contains("<RunLevel>LeastPrivilege</RunLevel>"));
+        assert!(body.contains("daemon --foreground --once --workspace"));
+        assert_eq!(body.matches("<Exec>").count(), 1);
+        for job in ["team_steward", "decay_sweep", "health_check"] {
+            assert_eq!(body.matches(&format!("--job {job}")).count(), 1);
+        }
+    }
+
+    #[test]
+    fn invalid_service_paths_are_refused_instead_of_lossily_retargeted() {
+        for kind in [
+            DaemonServiceKind::SystemdUser,
+            DaemonServiceKind::Launchd,
+            DaemonServiceKind::WindowsUserTask,
+        ] {
+            for bad in ["", "/bad\0path", "/bad\u{1f}path", "/bad\u{fffe}path"] {
+                assert!(render_unit_body_for_workspace(kind, Path::new(bad), Path::new("/work")).is_none());
+                assert!(render_unit_body_for_workspace(kind, Path::new("/ee"), Path::new(bad)).is_none());
+            }
+        }
+        for bad in ["/bin/ee'quoted", "/bin/ee\"quoted", "/bin/ee\\quoted", "/bin/ee\nname"] {
+            assert!(render_unit_body_for_workspace(
+                DaemonServiceKind::SystemdUser, Path::new(bad), Path::new("/work")
+            ).is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_service_paths_never_select_a_replacement_character_path() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let bad = PathBuf::from(OsString::from_vec(b"/work/\xff".to_vec()));
+        for kind in [DaemonServiceKind::SystemdUser, DaemonServiceKind::Launchd] {
+            assert!(render_unit_body_for_workspace(kind, &bad, Path::new("/work")).is_none());
+            assert!(render_unit_body_for_workspace(kind, Path::new("/ee"), &bad).is_none());
+        }
+    }
+
+    #[test]
+    fn windows_task_file_preserves_utf16_and_the_complete_rendered_schedule() {
+        let root = tempfile::tempdir().expect("task fixture");
+        let path = root.path().join(WINDOWS_TASK_FILE_NAME);
+        let body = render_unit_body_for_workspace(
+            DaemonServiceKind::WindowsUserTask,
+            Path::new(r"C:\ee tools\ee.exe"),
+            Path::new(r"C:\資料\"),
+        )
+        .expect("task body");
+        write_service_unit(DaemonServiceKind::WindowsUserTask, &path, &body).expect("task write");
+        let bytes = std::fs::read(&path).expect("task bytes");
+        assert_eq!(&bytes[..2], &[0xff, 0xfe]);
+        assert_eq!(bytes.len() % 2, 0);
+        let units = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        assert_eq!(String::from_utf16(&units).expect("valid UTF16"), body);
+    }
+
+    #[test]
     fn explicit_workspace_and_persistent_service_are_rendered() {
         let workspace = Path::new("/home/ubuntu/main");
         let systemd = render_unit_body_for_workspace(
@@ -658,7 +904,7 @@ mod tests {
             Path::new("/usr/bin/ee"),
             workspace,
         ).expect("systemd");
-        assert!(systemd.contains("--workspace /home/ubuntu/main"));
+        assert!(systemd.contains("--workspace \"/home/ubuntu/main\""));
         assert!(systemd.contains("Restart=always"));
         assert!(systemd.contains("--once"));
         let launchd = render_unit_body_for_workspace(
@@ -671,7 +917,7 @@ mod tests {
             "daemon install", DaemonServiceKind::SystemdUser,
             Path::new("/home/ubuntu"), Path::new("/usr/bin/ee"), workspace, false,
         );
-        assert!(plan.unit_body.expect("body").contains("--workspace /home/ubuntu/main"));
+        assert!(plan.unit_body.expect("body").contains("--workspace \"/home/ubuntu/main\""));
     }
 
     #[test]
@@ -688,7 +934,7 @@ mod tests {
     fn systemd_unit_is_user_scoped_and_restarts() {
         let body = render_unit_body(DaemonServiceKind::SystemdUser, Path::new("/usr/bin/ee"))
             .expect("systemd body");
-        assert!(body.contains("ExecStart=/usr/bin/ee daemon --foreground --once"));
+        assert!(body.contains("ExecStart=:\"/usr/bin/ee\" daemon --foreground --once"));
         assert!(body.contains("Restart=always"));
         assert!(body.contains("team_steward"));
         assert!(body.contains("[Install]"));
