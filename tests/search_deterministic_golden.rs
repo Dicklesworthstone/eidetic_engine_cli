@@ -4,7 +4,6 @@
 //! Frankensearch index with the hash embedder fallback, and compares the
 //! canonicalized CLI JSON output byte-for-byte against a committed golden file.
 
-use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::search::{Embedder, HashEmbedder};
@@ -355,27 +354,87 @@ fn seed_tie_workspace(workspace: &Path, database: &Path) -> TestResult {
     connection.close().map_err(|error| error.to_string())
 }
 
+/// Rebuild through the BINARY, with the same embedder environment the search
+/// child gets.
+///
+/// This used to call the library `rebuild_index` IN PROCESS while the search
+/// below runs `ee` as a child configured with
+///
+///     EE_EMBED_DOWNLOAD=off
+///     EE_EMBED_MODEL_DIR=<workspace>/.ee/empty-model-cache
+///     EE_EMBED_MODEL_PATH removed
+///
+/// None of which the cargo test process has. So the two halves could resolve
+/// DIFFERENT EMBEDDERS, and that is not a cosmetic difference: a read lease
+/// validates a generation against an identity carrying the embedder id and
+/// dimension (src/core/search.rs:9752 ->
+/// index_for_snapshot_with_identity). An index written under one identity
+/// cannot satisfy a read under another, and the failure surfaces as
+///
+///     "No complete index generation is available for the source snapshot;
+///      rebuild the index"
+///
+/// which is the opposite of actionable -- rebuilding is exactly what the
+/// fixture already did. Observed on bd-hwye2 as a search exit 4.
+///
+/// Building through the same binary with the same environment removes the
+/// asymmetry at its source rather than pinning whichever embedder happens to
+/// win. IndexRebuildOptions has no embedder override, so there is no in-process
+/// way to state the intent.
 fn rebuild_search_index_with_expected(
     workspace: &Path,
     database: &Path,
     index_dir: &Path,
     expected_documents: u32,
 ) -> TestResult {
-    let report = rebuild_index(&IndexRebuildOptions {
-        workspace_path: workspace.to_path_buf(),
-        database_path: Some(database.to_path_buf()),
-        index_dir: Some(index_dir.to_path_buf()),
-        dry_run: false,
-    })
-    .map_err(|error| error.to_string())?;
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env(
+            "EE_EMBED_MODEL_DIR",
+            workspace.join(".ee").join("empty-model-cache"),
+        )
+        .env_remove("EE_EMBED_MODEL_PATH")
+        .arg("--json")
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("index")
+        .arg("rebuild")
+        .arg("--database")
+        .arg(database)
+        .arg("--index-dir")
+        .arg(index_dir)
+        .output()
+        .map_err(|error| format!("failed to run ee index rebuild: {error}"))?;
 
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("index rebuild stdout was not UTF-8: {error}"))?;
+    ensure(
+        output.status.success(),
+        format!(
+            "index rebuild should succeed; exit {:?}; stdout: {}",
+            output.status.code(),
+            if stdout.trim().is_empty() {
+                "<empty>".to_owned()
+            } else {
+                stdout.chars().take(400).collect::<String>()
+            }
+        ),
+    )?;
+
+    let parsed: JsonValue = serde_json::from_str(&stdout)
+        .map_err(|error| format!("index rebuild stdout must be JSON: {error}; got {stdout}"))?;
     ensure_equal(
-        &report.status,
-        &IndexRebuildStatus::Success,
+        &parsed["data"]["status"].as_str().unwrap_or("<missing>"),
+        &"success",
         "index rebuild status",
     )?;
     ensure_equal(
-        &report.documents_total,
+        &u32::try_from(
+            parsed["data"]["documents_total"]
+                .as_u64()
+                .unwrap_or(u64::MAX),
+        )
+        .unwrap_or(u32::MAX),
         &expected_documents,
         "indexed document count",
     )

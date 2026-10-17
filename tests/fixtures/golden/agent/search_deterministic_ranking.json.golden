@@ -29,7 +29,7 @@
         "score": 1.0,
         "relevanceScore": 1.0,
         "scoreKind": "query_relative_pool_minmax",
-        "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+        "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
         "scoreInterval": [
           0.0,
           1.0
@@ -115,7 +115,7 @@
             "schema": "ee.search.score_calibration.v1",
             "method": "scaled_split_conformal",
             "status": "absent",
-            "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+            "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
             "coverage": 0.95,
             "sampleCount": 0,
             "minimumSamples": 20,
@@ -247,7 +247,7 @@
         "score": 0.6233764,
         "relevanceScore": 0.623376,
         "scoreKind": "query_relative_pool_minmax",
-        "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+        "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
         "scoreInterval": [
           0.0,
           1.0
@@ -333,7 +333,7 @@
             "schema": "ee.search.score_calibration.v1",
             "method": "scaled_split_conformal",
             "status": "absent",
-            "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+            "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
             "coverage": 0.95,
             "sampleCount": 0,
             "minimumSamples": 20,
@@ -465,7 +465,7 @@
         "score": 0.36304024,
         "relevanceScore": 0.36304,
         "scoreKind": "query_relative_pool_minmax",
-        "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+        "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
         "scoreInterval": [
           0.0,
           1.0
@@ -551,7 +551,7 @@
             "schema": "ee.search.score_calibration.v1",
             "method": "scaled_split_conformal",
             "status": "absent",
-            "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+            "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
             "coverage": 0.95,
             "sampleCount": 0,
             "minimumSamples": 20,
