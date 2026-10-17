@@ -2780,8 +2780,8 @@ pub fn record_daemon_foreground_start(
     let run_id = daemon_run_id(workspace_path, &recorded_at);
     // Only the first tick can be running. Never materialize future work up front.
     let mut rows = Vec::with_capacity(options.job_types.len());
-    for tick in 1..=1 {
-        for (offset, job_type) in options.job_types.iter().enumerate() {
+    let tick = 1;
+    for (offset, job_type) in options.job_types.iter().enumerate() {
             let runner_job_id = runner_job_id(offset);
             rows.push(DaemonJobRow {
                 schema: DAEMON_JOB_ROW_SCHEMA_V1.to_owned(),
@@ -2791,7 +2791,7 @@ pub fn record_daemon_foreground_start(
                 runner_job_id,
                 tick,
                 job_type: job_type.as_str().to_owned(),
-                status: if tick == 1 { "running" } else { "pending" }.to_owned(),
+                status: "running".to_owned(),
                 outcome: None,
                 workspace: workspace_path.to_string_lossy().into_owned(),
                 write_owner_id: DAEMON_WRITE_OWNER_IDENTITY.to_owned(),
@@ -2808,7 +2808,6 @@ pub fn record_daemon_foreground_start(
                 recovery_reason: None,
             });
         }
-    }
 
     trace_serve_localhost("persistence", 0, &[]);
     append_daemon_job_rows(&table_path, &rows)?;
