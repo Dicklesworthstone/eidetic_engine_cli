@@ -162,6 +162,10 @@ fn jaccard<T: Ord>(left: &BTreeSet<T>, right: &BTreeSet<T>) -> f64 {
     }
 }
 
+/// Flat positive signals are evidence, not missing measurements. Fall back to
+/// zero-anchored scaling when their spread cannot support min-max scaling;
+/// this keeps a singleton or equally supported cohort above a positive floor.
+/// These are batch-relative ranking signals, not calibrated probabilities.
 fn min_max_normalize(values: &mut [f64]) {
     let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
     for value in values.iter() {
@@ -171,7 +175,11 @@ fn min_max_normalize(values: &mut [f64]) {
     let span = max - min;
     if !span.is_finite() || span < 1e-12 {
         for value in values.iter_mut() {
-            *value = 0.0;
+            *value = if span.is_finite() && max > 0.0 && value.is_finite() {
+                (*value / max).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
         }
         return;
     }
@@ -442,6 +450,113 @@ pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_single_tag_supported_pair_survives_a_positive_score_floor() {
+        let input = SuggestLinksInput {
+            tags: tags_for(&[("mem_a", &["release"]), ("mem_b", &["release"])]),
+            min_score: 0.19,
+            limit: 10,
+            ..SuggestLinksInput::default()
+        };
+        let report = suggest_links(&input);
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(report.suggestions.len(), 1);
+        let suggestion = &report.suggestions[0];
+        assert_eq!(suggestion.score, input.weights.jaccard_tags);
+        assert_eq!(suggestion.signals.jaccard_tags, 1.0);
+        assert_eq!(suggestion.signals.adamic_adar, 0.0);
+        assert_eq!(suggestion.signals.ppr, 0.0);
+        assert_eq!(suggestion.signals.affinity, 0.0);
+        assert!(suggestion.reason.contains("driven by tag overlap"));
+        assert!(report.affinity_cold);
+    }
+
+    #[test]
+    fn equal_positive_cohorts_keep_support_and_the_inclusive_floor() {
+        let mut input = SuggestLinksInput {
+            tags: tags_for(&[
+                ("mem_c", &["release"]),
+                ("mem_a", &["release"]),
+                ("mem_b", &["release"]),
+            ]),
+            min_score: 0.20,
+            limit: 10,
+            ..SuggestLinksInput::default()
+        };
+        let report = suggest_links(&input);
+        assert_eq!(report.candidate_count, 3);
+        assert_eq!(report.suggestions.len(), 3);
+        assert!(report.suggestions.iter().all(|item| item.score == 0.20));
+        assert_eq!(report, suggest_links(&input));
+        input.min_score = 0.2001;
+        assert!(suggest_links(&input).suggestions.is_empty());
+    }
+
+    #[test]
+    fn singleton_native_graph_signals_retain_their_blend_weights() {
+        let input = SuggestLinksInput {
+            links: vec![
+                ("mem_a".to_owned(), "mem_c".to_owned()),
+                ("mem_b".to_owned(), "mem_c".to_owned()),
+            ],
+            min_score: 0.39,
+            limit: 10,
+            ..SuggestLinksInput::default()
+        };
+        let report = suggest_links(&input);
+        assert_eq!(report.suggestions.len(), 1);
+        let suggestion = &report.suggestions[0];
+        assert_eq!(
+            suggestion.score,
+            input.weights.adamic_adar + input.weights.preferential_attachment
+        );
+        assert!((suggestion.signals.adamic_adar - 1.0 / 2f64.ln()).abs() < 1e-9);
+        assert_eq!(suggestion.signals.preferential_attachment, 1.0);
+    }
+
+    #[test]
+    fn singleton_affinity_is_not_confused_with_cold_or_zero_affinity() {
+        let pair = ("mem_a".to_owned(), "mem_b".to_owned());
+        let mut input = SuggestLinksInput {
+            affinity: Some(BTreeMap::from([(pair.clone(), 0.7)])),
+            min_score: 0.14,
+            limit: 10,
+            ..SuggestLinksInput::default()
+        };
+        let report = suggest_links(&input);
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(report.suggestions.len(), 1);
+        assert_eq!(report.suggestions[0].score, input.weights.affinity);
+        assert_eq!(report.suggestions[0].signals.affinity, 0.7);
+        assert!(!report.affinity_cold);
+        input.affinity = Some(BTreeMap::from([(pair, 0.0)]));
+        let empty = suggest_links(&input);
+        assert_eq!(empty.candidate_count, 1);
+        assert!(empty.suggestions.is_empty());
+        assert!(!empty.affinity_cold);
+        input.affinity = None;
+        assert!(suggest_links(&input).affinity_cold);
+    }
+
+    #[test]
+    fn flat_scaling_preserves_absence_and_nonflat_scaling_is_unchanged() {
+        for (mut values, expected) in [
+            (vec![], vec![]),
+            (vec![0.0], vec![0.0]),
+            (vec![0.0, 0.0], vec![0.0, 0.0]),
+            (vec![-1.0, -1.0], vec![0.0, 0.0]),
+            (vec![2.0], vec![1.0]),
+            (vec![2.0, 2.0], vec![1.0, 1.0]),
+            (vec![0.0, 1e-13], vec![0.0, 1.0]),
+            (vec![9.0, 5.0, 2.0], vec![1.0, 3.0 / 7.0, 0.0]),
+            (vec![f64::INFINITY], vec![0.0]),
+            (vec![f64::NAN], vec![0.0]),
+        ] {
+            min_max_normalize(&mut values);
+            assert_eq!(values, expected);
+        }
+    }
 
     fn tags_for(pairs: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
         pairs
