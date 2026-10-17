@@ -404,8 +404,20 @@ impl Drop for InflightPermit {
         let mut current = self
             .pool
             .inflight
+            // bd-ijg41. RECOVER rather than panic, and this site matters most:
+            // a panic inside a Drop that is itself unwinding is a double panic,
+            // which ABORTS the process. So "a worker panics -> this mutex is
+            // poisoned -> some other permit unwinds -> its Drop panics" would
+            // kill the daemon outright instead of failing one request.
+            //
+            // Recovering is sound because the counter cannot be torn: no
+            // critical section on this mutex contains a call that can unwind
+            // (compare/increment, saturating_sub, notify_all), so a poisoning
+            // always originates elsewhere in the thread's stack. Failing to
+            // decrement would leak a permit forever and deadlock
+            // wait_until_idle.
             .lock()
-            .expect("daemon inflight mutex must not be poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *current = current.saturating_sub(1);
         if *current == 0 {
             self.pool.idle.notify_all();
@@ -442,8 +454,10 @@ impl InflightPool {
     fn try_acquire(self: &Arc<Self>) -> Option<InflightPermit> {
         let mut current = self
             .inflight
+            // bd-ijg41: recover. Refusing instead would mean the daemon stops
+            // admitting work permanently after one unrelated worker panic.
             .lock()
-            .expect("daemon inflight mutex must not be poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *current >= self.capacity {
             return None;
         }
@@ -457,8 +471,10 @@ impl InflightPool {
         let deadline = Instant::now() + timeout;
         let mut current = self
             .inflight
+            // bd-ijg41: recover. This path never mutates the counter, so it
+            // only ever reads a value the argument above shows is consistent.
             .lock()
-            .expect("daemon inflight mutex must not be poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         while *current > 0 {
             let now = Instant::now();
             if now >= deadline {
@@ -467,8 +483,13 @@ impl InflightPool {
             let remaining = deadline.saturating_duration_since(now);
             let (next, result) = self
                 .idle
+                // bd-ijg41: recover, and leave the control flow ALONE. The
+                // enclosing `while *current > 0` already re-checks the
+                // predicate after every wake, which is exactly what a poisoned
+                // condvar wait wants; into_inner yields the same
+                // (guard, WaitTimeoutResult) tuple the code already binds.
                 .wait_timeout(current, remaining)
-                .expect("daemon inflight condvar must not be poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             current = next;
             if result.timed_out() && *current > 0 {
                 return false;
@@ -6827,6 +6848,59 @@ mod tests {
 
     const TEST_AGENT_ID: &str = "agent-daemon-server-test";
     const TEST_WORKSPACE_ID: &str = "workspace-daemon-server-test";
+
+    /// bd-ijg41: the inflight pool must SURVIVE a poisoned mutex, not panic on
+    /// it. Before this test the four lock sites called `.expect(..)`, and the
+    /// one in `impl Drop for InflightPermit` was the dangerous one: a panic
+    /// inside a Drop that is itself unwinding is a double panic, which aborts
+    /// the process rather than failing one request.
+    ///
+    /// Without a PLANTED poisoning the change is unobservable, so this panics a
+    /// spawned thread while it holds the guard and then asserts the pool still
+    /// works.
+    #[test]
+    fn inflight_pool_recovers_from_a_poisoned_mutex() {
+        // `InflightPool::new` already returns `Arc<Self>`; wrapping it again
+        // would be `Arc<Arc<_>>` and would not compile.
+        let pool = InflightPool::new(2);
+
+        let poisoner = Arc::clone(&pool);
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoner
+                .inflight
+                .lock()
+                .expect("a fresh mutex is not poisoned");
+            panic!("deliberate poisoning for bd-ijg41");
+        });
+        assert!(
+            handle.join().is_err(),
+            "the spawned thread must have panicked"
+        );
+
+        // CONTROL. Without this the test would still pass if the poisoning
+        // silently failed to happen, which would make every assertion below
+        // decoration rather than evidence.
+        assert!(
+            pool.inflight.is_poisoned(),
+            "the mutex must actually be poisoned or this test proves nothing"
+        );
+
+        // try_acquire must keep admitting work (the :446 site).
+        let permit = pool
+            .try_acquire()
+            .expect("try_acquire must recover from a poisoned mutex");
+
+        // Dropping exercises the abort path (the :408 site): on the old code
+        // this Drop would panic against the poisoned mutex.
+        drop(permit);
+
+        // wait_until_idle covers the remaining two sites, and reaching idle
+        // proves the permit was decremented rather than leaked.
+        assert!(
+            pool.wait_until_idle(Duration::from_secs(5)),
+            "pool must report idle after the permit is dropped"
+        );
+    }
 
     fn context_request(
         request_id: &'static str,
