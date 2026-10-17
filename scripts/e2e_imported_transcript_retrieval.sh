@@ -495,6 +495,15 @@ run_ee remember "Workspace isolation probe ${ISO_SENTINEL} stays local to its ow
     --source "manual://imported_transcript_e2e/isolation-probe" \
     --no-auto-link --no-propose-candidates --json
 ISO_REMEMBER_EXIT="${LAST_EXIT}"
+# Capture the CAUSE beside the exit code.
+#
+# A bare `remember=7` says a durable write was refused and nothing about why,
+# and this control has already cost two wrong hypotheses that one error code
+# would have killed on sight: retained worker state (refuted by a clean-root
+# run that reproduced it) and an EE_DATABASE_PATH mismatch (refuted by
+# reproducing the exact env shape, which succeeds). The response body is
+# already on disk in ${LAST_STDOUT}; only nobody was reading it.
+ISO_REMEMBER_ERR="$(jq -r '((.error.code // "none") + ": " + ((.error.message // "")[0:200]))' "${LAST_STDOUT}" 2>/dev/null || printf 'unreadable')"
 # WS2 needs its own published index for the same reason WS1 does (section 3).
 run_ee index rebuild --workspace "${WS2}" --json
 ISO_INDEX_EXIT="${LAST_EXIT}"
@@ -506,7 +515,7 @@ if [[ "${ISO_INIT_EXIT}" -eq 0 && "${ISO_REMEMBER_EXIT}" -eq 0 && "${ISO_INDEX_E
     ISO_CONTROL_OK=1
     event second_workspace_retrieval_works pass "own_hits=${ISO_OWN_HITS}"
 else
-    event second_workspace_retrieval_works fail "the second workspace cannot find its OWN memory, so its silence about the first workspace proves nothing; init=${ISO_INIT_EXIT} remember=${ISO_REMEMBER_EXIT} index=${ISO_INDEX_EXIT} search=${ISO_OWN_EXIT} hits=${ISO_OWN_HITS}"
+    event second_workspace_retrieval_works fail "the second workspace cannot find its OWN memory, so its silence about the first workspace proves nothing; init=${ISO_INIT_EXIT} remember=${ISO_REMEMBER_EXIT} index=${ISO_INDEX_EXIT} search=${ISO_OWN_EXIT} hits=${ISO_OWN_HITS}; remember_error=${ISO_REMEMBER_ERR}"
 fi
 
 # The isolation claim DEPENDS on that control. Measured 2026-10-14: with the
