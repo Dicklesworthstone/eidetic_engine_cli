@@ -2782,8 +2782,8 @@ pub fn record_daemon_foreground_start(
     let mut rows = Vec::with_capacity(options.job_types.len());
     let tick = 1;
     for (offset, job_type) in options.job_types.iter().enumerate() {
-            let runner_job_id = runner_job_id(offset);
-            rows.push(DaemonJobRow {
+        let runner_job_id = runner_job_id(offset);
+        rows.push(DaemonJobRow {
                 schema: DAEMON_JOB_ROW_SCHEMA_V1.to_owned(),
                 row_id: row_id(&run_id, tick, &runner_job_id, "planned"),
                 run_id: run_id.clone(),
@@ -2806,8 +2806,8 @@ pub fn record_daemon_foreground_start(
                 durable_mutation: false,
                 recovered_from_orphan: false,
                 recovery_reason: None,
-            });
-        }
+        });
+    }
 
     trace_serve_localhost("persistence", 0, &[]);
     append_daemon_job_rows(&table_path, &rows)?;
