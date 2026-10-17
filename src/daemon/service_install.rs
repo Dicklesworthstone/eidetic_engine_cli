@@ -108,7 +108,20 @@ pub fn default_unit_path(kind: DaemonServiceKind, home: &Path) -> Option<PathBuf
 
 #[must_use]
 pub fn render_unit_body(kind: DaemonServiceKind, ee_binary: &Path) -> Option<String> {
+    render_unit_body_for_workspace(kind, ee_binary, Path::new("."))
+}
+
+/// Render a service with an explicitly pinned workspace.
+#[must_use]
+pub fn render_unit_body_for_workspace(
+    kind: DaemonServiceKind,
+    ee_binary: &Path,
+    workspace: &Path,
+) -> Option<String> {
     let binary = ee_binary.display();
+    let workspace_text = workspace.to_string_lossy();
+    let xml_workspace = xml_escape(&workspace_text);
+    let systemd_workspace = workspace_text.replace('%', "%%").replace('\\', "\\\\").replace(' ', "\\x20");
     match kind {
         DaemonServiceKind::Launchd => Some(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -123,6 +136,8 @@ pub fn render_unit_body(kind: DaemonServiceKind, ee_binary: &Path) -> Option<Str
     <string>daemon</string>
     <string>--foreground</string>
     <string>--once</string>
+    <string>--workspace</string>
+    <string>{xml_workspace}</string>
     <string>--job</string>
     <string>team_steward</string>
     <string>--job</string>
@@ -141,7 +156,7 @@ pub fn render_unit_body(kind: DaemonServiceKind, ee_binary: &Path) -> Option<Str
         DaemonServiceKind::SystemdUser => Some(format!(
             "[Unit]\nDescription=ee team/mesh steward daemon\nAfter=default.target\n\n[Service]\nType=simple\nExecStart={binary} daemon --foreground --job team_steward --job decay_sweep --job health_check\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
         )),
-        DaemonServiceKind::WindowsUserTask => Some(render_windows_task_xml(ee_binary)),
+        DaemonServiceKind::WindowsUserTask => Some(render_windows_task_xml(ee_binary, workspace)),
         DaemonServiceKind::Unsupported => None,
     }
 }
@@ -163,8 +178,9 @@ fn windows_command_path(path: &Path) -> String {
     xml_escape(trimmed)
 }
 
-fn render_windows_task_xml(ee_binary: &Path) -> String {
+fn render_windows_task_xml(ee_binary: &Path, workspace: &Path) -> String {
     let command = windows_command_path(ee_binary);
+    let xml_workspace = xml_escape(&workspace.to_string_lossy());
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -209,7 +225,7 @@ fn render_windows_task_xml(ee_binary: &Path) -> String {
   <Actions Context="Author">
     <Exec>
       <Command>{command}</Command>
-      <Arguments>daemon --foreground --once --job team_steward --job decay_sweep --job health_check</Arguments>
+      <Arguments>daemon --foreground --once --workspace &quot;{xml_workspace}&quot; --job team_steward --job decay_sweep --job health_check</Arguments>
     </Exec>
   </Actions>
 </Task>
