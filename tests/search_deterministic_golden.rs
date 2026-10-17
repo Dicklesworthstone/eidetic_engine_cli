@@ -354,6 +354,30 @@ fn seed_tie_workspace(workspace: &Path, database: &Path) -> TestResult {
     connection.close().map_err(|error| error.to_string())
 }
 
+/// A private HOME for every `ee` child this fixture spawns.
+///
+/// bd-hwye2. Without it the child resolves the RUNNING ACCOUNT'S user-global
+/// memory lane, and on an RCH worker that account's lane needs migrating, so
+/// the response grew an extra degradation:
+///
+///     { "code": "global_lane_migration_required", "severity": "info", ... }
+///
+/// which is a true statement about the worker's home directory and has nothing
+/// to do with deterministic search ranking. The golden has 906 lines, the
+/// actual had 924, and that entry was the difference.
+///
+/// tests/json_contract_snapshots.rs:569 already does exactly this for exactly
+/// this reason (bd-28kky), having been bitten by the same degradation carrying
+/// the worker account's home path into a committed contract. HOME only --
+/// that file records that also moving XDG_DATA_HOME broke the embedding
+/// registry resolution and took the fixture's own precondition with it.
+fn private_home(workspace: &Path) -> Result<PathBuf, String> {
+    let home = workspace.join(".home");
+    std::fs::create_dir_all(&home)
+        .map_err(|error| format!("failed to create private HOME {}: {error}", home.display()))?;
+    Ok(home)
+}
+
 /// Rebuild through the BINARY, with the same embedder environment the search
 /// child gets.
 ///
@@ -387,6 +411,7 @@ fn rebuild_search_index_with_expected(
     index_dir: &Path,
     expected_documents: u32,
 ) -> TestResult {
+    let home = private_home(workspace)?;
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .env("EE_EMBED_DOWNLOAD", "off")
         .env(
@@ -394,6 +419,7 @@ fn rebuild_search_index_with_expected(
             workspace.join(".ee").join("empty-model-cache"),
         )
         .env_remove("EE_EMBED_MODEL_PATH")
+        .env("HOME", &home)
         .arg("--json")
         .arg("--workspace")
         .arg(workspace)
@@ -466,6 +492,7 @@ fn run_search_json_for_query(
     query: &str,
     limit: u32,
 ) -> Result<String, String> {
+    let home = private_home(workspace)?;
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .env("EE_EMBED_DOWNLOAD", "off")
         .env(
@@ -473,6 +500,7 @@ fn run_search_json_for_query(
             workspace.join(".ee").join("empty-model-cache"),
         )
         .env_remove("EE_EMBED_MODEL_PATH")
+        .env("HOME", &home)
         .arg("--json")
         .arg("--workspace")
         .arg(workspace)
