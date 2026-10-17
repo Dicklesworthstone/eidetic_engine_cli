@@ -121,7 +121,7 @@ pub fn render_unit_body_for_workspace(
     let binary = ee_binary.display();
     let workspace_text = workspace.to_string_lossy();
     let xml_workspace = xml_escape(&workspace_text);
-    let systemd_workspace = workspace_text.replace('%', "%%").replace('\\', "\\\\").replace(' ', "\\x20");
+    let systemd_workspace = workspace_text.replace('%', "%%").replace(' ', "\\x20");
     match kind {
         DaemonServiceKind::Launchd => Some(format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
