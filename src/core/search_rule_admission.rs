@@ -17,6 +17,9 @@ pub(super) use scope::scoped_metadata;
 #[path = "search_revision_admission.rs"]
 pub(super) mod memory_revisions;
 
+#[path = "search_incident_admission.rs"]
+mod incident_cards;
+
 #[cfg(test)]
 #[path = "search_rule_quarantine_tests.rs"]
 mod quarantine_tests;
@@ -235,6 +238,7 @@ pub(super) fn admit_hits(
     read_connection: Option<&DbConnection>,
 ) -> Vec<SearchHit> {
     let hits = memory_revisions::admit_hits(options, hits, degraded, read_connection);
+    let hits = incident_cards::admit_hits(options, hits, degraded, read_connection);
     let ids: BTreeSet<&str> = hits
         .iter()
         .filter(|hit| is_rule_hit(hit))

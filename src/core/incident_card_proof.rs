@@ -45,7 +45,13 @@ pub(crate) struct SessionProofs {
 /// The reserved locator survives an altered prefix, kind or role. Such a row
 /// must not turn into ordinary transcript evidence or feed its own derivation.
 pub(crate) fn requires_proof(span: &StoredEvidenceSpan) -> bool {
-    span.is_derived_incident_card() || span.cass_span_id.starts_with("ee-incident-card:")
+    span.is_derived_incident_card()
+        || span.cass_span_id.starts_with("ee-incident-card:")
+        || span.has_screened_upstream_reference(&format!(
+            "ee-incident-card:{}:{}",
+            super::INCIDENT_CARD_DERIVATION,
+            span.id,
+        ))
 }
 
 /// Equality includes optional source-memory and byte coordinates: extra lineage
@@ -53,17 +59,7 @@ pub(crate) fn requires_proof(span: &StoredEvidenceSpan) -> bool {
 fn matches_draft(card: &StoredEvidenceSpan, draft: &IncidentCardDraft) -> bool {
     card.is_derived_incident_card()
         && card.id == draft.id
-        && card.workspace_id == draft.input.workspace_id
-        && card.session_id == draft.input.session_id
-        && card.cass_span_id == draft.input.cass_span_id
-        && card.memory_id == draft.input.memory_id
-        && card.start_line == draft.input.start_line
-        && card.end_line == draft.input.end_line
-        && card.start_byte == draft.input.start_byte
-        && card.end_byte == draft.input.end_byte
-        && card.excerpt == draft.input.excerpt
-        && card.content_hash == draft.input.content_hash
-        && card.metadata_json == draft.input.metadata_json
+        && card.matches_screened_input(&draft.input).unwrap_or(false)
 }
 
 /// Commit to the exact admitted row, not just its ID or declared content hash.
@@ -71,11 +67,23 @@ fn matches_draft(card: &StoredEvidenceSpan, draft: &IncidentCardDraft) -> bool {
 /// never replace a source hash, citation revision, or durable provenance.
 fn card_signature(span: &StoredEvidenceSpan) -> Result<CardSignature> {
     let bytes = serde_json::to_vec(&(
-        &span.id, &span.workspace_id, &span.session_id, &span.cass_span_id,
-        &span.producer_kind, &span.span_kind, &span.role, &span.memory_id,
-        span.start_line, span.end_line, &span.start_byte, &span.end_byte,
-        &span.excerpt, &span.content_hash, &span.metadata_json,
-    )).map_err(|_| unavailable())?;
+        &span.id,
+        &span.workspace_id,
+        &span.session_id,
+        &span.cass_span_id,
+        &span.producer_kind,
+        &span.span_kind,
+        &span.role,
+        &span.memory_id,
+        span.start_line,
+        span.end_line,
+        &span.start_byte,
+        &span.end_byte,
+        &span.excerpt,
+        &span.content_hash,
+        &span.metadata_json,
+    ))
+    .map_err(|_| unavailable())?;
     let mut hash = blake3::Hasher::new();
     hash.update(b"ee.incident_card.reader_proof.v1\0");
     hash.update(&bytes);
@@ -100,15 +108,24 @@ impl CardChecks {
         }
         if !span.is_derived_incident_card()
             || source_bytes(span) > MAX_SOURCE_BYTES
-            || !span.id.parse::<EvidenceId>().is_ok_and(|id| id.to_string() == span.id)
-            || !span.session_id.parse::<SessionId>().is_ok_and(|id| id.to_string() == span.session_id)
+            || !span
+                .id
+                .parse::<EvidenceId>()
+                .is_ok_and(|id| id.to_string() == span.id)
+            || !span
+                .session_id
+                .parse::<SessionId>()
+                .is_ok_and(|id| id.to_string() == span.session_id)
         {
             self.refused.insert(span.id.clone());
             return Ok(());
         }
         let signature = card_signature(span)?;
         let cards = self.sessions.entry(span.session_id.clone()).or_default();
-        if cards.insert(span.id.clone(), signature).is_some_and(|prior| prior != signature) {
+        if cards
+            .insert(span.id.clone(), signature)
+            .is_some_and(|prior| prior != signature)
+        {
             self.refused.insert(span.id.clone());
         }
         Ok(())
@@ -182,7 +199,9 @@ impl CardChecks {
 }
 
 pub(crate) fn source_bytes(span: &StoredEvidenceSpan) -> usize {
-    span.excerpt.len().saturating_add(span.metadata_json.as_deref().map_or(0, str::len))
+    span.excerpt
+        .len()
+        .saturating_add(span.metadata_json.as_deref().map_or(0, str::len))
 }
 
 pub(crate) fn session_proofs(
@@ -191,8 +210,7 @@ pub(crate) fn session_proofs(
     fingerprint: Option<&str>,
     session_id: &str,
 ) -> Result<SessionProofs> {
-    load_session_proofs(connection, workspace, fingerprint, session_id)
-        .map(|loaded| loaded.proofs)
+    load_session_proofs(connection, workspace, fingerprint, session_id).map(|loaded| loaded.proofs)
 }
 
 /// Own at most one proof-input-bounded session until its reducer has consumed
@@ -220,46 +238,73 @@ fn load_session_proofs(
         return Err(unavailable());
     }
     let count = |index| -> Result<usize> {
-        rows[0].get(index).and_then(Value::as_str)
-            .and_then(|value| value.parse().ok()).ok_or_else(unavailable)
+        rows[0]
+            .get(index)
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(unavailable)
     };
     let row_count = count(0)?;
     let byte_count = count(1)?;
     if row_count == 0 || row_count > MAX_SOURCE_ROWS || byte_count > MAX_SOURCE_BYTES {
         return Ok(LoadedSessionProofs::default());
     }
-    let Some(session) = connection.get_session(session_id).map_err(|_| unavailable())? else {
+    let Some(session) = connection
+        .get_session(session_id)
+        .map_err(|_| unavailable())?
+    else {
         return Ok(LoadedSessionProofs::default());
     };
     if session.id != session_id || session.workspace_id != workspace {
         return Ok(LoadedSessionProofs::default());
     }
-    let stored = connection.list_evidence_spans_for_session(session_id).map_err(|_| unavailable())?;
+    let stored = connection
+        .list_evidence_spans_for_session(session_id)
+        .map_err(|_| unavailable())?;
     if stored.len() != row_count
-        || stored.iter().fold(0_usize, |sum, span| sum.saturating_add(source_bytes(span))) != byte_count
+        || stored
+            .iter()
+            .fold(0_usize, |sum, span| sum.saturating_add(source_bytes(span)))
+            != byte_count
     {
         return Err(unavailable());
     }
-    let (cards, sources): (Vec<_>, Vec<_>) = stored.into_iter()
-        .partition(requires_proof);
-    let cards: BTreeMap<_, _> = cards.into_iter().map(|card| (card.id.clone(), card)).collect();
+    let (cards, sources): (Vec<_>, Vec<_>) = stored.into_iter().partition(requires_proof);
+    let cards: BTreeMap<_, _> = cards
+        .into_iter()
+        .map(|card| (card.id.clone(), card))
+        .collect();
     let mut proofs = SessionProofs::default();
     for arc in session_failure_arcs(workspace, &session, &sources) {
         if fingerprint.is_some_and(|key| {
-            !arc.diagnostics.iter().any(|diagnostic| diagnostic.layered_key().key == key)
+            !arc.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.layered_key().key == key)
         }) {
             continue;
         }
-        let Some(resolution) = &arc.resolution else { continue; };
+        let Some(resolution) = &arc.resolution else {
+            continue;
+        };
         for target in &resolution.repair_ids {
-            proofs.claims.insert(Claim { failure: arc.failure_id.clone(), target: target.clone(), card: false });
+            proofs.claims.insert(Claim {
+                failure: arc.failure_id.clone(),
+                target: target.clone(),
+                card: false,
+            });
         }
         if let Some(draft) = draft_incident_card(workspace, session_id, &sources, &arc)
-            && cards.get(&draft.id).is_some_and(|card| matches_draft(card, &draft))
+            && cards
+                .get(&draft.id)
+                .is_some_and(|card| matches_draft(card, &draft))
         {
             let card = cards.get(&draft.id).ok_or_else(unavailable)?;
             proofs.cards.insert(draft.id.clone(), card_signature(card)?);
-            proofs.claims.insert(Claim { failure: arc.failure_id, target: draft.id, card: true });
+            proofs.claims.insert(Claim {
+                failure: arc.failure_id,
+                target: draft.id,
+                card: true,
+            });
         }
         if proofs.claims.len() > MAX_CLAIMS {
             return Ok(LoadedSessionProofs::default());
@@ -285,7 +330,10 @@ mod reader_visit_tests {
                 fixture.current_card()?
             } else {
                 let id = fixture.old_card()?;
-                fixture.db.get_evidence_span(&id)?.ok_or("historical card")?
+                fixture
+                    .db
+                    .get_evidence_span(&id)?
+                    .ok_or("historical card")?
             };
             let mut checks = CardChecks::default();
             checks.observe(&card)?;
@@ -296,7 +344,10 @@ mod reader_visit_tests {
             checks.visit_verified(&fixture.db, WS, |span| {
                 assert_eq!(card_signature(&span)?, card_signature(&card)?);
                 assert_eq!(span.pack_entity_revision(), card.pack_entity_revision());
-                assert_eq!(span.canonical_provenance_uri(), card.canonical_provenance_uri());
+                assert_eq!(
+                    span.canonical_provenance_uri(),
+                    card.canonical_provenance_uri()
+                );
                 visited.push(span.id);
                 Ok(())
             })?;
@@ -336,7 +387,10 @@ mod reader_visit_tests {
     fn ordinary_candidates_do_not_load_proofs_or_expand_to_unobserved_cards() -> TestResult {
         let fixture = Fixture::new(true)?;
         let _card = fixture.current_card()?;
-        let ordinary = fixture.db.get_evidence_span(&fixture.repair)?.ok_or("repair")?;
+        let ordinary = fixture
+            .db
+            .get_evidence_span(&fixture.repair)?
+            .ok_or("repair")?;
         let mut checks = CardChecks::default();
         checks.observe(&ordinary)?;
         checks.visit_verified_with(
@@ -375,15 +429,18 @@ mod reader_visit_tests {
         let mut checks = CardChecks::default();
         checks.observe(&card)?;
         let mut visits = 0;
-        let error = checks.visit_verified(&fixture.db, WS, |_| {
-            visits += 1;
-            Err(unavailable())
-        }).expect_err("consumer refusal must propagate");
+        let error = checks
+            .visit_verified(&fixture.db, WS, |_| {
+                visits += 1;
+                Err(unavailable())
+            })
+            .expect_err("consumer refusal must propagate");
         assert_eq!(visits, 1);
         assert!(!error.to_string().contains(&fixture.session));
         fixture.db.execute_raw(&format!(
             "UPDATE evidence_spans SET metadata_json = '{}' WHERE id = '{}'",
-            "x".repeat(MAX_SOURCE_BYTES), fixture.failure,
+            serde_json::to_string(&"x".repeat(MAX_SOURCE_BYTES))?,
+            fixture.failure,
         ))?;
         let mut checks = CardChecks::default();
         checks.observe(&card)?;
