@@ -6,8 +6,12 @@
 //! retains successful as well as failed package/test subjects. A clean retry
 //! must not manufacture a repair by dropping previously exercised coverage.
 //! These commitments are never stored or substituted for provenance.
-//! Libtest suite identity is its complete selected inventory: duplicate,
-//! incomplete fail-fast and changed inventories remain unproven.
+//! Libtest anchors unchanged inventories first, then permits only a unique
+//! one-to-one coverage-preserving extension. Duplicate, incomplete fail-fast,
+//! replaced, split, merged and ambiguous inventories remain unproven.
+
+#[path = "cass_error_recall_libtest_growth.rs"]
+mod libtest_growth;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -93,9 +97,10 @@ impl Requirement {
         match execution(&output.text, &decoded) {
             Ok(None) => Self::Other,
             Ok(Some(execution)) if process_complete && execution.complete => {
-                let has_failures = execution.suites.values().any(|outcomes| {
-                    outcomes.values().any(|outcome| *outcome == Outcome::Failed)
-                });
+                let has_failures = execution
+                    .suites
+                    .values()
+                    .any(|outcomes| outcomes.values().any(|outcome| *outcome == Outcome::Failed));
                 if !has_failures {
                     return Self::Other;
                 }
@@ -112,7 +117,10 @@ impl Requirement {
                                 (result != Outcome::Ignored).then_some(name)
                             })
                             .collect();
-                        RequiredSuite { inventory, must_pass }
+                        RequiredSuite {
+                            inventory,
+                            must_pass,
+                        }
                     })
                     .collect();
                 Self::Libtest(required)
@@ -149,19 +157,10 @@ impl Requirement {
                 .eslint_files
                 .as_ref()
                 .is_some_and(|checked| required.is_subset(checked)),
-            Self::Libtest(required) => proof.execution.as_ref().is_some_and(|execution| {
-                required.iter().all(|suite| {
-                    execution
-                        .suites
-                        .get(&suite.inventory)
-                        .is_some_and(|outcomes| {
-                            suite
-                                .must_pass
-                                .iter()
-                                .all(|name| outcomes.get(name) == Some(&Outcome::Passed))
-                        })
-                })
-            }),
+            Self::Libtest(required) => proof
+                .execution
+                .as_ref()
+                .is_some_and(|execution| libtest_growth::verified_by(required, execution)),
         }
     }
 }
@@ -632,3 +631,7 @@ mod tests {
 #[cfg(test)]
 #[path = "cass_error_recall_coverage_preservation_tests.rs"]
 mod preservation_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_libtest_growth_tests.rs"]
+mod growth_tests;

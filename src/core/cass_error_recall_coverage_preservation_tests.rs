@@ -4,8 +4,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::super::{Proof, Requirement};
-use super::tests::{go_suite, lint, output, suite};
 use super::ToolOutput;
+use super::tests::{go_suite, lint, output, suite};
 
 fn verified(failure: &ToolOutput, retry: &ToolOutput) -> bool {
     let required = Requirement::capture(failure, true);
@@ -15,10 +15,18 @@ fn verified(failure: &ToolOutput, retry: &ToolOutput) -> bool {
 
 #[test]
 fn go_preserves_passed_controls_when_accepting_added_regressions() {
-    let failure = go_suite("example.org/cache", &[("TestCache", "fail"), ("TestControl", "pass")]);
-    let complete = go_suite("example.org/cache", &[
-        ("TestRegression", "pass"), ("TestControl", "pass"), ("TestCache", "pass"),
-    ]);
+    let failure = go_suite(
+        "example.org/cache",
+        &[("TestCache", "fail"), ("TestControl", "pass")],
+    );
+    let complete = go_suite(
+        "example.org/cache",
+        &[
+            ("TestRegression", "pass"),
+            ("TestControl", "pass"),
+            ("TestCache", "pass"),
+        ],
+    );
     assert!(verified(&failure, &complete));
     for results in [
         vec![("TestCache", "pass"), ("TestRegression", "pass")],
@@ -38,7 +46,10 @@ fn go_preserves_successful_packages_in_a_multi_package_invocation() {
     let failure = output(format!("{}\n{}", failed_package.text, clean_package.text));
     let repaired = go_suite("example.org/cache", &[("TestCache", "pass")]);
     let extra = go_suite("example.org/new", &[("TestRegression", "pass")]);
-    let complete = output(format!("{}\n{}\n{}", extra.text, clean_package.text, repaired.text));
+    let complete = output(format!(
+        "{}\n{}\n{}",
+        extra.text, clean_package.text, repaired.text
+    ));
     assert!(verified(&failure, &complete));
     assert!(!verified(&failure, &repaired));
     let renamed = go_suite("example.org/Control", &[("TestControl", "pass")]);
@@ -49,11 +60,13 @@ fn go_preserves_successful_packages_in_a_multi_package_invocation() {
 
 #[test]
 fn go_does_not_replace_prior_passes_with_cached_package_summaries() {
-    let failure = output(format!("{}\n{}",
+    let failure = output(format!(
+        "{}\n{}",
         go_suite("a", &[("TestFailure", "fail")]).text,
         go_suite("b", &[("TestControl", "pass")]).text,
     ));
-    let summary_only = output(format!("{}\n{}",
+    let summary_only = output(format!(
+        "{}\n{}",
         go_suite("a", &[("TestFailure", "pass")]).text,
         go_suite("b", &[]).text,
     ));
@@ -64,11 +77,19 @@ fn go_does_not_replace_prior_passes_with_cached_package_summaries() {
 #[test]
 fn eslint_preserves_clean_files_across_json_report_shapes() {
     for before_wrapped in [false, true] {
-        let failure = lint(&[("/src/cache.js", true), ("/src/control.js", false)], before_wrapped);
+        let failure = lint(
+            &[("/src/cache.js", true), ("/src/control.js", false)],
+            before_wrapped,
+        );
         for after_wrapped in [false, true] {
-            let complete = lint(&[
-                ("/src/regression.js", false), ("/src/control.js", false), ("/src/cache.js", false),
-            ], after_wrapped);
+            let complete = lint(
+                &[
+                    ("/src/regression.js", false),
+                    ("/src/control.js", false),
+                    ("/src/cache.js", false),
+                ],
+                after_wrapped,
+            );
             assert!(verified(&failure, &complete));
             for files in [
                 vec![("/src/cache.js", false), ("/src/regression.js", false)],
@@ -84,12 +105,23 @@ fn eslint_preserves_clean_files_across_json_report_shapes() {
 
 #[test]
 fn eslint_added_coverage_does_not_hide_new_errors_or_damaged_reports() {
-    let failure = lint(&[("/src/cache.js", true), ("/src/control.js", false)], false);
-    let mut retry = lint(&[
-        ("/src/cache.js", false), ("/src/control.js", false), ("/src/new.js", true),
-    ], true);
+    let failure = lint(
+        &[("/src/cache.js", true), ("/src/control.js", false)],
+        false,
+    );
+    let mut retry = lint(
+        &[
+            ("/src/cache.js", false),
+            ("/src/control.js", false),
+            ("/src/new.js", true),
+        ],
+        true,
+    );
     assert!(!verified(&failure, &retry));
-    retry = lint(&[("/src/control.js", false), ("/src/cache.js", false)], true);
+    retry = lint(
+        &[("/src/control.js", false), ("/src/cache.js", false)],
+        true,
+    );
     assert!(verified(&failure, &retry));
     retry.text.push_str(" trailing");
     assert!(!verified(&failure, &retry));
@@ -97,12 +129,14 @@ fn eslint_added_coverage_does_not_hide_new_errors_or_damaged_reports() {
 
 #[test]
 fn libtest_preserves_successful_and_ignored_suite_inventories() {
-    let failure = output(format!("{}\n{}\n{}",
+    let failure = output(format!(
+        "{}\n{}\n{}",
         suite(&[("failure", "failed")]),
         suite(&[("control", "ok")]),
         suite(&[("ignored_control", "ignored")]),
     ));
-    let complete = output(format!("{}\n{}\n{}\n{}",
+    let complete = output(format!(
+        "{}\n{}\n{}\n{}",
         suite(&[("new_binary_regression", "ok")]),
         suite(&[("ignored_control", "ignored")]),
         suite(&[("control", "ok")]),
@@ -110,9 +144,22 @@ fn libtest_preserves_successful_and_ignored_suite_inventories() {
     ));
     assert!(verified(&failure, &complete));
     for missing in [
-        format!("{}\n{}", suite(&[("failure", "ok")]), suite(&[("ignored_control", "ignored")])),
-        format!("{}\n{}", suite(&[("failure", "ok")]), suite(&[("control", "ok")])),
-        format!("{}\n{}\n{}", suite(&[("failure", "ok")]), suite(&[("replacement", "ok")]), suite(&[("ignored_control", "ignored")])),
+        format!(
+            "{}\n{}",
+            suite(&[("failure", "ok")]),
+            suite(&[("ignored_control", "ignored")])
+        ),
+        format!(
+            "{}\n{}",
+            suite(&[("failure", "ok")]),
+            suite(&[("control", "ok")])
+        ),
+        format!(
+            "{}\n{}\n{}",
+            suite(&[("failure", "ok")]),
+            suite(&[("replacement", "ok")]),
+            suite(&[("ignored_control", "ignored")])
+        ),
     ] {
         let retry = output(missing);
         assert!(retry.succeeded());
@@ -128,8 +175,16 @@ fn libtest_previous_passes_require_real_execution_on_retry() {
     assert!(!verified(&failure, &ignored));
     let complete = output(suite(&[("control", "ok"), ("failure", "ok")]));
     assert!(verified(&failure, &complete));
-    let separate = output(format!("{}\n{}", suite(&[("failure", "failed")]), suite(&[("control", "ok")])));
-    let skipped_suite = output(format!("{}\n{}", suite(&[("failure", "ok")]), suite(&[("control", "ignored")])));
+    let separate = output(format!(
+        "{}\n{}",
+        suite(&[("failure", "failed")]),
+        suite(&[("control", "ok")])
+    ));
+    let skipped_suite = output(format!(
+        "{}\n{}",
+        suite(&[("failure", "ok")]),
+        suite(&[("control", "ignored")])
+    ));
     assert!(skipped_suite.succeeded());
     assert!(!verified(&separate, &skipped_suite));
 }
@@ -138,17 +193,28 @@ fn libtest_previous_passes_require_real_execution_on_retry() {
 fn libtest_retains_its_anonymous_suite_identity_contract() {
     let failure = output(suite(&[("failure", "failed"), ("control", "ok")]));
     let changed_inventory = output(suite(&[
-        ("failure", "ok"), ("control", "ok"), ("new_test", "ok"),
+        ("failure", "ok"),
+        ("control", "ok"),
+        ("new_test", "ok"),
     ]));
     assert!(changed_inventory.succeeded());
-    // Unlike Go, raw libtest has no binary-qualified subject here. Keep the
-    // complete-inventory identity rule; do not guess which binary grew.
-    assert!(!verified(&failure, &changed_inventory));
+    // A single coverage-preserving extension is unambiguous. Two expanded
+    // anonymous binaries containing the old inventory cannot be disambiguated.
+    assert!(verified(&failure, &changed_inventory));
+    let ambiguous = output(format!(
+        "{}\n{}",
+        changed_inventory.text,
+        suite(&[("failure", "ok"), ("control", "ok"), ("another_test", "ok"),])
+    ));
+    assert!(ambiguous.succeeded());
+    assert!(!verified(&failure, &ambiguous));
 }
 
 #[test]
 fn clean_controls_beyond_the_diagnostic_display_cap_still_matter() {
-    let names = (0..16).map(|index| format!("TestControl{index}")).collect::<Vec<_>>();
+    let names = (0..16)
+        .map(|index| format!("TestControl{index}"))
+        .collect::<Vec<_>>();
     let mut before = vec![("TestFailure", "fail")];
     before.extend(names.iter().map(|name| (name.as_str(), "pass")));
     let failure = go_suite("example.org/cache", &before);
@@ -158,7 +224,9 @@ fn clean_controls_beyond_the_diagnostic_display_cap_still_matter() {
     assert!(verified(&failure, &complete));
     after.pop();
     assert!(!verified(&failure, &go_suite("example.org/cache", &after)));
-    let files = (0..16).map(|index| format!("/src/control-{index}.js")).collect::<Vec<_>>();
+    let files = (0..16)
+        .map(|index| format!("/src/control-{index}.js"))
+        .collect::<Vec<_>>();
     let mut before = vec![("/src/failure.js", true)];
     before.extend(files.iter().map(|file| (file.as_str(), false)));
     let failure = lint(&before, true);
@@ -189,9 +257,18 @@ fn later_polls_keep_newly_observed_controls_and_do_not_downgrade() {
 #[test]
 fn preserved_scope_does_not_replace_process_completion() {
     for (failure, mut retry) in [
-        (go_suite("a", &[("TestFailure", "fail"), ("TestControl", "pass")]), go_suite("a", &[("TestFailure", "pass"), ("TestControl", "pass")])),
-        (lint(&[("/a.js", true), ("/b.js", false)], false), lint(&[("/a.js", false), ("/b.js", false)], true)),
-        (output(suite(&[("failure", "failed"), ("control", "ok")])), output(suite(&[("failure", "ok"), ("control", "ok")]))),
+        (
+            go_suite("a", &[("TestFailure", "fail"), ("TestControl", "pass")]),
+            go_suite("a", &[("TestFailure", "pass"), ("TestControl", "pass")]),
+        ),
+        (
+            lint(&[("/a.js", true), ("/b.js", false)], false),
+            lint(&[("/a.js", false), ("/b.js", false)], true),
+        ),
+        (
+            output(suite(&[("failure", "failed"), ("control", "ok")])),
+            output(suite(&[("failure", "ok"), ("control", "ok")])),
+        ),
     ] {
         assert!(verified(&failure, &retry));
         assert!(!Requirement::capture(&failure, false).is_verified_by(&Proof::capture(&retry)));
