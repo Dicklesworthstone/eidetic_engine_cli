@@ -3694,6 +3694,11 @@ pub struct PackArgs {
     #[arg(long, value_name = "PACK_HASH")]
     pub since: Option<String>,
 
+    /// Maximum serialized delta bytes before falling back to the full pack.
+    /// Includes the trailing line ending; does not limit full-pack responses.
+    #[arg(long = "max-delta-bytes", value_name = "BYTES")]
+    pub max_delta_bytes: Option<u64>,
+
     /// Task scope for baseline recording and `--since last` resolution.
     #[arg(long = "task-key", value_name = "KEY")]
     pub task_key: Option<String>,
@@ -46695,14 +46700,10 @@ where
                 .as_ref()
                 .map(|resolved| resolved.task_lens.clone()),
             max_results: lens_overlay.and_then(|overlay| overlay.max_results),
-            // bd-7lvbg.6 supersedes the bd-1es1m scoping: the pack shim
-            // forwards --since/--task-key/--no-baseline-write so the headline
-            // surface gets baseline ergonomics; --max-delta-bytes stays a
-            // context-only tuning knob.
             since: args.since.clone(),
             task_key: args.task_key.clone(),
             no_baseline_write: args.no_baseline_write,
-            max_delta_bytes: None,
+            max_delta_bytes: args.max_delta_bytes,
         };
         return handle_context_pack_query(
             process,
@@ -75775,6 +75776,71 @@ mod tests {
             &serde_json::json!("degraded"),
             "combined disk posture",
         )
+    }
+
+    #[test]
+    fn parser_accepts_pack_delta_byte_budget_and_preserves_uncapped_default() -> TestResult {
+        for (raw, expected) in [("0", 0), ("4096", 4096), ("18446744073709551615", u64::MAX)] {
+            let parsed = Cli::try_parse_from([
+                "ee",
+                "pack",
+                "release",
+                "--since",
+                "blake3:prior-pack",
+                "--max-delta-bytes",
+                raw,
+                "--json",
+            ])
+            .map_err(|error| format!("pack delta byte-budget parse failed: {error}"))?;
+            let Some(Command::Pack(args)) = parsed.command else {
+                return Err("expected pack command".to_owned());
+            };
+            ensure_equal(
+                &args.max_delta_bytes,
+                &Some(expected),
+                "pack delta byte budget",
+            )?;
+            ensure_equal(
+                &args.since.as_deref(),
+                &Some("blake3:prior-pack"),
+                "pack delta baseline",
+            )?;
+        }
+
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "release",
+            "--since",
+            "blake3:prior-pack",
+            "--json",
+        ])
+        .map_err(|error| format!("uncapped pack delta parse failed: {error}"))?;
+        let Some(Command::Pack(args)) = parsed.command else {
+            return Err("expected pack command".to_owned());
+        };
+        ensure_equal(&args.max_delta_bytes, &None, "default delta byte budget")
+    }
+
+    #[test]
+    fn parser_rejects_invalid_pack_delta_byte_budgets() -> TestResult {
+        for invalid in ["-1", "1.5", "18446744073709551616", "unlimited"] {
+            let argument = format!("--max-delta-bytes={invalid}");
+            ensure(
+                Cli::try_parse_from([
+                    "ee",
+                    "pack",
+                    "release",
+                    "--since",
+                    "last",
+                    argument.as_str(),
+                    "--json",
+                ])
+                .is_err(),
+                format!("invalid byte budget {invalid:?} must be rejected"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

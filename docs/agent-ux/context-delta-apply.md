@@ -61,6 +61,21 @@ Use `data.tokenSavings.netPackTokens` as the logical size of the reconstructed
 new pack. That value can shrink when items are removed even though the delta
 payload itself still costs prompt tokens.
 
+Use `--max-delta-bytes <BYTES>` with `ee pack --since` to bound the emitted
+delta, including its trailing newline:
+
+```bash
+ee pack "continue the release" --since last --max-delta-bytes 8192 --json
+```
+
+The limit applies after response degradations are merged into a JSON delta,
+and also applies to the rendered text of a markdown delta. If the delta exceeds
+the limit, `ee` returns the full pack with `context_delta_larger_than_full`.
+It preserves the complete pack; this flag does not impose a byte limit on that
+fallback response. Omit the flag to keep the existing automatic choice between
+a delta and a full pack. For JSON deltas, `data.tokenSavings.deltaBytes` reports
+the actual output bytes, including the newline.
+
 ## Applying A Delta
 
 First validate the envelope and its association with the local baseline. It
