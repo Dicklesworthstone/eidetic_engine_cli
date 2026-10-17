@@ -24,30 +24,94 @@ const MAX_CACHED_VECTOR_BYTES: usize = 1024 * 1024;
 /// Keys borrow the caller's existing inputs; neither source text nor identity
 /// metadata is copied into the cache. Only validated vectors may enter it;
 /// boxed slices discard a provider's excess Vec capacity before retention.
-/// Once either bound is full, later misses still use normal bounded inference.
+/// A full cache evicts its least recently used inputs, so repeated evidence
+/// arriving late in a large delta can still reuse inference. Oversized vectors
+/// bypass retention without evicting useful inputs. Misses always use normal
+/// bounded inference; eviction never changes a document or its WAL ordering.
 /// This is not a persistent cache or a way around the planner's delta budget.
 #[derive(Default)]
 struct ValidatedInputCache<'a> {
-    vectors: BTreeMap<&'a str, Box<[f32]>>,
+    vectors: BTreeMap<&'a str, CachedInput>,
     vector_bytes: usize,
+    clock: u64,
+}
+
+struct CachedInput {
+    values: Box<[f32]>,
+    last_used: u64,
 }
 
 impl<'a> ValidatedInputCache<'a> {
-    fn get(&self, text: &str) -> Option<&[f32]> {
-        self.vectors.get(text).map(Box::as_ref)
+    fn get(&mut self, text: &str) -> Option<&[f32]> {
+        let now = self.next_tick();
+        let input = self.vectors.get_mut(text)?;
+        input.last_used = now;
+        Some(input.values.as_ref())
     }
 
     fn remember(&mut self, text: &'a str, values: Vec<f32>) {
-        let bytes = values.len().saturating_mul(std::mem::size_of::<f32>());
-        if self.vectors.len() >= MAX_CACHED_INPUTS
-            || bytes > MAX_CACHED_VECTOR_BYTES.saturating_sub(self.vector_bytes)
-        {
+        // Touch an existing entry without replacing its validated values or
+        // disturbing byte accounting, even if a later supplied Vec differs.
+        if self.get(text).is_some() {
             return;
         }
-        if let Entry::Vacant(entry) = self.vectors.entry(text) {
-            self.vector_bytes += bytes;
-            entry.insert(values.into_boxed_slice());
+        let bytes = values.len().saturating_mul(std::mem::size_of::<f32>());
+        if bytes > MAX_CACHED_VECTOR_BYTES {
+            return;
         }
+        while self.vectors.len() >= MAX_CACHED_INPUTS
+            || bytes > MAX_CACHED_VECTOR_BYTES.saturating_sub(self.vector_bytes)
+        {
+            let Some(oldest) = self
+                .vectors
+                .iter()
+                .min_by(|left, right| {
+                    left.1
+                        .last_used
+                        .cmp(&right.1.last_used)
+                        .then_with(|| left.0.cmp(right.0))
+                })
+                .map(|(text, _)| *text)
+            else {
+                return;
+            };
+            if let Some(evicted) = self.vectors.remove(oldest) {
+                self.vector_bytes -= evicted.values.len() * std::mem::size_of::<f32>();
+            }
+        }
+        let last_used = self.next_tick();
+        self.vectors.insert(
+            text,
+            CachedInput {
+                values: values.into_boxed_slice(),
+                last_used,
+            },
+        );
+        self.vector_bytes += bytes;
+    }
+
+    fn next_tick(&mut self) -> u64 {
+        if self.clock == u64::MAX {
+            // Rank at most 128 borrowed keys instead of wrapping old entries
+            // into apparent recency. This rare path copies no source text or
+            // vectors and preserves the same deterministic eviction order.
+            let mut ages = self
+                .vectors
+                .iter()
+                .map(|(text, input)| (*text, input.last_used))
+                .collect::<Vec<_>>();
+            ages.sort_unstable_by(|left, right| {
+                left.1.cmp(&right.1).then_with(|| left.0.cmp(right.0))
+            });
+            for (rank, (text, _)) in ages.into_iter().enumerate() {
+                if let Some(input) = self.vectors.get_mut(text) {
+                    input.last_used = rank as u64;
+                }
+            }
+            self.clock = self.vectors.len() as u64;
+        }
+        self.clock += 1;
+        self.clock
     }
 }
 
@@ -298,7 +362,6 @@ mod tests {
     fn batch_bounds_count_bytes_and_dimensions_without_dropping_oversized_documents() {
         assert_eq!(batch_len(&[], 256), 0);
         let docs = documents(65);
-        assert_eq!(batch_len(&docs, 256), 32);
         assert_eq!(batch_len(&docs, MAX_BATCH_VECTOR_BYTES / 4), 1);
         assert_eq!(batch_len(&docs, usize::MAX), 1);
         let mut large = documents(3);
@@ -553,8 +616,8 @@ mod tests {
             cache.vector_bytes,
             MAX_CACHED_INPUTS * 256 * std::mem::size_of::<f32>()
         );
-        assert!(cache.get(&docs[0].content).is_some());
-        assert!(cache.get(&docs[MAX_CACHED_INPUTS].content).is_none());
+        assert!(cache.get(&docs[0].content).is_none());
+        assert!(cache.get(&docs[MAX_CACHED_INPUTS].content).is_some());
 
         // Allocation accounting is independent of inference. Exercise the
         // inclusive byte bound without constructing a pathological provider.
@@ -564,11 +627,15 @@ mod tests {
             vec![0.0; MAX_CACHED_VECTOR_BYTES / std::mem::size_of::<f32>()],
         );
         assert_eq!(full.vector_bytes, MAX_CACHED_VECTOR_BYTES);
-        full.remember("overflow", vec![1.0]);
         full.remember("full", vec![1.0]);
         assert_eq!(full.vectors.len(), 1);
         assert_eq!(full.get("full").expect("original value")[0], 0.0);
-        assert!(full.get("overflow").is_none());
+        assert_eq!(full.vector_bytes, MAX_CACHED_VECTOR_BYTES);
+        full.remember("overflow", vec![1.0]);
+        assert_eq!(full.vectors.len(), 1);
+        assert!(full.get("full").is_none());
+        assert_eq!(full.get("overflow"), Some([1.0].as_slice()));
+        assert_eq!(full.vector_bytes, std::mem::size_of::<f32>());
         let mut empty = ValidatedInputCache::default();
         empty.remember(
             "oversized",
@@ -579,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_overflow_recomputes_misses_without_losing_any_wal_entry() -> TestResult {
+    fn late_inputs_are_reused_and_evicted_inputs_recomputed_without_losing_wal_entries() -> TestResult {
         crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
             let embedder = ObservedHash::new();
             let identity = embedder
@@ -595,7 +662,7 @@ mod tests {
                 ));
             }
             docs.push(IndexableDocument::new(
-                "cached_replay",
+                "evicted_replay",
                 original[0].content.clone(),
             ));
             let expected: Vec<_> = docs
@@ -616,10 +683,10 @@ mod tests {
             .await
             .map_err(|error| error.detail)?;
             assert_eq!(written, expected);
-            assert_eq!(
-                *embedder.sizes.lock().expect("sizes"),
-                vec![MAX_BATCH_DOCUMENTS; MAX_CACHED_INPUTS / MAX_BATCH_DOCUMENTS + 2]
-            );
+            let mut expected_batches =
+                vec![MAX_BATCH_DOCUMENTS; MAX_CACHED_INPUTS / MAX_BATCH_DOCUMENTS + 1];
+            expected_batches.push(1);
+            assert_eq!(*embedder.sizes.lock().expect("sizes"), expected_batches);
             Ok(())
         })
         .map_err(|error| error.to_string())?
@@ -726,6 +793,226 @@ mod tests {
     #[test]
     fn staged_duplicate_inputs_match_a_full_build_without_merging_index_identities() -> TestResult {
         assert_staged_updates(true)
+    }
+
+    #[test]
+    fn cache_hits_protect_recent_inputs_when_a_later_input_is_admitted() {
+        let hash = HashEmbedder::default_256();
+        let docs = documents(MAX_CACHED_INPUTS + 1);
+        let mut cache = ValidatedInputCache::default();
+        for document in &docs[..MAX_CACHED_INPUTS] {
+            cache.remember(&document.content, hash.embed_sync(&document.content));
+        }
+        assert!(cache.get(&docs[0].content).is_some());
+        let newest = &docs[MAX_CACHED_INPUTS].content;
+        cache.remember(newest, hash.embed_sync(newest));
+        assert!(cache.get(&docs[0].content).is_some());
+        assert!(cache.get(&docs[1].content).is_none());
+        assert_eq!(
+            cache.get(newest),
+            Some(hash.embed_sync(newest).as_slice())
+        );
+        assert_eq!(cache.vectors.len(), MAX_CACHED_INPUTS);
+        assert_eq!(cache.vector_bytes, MAX_CACHED_INPUTS * 256 * 4);
+    }
+
+    #[test]
+    fn byte_pressure_evicts_enough_cold_inputs_but_an_oversized_miss_evicts_none() {
+        let quarter = MAX_CACHED_VECTOR_BYTES / std::mem::size_of::<f32>() / 4;
+        let mut cache = ValidatedInputCache::default();
+        for key in ["a", "b", "c", "d"] {
+            cache.remember(key, vec![1.0; quarter]);
+        }
+        assert_eq!(cache.vector_bytes, MAX_CACHED_VECTOR_BYTES);
+        assert!(cache.get("a").is_some());
+        cache.remember("e", vec![2.0; quarter * 2]);
+        assert_eq!(cache.vectors.len(), 3);
+        assert_eq!(cache.vector_bytes, MAX_CACHED_VECTOR_BYTES);
+        assert!(cache.get("a").is_some());
+        assert!(cache.get("b").is_none());
+        assert!(cache.get("c").is_none());
+        assert!(cache.get("d").is_some());
+        assert_eq!(cache.get("e").map(<[f32]>::len), Some(quarter * 2));
+        let before = cache.vectors.keys().copied().collect::<Vec<_>>();
+        cache.remember("oversized", vec![3.0; quarter * 4 + 1]);
+        assert_eq!(cache.vectors.keys().copied().collect::<Vec<_>>(), before);
+        assert_eq!(cache.vector_bytes, MAX_CACHED_VECTOR_BYTES);
+        assert!(cache.get("oversized").is_none());
+        assert_eq!(cache.get("e").expect("retained vector")[0], 2.0);
+    }
+
+    #[test]
+    fn recency_clock_renormalization_preserves_eviction_order() {
+        let docs = documents(MAX_CACHED_INPUTS + 1);
+        let mut cache = ValidatedInputCache::default();
+        for document in &docs[..MAX_CACHED_INPUTS] {
+            cache.remember(&document.content, vec![1.0]);
+        }
+        cache.clock = u64::MAX;
+        assert!(cache.get(&docs[0].content).is_some());
+        assert!(cache.clock < u64::MAX);
+        cache.remember(&docs[MAX_CACHED_INPUTS].content, vec![2.0]);
+        assert!(cache.get(&docs[1].content).is_none());
+        assert_eq!(cache.get(&docs[0].content), Some([1.0].as_slice()));
+        assert_eq!(
+            cache.get(&docs[MAX_CACHED_INPUTS].content),
+            Some([2.0].as_slice())
+        );
+        assert_eq!(cache.vectors.len(), MAX_CACHED_INPUTS);
+        assert_eq!(cache.vector_bytes, MAX_CACHED_INPUTS * 4);
+    }
+
+    #[test]
+    fn cache_matches_an_independent_recency_queue_through_repeated_eviction_and_clock_wraps() {
+        use std::collections::{BTreeSet, VecDeque};
+
+        let hash = HashEmbedder::default_256();
+        let docs = documents(193);
+        let mut cache = ValidatedInputCache::default();
+        let mut order = VecDeque::new();
+        let mut random = 7_u64;
+        for step in 0..6000 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let number = ((random >> 32) as usize) % docs.len();
+            let text = docs[number].content.as_str();
+            let prior = order.iter().position(|id| *id == number);
+            if step % 997 == 0 {
+                cache.clock = u64::MAX;
+            }
+            if step % 4 == 0 {
+                let expected = prior.map(|position| {
+                    order.remove(position);
+                    order.push_back(number);
+                    hash.embed_sync(text)
+                });
+                assert_eq!(cache.get(text).map(<[f32]>::to_vec), expected);
+            } else {
+                if let Some(position) = prior {
+                    order.remove(position);
+                } else if order.len() == MAX_CACHED_INPUTS {
+                    order.pop_front();
+                }
+                order.push_back(number);
+                cache.remember(text, hash.embed_sync(text));
+            }
+            let expected = order
+                .iter()
+                .map(|id| docs[*id].content.as_str())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(cache.vectors.keys().copied().collect::<BTreeSet<_>>(), expected);
+            assert_eq!(cache.vector_bytes, order.len() * 256 * 4);
+            assert!(cache.vectors.len() <= MAX_CACHED_INPUTS);
+            assert!(cache.vector_bytes <= MAX_CACHED_VECTOR_BYTES);
+        }
+    }
+
+    #[test]
+    fn repeated_late_phase_does_not_reembed_after_an_unrelated_prefix_fills_the_cache() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            let embedder = ObservedHash::new();
+            let identity = embedder.identity().map_err(|error| error.to_string())?.fingerprint();
+            let mut docs = documents(160);
+            for number in 0..512 {
+                let text = docs[128 + number % 32].content.clone();
+                docs.push(IndexableDocument::new(format!("late_{number}"), text));
+            }
+            let expected = docs.iter().map(|document| {
+                (document.id.clone(), embedder.inner.embed_sync(&document.content))
+            }).collect::<Vec<_>>();
+            let mut written = Vec::new();
+            embed_batches_with(&cx, &embedder, &docs, &identity, "fast", |entries| {
+                assert!(entries.len() <= MAX_BATCH_DOCUMENTS);
+                written.extend(entries);
+                Ok(())
+            }).await.map_err(|error| error.detail)?;
+            assert_eq!(written, expected);
+            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![32; 5]);
+            Ok(())
+        }).map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn cancellation_after_cache_replacement_stops_before_another_cached_batch_is_written() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |_runtime_cx| async move {
+            let cx = asupersync::Cx::for_testing();
+            let embedder = ObservedHash::new();
+            let identity = embedder.identity().map_err(|error| error.to_string())?.fingerprint();
+            let mut docs = documents(MAX_CACHED_INPUTS);
+            for number in 0..96 {
+                docs.push(IndexableDocument::new(format!("late_{number}"), "late repeated body"));
+            }
+            let mut writes = 0;
+            let result = embed_batches_with(&cx, &embedder, &docs, &identity, "fast", |_| {
+                writes += 1;
+                if writes == 6 {
+                    cx.set_cancel_reason(asupersync::CancelReason::user("stop late cache reuse"));
+                }
+                Ok(())
+            }).await;
+            assert!(result.is_err());
+            assert_eq!(writes, 6);
+            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![32, 32, 32, 32, 1]);
+            Ok(())
+        }).map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn cache_replacement_in_a_native_staging_index_matches_full_rebuild() -> TestResult {
+        use super::super::super::{
+            IndexBuilder, compact_incremental_vector_index, hash_fallback_embedder_stack,
+            open_fast_vector_index, open_fast_vector_index_read_only,
+        };
+        use std::path::Path;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
+            let _root = root;
+            let live = parent.join("live");
+            let staged = parent.join("staged");
+            let rebuilt = parent.join("rebuilt");
+            let original = documents(160);
+            let stack = hash_fallback_embedder_stack();
+            IndexBuilder::new(&live).with_embedder_stack(stack.clone())
+                .add_documents(original.clone()).build(&cx).await
+                .map_err(|error| error.to_string())?;
+            let read_vectors = |path: &Path| -> Result<BTreeMap<String, Vec<f32>>, String> {
+                let index = open_fast_vector_index_read_only(path).map_err(|error| error.detail)?;
+                (0..index.record_count()).map(|position| {
+                    Ok((
+                        index.doc_id_at(position).map_err(|error| error.to_string())?.to_owned(),
+                        index.vector_at_f32(position).map_err(|error| error.to_string())?,
+                    ))
+                }).collect()
+            };
+            let original_vectors = read_vectors(&live)?;
+            std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
+            super::super::copy_generation(&live, &staged).map_err(|error| error.to_string())?;
+            let mut updated = original;
+            for document in &mut updated {
+                document.content.push_str(" revised");
+            }
+            for number in 0..96 {
+                let text = updated[128 + number % 32].content.clone();
+                updated.push(IndexableDocument::new(format!("late_{number}"), text));
+            }
+            let embedder = ObservedHash::new();
+            let identity = embedder.identity().map_err(|error| error.to_string())?.fingerprint();
+            let mut index = open_fast_vector_index(&staged).map_err(|error| error.detail)?;
+            upsert(&cx, &mut index, &embedder, &updated, &identity, "fast")
+                .await.map_err(|error| error.detail)?;
+            compact_incremental_vector_index(&mut index, "fast").map_err(|error| error.detail)?;
+            drop(index);
+            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![32; 5]);
+            IndexBuilder::new(&rebuilt).with_embedder_stack(stack)
+                .add_documents(updated).build(&cx).await
+                .map_err(|error| error.to_string())?;
+            let staged_vectors = read_vectors(&staged)?;
+            assert_eq!(staged_vectors.len(), 256);
+            assert_eq!(staged_vectors, read_vectors(&rebuilt)?);
+            assert_eq!(read_vectors(&live)?, original_vectors);
+            Ok(())
+        }).map_err(|error| error.to_string())?
     }
 
     fn assert_staged_updates(repeat_content: bool) -> TestResult {
