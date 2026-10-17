@@ -438,9 +438,29 @@ fn run_search_json_for_query(
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("search stderr was not UTF-8: {error}"))?;
 
+    // Print STDOUT too, and the exit code.
+    //
+    // This runs with `--json`, and `ee` puts its structured error envelope on
+    // STDOUT in that mode -- stderr is deliberately kept clean, which other
+    // tests in this repo assert outright. So a failure message carrying only
+    // stderr is structurally blind: it reported
+    //
+    //     "search --json should succeed; stderr: "
+    //
+    // on bd-hwye2, an empty string, and the actual reason was sitting unread
+    // in stdout. Exit status alone could not even distinguish a usage refusal
+    // from a storage error.
     ensure(
         output.status.success(),
-        format!("search --json should succeed; stderr: {stderr}"),
+        format!(
+            "search --json should succeed; exit {:?}; stderr: {stderr}; stdout: {}",
+            output.status.code(),
+            if stdout.trim().is_empty() {
+                "<empty>".to_owned()
+            } else {
+                stdout.chars().take(600).collect::<String>()
+            }
+        ),
     )?;
     ensure(
         stderr.is_empty(),

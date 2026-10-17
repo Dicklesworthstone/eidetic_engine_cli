@@ -3080,9 +3080,24 @@ mod tests {
         let stderr = String::from_utf8(output.stderr)
             .map_err(|error| format!("search stderr was not UTF-8: {error}"))?;
 
+        // Print STDOUT too. The assertion immediately below REQUIRES stderr to
+        // be empty, so reporting only stderr here can never carry the reason:
+        // under `--json` the structured error envelope goes to stdout by
+        // design. The sibling of this message in
+        // tests/search_deterministic_golden.rs failed on bd-hwye2 as
+        // "search --json should succeed; stderr: " -- an empty string -- while
+        // the cause sat unread in stdout.
         ensure(
             output.status.success(),
-            format!("search --json should succeed; stderr: {stderr}"),
+            format!(
+                "search --json should succeed; exit {:?}; stderr: {stderr}; stdout: {}",
+                output.status.code(),
+                if stdout.trim().is_empty() {
+                    "<empty>".to_owned()
+                } else {
+                    stdout.chars().take(600).collect::<String>()
+                }
+            ),
         )?;
         ensure(
             stderr.is_empty(),
