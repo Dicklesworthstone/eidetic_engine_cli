@@ -2761,10 +2761,26 @@ pub fn record_daemon_foreground_start(
         });
     }
 
+    // Reject invalid requests before any allocation, journal creation or mutation.
+    // The steward enforces the same limits at execution time.
+    if options.workspace.trim().is_empty() {
+        return Err("Daemon workspace must not be empty".to_owned());
+    }
+    if options.tick_limit == 0 || options.tick_limit > crate::steward::MAX_DAEMON_FOREGROUND_TICK_LIMIT {
+        return Err(format!("Daemon foreground tick limit must be between 1 and {}", crate::steward::MAX_DAEMON_FOREGROUND_TICK_LIMIT));
+    }
+    if options.interval_ms > crate::steward::MAX_DAEMON_FOREGROUND_INTERVAL_MS {
+        return Err(format!("Daemon foreground interval must be no greater than {} ms", crate::steward::MAX_DAEMON_FOREGROUND_INTERVAL_MS));
+    }
+    if options.job_types.is_empty() {
+        return Err("Daemon foreground mode requires at least one steward job type".to_owned());
+    }
+
     let recorded_at = Utc::now().to_rfc3339();
     let run_id = daemon_run_id(workspace_path, &recorded_at);
-    let mut rows = Vec::new();
-    for tick in 1..=options.tick_limit {
+    // Only the first tick can be running. Never materialize future work up front.
+    let mut rows = Vec::with_capacity(options.job_types.len());
+    for tick in 1..=1 {
         for (offset, job_type) in options.job_types.iter().enumerate() {
             let runner_job_id = runner_job_id(offset);
             rows.push(DaemonJobRow {
@@ -2939,19 +2955,29 @@ pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, 
     // `src/core/why.rs::fetch_coordination_fallback_evidence` (b040cde7).
     let reader = BufReader::new(file.take(DAEMON_JOB_TABLE_MAX_BYTES));
     let mut rows = Vec::new();
-    for (index, line) in reader.lines().enumerate() {
+    let mut lines = reader.split(b'\\n');
+    let mut index = 0;
+    while let Some(line) = lines.next() {
+        index += 1;
         let line = line.map_err(|error| format!("Failed to read daemon job row: {error}"))?;
-        if line.trim().is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let row = serde_json::from_str::<DaemonJobRow>(&line).map_err(|error| {
-            format!(
-                "Failed to parse daemon job row {} in {}: {error}",
-                index + 1,
-                table_path.display()
-            )
-        })?;
-        rows.push(row);
+        match serde_json::from_slice::<DaemonJobRow>(&line) {
+            Ok(row) => rows.push(row),
+            Err(error) => {
+                // A torn final append without a newline is recoverable. Preserve
+                // every previously committed record, but never mask middle-row
+                // corruption or a malformed newline-terminated record.
+                if lines.next().is_none() && !line.ends_with(b"\\n") && error.is_eof() {
+                    break;
+                }
+                return Err(format!(
+                    "Failed to parse daemon job row {} in {}: {error}",
+                    index, table_path.display()
+                ));
+            }
+        }
     }
     Ok(rows)
 }
