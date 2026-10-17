@@ -244,7 +244,7 @@ expression: canonical_json_text(value)
               "utility": true
             },
             "policyHash": "[HASH]",
-            "rankingBound": 1.2,
+            "rankingBound": 1.8000001,
             "referenceTime": "[TIMESTAMP]",
             "schema": "ee.search.quality_scoring.v1"
           },

@@ -864,7 +864,45 @@ fn is_timing_degradation(item: &Value) -> bool {
         .is_some_and(|code| TIMING_DEGRADED_CODES.contains(&code))
 }
 
+/// Replace the digit runs inside the WAL sidecar warning.
+///
+/// bd-b3bhh. `doctor_json_contract` committed a message of the form
+///
+///     "WAL sidecar is 5903992 bytes across 1433 frames, larger than the
+///      2510848-byte database it describes; every connection open replays it."
+///
+/// and a later run produced 6283032 / 1525 / 2596864. Those three numbers are
+/// a property of how much the fixture happened to write before the check ran,
+/// not of the surface under test, and they move every run. The WARNING is the
+/// contract -- that a WAL sidecar outgrew its database and will be replayed on
+/// every open -- and that survives this intact; only its digits are erased.
+///
+/// Scrubbed rather than dropped, deliberately: removing the degradation would
+/// also hide the case where the warning stops being emitted at all, which is a
+/// real regression this contract should still catch.
+fn normalize_wal_sidecar_counts(text: &str) -> String {
+    if !text.contains("WAL sidecar is") {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character.is_ascii_digit() {
+            while chars.peek().is_some_and(char::is_ascii_digit) {
+                chars.next();
+            }
+            out.push_str("[COUNT]");
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
 fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
+    if text.contains("WAL sidecar is") {
+        return normalize_wal_sidecar_counts(text);
+    }
     if text.starts_with("blake3:") || text.starts_with("sha256:") {
         return "[HASH]".to_string();
     }
