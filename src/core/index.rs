@@ -3227,23 +3227,23 @@ where
 {
     let cx = publish_lock.cx;
     index_checkpoint(cx)?;
-    let staging_dir = create_publish_staging_dir(index_dir)?;
+    let staging = UnpublishedIndexStage::create(index_dir)?;
     let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
     // Record what this generation indexes so the next write can publish only
     // its delta (bd-reality-core-convergence-1azkt.57).
     let digests = delta::DocDigests::new(&stack, &indexable_docs);
-    let stats = build_index_generation(cx, &staging_dir, stack, indexable_docs).await?;
-    let stats = validate_built_generation(&staging_dir, stats, document_counts)
+    let stats = build_index_generation(cx, staging.path(), stack, indexable_docs).await?;
+    let stats = validate_built_generation(staging.path(), stats, document_counts)
         .map_err(IndexRebuildError::Index)?;
-    digests.write(&staging_dir)?;
+    digests.write(staging.path())?;
     // Flush large payloads while cancellation is still available and before
     // taking the writer fence. Metadata is the recoverability marker; publish
     // it only after the final lease check below.
-    sync_index_generation(&staging_dir, || index_checkpoint(cx))?;
+    sync_index_generation(staging.path(), || index_checkpoint(cx))?;
     publish_staged_generation(
         publish_lock,
         index_dir,
-        &staging_dir,
+        staging,
         generation,
         document_counts,
         embedder_fingerprint.as_ref(),
@@ -3259,7 +3259,7 @@ where
 async fn publish_staged_generation<F>(
     publish_lock: &IndexPublishLockOwner<'_>,
     index_dir: &Path,
-    staging_dir: &Path,
+    mut staging: UnpublishedIndexStage,
     generation: u64,
     document_counts: IndexDocumentCounts,
     embedder_fingerprint: Option<&IndexEmbedderFingerprint>,
@@ -3275,12 +3275,16 @@ where
         .with_generation_fence(index_dir, || {
             cx.masked(|| {
                 write_index_metadata(
-                    staging_dir,
+                    staging.path(),
                     generation,
                     document_counts,
                     embedder_fingerprint,
                 )?;
-                publish_staged_index_with_commit(index_dir, staging_dir, commit_tail)?;
+                // From the first exchange onward this pathname may hold the
+                // displaced live generation. Rollback/recovery now owns it;
+                // the prepublication guard must never reclaim that evidence.
+                staging.hand_off_to_publication();
+                publish_staged_index_with_commit(index_dir, staging.path(), commit_tail)?;
                 // Still inside the exclusive generation fence: no reader lease
                 // can be open, so displaced copies beyond the retention bound
                 // are reclaimed here instead of accumulating one full index
@@ -3337,13 +3341,13 @@ where
     )
     .await
     {
-        Ok((staging_dir, applied)) => {
+        Ok((staging, applied)) => {
             let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
             let documents = indexable_docs.len();
             publish_staged_generation(
                 publish_lock,
                 index_dir,
-                &staging_dir,
+                staging,
                 generation,
                 document_counts,
                 embedder_fingerprint.as_ref(),
@@ -3407,7 +3411,7 @@ async fn stage_delta_generation(
     documents: &[crate::search::IndexableDocument],
     generation: u64,
     document_counts: IndexDocumentCounts,
-) -> Result<(PathBuf, delta::Delta), DeltaStageError> {
+) -> Result<(UnpublishedIndexStage, delta::Delta), DeltaStageError> {
     let refused = |fallback: IncrementalFallback| {
         DeltaStageError::Refused(format!("{}: {}", fallback.reason.as_str(), fallback.detail))
     };
@@ -3416,12 +3420,12 @@ async fn stage_delta_generation(
     // the digest diff, not the job list, decides what changed.
     validate_incremental_index_metadata(index_dir, generation, u64::MAX).map_err(refused)?;
     let applied = delta::plan(index_dir, stack, documents).map_err(refused)?;
-    let staging_dir = create_publish_staging_dir(index_dir)
+    let staging = UnpublishedIndexStage::create(index_dir)
         .map_err(|error| DeltaStageError::Refused(error.to_string()))?;
     let staged = async {
-        delta::copy_generation(index_dir, &staging_dir)?;
+        delta::copy_generation(index_dir, staging.path())?;
         index_checkpoint(cx)?;
-        delta::apply(cx, &staging_dir, stack, &applied)
+        delta::apply(cx, staging.path(), stack, &applied)
             .await
             .map_err(|fallback| {
                 IndexRebuildError::Index(format!(
@@ -3432,20 +3436,19 @@ async fn stage_delta_generation(
             })?;
         index_checkpoint(cx)?;
         verify_published_tier_counts(
-            &staging_dir,
+            staging.path(),
             document_counts.total(),
             stack.quality().is_some(),
         )
         .map_err(IndexRebuildError::Index)?;
-        delta::DocDigests::new(stack, documents).write(&staging_dir)?;
-        sync_index_generation(&staging_dir, || index_checkpoint(cx))?;
+        delta::DocDigests::new(stack, documents).write(staging.path())?;
+        sync_index_generation(staging.path(), || index_checkpoint(cx))?;
         Ok::<(), IndexRebuildError>(())
     }
     .await;
     match staged {
-        Ok(()) => Ok((staging_dir, applied)),
+        Ok(()) => Ok((staging, applied)),
         Err(error) => {
-            delta::discard_staging(&staging_dir);
             if matches!(error, IndexRebuildError::Cancelled(_)) {
                 Err(DeltaStageError::Cancelled(error))
             } else {
@@ -4462,6 +4465,131 @@ fn create_publish_staging_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildE
     ))
 }
 
+/// Own only the private build, until publication may exchange its pathname.
+/// Full rebuilds and delta fallbacks can write an entire corpus before failing;
+/// ordinary retention deliberately never sweeps these uncommitted stages.
+/// Keep ownership across awaits, cancellation, validation and flush errors, and
+/// unwinding so repeated failures do not leave a new full copy on every retry.
+///
+/// Unix directory descriptors pin both identities against inode reuse. If
+/// inspection detects a replaced stage or parent, or fails, preserve the stage.
+/// Cleanup follows the existing cooperative publisher-ownership model: the
+/// identity check and pathname-based removal are not one atomic operation.
+/// Non-Unix retains the stage because portable std metadata cannot establish
+/// equivalent directory ownership safely.
+struct UnpublishedIndexStage {
+    path: PathBuf,
+    #[cfg(unix)]
+    ownership: Option<UnpublishedStageOwnership>,
+}
+
+impl UnpublishedIndexStage {
+    fn create(index_dir: &Path) -> Result<Self, IndexRebuildError> {
+        let path = create_publish_staging_dir(index_dir)?;
+        #[cfg(unix)]
+        let ownership = match UnpublishedStageOwnership::capture(&path) {
+            Ok(ownership) => Some(ownership),
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::index",
+                    %error,
+                    staging = %path.display(),
+                    "private index staging ownership unavailable; abandoned output will be preserved"
+                );
+                None
+            }
+        };
+        Ok(Self {
+            path,
+            #[cfg(unix)]
+            ownership,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn hand_off_to_publication(&mut self) {
+        #[cfg(unix)]
+        {
+            self.ownership = None;
+        }
+    }
+}
+
+impl Drop for UnpublishedIndexStage {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(ownership) = &self.ownership {
+            if ownership.is_current(&self.path) {
+                delta::discard_staging(&self.path);
+            } else {
+                tracing::warn!(
+                    target: "ee::index",
+                    staging = %self.path.display(),
+                    "abandoned index staging ownership changed or could not be verified; preserving output"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+struct UnpublishedStageOwnership {
+    directory: std::fs::File,
+    parent: std::fs::File,
+}
+
+#[cfg(unix)]
+impl UnpublishedStageOwnership {
+    fn capture(path: &Path) -> Result<Self, IndexRebuildError> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        ensure_index_path_has_no_symlinks(path, "identify private index staging")?;
+        let open_directory = |path: &Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(
+                    (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::DIRECTORY).bits() as i32,
+                )
+                .open(path)
+                .map_err(|error| {
+                    IndexRebuildError::Index(format!(
+                        "Failed to identify private index staging: {error}"
+                    ))
+                })
+        };
+        let ownership = Self {
+            parent: open_directory(index_parent(path))?,
+            directory: open_directory(path)?,
+        };
+        if !ownership.is_current(path) {
+            return Err(IndexRebuildError::Index(
+                "Private index staging changed during ownership capture".to_owned(),
+            ));
+        }
+        Ok(ownership)
+    }
+
+    fn is_current(&self, path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        let matches = |directory: &std::fs::File, path: &Path| match (
+            directory.metadata(),
+            std::fs::symlink_metadata(path),
+        ) {
+            (Ok(owned), Ok(current)) => {
+                current.is_dir() && owned.dev() == current.dev() && owned.ino() == current.ino()
+            }
+            _ => false,
+        };
+        ensure_index_path_has_no_symlinks(path, "discard owned private index staging").is_ok()
+            && matches(&self.parent, index_parent(path))
+            && matches(&self.directory, path)
+    }
+}
+
 #[cfg(all(test, unix))]
 mod private_staging_tests {
     use super::*;
@@ -4473,6 +4601,121 @@ mod private_staging_tests {
         let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
         assert!(metadata.is_dir());
         assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        Ok(())
+    }
+
+    #[test]
+    fn unpublished_stage_reclaims_failed_and_unwound_builds_only() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let index = parent.join("index");
+        let retained = parent.join("index.previous");
+        for path in [&index, &retained] {
+            std::fs::create_dir(path).map_err(|error| error.to_string())?;
+            std::fs::write(path.join("body"), b"committed").map_err(|error| error.to_string())?;
+        }
+        let other = create_publish_staging_dir(&index).map_err(|error| error.to_string())?;
+        std::fs::write(other.join("body"), b"another publisher")
+            .map_err(|error| error.to_string())?;
+        for unwind in [false, true] {
+            let stage = UnpublishedIndexStage::create(&index).map_err(|error| error.to_string())?;
+            let path = stage.path().to_owned();
+            std::fs::create_dir(path.join("lexical")).map_err(|error| error.to_string())?;
+            std::fs::write(path.join("lexical/segment"), b"uncommitted source text")
+                .map_err(|error| error.to_string())?;
+            if unwind {
+                let result = std::panic::catch_unwind(move || {
+                    let _stage = stage;
+                    panic!("controlled prepublication build unwind");
+                });
+                assert!(result.is_err());
+            } else {
+                drop(stage);
+            }
+            assert!(!path.exists(), "owned failed build must not accumulate");
+        }
+        for path in [&index, &retained] {
+            assert_eq!(
+                std::fs::read(path.join("body")).map_err(|error| error.to_string())?,
+                b"committed"
+            );
+        }
+        assert_eq!(
+            std::fs::read(other.join("body")).map_err(|error| error.to_string())?,
+            b"another publisher"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unpublished_stage_preserves_replaced_directories_and_symlinks() -> TestResult {
+        for redirect in [false, true] {
+            let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let parent = root
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let stage = UnpublishedIndexStage::create(&parent.join("index"))
+                .map_err(|error| error.to_string())?;
+            let path = stage.path().to_owned();
+            std::fs::write(path.join("body"), b"owned stage").map_err(|error| error.to_string())?;
+            let displaced = parent.join("displaced-build");
+            std::fs::rename(&path, &displaced).map_err(|error| error.to_string())?;
+            if redirect {
+                symlink(&displaced, &path).map_err(|error| error.to_string())?;
+            } else {
+                std::fs::create_dir(&path).map_err(|error| error.to_string())?;
+                std::fs::write(path.join("body"), b"replacement belongs to someone else")
+                    .map_err(|error| error.to_string())?;
+            }
+            drop(stage);
+            assert!(
+                std::fs::symlink_metadata(&path).is_ok(),
+                "replacement must be preserved"
+            );
+            assert_eq!(
+                std::fs::read(displaced.join("body")).map_err(|error| error.to_string())?,
+                b"owned stage"
+            );
+            if !redirect {
+                assert_eq!(
+                    std::fs::read(path.join("body")).map_err(|error| error.to_string())?,
+                    b"replacement belongs to someone else"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unpublished_stage_preserves_a_build_after_parent_replacement() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let base = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let parent = base.join("workspace");
+        std::fs::create_dir(&parent).map_err(|error| error.to_string())?;
+        let stage = UnpublishedIndexStage::create(&parent.join("index"))
+            .map_err(|error| error.to_string())?;
+        let path = stage.path().to_owned();
+        std::fs::write(path.join("body"), b"original inode").map_err(|error| error.to_string())?;
+        let original_parent = base.join("original-workspace");
+        std::fs::rename(&parent, &original_parent).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&parent).map_err(|error| error.to_string())?;
+        let name = path.file_name().ok_or("stage has no file name")?;
+        // Even returning the exact owned inode to the same pathname cannot
+        // authorize cleanup through an unrelated replacement parent.
+        std::fs::rename(original_parent.join(name), &path).map_err(|error| error.to_string())?;
+        drop(stage);
+        assert_eq!(
+            std::fs::read(path.join("body")).map_err(|error| error.to_string())?,
+            b"original inode"
+        );
+        assert!(original_parent.is_dir());
         Ok(())
     }
 
@@ -4542,15 +4785,19 @@ mod private_staging_tests {
         publish_staged_index(&index, &first).map_err(|error| error.to_string())?;
         private(&index)?;
 
-        let second = create_publish_staging_dir(&index).map_err(|error| error.to_string())?;
-        std::fs::write(second.join("body"), b"rejected").map_err(|error| error.to_string())?;
-        let error = publish_staged_index_with_commit(&index, &second, || {
+        let mut second =
+            UnpublishedIndexStage::create(&index).map_err(|error| error.to_string())?;
+        std::fs::write(second.path().join("body"), b"rejected")
+            .map_err(|error| error.to_string())?;
+        second.hand_off_to_publication();
+        let error = publish_staged_index_with_commit(&index, second.path(), || {
             private(&index).map_err(IndexRebuildError::Index)?;
             Err(IndexRebuildError::Index(
                 "controlled job commit failure".to_owned(),
             ))
         });
         assert!(error.is_err());
+        drop(second);
         assert_eq!(
             std::fs::read(index.join("body")).map_err(|error| error.to_string())?,
             b"first"
@@ -19794,6 +20041,78 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    fn ensure_no_unpublished_index_stages(index_dir: &Path) -> TestResult {
+        let stages = discover_index_vacuum_candidates(index_dir)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|candidate| candidate.kind != IndexVacuumCandidateKind::RetainedGeneration)
+            .collect::<Vec<_>>();
+        ensure(
+            stages.is_empty(),
+            format!("failed prepublication build left source-bearing staging: {stages:?}"),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_build_validation_failure_reclaims_stage_and_preserves_active_index() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let index_dir = fixture.options.resolve_index_dir();
+        build_index_sync(
+            &index_dir,
+            cancellation_test_embedder_stack(),
+            vec![test_indexable_doc("doc-existing", "published memory")],
+        )?;
+        write_index_metadata(&index_dir, 1, 1, None).map_err(|error| error.to_string())?;
+        let baseline = index_regular_file_snapshot(&index_dir)?;
+        let committed = std::cell::Cell::new(false);
+        let result = crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| {
+            let fixture = &fixture;
+            let index_dir = &index_dir;
+            let committed = &committed;
+            async move {
+                let owner =
+                    IndexPublishLockOwner::acquire(&cx, &fixture.db, &fixture.workspace_id)?;
+                publish_full_index_generation_with_stack(
+                    &owner,
+                    index_dir,
+                    cancellation_test_embedder_stack(),
+                    vec![test_indexable_doc(
+                        "doc-new",
+                        "uncommitted replacement memory",
+                    )],
+                    2,
+                    // The real backend writes a complete one-document generation,
+                    // then source-count validation refuses it before publication.
+                    IndexDocumentCounts::memory_only(2),
+                    || {
+                        committed.set(true);
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        })
+        .map_err(|error| error.to_string())?;
+        let Err(error) = result else {
+            return Err("mismatched full build unexpectedly published".to_owned());
+        };
+        ensure(
+            error.to_string().contains("source document count mismatch"),
+            format!("expected post-build validation failure, got {error}"),
+        )?;
+        ensure(
+            !committed.get(),
+            "failed full build must not run its commit tail",
+        )?;
+        ensure(
+            index_regular_file_snapshot(&index_dir)? == baseline,
+            "active index changed",
+        )?;
+        ensure_no_unpublished_index_stages(&index_dir)
+    }
+
     fn reembed_index_with_test_stack(
         options: &IndexReembedOptions,
     ) -> Result<IndexReembedReport, IndexRebuildError> {
@@ -19936,6 +20255,8 @@ mod tests {
             index_regular_file_snapshot(&index_dir)? == baseline,
             "cancellation after validation must leave every active index file byte-identical",
         )?;
+        #[cfg(unix)]
+        ensure_no_unpublished_index_stages(&index_dir)?;
 
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         let jobs = connection
@@ -20943,7 +21264,7 @@ mod tests {
         let options = IndexReembedOptions {
             workspace_path: workspace,
             database_path: Some(database.clone()),
-            index_dir: Some(index_dir),
+            index_dir: Some(index_dir.clone()),
             dry_run: false,
         };
         let (result, caller_reason) = crate::core::run_cli_future(async move {
@@ -20975,6 +21296,8 @@ mod tests {
             reason.kind == asupersync::CancelKind::PollQuota,
             format!("backend cancellation lost its structured kind: {reason:?}"),
         )?;
+        #[cfg(unix)]
+        ensure_no_unpublished_index_stages(&index_dir)?;
 
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         let jobs = connection

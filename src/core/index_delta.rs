@@ -691,6 +691,7 @@ pub(super) async fn apply(
 
 /// Best-effort removal of a staging directory this publisher created and
 /// abandoned before publication.
+#[cfg(unix)]
 pub(super) fn discard_staging(staging_dir: &Path) {
     if ensure_index_path_has_no_symlinks(staging_dir, "discard abandoned staging").is_ok()
         && let Err(error) = std::fs::remove_dir_all(staging_dir)
@@ -699,7 +700,7 @@ pub(super) fn discard_staging(staging_dir: &Path) {
             target: "ee::index",
             %error,
             staging = %staging_dir.display(),
-            "abandoned delta staging could not be removed; ee index vacuum reports it"
+            "abandoned index staging could not be removed; ee index vacuum reports it"
         );
     }
 }
