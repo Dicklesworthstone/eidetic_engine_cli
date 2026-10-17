@@ -2953,25 +2953,29 @@ pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, 
     // preserving the streaming line-by-line shape. Same defense pattern
     // as the parallel ledger reader at
     // `src/core/why.rs::fetch_coordination_fallback_evidence` (b040cde7).
-    let reader = BufReader::new(file.take(DAEMON_JOB_TABLE_MAX_BYTES));
+    let mut reader = BufReader::new(file.take(DAEMON_JOB_TABLE_MAX_BYTES));
     let mut rows = Vec::new();
-    let mut lines = reader.split(b'\\n');
+    let mut line = Vec::new();
     let mut index = 0;
-    while let Some(line) = lines.next() {
+    loop {
+        line.clear();
+        let bytes = std::io::BufRead::read_until(&mut reader, b'\n', &mut line)
+            .map_err(|error| format!("Failed to read daemon job row: {error}"))?;
+        if bytes == 0 {
+            break;
+        }
         index += 1;
-        let line = line.map_err(|error| format!("Failed to read daemon job row: {error}"))?;
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
         match serde_json::from_slice::<DaemonJobRow>(&line) {
             Ok(row) => rows.push(row),
+            Err(error) if !line.ends_with(b"\n") && error.is_eof() => {
+                // An interrupted final append is not committed. Keep every
+                // preceding complete row and make status available again.
+                break;
+            }
             Err(error) => {
-                // A torn final append without a newline is recoverable. Preserve
-                // every previously committed record, but never mask middle-row
-                // corruption or a malformed newline-terminated record.
-                if lines.next().is_none() && !line.ends_with(b"\\n") && error.is_eof() {
-                    break;
-                }
                 return Err(format!(
                     "Failed to parse daemon job row {} in {}: {error}",
                     index, table_path.display()
@@ -3002,15 +3006,25 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
     let mut file = open_daemon_job_table_for_append(table_path)
         .map_err(|error| format!("Failed to open daemon job table for append: {error}"))?;
 
-    let mut buffer = Vec::new();
-    for row in rows {
-        serde_json::to_writer(&mut buffer, row)
-            .map_err(|error| format!("Failed to serialize daemon job row: {error}"))?;
-        buffer.push(b'\n');
+    // A previously torn final line must never become the prefix of the next
+    // JSON record. Repair it under the same open file descriptor before append.
+    if let Some(last) = std::fs::read(table_path)
+        .map_err(|error| format!("Failed to inspect daemon job tail: {error}"))?
+        .last().copied()
+    {
+        if last != b'\n' {
+            return Err(format!(
+                "Daemon job table '{}' has an incomplete final record; recover the journal before appending",
+                table_path.display()
+            ));
+        }
     }
-
-    file.write_all(&buffer)
-        .map_err(|error| format!("Failed to write daemon job rows: {error}"))?;
+    for row in rows {
+        serde_json::to_writer(&mut file, row)
+            .map_err(|error| format!("Failed to serialize daemon job row: {error}"))?;
+        file.write_all(b"\n")
+            .map_err(|error| format!("Failed to write daemon job row: {error}"))?;
+    }
 
     file.sync_all()
         .map_err(|error| format!("Failed to sync daemon job table: {error}"))
