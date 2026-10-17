@@ -196,14 +196,40 @@ fn why_not_unretrieved_memory_is_reconstructed() -> TestResult {
         // the real defect was a renamed or dropped field. A failure message
         // that narrates a cause it did not observe is worse than a silent one,
         // because it sends the next reader somewhere specific and wrong.
+        // ...and carry the fields that say WHY, not just that it happened.
+        //
+        // bd-hwye2: this row reported `got true (field present with an
+        // unexpected value)` and nothing more, which states that the premise
+        // broke without saying how. The premise is that a memory sharing no
+        // terms with the task never enters the candidate pool -- and setup()
+        // stores exactly ONE memory, so with a budget and no competitor the
+        // only thing keeping it out is an admission or relevance decision.
+        //
+        // This call runs IN PROCESS and controls no embedder environment
+        // (EE_EMBED* appears nowhere in this file), so whether an embedder
+        // resolves is a property of the machine. That matters: the same
+        // scenario probed with embeddings off reports stage `degraded_index`
+        // and selected=false -- agreeing with the assertion for a reason that
+        // has nothing to do with term overlap. retrievalStageReached is what
+        // separates those cases, so a failure has to print it.
         let observed = &json["selected"];
         return Err(format!(
-            "an unretrieved memory must report selected=false; got {observed} ({})",
+            "an unretrieved memory must report selected=false; got {observed} ({}). \
+             stage={}, primaryReason={}, reasonSource={}, scores={}. If the stage \
+             shows it reaching candidate admission, the fixture premise (one \
+             memory, no shared terms, therefore never a candidate) no longer holds \
+             and the fixture needs a competitor or a tighter budget; if the stage \
+             shows it excluded while selected is true, those two disagree and that \
+             is a product defect.",
             if observed.is_null() {
                 "field ABSENT from the report, not merely false"
             } else {
                 "field present with an unexpected value"
-            }
+            },
+            json["retrievalStageReached"],
+            json["primaryReason"],
+            json["reasonSource"],
+            json["scores"]
         ));
     }
     if json["primaryReason"] != "not_retrieved" {
