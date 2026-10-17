@@ -241,8 +241,21 @@ pub fn plan_daemon_service(
     ee_binary: &Path,
     confirm: bool,
 ) -> DaemonServicePlan {
+    plan_daemon_service_for_workspace(command, kind, home, ee_binary, home, confirm)
+}
+
+/// Prepare a daemon unit for a pinned workspace rather than the service manager's cwd.
+#[must_use]
+pub fn plan_daemon_service_for_workspace(
+    command: &'static str,
+    kind: DaemonServiceKind,
+    home: &Path,
+    ee_binary: &Path,
+    workspace: &Path,
+    confirm: bool,
+) -> DaemonServicePlan {
     let unit_path = default_unit_path(kind, home);
-    let unit_body = render_unit_body_for_workspace(kind, ee_binary, home);
+    let unit_body = render_unit_body_for_workspace(kind, ee_binary, workspace);
     let already_installed = unit_path.as_ref().is_some_and(|path| path.is_file());
     let next_commands = match kind {
         DaemonServiceKind::Launchd => {
