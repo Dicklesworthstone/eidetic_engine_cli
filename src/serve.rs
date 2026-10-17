@@ -3006,17 +3006,41 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
     let mut file = open_daemon_job_table_for_append(table_path)
         .map_err(|error| format!("Failed to open daemon job table for append: {error}"))?;
 
-    // A previously torn final line must never become the prefix of the next
-    // JSON record. Repair it under the same open file descriptor before append.
-    if let Some(last) = std::fs::read(table_path)
-        .map_err(|error| format!("Failed to inspect daemon job tail: {error}"))?
-        .last().copied()
-    {
-        if last != b'\n' {
-            return Err(format!(
-                "Daemon job table '{}' has an incomplete final record; recover the journal before appending",
-                table_path.display()
-            ));
+    // A torn final record can occur when the process is interrupted during
+    // append. Repair only the incomplete tail, preserving all committed rows.
+    // The file is opened with NOFOLLOW above to reject symlinked journals.
+    let mut existing = open_daemon_job_table_for_read(table_path)
+        .map_err(|error| format!("Failed to inspect daemon job tail: {error}"))?;
+    let mut offset = 0_u64;
+    let mut last_good = 0_u64;
+    let mut chunk = [0_u8; 8192];
+    use std::io::Read as _;
+    loop {
+        let count = existing.read(&mut chunk)
+            .map_err(|error| format!("Failed to read daemon job tail: {error}"))?;
+        if count == 0 { break; }
+        for (i, byte) in chunk[..count].iter().enumerate() {
+            if *byte == b'\n' { last_good = offset + i as u64 + 1; }
+        }
+        offset += count as u64;
+    }
+    if last_good < offset {
+        // Refuse to erase a valid newline-free record; it is an incomplete
+        // append only when JSON decoding confirms an unexpected EOF.
+        let mut trailing = Vec::new();
+        use std::io::{Seek as _, SeekFrom};
+        existing.seek(SeekFrom::Start(last_good))
+            .map_err(|error| format!("Failed to seek daemon job tail: {error}"))?;
+        existing.read_to_end(&mut trailing)
+            .map_err(|error| format!("Failed to read daemon job tail: {error}"))?;
+        match serde_json::from_slice::<DaemonJobRow>(&trailing) {
+            Err(error) if error.is_eof() => {
+                // Truncate the already-open append handle, never a symlink.
+                file.set_len(last_good)
+                    .map_err(|error| format!("Failed to repair incomplete daemon job tail: {error}"))?;
+            }
+            Err(error) => return Err(format!("Malformed daemon journal tail: {error}")),
+            Ok(_) => return Err("Daemon journal tail lacks a newline; refusing append".to_owned()),
         }
     }
     for row in rows {
