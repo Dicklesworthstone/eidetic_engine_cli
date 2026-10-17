@@ -1024,8 +1024,35 @@ fn looks_like_rfc3339(text: &str) -> bool {
         && (text.ends_with('Z') || text.contains("+00:00"))
 }
 
+/// Compare one contract snapshot and RECORD the outcome instead of aborting.
+///
+/// bd-b3bhh, final acceptance bullet. `assert_contract_snapshot` asserts by
+/// panicking and this function asserts SEVEN contracts in sequence, each
+/// preceded by the command that produces it. A mismatch in the first therefore
+/// stopped the other six from being compared -- and, because the commands are
+/// interleaved with the assertions, from being RUN at all.
+///
+/// That is not a theoretical cost. `status_json_contract` is first, and while
+/// it encoded the recording machine's scope fields, `doctor_json_contract`'s
+/// unscrubbed volatile WAL byte and frame counts sat undetected behind it, as
+/// did every contract after that. One stale snapshot made six others
+/// permanently unmeasurable.
+///
+/// insta still prints its own diff for each mismatch, so nothing is hidden;
+/// the test now fails ONCE with the complete list rather than hiding
+/// everything after the first failure.
+fn record_contract_snapshot(name: &str, value: Value, failures: &mut Vec<String>) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_contract_snapshot(name, value);
+    }));
+    if outcome.is_err() {
+        failures.push(name.to_owned());
+    }
+}
+
 #[test]
 fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
+    let mut snapshot_failures: Vec<String> = Vec::new();
     let fixture = JsonContractFixture::new()?;
     let workspace = fixture.workspace_arg();
     let database = fixture.database_arg();
@@ -1040,7 +1067,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "status".to_string(),
         ],
     )?;
-    assert_contract_snapshot("status_json_contract", status);
+    record_contract_snapshot("status_json_contract", status, &mut snapshot_failures);
 
     let doctor = run_json_command(
         &fixture,
@@ -1054,7 +1081,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "--full".to_string(),
         ],
     )?;
-    assert_contract_snapshot("doctor_json_contract", doctor);
+    record_contract_snapshot("doctor_json_contract", doctor, &mut snapshot_failures);
 
     let search = run_json_command(
         &fixture,
@@ -1072,7 +1099,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             index_dir.clone(),
         ],
     )?;
-    assert_contract_snapshot("search_json_contract", search);
+    record_contract_snapshot("search_json_contract", search, &mut snapshot_failures);
 
     let why = run_json_command(
         &fixture,
@@ -1086,7 +1113,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             database.clone(),
         ],
     )?;
-    assert_contract_snapshot("why_json_contract", why);
+    record_contract_snapshot("why_json_contract", why, &mut snapshot_failures);
 
     let context = run_json_command(
         &fixture,
@@ -1110,7 +1137,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "10".to_string(),
         ],
     )?;
-    assert_contract_snapshot("context_json_contract", context);
+    record_contract_snapshot("context_json_contract", context, &mut snapshot_failures);
 
     // Profile config plan contract - dry-run mode produces stable JSON showing
     // selected profile, budgets, planned TOML edits, and host probe summary.
@@ -1129,7 +1156,11 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             fixture.profile_config_arg(),
         ],
     )?;
-    assert_contract_snapshot("profile_config_plan_json_contract", profile_config_plan);
+    record_contract_snapshot(
+        "profile_config_plan_json_contract",
+        profile_config_plan,
+        &mut snapshot_failures,
+    );
 
     let missing_config_apply = run_profile_json_command(
         &fixture,
@@ -1188,7 +1219,21 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
         "missingConfigDryRun": missing_config_apply,
         "existingConfigDryRun": existing_config_apply,
     });
-    assert_contract_snapshot("profile_config_apply_json_contract", profile_config_apply);
+    record_contract_snapshot(
+        "profile_config_apply_json_contract",
+        profile_config_apply,
+        &mut snapshot_failures,
+    );
+
+    if !snapshot_failures.is_empty() {
+        return Err(format!(
+            "{} of 7 contract snapshots did not match: {}. Every diff is printed \
+             above -- all seven were compared, so this list is the COMPLETE set \
+             of drifted contracts rather than just the first one (bd-b3bhh).",
+            snapshot_failures.len(),
+            snapshot_failures.join(", ")
+        ));
+    }
 
     Ok(())
 }
