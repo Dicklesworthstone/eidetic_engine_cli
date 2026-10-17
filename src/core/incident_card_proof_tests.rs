@@ -26,6 +26,7 @@ pub(crate) struct Fixture {
     pub(crate) repair: String,
     pub(crate) proof: String,
     pub(crate) diagnostic: CanonicalDiagnostic,
+    command: &'static str,
 }
 
 fn go(results: &[(&str, &str)]) -> String {
@@ -46,6 +47,17 @@ fn go(results: &[(&str, &str)]) -> String {
 
 impl Fixture {
     pub(crate) fn new(valid_retry: bool) -> TestResult<Self> {
+        Self::with_output(valid_retry, false)
+    }
+
+    /// Plain compiler diagnostics exercise the positive public replay path.
+    /// Structured Go cards intentionally carry a fingerprint in their symptom;
+    /// the public replay guard rejects that opaque atom, even with valid proof.
+    pub(crate) fn new_public(valid_retry: bool) -> TestResult<Self> {
+        Self::with_output(valid_retry, true)
+    }
+
+    fn with_output(valid_retry: bool, public: bool) -> TestResult<Self> {
         let db = DbConnection::open_memory()?;
         db.migrate()?;
         for (workspace, path) in [
@@ -78,8 +90,20 @@ impl Fixture {
                 metadata_json: None,
             },
         )?;
-        let failed = go(&[("TestCache", "fail"), ("TestControl", "pass")]);
-        let passed = if valid_retry {
+        let command = if public { "cargo check" } else { COMMAND };
+        let failed = if public {
+            "error[E0308]: mismatched types\n --> src/cache.rs:4:2\n".to_owned()
+        } else {
+            go(&[("TestCache", "fail"), ("TestControl", "pass")])
+        };
+        let passed = if public {
+            if valid_retry {
+                "Checking cache v0.1.0\nFinished `dev` profile [unoptimized] target(s) in 0.01s\n"
+                    .to_owned()
+            } else {
+                failed.clone()
+            }
+        } else if valid_retry {
             go(&[
                 ("TestCache", "pass"),
                 ("TestControl", "pass"),
@@ -92,10 +116,14 @@ impl Fixture {
                 ("TestRegression", "pass"),
             ])
         };
-        let diagnostic = structured_error_diagnostics(&failed)
-            .into_iter()
-            .next()
-            .ok_or("diagnostic")?;
+        let diagnostic = if public {
+            crate::core::error_recall::from_cargo(Some("E0308"), "mismatched types")
+        } else {
+            structured_error_diagnostics(&failed)
+                .into_iter()
+                .next()
+                .ok_or("diagnostic")?
+        };
         let id = |line: u32| {
             EvidenceId::from_uuid(uuid::Uuid::from_u128(0x7700 + u128::from(line))).to_string()
         };
@@ -103,7 +131,7 @@ impl Fixture {
             (
                 "tool_call",
                 "assistant",
-                json!({"type":"tool_use","id":"fail","name":"Bash","input":{"command":COMMAND}}),
+                json!({"type":"tool_use","id":"fail","name":"Bash","input":{"command":command}}),
             ),
             (
                 "tool_result",
@@ -114,7 +142,7 @@ impl Fixture {
             (
                 "tool_call",
                 "assistant",
-                json!({"type":"tool_use","id":"retry","name":"Bash","input":{"command":COMMAND}}),
+                json!({"type":"tool_use","id":"retry","name":"Bash","input":{"command":command}}),
             ),
             (
                 "tool_result",
@@ -155,6 +183,7 @@ impl Fixture {
             repair: id(3),
             proof: id(5),
             diagnostic,
+            command,
         })
     }
 
@@ -164,12 +193,12 @@ impl Fixture {
         let arc = FailureArc {
             failure_id: self.failure.clone(),
             attempt_id: self.attempt.clone(),
-            family: CommandFamily::parse(COMMAND).ok_or("family")?,
+            family: CommandFamily::parse(self.command).ok_or("family")?,
             symptom: Some("The cache test failed because writes were not flushed.".to_owned()),
             diagnostics: vec![self.diagnostic.clone()],
             resolution: Some(Resolution {
                 proof_id: self.proof.clone(),
-                proof_family: CommandFamily::parse(COMMAND).ok_or("family")?,
+                proof_family: CommandFamily::parse(self.command).ok_or("family")?,
                 repair_ids: vec![self.repair.clone()],
             }),
         };
