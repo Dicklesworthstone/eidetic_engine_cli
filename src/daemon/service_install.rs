@@ -651,6 +651,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_workspace_and_persistent_service_are_rendered() {
+        let workspace = Path::new("/home/ubuntu/main");
+        let systemd = render_unit_body_for_workspace(
+            DaemonServiceKind::SystemdUser,
+            Path::new("/usr/bin/ee"),
+            workspace,
+        ).expect("systemd");
+        assert!(systemd.contains("--workspace /home/ubuntu/main"));
+        assert!(systemd.contains("Restart=always"));
+        assert!(systemd.contains("--once"));
+        let launchd = render_unit_body_for_workspace(
+            DaemonServiceKind::Launchd,
+            Path::new("/usr/bin/ee"),
+            workspace,
+        ).expect("launchd");
+        assert!(launchd.contains("<string>/home/ubuntu/main</string>"));
+        let plan = plan_daemon_service_for_workspace(
+            "daemon install", DaemonServiceKind::SystemdUser,
+            Path::new("/home/ubuntu"), Path::new("/usr/bin/ee"), workspace, false,
+        );
+        assert!(plan.unit_body.expect("body").contains("--workspace /home/ubuntu/main"));
+    }
+
+    #[test]
     fn launchd_unit_mentions_team_steward_and_label() {
         let body = render_unit_body(DaemonServiceKind::Launchd, Path::new("/usr/local/bin/ee"))
             .expect("launchd body");
