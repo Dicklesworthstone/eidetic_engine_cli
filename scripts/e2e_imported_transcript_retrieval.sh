@@ -484,7 +484,33 @@ fi
 # (This script has no `step` helper -- STEP is incremented inside run_ee -- so
 # sections are marked by comment, as above.)
 WS2="${ROOT}/ws2"
-ISO_SENTINEL="isolationsentinel-${RANDOM}${RANDOM}"
+# ALPHABETIC sentinel. This was `${RANDOM}${RANDOM}`, two concatenated random
+# integers, and that made this control fail INTERMITTENTLY -- roughly one run
+# in five:
+#
+#   remember_error=policy_denied: Refusing to persist memory content that
+#   contains secrets: phone_number.
+#
+# `ee` scans content for secrets before a durable write, and a long enough run
+# of digits looks like a phone number. The product was right every time; the
+# fixture was feeding it a different sentinel on each run and occasionally
+# rolled one shaped like a phone number. The failure then surfaced as the
+# second workspace being unable to retrieve its own memory, which reads like a
+# retrieval or isolation defect and is neither.
+#
+# That cost five eliminated hypotheses -- retained worker state, the argument
+# set, a contract change, an EE_DATABASE_PATH mismatch, determinism itself --
+# before the cause field added in 5475da79d named it on the first failing run
+# it saw.
+#
+# Mapping the digits to letters keeps the sentinel unique and searchable while
+# making a phone-number shape impossible to roll.
+# $RANDOM is expanded in THIS shell and only then handed to the substitution.
+# Expanding it inside `$( ... )` yields the subshell's reseeded value, which is
+# identical on every call -- the sentinel would be alphabetic but no longer
+# unique, and uniqueness is the whole point of a sentinel.
+ISO_SENTINEL_DIGITS="${RANDOM}${RANDOM}"
+ISO_SENTINEL="isolationsentinel-$(printf '%s' "${ISO_SENTINEL_DIGITS}" | tr '0-9' 'abcdefghij')"
 run_ee init --workspace "${WS2}" --json
 ISO_INIT_EXIT="${LAST_EXIT}"
 # A durable write needs provenance: `remember` without --source is POLICY
