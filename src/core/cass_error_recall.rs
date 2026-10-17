@@ -48,7 +48,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// V11 makes streamed output independent of poll boundaries and requires a
 /// completed failed invocation before a later retry can verify its repair.
 /// Imports reconsider older derivations without changing source identities.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v11";
+/// V12 admits uniquely attributable libtest suite growth while retaining every
+/// prior selected subject and requiring prior executed subjects to pass.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v12";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;

@@ -269,3 +269,6 @@ fn bounded_correspondence_agrees_with_exhaustive_assignment() {
     }
     assert_eq!(cases, 12_096);
 }
+
+#[path = "cass_error_recall_libtest_growth_store_tests.rs"]
+mod store_tests;
