@@ -39,6 +39,7 @@ pub mod workspace_rebind;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
+#[path = "serve_api.rs"]
 pub mod serve;
 
 pub mod science;
