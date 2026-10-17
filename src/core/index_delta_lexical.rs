@@ -5,6 +5,7 @@
 //! staging generation and its publication lease. No live index is opened for
 //! writing; the normal tier validation and durability barrier still follow.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::search::IndexableDocument;
@@ -78,22 +79,116 @@ fn failure(operation: &str, error: impl std::fmt::Display) -> IncrementalFallbac
     )
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SegmentState {
+    max_doc: u32,
+    live_docs: u32,
+    delete_opstamp: Option<u64>,
+}
+
+type SegmentStates = BTreeMap<SegmentId, SegmentState>;
+
+/// Capture native identities and deletion state, not directory filenames.
+/// Ordered identities make the before/after fence independent of meta ordering.
+fn segment_states(index: &Index) -> Result<SegmentStates, IncrementalFallback> {
+    let metas = index
+        .searchable_segment_metas()
+        .map_err(|error| failure("inventory", error))?;
+    let mut states = BTreeMap::new();
+    for meta in metas {
+        let state = SegmentState {
+            max_doc: meta.max_doc(),
+            live_docs: meta.num_docs(),
+            delete_opstamp: meta.delete_opstamp(),
+        };
+        if states.insert(meta.id(), state).is_some() {
+            return Err(failure("inventory", "duplicate active segment identity"));
+        }
+    }
+    Ok(states)
+}
+
+fn live_documents(states: &SegmentStates) -> Result<u64, IncrementalFallback> {
+    states.values().try_fold(0_u64, |total, state| {
+        total
+            .checked_add(u64::from(state.live_docs))
+            .ok_or_else(|| failure("inventory", "document count overflow"))
+    })
+}
+
 /// Read committed segment identities, not all files ending in `.idx`. Retired
 /// files can outlive a merge; neither they nor a directory-read error mean the
 /// active lexical index has zero segments. Keep native parsing authoritative.
 fn inventory(index: &Index) -> Result<(Vec<SegmentId>, u64), IncrementalFallback> {
-    let metas = index
-        .searchable_segment_metas()
-        .map_err(|error| failure("inventory", error))?;
-    let mut documents = 0_u64;
-    let mut ids = Vec::with_capacity(metas.len());
-    for meta in metas {
-        documents = documents
-            .checked_add(u64::from(meta.num_docs()))
-            .ok_or_else(|| failure("inventory", "document count overflow"))?;
-        ids.push(meta.id());
+    let states = segment_states(index)?;
+    Ok((states.keys().copied().collect(), live_documents(&states)?))
+}
+
+/// Merge the smallest segments until at least half the segment allowance is
+/// free. Include the entire equal-size boundary cohort, so a uniform set of
+/// tiny deltas collapses in one operation rather than repeatedly merging pairs.
+/// A large unchanged base is not rewritten merely because small deltas arrived.
+///
+/// max_doc includes deleted ordinals: it is a cheap work estimate, NOT a byte,
+/// latency or RSS bound. Exact identities break ties deterministically. With a
+/// zero/one limit, reducing to one segment necessarily includes every segment.
+fn compaction_candidates(states: &SegmentStates, max_segments: usize) -> Vec<SegmentId> {
+    let threshold = max_segments.max(1);
+    if states.len() <= threshold {
+        return Vec::new();
     }
-    Ok((ids, documents))
+    let target = (threshold / 2).max(1);
+    let minimum = states.len() - target + 1;
+    let mut ordered = states.iter().collect::<Vec<_>>();
+    ordered.sort_unstable_by(|left, right| {
+        left.1.max_doc.cmp(&right.1.max_doc).then_with(|| left.0.cmp(right.0))
+    });
+    let boundary = ordered[minimum - 1].1.max_doc;
+    ordered
+        .into_iter()
+        .take_while(|(_, state)| state.max_doc <= boundary)
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// A partial merge must retain every unselected segment, including its delete
+/// state. Equal total counts alone cannot prove that the right segments survived.
+fn validate_compaction(
+    before: &SegmentStates,
+    after: &SegmentStates,
+    selected: &[SegmentId],
+    replacement: Option<SegmentId>,
+    max_segments: usize,
+) -> Result<(), IncrementalFallback> {
+    let selected = selected.iter().copied().collect::<BTreeSet<_>>();
+    if selected.len() < 2 || !selected.iter().all(|id| before.contains_key(id)) {
+        return Err(failure("validation", "invalid compaction selection"));
+    }
+    let mut expected = BTreeSet::new();
+    for (id, state) in before {
+        if !selected.contains(id) {
+            if after.get(id) != Some(state) {
+                return Err(failure("validation", "unselected segment changed"));
+            }
+            expected.insert(*id);
+        }
+    }
+    if let Some(id) = replacement {
+        if before.contains_key(&id) {
+            return Err(failure("validation", "merge reused an existing segment identity"));
+        }
+        expected.insert(id);
+    }
+    if after.keys().copied().collect::<BTreeSet<_>>() != expected
+        || after.len() > (max_segments.max(1) / 2).max(1)
+        || live_documents(before)? != live_documents(after)?
+    {
+        return Err(failure(
+            "validation",
+            "segment identities or live-document count changed unexpectedly",
+        ));
+    }
+    Ok(())
 }
 
 fn open_staged(
@@ -203,8 +298,8 @@ fn delete_with_checkpoint(
 
 /// Runs before opening the staged lexical upsert writer. A tier at or below
 /// the threshold stays byte-for-byte unchanged and takes no writer lock.
-/// Above it, merge existing postings/stored fields using Tantivy itself. There
-/// is no text re-tokenization, provider call, or invented search implementation.
+/// Above it, merge a size-selected subset using Tantivy itself, preserving the
+/// larger untouched segments. There is no re-tokenization or provider call.
 pub(super) fn compact_if_needed(
     cx: &asupersync::Cx,
     staging_dir: &Path,
@@ -221,42 +316,41 @@ fn compact_with_checkpoint(
     mut checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
 ) -> Result<Compaction, IncrementalFallback> {
     let index = open_staged(staging_dir, &mut checkpoint)?;
-    let (segments, documents) = inventory(&index)?;
+    let before = segment_states(&index)?;
+    let documents = live_documents(&before)?;
     checkpoint()?;
-    // A single segment cannot be reduced by merging; this also makes a zero
-    // caller limit safe rather than submitting an empty merge to the backend.
-    if segments.len() <= max_segments.max(1) {
+    let selected = compaction_candidates(&before, max_segments);
+    checkpoint()?;
+    if selected.is_empty() {
         return Ok(Compaction {
-            segments_before: segments.len(),
-            segments_after: segments.len(),
+            segments_before: before.len(),
+            segments_after: before.len(),
             documents,
         });
     }
     let mut writer = maintenance_writer(&index)?;
-    // Once a writer exists, every exit joins its workers. In particular, a
-    // cancellation after submitting a merge cannot leave a writer racing the
-    // caller's staging cleanup or subsequent fallback. A filesystem/merge call
-    // is not preemptible; checkpoints preserve cooperative cancellation.
+    // Every exit joins the native workers. A cancelled merge must not leave a
+    // writer racing staging cleanup or fallback. Native IO is not preemptible.
     let merged = (|| {
         checkpoint()?;
-        let (locked_segments, locked_documents) = inventory(&index)?;
-        if locked_segments != segments || locked_documents != documents {
+        if segment_states(&index)? != before {
             return Err(failure(
                 "inventory",
                 "staged generation changed before writer acquisition",
             ));
         }
         checkpoint()?;
-        let _ = writer
-            .merge(&segments)
+        let replacement = writer
+            .merge(&selected)
             .wait()
-            .map_err(|error| failure("merge", error))?;
+            .map_err(|error| failure("merge", error))?
+            .map(|meta| meta.id());
         checkpoint()?;
         let _ = writer
             .garbage_collect_files()
             .wait()
             .map_err(|error| failure("garbage collection", error))?;
-        Ok(())
+        Ok(replacement)
     })();
     let joined = writer
         .wait_merging_threads()
@@ -264,27 +358,24 @@ fn compact_with_checkpoint(
     // A cancelled request wins over a backend interruption, matching the
     // surrounding publisher's existing cancellation/fallback ordering.
     checkpoint()?;
-    merged?;
+    let replacement = merged?;
     joined?;
-    let (remaining, after_documents) = inventory(&index)?;
+    let after = segment_states(&index)?;
     checkpoint()?;
-    if remaining.len() > 1 || after_documents != documents {
-        return Err(failure(
-            "validation",
-            "segment or live-document count changed unexpectedly",
-        ));
-    }
+    validate_compaction(&before, &after, &selected, replacement, max_segments)?;
     let report = Compaction {
-        segments_before: segments.len(),
-        segments_after: remaining.len(),
+        segments_before: before.len(),
+        segments_after: after.len(),
         documents,
     };
     tracing::debug!(
         target: "ee::index",
         segments_before = report.segments_before,
         segments_after = report.segments_after,
+        merged_segments = selected.len(),
+        retained_segments = before.len() - selected.len(),
         documents = report.documents,
-        "compacted staged lexical tier without re-embedding"
+        "compacted staged lexical tier without re-embedding or rewriting larger segments"
     );
     Ok(report)
 }
@@ -292,3 +383,7 @@ fn compact_with_checkpoint(
 #[cfg(test)]
 #[path = "index_delta_lexical_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "index_delta_selective_compaction_tests.rs"]
+mod selective_compaction_tests;
