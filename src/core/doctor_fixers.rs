@@ -662,9 +662,24 @@ pub fn fix_dispatch_for_finding(workspace_root: &Path, finding: &str) -> Option<
         }
         "cass_integration_drift" => Some(fix_cass_integration_drift(workspace_root)),
         // bd-223vl. Takes only `workspace_root`, which is why this one of the
-        // nine unwired fixers fits the table as it stands; the others need
-        // check-derived arguments (a row count, a summary, a label, a path)
-        // that this signature cannot carry.
+        // nine unwired fixers fits the table as it stands. FIVE of the others
+        // need check-derived arguments (a row count, a summary, a label, a
+        // path) that this signature cannot carry.
+        //
+        // The remaining TWO do not, and an earlier version of this comment was
+        // wrong to lump them in: fix_graph_snapshot_stale and
+        // fix_policy_safety_inconsistent each take only `workspace_root` and
+        // would fit this table unchanged. What blocks them is upstream -- no
+        // doctor check emits either finding, so `fix_finding_for_check` can
+        // never produce the string, and an arm here would be dead code.
+        // Measured 2026-10-17; the signature was never their blocker.
+        //
+        // EDITING THIS BODY: never write a fixer name immediately followed by
+        // an open paren inside a comment here. `dispatched_fixers` in the test
+        // module scans this body for any `fix_` token directly followed by one,
+        // and counts it as dispatched -- so a parenthesised mention of an
+        // unwired fixer would make the guard believe it is wired. That is why
+        // the two names above are written bare.
         "wal_checkpoint_pending" => Some(fix_wal_checkpoint_pending(workspace_root)),
         // bd-bigu7. Also takes only `workspace_root`, so like the WAL fixer it
         // fits this signature as it stands.
