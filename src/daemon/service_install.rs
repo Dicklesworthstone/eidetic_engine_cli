@@ -122,6 +122,7 @@ pub fn render_unit_body(kind: DaemonServiceKind, ee_binary: &Path) -> Option<Str
     <string>{binary}</string>
     <string>daemon</string>
     <string>--foreground</string>
+    <string>--once</string>
     <string>--job</string>
     <string>team_steward</string>
     <string>--job</string>
@@ -208,7 +209,7 @@ fn render_windows_task_xml(ee_binary: &Path) -> String {
   <Actions Context="Author">
     <Exec>
       <Command>{command}</Command>
-      <Arguments>daemon --foreground --job team_steward --job decay_sweep --job health_check</Arguments>
+      <Arguments>daemon --foreground --once --job team_steward --job decay_sweep --job health_check</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -634,7 +635,8 @@ mod tests {
     fn systemd_unit_is_user_scoped_and_restarts() {
         let body = render_unit_body(DaemonServiceKind::SystemdUser, Path::new("/usr/bin/ee"))
             .expect("systemd body");
-        assert!(body.contains("ExecStart=/usr/bin/ee daemon --foreground"));
+        assert!(body.contains("ExecStart=/usr/bin/ee daemon --foreground --once"));
+        assert!(body.contains("Restart=always"));
         assert!(body.contains("team_steward"));
         assert!(body.contains("[Install]"));
         assert!(body.contains("WantedBy=default.target"));
