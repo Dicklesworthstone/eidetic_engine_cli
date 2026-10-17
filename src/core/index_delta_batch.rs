@@ -362,6 +362,7 @@ mod tests {
     fn batch_bounds_count_bytes_and_dimensions_without_dropping_oversized_documents() {
         assert_eq!(batch_len(&[], 256), 0);
         let docs = documents(65);
+        assert_eq!(batch_len(&docs, 256), 32);
         assert_eq!(batch_len(&docs, MAX_BATCH_VECTOR_BYTES / 4), 1);
         assert_eq!(batch_len(&docs, usize::MAX), 1);
         let mut large = documents(3);
