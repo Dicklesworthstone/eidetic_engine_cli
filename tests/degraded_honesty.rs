@@ -106,10 +106,56 @@ fn ensure_no_ansi(text: &str, context: &str) -> TestResult {
     )
 }
 
-fn unique_artifact_dir(name: &str) -> Result<PathBuf, String> {
-    let target_dir = env::var_os("CARGO_TARGET_DIR")
+/// True when `path` or any ancestor holds a `.ee` store or a `.git` directory.
+///
+/// bd-tzlmo. `ee` walks UPWARD looking for an initialised store, and when it
+/// finds one it correctly offers to retarget instead of suggesting a fresh
+/// `ee init`. That behaviour is right and these tests should not be the thing
+/// that suppresses it -- they should simply not run inside somebody's store.
+fn has_store_or_repo_ancestor(path: &Path) -> bool {
+    path.ancestors()
+        .any(|ancestor| ancestor.join(".ee").exists() || ancestor.join(".git").exists())
+}
+
+/// A base for fixture artifacts that is NOT inside a checkout or an `ee` store.
+///
+/// The default was `CARGO_TARGET_DIR`, which on the RCH lane is
+/// `<project>/.rch-target` -- inside the repository, whose root carries a
+/// populated `.ee` store. Four tests in this file assert that a missing
+/// database yields the repair `ee init --workspace .`, and instead got
+///
+///     "Re-check --workspace addressing ...; a populated store exists at
+///      <project> (1 docs) -- retarget with --workspace <project> ...
+///      Only if you intended to create a NEW store here: ee init --workspace ..."
+///
+/// which is the PRODUCT BEING HELPFUL about a real neighbouring store. The
+/// fixture was standing inside the repository's own store and recording the
+/// advice that produced, so the contract encoded where the suite ran.
+///
+/// Falls back to the target dir when no candidate is clean, rather than
+/// failing: most tests in this file do not care, and the four that do will
+/// fail with their own message, which is more informative than this helper
+/// refusing for all of them.
+fn repo_free_artifact_base() -> PathBuf {
+    let mut candidates = vec![env::temp_dir()];
+    for fallback in ["/tmp", "/var/tmp"] {
+        let path = PathBuf::from(fallback);
+        if path.is_dir() && !candidates.iter().any(|existing| existing == &path) {
+            candidates.push(path);
+        }
+    }
+    for candidate in candidates {
+        if !has_store_or_repo_ancestor(&candidate) {
+            return candidate;
+        }
+    }
+    env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target"));
+        .unwrap_or_else(|| PathBuf::from("target"))
+}
+
+fn unique_artifact_dir(name: &str) -> Result<PathBuf, String> {
+    let target_dir = repo_free_artifact_base();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("system clock before UNIX_EPOCH: {error}"))?
