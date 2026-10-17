@@ -3905,6 +3905,7 @@ pub fn unrelated_context() -> u64 {{
                 Vec::new(),
                 evidence_candidates,
                 &request,
+                None,
                 &mut draft,
                 &mut degraded,
             );
@@ -3974,6 +3975,7 @@ pub fn unrelated_context() -> u64 {{
                 Vec::new(),
                 evidence_candidates,
                 &limited,
+                None,
                 &mut draft,
                 &mut degraded,
             );
@@ -4070,6 +4072,7 @@ pub fn unrelated_context() -> u64 {{
                             Vec::new(),
                             evidence,
                             &limited,
+                            None,
                             &mut draft,
                             &mut degraded,
                         );
@@ -4194,6 +4197,7 @@ pub fn unrelated_context() -> u64 {{
                 Vec::new(),
                 evidence,
                 request,
+                None,
                 &mut draft,
                 &mut degraded,
             );
@@ -4309,6 +4313,7 @@ pub fn unrelated_context() -> u64 {{
                     Vec::new(),
                     evidence,
                     request,
+                    None,
                     &mut draft,
                     &mut degraded,
                 );

@@ -3781,12 +3781,19 @@ async fn run_context_pack_with_performance_inner(
         options.relevance_floor,
         &mut degraded,
     )?);
+    let warning_reservation = native_warning_candidate_for_page(
+        &candidates,
+        &rule_candidates,
+        &request,
+        options.relevance_floor,
+    );
     let pagination_info = apply_pagination_with_rules(
         &mut candidates,
         &mut rule_candidates,
         &mut evidence_candidates,
         &options.pagination,
         request.max_results,
+        warning_reservation,
         &mut degraded,
     );
     candidate_metrics.subspans.scoring_ordering = scoring_ordering_start.elapsed();
@@ -3920,6 +3927,7 @@ async fn run_context_pack_with_performance_inner(
             rule_candidates,
             evidence_candidates,
             &request,
+            options.relevance_floor,
             &mut draft,
             &mut degraded,
         );
@@ -5681,6 +5689,7 @@ fn apply_pagination(
         evidence_candidates,
         pagination,
         max_results,
+        None,
         degraded,
     )
 }
@@ -5725,6 +5734,60 @@ enum ContextPackCandidateSlot {
     Evidence(usize),
 }
 
+/// Keep the warning reservation reachable through a hard result cap. Native
+/// warnings compete with an eligible memory warning for one slot; ordinary
+/// rules retain their relevance ordering. Explicit pages traverse that stable
+/// population once instead of repeating the warning on every page.
+fn native_warning_candidate_for_page(
+    memories: &[PackCandidate],
+    rules: &[crate::pack::PackRuleItem],
+    request: &ContextRequest,
+    relevance_floor: Option<f32>,
+) -> Option<ContextPackEntityKey> {
+    let floor = crate::pack::PackAssemblyOptions {
+        relevance_floor,
+        ..crate::pack::PackAssemblyOptions::default()
+    }
+    .effective_relevance_floor();
+    let quotas =
+        crate::pack::SectionQuotas::for_profile(request.profile, request.budget.max_tokens());
+    let native = rules
+        .iter()
+        .filter(|item| {
+            item.section == PackSection::Failures
+                && item.relevance.into_inner() >= floor
+                && quotas.has_room(PackSection::Failures, 0, item.estimated_tokens)
+                && item.estimated_tokens <= request.budget.max_tokens()
+        })
+        .map(|item| ContextPackPriority {
+            relevance: item.relevance,
+            utility: item.utility,
+            entity: ContextPackEntityKey::Rule(item.rule_id.clone()),
+        })
+        .min_by(compare_context_pack_priority)?;
+    memories
+        .iter()
+        .filter(|item| {
+            item.section == PackSection::Failures
+                && item.relevance.into_inner() >= floor
+                // MMR needs positive relevance on its first step; facility
+                // coverage can also gain from a candidate's positive utility.
+                && (item.relevance.into_inner() > 0.0
+                    || (request.profile == ContextPackProfile::Submodular
+                        && item.utility.into_inner() > 0.0))
+                && quotas.has_room(PackSection::Failures, 0, item.estimated_tokens)
+                && item.estimated_tokens <= request.budget.max_tokens()
+        })
+        .map(|item| ContextPackPriority {
+            relevance: item.relevance,
+            utility: item.utility,
+            entity: ContextPackEntityKey::Memory(item.memory_id),
+        })
+        .chain(std::iter::once(native))
+        .min_by(compare_context_pack_priority)
+        .map(|priority| priority.entity)
+}
+
 /// Apply result caps and page offsets to one ranked candidate population.
 /// Native evidence and rules must not lose their places merely because their
 /// source kind used to follow every memory in an implicit concatenation.
@@ -5734,6 +5797,7 @@ fn apply_pagination_with_rules(
     evidence_candidates: &mut Vec<DirectEvidencePackCandidate>,
     pagination: &Option<ContextPagination>,
     max_results: Option<u32>,
+    warning_reservation: Option<ContextPackEntityKey>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> PaginationInfo {
     if pagination.is_none() && max_results.is_none() {
@@ -5800,7 +5864,13 @@ fn apply_pagination_with_rules(
         )
         .collect::<Vec<_>>();
     if !rule_candidates.is_empty() || !evidence_candidates.is_empty() {
-        ranked.sort_by(|(left, _), (right, _)| compare_context_pack_priority(left, right));
+        ranked.sort_by(|(left, _), (right, _)| {
+            let left_reserved = warning_reservation.as_ref() == Some(&left.entity);
+            let right_reserved = warning_reservation.as_ref() == Some(&right.entity);
+            right_reserved
+                .cmp(&left_reserved)
+                .then_with(|| compare_context_pack_priority(left, right))
+        });
     }
     let mut represented_links = BTreeSet::new();
     ranked.retain(|(_, slot)| {
@@ -8435,18 +8505,18 @@ fn context_pack_l2_feature_flags_hash(
     hash_labeled_bytes(&mut hasher, "instruction_authority_policy", b"v1");
     // Cached source-memory hydration predating native rule filters and
     // advisory posture must be reassembled under the current admission policy.
-    // v2 admits sourced rules under RuleId and applies native authority and
-    // section filters. Older persisted packs may carry rule bodies under a
-    // source MemoryId, so they cannot bypass this admission on an L2 hit.
-    hash_labeled_bytes(&mut hasher, "procedural_rule_admission_policy", b"v2");
+    // v3 preserves native anti-pattern section semantics and the warning
+    // reservation. Older packs can contain the same rule as ordinary advice,
+    // or omit it despite an explicit failure-section request.
+    hash_labeled_bytes(&mut hasher, "procedural_rule_admission_policy", b"v3");
     // Older responses classify elapsed breaches as within_budget and include
     // elapsed time in signed resource warnings. They cannot satisfy this policy.
     hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
     // Cached packs from before caller floors reached assembly must be rebuilt.
     hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v1");
-    // Native sources now compete with lower-ranked selected memories for the
-    // shared budget. A memory-first cached pack cannot satisfy that policy.
-    hash_labeled_bytes(&mut hasher, "mixed_source_budget_policy", b"v1");
+    // Native sources share memory's budget and warning reservation. Cached
+    // packs from before native warnings had priority must be reassembled.
+    hash_labeled_bytes(&mut hasher, "mixed_source_budget_policy", b"v2");
     if options.pagination.is_some() {
         // Offsets and maxResults operate on one ranked native-entity union.
         hash_labeled_bytes(&mut hasher, "native_evidence_pagination_policy", b"v2");
@@ -14190,9 +14260,6 @@ fn direct_rule_pack_candidates(
     output_redaction_enabled: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<crate::pack::PackRuleItem> {
-    if !request.sections.is_empty() && !request.sections.contains(&PackSection::ProceduralRules) {
-        return Vec::new();
-    }
     let mut items = Vec::new();
     let mut seen = BTreeSet::new();
     let mut filtered_count = 0_usize;
@@ -14200,6 +14267,21 @@ fn direct_rule_pack_candidates(
     for (hit, projection) in hits {
         let rule = projection.rule();
         if !seen.insert(rule.id.clone()) {
+            continue;
+        }
+        // Anti-pattern curation persists a native rule, with this explicit
+        // tag identifying its warning semantics. Protection alone is a
+        // lifecycle setting and must not turn ordinary guidance into a risk.
+        let section = if projection
+            .tags()
+            .iter()
+            .any(|tag| matches!(tag.as_str(), "anti-pattern" | "anti_pattern"))
+        {
+            PackSection::Failures
+        } else {
+            PackSection::ProceduralRules
+        };
+        if !request.sections.is_empty() && !request.sections.contains(&section) {
             continue;
         }
         let Ok(trust_class) = TrustClass::from_str(&rule.trust_class) else {
@@ -14277,7 +14359,7 @@ fn direct_rule_pack_candidates(
             rank: 0,
             rule_id: rule.id.clone(),
             entity_revision: projection.entity_revision().to_owned(),
-            section: PackSection::ProceduralRules,
+            section,
             content,
             estimated_tokens,
             relevance,
@@ -14350,13 +14432,15 @@ struct NativePackEvictionGroup {
 /// Find a complete feasible replacement before mutating selection. An
 /// oversized native item must never clear useful memory and then fail to fit.
 /// A memory's selected LODs move together; an anti-pattern reservation or an
-/// equal/higher-ranked member protects the entire memory identity.
+/// equal/higher-ranked member protects the entire memory identity, except
+/// when reserving the one warning slice before ordinary action items.
 fn native_pack_memory_displacements(
     priority: &ContextPackPriority,
     estimated_tokens: u32,
     request: &ContextRequest,
     draft: &PackDraft,
     represented_memory_ids: &BTreeSet<MemoryId>,
+    reserve_warning: bool,
 ) -> Option<Vec<MemoryId>> {
     let budget = u64::from(draft.budget.max_tokens());
     let mut next_tokens = u64::from(draft.used_tokens) + u64::from(estimated_tokens);
@@ -14380,7 +14464,7 @@ fn native_pack_memory_displacements(
         };
         let eligible = !represented_memory_ids.contains(&item.memory_id)
             && item.selected_in != crate::pack::PackSelectionPhase::AntiPatternFirst
-            && compare_context_pack_priority(priority, &item_priority).is_lt();
+            && (reserve_warning || compare_context_pack_priority(priority, &item_priority).is_lt());
         let group = groups
             .entry(item.memory_id)
             .or_insert_with(|| NativePackEvictionGroup {
@@ -14419,12 +14503,15 @@ fn native_pack_memory_displacements(
 
 /// Admit native sources in their shared ranking order. The memory selector
 /// still supplies its MMR/facility-location choice; a better-ranked native
-/// item can reclaim budget only from strictly weaker selected memories.
-/// No source receives a fixed quota or a manufactured memory identity.
+/// item can reclaim budget from strictly weaker selected memories. The one
+/// anti-pattern reservation may also replace higher-ranked ordinary memories;
+/// it uses the existing failure quota and never displaces a reserved warning.
+/// No source receives a manufactured memory identity.
 fn append_ranked_native_pack_items(
     rules: Vec<crate::pack::PackRuleItem>,
     evidence: Vec<DirectEvidencePackCandidate>,
     request: &ContextRequest,
+    relevance_floor: Option<f32>,
     draft: &mut PackDraft,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) {
@@ -14438,6 +14525,57 @@ fn append_ranked_native_pack_items(
         return;
     }
     candidates.sort_by(|(left, _), (right, _)| compare_context_pack_priority(left, right));
+    // The memory selector already reserves one failure/risk item. When it
+    // found none, a native anti-pattern must be able to fill that same slice
+    // before action rules or evidence consume the remaining budget. Admission
+    // and caller filtering have already run; reservation additionally uses
+    // the same relevance floor and failure quota as the memory selector.
+    let warning_reserved = draft
+        .items
+        .iter()
+        .any(|item| item.selected_in == crate::pack::PackSelectionPhase::AntiPatternFirst)
+        || draft
+            .rule_items
+            .iter()
+            .any(|item| item.section == PackSection::Failures);
+    let floor = crate::pack::PackAssemblyOptions {
+        relevance_floor,
+        ..crate::pack::PackAssemblyOptions::default()
+    }
+    .effective_relevance_floor();
+    let quotas =
+        crate::pack::SectionQuotas::for_profile(request.profile, draft.budget.max_tokens());
+    let failure_tokens = draft
+        .items
+        .iter()
+        .filter(|item| item.section == PackSection::Failures)
+        .map(|item| item.estimated_tokens)
+        .fold(0_u32, u32::saturating_add);
+    let reserved_index = (!warning_reserved)
+        .then(|| {
+            candidates.iter().position(|(priority, candidate)| {
+                matches!(candidate, NativePackCandidate::Rule(item)
+                    if item.section == PackSection::Failures
+                        && item.relevance.into_inner() >= floor
+                        && quotas.has_room(PackSection::Failures, failure_tokens, item.estimated_tokens))
+                    && native_pack_memory_displacements(
+                        priority,
+                        candidate.estimated_tokens(),
+                        request,
+                        draft,
+                        &BTreeSet::new(),
+                        true,
+                    )
+                    .is_some()
+            })
+        })
+        .flatten();
+    let reserved_entity = reserved_index.map(|index| {
+        let reserved = candidates.remove(index);
+        let entity = reserved.0.entity.clone();
+        candidates.insert(0, reserved);
+        entity
+    });
     let candidate_count = candidates.len();
     let mut rule_result_limit = 0_usize;
     let mut evidence_result_limit = 0_usize;
@@ -14446,6 +14584,7 @@ fn append_ranked_native_pack_items(
     let mut linked_duplicates = 0_usize;
     let mut represented_memory_ids = BTreeSet::new();
     for (priority, candidate) in candidates {
+        let reserve_warning = reserved_entity.as_ref() == Some(&priority.entity);
         if let NativePackCandidate::Evidence(evidence) = &candidate
             && let Some(memory_id) = evidence
                 .linked_memory_id
@@ -14466,6 +14605,7 @@ fn append_ranked_native_pack_items(
             request,
             draft,
             &represented_memory_ids,
+            reserve_warning,
         ) else {
             let result_limited = request
                 .max_results
@@ -14493,8 +14633,34 @@ fn append_ranked_native_pack_items(
                 omission.reason = PackOmissionReason::ExcludedByFilter;
             }
         }
-        let rank = u32::try_from(draft.selected_item_count().saturating_add(1)).unwrap_or(u32::MAX);
-        let selection_note = if displaced_count > 0 {
+        let rank = if reserve_warning {
+            // Keep the typed warning first in persisted selection as well as
+            // in the prompt. The memory-only audit retains its own entities
+            // and their updated ranks; no synthetic MemoryId is introduced.
+            for item in &mut draft.items {
+                item.rank = item.rank.saturating_add(1);
+            }
+            for item in &mut draft.rule_items {
+                item.rank = item.rank.saturating_add(1);
+            }
+            for item in &mut draft.evidence_items {
+                item.rank = item.rank.saturating_add(1);
+            }
+            for item in &mut draft.selection_audit.selected_items {
+                item.rank = item.rank.saturating_add(1);
+            }
+            for step in &mut draft.selection_audit.steps {
+                step.rank = step.rank.saturating_add(1);
+            }
+            1
+        } else {
+            u32::try_from(draft.selected_item_count().saturating_add(1)).unwrap_or(u32::MAX)
+        };
+        let selection_note = if reserve_warning && displaced_count > 0 {
+            format!(
+                "; anti-pattern reservation displaced {displaced_count} non-reserved memory items"
+            )
+        } else if displaced_count > 0 {
             format!("; shared budget ranking displaced {displaced_count} lower-ranked memory items")
         } else {
             "; selected within the shared native-source budget".to_owned()
@@ -14502,6 +14668,12 @@ fn append_ranked_native_pack_items(
         match candidate {
             NativePackCandidate::Rule(mut item) => {
                 item.rank = rank;
+                if reserve_warning {
+                    item.why = format!(
+                        "What NOT to do: selected from the reserved anti-pattern/failure/risk slice before action. {}",
+                        item.why
+                    );
+                }
                 item.why.push_str(&selection_note);
                 draft.rule_items.push(item);
             }
@@ -16010,6 +16182,7 @@ mod relevance_floor_tests {
                 query_hash: "relevance-floor".to_owned(),
             }),
             Some(6),
+            None,
             &mut degraded,
         );
         assert_eq!(page.total, 6);
@@ -16038,6 +16211,7 @@ mod relevance_floor_tests {
             candidates.rules,
             candidates.evidence,
             &request,
+            Some(0.5),
             &mut draft,
             &mut degraded,
         );

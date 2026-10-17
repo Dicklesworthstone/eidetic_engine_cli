@@ -224,6 +224,7 @@ fn assert_native_evidence_replay_after_memory_displacement(multiple_lods: bool) 
         Vec::new(),
         vec![native],
         &request,
+        None,
         &mut draft,
         &mut degraded,
     );
@@ -307,7 +308,14 @@ fn native_sources_compete_by_rank_instead_of_rule_then_evidence_phase_order() ->
     let best_id = best.item.evidence_id.clone();
     let lower = rule(12, 0.8, 40)?;
     let mut degraded = Vec::new();
-    append_ranked_native_pack_items(vec![lower], vec![best], &request, &mut draft, &mut degraded);
+    append_ranked_native_pack_items(
+        vec![lower],
+        vec![best],
+        &request,
+        None,
+        &mut draft,
+        &mut degraded,
+    );
     assert!(draft.rule_items.is_empty());
     assert_eq!(draft.evidence_items.len(), 1);
     assert_eq!(draft.evidence_items[0].evidence_id, best_id);
@@ -349,6 +357,7 @@ fn native_replacement_is_feasible_atomic_and_keeps_stronger_or_reserved_memories
             Vec::new(),
             vec![evidence(22, native_relevance, native_tokens)?],
             &request,
+            None,
             &mut draft,
             &mut Vec::new(),
         );
@@ -384,6 +393,7 @@ fn result_caps_and_pages_use_one_deterministic_mixed_candidate_order() -> TestRe
             &mut cap_evidence,
             &None,
             Some(1),
+            None,
             &mut Vec::new(),
         );
         assert!(cap_memories.is_empty());
@@ -400,6 +410,7 @@ fn result_caps_and_pages_use_one_deterministic_mixed_candidate_order() -> TestRe
                 query_hash: "mixed-ranking".to_owned(),
             }),
             Some(5),
+            None,
             &mut Vec::new(),
         );
         assert_eq!(page.total, 5);
@@ -433,10 +444,278 @@ fn represented_linked_evidence_does_not_displace_its_selected_memory() -> TestRe
         Vec::new(),
         vec![linked],
         &request,
+        None,
         &mut draft,
         &mut Vec::new(),
     );
     assert_eq!(draft.items, before);
     assert!(draft.evidence_items.is_empty());
+    Ok(())
+}
+
+#[test]
+fn native_warning_reserves_budget_before_higher_scoring_native_actions() -> TestResult {
+    let request = request(100)?;
+    let mut hashes = Vec::new();
+    for reverse in [false, true] {
+        let mut warning = rule(51, 0.4, 10)?;
+        warning.section = PackSection::Failures;
+        let warning_id = warning.rule_id.clone();
+        let action = rule(52, 0.9, 90)?;
+        let action_id = action.rule_id.clone();
+        let mut rules = vec![action, warning];
+        if reverse {
+            rules.reverse();
+        }
+        let mut draft = crate::pack::assemble_draft(&request.query, request.budget, Vec::new())?;
+        let mut degraded = Vec::new();
+        append_ranked_native_pack_items(
+            rules,
+            vec![evidence(53, 0.99, 100)?],
+            &request,
+            None,
+            &mut draft,
+            &mut degraded,
+        );
+        assert_eq!(draft.rule_items.len(), 2);
+        assert_eq!(draft.rule_items[0].rule_id, warning_id);
+        assert_eq!(draft.rule_items[0].rank, 1);
+        assert!(draft.rule_items[0].why.starts_with("What NOT to do:"));
+        assert_eq!(draft.rule_items[1].rule_id, action_id);
+        assert_eq!(draft.rule_items[1].rank, 2);
+        assert!(draft.evidence_items.is_empty());
+        assert_eq!(draft.used_tokens, 100);
+        assert_eq!(draft.selection_audit.candidate_count, 3);
+        assert_eq!(draft.selection_audit.selected_count, 2);
+        assert_eq!(draft.selection_audit.omitted_count, 1);
+        hashes.push(compute_pack_hash(&request, &draft, &degraded));
+    }
+    assert_eq!(
+        hashes[0], hashes[1],
+        "input order cannot change warning selection"
+    );
+    Ok(())
+}
+
+#[test]
+fn native_warning_reservation_obeys_floor_and_exact_failure_quota() -> TestResult {
+    let request = request(100)?;
+    let quota = crate::pack::SectionQuotas::for_profile(request.profile, 100)
+        .get(PackSection::Failures)
+        .max_tokens;
+    assert!(quota > 0 && quota < 100);
+    for (score, floor, tokens, reserved) in [
+        (0.049, None, 10, false),
+        (0.05, None, 10, true),
+        (0.3, Some(0.4), 10, false),
+        (0.4, Some(0.4), 10, true),
+        (0.0, Some(0.0), 10, true),
+        (0.4, None, quota, true),
+        (0.4, None, quota + 1, false),
+        (0.4, None, 101, false),
+    ] {
+        let mut warning = rule(61, score, tokens)?;
+        warning.section = PackSection::Failures;
+        let warning_id = warning.rule_id.clone();
+        let selected = native_warning_candidate_for_page(&[], &[warning.clone()], &request, floor);
+        assert_eq!(selected.is_some(), reserved);
+        let mut draft = crate::pack::assemble_draft(&request.query, request.budget, Vec::new())?;
+        append_ranked_native_pack_items(
+            vec![rule(62, 0.99, 100)?, warning],
+            Vec::new(),
+            &request,
+            floor,
+            &mut draft,
+            &mut Vec::new(),
+        );
+        assert_eq!(draft.rule_items.len(), 1);
+        assert_eq!(draft.rule_items[0].rule_id == warning_id, reserved);
+        assert_eq!(
+            draft.rule_items[0].why.starts_with("What NOT to do:"),
+            reserved
+        );
+        assert!(draft.used_tokens <= 100);
+        assert_eq!(draft.selection_audit.budget_used, draft.used_tokens);
+    }
+    Ok(())
+}
+
+#[test]
+fn native_warning_replaces_ordinary_memory_but_never_a_reserved_memory_warning() -> TestResult {
+    for protect_failure in [false, true] {
+        let mut request = request(100)?;
+        request.max_results = Some(1);
+        let mut candidate = memory(81, 0.99)?;
+        if protect_failure {
+            candidate.section = PackSection::Failures;
+        }
+        let mut draft = memory_draft(&request, candidate, protect_failure)?;
+        let selected_before = draft.items.clone();
+        let tokens_before = draft.used_tokens;
+        let mut warning = rule(82, 0.4, 10)?;
+        warning.section = PackSection::Failures;
+        append_ranked_native_pack_items(
+            vec![warning],
+            Vec::new(),
+            &request,
+            None,
+            &mut draft,
+            &mut Vec::new(),
+        );
+        assert_eq!(draft.selected_item_count(), 1);
+        if protect_failure {
+            assert_eq!(draft.items, selected_before);
+            assert_eq!(draft.used_tokens, tokens_before);
+            assert!(draft.rule_items.is_empty());
+            assert!(draft.omitted.is_empty());
+        } else {
+            assert!(draft.items.is_empty());
+            assert_eq!(draft.rule_items.len(), 1);
+            assert_eq!(draft.rule_items[0].rank, 1);
+            assert_eq!(draft.used_tokens, 10);
+            assert_eq!(draft.omitted.len(), 1);
+            assert_eq!(
+                draft.omitted[0].reason,
+                PackOmissionReason::ExcludedByFilter
+            );
+            assert!(draft.selection_audit.steps.is_empty());
+            assert!(draft.selection_audit.selected_items.is_empty());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn native_warning_survives_result_caps_and_pages_do_not_repeat_it() -> TestResult {
+    let mut request = request(100)?;
+    request.max_results = Some(1);
+    for reverse in [false, true] {
+        let mut warning = rule(91, 0.4, 10)?;
+        warning.section = PackSection::Failures;
+        let warning_id = warning.rule_id.clone();
+        let mut rules = vec![rule(92, 0.99, 10)?, warning];
+        if reverse {
+            rules.reverse();
+        }
+        let memories = vec![memory(93, 0.8)?];
+        let evidence = vec![evidence(94, 0.98, 10)?];
+        let reservation = native_warning_candidate_for_page(&memories, &rules, &request, None);
+        assert_eq!(
+            reservation,
+            Some(ContextPackEntityKey::Rule(warning_id.clone()))
+        );
+        let mut capped_memories = memories.clone();
+        let mut capped_rules = rules.clone();
+        let mut capped_evidence = evidence.clone();
+        apply_pagination_with_rules(
+            &mut capped_memories,
+            &mut capped_rules,
+            &mut capped_evidence,
+            &None,
+            request.max_results,
+            reservation.clone(),
+            &mut Vec::new(),
+        );
+        assert!(capped_memories.is_empty());
+        assert!(capped_evidence.is_empty());
+        assert_eq!(capped_rules.len(), 1);
+        assert_eq!(capped_rules[0].rule_id, warning_id);
+        let mut page_ids = Vec::new();
+        for offset in 0..=4 {
+            let mut page_memories = memories.clone();
+            let mut page_rules = rules.clone();
+            let mut page_evidence = evidence.clone();
+            let page = apply_pagination_with_rules(
+                &mut page_memories,
+                &mut page_rules,
+                &mut page_evidence,
+                &Some(ContextPagination {
+                    offset,
+                    limit: 1,
+                    query_hash: "native-warning-page".to_owned(),
+                }),
+                None,
+                reservation.clone(),
+                &mut Vec::new(),
+            );
+            assert_eq!(page.total, 4);
+            assert_eq!(page.page_size, u32::from(offset < 4));
+            page_ids.extend(page_memories.iter().map(|item| item.memory_id.to_string()));
+            page_ids.extend(page_rules.iter().map(|item| item.rule_id.clone()));
+            page_ids.extend(
+                page_evidence
+                    .iter()
+                    .map(|item| item.item.evidence_id.clone()),
+            );
+        }
+        assert_eq!(page_ids.len(), 4);
+        assert_eq!(page_ids[0], warning_id);
+        assert_eq!(page_ids.iter().collect::<BTreeSet<_>>().len(), 4);
+        assert!(
+            native_warning_candidate_for_page(&memories, &rules, &request, Some(0.5)).is_none()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn native_warning_zero_floor_survives_a_zero_gain_memory_at_the_result_cap() -> TestResult {
+    let mut request = request(100)?;
+    request.max_results = Some(1);
+    let mut memory = memory(101, 0.0)?;
+    memory.section = PackSection::Failures;
+    let memory_id = memory.memory_id;
+    let mut warning = rule(102, 0.0, 10)?;
+    warning.section = PackSection::Failures;
+    let warning_id = warning.rule_id.clone();
+    let mut memories = vec![memory];
+    let mut rules = vec![warning];
+    let reservation = native_warning_candidate_for_page(&memories, &rules, &request, Some(0.0));
+    assert_eq!(
+        reservation,
+        Some(ContextPackEntityKey::Rule(warning_id.clone())),
+        "a zero-gain memory cannot consume the warning's only result slot"
+    );
+    let mut submodular = request.clone();
+    submodular.profile = ContextPackProfile::Submodular;
+    assert_eq!(
+        native_warning_candidate_for_page(&memories, &rules, &submodular, Some(0.0)),
+        Some(ContextPackEntityKey::Memory(memory_id)),
+        "positive utility can still give a zero-relevance memory facility coverage gain"
+    );
+    apply_pagination_with_rules(
+        &mut memories,
+        &mut rules,
+        &mut Vec::new(),
+        &None,
+        request.max_results,
+        reservation,
+        &mut Vec::new(),
+    );
+    let mut draft = crate::pack::assemble_draft_with_profile_and_options(
+        request.profile,
+        request.query.clone(),
+        request.budget,
+        memories,
+        PackAssemblyOptions {
+            relevance_floor: Some(0.0),
+            include_coverage_fill: false,
+            lod_budget_shares: None,
+            ..PackAssemblyOptions::default()
+        },
+    )?;
+    append_ranked_native_pack_items(
+        rules,
+        Vec::new(),
+        &request,
+        Some(0.0),
+        &mut draft,
+        &mut Vec::new(),
+    );
+    assert_eq!(draft.selected_item_count(), 1);
+    assert_eq!(draft.rule_items[0].rule_id, warning_id);
+    assert_eq!(draft.rule_items[0].rank, 1);
+    assert_eq!(draft.used_tokens, 10);
+    assert!(draft.rule_items[0].why.starts_with("What NOT to do:"));
     Ok(())
 }

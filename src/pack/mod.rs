@@ -3198,7 +3198,7 @@ pub fn explain_coverage_gap(task: impl Into<String>, pack: &PackDraft) -> Covera
             expected_level: spec.expected_level.to_string(),
             section: spec.section.as_str().to_string(),
             reason: format!(
-                "No selected memory in {} satisfies `{}` demand for this task.",
+                "No selected item in {} satisfies `{}` demand for this task.",
                 spec.section.as_str(),
                 spec.kind
             ),
@@ -3217,8 +3217,8 @@ pub fn explain_coverage_gap(task: impl Into<String>, pack: &PackDraft) -> Covera
         task_hash: blake3::hash(task.as_bytes()).to_hex().to_string(),
         posture: coverage_gap_posture(pack, missing_kinds.len()),
         pack_summary: CoverageGapPackSummary {
-            selected_count: pack.items.len(),
-            omitted_count: pack.omitted.len(),
+            selected_count: pack.selected_item_count(),
+            omitted_count: pack.selection_audit.omitted_count.max(pack.omitted.len()),
             used_tokens: pack.used_tokens,
             max_tokens: pack.budget.max_tokens(),
             quality: coverage_gap_quality(pack, missing_kinds.len()),
@@ -3247,9 +3247,25 @@ fn expected_gap_specs_for_task(task_lower: &str) -> Vec<&'static CoverageGapKind
 }
 
 fn pack_satisfies_gap_spec(pack: &PackDraft, spec: &CoverageGapKindSpec) -> bool {
+    // Coverage belongs to the selected pack, including native rules and
+    // evidence. Their source memories need not exist. Keep section matching:
+    // a transcript quoting a release command is not a procedural rule.
     pack.items
         .iter()
-        .any(|item| item.section == spec.section && content_satisfies_gap_spec(&item.content, spec))
+        .map(|item| (item.section, item.content.as_str()))
+        .chain(
+            pack.rule_items
+                .iter()
+                .map(|item| (item.section, item.content.as_str())),
+        )
+        .chain(
+            pack.evidence_items
+                .iter()
+                .map(|item| (item.section, item.content.as_str())),
+        )
+        .any(|(section, content)| {
+            section == spec.section && content_satisfies_gap_spec(content, spec)
+        })
 }
 
 fn content_satisfies_gap_spec(content: &str, spec: &CoverageGapKindSpec) -> bool {
@@ -3270,9 +3286,9 @@ fn coverage_gap_confidence(task_lower: &str, spec: &CoverageGapKindSpec) -> u32 
 }
 
 fn coverage_gap_quality(pack: &PackDraft, missing_count: usize) -> String {
-    if pack.items.is_empty() {
+    if pack.is_empty() {
         "empty".to_string()
-    } else if missing_count >= 2 || pack.items.len() <= 1 {
+    } else if missing_count >= 2 || pack.selected_item_count() <= 1 {
         "thin".to_string()
     } else if missing_count == 1 {
         "partial".to_string()
@@ -3282,7 +3298,7 @@ fn coverage_gap_quality(pack: &PackDraft, missing_count: usize) -> String {
 }
 
 fn coverage_gap_posture(pack: &PackDraft, missing_count: usize) -> String {
-    if pack.items.is_empty() || missing_count >= 2 {
+    if pack.is_empty() || missing_count >= 2 {
         "capture_required".to_string()
     } else if missing_count == 1 {
         "capture_recommended".to_string()
@@ -5073,6 +5089,14 @@ pub fn render_context_markdown_with_analysis(
         }
 
         let mut display_index: u32 = 0;
+        render_native_rule_items(
+            &mut output,
+            pack.rule_items
+                .iter()
+                .filter(|item| item.section == PackSection::Failures),
+            "What NOT to do",
+            &mut display_index,
+        );
         for section in section_order {
             let Some(items) = by_section.get(section) else {
                 continue;
@@ -5119,41 +5143,14 @@ pub fn render_context_markdown_with_analysis(
             }
         }
 
-        if !pack.rule_items.is_empty() {
-            output.push_str("## Rules\n\n");
-            for item in &pack.rule_items {
-                display_index = display_index.saturating_add(1);
-                output.push_str(&format!(
-                    "### {}. {} ({} tokens)\n\n",
-                    display_index,
-                    escape_markdown_text(&item.rule_id),
-                    item.estimated_tokens
-                ));
-                if !item.content.is_empty() {
-                    output.push_str(&markdown_fenced_code_block(&item.content));
-                    output.push('\n');
-                }
-                if !item.why.is_empty() {
-                    output.push_str(&format!("**Why:** {}\n\n", escape_markdown_text(&item.why)));
-                }
-                output.push_str(&format!(
-                    "**Trust:** `{}` / `{}`\n\n",
-                    item.trust.class.as_str(),
-                    item.trust.posture().as_str()
-                ));
-                if !item.provenance.is_empty() {
-                    output.push_str("**Provenance:**\n");
-                    for provenance in item.rendered_provenance() {
-                        output.push_str(&format!(
-                            "- {} ({})\n",
-                            markdown_inline_code(&provenance.uri),
-                            escape_markdown_text(&provenance.scheme)
-                        ));
-                    }
-                    output.push('\n');
-                }
-            }
-        }
+        render_native_rule_items(
+            &mut output,
+            pack.rule_items
+                .iter()
+                .filter(|item| item.section != PackSection::Failures),
+            "Rules",
+            &mut display_index,
+        );
 
         if !pack.evidence_items.is_empty() {
             output.push_str("## Evidence\n\n");
@@ -5398,6 +5395,51 @@ fn context_advisory_banner(
         legacy_count: counts.legacy(),
         degradation_count: degraded.len(),
         notes,
+    }
+}
+
+fn render_native_rule_items<'a>(
+    output: &mut String,
+    items: impl Iterator<Item = &'a PackRuleItem>,
+    heading: &str,
+    display_index: &mut u32,
+) {
+    let mut heading_emitted = false;
+    for item in items {
+        if !heading_emitted {
+            output.push_str(&format!("## {heading}\n\n"));
+            heading_emitted = true;
+        }
+        *display_index = display_index.saturating_add(1);
+        output.push_str(&format!(
+            "### {}. {} ({} tokens)\n\n",
+            display_index,
+            escape_markdown_text(&item.rule_id),
+            item.estimated_tokens
+        ));
+        if !item.content.is_empty() {
+            output.push_str(&markdown_fenced_code_block(&item.content));
+            output.push('\n');
+        }
+        if !item.why.is_empty() {
+            output.push_str(&format!("**Why:** {}\n\n", escape_markdown_text(&item.why)));
+        }
+        output.push_str(&format!(
+            "**Trust:** `{}` / `{}`\n\n",
+            item.trust.class.as_str(),
+            item.trust.posture().as_str()
+        ));
+        if !item.provenance.is_empty() {
+            output.push_str("**Provenance:**\n");
+            for provenance in item.rendered_provenance() {
+                output.push_str(&format!(
+                    "- {} ({})\n",
+                    markdown_inline_code(&provenance.uri),
+                    escape_markdown_text(&provenance.scheme)
+                ));
+            }
+            output.push('\n');
+        }
     }
 }
 
@@ -15907,6 +15949,216 @@ mod tests {
                 .iter()
                 .any(|template| template.kind == "release_rule"),
             "cleared demand should not keep a stale capture template",
+        )
+    }
+
+    fn coverage_gap_native_rule(
+        seed: u128,
+        section: PackSection,
+        content: &str,
+    ) -> Result<super::PackRuleItem, String> {
+        let rule_id = super::RuleId::from_uuid(Uuid::from_u128(seed)).to_string();
+        Ok(super::PackRuleItem {
+            rank: u32::try_from(seed).map_err(|error| error.to_string())?,
+            provenance: vec![provenance(&format!("ee://rule/{rule_id}"))?],
+            rule_id,
+            entity_revision: format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
+            section,
+            content: content.to_owned(),
+            estimated_tokens: 20,
+            relevance: score(0.9)?,
+            utility: score(0.8)?,
+            why: "selected native rule".to_owned(),
+            trust: PackTrustSignal::new(TrustClass::HumanExplicit, None),
+        })
+    }
+
+    #[test]
+    fn coverage_gap_native_rules_close_demand_without_source_memories() -> TestResult {
+        let mut draft = draft_from_candidates(Vec::new())?;
+        let before = super::explain_coverage_gap("prepare release", &draft);
+        ensure_equal(
+            &before.pack_summary.quality.as_str(),
+            &"empty",
+            "empty control",
+        )?;
+
+        draft.rule_items = vec![
+            coverage_gap_native_rule(
+                1,
+                PackSection::ProceduralRules,
+                "Before release, run the verification suite and confirm rollback.",
+            )?,
+            coverage_gap_native_rule(
+                2,
+                PackSection::Failures,
+                "Avoid publishing a release before its verification suite completes.",
+            )?,
+        ];
+        draft.used_tokens = 40;
+        let native_only = super::explain_coverage_gap("prepare release", &draft);
+        ensure_equal(
+            &native_only.pack_summary.selected_count,
+            &2,
+            "native selection count",
+        )?;
+        ensure_equal(
+            &native_only.pack_summary.quality.as_str(),
+            &"partial",
+            "native pack quality",
+        )?;
+        ensure_equal(
+            &native_only.posture.as_str(),
+            &"capture_recommended",
+            "native pack posture",
+        )?;
+        ensure_equal(
+            &native_only
+                .missing_kinds
+                .iter()
+                .map(|gap| gap.kind.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["decision"],
+            "native release and warning rules satisfy their own demand",
+        )?;
+        ensure_equal(
+            &native_only
+                .capture_templates
+                .iter()
+                .map(|template| template.kind.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["decision"],
+            "no duplicate rule capture is suggested",
+        )?;
+        ensure(
+            draft.items.is_empty(),
+            "native coverage must not synthesize memories",
+        )?;
+
+        let mut mixed = draft_from_candidates(vec![candidate_in_section(
+            3,
+            PackSection::Decisions,
+            0.9,
+            0.8,
+            20,
+            "Decision: publish from the release branch because it has the verified artifacts.",
+        )?])?;
+        mixed.rule_items = draft.rule_items;
+        mixed.used_tokens += draft.used_tokens;
+        let covered = super::explain_coverage_gap("prepare release", &mixed);
+        ensure_equal(
+            &covered.pack_summary.selected_count,
+            &3,
+            "mixed selection count",
+        )?;
+        ensure_equal(
+            &covered.pack_summary.quality.as_str(),
+            &"covered",
+            "mixed pack quality",
+        )?;
+        ensure_equal(&covered.posture.as_str(), &"covered", "mixed pack posture")?;
+        ensure(
+            covered.missing_kinds.is_empty() && covered.capture_templates.is_empty(),
+            "satisfied demand must stop requesting capture",
+        )?;
+
+        mixed.rule_items.pop();
+        let withdrawn = super::explain_coverage_gap("prepare release", &mixed);
+        ensure(
+            withdrawn
+                .missing_kinds
+                .iter()
+                .any(|gap| gap.kind == "anti_pattern"),
+            "only currently selected warnings satisfy demand",
+        )
+    }
+
+    #[test]
+    fn coverage_gap_counts_native_evidence_without_promoting_it_to_a_rule() -> TestResult {
+        let mut draft = draft_from_candidates(Vec::new())?;
+        let content = "The release workflow must avoid the prior failure; the decision was recorded in the ADR.";
+        let evidence_id = super::EvidenceId::from_uuid(Uuid::from_u128(4)).to_string();
+        draft.evidence_items.push(super::PackEvidenceItem {
+            rank: 1,
+            provenance: vec![provenance(&format!("ee://evidence/{evidence_id}"))?],
+            evidence_id,
+            entity_revision: format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
+            session_id: crate::models::SessionId::from_uuid(Uuid::from_u128(5)).to_string(),
+            start_line: 10,
+            end_line: 11,
+            section: PackSection::Evidence,
+            content: content.to_owned(),
+            estimated_tokens: 20,
+            relevance: score(0.9)?,
+            utility: score(0.8)?,
+            why: "selected imported transcript".to_owned(),
+            trust: PackTrustSignal::new(TrustClass::CassEvidence, None),
+        });
+        draft.used_tokens = 20;
+        let report = super::explain_coverage_gap("prepare release", &draft);
+        ensure_equal(
+            &report.pack_summary.selected_count,
+            &1,
+            "evidence selection count",
+        )?;
+        ensure_equal(
+            &report.pack_summary.quality.as_str(),
+            &"thin",
+            "evidence is not an empty pack",
+        )?;
+        ensure_equal(
+            &report.missing_kinds.len(),
+            &3,
+            "evidence cannot impersonate rules or decisions",
+        )?;
+        ensure_equal(
+            &report.capture_templates.len(),
+            &3,
+            "unmet demands keep capture templates",
+        )?;
+        ensure(draft.items.is_empty(), "evidence keeps its native identity")
+    }
+
+    #[test]
+    fn coverage_gap_native_rules_require_matching_content_and_section() -> TestResult {
+        let mut draft = draft_from_candidates(Vec::new())?;
+        draft.rule_items = vec![
+            coverage_gap_native_rule(
+                1,
+                PackSection::ProceduralRules,
+                "Document the parser grammar.",
+            )?,
+            coverage_gap_native_rule(
+                2,
+                PackSection::ProceduralRules,
+                "Avoid an undocumented schema migration.",
+            )?,
+        ];
+        let report = super::explain_coverage_gap("prepare release", &draft);
+        ensure_equal(
+            &report.missing_kinds.len(),
+            &3,
+            "unrelated or wrong-section rules do not close demand",
+        )?;
+        let first = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        let second = serde_json::to_value(super::explain_coverage_gap("prepare release", &draft))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&first, &second, "native coverage is deterministic")
+    }
+
+    #[test]
+    fn coverage_gap_counts_native_omissions_from_selection_audit() -> TestResult {
+        let mut draft = draft_from_candidates(Vec::new())?;
+        draft.selection_audit.omitted_count = 3;
+        let report = super::explain_coverage_gap("prepare release", &draft);
+        ensure_equal(
+            &report.pack_summary.omitted_count,
+            &3,
+            "native omissions are retained without fabricated memory omissions",
+        )?;
+        ensure(
+            draft.omitted.is_empty(),
+            "native omissions keep native identity",
         )
     }
 

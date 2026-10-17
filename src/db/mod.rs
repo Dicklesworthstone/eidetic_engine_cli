@@ -11937,6 +11937,68 @@ END;
     "blake3:v131_evidence_admission_counts_2026_10_08",
 );
 
+/// Admit learned anti-pattern rules in the reserved failure section without
+/// changing their native identity or any historical pack and replay bytes.
+/// The pack-history backup asset carries these same rows through recovery.
+pub const V132_PACK_RULE_FAILURE_SECTIONS: Migration = Migration::new(
+    132,
+    "pack_rule_failure_sections",
+    r#"
+CREATE TABLE pack_rule_items_v132_new (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    rule_id TEXT NOT NULL REFERENCES procedural_rules(id) ON DELETE RESTRICT
+        CHECK (rule_id GLOB 'rule_*' AND length(rule_id) = 31),
+    entity_revision TEXT NOT NULL CHECK (
+        length(entity_revision) = 71 AND substr(entity_revision, 1, 7) = 'blake3:'
+    ),
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    section TEXT NOT NULL CHECK (section IN ('procedural_rules', 'failures')),
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    relevance REAL NOT NULL CHECK (relevance >= 0.0 AND relevance <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    why TEXT NOT NULL CHECK (length(trim(why)) > 0),
+    provenance_json TEXT NOT NULL CHECK (length(trim(provenance_json)) > 0),
+    trust_class TEXT NOT NULL CHECK (length(trim(trust_class)) > 0),
+    trust_subclass TEXT,
+    PRIMARY KEY (pack_id, rule_id),
+    UNIQUE (pack_id, rank)
+);
+
+INSERT INTO pack_rule_items_v132_new (
+    pack_id, rule_id, entity_revision, rank, section, estimated_tokens,
+    relevance, utility, why, provenance_json, trust_class, trust_subclass
+)
+SELECT pack_id, rule_id, entity_revision, rank, section, estimated_tokens,
+       relevance, utility, why, provenance_json, trust_class, trust_subclass
+FROM pack_rule_items ORDER BY rowid;
+
+DROP TABLE pack_rule_items;
+ALTER TABLE pack_rule_items_v132_new RENAME TO pack_rule_items;
+CREATE INDEX idx_pack_rule_items_rule ON pack_rule_items(rule_id);
+
+CREATE TRIGGER pack_rule_items_workspace_insert
+BEFORE INSERT ON pack_rule_items
+WHEN NOT coalesce(
+    (SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)
+BEGIN
+    SELECT RAISE(ABORT, 'pack rule must belong to the pack workspace');
+END;
+
+CREATE TRIGGER pack_rule_items_workspace_update
+BEFORE UPDATE OF pack_id, rule_id ON pack_rule_items
+WHEN NOT coalesce(
+    (SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)
+BEGIN
+    SELECT RAISE(ABORT, 'pack rule must belong to the pack workspace');
+END;
+"#,
+    "blake3:v132_pack_rule_failure_sections_2026_10_17",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -12070,6 +12132,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V129_PACK_GUARD_TRIGGERS_WITHOUT_JOINS,
     V130_EVIDENCE_READER_PROJECTIONS,
     V131_EVIDENCE_ADMISSION_COUNTS,
+    V132_PACK_RULE_FAILURE_SECTIONS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -12185,7 +12248,8 @@ impl DbConnection {
                 || migration.version == V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST.version
                 || migration.version == V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version
                 || migration.version == V096_MEMORY_SENTINEL_POLARITY.version
-                || migration.version == V121_EVIDENCE_FEEDBACK_TARGETS.version;
+                || migration.version == V121_EVIDENCE_FEEDBACK_TARGETS.version
+                || migration.version == V132_PACK_RULE_FAILURE_SECTIONS.version;
             let outcome =
                 if rebuilds_existing_table && matches!(&self.location, DatabaseLocation::File(_)) {
                     self.apply_file_schema_rebuild_migration(migration, &now)?
@@ -34846,7 +34910,7 @@ fn validate_pack_record_input(
             item.pack_id != id
                 || !is_canonical_rule_id(&item.rule_id)
                 || !is_canonical_blake3_hash(&item.entity_revision)
-                || item.section != "procedural_rules"
+                || !matches!(item.section.as_str(), "procedural_rules" | "failures")
                 || item.estimated_tokens == 0
                 || !item.relevance.is_finite()
                 || !(0.0..=1.0).contains(&item.relevance)
@@ -34860,7 +34924,7 @@ fn validate_pack_record_input(
     {
         return Err(DbError::MalformedRow {
             operation: DbOperation::Execute,
-            message: "pack rule items require unique canonical identities, revisions, the procedural_rules section, advisory rule trust, and provenance".to_owned(),
+            message: "pack rule items require unique canonical identities, revisions, a procedural_rules or failures section, advisory rule trust, and provenance".to_owned(),
         });
     }
     if omissions.iter().any(|omission| omission.pack_id != id) {
@@ -37447,7 +37511,7 @@ fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> 
                     && item.evidence_span_id.is_empty()
                     && is_canonical_rule_id(&item.entity_id)
                     && is_canonical_blake3_hash(&item.entity_revision)
-                    && item.section == "procedural_rules"
+                    && matches!(item.section.as_str(), "procedural_rules" | "failures")
                     && item.trust_subclass.as_deref() == Some("procedural_rule")
             }
             _ => false,
