@@ -9633,14 +9633,32 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         .map(|(label, ms)| format!("{label} {:.1}s", *ms as f64 / 1000.0))
         .collect::<Vec<_>>()
         .join(", ");
+    // The "one step dominating" rule above needs a BASELINE or it convicts the
+    // wrong step, and it already did once (bd-hwye2).
+    //
+    // `init` is the slowest step by construction -- it creates the store -- so
+    // it tops this list on a healthy machine too and therefore ALWAYS looks
+    // like it is dominating. Measured on an idle laptop: init 1.72s, remember
+    // 0.39s, search 0.44s, index rebuild 0.20s, i.e. init is already ~4x the
+    // next step with nothing wrong.
+    //
+    // What separates load from regression is the per-step RATIO against that
+    // shape, not the ranking. A 136s run on a shared worker read init 45.5s /
+    // remember 16.1s / search 13.8s / index-rebuild 10.8s, which is 26x, 41x,
+    // 31x and 54x the idle figures: init was the LEAST degraded step in the
+    // run, and the honest verdict was load. Reading the ranking alone pointed
+    // at init, which was wrong.
     ensure(
         elapsed.as_secs() < 60,
         format!(
             "walking skeleton scenario should complete in under 60s, took {}s. \
              THIS IS WALL CLOCK ON A SHARED WORKER and cannot by itself \
-             distinguish a regression from a busy fleet (bd-x63yk); read the \
-             breakdown to tell them apart -- one step dominating is a \
-             regression with an address, an even spread is load. \
+             distinguish a regression from a busy fleet (bd-x63yk). Read the \
+             breakdown as RATIOS against the idle-laptop shape (init ~1.7s, \
+             remember ~0.4s, search ~0.4s, index-rebuild ~0.2s), NOT as a \
+             ranking: init tops this list even when nothing is wrong, because \
+             it creates the store. A step whose multiple of its idle figure is \
+             far above the others is the address; a uniform multiple is load. \
              Slowest first: {breakdown}",
             elapsed.as_secs()
         ),
