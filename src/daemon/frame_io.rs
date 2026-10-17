@@ -137,16 +137,7 @@ fn write_with_checkpoint<W: Write>(
     response: &DaemonResponse,
     checkpoint: &mut impl FnMut() -> io::Result<()>,
 ) -> Result<(), FrameWriteError> {
-    checkpoint()?;
-    let body = serde_json::to_vec(response);
-    checkpoint()?;
-    let body = body.map_err(FrameWriteError::Encode)?;
-    if body.len() > DAEMON_RESPONSE_MAX_BYTES {
-        return Err(FrameWriteError::TooLarge {
-            actual: body.len(),
-            max: DAEMON_RESPONSE_MAX_BYTES,
-        });
-    }
+    let body = encode_response(response, DAEMON_RESPONSE_MAX_BYTES, checkpoint)?;
     let length = u32::try_from(body.len()).map_err(|_| FrameWriteError::TooLarge {
         actual: body.len(),
         max: DAEMON_RESPONSE_MAX_BYTES,
@@ -155,6 +146,96 @@ fn write_with_checkpoint<W: Write>(
     write_all_checked(writer, &body, checkpoint)?;
     retry_io(checkpoint, || writer.flush())?;
     Ok(())
+}
+
+/// Retain at most the allowed encoded bytes. Once oversized, count the rest
+/// without keeping it so TooLarge.actual remains the exact serialized size.
+/// This avoids allocating a complete rejected JSON copy, including escaping
+/// expansion. Counting still observes the SAME frame checkpoint; a single
+/// serializer operation cannot be preempted. This is not a bound on the source
+/// Value's allocations, allocator overhead, or the caller's total memory.
+struct ResponseBuffer<'a> {
+    bytes: Vec<u8>,
+    actual: usize,
+    limit: usize,
+    checkpoint: &'a mut dyn FnMut() -> io::Result<()>,
+    failure: Option<io::Error>,
+}
+
+impl<'a> ResponseBuffer<'a> {
+    fn new(limit: usize, checkpoint: &'a mut dyn FnMut() -> io::Result<()>) -> Self {
+        Self { bytes: Vec::new(), actual: 0, limit, checkpoint, failure: None }
+    }
+}
+
+impl Write for ResponseBuffer<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.failure.is_some() {
+            return Err(io::Error::other("daemon response encoding already failed"));
+        }
+        let result = (|| {
+            (self.checkpoint)()?;
+            let next = self.actual.checked_add(bytes.len()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "daemon response byte count overflow")
+            })?;
+            if next <= self.limit {
+                if next > self.bytes.capacity() {
+                    // Ask for bounded geometric growth rather than reallocating
+                    // on every JSON token or reserving an oversized input slice.
+                    let capacity = next
+                        .max(self.bytes.capacity().saturating_mul(2))
+                        .max(REQUEST_BODY_PREALLOC_CAP.min(self.limit))
+                        .min(self.limit);
+                    self.bytes.try_reserve_exact(capacity - self.bytes.len()).map_err(|_| {
+                        io::Error::other("unable to allocate bounded daemon response buffer")
+                    })?;
+                }
+                self.bytes.extend_from_slice(bytes);
+            } else {
+                // Never expose this rejected prefix to the transport. Retained
+                // capacity is bounded by earlier admitted allocation requests.
+                self.bytes.clear();
+            }
+            self.actual = next;
+            (self.checkpoint)()?;
+            Ok(bytes.len())
+        })();
+        match result {
+            Ok(count) => Ok(count),
+            Err(error) => {
+                // serde_json wraps writer errors. Preserve the original kind
+                // separately so cancellation/deadlines stay transport errors.
+                self.failure = Some(error);
+                Err(io::Error::other("daemon response encoding interrupted"))
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_response(
+    response: &DaemonResponse,
+    limit: usize,
+    checkpoint: &mut impl FnMut() -> io::Result<()>,
+) -> Result<Vec<u8>, FrameWriteError> {
+    checkpoint()?;
+    let (encoded, bytes, actual, failure) = {
+        let mut buffer = ResponseBuffer::new(limit, checkpoint);
+        let encoded = serde_json::to_writer(&mut buffer, response);
+        (encoded, buffer.bytes, buffer.actual, buffer.failure)
+    };
+    checkpoint()?;
+    if let Some(error) = failure {
+        return Err(FrameWriteError::Io(error));
+    }
+    encoded.map_err(FrameWriteError::Encode)?;
+    if actual > limit {
+        return Err(FrameWriteError::TooLarge { actual, max: limit });
+    }
+    Ok(bytes)
 }
 
 fn write_all_checked<W: Write>(
@@ -345,6 +426,109 @@ mod tests {
     fn expired_frame_budget_refuses_io_without_waiting_for_a_socket_timeout() {
         let error = frame_checkpoint(Duration::ZERO)().expect_err("zero remaining time");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn bounded_encoding_matches_native_json_and_exact_oversize_counts() {
+        let success = DaemonResponse::ok("r", "agent", Some("workspace".to_owned()),
+            serde_json::json!({"text": "資料 café\n\0\"\\", "values": [null, true, u64::MAX]}))
+            .with_degraded("diagnostic")
+            .with_search_advisory_delivery("workspace", 19, true);
+        let failure = DaemonResponse::err("r", "agent", None, "failure", "quoted \"message\"");
+        for response in [success, failure] {
+            let expected = serde_json::to_vec(&response).expect("native serialization");
+            for limit in [expected.len(), expected.len() + 1, DAEMON_RESPONSE_MAX_BYTES] {
+                assert_eq!(encode_response(&response, limit, &mut || Ok(())).expect("fits"), expected);
+            }
+            for limit in [0, 1, expected.len() - 1] {
+                assert!(matches!(encode_response(&response, limit, &mut || Ok(())),
+                    Err(FrameWriteError::TooLarge {actual, max}) if actual == expected.len() && max == limit));
+            }
+        }
+    }
+
+    #[test]
+    fn exact_wire_limit_is_inclusive_and_oversize_never_writes_a_prefix() {
+        let mut response = DaemonResponse::ok("r", "agent", None, serde_json::Value::String(String::new()));
+        let overhead = serde_json::to_vec(&response).expect("empty response").len();
+        response.result = Some(serde_json::Value::String("x".repeat(DAEMON_RESPONSE_MAX_BYTES - overhead)));
+        let mut wire = Vec::new();
+        write_with_checkpoint(&mut wire, &response, &mut || Ok(())).expect("inclusive cap");
+        assert_eq!(wire.len(), DAEMON_RESPONSE_MAX_BYTES + 4);
+        assert_eq!(&wire[..4], &(DAEMON_RESPONSE_MAX_BYTES as u32).to_be_bytes());
+        assert_eq!(serde_json::from_slice::<DaemonResponse>(&wire[4..]).expect("complete JSON"), response);
+        if let Some(serde_json::Value::String(text)) = &mut response.result { text.push('x'); }
+        let mut rejected = vec![17, 23];
+        assert!(matches!(write_with_checkpoint(&mut rejected, &response, &mut || Ok(())),
+            Err(FrameWriteError::TooLarge {actual, max}) if actual == DAEMON_RESPONSE_MAX_BYTES + 1 && max == DAEMON_RESPONSE_MAX_BYTES));
+        assert_eq!(rejected, [17, 23]);
+    }
+
+    #[test]
+    fn escaped_oversize_counts_every_byte_without_retaining_the_encoded_tail() {
+        let response = DaemonResponse::ok("r", "agent", None, serde_json::Value::String("\0".repeat(8192)));
+        let expected = serde_json::to_vec(&response).expect("native escaped bytes");
+        assert!(expected.len() > 8192 * 5);
+        let mut checkpoint = || Ok(());
+        let mut buffer = ResponseBuffer::new(1024, &mut checkpoint);
+        serde_json::to_writer(&mut buffer, &response).expect("bounded counting");
+        assert_eq!(buffer.actual, expected.len());
+        assert!(buffer.bytes.is_empty());
+        assert!(buffer.failure.is_none());
+    }
+
+    #[test]
+    fn encoding_cancellation_retains_its_io_kind_without_touching_the_transport() {
+        let response = DaemonResponse::ok("r", "agent", None, serde_json::json!({"body": "x".repeat(8192)}));
+        for kind in [io::ErrorKind::TimedOut, io::ErrorKind::Interrupted] {
+            let mut checks = 0;
+            let steps = Cell::new(0);
+            let mut writer = SteppedWriter {bytes: Vec::new(), steps: &steps, width: 3, flush_error: false, flushes: 0};
+            // A one-shot checkpoint error must survive serde_json's wrapper,
+            // even though the final post-encoding checkpoint succeeds.
+            let result = write_with_checkpoint(&mut writer, &response, &mut || {
+                checks += 1;
+                if checks == 3 { Err(stopped(kind)) } else { Ok(()) }
+            });
+            assert!(matches!(result, Err(FrameWriteError::Io(error)) if error.kind() == kind));
+            assert_eq!(checks, 4);
+            assert_eq!(steps.get(), 0);
+            assert!(writer.bytes.is_empty());
+            assert_eq!(writer.flushes, 0);
+        }
+    }
+
+    #[test]
+    fn response_buffer_bounds_retention_independently_of_serializer_chunk_sizes() {
+        let input = (0..300).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        for limit in [0, 1, 7, 31, 299, 300] {
+            for width in [1, 2, 7, 31, 32, 100, 300] {
+                let mut checkpoint = || Ok(());
+                let mut buffer = ResponseBuffer::new(limit, &mut checkpoint);
+                let mut written = 0;
+                for chunk in input.chunks(width) {
+                    assert_eq!(buffer.write(chunk).expect("count bytes"), chunk.len());
+                    written += chunk.len();
+                    assert_eq!(buffer.actual, written);
+                    assert!(buffer.bytes.len() <= limit);
+                    if written <= limit { assert_eq!(buffer.bytes, input[..written]); }
+                    else { assert!(buffer.bytes.is_empty()); }
+                }
+                assert_eq!(buffer.actual, input.len());
+            }
+        }
+    }
+
+    #[test]
+    fn response_count_overflow_is_terminal_and_cannot_wrap_into_admission() {
+        let mut checkpoint = || Ok(());
+        let mut buffer = ResponseBuffer::new(16, &mut checkpoint);
+        buffer.actual = usize::MAX;
+        assert!(buffer.write(b"x").is_err());
+        assert_eq!(buffer.actual, usize::MAX);
+        assert_eq!(buffer.failure.as_ref().expect("count overflow").kind(), io::ErrorKind::InvalidData);
+        assert!(buffer.bytes.is_empty());
+        assert!(buffer.write(b"").is_err());
     }
 
     #[cfg(unix)]
