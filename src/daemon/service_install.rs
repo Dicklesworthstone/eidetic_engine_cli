@@ -668,9 +668,16 @@ fn prove_windows_user_task_load(home: &Path, unit_stem: &str) -> Result<String, 
     ))
 }
 
-/// Unregister a previously loaded Windows user task. Unix uninstall still
-/// only quarantines the unit file (existing launchd/systemd behavior).
+/// Remove the supervisor's live registration before the caller quarantines
+/// its unit file. Renaming a file alone does not stop a loaded KeepAlive or
+/// Restart=always service. This does not stop a separately started RPC daemon.
 pub fn deactivate_daemon_service(kind: DaemonServiceKind) -> Result<(), String> {
+    if kind == DaemonServiceKind::Launchd && super::current_euid() == 0 {
+        return Err("launchd steward deactivation must run as the signed-in user, not root".to_owned());
+    }
+    if matches!(kind, DaemonServiceKind::Launchd | DaemonServiceKind::SystemdUser) {
+        return deactivate_unix_service_with(kind, run_deactivation_command);
+    }
     match kind {
         DaemonServiceKind::WindowsUserTask => {
             let output = std::process::Command::new("schtasks")
@@ -694,6 +701,124 @@ pub fn deactivate_daemon_service(kind: DaemonServiceKind) -> Result<(), String> 
         | DaemonServiceKind::SystemdUser
         | DaemonServiceKind::Unsupported => Ok(()),
     }
+}
+
+/// Use argv, not a shell, and never prompt for credentials. In particular a
+/// failed status query is not evidence that the service is absent. Raw status
+/// listings may name unrelated private jobs, so do not echo them in errors.
+fn run_deactivation_command(program: &str, arguments: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new(program)
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| format!("could not run {program} for service deactivation: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{program} service deactivation command exited {}; the service is not confirmed stopped",
+            output.status
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|_| format!("{program} returned unreadable service state"))
+}
+
+fn deactivate_unix_service_with(
+    kind: DaemonServiceKind,
+    mut run: impl FnMut(&str, &[&str]) -> Result<String, String>,
+) -> Result<(), String> {
+    match kind {
+        DaemonServiceKind::SystemdUser => {
+            let inspect = [
+                "--user", "--no-ask-password", "--no-pager", "show", "--all",
+                "--property=Id", "--property=LoadState", "--property=ActiveState",
+                "--property=UnitFileState", "--", SYSTEMD_UNIT_NAME,
+            ];
+            if systemd_service_is_stopped(&run("systemctl", &inspect)?)? {
+                return Ok(());
+            }
+            // --now waits for the stop job as well as removing startup links.
+            // No system-wide manager, wildcard, sudo, kill or reboot is used.
+            run("systemctl", &[
+                "--user", "--no-ask-password", "disable", "--now", "--", SYSTEMD_UNIT_NAME,
+            ])?;
+            if !systemd_service_is_stopped(&run("systemctl", &inspect)?)? {
+                return Err("systemd still reports the steward active or enabled after deactivation".to_owned());
+            }
+            Ok(())
+        }
+        DaemonServiceKind::Launchd => {
+            // Match the current bootstrap context used by activation's load
+            // command. Remove by exact label: stop alone permits KeepAlive to
+            // restart it, and unloading a renamed pathname cannot find it.
+            if !launchd_service_is_registered(&run("launchctl", &["list"])?)? {
+                return Ok(());
+            }
+            run("launchctl", &["remove", LAUNCHD_LABEL])?;
+            if launchd_service_is_registered(&run("launchctl", &["list"])?)? {
+                return Err("launchd still reports the steward registered after removal".to_owned());
+            }
+            Ok(())
+        }
+        _ => Err("Unix service deactivation requires a Unix user supervisor".to_owned()),
+    }
+}
+
+/// An acknowledged query must describe this exact unit and all four requested
+/// properties. Never mistake an empty response, another unit, duplicate fields
+/// or a future/unknown state for proof of a successful stop.
+fn systemd_service_is_stopped(output: &str) -> Result<bool, String> {
+    let invalid = || "systemd returned an incomplete or ambiguous steward state".to_owned();
+    let mut fields = std::collections::BTreeMap::new();
+    for line in output.lines() {
+        let (name, value) = line.split_once('=').ok_or_else(invalid)?;
+        if !matches!(name, "Id" | "LoadState" | "ActiveState" | "UnitFileState")
+            || fields.insert(name, value).is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    if fields.len() != 4 || fields.get("Id").copied() != Some(SYSTEMD_UNIT_NAME) {
+        return Err(invalid());
+    }
+    Ok(fields.get("ActiveState").copied() == Some("inactive")
+        && matches!(
+            (fields.get("LoadState").copied(), fields.get("UnitFileState").copied()),
+            (Some("not-found"), Some(""))
+                | (Some("loaded"), Some("disabled" | "static"))
+                | (Some("masked"), Some("masked" | "masked-runtime"))
+        ))
+}
+
+/// launchctl list without a label emits its documented PID/status/label table.
+/// Exact field boundaries distinguish similarly named jobs. Validate the whole
+/// table before deciding absence; a partial or failed listing is not a stop.
+fn launchd_service_is_registered(output: &str) -> Result<bool, String> {
+    let invalid = || "launchd returned an incomplete or ambiguous service list".to_owned();
+    let mut lines = output.lines();
+    if lines.next() != Some("PID\tStatus\tLabel") {
+        return Err(invalid());
+    }
+    let mut found = false;
+    for line in lines {
+        let mut fields = line.splitn(3, '\t');
+        let pid = fields.next().ok_or_else(invalid)?;
+        let status = fields.next().ok_or_else(invalid)?;
+        let label = fields.next().ok_or_else(invalid)?;
+        if (pid != "-" && (pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit())))
+            || status.parse::<i32>().is_err()
+            || label.is_empty()
+            || label.chars().any(char::is_control)
+        {
+            return Err(invalid());
+        }
+        if label == LAUNCHD_LABEL {
+            if found {
+                return Err(invalid());
+            }
+            found = true;
+        }
+    }
+    Ok(found)
 }
 
 /// Write the unit file. Callers must have already confirmed.
@@ -743,6 +868,199 @@ pub fn quarantine_unit_file(path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn systemd_state(load: &str, active: &str, enabled: &str) -> String {
+        format!(
+            "Id={SYSTEMD_UNIT_NAME}\nLoadState={load}\nActiveState={active}\nUnitFileState={enabled}\n"
+        )
+    }
+
+    fn launchd_list(registered: bool) -> String {
+        let mut output = format!("PID\tStatus\tLabel\n-\t0\t{LAUNCHD_LABEL}-other\n");
+        if registered {
+            output.push_str(&format!("42\t-9\t{LAUNCHD_LABEL}\n"));
+        }
+        output
+    }
+
+    #[test]
+    fn systemd_stop_proof_requires_both_inactivity_and_no_startup_enablement() {
+        for (load, active, enabled, expected) in [
+            ("loaded", "inactive", "disabled", true),
+            ("loaded", "inactive", "static", true),
+            ("not-found", "inactive", "", true),
+            ("masked", "inactive", "masked", true),
+            ("masked", "inactive", "masked-runtime", true),
+            ("loaded", "active", "disabled", false),
+            ("loaded", "inactive", "enabled", false),
+            ("loaded", "inactive", "enabled-runtime", false),
+            ("loaded", "deactivating", "disabled", false),
+            ("loaded", "failed", "disabled", false),
+            ("not-found", "active", "", false),
+            ("unknown", "inactive", "disabled", false),
+            ("loaded", "inactive", "unknown", false),
+        ] {
+            assert_eq!(
+                systemd_service_is_stopped(&systemd_state(load, active, enabled)).expect("state"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_systemd_state_never_proves_absence_or_echoes_private_output() {
+        let valid = systemd_state("loaded", "inactive", "disabled");
+        for output in [
+            String::new(),
+            "PRIVATE-SUPERVISOR-OUTPUT".to_owned(),
+            valid.replace("Id=ee-daemon.service", "Id=other.service"),
+            valid.replace("ActiveState=inactive\n", ""),
+            format!("{valid}ActiveState=inactive\n"),
+            format!("{valid}Private=PRIVATE-SUPERVISOR-OUTPUT\n"),
+        ] {
+            let error = systemd_service_is_stopped(&output).expect_err("unproven state");
+            assert!(!error.contains("PRIVATE-SUPERVISOR-OUTPUT"));
+        }
+    }
+
+    #[test]
+    fn systemd_deactivation_disables_and_stops_only_the_user_unit_then_rechecks() {
+        let mut calls = Vec::new();
+        deactivate_unix_service_with(DaemonServiceKind::SystemdUser, |program, args| {
+            calls.push((program.to_owned(), args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>()));
+            Ok(match calls.len() {
+                1 => systemd_state("loaded", "active", "enabled"),
+                2 => String::new(),
+                3 => systemd_state("loaded", "inactive", "disabled"),
+                _ => panic!("unexpected supervisor command"),
+            })
+        })
+        .expect("acknowledged stop");
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0], calls[2]);
+        assert!(calls.iter().all(|(program, args)| {
+            program == "systemctl" && args[0] == "--user"
+                && args.last().map(String::as_str) == Some(SYSTEMD_UNIT_NAME)
+        }));
+        assert_eq!(calls[1].1, ["--user", "--no-ask-password", "disable", "--now", "--", SYSTEMD_UNIT_NAME]);
+        assert!(calls[0].1.iter().any(|arg| arg == "--property=ActiveState"));
+        assert!(calls[0].1.iter().any(|arg| arg == "--property=UnitFileState"));
+    }
+
+    #[test]
+    fn already_stopped_unix_registrations_are_idempotent_without_mutating_commands() {
+        for kind in [DaemonServiceKind::SystemdUser, DaemonServiceKind::Launchd] {
+            let mut calls = 0;
+            deactivate_unix_service_with(kind, |_, args| {
+                calls += 1;
+                assert_eq!(calls, 1);
+                match kind {
+                    DaemonServiceKind::SystemdUser => {
+                        assert!(args.contains(&"show"));
+                        Ok(systemd_state("not-found", "inactive", ""))
+                    }
+                    DaemonServiceKind::Launchd => {
+                        assert_eq!(args, ["list"]);
+                        Ok(launchd_list(false))
+                    }
+                    _ => unreachable!(),
+                }
+            })
+            .expect("already absent");
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn supervisor_failure_at_any_step_stops_the_deactivation_sequence() {
+        for kind in [DaemonServiceKind::SystemdUser, DaemonServiceKind::Launchd] {
+            for fail_at in 1..=3 {
+                let mut calls = 0;
+                let error = deactivate_unix_service_with(kind, |_, _| {
+                    calls += 1;
+                    if calls == fail_at {
+                        return Err("supervisor unavailable".to_owned());
+                    }
+                    Ok(if kind == DaemonServiceKind::SystemdUser {
+                        systemd_state("loaded", "active", "enabled")
+                    } else {
+                        launchd_list(true)
+                    })
+                })
+                .expect_err("failed supervisor command");
+                assert_eq!(error, "supervisor unavailable");
+                assert_eq!(calls, fail_at);
+            }
+        }
+    }
+
+    #[test]
+    fn successful_commands_without_a_stopped_postcondition_do_not_report_success() {
+        for kind in [DaemonServiceKind::SystemdUser, DaemonServiceKind::Launchd] {
+            let mut calls = 0;
+            let result = deactivate_unix_service_with(kind, |_, _| {
+                calls += 1;
+                Ok(if kind == DaemonServiceKind::SystemdUser {
+                    systemd_state("loaded", "active", "enabled")
+                } else {
+                    launchd_list(true)
+                })
+            });
+            assert!(result.is_err());
+            assert_eq!(calls, 3);
+        }
+    }
+
+    #[test]
+    fn launchd_removal_targets_the_exact_registered_label_and_rechecks_absence() {
+        assert!(launchd_service_is_registered(&launchd_list(true)).expect("registered"));
+        assert!(!launchd_service_is_registered(&launchd_list(false)).expect("other job"));
+        let mut calls = Vec::new();
+        deactivate_unix_service_with(DaemonServiceKind::Launchd, |program, args| {
+            assert_eq!(program, "launchctl");
+            calls.push(args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>());
+            Ok(match calls.len() {
+                1 => launchd_list(true),
+                2 => String::new(),
+                3 => launchd_list(false),
+                _ => panic!("unexpected launchctl call"),
+            })
+        })
+        .expect("registration removed");
+        assert_eq!(calls, vec![vec!["list"], vec!["remove", LAUNCHD_LABEL], vec!["list"]]);
+    }
+
+    #[test]
+    fn launchd_refuses_malformed_or_duplicate_rows_even_after_finding_the_label() {
+        for output in [
+            String::new(),
+            "PRIVATE-SUPERVISOR-OUTPUT".to_owned(),
+            format!("{}42\t0\t{LAUNCHD_LABEL}\n", launchd_list(true)),
+            "PID\tStatus\tLabel\n42\t0\n".to_owned(),
+            "PID\tStatus\tLabel\nbad-pid\t0\tother\n".to_owned(),
+            "PID\tStatus\tLabel\n-\tbad-status\tother\n".to_owned(),
+            format!("{}PRIVATE-SUPERVISOR-OUTPUT\n", launchd_list(true)),
+        ] {
+            let error = launchd_service_is_registered(&output).expect_err("invalid listing");
+            assert!(!error.contains("PRIVATE-SUPERVISOR-OUTPUT"));
+        }
+    }
+
+    #[test]
+    fn invalid_inspection_cannot_authorize_a_supervisor_mutation() {
+        for kind in [DaemonServiceKind::SystemdUser, DaemonServiceKind::Launchd] {
+            let mut calls = 0;
+            assert!(deactivate_unix_service_with(kind, |_, _| {
+                calls += 1;
+                Ok(String::new())
+            }).is_err());
+            assert_eq!(calls, 1);
+        }
+        assert!(deactivate_unix_service_with(DaemonServiceKind::WindowsUserTask, |_, _| {
+            panic!("a Unix helper must never control a Windows task")
+        }).is_err());
+        assert!(deactivate_daemon_service(DaemonServiceKind::Unsupported).is_ok());
+    }
 
     #[test]
     fn systemd_paths_are_literal_single_arguments_not_unit_or_environment_syntax() {
