@@ -283,12 +283,24 @@ invisible for as long as the dispatch takes, so have the job grade itself and
 exit nonzero:
 
 ```bash
-RESULT=$(grep -a '^test result:' out.txt | tail -1)
+# STRIP ANSI FIRST. cargo emits escapes *between* "Running" and the following
+# space, so a literal 'Running .*<target>' never matches the raw bytes.
+sed $'s/\033\\[[0-9;]*m//g' out.txt > clean.txt
+RESULT=$(grep -a '^test result:' clean.txt | tail -1)
 P=$(echo "$RESULT" | sed -n 's/.* \([0-9]*\) passed.*/\1/p')
 F=$(echo "$RESULT" | sed -n 's/.* \([0-9]*\) failed.*/\1/p')
-grep -qa 'Running .*<target>' out.txt || { echo 'VERDICT=NONE no Running line'; exit 91; }
+grep -qa 'Running .*<target>' clean.txt || { echo 'VERDICT=NONE no Running line'; exit 91; }
 test $(( ${P:-0} + ${F:-0} )) -eq <N filters> || { echo 'VERDICT=NONE'; exit 90; }
 ```
 
 `Running` proves the target executed; `passed + failed` proves which tests did.
 `filtered out` is not part of that sum.
+
+**The `sed` is not optional, and this is measured, not theoretical.** An earlier
+version of this block omitted it. A dispatch on 2026-10-17 then ran the target,
+executed exactly one test and failed it legitimately — and the grader reported
+`RUNNING_LINES=0` and exited 91 as though nothing had run, because the log held
+`Running` + `ESC[0m` + ` tests/contracts.rs`. The real reading was `TEST_RC=101`
+with `RAN=1 FAILED=1`. A grader that cannot see a `Running` line turns a genuine
+product failure into "no verdict", which is the worse error of the two: it looks
+like infrastructure noise and gets retried instead of reported.
