@@ -140,11 +140,34 @@ def call_contexts(name, all_lines):
     kinds = set()
     call = re.compile(r"(?:^|\s|\(|;|&&|\|\|)" + re.escape(name) + r"(?:\s|$|;|\))")
     for lines in all_lines:
+        # -e STATE AT THE CALL SITE, NOT AT THE DEFINITION. A function's
+        # runtime errexit state comes from wherever it is invoked, so a call
+        # bracketed by `set +e` / `set -e` suppresses -e through the whole body
+        # exactly as `f || x` does. This file's header already accepts the
+        # principle for dispatchers (verify.sh runs stages as
+        # `{ set +e; eval "$cmd"; }`); this makes it general.
+        #
+        # Without it, rch_verify.sh's run_rch_invocation_once and
+        # run_rch_invocation_retry were reported DEAD. Both are called at
+        # :7524 and :7571, each between a `set +e` and a `set -e`, so their
+        # `local status=$?` runs correctly. Those were the census's last two
+        # DEAD rows and both were wrong -- in the dispatch wrapper, where
+        # "repairing" working error handling would have been the worst place
+        # to be wrong.
+        errexit = False
         for l in lines:
+            bare = _decomment(l)
+            if SET_E.search(bare):
+                errexit = True
+            elif SET_PLUS_E.search(bare):
+                errexit = False
             s = l.strip()
             if not s or s.startswith("#") or FUNC_DEF.match(l):
                 continue
             if not call.search(s):
+                continue
+            if not errexit:
+                kinds.add("tested")
                 continue
             m = TEST_CTX.match(l)
             tested = bool(m and name in (m.group(1) or m.group(2) or m.group(3) or ""))
@@ -398,6 +421,15 @@ def self_test():
         # census's headline findings.
         open(os.path.join(d, "intervening.sh"), "w").write(
             'set -e\nout="$(date)"\nrun_thing --flag || other=$?\necho done\n')
+        # EXEMPT-BY-CALL-SITE: the dead-handler SHAPE is present, but the only
+        # call is bracketed by `set +e`, so -e is off through the body and the
+        # handler runs. This must be reported EXEMPT, not DEAD -- the two
+        # rch_verify.sh rows it models were the census's last DEAD rows and
+        # both were wrong. Asserted on the VERDICT, not on presence, because
+        # the row legitimately still exists.
+        open(os.path.join(d, "setpluse.sh"), "w").write(
+            'set -e\nwrapped() {\n    out="$(false)"\n    rc=$?\n    echo "$rc"\n}\n'
+            'set +e\nwrapped\nset -e\necho done\n')
         rows = census(tmp)
         got = {r["file"] for r in rows}
         arm("arithmetic `n=$((n + 1))` is NOT mistaken for a subshell",
@@ -419,7 +451,11 @@ def self_test():
             "scripts/trailcomment.sh" in got)
         arm("a $? belonging to an INTERVENING command is not attributed here",
             "scripts/intervening.sh" not in got)
-        arm("exactly two candidates across the fixtures", len(rows) == 2)
+        setpluse_rows = [r for r in rows if r["file"] == "scripts/setpluse.sh"]
+        arm("a handler whose only call site is under `set +e` is EXEMPT, not DEAD",
+            bool(setpluse_rows)
+            and all("EXEMPT" in r["verdict"] for r in setpluse_rows))
+        arm("exactly three candidates across the fixtures", len(rows) == 3)
     print(f"\n[set-e-census] self-test: {sum(arms)}/{len(arms)} arms passed")
     return 0 if all(arms) else 1
 
