@@ -8,6 +8,7 @@
 use super::*;
 use crate::db::{CassSourceCommitment, ReviewCorroborationLimits};
 use serde::{Deserialize, Serialize};
+use std::cell::OnceCell;
 
 const SCHEMA: &str = "ee.review.corroboration.v1";
 const SCORE_KIND: &str = "bounded_exact_session_support_heuristic";
@@ -85,6 +86,10 @@ impl ReviewCorroboration {
 
     pub(super) fn recorded(&self) -> bool {
         !self.sessions.is_empty()
+    }
+
+    fn wants_support(&self) -> bool {
+        !self.sessions.is_empty() && self.sessions.len() < MAX_SUPPORT
     }
 
     fn confidence(&self) -> f32 {
@@ -230,37 +235,145 @@ fn reconstruct_support(
     spans: &[StoredEvidenceSpan],
     expected: &SupportingSession,
 ) -> Option<ReviewSessionCandidate> {
-    // Reconstruct the recorded source group, not a current ownership cluster.
-    // Additional unrelated turns cannot replace a named supporting source.
-    let mut sources = expected
-        .sources
-        .iter()
-        .map(|source| spans.iter().find(|span| span.id == source.evidence_span_id))
-        .collect::<Option<Vec<_>>>()?;
-    sources.sort_by(|left, right| session_arc_span_order(left, right));
-    let topic = review_topic_key(&review_learning_text(sources.first()?)?);
-    if topic != "noise"
-        && sources.iter().all(|source| {
-            review_learning_text(source).is_some_and(|text| review_topic_key(&text) == topic)
-        })
-        && let Some(candidate) = build_bootstrap_candidate(workspace_id, session, &topic, &sources)
-        && candidate.candidate_id == expected.candidate_id
-    {
-        return Some(candidate);
-    }
-    // The complete ordered transcript retains every class-A barrier, so
-    // selecting just two named endpoints cannot invent a failure/repair link.
-    build_session_arc_candidates(workspace_id, session, spans, 0.0)
-        .into_iter()
-        .find(|candidate| candidate.candidate_id == expected.candidate_id)
+    SessionEvidence::new(workspace_id, session, spans).reconstruct(expected)
 }
 
-fn support(
-    session: &StoredSession,
-    spans: &[StoredEvidenceSpan],
-    candidate: &ReviewSessionCandidate,
-) -> Option<SupportingSession> {
-    support_in_context(session, spans, candidate, None)
+/// Request-local facts bound to one immutable session/snapshot. No cache can
+/// outlive these borrowed rows or substitute another session's observations.
+/// Mine all arcs only on the first fallback and hash the complete context only
+/// on the first admitted support. Neither cache filters conversation barriers.
+struct SessionEvidence<'a> {
+    workspace_id: &'a str,
+    session: &'a StoredSession,
+    spans: &'a [StoredEvidenceSpan],
+    by_id: BTreeMap<&'a str, &'a StoredEvidenceSpan>,
+    arcs: OnceCell<BTreeMap<String, ReviewSessionCandidate>>,
+    context: OnceCell<SupportingContext>,
+    #[cfg(test)]
+    arc_builds: std::cell::Cell<usize>,
+    #[cfg(test)]
+    context_builds: std::cell::Cell<usize>,
+}
+
+impl<'a> SessionEvidence<'a> {
+    fn new(
+        workspace_id: &'a str,
+        session: &'a StoredSession,
+        spans: &'a [StoredEvidenceSpan],
+    ) -> Self {
+        let mut by_id = BTreeMap::new();
+        for span in spans {
+            // Match the original ordered find even for malformed duplicate
+            // IDs. Do not let a later row silently replace a named source.
+            by_id.entry(span.id.as_str()).or_insert(span);
+        }
+        Self {
+            workspace_id,
+            session,
+            spans,
+            by_id,
+            arcs: OnceCell::new(),
+            context: OnceCell::new(),
+            #[cfg(test)]
+            arc_builds: std::cell::Cell::new(0),
+            #[cfg(test)]
+            context_builds: std::cell::Cell::new(0),
+        }
+    }
+
+    fn reconstruct(&self, expected: &SupportingSession) -> Option<ReviewSessionCandidate> {
+        // Reconstruct the recorded source group, not a current ownership
+        // cluster. Later unrelated turns cannot replace a named supporter.
+        let mut sources = expected
+            .sources
+            .iter()
+            .map(|source| self.by_id.get(source.evidence_span_id.as_str()).copied())
+            .collect::<Option<Vec<_>>>()?;
+        sources.sort_by(|left, right| session_arc_span_order(left, right));
+        let topic = review_topic_key(&review_learning_text(sources.first()?)?);
+        if topic != "noise"
+            && sources.iter().all(|source| {
+                review_learning_text(source).is_some_and(|text| review_topic_key(&text) == topic)
+            })
+            && let Some(candidate) =
+                build_bootstrap_candidate(self.workspace_id, self.session, &topic, &sources)
+            && candidate.candidate_id == expected.candidate_id
+        {
+            return Some(candidate);
+        }
+        let arcs = self.arcs.get_or_init(|| {
+            #[cfg(test)]
+            self.arc_builds.set(self.arc_builds.get() + 1);
+            let mut arcs = BTreeMap::new();
+            // Always pass the full transcript, including class-A barriers.
+            // Filtering to just the endpoints could invent a causal link.
+            for candidate in
+                build_session_arc_candidates(self.workspace_id, self.session, self.spans, 0.0)
+            {
+                arcs.entry(candidate.candidate_id.clone())
+                    .or_insert(candidate);
+            }
+            arcs
+        });
+        arcs.get(&expected.candidate_id).cloned()
+    }
+
+    fn source_refs(&self, candidate: &ReviewSessionCandidate) -> Option<Vec<SupportingSource>> {
+        let mut sources = Vec::new();
+        for id in &candidate.source_ids {
+            let span = self.by_id.get(id.as_str())?;
+            if !span.is_search_admitted_for_session(&self.session.workspace_id, self.session)
+                || review_learning_text(span).is_none()
+            {
+                return None;
+            }
+            sources.push(source_reference(span));
+        }
+        sources.sort_by(|left, right| left.evidence_span_id.cmp(&right.evidence_span_id));
+        sources.dedup();
+        (!sources.is_empty()).then_some(sources)
+    }
+
+    fn support(&self, candidate: &ReviewSessionCandidate) -> Option<SupportingSession> {
+        let sources = self.source_refs(candidate)?;
+        let context = self.context.get_or_init(|| {
+            #[cfg(test)]
+            self.context_builds.set(self.context_builds.get() + 1);
+            build_support_context(self.session, self.spans, u32::MAX)
+        });
+        Some(
+            context
+                .clone()
+                .into_support(self.session, candidate, sources),
+        )
+    }
+}
+
+#[derive(Clone)]
+struct SupportingContext {
+    upstream_hash: String,
+    source_path_hash: Option<String>,
+    payload_hash: String,
+    context_sources: Vec<SupportingSource>,
+}
+
+impl SupportingContext {
+    fn into_support(
+        self,
+        session: &StoredSession,
+        candidate: &ReviewSessionCandidate,
+        sources: Vec<SupportingSource>,
+    ) -> SupportingSession {
+        SupportingSession {
+            session_id: session.id.clone(),
+            upstream_hash: self.upstream_hash,
+            source_path_hash: self.source_path_hash,
+            payload_hash: self.payload_hash,
+            candidate_id: candidate.candidate_id.clone(),
+            sources,
+            context_sources: self.context_sources,
+        }
+    }
 }
 
 fn source_reference(span: &StoredEvidenceSpan) -> SupportingSource {
@@ -291,27 +404,8 @@ fn support_in_context(
     candidate: &ReviewSessionCandidate,
     recorded: Option<&SupportingSession>,
 ) -> Option<SupportingSession> {
-    let mut sources = Vec::new();
-    for id in &candidate.source_ids {
-        let span = spans.iter().find(|span| span.id == *id)?;
-        if !span.is_search_admitted_for_session(&session.workspace_id, session)
-            || review_learning_text(span).is_none()
-        {
-            return None;
-        }
-        sources.push(source_reference(span));
-    }
-    sources.sort_by(|left, right| left.evidence_span_id.cmp(&right.evidence_span_id));
-    sources.dedup();
-    if sources.is_empty() {
-        return None;
-    }
-    // An alias carrying a byte-identical conversation is not another
-    // independent observation. Ignore local IDs and JSON envelopes for text
-    // records; preserve complete screened tool payloads as barriers.
-    let mut payload = vec!["complete_session".to_owned()];
-    let mut seen_events = BTreeSet::new();
-    let mut context_sources = Vec::new();
+    let evidence = SessionEvidence::new(&session.workspace_id, session, spans);
+    let sources = evidence.source_refs(candidate)?;
     // Capture an observed prefix, not a promise that a session will never
     // grow. New rows within that prefix fail equality; ordinary later turns
     // do not rewrite the support snapshot. The caller still screens all
@@ -325,6 +419,24 @@ fn support_in_context(
                 .max()
         })
         .unwrap_or(Some(u32::MAX))?;
+    let context = build_support_context(session, spans, last_line);
+    if recorded.is_some_and(|recorded| recorded.context_sources != context.context_sources) {
+        return None;
+    }
+    Some(context.into_support(session, candidate, sources))
+}
+
+fn build_support_context(
+    session: &StoredSession,
+    spans: &[StoredEvidenceSpan],
+    last_line: u32,
+) -> SupportingContext {
+    // An alias carrying a byte-identical conversation is not another
+    // independent observation. Ignore local IDs and JSON envelopes for text
+    // records; preserve complete screened tool payloads as barriers.
+    let mut payload = vec!["complete_session".to_owned()];
+    let mut seen_events = BTreeSet::new();
+    let mut context_sources = Vec::new();
     for span in spans.iter().filter(|span| span.start_line <= last_line) {
         context_sources.push(source_reference(span));
         let text = review_learning_text(span).unwrap_or(Cow::Borrowed(&span.excerpt));
@@ -339,21 +451,15 @@ fn support_in_context(
             payload.push(event);
         }
     }
-    if recorded.is_some_and(|recorded| recorded.context_sources != context_sources) {
-        return None;
-    }
-    Some(SupportingSession {
-        session_id: session.id.clone(),
+    SupportingContext {
         upstream_hash: digest(["upstream", session.cass_session_id.as_str()]),
         source_path_hash: session
             .source_path
             .as_deref()
             .map(|path| digest(["source_path", path])),
         payload_hash: digest(&payload),
-        candidate_id: candidate.candidate_id.clone(),
-        sources,
         context_sources,
-    })
+    }
 }
 
 fn independent(support: &SupportingSession, previous: &[SupportingSession]) -> bool {
@@ -397,7 +503,7 @@ fn corroborate_candidates(
         let Some(proof) = &candidate.corroboration else {
             continue;
         };
-        if proof.sessions.is_empty() || proof.sessions.len() >= MAX_SUPPORT {
+        if !proof.wants_support() {
             continue;
         }
         targets
@@ -488,16 +594,15 @@ pub(super) fn score_candidates(
     if let Some((anchor_session, anchor_spans, anchor_bytes)) = anchor.first()
         && eligible_session(workspace_id, anchor_session, anchor_spans)
     {
+        let evidence = SessionEvidence::new(workspace_id, anchor_session, anchor_spans);
         for candidate in candidates.iter_mut() {
             if candidate.corroboration.is_none() {
                 continue;
             }
-            let Some(anchor_support) = support(anchor_session, anchor_spans, candidate) else {
+            let Some(anchor_support) = evidence.support(candidate) else {
                 continue;
             };
-            let Some(current) =
-                reconstruct_support(workspace_id, anchor_session, anchor_spans, &anchor_support)
-            else {
+            let Some(current) = evidence.reconstruct(&anchor_support) else {
                 continue;
             };
             if same_proposal(candidate, &current)
@@ -509,6 +614,9 @@ pub(super) fn score_candidates(
                 proof.sessions = vec![anchor_support];
             }
         }
+        // The mined anchor cards are no longer needed. Do not retain a second
+        // complete candidate set while examining the other source sessions.
+        drop(evidence);
         let other_limits = ReviewCorroborationLimits {
             total_bytes: LIMITS.total_bytes.saturating_sub(*anchor_bytes),
             ..LIMITS
@@ -517,10 +625,22 @@ pub(super) fn score_candidates(
             .review_corroboration_sessions(workspace_id, &session.id, &[], other_limits)
             .map_err(domain)?;
         for (other_session, spans, _) in &others {
+            if !candidates.iter().any(|candidate| {
+                candidate
+                    .corroboration
+                    .as_ref()
+                    .is_some_and(ReviewCorroboration::wants_support)
+            }) {
+                // More sessions cannot change any current proposal. In
+                // particular, do not mine every remaining bounded transcript
+                // after all anchors have reached the existing support cap.
+                break;
+            }
             if !eligible_session(workspace_id, other_session, spans) {
                 continue;
             }
             let other_candidates = source_candidates(workspace_id, other_session, spans);
+            let evidence = SessionEvidence::new(workspace_id, other_session, spans);
             corroborate_candidates(
                 candidates,
                 &other_candidates,
@@ -529,7 +649,7 @@ pub(super) fn score_candidates(
                     if rejected(connection, workspace_id, other)? {
                         Ok(None)
                     } else {
-                        Ok(support(other_session, spans, other))
+                        Ok(evidence.support(other))
                     }
                 },
             )?;
