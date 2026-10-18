@@ -322,6 +322,12 @@ count_pack_id() {
 # undiagnosable until `ee_json` recorded the error envelope (1d41d7963). Printed
 # unconditionally rather than only on mismatch, so a PASSING run still shows
 # what pack rejected and why -- which is how a future narrowing starts.
+count_pack_skip_reason() {
+    printf '%s' "$pack_out" | jq -r --arg id "$1" --arg reason "$2" \
+        '[.data.pack.skipped[]? | select(.memoryId == $id and .reason == $reason)] | length' \
+        2>/dev/null || echo -1
+}
+
 pack_omission_report() {
     printf '[diagnostic] pack selection: items=%s skippedTotal=%s\n' \
         "$(json_scalar "$pack_out" '[.data.pack.items[]?] | length')" \
@@ -342,8 +348,36 @@ assert_num "$(count_pack_id "$SURVIVOR_ID")" -eq 1 \
     "pack contains the consolidated survivor as exactly one item"
 assert_num "$(count_pack_id "$DUPLICATE_ID")" -eq 0 \
     "pack never contains the absorbed duplicate"
-assert_num "$(count_pack_id "$WORDING_CONTROL_ID")" -eq 1 \
-    "wording control packs as exactly one distinct item"
+# bd-kcpda. This assertion used to expect the wording control to PACK as one
+# item, and it was wrong about the product rather than finding a bug in it.
+#
+# Measured 2026-10-18 from pack's own telemetry, which this script now prints:
+#     reason=redundant_candidate  rejectedAt=selection
+#     feasible=false  tokens=16  couldFitWithBudget=null
+#
+# That rules out every alternative specifically: not a budget cut (16 tokens
+# against --max-tokens 2000, and couldFitWithBudget is null), not a relevance
+# floor (rejectedAt is `selection`, not admission), not a supersession.
+#
+# THE POLICY, stated because this is a product statement and not a fixture
+# convenience: CONSOLIDATION ELIGIBILITY AND PACK SELECTION ARE DIFFERENT
+# QUESTIONS, and a memory can legitimately pass one and fail the other.
+#   - Consolidation: "...before publishing." differs in MEANING from
+#     "...before release.", so it is correctly NOT absorbed and survives as its
+#     own memory. Step 11 proves search still returns it exactly once.
+#   - Pack selection: given the survivor, it adds no marginal coverage, so
+#     redundancy-aware selection correctly leaves it out.
+# A pack is not a mirror of search. Asserting that every surviving memory packs
+# would require pack to abandon redundancy-aware selection, which is a feature.
+#
+# So the expectation is inverted, and made STRONGER rather than weaker: the old
+# form asserted one number, this asserts the omission AND the recorded reason,
+# so a future change that drops the item for a DIFFERENT reason (a budget cut,
+# a floor, a supersession) still fails here instead of passing quietly.
+assert_num "$(count_pack_id "$WORDING_CONTROL_ID")" -eq 0 \
+    "wording control is not packed: pack selection judges it redundant"
+assert_num "$(count_pack_skip_reason "$WORDING_CONTROL_ID" redundant_candidate)" -eq 1 \
+    "wording control omission is recorded as redundant_candidate at selection"
 assert_num "$(count_pack_id "$KIND_CONTROL_ID")" -eq 1 \
     "kind control packs as exactly one distinct item"
 
