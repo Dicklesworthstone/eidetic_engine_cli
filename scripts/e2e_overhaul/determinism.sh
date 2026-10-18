@@ -272,8 +272,15 @@ run_3x_assert_identical() {
     local -a hashes=()
     for run in 1 2 3; do
         stderr_path="${EPIC_WORKSPACE}/determinism_${name}_run_${run}.stderr"
-        output=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>"$stderr_path")
-        command_status=$?
+        # `|| command_status=$?` keeps the failure branch REACHABLE. With the
+        # bare form, `set -euo pipefail` (:33) aborted the epic the moment the
+        # binary exited non-zero -- which is the case this block exists to
+        # report -- so `command_status=$?` and the e2e_log_assert_eq below were
+        # both dead. run_3x_assert_identical() is called bare at all seven of
+        # its call sites, so nothing suspended -e on its behalf.
+        command_status=0
+        output=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>"$stderr_path") \
+            || command_status=$?
         if [ "$command_status" -ne 0 ] \
             || ! printf '%s' "$output" | jq -e \
                 '.schema == "ee.response.v2" and .success == true' >/dev/null 2>&1; then
@@ -282,9 +289,12 @@ run_3x_assert_identical() {
                 "determinism_${name}_run_valid"
             return 1
         fi
+        # Same shape, and `pipefail` makes it likelier: any stage of this pipe
+        # failing aborted before the canonicalisation failure could be reported.
+        command_status=0
         canonical_hash=$(printf '%s' "$output" \
-            | strip_variable_fields | jq -S '.' | hash_stdin)
-        command_status=$?
+            | strip_variable_fields | jq -S '.' | hash_stdin) \
+            || command_status=$?
         if [ "$command_status" -ne 0 ] || [ -z "$canonical_hash" ]; then
             e2e_log_assert_eq \
                 "run=$run canonicalize_exit=$command_status hash=${canonical_hash:-<empty>}" \
