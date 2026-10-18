@@ -518,3 +518,29 @@ ee_assert_feature_set_matches_manifest \
 feat_subset_rc=$?
 set -e
 assert_eq "$feat_subset_rc" "1" "a subset of the declared features is not a match"
+
+# 23-24. ee_resolve_fixture_binary PROVENANCE. This function had NO arms at
+#    all, and it is the one every fixture harness calls. Measured 2026-10-18:
+#    on a host whose built binaries are the wrong platform it falls back to
+#    PATH `ee` and printed
+#        <label>: ee_binary=ee origin=path_fallback
+#    while that binary was FOUR minor versions stale. The origin said where
+#    the binary came from and nothing said what it was, so a harness ran
+#    against superseded code with no signal in its own log.
+fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/ee-fixture-resolve.XXXXXX")"
+fixture_bin="$fixture_dir/ee"
+printf '#!/bin/sh\necho "ee 9.9.9"\n' >"$fixture_bin"
+chmod +x "$fixture_bin"
+
+fixture_prov="$(ee_resolve_fixture_binary selftest "$fixture_bin" 2>&1 >/dev/null)"
+case "$fixture_prov" in
+    *"version=9.9.9"*) printf 'ok %s\n' "provenance line names the resolved VERSION" ;;
+    *) printf 'FAIL provenance must carry version=\n%s\n' "$fixture_prov" >&2; exit 1 ;;
+esac
+
+# THE STDOUT ARM IS LOAD-BEARING. Every caller does
+# `bin="$(ee_resolve_fixture_binary ...)"`, so one stray byte on stdout -- a
+# provenance field printed to the wrong stream -- becomes part of the path
+# and breaks the harness rather than the message.
+fixture_out="$(ee_resolve_fixture_binary selftest "$fixture_bin" 2>/dev/null)"
+assert_eq "$fixture_out" "$fixture_bin" "resolver returns ONLY the path on stdout"

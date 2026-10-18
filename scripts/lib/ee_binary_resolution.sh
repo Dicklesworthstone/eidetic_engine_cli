@@ -542,6 +542,29 @@ ee_resolve_fixture_binary() {
         fi
     fi
 
-    printf '%s: ee_binary=%s origin=%s\n' "$label" "$candidate" "$origin" >&2
+    # VERSION BELONGS ON THE PROVENANCE LINE, not just the path and origin.
+    # This function does NOT require the binary to be current (that is
+    # bd-resolve-without-require-binary-guard-jqiws, and adding the
+    # requirement here would refuse every local harness run on a host that
+    # cannot build one). What it can do for free is stop the staleness being
+    # SILENT.
+    #
+    # Measured on this Mac 2026-10-18: both built binaries are Linux ELF, so
+    # `ee_binary_executes_here` rejects them, the fallback takes PATH `ee`,
+    # and the line read
+    #
+    #     verify-metamorphic: ee_binary=ee origin=path_fallback
+    #
+    # while that binary was 0.14.2 against a source version of 0.18.0 -- four
+    # minor versions and two months behind. The origin said where it came
+    # from and nothing said what it was.
+    #
+    # `|| echo unknown` because a candidate that cannot report a version must
+    # not break resolution; that is a different failure and the callers that
+    # care have ee_require_current_binary.
+    local candidate_version
+    candidate_version="$(ee_binary_version "$candidate" 2>/dev/null || true)"
+    printf '%s: ee_binary=%s origin=%s version=%s\n' \
+        "$label" "$candidate" "$origin" "${candidate_version:-unknown}" >&2
     printf '%s\n' "$candidate"
 }
