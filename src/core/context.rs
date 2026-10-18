@@ -12531,13 +12531,10 @@ fn boost_candidate_for_graph(candidate: &mut PackCandidate, evidence: &GraphHint
         2 => 0.09,
         _ => 0.05,
     };
-    let floor = match evidence.depth {
-        0 => 0.98,
-        1 => 0.92,
-        2 => 0.86,
-        _ => 0.80,
-    };
-    let boosted = (current + boost).max(floor).min(1.0);
+    // Graph proximity is a prior, not a replacement for memory quality.
+    // An absolute floor used to promote even zero-relevance memories to 0.98,
+    // erasing confidence, harmful-feedback, maturity, and recency penalties.
+    let boosted = (current * (1.0 + boost)).min(1.0);
     let Some(score) = unit_score(boosted) else {
         return false;
     };
@@ -16070,6 +16067,47 @@ mod relevance_floor_tests {
         memories: Vec<PackCandidate>,
         rules: Vec<crate::pack::PackRuleItem>,
         evidence: Vec<DirectEvidencePackCandidate>,
+    }
+
+    #[test]
+    fn graph_hint_boost_does_not_resurrect_zero_relevance() {
+        for depth in [0, 1, 2, 3, u32::MAX] {
+            let mut candidates = candidate_set(&[0.0]).memories;
+            let candidate = &mut candidates[0];
+            let original_why = candidate.why.clone();
+            let evidence = GraphHintEvidence {
+                seed_memory_id: candidate.memory_id.to_string(),
+                depth,
+                relation: None,
+                traversal: crate::models::QueryGraphTraversal::Outbound,
+            };
+            assert!(!boost_candidate_for_graph(candidate, &evidence));
+            assert_eq!(candidate.relevance.into_inner(), 0.0);
+            assert_eq!(candidate.why, original_why);
+        }
+    }
+
+    #[test]
+    fn graph_hint_boost_preserves_quality_order_and_bounds() {
+        for (depth, multiplier) in [(0, 1.20), (1, 1.14), (2, 1.09), (3, 1.05)] {
+            let scores = [0.05_f32, 0.10, 0.50, 0.99, 1.0];
+            let mut candidates = candidate_set(&scores).memories;
+            for (candidate, original) in candidates.iter_mut().zip(scores) {
+                let evidence = GraphHintEvidence {
+                    seed_memory_id: candidate.memory_id.to_string(),
+                    depth,
+                    relation: Some("supports".to_owned()),
+                    traversal: crate::models::QueryGraphTraversal::Outbound,
+                };
+                let changed = boost_candidate_for_graph(candidate, &evidence);
+                let expected = (original * multiplier).min(1.0);
+                assert!((candidate.relevance.into_inner() - expected).abs() < 1.0e-6);
+                assert_eq!(changed, original < 1.0);
+            }
+            assert!(candidates.windows(2).all(|pair| {
+                pair[0].relevance.into_inner() <= pair[1].relevance.into_inner()
+            }));
+        }
     }
 
     fn candidate_set(scores: &[f32]) -> CandidateSet {
