@@ -205,8 +205,13 @@ jobs:
           components: rustfmt, clippy
       - name: Run nine procedure atomicity regressions
         run: |
-          set -euo pipefail
-          cargo test --locked --lib core::outcome::procedure_atomic_tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/procedure-atomic-tests.log"
+          # ACCUMULATOR (bd-lagsa). Under `set -e` a failing cargo run killed the
+          # step before the floor check below could run, so the ATTRIBUTION line
+          # that explains WHICH arm stopped the lane -- the whole reason that
+          # check exists -- was never printed on the one run where it mattered.
+          set -uo pipefail
+          failed=0
+          cargo test --locked --lib core::outcome::procedure_atomic_tests:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/procedure-atomic-tests.log" || failed=1
           # FLOOR, at a MEASURED value (bd-lagsa, bd-aav0v). Was a bare exact-count grep.
           # Measured on RCH 2026-10-08: `cargo test --locked --lib
           # core::outcome::procedure_atomic_tests` -> ok. 9 passed; 0 failed. That is also the
@@ -216,9 +221,11 @@ jobs:
           atomic_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/procedure-atomic-tests.log" | head -1)
           if test -z "$atomic_ran" || test "$atomic_ran" -lt 9; then
             echo "ATTRIBUTION: arm 'core::outcome::procedure_atomic_tests::' STOPPED this lane -- passing-with-zero-failures count '${atomic_ran:-none}', required floor 9. An empty count means no 'test result: ok.' line at all, which is what a filter matching zero tests looks like."
-            exit 1
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'core::outcome::procedure_atomic_tests::' ok -- ran $atomic_ran tests (floor 9, measured 9 on 2026-10-08), 0 failed."
           fi
-          echo "ATTRIBUTION: arm 'core::outcome::procedure_atomic_tests::' ok -- ran $atomic_ran tests (floor 9, measured 9 on 2026-10-08), 0 failed."
+          exit "$failed"
       - name: Preserve existing atomic memory learning behavior
         run: |
           set -euo pipefail

@@ -111,10 +111,16 @@ jobs:
             recovery-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
       - name: Check library and execute all diagnostic regressions
         run: |
+          # ACCUMULATOR (bd-lagsa), matching the step below. The floor check's
+          # ATTRIBUTION line is the only thing that names which arm stopped the
+          # lane, and `exit 1` meant a check or test failure above it skipped
+          # that line entirely -- the same "aborted with no output" failure the
+          # next comment describes.
           set -o pipefail
-          git rev-parse HEAD | tee "$RUNNER_TEMP/diag-source-sha.log"
-          cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/diag-check.log"
-          cargo test --locked --lib 'core::search::diagnostic_snapshot::tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/diag-tests.log"
+          failed=0
+          git rev-parse HEAD | tee "$RUNNER_TEMP/diag-source-sha.log" || failed=1
+          cargo check --locked --lib 2>&1 | tee "$RUNNER_TEMP/diag-check.log" || failed=1
+          cargo test --locked --lib 'core::search::diagnostic_snapshot::tests::' -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/diag-tests.log" || failed=1
           # FLOOR, at a MEASURED value (bd-lagsa, bd-aav0v). This was a bare
           # `grep -Fq 'test result: ok. 15 passed'`: an exact count, which reds this lane the
           # moment a test is ADDED to the subtree, and which aborted the step with no output
@@ -127,9 +133,11 @@ jobs:
           diag_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/diag-tests.log" | head -1)
           if test -z "$diag_ran" || test "$diag_ran" -lt 15; then
             echo "ATTRIBUTION: arm 'core::search::diagnostic_snapshot::tests::' STOPPED this lane -- passing-with-zero-failures count '${diag_ran:-none}', required floor 15. An empty count means NO 'test result: ok.' line at all, which is what a filter matching zero tests looks like and is treated as a failure, not as a zero."
-            exit 1
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'core::search::diagnostic_snapshot::tests::' ok -- ran $diag_ran tests (floor 15, measured 15 on 2026-10-08), 0 failed."
           fi
-          echo "ATTRIBUTION: arm 'core::search::diagnostic_snapshot::tests::' ok -- ran $diag_ran tests (floor 15, measured 15 on 2026-10-08), 0 failed."
+          exit "$failed"
       - name: Exercise actual CLI search and the registered global integration module
         if: ${{ !cancelled() }}
         run: |

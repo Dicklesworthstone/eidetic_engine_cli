@@ -175,8 +175,14 @@ jobs:
       - name: Verify the public copy approval reindex and retrieval loop
         if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: |
-          set -euo pipefail
-          cargo test --locked --test contracts workspace_relocation:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/relocation-public.log"
+          # ACCUMULATOR (bd-lagsa). The deliberate red below is UNCHANGED -- this
+          # only stops the first failure from skipping the later attribution
+          # branches, which is the same failure mode the comment describes ("a
+          # bare `grep -Fq` here aborted with no output at all, which is how an
+          # unreachable assertion survives for weeks") one level up.
+          set -uo pipefail
+          failed=0
+          cargo test --locked --test contracts workspace_relocation:: -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/relocation-public.log" || failed=1
           # UNSATISFIABLE FILTER, MEASURED (bd-lagsa, bd-aav0v). This arm cannot pass, and
           # not because of a count: the filter selects ZERO tests from this target.
           #
@@ -203,13 +209,14 @@ jobs:
           relocation_ran=$(sed -nE 's/^test result: ok\. ([0-9]+) passed; 0 failed.*/\1/p' "$RUNNER_TEMP/relocation-public.log" | head -1)
           if test "${relocation_ran:-none}" = "0"; then
             echo "ATTRIBUTION: arm 'contracts workspace_relocation::' STOPPED this lane -- the filter matched ZERO tests in the 'contracts' target (cargo exited 0 and reported 'ok. 0 passed'). This is not a stale count; it is an unsatisfiable filter. The workspace_relocation tests are LIB tests in src/db/mod.rs and are already covered by the --lib arm above at floor 1. Deciding which target should carry a public-surface check for this, or whether to retire this step, is the lane owner's call."
-            exit 1
-          fi
-          if test -z "$relocation_ran" || test "$relocation_ran" -lt 2; then
+            failed=1
+          elif test -z "$relocation_ran" || test "$relocation_ran" -lt 2; then
             echo "ATTRIBUTION: arm 'contracts workspace_relocation::' STOPPED this lane -- passing-with-zero-failures count '${relocation_ran:-none}', required 2. An empty count means no 'test result: ok.' line at all."
-            exit 1
+            failed=1
+          else
+            echo "ATTRIBUTION: arm 'contracts workspace_relocation::' ok -- ran $relocation_ran tests (required 2)."
           fi
-          echo "ATTRIBUTION: arm 'contracts workspace_relocation::' ok -- ran $relocation_ran tests (required 2)."
+          exit "$failed"
       - name: Report strict Clippy and repository formatting
         if: ${{ !cancelled() && steps.source.outcome == 'success' }}
         run: |
