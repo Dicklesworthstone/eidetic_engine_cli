@@ -737,8 +737,12 @@ run_native_rerank_determinism_lane() {
             rerankedOrder: [.data.results[].content],
             rerankedScores: [.data.results[] | {content, rerankScore}]
         }
-    ' >"$RERANK_VECTOR_OUT"
-    comparison_status=$?
+    # `&& ...=0 || ...=$?` keeps the failure branch reachable. A bare command
+    # followed by `comparison_status=$?` aborts at `set -euo pipefail` (:33)
+    # the moment jq fails -- which is the case the `if` below exists to report
+    # -- so the status was never captured and the assertion never fired. This
+    # function is called bare, so nothing suspended -e on its behalf.
+    ' >"$RERANK_VECTOR_OUT" && comparison_status=0 || comparison_status=$?
     if [ "$comparison_status" -ne 0 ] \
         || ! jq -e '.schema == "ee.rerank_determinism.vector.v1"' \
             "$RERANK_VECTOR_OUT" >/dev/null 2>&1; then
@@ -764,8 +768,9 @@ run_native_rerank_determinism_lane() {
                 $actual.rerankedScores[.].content == $expected.rerankedScores[.].content
                 and (($actual.rerankedScores[.].rerankScore
                     - $expected.rerankedScores[.].rerankScore) | fabs) <= $tolerance)
-        ' "$RERANK_VECTOR_OUT" >/dev/null 2>&1
-        comparison_status=$?
+        # Same shape as the vector-write case above: without this, a jq
+        # mismatch aborted before the reference-mismatch assertion could run.
+        ' "$RERANK_VECTOR_OUT" >/dev/null 2>&1 && comparison_status=0 || comparison_status=$?
         if [ "$comparison_status" -ne 0 ]; then
             e2e_log_assert_eq \
                 "reference_mismatch tolerance=$RERANK_SCORE_TOLERANCE" \
@@ -782,8 +787,13 @@ run_native_rerank_determinism_lane() {
     return 0
 }
 
-run_native_rerank_determinism_lane
-RERANK_LANE_STATUS=$?
+# Called in a suspending context so the note below actually runs. Bare, a
+# non-zero return aborted the script at `set -e` here: the exit CODE survived
+# (-e exits with it) but `e2e_log_note` never fired and the explicit `exit`
+# below was never reached, so the harness saw an abort rather than a recorded
+# lane status. The structured record is the point of these three lines.
+RERANK_LANE_STATUS=0
+run_native_rerank_determinism_lane || RERANK_LANE_STATUS=$?
 e2e_log_note "native_rerank_determinism_lane_status=$RERANK_LANE_STATUS"
 if [ "$RERANK_LANE_STATUS" -ne 0 ]; then
     exit "$RERANK_LANE_STATUS"
