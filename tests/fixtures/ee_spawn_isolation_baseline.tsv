@@ -190,7 +190,6 @@
 1	tests/rule_provenance_unit.rs
 1	tests/schema_compat_v0_v1.rs
 1	tests/search_conformal_e2e.rs
-1	tests/search_deterministic_golden.rs
 1	tests/situation_persistence.rs
 4	tests/smoke.rs
 1	tests/subscribe_e2e.rs
