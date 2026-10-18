@@ -382,22 +382,18 @@ fn coherent_cluster(
         .map(|index| points[*index].memory_id.clone())
         .collect::<Vec<_>>();
     let average_internal_similarity = internal_similarity(members, similarities);
-    // Compute nearest_external_similarity unrounded so silhouette_score uses consistent
-    // precision for both inputs; round only when storing in the output struct.
+    // This cluster-level summary is explanatory, not the per-member nearest
+    // alternative used by the silhouette calculation below.
     let nearest_external_similarity_raw = all_clusters
         .iter()
         .filter(|cluster| cluster.as_slice() != members)
         .map(|cluster| average_linkage_similarity(members, cluster, similarities))
         .max_by(f64::total_cmp);
-    let silhouette_score = silhouette_score(
-        average_internal_similarity,
-        nearest_external_similarity_raw,
-        members.len(),
-    )
-    .map(round_metric);
+    let silhouette_raw = silhouette_score(members, all_clusters, similarities);
+    let silhouette_score = silhouette_raw.map(round_metric);
     let nearest_external_similarity = nearest_external_similarity_raw.map(round_metric);
     let accepted = members.len() >= config.min_cluster_size
-        && silhouette_score.is_some_and(|score| score >= config.silhouette_cutoff);
+        && silhouette_raw.is_some_and(|score| score >= config.silhouette_cutoff);
     let cluster_id = cluster_id(&member_memory_ids, config.merge_threshold);
     let centroid_hash = centroid_hash(members, points);
     CoherentCluster {
@@ -446,26 +442,54 @@ fn internal_similarity(members: &[usize], similarities: &[Vec<f64>]) -> f64 {
 }
 
 fn silhouette_score(
-    internal_similarity: f64,
-    nearest_external_similarity: Option<f64>,
-    member_count: usize,
+    members: &[usize],
+    all_clusters: &[Vec<usize>],
+    similarities: &[Vec<f64>],
 ) -> Option<f64> {
-    if member_count < 2 {
+    if members.len() < 2 {
         return None;
     }
-    let Some(nearest_external_similarity) = nearest_external_similarity else {
+    let alternatives = all_clusters
+        .iter()
+        .filter(|cluster| !cluster.is_empty() && cluster.as_slice() != members)
+        .collect::<Vec<_>>();
+    if alternatives.is_empty() {
+        // Retain the existing single-cluster admission convention. There is
+        // no measured separation in this case; nearestExternalSimilarity
+        // remains null. Multi-cluster scores below use cosine distances.
         return Some(1.0);
-    };
-    let denominator = internal_similarity
-        .abs()
-        .max(nearest_external_similarity.abs())
-        .max(FLOAT_EPSILON);
-    let score = (internal_similarity - nearest_external_similarity) / denominator;
-    if score.is_nan() {
-        Some(0.0)
-    } else {
-        Some(score.clamp(-1.0, 1.0))
     }
+    let mut total = 0.0;
+    for member in members {
+        // a(i) excludes the point itself; b(i) chooses the nearest OTHER
+        // cluster separately for each point. Averaging cosine similarities
+        // first, or dividing by similarities instead of distances, does not
+        // compute a silhouette and rejects compact, nearby topics.
+        let within = members
+            .iter()
+            .filter(|other| *other != member)
+            .map(|other| 1.0 - similarities[*member][*other])
+            .sum::<f64>()
+            / (members.len() - 1) as f64;
+        let nearest = alternatives
+            .iter()
+            .map(|cluster| {
+                cluster
+                    .iter()
+                    .map(|other| 1.0 - similarities[*member][*other])
+                    .sum::<f64>()
+                    / cluster.len() as f64
+            })
+            .min_by(f64::total_cmp)?;
+        let denominator = within.max(nearest);
+        // Coincident points in different clusters have zero separation.
+        // Do not use an absolute epsilon: cosine distance can legitimately
+        // be tiny, and its ratio still contains the separation signal.
+        if denominator > 0.0 {
+            total += ((nearest - within) / denominator).clamp(-1.0, 1.0);
+        }
+    }
+    Some((total / members.len() as f64).clamp(-1.0, 1.0))
 }
 
 fn cluster_id(member_memory_ids: &[String], threshold: f64) -> String {
@@ -537,6 +561,108 @@ fn round_metric(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn angular_points(angles: &[f64]) -> Vec<EmbeddingPoint> {
+        angles
+            .iter()
+            .enumerate()
+            .map(|(index, angle)| {
+                let radians = angle.to_radians();
+                EmbeddingPoint::new(
+                    format!("memory_{index:02}"),
+                    vec![radians.cos(), radians.sin()],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compact_nearby_topics_are_admitted_using_cosine_distance_silhouettes() {
+        let points = angular_points(&[0.0, 5.0, 10.0, 45.0, 50.0, 55.0]);
+        let report = agglomerate(
+            &points,
+            ClusterCoherenceConfig {
+                merge_threshold: 0.95,
+                ..ClusterCoherenceConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.clusters.len(), 2);
+        for cluster in &report.clusters {
+            assert_eq!(cluster.member_count, 3);
+            assert!((cluster.silhouette_score.unwrap() - 0.973).abs() < 1.0e-9);
+            assert!(cluster.accepted);
+        }
+    }
+
+    #[test]
+    fn nearest_alternative_is_chosen_per_member_not_per_cluster() {
+        let points = angular_points(&[-10.0, 10.0, -11.0, 11.0]);
+        let similarities = pairwise_cosine_matrix(&points).unwrap();
+        let clusters = vec![vec![0, 1], vec![2], vec![3]];
+        let score = silhouette_score(&clusters[0], &clusters, &similarities).unwrap();
+        let expected = (1.0 - 1.0_f64.to_radians().cos())
+            / (1.0 - 20.0_f64.to_radians().cos())
+            - 1.0;
+        assert!((score - expected).abs() < 1.0e-12);
+        assert!(score < -0.99);
+    }
+
+    #[test]
+    fn admission_uses_unrounded_silhouette_not_display_precision() {
+        let external = 1.0 - 0.5 / (1.0 - 0.3996);
+        let similarities = vec![
+            vec![1.0, 0.5, external],
+            vec![0.5, 1.0, external],
+            vec![external, external, 1.0],
+        ];
+        let points = angular_points(&[0.0, 60.0, 120.0]);
+        let clusters = vec![vec![0, 1], vec![2]];
+        let cluster = coherent_cluster(
+            &clusters[0],
+            &clusters,
+            &points,
+            &similarities,
+            ClusterCoherenceConfig {
+                min_cluster_size: 2,
+                ..ClusterCoherenceConfig::default()
+            },
+        );
+        assert!((cluster.silhouette_score.unwrap() - 0.4).abs() < 1.0e-12);
+        assert!(!cluster.accepted, "rounding must not manufacture admission");
+    }
+
+    #[test]
+    fn coincident_alternatives_have_zero_silhouette_without_nan() {
+        let similarities = vec![vec![1.0; 3]; 3];
+        let clusters = vec![vec![0, 1], vec![2]];
+        let score = silhouette_score(&clusters[0], &clusters, &similarities).unwrap();
+        assert!(score.is_finite() && score.abs() < f64::EPSILON);
+        assert!(silhouette_score(&clusters[1], &clusters, &similarities).is_none());
+    }
+
+    #[test]
+    fn silhouette_and_admission_remain_stable_under_input_permutation() {
+        let mut points = angular_points(&[0.0, 5.0, 10.0, 45.0, 50.0, 55.0]);
+        let config = ClusterCoherenceConfig {
+            merge_threshold: 0.95,
+            ..ClusterCoherenceConfig::default()
+        };
+        let forward = agglomerate(&points, config).unwrap();
+        points.reverse();
+        assert_eq!(agglomerate(&points, config).unwrap(), forward);
+    }
+
+    #[test]
+    fn single_cluster_retains_existing_admission_convention() {
+        let points = angular_points(&[0.0, 5.0, 10.0]);
+        let report = agglomerate(&points, ClusterCoherenceConfig::default()).unwrap();
+        assert_eq!(report.clusters.len(), 1);
+        let cluster = &report.clusters[0];
+        assert!(cluster.nearest_external_similarity.is_none());
+        assert!((cluster.silhouette_score.unwrap() - 1.0).abs() < f64::EPSILON);
+        assert!(cluster.accepted);
+    }
 
     #[test]
     fn cluster_coherence_serializes_aggregated_degraded_entries() -> Result<(), String> {
