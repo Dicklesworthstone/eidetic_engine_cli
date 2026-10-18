@@ -24,11 +24,16 @@ pub(super) const MAX_ROW_BYTES: usize = 1024 * 1024;
 const MAX_HISTORY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RECENT_ROWS: usize = 256;
 const MAX_RECOVERY_DETAILS: usize = 256;
+const MAX_JOBS_PER_TICK: usize = 256;
 const RECOVERY_SYNC_ROWS: usize = 64;
 
 #[path = "journal_index.rs"]
 mod journal_index;
 use journal_index::{LatestIndex, LatestKeys};
+
+#[path = "detail_budget.rs"]
+mod detail_budget;
+use detail_budget::{MAX_DETAIL_BYTES, RecentRows, retained_bytes};
 
 /// Keep this plan alive until execution and terminal recording have finished.
 /// Cloning shares the lease rather than opening another lock descriptor.
@@ -136,6 +141,9 @@ fn validate_options(options: &DaemonForegroundOptions) -> Result<(), String> {
     if options.job_types.is_empty() {
         return Err("Daemon foreground mode requires at least one steward job type".to_owned());
     }
+    if options.job_types.len() > MAX_JOBS_PER_TICK {
+        return Err(format!("Daemon foreground mode permits at most {MAX_JOBS_PER_TICK} jobs per tick"));
+    }
     Ok(())
 }
 
@@ -166,18 +174,26 @@ pub fn load_daemon_job_rows(workspace: &Path) -> Result<Vec<DaemonJobRow>, Strin
     let Some(mut file) = open_existing(&path, false)? else { return Ok(Vec::new()); };
     Fs4FileExt::lock_shared(&file).map_err(|e| format!("Lock daemon journal: {e}"))?;
     let mut rows = Vec::new();
+    let mut retained = 0_usize;
     scan(&mut file, &path, |row, offset, length| {
         if offset.saturating_add(length as u64) > MAX_HISTORY_BYTES {
             return Err("Daemon full-history read exceeds 16 MiB; use daemon status or recovery for a bounded complete snapshot".to_owned());
         }
+        let bytes = retained_bytes(&row);
+        if bytes > (MAX_HISTORY_BYTES as usize).saturating_sub(retained) {
+            return Err("Daemon full-history payload exceeds 16 MiB; use daemon status or recovery for a bounded complete snapshot".to_owned());
+        }
+        retained += bytes;
         rows.push(row);
         Ok(())
     })?;
     Ok(rows)
 }
 
-/// Stream a complete snapshot, retaining at most 256 recent rows. The
-/// history index has a bounded key buffer and spills larger histories to
+/// Stream a complete snapshot, retaining the newest prefix of at most 256
+/// rows and 4 MiB of row payloads. Counts always cover the complete history;
+/// only diagnostic details are capped. The existing recentOutcomeCount reports
+/// the number actually returned. The history index spills larger histories to
 /// temporary files outside the workspace. No journal bytes are changed.
 pub fn daemon_status_report(
     workspace: &Path,
@@ -196,19 +212,14 @@ pub fn daemon_status_report(
     let (summary, keys) = build_index(&mut file, &path)?;
     report.row_count = summary.rows;
     let limit = recent_limit.min(MAX_RECENT_ROWS);
+    let mut recent = RecentRows::new(limit, MAX_DETAIL_BYTES);
     for entry in keys {
         let (_, offset) = entry.map_err(|e| format!("Read daemon index: {e}"))?;
         let row = row_at(&mut file, &path, offset)?;
         report.open_job_count += usize::from(row.is_open());
-        if limit != 0 {
-            report.recent_outcomes.push(row);
-            report.recent_outcomes.sort_by(|left, right| {
-                right.recorded_at.cmp(&left.recorded_at)
-                    .then_with(|| left.daemon_job_key.cmp(&right.daemon_job_key))
-            });
-            report.recent_outcomes.truncate(limit);
-        }
+        recent.push(row);
     }
+    report.recent_outcomes = recent.into_rows();
     Ok(report)
 }
 
@@ -231,6 +242,7 @@ pub fn recover_orphaned_daemon_jobs(
     let (summary, keys) = build_index(&mut file, &path)?;
     report.scanned_rows = summary.rows;
     repair_tail(&mut file, &path)?;
+    let mut detail_bytes = 0_usize;
     for entry in keys {
         let (_, offset) = entry.map_err(|e| format!("Read daemon recovery index: {e}"))?;
         let mut row = row_at(&mut file, &path, offset)?;
@@ -249,9 +261,15 @@ pub fn recover_orphaned_daemon_jobs(
         row.recovery_reason = Some(reason.to_owned());
         write_row(&mut file, &row)?;
         report.open_jobs_cancelled += 1;
-        if report.recovered_rows.len() < MAX_RECOVERY_DETAILS {
+        let bytes = retained_bytes(&row);
+        if !report.recovered_rows_truncated
+            && report.recovered_rows.len() < MAX_RECOVERY_DETAILS
+            && bytes <= MAX_DETAIL_BYTES.saturating_sub(detail_bytes)
+        {
+            detail_bytes += bytes;
             report.recovered_rows.push(row);
         } else {
+            // This caps only the response, never the number of cancellations.
             report.recovered_rows_truncated = true;
         }
         if report.open_jobs_cancelled % RECOVERY_SYNC_ROWS == 0 {
@@ -348,12 +366,31 @@ fn torn_json(bytes: &[u8], error: &serde_json::Error) -> bool {
 
 fn append_rows(path: &Path, rows: &[DaemonJobRow]) -> Result<(), String> {
     if rows.is_empty() { return Ok(()); }
+    // An invalid later row must not append an earlier valid prefix or repair
+    // evidence before the request fails. Check wire sizes without allocating
+    // encoded rows, including JSON escape expansion and the final newline.
+    for row in rows {
+        serde_json::to_writer(RowSize(0), row)
+            .map_err(|e| format!("Encode daemon job row: {e}"))?;
+    }
     let mut file = open_append(path)?;
     Fs4FileExt::lock(&file).map_err(|e| format!("Lock daemon journal: {e}"))?;
     repair_tail(&mut file, path)?;
     for row in rows { write_row(&mut file, row)?; }
     file.sync_all().map_err(|e| format!("Sync daemon journal: {e}"))?;
     sync_parent(path)
+}
+
+struct RowSize(usize);
+impl Write for RowSize {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_ROW_BYTES.saturating_sub(1).saturating_sub(self.0) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "daemon job row exceeds its byte budget"));
+        }
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
 struct RowBuffer(Vec<u8>);
@@ -557,3 +594,7 @@ fn row_from_result(
 #[cfg(test)]
 #[path = "job_journal_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "job_journal_budget_tests.rs"]
+mod budget_tests;
