@@ -32,6 +32,7 @@ pub mod policy;
 pub mod runtime;
 pub mod search;
 pub mod shadow;
+#[path = "steward_api.rs"]
 pub mod steward;
 pub mod util;
 pub mod workspace_rebind;
