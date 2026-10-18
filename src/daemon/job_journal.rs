@@ -35,6 +35,10 @@ use journal_index::{LatestIndex, LatestKeys};
 mod detail_budget;
 use detail_budget::{MAX_DETAIL_BYTES, RecentRows, retained_bytes};
 
+#[path = "execution.rs"]
+mod execution;
+pub use execution::{DaemonExecution, DaemonJobInvocation};
+
 /// Keep this plan alive until execution and terminal recording have finished.
 /// Cloning shares the lease rather than opening another lock descriptor.
 #[derive(Clone, Debug)]
@@ -227,6 +231,28 @@ pub fn recover_orphaned_daemon_jobs(
     workspace: &Path,
     reason: &str,
 ) -> Result<DaemonRecoveryReport, String> {
+    // Read-only absence must not create the execution lock or .ee directory.
+    let lease = if regular_file_exists(&daemon_job_table_path(workspace))? {
+        Some(execution_lease(workspace)?)
+    } else {
+        None
+    };
+    recover_orphaned_daemon_jobs_inner(workspace, reason, lease.as_ref())
+}
+
+fn recover_orphaned_daemon_jobs_with_lease(
+    workspace: &Path,
+    reason: &str,
+    lease: &File,
+) -> Result<DaemonRecoveryReport, String> {
+    recover_orphaned_daemon_jobs_inner(workspace, reason, Some(lease))
+}
+
+fn recover_orphaned_daemon_jobs_inner(
+    workspace: &Path,
+    reason: &str,
+    lease: Option<&File>,
+) -> Result<DaemonRecoveryReport, String> {
     let path = daemon_job_table_path(workspace);
     let mut report = DaemonRecoveryReport {
         workspace: workspace.to_string_lossy().into_owned(), table_path: path.clone(),
@@ -235,7 +261,11 @@ pub fn recover_orphaned_daemon_jobs(
     };
     // Do not create a workspace merely to discover there is no journal.
     if !regular_file_exists(&path)? { return Ok(report); }
-    let _lease = execution_lease(workspace)?;
+    // The journal may have appeared between the caller's absence check and
+    // this read. Refuse rather than recovering without an execution owner.
+    if lease.is_none() {
+        return Err("Daemon journal appeared before recovery acquired its execution lease; retry".to_owned());
+    }
     let Some(mut file) = open_existing(&path, true)? else { return Ok(report); };
     Fs4FileExt::lock(&file).map_err(|e| format!("Lock daemon journal: {e}"))?;
     // Validate every complete row before performing any recovery mutation.

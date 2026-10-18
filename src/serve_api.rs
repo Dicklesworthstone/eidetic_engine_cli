@@ -13,7 +13,7 @@ pub use transport::*;
 mod job_journal;
 
 pub use job_journal::{
-    DaemonRecoveryReport, DaemonRunPlan, daemon_status_report, load_daemon_job_rows,
-    record_daemon_foreground_report, record_daemon_foreground_start,
-    recover_orphaned_daemon_jobs,
+    DaemonExecution, DaemonJobInvocation, DaemonRecoveryReport, DaemonRunPlan,
+    daemon_status_report, load_daemon_job_rows, record_daemon_foreground_report,
+    record_daemon_foreground_start, recover_orphaned_daemon_jobs,
 };
