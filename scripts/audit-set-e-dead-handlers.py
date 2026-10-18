@@ -64,6 +64,13 @@ import re, glob, os, sys
 # e2e_overhaul/concurrency.sh:160). The negative lookahead is the whole fix.
 ASSIGN = re.compile(r"^\s*(?:local\s+|declare\s+|export\s+)?([A-Za-z_][A-Za-z0-9_]*)=\"?\$\((?!\()")
 READS_Q = re.compile(r"\$\?")
+# A line that CONSUMES the previous command's status, as opposed to one that
+# runs something and then reads its own. `rc=$?` and `case "$?" in` consume;
+# `env ... || exit_code=$?` does not -- its `$?` is its own.
+HANDLER = re.compile(
+    r"^(?:local\s+|declare\s+|export\s+)?[A-Za-z_][A-Za-z0-9_]*=\"?\$\?"
+    r"|^(?:case|if|while|until|elif|test|\[\[|\[)\b[^|&]*\$\?"
+)
 SET_E = re.compile(r"^\s*set\s+-[a-zA-Z]*e[a-zA-Z]*\b|^\s*set\s+-o\s+errexit")
 SET_PLUS_E = re.compile(r"^\s*set\s+\+[a-zA-Z]*e")
 IF_COND = re.compile(r"^\s*(?:if|while|until|elif)\s")
@@ -204,8 +211,28 @@ def census(root):
             # of the assignment above it. Same substitution this repo keeps
             # finding elsewhere: a sentence about the mechanism read as the
             # mechanism.
-            if not any(READS_Q.search(_decomment(w))
-                       for w in lines[last + 1:last + 4]):
+            # `$?` HOLDS THE LAST COMMAND'S STATUS, so a read three lines down
+            # with a command in between does NOT belong to this assignment. The
+            # old 3-line any() window ignored that and attributed other
+            # commands' handlers to whatever assignment preceded them --
+            # e2e_output_budget.sh:126 was reported DEAD because
+            # `env ... || exit_code=$?` two lines later reads `$?` for ITS OWN
+            # command, and :127 for the same reason.
+            #
+            # So: the handler must be the NEXT effective line (blank and
+            # comment lines skipped, heredoc bodies already excluded), AND it
+            # must be a line that READS `$?` rather than one that runs
+            # something and then reads its own status.
+            nxt = None
+            for j in range(last + 1, len(lines)):
+                if shell[j] is None:
+                    continue
+                body = _decomment(lines[j]).strip()
+                if not body:
+                    continue
+                nxt = body
+                break
+            if nxt is None or not HANDLER.match(nxt):
                 continue
             rows.append({"file": os.path.relpath(path, root), "line": i + 1,
                          "var": m.group(1), "live": active[i], "_lines": lines,
@@ -299,6 +326,13 @@ def self_test():
         # negative above would still pass while the census went blind.
         open(os.path.join(d, "trailcomment.sh"), "w").write(
             'set -e\nout="$(false)"\nrc=$?  # keep the status\necho "$rc"\n')
+        # NEGATIVE 10: the next line RUNS something and reads ITS OWN status.
+        # `$?` holds only the last command's result, so that read has nothing to
+        # do with the assignment above it. The old 3-line any() window counted
+        # it and reported 6 correct sites as DEAD -- three quarters of the
+        # census's headline findings.
+        open(os.path.join(d, "intervening.sh"), "w").write(
+            'set -e\nout="$(date)"\nrun_thing --flag || other=$?\necho done\n')
         rows = census(tmp)
         got = {r["file"] for r in rows}
         arm("arithmetic `n=$((n + 1))` is NOT mistaken for a subshell",
@@ -318,6 +352,8 @@ def self_test():
             "scripts/comment.sh" not in got)
         arm("a real handler with a TRAILING comment is still flagged",
             "scripts/trailcomment.sh" in got)
+        arm("a $? belonging to an INTERVENING command is not attributed here",
+            "scripts/intervening.sh" not in got)
         arm("exactly two candidates across the fixtures", len(rows) == 2)
     print(f"\n[set-e-census] self-test: {sum(arms)}/{len(arms)} arms passed")
     return 0 if all(arms) else 1
