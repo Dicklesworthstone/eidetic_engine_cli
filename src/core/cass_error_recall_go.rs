@@ -75,11 +75,23 @@ struct BuildEvent {
     output: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
 enum Record {
     Test(Event),
     Build(BuildEvent),
+}
+
+impl Record {
+    // Decode directly from the original JSON slice. With arbitrary_precision,
+    // Serde's untagged intermediate representation turns fractional numbers
+    // into maps that f64 cannot read. Value round-tripping would instead hide
+    // duplicate fields. The two strict schemas have disjoint required fields;
+    // trying them directly preserves both native numbers and duplicate checks.
+    fn decode(text: &str) -> Result<Self, ()> {
+        serde_json::from_str::<Event>(text)
+            .map(Self::Test)
+            .or_else(|_| serde_json::from_str::<BuildEvent>(text).map(Self::Build))
+            .map_err(|_| ())
+    }
 }
 
 fn identity(value: &str) -> bool {
@@ -182,11 +194,12 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
     let mut skipped_tests = BTreeSet::new();
     let mut build_failures = BTreeSet::new();
     let mut linked_builds = BTreeSet::new();
-    let mut records = serde_json::Deserializer::from_str(text).into_iter::<Record>();
+    // Locate complete values without buffering/normalizing their fields.
+    let mut records = serde_json::Deserializer::from_str(text).into_iter::<serde::de::IgnoredAny>();
     let mut consumed = 0;
     let mut count = 0;
     while let Some(event) = records.next() {
-        let event = event.map_err(|_| ())?;
+        event.map_err(|_| ())?;
         if count == MAX_GO_RECORDS {
             return Err(());
         }
@@ -200,7 +213,7 @@ pub(super) fn inspect(text: &str) -> Result<Option<CompilerOutput>, ()> {
         }
         consumed = end;
         count += 1;
-        let event = match event {
+        let event = match Record::decode(raw)? {
             Record::Test(event) => event,
             Record::Build(event) => {
                 if !identity(&event.import_path) {
@@ -409,6 +422,7 @@ fn retain_diagnostic(
         output.diagnostics.push(diagnostic);
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -1083,3 +1097,106 @@ mod tests {
 #[cfg(test)]
 #[path = "cass_error_recall_go_intake_tests.rs"]
 mod intake_tests;
+
+#[cfg(test)]
+mod numeric_tests {
+    use super::*;
+    use crate::core::cass_error_recall::{ToolOutput, failure_diagnostics};
+
+    fn report(elapsed: &str, terminal: &str) -> String {
+        format!(
+            "{{\"Action\":\"start\",\"Package\":\"example.org/cache\"}}\n\
+             {{\"Action\":\"run\",\"Package\":\"example.org/cache\",\"Test\":\"TestCache\"}}\n\
+             {{\"Action\":\"{terminal}\",\"Package\":\"example.org/cache\",\"Test\":\"TestCache\",\"Elapsed\":{elapsed}}}\n\
+             {{\"Action\":\"{terminal}\",\"Package\":\"example.org/cache\",\"Elapsed\":{elapsed}}}"
+        )
+    }
+
+    #[test]
+    fn native_fractional_timing_preserves_success_failure_and_exact_subjects() {
+        let baseline = inspect(&report("0", "pass")).unwrap().unwrap();
+        for elapsed in [
+            "0.01",
+            "0.010000",
+            "1e-3",
+            "1E+2",
+            "-0.0",
+            "5e-324",
+            "9007199254740993",
+        ] {
+            let text = report(elapsed, "pass");
+            let decoded = inspect(&text).expect(elapsed).unwrap();
+            assert!(decoded.allows_completion, "{elapsed}");
+            assert!(!decoded.failed);
+            let coverage = decoded.go_test_coverage.unwrap();
+            let original = baseline.go_test_coverage.as_ref().unwrap();
+            assert_eq!(coverage.passed_packages, original.passed_packages);
+            assert_eq!(coverage.passed_tests, original.passed_tests);
+            let failure = ToolOutput {
+                text: report(elapsed, "fail"),
+                is_error: Some(false),
+                exit_code: Some(0),
+            };
+            assert_eq!(failure_diagnostics(&failure).len(), 1, "{elapsed}");
+            assert!(failure.failed());
+            assert!(!failure.succeeded());
+        }
+    }
+
+    #[test]
+    fn malformed_timing_and_duplicate_fields_never_gain_completion_authority() {
+        for invalid in [
+            "-0.01",
+            "1e999",
+            "\"0.01\"",
+            "true",
+            "[]",
+            "{}",
+            "{\"$serde_json::private::Number\":\"0.01\"}",
+        ] {
+            assert!(inspect(&report(invalid, "pass")).is_err(), "{invalid}");
+        }
+        let good = report("0.01", "pass");
+        assert!(inspect(&good).unwrap().unwrap().allows_completion);
+        for malformed in [
+            good.replace("\"Elapsed\":0.01", "\"Elapsed\":0.01,\"Elapsed\":0.02"),
+            good.replace("\"Elapsed\":0.01", "\"Elapsed\":0.01,\"Unknown\":0.02"),
+            good.replace(
+                "\"Action\":\"pass\"",
+                "\"Action\":\"fail\",\"Action\":\"pass\"",
+            ),
+            good.replace(
+                "\"Action\":\"pass\"",
+                "\"Action\":\"pass\",\"ImportPath\":\"foreign\"",
+            ),
+            good.replace('\n', " "),
+            format!("{good}\n{{"),
+            format!("{good}\n{{\"success\":true}}"),
+        ] {
+            assert!(inspect(&malformed).is_err(), "{malformed}");
+        }
+    }
+
+    #[test]
+    fn timing_decode_cannot_hide_build_failure_or_interpret_output_as_protocol() {
+        let failed = format!(
+            "{{\"ImportPath\":\"example.org/broken\",\"Action\":\"build-output\",\"Output\":\"compiler diagnostic\"}}\n\
+             {{\"ImportPath\":\"example.org/broken\",\"Action\":\"build-fail\"}}\n\
+             {{\"Action\":\"start\",\"Package\":\"example.org/cache\"}}\n\
+             {{\"Action\":\"fail\",\"Package\":\"example.org/cache\",\"FailedBuild\":\"example.org/broken\",\"Elapsed\":0.01}}\n{}",
+            report("0.02", "pass").replace("example.org/cache", "example.org/control")
+        );
+        let decoded = inspect(&failed).unwrap().unwrap();
+        assert!(decoded.failed);
+        assert!(!decoded.allows_completion);
+        assert!(decoded.go_test_coverage.unwrap().complete);
+        let success = report("0.01", "pass");
+        let (start, rest) = success.split_once('\n').unwrap();
+        let nested = serde_json::json!({"Action":"output", "Package":"example.org/cache",
+            "Output": report("0.02", "fail")});
+        let text = format!("{start}\n{nested}\n{rest}");
+        let decoded = inspect(&text).unwrap().unwrap();
+        assert!(decoded.allows_completion);
+        assert!(decoded.diagnostics.is_empty());
+    }
+}
