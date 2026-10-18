@@ -17,3 +17,11 @@ pub use job_journal::{
     daemon_status_report, load_daemon_job_rows, record_daemon_foreground_report,
     record_daemon_foreground_start, recover_orphaned_daemon_jobs,
 };
+
+#[path = "daemon/durable_foreground.rs"]
+mod durable_foreground;
+
+pub use durable_foreground::{
+    DaemonExecutionReport, run_daemon_foreground_durable,
+    run_daemon_foreground_durable_supervised,
+};

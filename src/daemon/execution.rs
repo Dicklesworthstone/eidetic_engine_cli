@@ -36,6 +36,11 @@ pub struct DaemonExecution {
 }
 
 impl DaemonExecution {
+    /// Validate admission limits without acquiring a lease or writing state.
+    pub(crate) fn validate_request(options: &DaemonForegroundOptions) -> Result<(), String> {
+        validate_options(options)
+    }
+
     /// Validate and recover the selected workspace while holding the SAME
     /// execution lease that will cover all subsequent jobs and their finishes.
     /// No new job is recorded or executed by this constructor.
