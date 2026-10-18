@@ -59,8 +59,7 @@ impl Locations<'_> {
             // artifacts. An explicit absolute URI still identifies a root.
             if !resolved.absolute
                 && self.artifacts.iter().any(|artifact| {
-                    artifact.offset
-                        || !matches!(array_index(&artifact.parent_index), Ok(None))
+                    artifact.offset || !matches!(array_index(&artifact.parent_index), Ok(None))
                 })
             {
                 return None;
@@ -74,7 +73,10 @@ impl Locations<'_> {
         let target = artifact.location.as_ref()?;
         // An artifact's own location may repeat its position, not redirect to
         // another entry. Do not recurse through arbitrary index chains.
-        if array_index(&target.index).ok()?.is_some_and(|own| own != index) {
+        if array_index(&target.index)
+            .ok()?
+            .is_some_and(|own| own != index)
+        {
             return None;
         }
         let resolved = self.inline(target)?;
@@ -231,9 +233,7 @@ fn base_directory(uri: &str) -> bool {
     } else {
         uri
     };
-    path.ends_with('/')
-        && !path.ends_with("//")
-        && !path.split('/').any(dot_segment)
+    path.ends_with('/') && !path.ends_with("//") && !path.split('/').any(dot_segment)
 }
 
 fn dot_segment(segment: &str) -> bool {

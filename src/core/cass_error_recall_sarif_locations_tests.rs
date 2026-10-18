@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use super::*;
 use super::tests::{decoded, failed, output, passed};
+use super::*;
 use crate::core::cass_error_recall::{failure_diagnostics, structured_error_diagnostics};
 use serde_json::json;
 
@@ -123,7 +123,11 @@ fn archive_members_and_offset_artifacts_are_not_top_level_files() {
     }
     let mut top_level = indexed(passed());
     top_level["runs"][0]["artifacts"][0]["parentIndex"] = json!(-1);
-    assert!(decoded(&failed()).execution.verified_by(&decoded(&top_level).execution));
+    assert!(
+        decoded(&failed())
+            .execution
+            .verified_by(&decoded(&top_level).execution)
+    );
 }
 
 #[test]
@@ -210,7 +214,14 @@ fn missing_cyclic_and_unsupported_bases_preserve_diagnostics_without_proof() {
         assert_unresolved(value);
     }
     for uri in [
-        "src", "../", "%2e%2E/", "./", "src//", "src/?query", "src/#fragment", "src/%ZZ/",
+        "src",
+        "../",
+        "%2e%2E/",
+        "./",
+        "src//",
+        "src/?query",
+        "src/#fragment",
+        "src/%ZZ/",
     ] {
         let mut value = based(passed());
         value["runs"][0]["originalUriBaseIds"]["SRC"]["uri"] = json!(uri);
@@ -257,8 +268,10 @@ fn reference_depth_uri_length_and_inventory_all_have_nonvacuous_bounds() {
     let mut small = indexed(passed());
     small["runs"][0]["artifacts"] = json!(vec![json!({"location": {"uri": "src/cache.rs"}}); 8]);
     assert!(decoded(&small).output.allows_completion);
-    small["runs"][0]["artifacts"] =
-        json!(vec![json!({"location": {"uri": "src/cache.rs"}}); MAX_RECORDS]);
+    small["runs"][0]["artifacts"] = json!(vec![
+        json!({"location": {"uri": "src/cache.rs"}});
+        MAX_RECORDS
+    ]);
     assert!(decode(&small.to_string()).is_err());
 }
 

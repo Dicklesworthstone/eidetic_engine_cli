@@ -318,8 +318,7 @@ fn fail_fast_warning(line: &str, selected: Selection, summary: Summary) -> Resul
         .ok_or(())?;
     if !matches!(
         advice,
-        ""
-            | " (run with --no-fail-fast to run all tests)"
+        "" | " (run with --no-fail-fast to run all tests)"
             | " (run with --no-fail-fast to run all tests, or run with --max-fail)"
     ) {
         return Err(());
@@ -448,7 +447,8 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
                         return Err(());
                     }
                     slow_nodes.insert((binary, name));
-                } else if nodes.len() == MAX_TESTS || nodes.insert((binary, name), status).is_some() {
+                } else if nodes.len() == MAX_TESTS || nodes.insert((binary, name), status).is_some()
+                {
                     return Err(());
                 }
                 capture = false;
@@ -505,8 +505,12 @@ pub(in crate::core::cass_error_recall) fn decode(text: &str) -> Result<Option<De
             .filter(|node| nodes.get(*node) == Some(&Status::Passed))
             .count();
         if slow_nodes.iter().any(|node| !nodes.contains_key(node))
-            || summary.slow_passed.is_some_and(|count| count != slow_passed)
-            || summary.selected.is_some_and(|total| total != selected.tests)
+            || summary
+                .slow_passed
+                .is_some_and(|count| count != slow_passed)
+            || summary
+                .selected
+                .is_some_and(|total| total != selected.tests)
             || (summary.selected.is_none() && !full_inventory)
             || (!full_inventory && (!cancelled || summary.failed == 0))
             || (cancelled && summary.failed == 0)

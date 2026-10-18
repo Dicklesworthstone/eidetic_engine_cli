@@ -15,15 +15,21 @@ fn fixture() -> Result<(tempfile::TempDir, DaemonForegroundOptions), Box<dyn std
 
 fn result(invocation: &DaemonJobInvocation) -> JobRunResult {
     JobRunResult {
-        job_id: invocation.runner_job_id.clone(), job_type: invocation.job_type,
-        outcome: RunOutcome::Success, duration_ms: 1, items_processed: Some(1),
-        error: None, budget_summary: None,
-        details: Some(json!({"durableMutation": true})), dry_run: false,
+        job_id: invocation.runner_job_id.clone(),
+        job_type: invocation.job_type,
+        outcome: RunOutcome::Success,
+        duration_ms: 1,
+        items_processed: Some(1),
+        error: None,
+        budget_summary: None,
+        details: Some(json!({"durableMutation": true})),
+        dry_run: false,
     }
 }
 
 #[test]
-fn only_the_current_job_is_started_and_each_finish_is_visible_before_next_admission() -> TestResult {
+fn only_the_current_job_is_started_and_each_finish_is_visible_before_next_admission() -> TestResult
+{
     let (_temp, options) = fixture()?;
     let root = Path::new(&options.workspace);
     let mut execution = DaemonExecution::begin(&options)?;
@@ -33,7 +39,10 @@ fn only_the_current_job_is_started_and_each_finish_is_visible_before_next_admiss
     for index in 0..6 {
         let invocation = execution.begin_next_job()?.unwrap();
         assert_eq!(invocation.tick, index / 2 + 1);
-        assert_eq!(invocation.runner_job_id, format!("job-{:06}", index % 2 + 1));
+        assert_eq!(
+            invocation.runner_job_id,
+            format!("job-{:06}", index % 2 + 1)
+        );
         let status = daemon_status_report(root, &[], 20)?;
         assert_eq!(status.row_count, (2 * index + 1) as usize);
         assert_eq!(status.open_job_count, 1);
@@ -149,7 +158,11 @@ fn oversized_terminal_record_stops_admission_and_remains_recoverable() -> TestRe
     assert_eq!(fs::read(daemon_job_table_path(root))?, before);
     assert_eq!(execution.completed_jobs(), 0);
     assert!(execution.begin_next_job().is_err());
-    assert!(execution.finish_job(&invocation, &result(&invocation)).is_err());
+    assert!(
+        execution
+            .finish_job(&invocation, &result(&invocation))
+            .is_err()
+    );
     drop(execution);
     let restarted = DaemonExecution::begin(&options)?;
     assert_eq!(restarted.recovered_orphans(), 1);
@@ -196,7 +209,10 @@ fn corrupt_complete_history_prevents_a_new_execution_without_mutating_evidence()
     execution.begin_next_job()?;
     drop(execution);
     let path = daemon_job_table_path(root);
-    OpenOptions::new().append(true).open(&path)?.write_all(b"{invalid}\n")?;
+    OpenOptions::new()
+        .append(true)
+        .open(&path)?
+        .write_all(b"{invalid}\n")?;
     let before = fs::read(&path)?;
     assert!(DaemonExecution::begin(&options).is_err());
     assert_eq!(fs::read(&path)?, before);

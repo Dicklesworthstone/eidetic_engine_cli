@@ -53,9 +53,17 @@ fn cached_helpful_report_cannot_override_new_harmful_feedback() -> TestResult {
     assert_eq!(actual.len(), 1);
     assert_eq!(actual[0].evidence_id, good);
     assert_eq!(actual[0].role, "repair");
-    assert!(actual[0].text.as_deref().is_some_and(|text| text.contains("Repair 2")));
+    assert!(
+        actual[0]
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("Repair 2"))
+    );
     assert_eq!(connection.get_evidence_span(&bad)?, source);
-    assert_eq!(connection.list_error_repair_links(WS, "rustc:E0277")?, links);
+    assert_eq!(
+        connection.list_error_repair_links(WS, "rustc:E0277")?,
+        links
+    );
     let history = error_recall_report(&connection, WS, &canonical)?;
     assert!(history.helpful_repairs.contains(&bad));
     assert_eq!(history.harmful_repairs, std::slice::from_ref(&bad));
@@ -66,7 +74,8 @@ fn cached_helpful_report_cannot_override_new_harmful_feedback() -> TestResult {
 }
 
 #[test]
-fn declared_harmful_repairs_are_not_hydrated_but_independent_proofs_remain_locators() -> TestResult {
+fn declared_harmful_repairs_are_not_hydrated_but_independent_proofs_remain_locators() -> TestResult
+{
     let connection = db()?;
     let session = session(&connection, WS, 911)?;
     let bad_card = span(&connection, WS, &session, 1, true)?;
@@ -137,7 +146,12 @@ fn harmful_batch_prefix_does_not_hide_later_admitted_evidence() -> TestResult {
     assert_eq!(hydrated, std::slice::from_ref(&good));
     assert_eq!(actual.len(), 1);
     assert_eq!(actual[0].evidence_id, good);
-    assert!(actual[0].text.as_deref().is_some_and(|text| text.contains("Repair 129")));
+    assert!(
+        actual[0]
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("Repair 129"))
+    );
     Ok(())
 }
 
@@ -157,7 +171,11 @@ fn missing_feedback_authority_fails_before_hydration_and_releases_owned_snapshot
     });
     assert!(result.is_err());
     assert_eq!(hydration_calls, 0);
-    assert!(result.err().is_some_and(|error| error.to_string().contains("positive guidance withheld")));
+    assert!(
+        result
+            .err()
+            .is_some_and(|error| error.to_string().contains("positive guidance withheld"))
+    );
     // No leaked read transaction after the failure.
     connection.begin_read_snapshot()?;
     connection.rollback_read_snapshot()?;
@@ -182,12 +200,19 @@ fn feedback_reads_leave_the_callers_transaction_and_uncommitted_marks_intact() -
             },
         )?;
         assert!(read(&connection, WS, &report)?.is_empty());
-        assert_eq!(connection.list_error_repair_links(WS, "rustc:E0277")?.len(), 1);
+        assert_eq!(
+            connection.list_error_repair_links(WS, "rustc:E0277")?.len(),
+            1
+        );
         connection.execute_raw("INSERT INTO missing_feedback_rollback_table VALUES (1)")?;
         Ok(())
     });
     assert!(result.is_err());
-    assert!(connection.list_error_repair_links(WS, "rustc:E0277")?.is_empty());
+    assert!(
+        connection
+            .list_error_repair_links(WS, "rustc:E0277")?
+            .is_empty()
+    );
     assert_eq!(read(&connection, WS, &report)?.len(), 1);
     Ok(())
 }

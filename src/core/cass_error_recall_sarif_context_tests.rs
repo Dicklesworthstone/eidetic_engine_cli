@@ -1,7 +1,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
-use crate::core::cass_error_recall::{ToolOutput, failure_diagnostics, structured_error_diagnostics};
+use crate::core::cass_error_recall::{
+    ToolOutput, failure_diagnostics, structured_error_diagnostics,
+};
 use serde_json::json;
 
 fn report(kind: &str, invocation: Value) -> Value {
@@ -60,9 +62,18 @@ fn reported_analyzer_scope_is_required_even_when_outer_command_is_unchanged() {
     for (field, changed) in [
         ("commandLine", json!("analyzer --lenient src/cache.rs")),
         ("arguments", json!(["--lenient", "src/cache.rs"])),
-        ("environmentVariables", json!({"MODE": "lenient", "LANG": "C"})),
-        ("workingDirectory", json!({"uri": "file:///different-repo/"})),
-        ("executableLocation", json!({"uri": "file:///other/analyzer"})),
+        (
+            "environmentVariables",
+            json!({"MODE": "lenient", "LANG": "C"}),
+        ),
+        (
+            "workingDirectory",
+            json!({"uri": "file:///different-repo/"}),
+        ),
+        (
+            "executableLocation",
+            json!({"uri": "file:///other/analyzer"}),
+        ),
     ] {
         let mut changed_invocation = invocation();
         changed_invocation[field] = changed;
@@ -142,7 +153,11 @@ fn environment_order_and_runtime_timestamps_do_not_change_analysis_scope() {
     after_invocation["endTimeUtc"] = json!("2026-10-15T01:01:00Z");
     after_invocation["processId"] = json!(1234);
     let after = report("pass", after_invocation);
-    assert!(decoded(&before).execution.verified_by(&decoded(&after).execution));
+    assert!(
+        decoded(&before)
+            .execution
+            .verified_by(&decoded(&after).execution)
+    );
 }
 
 #[test]
@@ -154,9 +169,18 @@ fn unknown_or_unresolved_execution_metadata_retains_diagnostics_not_proof() {
         ("commandLine", json!("")),
         ("workingDirectory", json!(null)),
         ("workingDirectory", json!({"uri": "relative/root"})),
-        ("workingDirectory", json!({"uri": "file:///repo/", "index": 0})),
-        ("workingDirectory", json!({"uri": "file:///repo/", "uriBaseId": null})),
-        ("executableLocation", json!({"uri": "analyzer", "index": null})),
+        (
+            "workingDirectory",
+            json!({"uri": "file:///repo/", "index": 0}),
+        ),
+        (
+            "workingDirectory",
+            json!({"uri": "file:///repo/", "uriBaseId": null}),
+        ),
+        (
+            "executableLocation",
+            json!({"uri": "analyzer", "index": null}),
+        ),
         ("responseFiles", json!([{"uri": "analysis.args"}])),
         ("responseFiles", json!([{"index": 0}])),
         ("executableLocation", json!({"index": 0})),

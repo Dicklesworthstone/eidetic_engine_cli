@@ -11,10 +11,7 @@ use serde_json::Value as JsonValue;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PackSelectionIdentity<'a> {
     Memory(&'a str),
-    Native {
-        kind: &'a str,
-        entity_id: &'a str,
-    },
+    Native { kind: &'a str, entity_id: &'a str },
 }
 
 /// Classify one selected item from an already integrity-verified pack ledger.

@@ -42,7 +42,9 @@ fn growth_can_add_a_binary_but_cannot_change_profile_or_filter_posture() {
     for changed in [
         grown.replace("profile: default", "profile: ci"),
         grown.replace("3 binaries", "1 binary"),
-        grown.replace("3 tests skipped", "4 tests skipped").replace("3 skipped", "4 skipped"),
+        grown
+            .replace("3 tests skipped", "4 tests skipped")
+            .replace("3 skipped", "4 skipped"),
         // Counters alone cannot authorize a different selection without growth.
         passed().text.replace("2 binaries", "3 binaries"),
     ] {
@@ -72,7 +74,10 @@ fn named_skips_cannot_hide_an_original_subject_behind_a_new_passing_test() {
         ("other", "case", "cache", "cache::round_trip"),
     ] {
         let text = report(
-            &[("PASS", other_binary, other_name), ("PASS", "cache", "regression")],
+            &[
+                ("PASS", other_binary, other_name),
+                ("PASS", "cache", "regression"),
+            ],
             3,
         );
         let text = text.replacen(
@@ -105,10 +110,19 @@ fn a_new_regression_failure_vetoes_the_direct_matcher_and_the_public_proof() {
 #[test]
 fn growth_preserves_every_failed_subject_beyond_the_diagnostic_cap() {
     let names: Vec<_> = (0..6).map(|index| format!("case_{index}")).collect();
-    let failed_rows: Vec<_> = names.iter().map(|name| ("FAIL", "cache", name.as_str())).collect();
+    let failed_rows: Vec<_> = names
+        .iter()
+        .map(|name| ("FAIL", "cache", name.as_str()))
+        .collect();
     let failure = output(report(&failed_rows, 0));
-    assert_eq!(failure_diagnostics(&failure).len(), MAX_DIAGNOSTICS_PER_FAILURE);
-    let mut passed_rows: Vec<_> = names.iter().map(|name| ("PASS", "cache", name.as_str())).collect();
+    assert_eq!(
+        failure_diagnostics(&failure).len(),
+        MAX_DIAGNOSTICS_PER_FAILURE
+    );
+    let mut passed_rows: Vec<_> = names
+        .iter()
+        .map(|name| ("PASS", "cache", name.as_str()))
+        .collect();
     passed_rows.push(("PASS", "cache", "new_regression"));
     assert!(verifies(&failure, &output(report(&passed_rows, 0))));
     passed_rows[5].2 = "replacement";
@@ -137,13 +151,19 @@ fn fail_fast_unknown_subjects_keep_the_exact_selection_requirement() {
 fn growth_retains_process_completion_poll_and_whole_report_guards() {
     let proof = output(growing_report());
     for (is_error, exit_code) in [(None, None), (Some(true), Some(0)), (None, Some(1))] {
-        let rejected = ToolOutput { is_error, exit_code, ..proof.clone() };
+        let rejected = ToolOutput {
+            is_error,
+            exit_code,
+            ..proof.clone()
+        };
         assert!(!verifies(&failed(), &rejected));
     }
     for text in [
         proof.text.replace("3 tests across", "4 tests across"),
         proof.text.replace("3 passed", "4 passed"),
-        proof.text.replace("regression::flushes_pending_writes", "cache::round_trip"),
+        proof
+            .text
+            .replace("regression::flushes_pending_writes", "cache::round_trip"),
         format!("{}output truncated\n", proof.text),
         proof.text.lines().take(6).collect::<Vec<_>>().join("\n"),
     ] {
@@ -160,7 +180,8 @@ fn growth_retains_process_completion_poll_and_whole_report_guards() {
 }
 
 #[test]
-fn growing_suite_records_repair_card_proof_and_pack_context_without_rewriting_sources() -> TestResult {
+fn growing_suite_records_repair_card_proof_and_pack_context_without_rewriting_sources() -> TestResult
+{
     let (db, session, ids) = episode(&growing_report(), COMMAND)?;
     let before = db.list_evidence_spans_for_session(&session)?;
     let recorded = record_session_error_recall(&db, WS, &session)?;
@@ -179,12 +200,21 @@ fn growing_suite_records_repair_card_proof_and_pack_context_without_rewriting_so
     let key = diagnostic.layered_key().key;
     let links = db.list_error_repair_links(WS, &key)?;
     assert_eq!(links.len(), 3);
-    assert!(links.iter().all(|link| link.evidence_ref.as_deref() == Some(ids[1].as_str())));
+    assert!(
+        links
+            .iter()
+            .all(|link| link.evidence_ref.as_deref() == Some(ids[1].as_str()))
+    );
     for source in before {
-        let after = db.get_evidence_span(&source.id)?.ok_or("source disappeared")?;
+        let after = db
+            .get_evidence_span(&source.id)?
+            .ok_or("source disappeared")?;
         assert_eq!(source.excerpt, after.excerpt);
         assert_eq!(source.content_hash, after.content_hash);
-        assert_eq!(source.canonical_provenance_uri(), after.canonical_provenance_uri());
+        assert_eq!(
+            source.canonical_provenance_uri(),
+            after.canonical_provenance_uri()
+        );
     }
     let rerun = record_session_error_recall(&db, WS, &session)?;
     assert_eq!(rerun.resolved_failures, 1);
@@ -194,10 +224,14 @@ fn growing_suite_records_repair_card_proof_and_pack_context_without_rewriting_so
 }
 
 #[test]
-fn growing_suite_does_not_persist_repairs_from_another_invocation_or_missing_control() -> TestResult {
+fn growing_suite_does_not_persist_repairs_from_another_invocation_or_missing_control() -> TestResult
+{
     for (proof, command) in [
         (growing_report(), "cargo nextest run --lib"),
-        (growing_report().replace("other case", "other replacement"), COMMAND),
+        (
+            growing_report().replace("other case", "other replacement"),
+            COMMAND,
+        ),
     ] {
         let (db, session, _) = episode(&proof, command)?;
         let recorded = record_session_error_recall(&db, WS, &session)?;

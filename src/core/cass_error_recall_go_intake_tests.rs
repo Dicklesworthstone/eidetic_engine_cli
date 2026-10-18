@@ -37,7 +37,11 @@ fn events(count: usize, failure: Option<usize>, skipped: Option<usize>) -> Vec<V
 
 fn output(events: &[Value]) -> ToolOutput {
     ToolOutput {
-        text: events.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"),
+        text: events
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
         is_error: Some(false),
         exit_code: Some(0),
     }
@@ -59,7 +63,10 @@ fn hundred_test_reports_feed_diagnosis_and_coverage_preserving_growth() {
     assert!(!parsed.allows_completion);
     assert_eq!(parsed.diagnostics.len(), 1);
     assert_eq!(failure_diagnostics(&failed), parsed.diagnostics);
-    assert_eq!(structured_error_diagnostics(&failed.text), parsed.diagnostics);
+    assert_eq!(
+        structured_error_diagnostics(&failed.text),
+        parsed.diagnostics
+    );
     let coverage = parsed.go_test_coverage.unwrap();
     assert!(coverage.complete);
     assert_eq!(coverage.passed_tests.len(), 99);
@@ -102,7 +109,10 @@ fn damaged_late_records_never_salvage_an_already_complete_prefix() {
         let text = format!("{}\n{tail}", valid.text);
         assert!(text.len() < MAX_SCANNED_OUTPUT_BYTES);
         assert!(super::super::inspect(&text).is_err());
-        let bad = ToolOutput { text, ..ToolOutput::default() };
+        let bad = ToolOutput {
+            text,
+            ..ToolOutput::default()
+        };
         assert!(!bad.succeeded());
     }
 }
@@ -110,7 +120,10 @@ fn damaged_late_records_never_salvage_an_already_complete_prefix() {
 #[test]
 fn exact_go_record_boundary_counts_build_and_opaque_output_events() {
     let mut records = events(1, None, None);
-    records.insert(0, json!({"Action":"build-output","ImportPath":"dep","Output":""}));
+    records.insert(
+        0,
+        json!({"Action":"build-output","ImportPath":"dep","Output":""}),
+    );
     while records.len() < MAX_GO_RECORDS {
         records.insert(2, json!({"Action":"output","Package":PACKAGE,"Output":""}));
     }
@@ -127,13 +140,18 @@ fn exact_go_record_boundary_counts_build_and_opaque_output_events() {
 #[test]
 fn go_byte_limit_is_unchanged_and_counts_unicode_and_trailing_whitespace() {
     let valid = output(&events(1, None, None));
-    let exact = format!("{}{}", valid.text, " ".repeat(MAX_SCANNED_OUTPUT_BYTES - valid.text.len()));
+    let exact = format!(
+        "{}{}",
+        valid.text,
+        " ".repeat(MAX_SCANNED_OUTPUT_BYTES - valid.text.len())
+    );
     assert_eq!(exact.len(), MAX_SCANNED_OUTPUT_BYTES);
     assert!(inspect(&exact).unwrap().unwrap().allows_completion);
     assert!(inspect(&(exact + " ")).is_err());
     let huge_first = json!({
         "Action":"output","Package":PACKAGE,"Output":"界".repeat(MAX_SCANNED_OUTPUT_BYTES / 3),
-    }).to_string();
+    })
+    .to_string();
     assert!(huge_first.len() > MAX_SCANNED_OUTPUT_BYTES);
     assert!(inspect(&huge_first).is_err());
     assert!(super::super::inspect(&huge_first).is_err());
@@ -141,7 +159,8 @@ fn go_byte_limit_is_unchanged_and_counts_unicode_and_trailing_whitespace() {
 
 #[test]
 fn expanded_go_intake_does_not_enlarge_the_cargo_compiler_budget() {
-    let mut records = vec![json!({"reason":"compiler-artifact"}); super::super::MAX_COMPILER_RECORDS - 1];
+    let mut records =
+        vec![json!({"reason":"compiler-artifact"}); super::super::MAX_COMPILER_RECORDS - 1];
     records.push(json!({"reason":"build-finished","success":true}));
     assert!(super::super::inspect(&output(&records).text).is_ok());
     records.insert(0, json!({"reason":"compiler-artifact"}));
@@ -155,7 +174,10 @@ fn large_reports_still_require_complete_lifecycles_and_process_observation() {
     let required = Requirement::capture(&failed, true);
     assert!(required.is_verified_by(&Proof::capture(&retry)));
     assert!(!Requirement::capture(&failed, false).is_verified_by(&Proof::capture(&retry)));
-    let unknown_process = ToolOutput { text: retry.text.clone(), ..ToolOutput::default() };
+    let unknown_process = ToolOutput {
+        text: retry.text.clone(),
+        ..ToolOutput::default()
+    };
     assert!(!unknown_process.succeeded());
     assert!(!required.is_verified_by(&Proof::capture(&unknown_process)));
     let mut partial = events(100, Some(99), None);
@@ -177,7 +199,10 @@ fn accumulated_large_polls_keep_every_executed_control() {
     assert!(!required.is_verified_by(&Proof::capture(&narrow_retry)));
     let complete_retry = output(&events(101, None, None));
     assert!(required.is_verified_by(&Proof::capture(&complete_retry)));
-    let damaged = ToolOutput { text: complete_failure.text + "\n{", ..ToolOutput::default() };
+    let damaged = ToolOutput {
+        text: complete_failure.text + "\n{",
+        ..ToolOutput::default()
+    };
     required.refresh(&damaged, true);
     assert!(!required.is_verified_by(&Proof::capture(&complete_retry)));
 }
@@ -195,48 +220,100 @@ fn large_store_repair_rejects_dropped_controls_then_records_cited_full_retry()
     const WS: &str = "wsp_01234567890123456789012345";
     let db = DbConnection::open_memory()?;
     db.migrate()?;
-    db.insert_workspace(WS, &CreateWorkspaceInput {
-        path: "/tmp/cass-go-intake-recall".to_owned(), name: None,
-    })?;
+    db.insert_workspace(
+        WS,
+        &CreateWorkspaceInput {
+            path: "/tmp/cass-go-intake-recall".to_owned(),
+            name: None,
+        },
+    )?;
     let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x60_5000)).to_string();
-    db.insert_session(&session, &CreateSessionInput {
-        workspace_id: WS.to_owned(), cass_session_id: "/sessions/go-intake.jsonl".to_owned(),
-        source_path: None, agent_name: Some("claude_code".to_owned()), model: None,
-        started_at: None, ended_at: None, message_count: 0, token_count: None,
-        content_hash: format!("blake3:{}", blake3::hash(b"go-intake").to_hex()), metadata_json: None,
-    })?;
-    let append = |number: u32, kind: &str, role: &str, record: Value| -> Result<String, crate::db::DbError> {
-        let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x60_5000 + u128::from(number))).to_string();
+    db.insert_session(
+        &session,
+        &CreateSessionInput {
+            workspace_id: WS.to_owned(),
+            cass_session_id: "/sessions/go-intake.jsonl".to_owned(),
+            source_path: None,
+            agent_name: Some("claude_code".to_owned()),
+            model: None,
+            started_at: None,
+            ended_at: None,
+            message_count: 0,
+            token_count: None,
+            content_hash: format!("blake3:{}", blake3::hash(b"go-intake").to_hex()),
+            metadata_json: None,
+        },
+    )?;
+    let append = |number: u32,
+                  kind: &str,
+                  role: &str,
+                  record: Value|
+     -> Result<String, crate::db::DbError> {
+        let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+            0x60_5000 + u128::from(number),
+        ))
+        .to_string();
         let excerpt = record.to_string();
-        db.insert_evidence_span(&id, &CreateEvidenceSpanInput {
-            workspace_id: WS.to_owned(), session_id: session.clone(), memory_id: None,
-            producer_kind: EvidenceProducerKind::CassImport, cass_span_id: format!("go-intake:{number}"),
-            span_kind: kind.to_owned(), start_line: number, end_line: number,
-            start_byte: None, end_byte: None, role: Some(role.to_owned()),
-            content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
-            excerpt, metadata_json: None, inherited_redaction_classes: Vec::new(),
-        })?;
+        db.insert_evidence_span(
+            &id,
+            &CreateEvidenceSpanInput {
+                workspace_id: WS.to_owned(),
+                session_id: session.clone(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: format!("go-intake:{number}"),
+                span_kind: kind.to_owned(),
+                start_line: number,
+                end_line: number,
+                start_byte: None,
+                end_byte: None,
+                role: Some(role.to_owned()),
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                excerpt,
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )?;
         Ok(id)
     };
-    let call = |number, id| append(number, "tool_call", "assistant", json!({
-        "type":"assistant","message":{"role":"assistant","content":[{
-            "type":"tool_use","id":id,"name":"Bash","input":{"command":"go test -json ./..."}
-        }]}
-    }));
-    let result = |number, id, text: String, is_error| append(number, "tool_result", "user", json!({
-        "type":"user","message":{"role":"user","content":[{
-            "type":"tool_result","tool_use_id":id,"content":text,"is_error":is_error
-        }]}
-    }));
+    let call = |number, id| {
+        append(
+            number,
+            "tool_call",
+            "assistant",
+            json!({
+                "type":"assistant","message":{"role":"assistant","content":[{
+                    "type":"tool_use","id":id,"name":"Bash","input":{"command":"go test -json ./..."}
+                }]}
+            }),
+        )
+    };
+    let result = |number, id, text: String, is_error| {
+        append(
+            number,
+            "tool_result",
+            "user",
+            json!({
+                "type":"user","message":{"role":"user","content":[{
+                    "type":"tool_result","tool_use_id":id,"content":text,"is_error":is_error
+                }]}
+            }),
+        )
+    };
     call(1, "failure")?;
     let failure = output(&events(100, Some(99), None));
     let diagnostic = decoded(&failure).diagnostics.remove(0);
     let failure_id = result(2, "failure", failure.text, true)?;
-    let repair_id = append(3, "message", "assistant", json!({
-        "type":"assistant","message":{"role":"assistant","content":[{
-            "type":"text","text":"Fixed the Go test failure by flushing pending cache writes in cache.go."
-        }]}
-    }))?;
+    let repair_id = append(
+        3,
+        "message",
+        "assistant",
+        json!({
+            "type":"assistant","message":{"role":"assistant","content":[{
+                "type":"text","text":"Fixed the Go test failure by flushing pending cache writes in cache.go."
+            }]}
+        }),
+    )?;
     call(4, "dropped-control")?;
     let mut narrowed = events(101, None, None);
     narrowed.retain(|event| event.get("Test").and_then(Value::as_str) != Some("TestCase000"));
@@ -245,9 +322,18 @@ fn large_store_repair_rejects_dropped_controls_then_records_cited_full_retry()
     assert_eq!(report.failures_seen, 1);
     assert_eq!(report.resolved_failures, 0);
     assert_eq!(report.incident_cards_recorded, 0);
-    assert!(error_recall_report(&db, WS, &diagnostic)?.helpful_repairs.is_empty());
+    assert!(
+        error_recall_report(&db, WS, &diagnostic)?
+            .helpful_repairs
+            .is_empty()
+    );
     call(6, "full-retry")?;
-    let proof = result(7, "full-retry", output(&events(101, None, None)).text, false)?;
+    let proof = result(
+        7,
+        "full-retry",
+        output(&events(101, None, None)).text,
+        false,
+    )?;
     let report = record_session_error_recall(&db, WS, &session)?;
     assert_eq!(report.resolved_failures, 1);
     assert_eq!(report.incident_cards_recorded, 1);
@@ -257,6 +343,9 @@ fn large_store_repair_rejects_dropped_controls_then_records_cited_full_retry()
     assert!(!recall.proof_links.contains(&wrong));
     let card = crate::core::incident_card::incident_card_id(WS, &failure_id);
     assert!(db.get_search_admitted_evidence_span(&card, WS)?.is_some());
-    assert_eq!(record_session_error_recall(&db, WS, &session)?.incident_cards_recorded, 0);
+    assert_eq!(
+        record_session_error_recall(&db, WS, &session)?.incident_cards_recorded,
+        0
+    );
     Ok(())
 }

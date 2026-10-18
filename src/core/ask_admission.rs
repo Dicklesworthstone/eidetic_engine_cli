@@ -154,7 +154,8 @@ pub(super) fn append_evidence(
             Ok(())
         })
         .map_err(|_| super::corpus_storage_error())?;
-    let withheld = card_checks.withheld(connection, workspace_id)
+    let withheld = card_checks
+        .withheld(connection, workspace_id)
         .map_err(|_| super::corpus_storage_error())?;
     evidence_candidates.retain(|candidate| !withheld.contains(&candidate.memory_id));
     evidence_sources.retain(|id, _| !withheld.contains(id));

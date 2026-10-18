@@ -31,7 +31,11 @@ fn record(connection: &DbConnection, helpful: Vec<String>, harmful: Vec<String>)
 }
 
 fn seed(connection: &DbConnection) -> crate::db::Result<String> {
-    pack_error_recall_query_seed(connection, WS, &from_rustc(Some(CODE), "trait bound failed"))
+    pack_error_recall_query_seed(
+        connection,
+        WS,
+        &from_rustc(Some(CODE), "trait bound failed"),
+    )
 }
 
 fn memory(connection: &DbConnection, number: u128, body: &str) -> TestResult<String> {
@@ -97,20 +101,38 @@ fn harmful_feedback_excludes_evidence_memories_and_rules_without_erasing_history
     for text in ["Repair 1", MEMORY_BODY, RULE_BODY, GOOD_BODY] {
         assert!(before.contains(text), "positive control: {text}");
     }
-    record(&connection, Vec::new(), vec![evidence.clone(), memory.clone(), rule.clone()])?;
+    record(
+        &connection,
+        Vec::new(),
+        vec![evidence.clone(), memory.clone(), rule.clone()],
+    )?;
     let rows = connection.list_error_repair_links(WS, KEY)?;
     let source = connection.get_procedural_rule(&rule)?;
     let after = seed(&connection)?;
     assert!(after.contains(GOOD_BODY));
     assert!(after.contains(&format!("helpful_repair:{good}")));
     assert_eq!(after.matches("\nprior fix: ").count(), 1);
-    for text in ["Repair 1", MEMORY_BODY, RULE_BODY, evidence.as_str(), memory.as_str(), rule.as_str()] {
-        assert!(!after.contains(text), "harmful target became positive guidance: {text}");
+    for text in [
+        "Repair 1",
+        MEMORY_BODY,
+        RULE_BODY,
+        evidence.as_str(),
+        memory.as_str(),
+        rule.as_str(),
+    ] {
+        assert!(
+            !after.contains(text),
+            "harmful target became positive guidance: {text}"
+        );
     }
     assert_eq!(seed(&connection)?, after);
     assert_eq!(connection.list_error_repair_links(WS, KEY)?, rows);
     assert_eq!(connection.get_procedural_rule(&rule)?, source);
-    let history = error_recall_report(&connection, WS, &from_rustc(Some(CODE), "trait bound failed"))?;
+    let history = error_recall_report(
+        &connection,
+        WS,
+        &from_rustc(Some(CODE), "trait bound failed"),
+    )?;
     assert_eq!(history.helpful_repairs.len(), 4);
     assert_eq!(history.harmful_repairs.len(), 3);
     assert!(history.helpful_repairs.contains(&rule));
@@ -153,7 +175,11 @@ fn selector_preserves_legacy_bounds_and_aliases_when_feedback_is_uncontested() -
     let good = memory(&connection, 1, GOOD_BODY)?;
     let alias = format!("{good}\0suffix");
     let oversized = format!("!{}", "x".repeat(16_384));
-    record(&connection, vec![good.clone(), alias.clone(), oversized], Vec::new())?;
+    record(
+        &connection,
+        vec![good.clone(), alias.clone(), oversized],
+        Vec::new(),
+    )?;
     let legacy = connection.list_helpful_error_repair_target_ids(WS, KEY, 32)?;
     let admitted = feedback::pack_targets(&connection, WS, KEY, 32)?;
     assert_eq!(admitted, legacy);
@@ -188,7 +214,11 @@ fn report_query_seed_retains_harm_warnings_without_contradictory_positive_hints(
         vec!["mem_contested".to_owned(), "mem_good".to_owned()],
         vec!["mem_contested".to_owned()],
     )?;
-    let report = error_recall_report(&connection, WS, &from_rustc(Some(CODE), "trait bound failed"))?;
+    let report = error_recall_report(
+        &connection,
+        WS,
+        &from_rustc(Some(CODE), "trait bound failed"),
+    )?;
     assert_eq!(report.helpful_repairs.len(), 2);
     let query = report.query_seed();
     assert!(!query.contains("helpful_repair:mem_contested"));

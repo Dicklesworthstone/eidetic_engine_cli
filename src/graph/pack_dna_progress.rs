@@ -9,10 +9,9 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use super::{
-    Cx, GraphError, GraphResult, MemoryGraphProjection, PackDna, PackDnaDegradation,
-    PackDnaInput, PackDnaInputSummary, PackDnaPartialResult, PackDnaPprNeighbor,
-    check_cancelled, compute_pack_dna_unbudgeted, merge_pack_dna_partial_results,
-    undirected_from_directed,
+    Cx, GraphError, GraphResult, MemoryGraphProjection, PackDna, PackDnaDegradation, PackDnaInput,
+    PackDnaInputSummary, PackDnaPartialResult, PackDnaPprNeighbor, check_cancelled,
+    compute_pack_dna_unbudgeted, merge_pack_dna_partial_results, undirected_from_directed,
 };
 use crate::graph::algorithms::{DEFAULT_FOREGROUND_BUDGET, run_with_budget};
 use crate::models::degradation::GRAPH_PACK_DNA_TIMEOUT_CODE;
@@ -134,12 +133,8 @@ pub(super) fn finish_neighbors(
 ) -> GraphResult<(Vec<PackDnaPprNeighbor>, Option<PackDnaDegradation>)> {
     match result {
         Ok(neighbors) => Ok((neighbors, None)),
-        Err(GraphError::AlgorithmTimeout { .. }) => {
-            Ok((Vec::new(), Some(ppr_degradation(true))))
-        }
-        Err(GraphError::GraphEngine { .. }) => {
-            Ok((Vec::new(), Some(ppr_degradation(false))))
-        }
+        Err(GraphError::AlgorithmTimeout { .. }) => Ok((Vec::new(), Some(ppr_degradation(true)))),
+        Err(GraphError::GraphEngine { .. }) => Ok((Vec::new(), Some(ppr_degradation(false)))),
         Err(error) => Err(error),
     }
 }

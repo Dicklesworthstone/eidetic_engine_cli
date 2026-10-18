@@ -14,7 +14,9 @@ use std::collections::BTreeSet;
 use crate::db::{DbConnection, HydratedEvidenceSpan, Result};
 use crate::models::EvidenceId;
 
-use super::{ErrorRecallReport, RECALLED_REPAIR_TEXT_CHARS, RecalledRepairEvidence, feedback, memory};
+use super::{
+    ErrorRecallReport, RECALLED_REPAIR_TEXT_CHARS, RecalledRepairEvidence, feedback, memory,
+};
 
 const HYDRATION_BATCH: usize = 128;
 

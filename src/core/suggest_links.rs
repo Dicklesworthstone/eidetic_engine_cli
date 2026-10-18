@@ -345,7 +345,10 @@ fn rank_candidates(
     for index in 0..candidate_count {
         let score = score(index);
         // Preserve the inclusive floor and its NaN refusal behavior.
-        if score.partial_cmp(&min_score).is_none_or(|ordering| ordering.is_lt()) {
+        if score
+            .partial_cmp(&min_score)
+            .is_none_or(|ordering| ordering.is_lt())
+        {
             continue;
         }
         let candidate = RankedCandidate { index, score };
@@ -524,7 +527,10 @@ mod tests {
             .collect();
         // The old full-materialization comparator, not the heap's Ord impl.
         result.sort_by(|left, right| {
-            right.score.partial_cmp(&left.score).unwrap_or(std::cmp::Ordering::Equal)
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| left.index.cmp(&right.index))
         });
         if limit != 0 {
@@ -535,7 +541,18 @@ mod tests {
 
     #[test]
     fn numeric_selection_matches_full_sort_across_limits_floors_and_ties() {
-        let scores = [0.1, 0.8, 0.8, 0.5, 0.9, -0.0, 0.0, f64::INFINITY, f64::NAN, f64::NEG_INFINITY];
+        let scores = [
+            0.1,
+            0.8,
+            0.8,
+            0.5,
+            0.9,
+            -0.0,
+            0.0,
+            f64::INFINITY,
+            f64::NAN,
+            f64::NEG_INFINITY,
+        ];
         for limit in [0, 1, 2, 5, 20, usize::MAX] {
             for floor in [f64::NEG_INFINITY, -0.0, 0.6, 1.0, f64::INFINITY, f64::NAN] {
                 let mut calls = 0;
@@ -554,10 +571,12 @@ mod tests {
     fn heap_selection_matches_the_independent_full_sort_over_generated_cohorts() {
         let mut random = 17_u64;
         for count in 0..96 {
-            let scores: Vec<_> = (0..count).map(|_| {
-                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
-                ((random >> 32) % 19) as f64 / 13.0
-            }).collect();
+            let scores: Vec<_> = (0..count)
+                .map(|_| {
+                    random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((random >> 32) % 19) as f64 / 13.0
+                })
+                .collect();
             for limit in [0, 1, 2, 7, 32, 96, usize::MAX] {
                 for floor in [-1.0, 0.0, 0.5, 1.0, 2.0] {
                     assert_eq!(
@@ -572,22 +591,38 @@ mod tests {
     #[test]
     fn a_late_winner_is_not_lost_to_an_early_candidate_limit() {
         let result = rank_candidates(10_000, 1, 0.0, |index| index as f64);
-        assert_eq!(result, vec![RankedCandidate { index: 9999, score: 9999.0 }]);
+        assert_eq!(
+            result,
+            vec![RankedCandidate {
+                index: 9999,
+                score: 9999.0
+            }]
+        );
         let tied = rank_candidates(10_000, 3, 0.0, |_| 1.0);
-        assert_eq!(tied.iter().map(|item| item.index).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(
+            tied.iter().map(|item| item.index).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
     }
 
     fn ranking_fixture() -> SuggestLinksInput {
-        let mut input = SuggestLinksInput { limit: 0, ..SuggestLinksInput::default() };
+        let mut input = SuggestLinksInput {
+            limit: 0,
+            ..SuggestLinksInput::default()
+        };
         for index in 0..24 {
             let id = format!("mem_{index:03}");
-            input.tags.insert(id.clone(), BTreeSet::from([
-                "candidate".to_owned(), format!("group_{}", index % 5),
-            ]));
-            input.content.insert(id.clone(), format!(
-                "{} run the schema drift gate before changing public JSON",
-                if index % 3 == 0 { "never" } else { "always" }
-            ));
+            input.tags.insert(
+                id.clone(),
+                BTreeSet::from(["candidate".to_owned(), format!("group_{}", index % 5)]),
+            );
+            input.content.insert(
+                id.clone(),
+                format!(
+                    "{} run the schema drift gate before changing public JSON",
+                    if index % 3 == 0 { "never" } else { "always" }
+                ),
+            );
             if index != 0 {
                 input.links.push((format!("mem_{:03}", index - 1), id));
             }
@@ -608,7 +643,9 @@ mod tests {
             for floor in [0.0, 0.2, 0.4, 0.6] {
                 let mut input = ranking_fixture();
                 input.min_score = floor;
-                if !warm { input.affinity = None; }
+                if !warm {
+                    input.affinity = None;
+                }
                 let full = suggest_links(&input);
                 assert!(full.candidate_count > 100);
                 for limit in [1, 2, 7, 64, usize::MAX] {
@@ -639,9 +676,13 @@ mod tests {
             let calls = RELATION_CLASSIFICATIONS.with(std::cell::Cell::get) - before;
             assert_eq!(calls, report.suggestions.len());
             assert!(report.candidate_count > 100);
-            if floor > 1.0 { assert_eq!(calls, 0); }
-            else if limit == 0 { assert_eq!(calls, report.candidate_count); }
-            else { assert_eq!(calls, limit); }
+            if floor > 1.0 {
+                assert_eq!(calls, 0);
+            } else if limit == 0 {
+                assert_eq!(calls, report.candidate_count);
+            } else {
+                assert_eq!(calls, limit);
+            }
         }
     }
 

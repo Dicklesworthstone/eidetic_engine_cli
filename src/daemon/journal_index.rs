@@ -89,9 +89,14 @@ impl LatestIndex {
             }
             runs = next;
         }
-        let path = runs.pop().ok_or_else(|| invalid("empty daemon index merge"))?;
+        let path = runs
+            .pop()
+            .ok_or_else(|| invalid("empty daemon index merge"))?;
         let reader = BufReader::new(File::open(&path)?);
-        Ok(LatestKeys::Disk { reader, _path: path })
+        Ok(LatestKeys::Disk {
+            reader,
+            _path: path,
+        })
     }
 }
 
@@ -109,7 +114,10 @@ fn collapse(entries: &mut Vec<Entry>) {
 
 pub(super) enum LatestKeys {
     Memory(std::vec::IntoIter<Entry>),
-    Disk { reader: BufReader<File>, _path: TempPath },
+    Disk {
+        reader: BufReader<File>,
+        _path: TempPath,
+    },
 }
 
 impl Iterator for LatestKeys {
@@ -125,7 +133,10 @@ impl Iterator for LatestKeys {
 
 fn merge(runs: Vec<TempPath>) -> io::Result<TempPath> {
     if runs.len() == 1 {
-        return runs.into_iter().next().ok_or_else(|| invalid("empty merge"));
+        return runs
+            .into_iter()
+            .next()
+            .ok_or_else(|| invalid("empty merge"));
     }
     let mut readers = runs
         .iter()
@@ -235,12 +246,18 @@ mod tests {
     fn automatic_spill_bounds_the_in_memory_key_chunk() -> io::Result<()> {
         let mut index = LatestIndex::default();
         for offset in 0..100_000_u64 {
-            index.insert(format!("run-00000000-0000-0000-0000-{offset:012}:tick-000001:job-000001"), offset)?;
+            index.insert(
+                format!("run-00000000-0000-0000-0000-{offset:012}:tick-000001:job-000001"),
+                offset,
+            )?;
             assert!(index.bytes < CHUNK_BYTES);
         }
         assert!(!index.levels.is_empty());
         assert!(index.levels.iter().all(|runs| runs.len() < FAN_IN));
-        assert_eq!(index.finish()?.collect::<io::Result<Vec<_>>>()?.len(), 100_000);
+        assert_eq!(
+            index.finish()?.collect::<io::Result<Vec<_>>>()?.len(),
+            100_000
+        );
         Ok(())
     }
 

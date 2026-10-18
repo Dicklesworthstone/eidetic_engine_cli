@@ -49,7 +49,11 @@ fn nonuniform_compaction_leaves_headroom_and_is_independent_of_input_order() {
     assert_eq!(selected.len(), 50);
     assert_eq!(before.len() - selected.len() + 1, 16);
     assert!(selected.iter().all(|id| before[id].max_doc <= 50));
-    let reversed: SegmentStates = before.iter().rev().map(|(id, state)| (*id, state.clone())).collect();
+    let reversed: SegmentStates = before
+        .iter()
+        .rev()
+        .map(|(id, state)| (*id, state.clone()))
+        .collect();
     assert_eq!(compaction_candidates(&reversed, 32), selected);
 }
 
@@ -57,7 +61,10 @@ fn nonuniform_compaction_leaves_headroom_and_is_independent_of_input_order() {
 fn uniform_fragmentation_keeps_the_existing_single_merge_behavior() {
     for size in [0, 1, 17, u32::MAX] {
         let before = states(&[size; 33]);
-        assert_eq!(compaction_candidates(&before, 32), before.keys().copied().collect::<Vec<_>>());
+        assert_eq!(
+            compaction_candidates(&before, 32),
+            before.keys().copied().collect::<Vec<_>>()
+        );
     }
 }
 
@@ -71,7 +78,10 @@ fn threshold_and_headroom_hold_across_boundary_shapes() {
                 assert!(selected.is_empty());
             } else {
                 assert!(selected.len() >= 2 && selected.len() <= count);
-                assert_eq!(selected.iter().collect::<BTreeSet<_>>().len(), selected.len());
+                assert_eq!(
+                    selected.iter().collect::<BTreeSet<_>>().len(),
+                    selected.len()
+                );
                 assert!(selected.iter().all(|id| before.contains_key(id)));
                 assert!(count - selected.len() + 1 <= (limit.max(1) / 2).max(1));
             }
@@ -86,7 +96,14 @@ fn validation_rejects_same_count_substitutions_and_changed_retained_deletion_sta
     let replacement = segment_id(99);
     let mut after = BTreeMap::from([
         (segment_id(1), before[&segment_id(1)].clone()),
-        (replacement, SegmentState { max_doc: 4, live_docs: 4, delete_opstamp: None }),
+        (
+            replacement,
+            SegmentState {
+                max_doc: 4,
+                live_docs: 4,
+                delete_opstamp: None,
+            },
+        ),
     ]);
     assert!(validate_compaction(&before, &after, &selected, Some(replacement), 4).is_ok());
     let valid = after.clone();
@@ -99,7 +116,10 @@ fn validation_rejects_same_count_substitutions_and_changed_retained_deletion_sta
     after = valid.clone();
     after.get_mut(&segment_id(1)).expect("base").live_docs -= 1;
     after.get_mut(&replacement).expect("merged").live_docs += 1;
-    assert_eq!(live_documents(&before).unwrap(), live_documents(&after).unwrap());
+    assert_eq!(
+        live_documents(&before).unwrap(),
+        live_documents(&after).unwrap()
+    );
     assert!(validate_compaction(&before, &after, &selected, Some(replacement), 4).is_err());
     assert!(validate_compaction(&before, &valid, &selected, None, 4).is_err());
     assert!(validate_compaction(&before, &valid, &selected, Some(segment_id(100)), 4).is_err());
@@ -126,11 +146,19 @@ fn file_inventory(root: &Path) -> TestResult<BTreeMap<std::path::PathBuf, Vec<u8
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
-            if entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+            if entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_dir()
+            {
                 pending.push(entry.path());
             } else {
                 result.insert(
-                    entry.path().strip_prefix(root).map_err(|error| error.to_string())?.to_path_buf(),
+                    entry
+                        .path()
+                        .strip_prefix(root)
+                        .map_err(|error| error.to_string())?
+                        .to_path_buf(),
                     std::fs::read(entry.path()).map_err(|error| error.to_string())?,
                 );
             }
@@ -148,9 +176,15 @@ fn unequal_segments(root: &Path) -> TestResult<Index> {
     let index = Index::open_in_dir(&directory).map_err(|error| error.to_string())?;
     let schema = index.schema();
     let id = schema.get_field("id").map_err(|error| error.to_string())?;
-    let content = schema.get_field("content").map_err(|error| error.to_string())?;
-    let title = schema.get_field("title").map_err(|error| error.to_string())?;
-    let metadata = schema.get_field("metadata_json").map_err(|error| error.to_string())?;
+    let content = schema
+        .get_field("content")
+        .map_err(|error| error.to_string())?;
+    let title = schema
+        .get_field("title")
+        .map_err(|error| error.to_string())?;
+    let metadata = schema
+        .get_field("metadata_json")
+        .map_err(|error| error.to_string())?;
     let ordinal = schema.get_field("ord").ok();
     let mut writer = maintenance_writer(&index).map_err(|error| error.detail)?;
     let mut number = 0_u64;
@@ -164,12 +198,16 @@ fn unequal_segments(root: &Path) -> TestResult<Index> {
             if let Some(ordinal) = ordinal {
                 document.add_u64(ordinal, number);
             }
-            writer.add_document(document).map_err(|error| error.to_string())?;
+            writer
+                .add_document(document)
+                .map_err(|error| error.to_string())?;
             number += 1;
         }
         writer.commit().map_err(|error| error.to_string())?;
     }
-    writer.wait_merging_threads().map_err(|error| error.to_string())?;
+    writer
+        .wait_merging_threads()
+        .map_err(|error| error.to_string())?;
     Ok(index)
 }
 
@@ -186,56 +224,102 @@ async fn ids(cx: &asupersync::Cx, index: &crate::search::TantivyIndex) -> TestRe
 }
 
 #[test]
-fn native_partial_merge_preserves_the_base_bytes_search_results_and_live_generation() -> TestResult {
+fn native_partial_merge_preserves_the_base_bytes_search_results_and_live_generation() -> TestResult
+{
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let root = temp.path().canonicalize().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
         let _temp = temp;
         let live = root.join("live");
         let staged = root.join("staged");
         let native = unequal_segments(&live)?;
-        let metas = native.searchable_segment_metas().map_err(|error| error.to_string())?;
+        let metas = native
+            .searchable_segment_metas()
+            .map_err(|error| error.to_string())?;
         assert_eq!(metas.len(), 5);
-        let base = metas.iter().find(|meta| meta.max_doc() == 96).ok_or("large base absent")?;
+        let base = metas
+            .iter()
+            .find(|meta| meta.max_doc() == 96)
+            .ok_or("large base absent")?;
         let base_id = base.id();
         let original = file_inventory(&live)?;
-        let base_files = base.list_files().into_iter().filter_map(|path| {
-            let relative = Path::new(LEXICAL_INDEX_SUBDIR).join(path);
-            original.get(&relative).map(|bytes| (relative, bytes.clone()))
-        }).collect::<BTreeMap<_, _>>();
-        assert!(!base_files.is_empty(), "base-file preservation must not be vacuous");
+        let base_files = base
+            .list_files()
+            .into_iter()
+            .filter_map(|path| {
+                let relative = Path::new(LEXICAL_INDEX_SUBDIR).join(path);
+                original
+                    .get(&relative)
+                    .map(|bytes| (relative, bytes.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(
+            !base_files.is_empty(),
+            "base-file preservation must not be vacuous"
+        );
         std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
         super::super::copy_generation(&live, &staged).map_err(|error| error.to_string())?;
-        let pinned = crate::search::TantivyIndex::open_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
-            .map_err(|error| error.to_string())?;
+        let pinned =
+            crate::search::TantivyIndex::open_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
+                .map_err(|error| error.to_string())?;
         let expected = ids(&cx, &pinned).await?;
         assert_eq!(expected.len(), 100);
         let report = compact_with_checkpoint(&staged, 4, || batch::checkpoint(&cx, "lexical"))
             .map_err(|error| error.detail)?;
-        assert_eq!(report, Compaction { segments_before: 5, segments_after: 2, documents: 100 });
+        assert_eq!(
+            report,
+            Compaction {
+                segments_before: 5,
+                segments_after: 2,
+                documents: 100
+            }
+        );
         let compacted = Index::open_in_dir(staged.join(LEXICAL_INDEX_SUBDIR))
             .map_err(|error| error.to_string())?;
-        assert!(segment_states(&compacted).map_err(|error| error.detail)?.contains_key(&base_id));
+        assert!(
+            segment_states(&compacted)
+                .map_err(|error| error.detail)?
+                .contains_key(&base_id)
+        );
         let retained = file_inventory(&staged)?;
         for (path, bytes) in base_files {
-            assert_eq!(retained.get(&path), Some(&bytes), "base segment was rewritten: {path:?}");
+            assert_eq!(
+                retained.get(&path),
+                Some(&bytes),
+                "base segment was rewritten: {path:?}"
+            );
         }
-        assert_eq!(file_inventory(&live)?, original, "the live generation must not change");
+        assert_eq!(
+            file_inventory(&live)?,
+            original,
+            "the live generation must not change"
+        );
         let fresh = crate::search::TantivyIndex::open_read_only(&staged.join(LEXICAL_INDEX_SUBDIR))
             .map_err(|error| error.to_string())?;
         assert_eq!(ids(&cx, &fresh).await?, expected);
-        assert_eq!(ids(&cx, &pinned).await?, expected, "pinned reader remains valid");
+        assert_eq!(
+            ids(&cx, &pinned).await?,
+            expected,
+            "pinned reader remains valid"
+        );
         let again = compact_with_checkpoint(&staged, 4, || Ok(())).map_err(|error| error.detail)?;
         assert_eq!(again.segments_before, again.segments_after);
         assert_eq!(file_inventory(&staged)?, retained);
         Ok(())
-    }).map_err(|error| error.to_string())?
+    })
+    .map_err(|error| error.to_string())?
 }
 
 #[test]
 fn cancellation_after_a_partial_merge_still_joins_and_releases_the_writer() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let root = temp.path().canonicalize().map_err(|error| error.to_string())?;
+    let root = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let index = unequal_segments(&root)?;
     let mut observed = false;
     let result = compact_with_checkpoint(&root, 4, || {
@@ -245,9 +329,14 @@ fn cancellation_after_a_partial_merge_still_joins_and_releases_the_writer() -> T
         }
         Ok(())
     });
-    assert!(observed, "must observe the native partial merge before cancelling");
+    assert!(
+        observed,
+        "must observe the native partial merge before cancelling"
+    );
     assert!(result.is_err());
-    maintenance_writer(&index).map_err(|error| error.detail)?
-        .wait_merging_threads().map_err(|error| error.to_string())?;
+    maintenance_writer(&index)
+        .map_err(|error| error.detail)?
+        .wait_merging_threads()
+        .map_err(|error| error.to_string())?;
     Ok(())
 }

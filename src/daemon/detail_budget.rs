@@ -13,13 +13,24 @@ pub(super) const MAX_DETAIL_BYTES: usize = 4 * 1024 * 1024;
 
 pub(super) fn retained_bytes(row: &DaemonJobRow) -> usize {
     let required = [
-        &row.schema, &row.row_id, &row.run_id, &row.daemon_job_key,
-        &row.runner_job_id, &row.job_type, &row.status, &row.workspace,
-        &row.write_owner_id, &row.reason, &row.recorded_at,
+        &row.schema,
+        &row.row_id,
+        &row.run_id,
+        &row.daemon_job_key,
+        &row.runner_job_id,
+        &row.job_type,
+        &row.status,
+        &row.workspace,
+        &row.write_owner_id,
+        &row.reason,
+        &row.recorded_at,
     ];
     let optional = [
-        &row.outcome, &row.started_at, &row.completed_at,
-        &row.error, &row.recovery_reason,
+        &row.outcome,
+        &row.started_at,
+        &row.completed_at,
+        &row.error,
+        &row.recovery_reason,
     ];
     let mut bytes = std::mem::size_of::<DaemonJobRow>();
     for value in required {
@@ -32,7 +43,9 @@ pub(super) fn retained_bytes(row: &DaemonJobRow) -> usize {
 }
 
 fn compare(left: &DaemonJobRow, right: &DaemonJobRow) -> Ordering {
-    right.recorded_at.cmp(&left.recorded_at)
+    right
+        .recorded_at
+        .cmp(&left.recorded_at)
         .then_with(|| left.daemon_job_key.cmp(&right.daemon_job_key))
 }
 
@@ -50,7 +63,12 @@ pub(super) struct RecentRows {
 
 impl RecentRows {
     pub(super) fn new(row_limit: usize, byte_limit: usize) -> Self {
-        Self { rows: Vec::new(), cutoff: None, row_limit, byte_limit }
+        Self {
+            rows: Vec::new(),
+            cutoff: None,
+            row_limit,
+            byte_limit,
+        }
     }
 
     pub(super) fn push(&mut self, row: DaemonJobRow) {
@@ -58,7 +76,8 @@ impl RecentRows {
             return;
         }
         if let Some((recorded_at, key)) = &self.cutoff {
-            let ordering = recorded_at.cmp(&row.recorded_at)
+            let ordering = recorded_at
+                .cmp(&row.recorded_at)
                 .then_with(|| row.daemon_job_key.cmp(key));
             if ordering != Ordering::Less {
                 return;

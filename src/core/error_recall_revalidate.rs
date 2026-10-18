@@ -13,11 +13,11 @@ use sqlmodel_core::Value;
 
 use crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR;
 use crate::core::incident_card::INCIDENT_CARD_ACTOR;
-use crate::core::incident_card::proof::{self, Claim};
 #[cfg(test)]
 use crate::core::incident_card::draft_incident_card;
 #[cfg(test)]
 use crate::core::incident_card::proof::MAX_SOURCE_BYTES;
+use crate::core::incident_card::proof::{self, Claim};
 use crate::db::{DbConnection, Result};
 use crate::models::EvidenceId;
 
@@ -62,12 +62,8 @@ impl<'a> Gate<'a> {
         &mut self,
         targets: &[&str],
     ) -> Result<BTreeSet<String>> {
-        let mut withheld = harmful_targets(
-            self.connection,
-            self.workspace,
-            self.fingerprint,
-            targets,
-        )?;
+        let mut withheld =
+            harmful_targets(self.connection, self.workspace, self.fingerprint, targets)?;
         let selected: BTreeSet<_> = targets
             .iter()
             .copied()
@@ -91,7 +87,10 @@ impl<'a> Gate<'a> {
             Value::Text(INCIDENT_CARD_ACTOR.to_owned()),
         ];
         parameters.extend(selected.iter().map(|id| Value::Text((*id).to_owned())));
-        let rows = self.connection.query(&sql, &parameters).map_err(|_| unavailable())?;
+        let rows = self
+            .connection
+            .query(&sql, &parameters)
+            .map_err(|_| unavailable())?;
         if rows.len() > FEEDBACK_BATCH {
             return Err(unavailable());
         }
@@ -115,7 +114,11 @@ impl<'a> Gate<'a> {
                 withheld.insert(target.to_owned());
                 continue;
             }
-            claims.insert(Claim { failure: failure.to_owned(), target: target.to_owned(), card });
+            claims.insert(Claim {
+                failure: failure.to_owned(),
+                target: target.to_owned(),
+                card,
+            });
         }
         // A malformed twin has already refused this target. Do not spend
         // source I/O on another row that cannot reverse that decision.
@@ -156,9 +159,12 @@ impl<'a> Gate<'a> {
             false
         });
         for (session, pending) in groups {
-            let known = session_claims(self.connection, self.workspace, self.fingerprint, &session)?;
+            let known =
+                session_claims(self.connection, self.workspace, self.fingerprint, &session)?;
             #[cfg(test)]
-            { self.source_reads += 1; }
+            {
+                self.source_reads += 1;
+            }
             withhold_unknown(&pending, &known, withheld);
             if self.sessions.len() == MAX_CACHED_SESSIONS {
                 self.sessions.pop_first();
@@ -186,8 +192,13 @@ impl<'a> Gate<'a> {
         let mut parameters = vec![Value::Text(self.workspace.to_owned())];
         parameters.extend(failures.iter().map(|id| Value::Text((*id).to_owned())));
         #[cfg(test)]
-        { self.ownership_reads += 1; }
-        let rows = self.connection.query(&sql, &parameters).map_err(|_| unavailable())?;
+        {
+            self.ownership_reads += 1;
+        }
+        let rows = self
+            .connection
+            .query(&sql, &parameters)
+            .map_err(|_| unavailable())?;
         if rows.len() > failures.len() {
             return Err(unavailable());
         }
@@ -196,7 +207,10 @@ impl<'a> Gate<'a> {
         for row in rows {
             let failure = row.get(0).and_then(Value::as_str).ok_or_else(unavailable)?;
             let session = row.get(1).and_then(Value::as_str).ok_or_else(unavailable)?;
-            if !failures.contains(failure) || !seen.insert(failure.to_owned()) || session.len() > 128 {
+            if !failures.contains(failure)
+                || !seen.insert(failure.to_owned())
+                || session.len() > 128
+            {
                 return Err(unavailable());
             }
             if !session.is_empty() {
@@ -214,13 +228,17 @@ fn withhold_unknown(
     known: &BTreeSet<Claim>,
     withheld: &mut BTreeSet<String>,
 ) {
-    withheld.extend(pending.iter()
-        .filter(|claim| !known.contains(*claim))
-        .map(|claim| claim.target.clone()));
+    withheld.extend(
+        pending
+            .iter()
+            .filter(|claim| !known.contains(*claim))
+            .map(|claim| claim.target.clone()),
+    );
 }
 
 fn canonical_evidence(id: &str) -> bool {
-    id.parse::<EvidenceId>().is_ok_and(|parsed| parsed.to_string() == id)
+    id.parse::<EvidenceId>()
+        .is_ok_and(|parsed| parsed.to_string() == id)
 }
 
 fn session_claims(

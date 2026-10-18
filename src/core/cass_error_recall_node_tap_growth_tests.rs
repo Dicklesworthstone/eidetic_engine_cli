@@ -5,8 +5,8 @@
 
 #![allow(clippy::expect_used)]
 
-use super::*;
 use super::super::super::{Proof, Requirement};
+use super::*;
 use crate::core::cass_error_recall::{ToolOutput, failure_diagnostics};
 
 const NATIVE_FAILED: &str = include_str!("../../tests/fixtures/cass_node_tap/growth_failed.tap");
@@ -21,7 +21,9 @@ fn output(text: &str) -> ToolOutput {
 }
 
 fn parsed(text: &str) -> super::super::Decoded {
-    decode(text).expect("complete TAP report").expect("Node TAP family")
+    decode(text)
+        .expect("complete TAP report")
+        .expect("Node TAP family")
 }
 
 fn verifies(failure: &str, proof: &str) -> bool {
@@ -67,7 +69,11 @@ fn flat_failure() -> String {
 }
 
 fn flat_growth() -> String {
-    report(&[("new regression", "pass"), ("control", "pass"), ("repair", "pass")])
+    report(&[
+        ("new regression", "pass"),
+        ("control", "pass"),
+        ("repair", "pass"),
+    ])
 }
 
 #[test]
@@ -89,17 +95,32 @@ fn complete_flat_and_native_nested_suites_accept_added_regression_tests() {
 #[test]
 fn growing_inventory_never_replaces_original_names_parents_or_node_kinds() {
     for (failure, proof) in [
-        (flat_failure(), flat_growth().replace("control", "replacement")),
+        (
+            flat_failure(),
+            flat_growth().replace("control", "replacement"),
+        ),
         (flat_failure(), flat_growth().replace("repair", "Repair")),
-        (NATIVE_FAILED.to_owned(), NATIVE_GROWN.replace("ledger", "different ledger")),
-        (NATIVE_FAILED.to_owned(), NATIVE_GROWN.replace("saved revision", "another revision")),
-        (NATIVE_FAILED.to_owned(), NATIVE_GROWN
-            .replace("type: 'suite'", "type: 'test'")
-            .replace("# tests 3", "# tests 4")
-            .replace("# suites 1", "# suites 0")
-            .replace("# pass 3", "# pass 4")),
+        (
+            NATIVE_FAILED.to_owned(),
+            NATIVE_GROWN.replace("ledger", "different ledger"),
+        ),
+        (
+            NATIVE_FAILED.to_owned(),
+            NATIVE_GROWN.replace("saved revision", "another revision"),
+        ),
+        (
+            NATIVE_FAILED.to_owned(),
+            NATIVE_GROWN
+                .replace("type: 'suite'", "type: 'test'")
+                .replace("# tests 3", "# tests 4")
+                .replace("# suites 1", "# suites 0")
+                .replace("# pass 3", "# pass 4"),
+        ),
     ] {
-        assert!(output(&proof).succeeded(), "clean output with different subjects");
+        assert!(
+            output(&proof).succeeded(),
+            "clean output with different subjects"
+        );
         assert!(!verifies(&failure, &proof));
     }
 }
@@ -113,7 +134,10 @@ fn prior_passes_cannot_become_skipped_or_todo_even_without_suite_growth() {
                 rows.push(("new regression", "pass"));
             }
             let proof = report(&rows);
-            assert!(output(&proof).succeeded(), "process success does not prove retained execution");
+            assert!(
+                output(&proof).succeeded(),
+                "process success does not prove retained execution"
+            );
             let required = parsed(&flat_failure());
             assert!(!required.execution.verified_by(&parsed(&proof).execution));
             assert!(!verifies(&flat_failure(), &proof));
@@ -121,7 +145,10 @@ fn prior_passes_cannot_become_skipped_or_todo_even_without_suite_growth() {
         let marker = if status == "skip" { "SKIP" } else { "TODO" };
         let counter = if status == "skip" { "skipped" } else { "todo" };
         let proof = NATIVE_GROWN
-            .replace("ok 2 - control still runs\n", &format!("ok 2 - control still runs # {marker}\n"))
+            .replace(
+                "ok 2 - control still runs\n",
+                &format!("ok 2 - control still runs # {marker}\n"),
+            )
             .replace("# pass 3", "# pass 2")
             .replace(&format!("# {counter} 0"), &format!("# {counter} 1"));
         assert!(output(&proof).succeeded());
@@ -131,26 +158,56 @@ fn prior_passes_cannot_become_skipped_or_todo_even_without_suite_growth() {
 
 #[test]
 fn original_nonexecuted_subjects_must_remain_but_need_not_become_passes() {
-    let failure = report(&[("repair", "fail"), ("known skip", "skip"), ("known todo", "todo")]);
+    let failure = report(&[
+        ("repair", "fail"),
+        ("known skip", "skip"),
+        ("known todo", "todo"),
+    ]);
     for status in ["skip", "pass"] {
         let proof = report(&[
-            ("repair", "pass"), ("known skip", status), ("known todo", "todo"), ("new regression", "pass"),
+            ("repair", "pass"),
+            ("known skip", status),
+            ("known todo", "todo"),
+            ("new regression", "pass"),
         ]);
         assert!(verifies(&failure, &proof));
-        assert!(!verifies(&failure, &proof.replace("known todo", "different todo")));
+        assert!(!verifies(
+            &failure,
+            &proof.replace("known todo", "different todo")
+        ));
     }
 }
 
 #[test]
 fn remaining_or_new_failures_veto_even_the_direct_execution_matcher() {
     for rows in [
-        vec![("repair", "pass"), ("control", "pass"), ("new regression", "fail")],
-        vec![("repair", "fail"), ("control", "pass"), ("new regression", "pass")],
-        vec![("repair", "todo"), ("control", "pass"), ("new regression", "pass")],
-        vec![("repair", "skip"), ("control", "pass"), ("new regression", "pass")],
+        vec![
+            ("repair", "pass"),
+            ("control", "pass"),
+            ("new regression", "fail"),
+        ],
+        vec![
+            ("repair", "fail"),
+            ("control", "pass"),
+            ("new regression", "pass"),
+        ],
+        vec![
+            ("repair", "todo"),
+            ("control", "pass"),
+            ("new regression", "pass"),
+        ],
+        vec![
+            ("repair", "skip"),
+            ("control", "pass"),
+            ("new regression", "pass"),
+        ],
     ] {
         let proof = report(&rows);
-        assert!(!parsed(&flat_failure()).execution.verified_by(&parsed(&proof).execution));
+        assert!(
+            !parsed(&flat_failure())
+                .execution
+                .verified_by(&parsed(&proof).execution)
+        );
         assert!(!verifies(&flat_failure(), &proof));
     }
 }
@@ -175,7 +232,11 @@ fn growth_keeps_independent_process_completion_and_poll_refusals() {
     let required = Requirement::capture(&output(NATIVE_FAILED), true);
     let proof = output(NATIVE_GROWN);
     for (is_error, exit_code) in [(None, None), (Some(true), Some(0)), (None, Some(1))] {
-        let changed = ToolOutput { is_error, exit_code, ..proof.clone() };
+        let changed = ToolOutput {
+            is_error,
+            exit_code,
+            ..proof.clone()
+        };
         assert!(!required.is_verified_by(&Proof::capture(&changed)));
     }
     let mut pending = Requirement::capture(&output(NATIVE_FAILED), false);
@@ -209,49 +270,83 @@ fn larger_counts_do_not_salvage_duplicate_incomplete_or_contradictory_reports() 
 #[test]
 fn native_growth_reaches_persisted_repairs_cards_and_pack_context_idempotently() -> TestResult {
     let episode = episode(NATIVE_FAILED, NATIVE_GROWN, COMMAND)?;
-    let before = episode.db.list_evidence_spans_for_session(&episode.session)?;
+    let before = episode
+        .db
+        .list_evidence_spans_for_session(&episode.session)?;
     let result = record_session_error_recall(&episode.db, WS, &episode.session)?;
     assert_eq!(result.failures_seen, 1);
     assert_eq!(result.resolved_failures, 1);
     assert_eq!(result.repair_links_recorded, 2);
     assert_eq!(result.incident_cards_recorded, 1);
     let decoded = parsed(NATIVE_FAILED);
-    let diagnostic = decoded.output.diagnostics.first().ok_or("missing diagnostic")?;
+    let diagnostic = decoded
+        .output
+        .diagnostics
+        .first()
+        .ok_or("missing diagnostic")?;
     let recall = error_recall_report(&episode.db, WS, diagnostic)?;
     let card = crate::core::incident_card::incident_card_id(WS, &evidence_id(2));
     assert!(recall.exact);
     assert!(recall.helpful_repairs.contains(&evidence_id(3)));
     assert!(recall.helpful_repairs.contains(&card));
     assert_eq!(recall.proof_links, vec![evidence_id(5)]);
-    let links = episode.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?;
+    let links = episode
+        .db
+        .list_error_repair_links(WS, &diagnostic.layered_key().key)?;
     assert_eq!(links.len(), 3);
-    assert!(links.iter().all(|link| link.evidence_ref.as_deref() == Some(evidence_id(2).as_str())));
+    assert!(
+        links
+            .iter()
+            .all(|link| link.evidence_ref.as_deref() == Some(evidence_id(2).as_str()))
+    );
     let evidence = recalled_repair_evidence(&episode.db, WS, &recall)?;
-    assert!(evidence.iter().any(|item| item.evidence_id == evidence_id(5) && item.text.is_none()));
+    assert!(
+        evidence
+            .iter()
+            .any(|item| item.evidence_id == evidence_id(5) && item.text.is_none())
+    );
     let seed = pack_error_recall_query_seed(&episode.db, WS, diagnostic)?;
     assert!(seed.contains("prior fix:") && seed.contains("stored revision"));
     for source in before {
-        let after = episode.db.get_evidence_span(&source.id)?.ok_or("missing source")?;
+        let after = episode
+            .db
+            .get_evidence_span(&source.id)?
+            .ok_or("missing source")?;
         assert_eq!(after.excerpt, source.excerpt);
         assert_eq!(after.content_hash, source.content_hash);
-        assert_eq!(after.canonical_provenance_uri(), source.canonical_provenance_uri());
+        assert_eq!(
+            after.canonical_provenance_uri(),
+            source.canonical_provenance_uri()
+        );
     }
     let rerun = record_session_error_recall(&episode.db, WS, &episode.session)?;
     assert_eq!(rerun.resolved_failures, 1);
     assert_eq!(rerun.incident_cards_recorded, 0);
-    assert_eq!(episode.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?.len(), 3);
+    assert_eq!(
+        episode
+            .db
+            .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+            .len(),
+        3
+    );
     Ok(())
 }
 
 #[test]
 fn skipped_controls_or_changed_commands_do_not_persist_helpful_repair_links() -> TestResult {
     let skipped = NATIVE_GROWN
-        .replace("ok 2 - control still runs\n", "ok 2 - control still runs # SKIP\n")
+        .replace(
+            "ok 2 - control still runs\n",
+            "ok 2 - control still runs # SKIP\n",
+        )
         .replace("# pass 3", "# pass 2")
         .replace("# skipped 0", "# skipped 1");
     for (proof, command) in [
         (skipped.as_str(), COMMAND),
-        (NATIVE_GROWN, "node --test --test-reporter=tap other.test.cjs"),
+        (
+            NATIVE_GROWN,
+            "node --test --test-reporter=tap other.test.cjs",
+        ),
     ] {
         let episode = episode(NATIVE_FAILED, proof, command)?;
         let result = record_session_error_recall(&episode.db, WS, &episode.session)?;
@@ -260,7 +355,11 @@ fn skipped_controls_or_changed_commands_do_not_persist_helpful_repair_links() ->
         assert_eq!(result.repair_links_recorded, 0);
         assert_eq!(result.incident_cards_recorded, 0);
         let decoded = parsed(NATIVE_FAILED);
-        let diagnostic = decoded.output.diagnostics.first().ok_or("missing diagnostic")?;
+        let diagnostic = decoded
+            .output
+            .diagnostics
+            .first()
+            .ok_or("missing diagnostic")?;
         let recall = error_recall_report(&episode.db, WS, diagnostic)?;
         assert!(recall.helpful_repairs.is_empty() && recall.proof_links.is_empty());
     }

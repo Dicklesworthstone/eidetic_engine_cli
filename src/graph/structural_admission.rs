@@ -39,10 +39,7 @@ pub(super) fn live_memory_workspaces(memories: &[StoredMemory]) -> BTreeMap<&str
     admitted
 }
 
-pub(super) fn link_is_admitted(
-    link: &StoredMemoryLink,
-    workspaces: &BTreeMap<&str, &str>,
-) -> bool {
+pub(super) fn link_is_admitted(link: &StoredMemoryLink, workspaces: &BTreeMap<&str, &str>) -> bool {
     let Some(source_workspace) = workspaces.get(link.src_memory_id.as_str()) else {
         return false;
     };

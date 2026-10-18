@@ -72,9 +72,11 @@ struct RankedNeighbor(PackDnaPprNeighbor);
 
 impl Ord for RankedNeighbor {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.0.score.total_cmp(&self.0.score).then_with(|| {
-            compare_ulid_payload_or_lexical(&self.0.memory_id, &other.0.memory_id)
-        })
+        other
+            .0
+            .score
+            .total_cmp(&self.0.score)
+            .then_with(|| compare_ulid_payload_or_lexical(&self.0.memory_id, &other.0.memory_id))
     }
 }
 
@@ -154,7 +156,10 @@ mod tests {
         for rotation in 0..17 {
             let scores: BTreeMap<_, _> = (0_u32..257)
                 .map(|number| {
-                    (mem(u128::from(number + 1)), f64::from((number + rotation) % 17))
+                    (
+                        mem(u128::from(number + 1)),
+                        f64::from((number + rotation) % 17),
+                    )
                 })
                 .collect();
             let seeds = BTreeSet::from([mem(17), mem(34)]);
@@ -208,14 +213,16 @@ mod tests {
 
     #[test]
     fn empty_scores_and_zero_cap_do_not_allocate_from_the_requested_limit() {
-        assert!(select(
-            &current_or_testing_cx(),
-            BTreeMap::new(),
-            &BTreeSet::new(),
-            usize::MAX,
-        )
-        .unwrap()
-        .is_empty());
+        assert!(
+            select(
+                &current_or_testing_cx(),
+                BTreeMap::new(),
+                &BTreeSet::new(),
+                usize::MAX,
+            )
+            .unwrap()
+            .is_empty()
+        );
         let mut checks = 0;
         let result = select_with_checkpoint(
             BTreeMap::from([(mem(1), 1.0)]),
@@ -236,7 +243,10 @@ mod tests {
         let mut attrs = AttrMap::new();
         attrs.insert("weight".to_owned(), CgseValue::Float(1.0));
         attrs.insert("confidence".to_owned(), CgseValue::Float(1.0));
-        attrs.insert("relation".to_owned(), CgseValue::String(relation.to_owned()));
+        attrs.insert(
+            "relation".to_owned(),
+            CgseValue::String(relation.to_owned()),
+        );
         graph
             .add_edge_with_attrs(&mem(source).to_string(), &mem(target).to_string(), attrs)
             .unwrap();
@@ -249,7 +259,11 @@ mod tests {
             &mut graph,
             2,
             3,
-            if block_second_edge { "contradicts" } else { "supports" },
+            if block_second_edge {
+                "contradicts"
+            } else {
+                "supports"
+            },
         );
         edge(&mut graph, 4, 5, "supports");
         graph.add_node(mem(6).to_string());

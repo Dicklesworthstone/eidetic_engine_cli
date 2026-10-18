@@ -22,6 +22,5 @@ pub use job_journal::{
 mod durable_foreground;
 
 pub use durable_foreground::{
-    DaemonExecutionReport, run_daemon_foreground_durable,
-    run_daemon_foreground_durable_supervised,
+    DaemonExecutionReport, run_daemon_foreground_durable, run_daemon_foreground_durable_supervised,
 };

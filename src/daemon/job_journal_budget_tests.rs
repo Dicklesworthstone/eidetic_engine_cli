@@ -4,19 +4,33 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn row(key: &str, timestamp: &str, padding: usize) -> DaemonJobRow {
     DaemonJobRow {
-        schema: DAEMON_JOB_ROW_SCHEMA_V1.to_owned(), row_id: format!("row-{key}"),
-        run_id: "run-budget".to_owned(), daemon_job_key: key.to_owned(),
-        runner_job_id: "j".repeat(padding), tick: 1, job_type: "health_check".to_owned(),
-        status: "running".to_owned(), outcome: None, workspace: "/fixture".to_owned(),
-        write_owner_id: DAEMON_WRITE_OWNER_IDENTITY.to_owned(), reason: "fixture".to_owned(),
-        started_at: Some(timestamp.to_owned()), completed_at: None,
-        recorded_at: timestamp.to_owned(), duration_ms: None, items_processed: None,
-        error: None, dry_run: false, durable_mutation: false,
-        recovered_from_orphan: false, recovery_reason: None,
+        schema: DAEMON_JOB_ROW_SCHEMA_V1.to_owned(),
+        row_id: format!("row-{key}"),
+        run_id: "run-budget".to_owned(),
+        daemon_job_key: key.to_owned(),
+        runner_job_id: "j".repeat(padding),
+        tick: 1,
+        job_type: "health_check".to_owned(),
+        status: "running".to_owned(),
+        outcome: None,
+        workspace: "/fixture".to_owned(),
+        write_owner_id: DAEMON_WRITE_OWNER_IDENTITY.to_owned(),
+        reason: "fixture".to_owned(),
+        started_at: Some(timestamp.to_owned()),
+        completed_at: None,
+        recorded_at: timestamp.to_owned(),
+        duration_ms: None,
+        items_processed: None,
+        error: None,
+        dry_run: false,
+        durable_mutation: false,
+        recovered_from_orphan: false,
+        recovery_reason: None,
     }
 }
 
-fn fixture() -> Result<(tempfile::TempDir, PathBuf, DaemonForegroundOptions), Box<dyn std::error::Error>> {
+fn fixture()
+-> Result<(tempfile::TempDir, PathBuf, DaemonForegroundOptions), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().canonicalize()?;
     let mut options = DaemonForegroundOptions::new(root.to_string_lossy().into_owned());
@@ -40,7 +54,10 @@ fn payload_budget_counts_allocated_capacity_and_optional_strings() {
     assert_eq!(retained_bytes(&value) - before, capacity);
     let before = retained_bytes(&value);
     value.recovery_reason = Some("λ🦀".repeat(500));
-    assert_eq!(retained_bytes(&value) - before, value.recovery_reason.as_ref().unwrap().capacity());
+    assert_eq!(
+        retained_bytes(&value) - before,
+        value.recovery_reason.as_ref().unwrap().capacity()
+    );
     assert!(retained_bytes(&value) > serde_json::to_vec(&value).unwrap().len());
 }
 
@@ -58,7 +75,9 @@ fn excluded_large_newer_row_blocks_gap_filling_by_small_older_rows() {
 }
 
 fn compare_rows(left: &DaemonJobRow, right: &DaemonJobRow) -> std::cmp::Ordering {
-    right.recorded_at.cmp(&left.recorded_at)
+    right
+        .recorded_at
+        .cmp(&left.recorded_at)
         .then_with(|| left.daemon_job_key.cmp(&right.daemon_job_key))
 }
 
@@ -76,14 +95,23 @@ fn check_permutations(values: &mut [DaemonJobRow], at: usize, checks: &mut usize
             let mut oracle = values.to_vec();
             oracle.sort_by(compare_rows);
             let mut used = 0;
-            let expected: Vec<_> = oracle.iter().take(limit).take_while(|row| {
-                let bytes = retained_bytes(row);
-                if bytes > budget.saturating_sub(used) { return false; }
-                used += bytes;
-                true
-            }).map(|row| row.daemon_job_key.as_str()).collect();
+            let expected: Vec<_> = oracle
+                .iter()
+                .take(limit)
+                .take_while(|row| {
+                    let bytes = retained_bytes(row);
+                    if bytes > budget.saturating_sub(used) {
+                        return false;
+                    }
+                    used += bytes;
+                    true
+                })
+                .map(|row| row.daemon_job_key.as_str())
+                .collect();
             let mut recent = RecentRows::new(limit, budget);
-            for row in values.iter().cloned() { recent.push(row); }
+            for row in values.iter().cloned() {
+                recent.push(row);
+            }
             let actual = recent.into_rows();
             assert_eq!(keys(&actual), expected);
             assert!(actual.iter().map(retained_bytes).sum::<usize>() <= budget);
@@ -95,9 +123,12 @@ fn check_permutations(values: &mut [DaemonJobRow], at: usize, checks: &mut usize
 #[test]
 fn newest_prefix_matches_full_sort_for_every_scan_order() {
     let mut values = [
-        row("a", "004", 0), row("b", "004", 7_000),
-        row("c", "003", 30), row("d", "002", 12_000),
-        row("e", "002", 0), row("f", "001", 100),
+        row("a", "004", 0),
+        row("b", "004", 7_000),
+        row("c", "003", 30),
+        row("d", "002", 12_000),
+        row("e", "002", 0),
+        row("f", "001", 100),
     ];
     let mut checks = 0;
     check_permutations(&mut values, 0, &mut checks);
@@ -123,8 +154,11 @@ fn large_valid_rows_do_not_exhaust_status_or_skip_recovery() -> TestResult {
     // Each row is legal, but the combined details exceed the payload budget
     // long before the 256-row count ceiling. Keep fixture creation streaming.
     for index in 0..12 {
-        let value = row(&format!("large-{index:03}"), &format!("2026-10-17T00:00:{index:02}Z"),
-            MAX_ROW_BYTES * 3 / 4);
+        let value = row(
+            &format!("large-{index:03}"),
+            &format!("2026-10-17T00:00:{index:02}Z"),
+            MAX_ROW_BYTES * 3 / 4,
+        );
         append_rows(&path, &[value])?;
     }
     let before = fs::read(&path)?;
@@ -134,7 +168,14 @@ fn large_valid_rows_do_not_exhaust_status_or_skip_recovery() -> TestResult {
     assert!(!status.recent_outcomes.is_empty());
     assert!(status.recent_outcomes.len() < 12);
     assert_eq!(status.recent_outcomes[0].daemon_job_key, "large-011");
-    assert!(status.recent_outcomes.iter().map(retained_bytes).sum::<usize>() <= MAX_DETAIL_BYTES);
+    assert!(
+        status
+            .recent_outcomes
+            .iter()
+            .map(retained_bytes)
+            .sum::<usize>()
+            <= MAX_DETAIL_BYTES
+    );
     assert_eq!(fs::read(&path)?, before, "status must remain read-only");
     let empty = daemon_status_report(&root, &options.job_types, 0)?;
     assert_eq!(empty.open_job_count, 12);
@@ -145,12 +186,22 @@ fn large_valid_rows_do_not_exhaust_status_or_skip_recovery() -> TestResult {
     assert_eq!(recovered.scanned_rows, 12);
     assert!(recovered.recovered_rows_truncated);
     assert!(recovered.recovered_rows.len() < 12);
-    assert!(recovered.recovered_rows.iter().map(retained_bytes).sum::<usize>() <= MAX_DETAIL_BYTES);
+    assert!(
+        recovered
+            .recovered_rows
+            .iter()
+            .map(retained_bytes)
+            .sum::<usize>()
+            <= MAX_DETAIL_BYTES
+    );
     assert_eq!(recovered.data_json()["recoveredRowsTruncated"], true);
     let after = daemon_status_report(&root, &options.job_types, 5)?;
     assert_eq!(after.row_count, 24);
     assert_eq!(after.open_job_count, 0);
-    assert_eq!(recover_orphaned_daemon_jobs(&root, "again")?.open_jobs_cancelled, 0);
+    assert_eq!(
+        recover_orphaned_daemon_jobs(&root, "again")?.open_jobs_cancelled,
+        0
+    );
     Ok(())
 }
 
@@ -167,7 +218,11 @@ fn excessive_job_lists_are_rejected_before_any_workspace_mutation() -> TestResul
     let (_temp, root, mut options) = fixture()?;
     options.dry_run = true;
     options.job_types = vec![JobType::HealthCheck; MAX_JOBS_PER_TICK];
-    assert!(record_daemon_foreground_start(&root, &options)?.rows.is_empty());
+    assert!(
+        record_daemon_foreground_start(&root, &options)?
+            .rows
+            .is_empty()
+    );
     assert!(!root.join(".ee").exists());
     Ok(())
 }
@@ -179,7 +234,10 @@ fn invalid_later_row_cannot_append_a_valid_prefix_or_repair_a_tail() -> TestResu
     let valid = row("valid", "001", 0);
     append_rows(&path, &[valid.clone()])?;
     let tail = b"{\"reason\":\"interrupted";
-    OpenOptions::new().append(true).open(&path)?.write_all(tail)?;
+    OpenOptions::new()
+        .append(true)
+        .open(&path)?
+        .write_all(tail)?;
     let before = fs::read(&path)?;
     let entries = fs::read_dir(path.parent().unwrap())?.count();
     let mut invalid = valid.clone();

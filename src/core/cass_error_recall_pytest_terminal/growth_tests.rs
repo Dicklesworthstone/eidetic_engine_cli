@@ -33,7 +33,9 @@ fn pytest_report(results: &[(&str, &str)]) -> String {
     text.push_str("================ short test summary info ================\n");
     for (node, outcome) in results {
         if matches!(*outcome, "FAILED" | "ERROR") {
-            text.push_str(&format!("{outcome} {node} - AssertionError: parser mismatch\n"));
+            text.push_str(&format!(
+                "{outcome} {node} - AssertionError: parser mismatch\n"
+            ));
         }
     }
     let counts = counts
@@ -41,7 +43,9 @@ fn pytest_report(results: &[(&str, &str)]) -> String {
         .map(|(name, count)| format!("{count} {name}"))
         .collect::<Vec<_>>()
         .join(", ");
-    text.push_str(&format!("================ {counts} in 0.01s ================\n"));
+    text.push_str(&format!(
+        "================ {counts} in 0.01s ================\n"
+    ));
     text
 }
 
@@ -113,7 +117,11 @@ fn native_pytest_growth_verifies_a_fix_with_added_regressions() {
 #[test]
 fn native_unittest_growth_verifies_a_fix_with_added_regressions() {
     let failure = unittest_report(&[(UNIT_FAILED, "FAIL"), (UNIT_CONTROL, "ok")]);
-    let proof = unittest_report(&[(UNIT_ADDED, "ok"), (UNIT_CONTROL, "ok"), (UNIT_FAILED, "ok")]);
+    let proof = unittest_report(&[
+        (UNIT_ADDED, "ok"),
+        (UNIT_CONTROL, "ok"),
+        (UNIT_FAILED, "ok"),
+    ]);
     assert!(verifies(&failure, &proof));
 }
 
@@ -168,7 +176,11 @@ fn native_python_growth_rejects_new_failures_at_the_execution_boundary() {
         ),
         (
             unittest_report(&[(UNIT_FAILED, "FAIL"), (UNIT_CONTROL, "ok")]),
-            unittest_report(&[(UNIT_FAILED, "ok"), (UNIT_CONTROL, "ok"), (UNIT_ADDED, "FAIL")]),
+            unittest_report(&[
+                (UNIT_FAILED, "ok"),
+                (UNIT_CONTROL, "ok"),
+                (UNIT_ADDED, "FAIL"),
+            ]),
         ),
     ] {
         assert!(!verifies(&failure, &proof));
@@ -229,9 +241,19 @@ fn native_python_growth_cannot_infer_coverage_from_quiet_or_incomplete_runs() {
     let failure = unittest_report(&[(UNIT_FAILED, "FAIL"), (UNIT_CONTROL, "ok")]);
     let quiet = "...\n----------------------------------------------------------------------\nRan 3 tests in 0.001s\n\nOK\n";
     assert!(!verifies(&failure, quiet));
-    let proof = unittest_report(&[(UNIT_FAILED, "ok"), (UNIT_CONTROL, "ok"), (UNIT_ADDED, "ok")]);
-    assert!(!verifies(&failure, &proof.replace("Ran 3 tests", "Ran 4 tests")));
-    assert!(!verifies(&failure, &proof.replace(UNIT_ADDED, UNIT_CONTROL)));
+    let proof = unittest_report(&[
+        (UNIT_FAILED, "ok"),
+        (UNIT_CONTROL, "ok"),
+        (UNIT_ADDED, "ok"),
+    ]);
+    assert!(!verifies(
+        &failure,
+        &proof.replace("Ran 3 tests", "Ran 4 tests")
+    ));
+    assert!(!verifies(
+        &failure,
+        &proof.replace(UNIT_ADDED, UNIT_CONTROL)
+    ));
 }
 
 #[test]
@@ -247,7 +269,11 @@ fn native_python_growth_needs_independent_process_completion() {
         ),
         (
             unittest_report(&[(UNIT_FAILED, "FAIL"), (UNIT_CONTROL, "ok")]),
-            unittest_report(&[(UNIT_FAILED, "ok"), (UNIT_CONTROL, "ok"), (UNIT_ADDED, "ok")]),
+            unittest_report(&[
+                (UNIT_FAILED, "ok"),
+                (UNIT_CONTROL, "ok"),
+                (UNIT_ADDED, "ok"),
+            ]),
         ),
     ] {
         let required = Requirement::capture(&output(&failure, 1), true);

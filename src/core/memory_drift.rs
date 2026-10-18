@@ -1936,7 +1936,10 @@ fn ranked_memory_ids(
                 )
             })?;
         if !ranks.insert(rank) {
-            return Err(("pack_item_ledger_selected_item_ambiguous", finding_id.clone()));
+            return Err((
+                "pack_item_ledger_selected_item_ambiguous",
+                finding_id.clone(),
+            ));
         }
 
         let identity_key = match identity {
@@ -1950,7 +1953,10 @@ fn ranked_memory_ids(
             } => format!("{kind}:{entity_id}"),
         };
         if !identities.insert(identity_key) {
-            return Err(("pack_item_ledger_selected_item_ambiguous", finding_id.clone()));
+            return Err((
+                "pack_item_ledger_selected_item_ambiguous",
+                finding_id.clone(),
+            ));
         }
     }
 

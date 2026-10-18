@@ -15293,8 +15293,7 @@ fn prefer_incident_cards(
     proof_spans.extend(direct_spans);
     proof_spans.sort_by(|left, right| left.id.cmp(&right.id));
     proof_spans.dedup_by(|left, right| left.id == right.id);
-    let mut checks =
-        BTreeMap::<String, crate::core::incident_card::proof::CardChecks>::new();
+    let mut checks = BTreeMap::<String, crate::core::incident_card::proof::CardChecks>::new();
     let mut ids_by_workspace = BTreeMap::<String, BTreeSet<String>>::new();
     for span in &proof_spans {
         ids_by_workspace

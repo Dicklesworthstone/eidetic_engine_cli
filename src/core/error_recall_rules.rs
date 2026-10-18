@@ -100,9 +100,10 @@ fn read_observed(
         }
         if current(row.get(1).and_then(Value::as_str), at)
             && current(row.get(2).and_then(Value::as_str), at)
-            && row.get(3).and_then(Value::as_i64).is_some_and(|bytes| {
-                (1..=MAX_SOURCE_BYTES as i64).contains(&bytes)
-            })
+            && row
+                .get(3)
+                .and_then(Value::as_i64)
+                .is_some_and(|bytes| (1..=MAX_SOURCE_BYTES as i64).contains(&bytes))
         {
             admitted.push(id.to_owned());
         }
@@ -209,7 +210,11 @@ fn relations(connection: &DbConnection, workspace: &str, ids: &[&str]) -> Result
         {
             relations.withheld.insert(id.to_owned());
         }
-        relations.sources.entry(id.to_owned()).or_default().push(source.to_owned());
+        relations
+            .sources
+            .entry(id.to_owned())
+            .or_default()
+            .push(source.to_owned());
     }
     let sql = format!(
         "SELECT rule_id, tag FROM rule_tags WHERE rule_id IN ({names})
@@ -226,7 +231,11 @@ fn relations(connection: &DbConnection, workspace: &str, ids: &[&str]) -> Result
         if !ids.contains(&id) {
             return Err(unavailable());
         }
-        relations.tags.entry(id.to_owned()).or_default().push(tag.to_owned());
+        relations
+            .tags
+            .entry(id.to_owned())
+            .or_default()
+            .push(tag.to_owned());
     }
     Ok(relations)
 }
@@ -248,7 +257,10 @@ fn public_body(content: &str) -> Option<String> {
     {
         return None;
     }
-    Some(bounded_pack_recall_text(content.trim(), PACK_RECALL_EXCERPT_BYTES))
+    Some(bounded_pack_recall_text(
+        content.trim(),
+        PACK_RECALL_EXCERPT_BYTES,
+    ))
 }
 
 #[cfg(test)]

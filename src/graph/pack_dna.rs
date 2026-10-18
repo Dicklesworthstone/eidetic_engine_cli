@@ -679,14 +679,9 @@ mod tests {
             vec![mem(1), mem(4)],
         );
         let cx = current_or_testing_cx();
-        let (summary, partial_results) = compute_pack_dna_partial_results(
-            &cx,
-            &directed,
-            &undirected,
-            &input,
-            |_, _| Ok(()),
-        )
-        .map_err(|error| error.to_string())?;
+        let (summary, partial_results) =
+            compute_pack_dna_partial_results(&cx, &directed, &undirected, &input, |_, _| Ok(()))
+                .map_err(|error| error.to_string())?;
 
         let serial = merge_pack_dna_partial_results(
             projection.snapshot_version,

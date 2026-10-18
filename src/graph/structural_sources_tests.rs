@@ -14,11 +14,8 @@ use crate::db::StoredMemoryLink;
 use fnx_runtime::CgseValue;
 
 fn project(links: &[StoredMemoryLink]) -> StructuralGraphInput {
-    let input = build_structural_graph_input(
-        &[memory("a"), memory("b"), memory("c")],
-        links,
-        Some(19),
-    );
+    let input =
+        build_structural_graph_input(&[memory("a"), memory("b"), memory("c")], links, Some(19));
     assert_eq!(input.node_count, 3);
     assert_eq!(input.node_count, input.graph.node_count());
     assert_eq!(input.edge_count, input.graph.edge_count());
@@ -198,8 +195,7 @@ fn all_four_source_state_combinations_match_an_independent_admission_oracle() {
                     links.extend([original.clone(), different, original]);
                 }
                 4 => {
-                    original.metadata_json =
-                        Some("{\"cachedMaterialId\":\"hidden\"}".to_owned());
+                    original.metadata_json = Some("{\"cachedMaterialId\":\"hidden\"}".to_owned());
                     links.push(original);
                 }
                 _ => {

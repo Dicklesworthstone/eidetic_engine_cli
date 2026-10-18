@@ -85,7 +85,10 @@ fn runner_report_failed(line: &str) -> bool {
     {
         return true;
     }
-    if let Some(fields) = body.strip_prefix("failed (").and_then(|s| s.strip_suffix(')')) {
+    if let Some(fields) = body
+        .strip_prefix("failed (")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         return !fields.is_empty()
             && fields.split(',').all(|field| {
                 field.trim().split_once('=').is_some_and(|(name, count)| {
@@ -119,7 +122,10 @@ fn runner_report_failed(line: &str) -> bool {
         body = counts.trim_end();
     }
     if let Some((counts, total)) = body.rsplit_once('(') {
-        if !total.strip_suffix(')').is_some_and(|total| decimal_count(total.trim())) {
+        if !total
+            .strip_suffix(')')
+            .is_some_and(|total| decimal_count(total.trim()))
+        {
             return false;
         }
         body = counts.trim_end();
@@ -539,11 +545,17 @@ mod tests {
             "TAP version 13\nok 1 - reload\n1..1",
         ] {
             assert!(!failed(&output(text)), "false failure: {text}");
-            assert!(!succeeded(&output(text)), "stdout granted authority: {text}");
-            assert!(succeeded(&ToolOutput {
-                exit_code: Some(0),
-                ..output(text)
-            }), "lost valid completed run: {text}");
+            assert!(
+                !succeeded(&output(text)),
+                "stdout granted authority: {text}"
+            );
+            assert!(
+                succeeded(&ToolOutput {
+                    exit_code: Some(0),
+                    ..output(text)
+                }),
+                "lost valid completed run: {text}"
+            );
         }
     }
 

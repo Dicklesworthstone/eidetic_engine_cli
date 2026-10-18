@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn fixture() -> Result<(tempfile::TempDir, PathBuf, DaemonForegroundOptions), Box<dyn std::error::Error>> {
+fn fixture()
+-> Result<(tempfile::TempDir, PathBuf, DaemonForegroundOptions), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().canonicalize()?;
     let mut options = DaemonForegroundOptions::new(root.to_string_lossy().into_owned());
@@ -54,11 +55,20 @@ fn plan_is_one_tick_and_its_last_clone_owns_the_execution_lease() -> TestResult 
     let before = fs::read(daemon_job_table_path(&root))?;
     assert!(record_daemon_foreground_start(&root, &options).is_err());
     assert!(recover_orphaned_daemon_jobs(&root, "not an orphan").is_err());
-    assert_eq!(daemon_status_report(&root, &options.job_types, 5)?.open_job_count, 2);
+    assert_eq!(
+        daemon_status_report(&root, &options.job_types, 5)?.open_job_count,
+        2
+    );
     assert_eq!(fs::read(daemon_job_table_path(&root))?, before);
     drop(clone);
-    assert_eq!(recover_orphaned_daemon_jobs(&root, "owner stopped")?.open_jobs_cancelled, 2);
-    assert_eq!(daemon_status_report(&root, &options.job_types, 5)?.open_job_count, 0);
+    assert_eq!(
+        recover_orphaned_daemon_jobs(&root, "owner stopped")?.open_jobs_cancelled,
+        2
+    );
+    assert_eq!(
+        daemon_status_report(&root, &options.job_types, 5)?.open_job_count,
+        0
+    );
     assert!(root.join(".ee/daemon-run.lock").is_file());
     let restarted = record_daemon_foreground_start(&root, &options)?;
     assert_eq!(restarted.rows.len(), 2);
@@ -72,7 +82,10 @@ fn status_of_missing_workspace_storage_does_not_create_it() -> TestResult {
     assert_eq!(status.row_count, 0);
     assert_eq!(status.open_job_count, 0);
     assert!(!root.join(".ee").exists());
-    assert_eq!(recover_orphaned_daemon_jobs(&root, "missing")?.scanned_rows, 0);
+    assert_eq!(
+        recover_orphaned_daemon_jobs(&root, "missing")?.scanned_rows,
+        0
+    );
     assert!(!root.join(".ee").exists());
     Ok(())
 }
@@ -105,20 +118,35 @@ fn recovery_preserves_tail_evidence_and_valid_history_and_is_idempotent() -> Tes
     let path = daemon_job_table_path(&root);
     let prefix = fs::read(&path)?;
     let tail = b"{\"reason\":\"stopped while writing \xf0\x9f";
-    OpenOptions::new().append(true).open(&path)?.write_all(tail)?;
-    assert_eq!(daemon_status_report(&root, &options.job_types, 5)?.open_job_count, 1);
+    OpenOptions::new()
+        .append(true)
+        .open(&path)?
+        .write_all(tail)?;
+    assert_eq!(
+        daemon_status_report(&root, &options.job_types, 5)?.open_job_count,
+        1
+    );
     assert_eq!(fs::read(&path)?.len(), prefix.len() + tail.len());
     let recovery = recover_orphaned_daemon_jobs(&root, "interrupted process")?;
     assert_eq!(recovery.scanned_rows, 1);
     assert_eq!(recovery.open_jobs_cancelled, 1);
     assert!(!recovery.recovered_rows_truncated);
     assert!(fs::read(&path)?.starts_with(&prefix));
-    let evidence = root.join(".ee").join(format!("daemon-jobs.torn-{}.partial", blake3::hash(tail).to_hex()));
+    let evidence = root.join(".ee").join(format!(
+        "daemon-jobs.torn-{}.partial",
+        blake3::hash(tail).to_hex()
+    ));
     assert_eq!(fs::read(evidence)?, tail);
     let after = fs::read(&path)?;
-    assert_eq!(recover_orphaned_daemon_jobs(&root, "again")?.open_jobs_cancelled, 0);
+    assert_eq!(
+        recover_orphaned_daemon_jobs(&root, "again")?.open_jobs_cancelled,
+        0
+    );
     assert_eq!(fs::read(&path)?, after);
-    assert_eq!(daemon_status_report(&root, &options.job_types, 5)?.open_job_count, 0);
+    assert_eq!(
+        daemon_status_report(&root, &options.job_types, 5)?.open_job_count,
+        0
+    );
     Ok(())
 }
 
@@ -128,8 +156,14 @@ fn a_torn_tail_is_repaired_even_when_there_are_no_open_jobs() -> TestResult {
     let path = daemon_job_table_path(&root);
     fs::create_dir_all(path.parent().unwrap())?;
     fs::write(&path, b"{\"schema\":\"interrupted")?;
-    assert_eq!(daemon_status_report(&root, &options.job_types, 5)?.row_count, 0);
-    assert_eq!(recover_orphaned_daemon_jobs(&root, "empty prefix")?.open_jobs_cancelled, 0);
+    assert_eq!(
+        daemon_status_report(&root, &options.job_types, 5)?.row_count,
+        0
+    );
+    assert_eq!(
+        recover_orphaned_daemon_jobs(&root, "empty prefix")?.open_jobs_cancelled,
+        0
+    );
     assert!(fs::read(&path)?.is_empty());
     let plan = record_daemon_foreground_start(&root, &options)?;
     assert_eq!(load_daemon_job_rows(&root)?.len(), 1);
@@ -208,11 +242,18 @@ fn status_and_recovery_read_past_the_old_sixteen_mib_cutoff() -> TestResult {
     let status = daemon_status_report(&root, &options.job_types, 20)?;
     assert_eq!(status.row_count, count);
     assert_eq!(status.open_job_count, 1);
-    assert!(load_daemon_job_rows(&root).unwrap_err().contains("full-history"));
+    assert!(
+        load_daemon_job_rows(&root)
+            .unwrap_err()
+            .contains("full-history")
+    );
     let recovery = recover_orphaned_daemon_jobs(&root, "after old cap")?;
     assert_eq!(recovery.scanned_rows, count);
     assert_eq!(recovery.open_jobs_cancelled, 1);
-    assert_eq!(daemon_status_report(&root, &options.job_types, 20)?.open_job_count, 0);
+    assert_eq!(
+        daemon_status_report(&root, &options.job_types, 20)?.open_job_count,
+        0
+    );
     Ok(())
 }
 
@@ -231,7 +272,10 @@ fn recovery_detail_output_is_bounded_without_skipping_cancellations() -> TestRes
     assert_eq!(recovery.open_jobs_cancelled, rows.len() + 1);
     assert_eq!(recovery.recovered_rows.len(), MAX_RECOVERY_DETAILS);
     assert_eq!(recovery.data_json()["recoveredRowsTruncated"], true);
-    assert_eq!(daemon_status_report(&root, &options.job_types, 5)?.open_job_count, 0);
+    assert_eq!(
+        daemon_status_report(&root, &options.job_types, 5)?.open_job_count,
+        0
+    );
     Ok(())
 }
 
@@ -240,7 +284,10 @@ fn concurrent_appenders_cannot_interleave_or_repair_each_others_rows() -> TestRe
     let (_temp, root, options) = fixture()?;
     let row = seed(&root, &options)?;
     let path = daemon_job_table_path(&root);
-    OpenOptions::new().append(true).open(&path)?.write_all(b"{\"status\":\"torn")?;
+    OpenOptions::new()
+        .append(true)
+        .open(&path)?
+        .write_all(b"{\"status\":\"torn")?;
     let mut workers = Vec::new();
     for worker in 0..4 {
         let path = path.clone();
@@ -253,10 +300,15 @@ fn concurrent_appenders_cannot_interleave_or_repair_each_others_rows() -> TestRe
             Ok(())
         }));
     }
-    for worker in workers { worker.join().expect("writer thread")?; }
+    for worker in workers {
+        worker.join().expect("writer thread")?;
+    }
     let rows = load_daemon_job_rows(&root)?;
     assert_eq!(rows.len(), 129);
-    let keys = rows.iter().map(|row| row.daemon_job_key.as_str()).collect::<BTreeSet<_>>();
+    let keys = rows
+        .iter()
+        .map(|row| row.daemon_job_key.as_str())
+        .collect::<BTreeSet<_>>();
     assert_eq!(keys.len(), 129);
     Ok(())
 }
@@ -269,7 +321,11 @@ fn oversize_records_are_not_silently_treated_as_a_torn_tail() -> TestResult {
     let mut bytes = b"{\"reason\":\"".to_vec();
     bytes.resize(MAX_ROW_BYTES + 1, b'x');
     fs::write(&path, &bytes)?;
-    assert!(daemon_status_report(&root, &options.job_types, 5).unwrap_err().contains("limit"));
+    assert!(
+        daemon_status_report(&root, &options.job_types, 5)
+            .unwrap_err()
+            .contains("limit")
+    );
     assert!(recover_orphaned_daemon_jobs(&root, "too large").is_err());
     assert_eq!(fs::metadata(path)?.len(), bytes.len() as u64);
     Ok(())
@@ -312,34 +368,51 @@ fn killed_owner_releases_lease_and_next_process_can_recover() -> TestResult {
     let child = Command::new(std::env::current_exe()?)
         .arg("daemon_lease_child_process")
         .env("EE_TEST_DAEMON_LEASE_ROOT", &root)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()?;
     let mut child = ChildGuard(child);
     let ready = root.join("child-ready");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !ready.exists() && Instant::now() < deadline {
-        if let Some(status) = child.0.try_wait()? { panic!("child exited before lease proof: {status}"); }
+        if let Some(status) = child.0.try_wait()? {
+            panic!("child exited before lease proof: {status}");
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(ready.exists(), "child did not report durable running row");
     assert!(recover_orphaned_daemon_jobs(&root, "live child").is_err());
-    assert_eq!(daemon_status_report(&root, &options.job_types, 5)?.open_job_count, 1);
+    assert_eq!(
+        daemon_status_report(&root, &options.job_types, 5)?.open_job_count,
+        1
+    );
     child.0.kill()?;
     child.0.wait()?;
-    assert_eq!(recover_orphaned_daemon_jobs(&root, "killed child")?.open_jobs_cancelled, 1);
-    assert_eq!(daemon_status_report(&root, &options.job_types, 5)?.open_job_count, 0);
+    assert_eq!(
+        recover_orphaned_daemon_jobs(&root, "killed child")?.open_jobs_cancelled,
+        1
+    );
+    assert_eq!(
+        daemon_status_report(&root, &options.job_types, 5)?.open_job_count,
+        0
+    );
     Ok(())
 }
 
 #[test]
 fn daemon_lease_child_process() -> TestResult {
-    let Some(root) = std::env::var_os("EE_TEST_DAEMON_LEASE_ROOT") else { return Ok(()); };
+    let Some(root) = std::env::var_os("EE_TEST_DAEMON_LEASE_ROOT") else {
+        return Ok(());
+    };
     let root = PathBuf::from(root);
     let mut options = DaemonForegroundOptions::new(root.to_string_lossy().into_owned());
     options.job_types = vec![JobType::HealthCheck];
     let _plan = record_daemon_foreground_start(&root, &options)?;
     fs::write(root.join("child-ready"), b"ready")?;
-    loop { std::thread::sleep(Duration::from_secs(60)); }
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+    }
 }
 
 #[test]
@@ -347,7 +420,11 @@ fn mismatched_workspace_cannot_steer_jobs_away_from_their_journal() -> TestResul
     let (_temp, root, mut options) = fixture()?;
     let other = tempfile::tempdir()?;
     options.workspace = other.path().to_string_lossy().into_owned();
-    assert!(record_daemon_foreground_start(&root, &options).unwrap_err().contains("does not match"));
+    assert!(
+        record_daemon_foreground_start(&root, &options)
+            .unwrap_err()
+            .contains("does not match")
+    );
     assert!(!root.join(".ee").exists());
     assert!(!other.path().join(".ee").exists());
     Ok(())

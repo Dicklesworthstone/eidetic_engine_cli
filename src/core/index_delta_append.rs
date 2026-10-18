@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::search::IndexableDocument;
 
 use super::{
-    Delta, EmbeddingReuse, IncrementalFallback, IncrementalFallbackReason,
-    MAX_LEXICAL_DELTA_BYTES, document_digest, document_payload_bytes, incremental_fallback,
+    Delta, EmbeddingReuse, IncrementalFallback, IncrementalFallbackReason, MAX_LEXICAL_DELTA_BYTES,
+    document_digest, document_payload_bytes, incremental_fallback,
 };
 
 // Inference and WAL writes remain bounded to the existing small batches.
@@ -34,7 +34,9 @@ impl AppendBudget {
             return Err(over_limit("bulk intake exceeds the document budget"));
         }
         if bytes > MAX_LEXICAL_DELTA_BYTES.saturating_sub(self.bytes) {
-            return Err(over_limit("bulk intake exceeds the document-payload byte budget"));
+            return Err(over_limit(
+                "bulk intake exceeds the document-payload byte budget",
+            ));
         }
         self.documents += 1;
         self.bytes += bytes;
@@ -99,7 +101,11 @@ fn collect_appends<'a>(
     checkpoint()?;
     // A pure append must grow the source. Refuse obvious non-appends and
     // oversized growth before allocating the source-identity membership set.
-    let Some(added) = documents.len().checked_sub(live.len()).filter(|count| *count > 0) else {
+    let Some(added) = documents
+        .len()
+        .checked_sub(live.len())
+        .filter(|count| *count > 0)
+    else {
         return Ok(None);
     };
     if added > MAX_APPEND_DOCUMENTS {
@@ -148,12 +154,17 @@ mod tests {
 
     fn documents(count: usize) -> Vec<IndexableDocument> {
         (0..count)
-            .map(|number| IndexableDocument::new(format!("doc-{number:05}"), format!("lesson {number}")))
+            .map(|number| {
+                IndexableDocument::new(format!("doc-{number:05}"), format!("lesson {number}"))
+            })
             .collect()
     }
 
     fn digests(documents: &[IndexableDocument]) -> BTreeMap<String, String> {
-        documents.iter().map(|document| (document.id.clone(), document_digest(document))).collect()
+        documents
+            .iter()
+            .map(|document| (document.id.clone(), document_digest(document)))
+            .collect()
     }
 
     #[test]
@@ -161,14 +172,18 @@ mod tests {
         let original = documents(1024);
         let current = documents(21_024);
         let delta = try_plan(&digests(&original), &current, IDENTITY.to_owned())
-            .expect("bounded import").expect("pure append");
+            .expect("bounded import")
+            .expect("pure append");
         assert_eq!(delta.upserts.len(), 20_000);
         assert!(delta.removals.is_empty());
         assert_eq!(digests(&delta.upserts), digests(&current[1024..]));
         let mut reconstructed = digests(&original);
         reconstructed.extend(digests(&delta.upserts));
         assert_eq!(reconstructed, digests(&current));
-        assert_eq!(delta.vector_upserts(IDENTITY).expect("same producer").len(), 20_000);
+        assert_eq!(
+            delta.vector_upserts(IDENTITY).expect("same producer").len(),
+            20_000
+        );
         assert!(delta.vector_upserts("changed-producer").is_err());
     }
 
@@ -180,11 +195,18 @@ mod tests {
             match change {
                 0 => current[7].content.push_str(" changed"),
                 1 => current[7].title = Some("changed title".to_owned()),
-                _ => { current[7].metadata.insert("scope".to_owned(), "changed".to_owned()); }
+                _ => {
+                    current[7]
+                        .metadata
+                        .insert("scope".to_owned(), "changed".to_owned());
+                }
             }
             current.rotate_left(8);
-            assert!(try_plan(&digests(&original), &current, IDENTITY.to_owned())
-                .expect("composition check").is_none());
+            assert!(
+                try_plan(&digests(&original), &current, IDENTITY.to_owned())
+                    .expect("composition check")
+                    .is_none()
+            );
         }
     }
 
@@ -192,8 +214,11 @@ mod tests {
     fn a_missing_old_document_cannot_be_hidden_by_many_additions() {
         let original = documents(8);
         let current = documents(1024);
-        assert!(try_plan(&digests(&original), &current[1..], IDENTITY.to_owned())
-            .expect("membership check").is_none());
+        assert!(
+            try_plan(&digests(&original), &current[1..], IDENTITY.to_owned())
+                .expect("membership check")
+                .is_none()
+        );
     }
 
     #[test]
@@ -204,7 +229,10 @@ mod tests {
             current.push(current[duplicate].clone());
             let error = try_plan(&digests(&original), &current, IDENTITY.to_owned())
                 .expect_err("duplicate source identity");
-            assert_eq!(error.reason, IncrementalFallbackReason::CorpusRevisionMismatch);
+            assert_eq!(
+                error.reason,
+                IncrementalFallbackReason::CorpusRevisionMismatch
+            );
         }
     }
 
@@ -213,27 +241,56 @@ mod tests {
         let original = documents(8);
         let mut current = original.clone();
         for number in 0..16 {
-            current.push(IndexableDocument::new(format!("new-{number}"), &original[0].content));
+            current.push(IndexableDocument::new(
+                format!("new-{number}"),
+                &original[0].content,
+            ));
         }
         current.reverse();
-        let expected: Vec<_> = current.iter().take(16).map(|document| document.id.as_str()).collect();
+        let expected: Vec<_> = current
+            .iter()
+            .take(16)
+            .map(|document| document.id.as_str())
+            .collect();
         let delta = try_plan(&digests(&original), &current, IDENTITY.to_owned())
-            .expect("source order").expect("append");
-        assert_eq!(delta.upserts.iter().map(|document| document.id.as_str()).collect::<Vec<_>>(), expected);
-        assert_eq!(delta.vector_upserts(IDENTITY).expect("new vector IDs").len(), 16);
+            .expect("source order")
+            .expect("append");
+        assert_eq!(
+            delta
+                .upserts
+                .iter()
+                .map(|document| document.id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            delta
+                .vector_upserts(IDENTITY)
+                .expect("new vector IDs")
+                .len(),
+            16
+        );
     }
 
     #[test]
     fn zero_growth_and_withdrawals_keep_the_ordinary_planner() {
         let original = documents(8);
         for current in [&original[..], &original[..7], &original[..0]] {
-            assert!(try_plan(&digests(&original), current, IDENTITY.to_owned())
-                .expect("no growth").is_none());
+            assert!(
+                try_plan(&digests(&original), current, IDENTITY.to_owned())
+                    .expect("no growth")
+                    .is_none()
+            );
         }
-        assert!(try_plan(&BTreeMap::new(), &[], IDENTITY.to_owned()).expect("empty").is_none());
+        assert!(
+            try_plan(&BTreeMap::new(), &[], IDENTITY.to_owned())
+                .expect("empty")
+                .is_none()
+        );
         let current = documents(128);
         let delta = try_plan(&BTreeMap::new(), &current, IDENTITY.to_owned())
-            .expect("existing empty generation").expect("append");
+            .expect("existing empty generation")
+            .expect("append");
         assert_eq!(delta.upserts.len(), current.len());
     }
 
@@ -242,11 +299,16 @@ mod tests {
         let original = documents(1);
         let mut current = documents(MAX_APPEND_DOCUMENTS + 1);
         let delta = try_plan(&digests(&original), &current, IDENTITY.to_owned())
-            .expect("exact row bound").expect("append");
+            .expect("exact row bound")
+            .expect("append");
         assert_eq!(delta.upserts.len(), MAX_APPEND_DOCUMENTS);
         current.push(IndexableDocument::new("one-too-many", "lesson"));
-        assert_eq!(try_plan(&digests(&original), &current, IDENTITY.to_owned())
-            .expect_err("row bound").reason, IncrementalFallbackReason::DeltaOverThreshold);
+        assert_eq!(
+            try_plan(&digests(&original), &current, IDENTITY.to_owned())
+                .expect_err("row bound")
+                .reason,
+            IncrementalFallbackReason::DeltaOverThreshold
+        );
         let mut budget = AppendBudget::default();
         assert!(budget.admit(MAX_LEXICAL_DELTA_BYTES).is_ok());
         assert!(budget.admit(0).is_ok());
@@ -263,12 +325,23 @@ mod tests {
         let mut added = IndexableDocument::new("new-é", "資料").with_title("title");
         added.metadata.insert("clé".to_owned(), "値".to_owned());
         let overhead = document_payload_bytes(&added);
-        added.content.push_str(&"x".repeat(MAX_LEXICAL_DELTA_BYTES - overhead));
+        added
+            .content
+            .push_str(&"x".repeat(MAX_LEXICAL_DELTA_BYTES - overhead));
         current.push(added);
         let live = digests(&original);
-        assert_eq!(collect_appends(&live, &current, &mut || Ok(())).expect("exact payload").expect("append").len(), 1);
-        current[1].metadata.insert("extra".to_owned(), "value".to_owned());
-        let error = collect_appends(&live, &current, &mut || Ok(())).expect_err("metadata counts too");
+        assert_eq!(
+            collect_appends(&live, &current, &mut || Ok(()))
+                .expect("exact payload")
+                .expect("append")
+                .len(),
+            1
+        );
+        current[1]
+            .metadata
+            .insert("extra".to_owned(), "value".to_owned());
+        let error =
+            collect_appends(&live, &current, &mut || Ok(())).expect_err("metadata counts too");
         assert!(error.detail.contains("byte budget"));
     }
 
@@ -278,18 +351,28 @@ mod tests {
         let current = documents(128);
         let live = digests(&original);
         let mut total = 0;
-        assert!(collect_appends(&live, &current, &mut || { total += 1; Ok(()) })
-            .expect("reference scan").is_some());
+        assert!(
+            collect_appends(&live, &current, &mut || {
+                total += 1;
+                Ok(())
+            })
+            .expect("reference scan")
+            .is_some()
+        );
         for stop_at in [1, 7, total] {
             let mut calls = 0;
             let error = collect_appends(&live, &current, &mut || {
                 calls += 1;
                 if calls == stop_at {
-                    Err(incremental_fallback(IncrementalFallbackReason::TierUnavailable, "cancelled append scan"))
+                    Err(incremental_fallback(
+                        IncrementalFallbackReason::TierUnavailable,
+                        "cancelled append scan",
+                    ))
                 } else {
                     Ok(())
                 }
-            }).expect_err("checkpoint refusal");
+            })
+            .expect_err("checkpoint refusal");
             assert_eq!(calls, stop_at);
             assert_eq!(error.detail, "cancelled append scan");
         }

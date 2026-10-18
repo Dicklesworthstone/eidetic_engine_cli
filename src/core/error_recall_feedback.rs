@@ -22,7 +22,8 @@ const FEEDBACK_BATCH: usize = 128;
 fn unavailable() -> DbError {
     DbError::MalformedRow {
         operation: DbOperation::Query,
-        message: "Could not verify repair feedback or source proof; positive guidance withheld".to_owned(),
+        message: "Could not verify repair feedback or source proof; positive guidance withheld"
+            .to_owned(),
     }
 }
 
@@ -85,7 +86,9 @@ pub(super) fn pack_targets(
     limit: u32,
 ) -> Result<Vec<String>> {
     let mut gate = Gate::new(connection, workspace_id, fingerprint_key);
-    pack_targets_with(connection, workspace_id, fingerprint_key, limit, |ids| gate.withheld(ids))
+    pack_targets_with(connection, workspace_id, fingerprint_key, limit, |ids| {
+        gate.withheld(ids)
+    })
 }
 
 fn pack_targets_with(
@@ -120,10 +123,16 @@ fn pack_targets_with(
         let page_complete = rows.len() == remaining;
         let mut targets = Vec::with_capacity(rows.len());
         for row in &rows {
-            let target = row.get(0).and_then(Value::as_str)
-                .filter(|id| id.len() <= 128).ok_or_else(unavailable)?;
-            let cursor = row.get(1).and_then(Value::as_str)
-                .filter(|id| !id.is_empty() && id.len() <= 128).ok_or_else(unavailable)?;
+            let target = row
+                .get(0)
+                .and_then(Value::as_str)
+                .filter(|id| id.len() <= 128)
+                .ok_or_else(unavailable)?;
+            let cursor = row
+                .get(1)
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 128)
+                .ok_or_else(unavailable)?;
             if cursor == after {
                 return Err(unavailable());
             }

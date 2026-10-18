@@ -1,17 +1,18 @@
 //! Native reports through the production diagnostic, coverage and store paths.
 
-use super::*;
-use super::super::{Proof, Requirement};
 use super::super::super::{
     ToolOutput, failure_diagnostics, record_session_error_recall, structured_error_diagnostics,
 };
+use super::super::{Proof, Requirement};
+use super::*;
 
 const RUN_ID: &str = "01234567-89ab-cdef-0123-456789abcdef";
 
 fn report(rows: &[(&str, &str, &str)], skipped: usize) -> String {
     let mut text = format!(
         "{SEPARATOR}\n Nextest run ID {RUN_ID} with nextest profile: default\n{label:>12} {} tests across 2 binaries ({skipped} tests skipped)\n",
-        rows.len(), label = "Starting",
+        rows.len(),
+        label = "Starting",
     );
     for (status, binary, name) in rows {
         text.push_str(&format!("{status:>12} [   0.001s] {binary} {name}\n"));
@@ -34,11 +35,23 @@ fn output(text: String) -> ToolOutput {
 }
 
 fn failed() -> ToolOutput {
-    output(report(&[("FAIL", "cache", "cache::round_trip"), ("PASS", "other", "case")], 3))
+    output(report(
+        &[
+            ("FAIL", "cache", "cache::round_trip"),
+            ("PASS", "other", "case"),
+        ],
+        3,
+    ))
 }
 
 fn passed() -> ToolOutput {
-    output(report(&[("PASS", "other", "case"), ("PASS", "cache", "cache::round_trip")], 3))
+    output(report(
+        &[
+            ("PASS", "other", "case"),
+            ("PASS", "cache", "cache::round_trip"),
+        ],
+        3,
+    ))
 }
 
 #[test]
@@ -47,14 +60,19 @@ fn native_diagnostics_and_repairs_share_the_same_binary_qualified_subjects() {
     let original = failure.clone();
     let required = Requirement::capture(&failure, true);
     assert!(required.is_guarded());
-    assert!(failure.failed(), "native failure overrides optimistic metadata");
+    assert!(
+        failure.failed(),
+        "native failure overrides optimistic metadata"
+    );
     assert!(!failure.succeeded());
     assert!(required.is_verified_by(&Proof::capture(&passed())));
     let diagnostics = failure_diagnostics(&failure);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(
         diagnostics[0].layered_key().key,
-        structured_error_diagnostics(&failure.text)[0].layered_key().key,
+        structured_error_diagnostics(&failure.text)[0]
+            .layered_key()
+            .key,
     );
     assert_eq!(failure, original);
     assert!(decode("unrelated stdout").unwrap().is_none());
@@ -65,10 +83,13 @@ fn binary_case_parameters_inventory_and_selection_are_not_interchangeable() {
     let required = Requirement::capture(&failed(), true);
     let good = passed();
     for bad in [
-        good.text.replace("cache cache::round_trip", "replacement cache::round_trip"),
+        good.text
+            .replace("cache cache::round_trip", "replacement cache::round_trip"),
         good.text.replace("cache::round_trip", "cache::Round_trip"),
         good.text.replace("other case", "other another_case"),
-        good.text.replace("3 tests skipped", "4 tests skipped").replace("3 skipped", "4 skipped"),
+        good.text
+            .replace("3 tests skipped", "4 tests skipped")
+            .replace("3 skipped", "4 skipped"),
         good.text.replace("2 binaries", "3 binaries"),
         report(&[("PASS", "other", "case")], 3),
         report(&[], 5),
@@ -86,11 +107,20 @@ fn binary_case_parameters_inventory_and_selection_are_not_interchangeable() {
 #[test]
 fn complete_inventory_checks_every_failure_beyond_the_diagnostic_cap() {
     let names: Vec<_> = (0..6).map(|index| format!("case_{index}")).collect();
-    let rows: Vec<_> = names.iter().map(|name| ("FAIL", "cache", name.as_str())).collect();
+    let rows: Vec<_> = names
+        .iter()
+        .map(|name| ("FAIL", "cache", name.as_str()))
+        .collect();
     let failure = output(report(&rows, 0));
-    assert_eq!(failure_diagnostics(&failure).len(), MAX_DIAGNOSTICS_PER_FAILURE);
+    assert_eq!(
+        failure_diagnostics(&failure).len(),
+        MAX_DIAGNOSTICS_PER_FAILURE
+    );
     let required = Requirement::capture(&failure, true);
-    let mut rows: Vec<_> = names.iter().map(|name| ("PASS", "cache", name.as_str())).collect();
+    let mut rows: Vec<_> = names
+        .iter()
+        .map(|name| ("PASS", "cache", name.as_str()))
+        .collect();
     assert!(required.is_verified_by(&Proof::capture(&output(report(&rows, 0)))));
     rows[5].2 = "replacement";
     assert!(!required.is_verified_by(&Proof::capture(&output(report(&rows, 0)))));
@@ -163,7 +193,11 @@ fn captured_libtest_stdout_is_not_another_run_or_diagnostic_class() {
     );
     let diagnostics = failure_diagnostics(&failure);
     assert_eq!(diagnostics.len(), 1);
-    assert!(!diagnostics[0].message_template.contains("CAPTURED_SENTINEL"));
+    assert!(
+        !diagnostics[0]
+            .message_template
+            .contains("CAPTURED_SENTINEL")
+    );
     assert!(Requirement::capture(&failure, true).is_verified_by(&Proof::capture(&passed())));
     let captured_success = passed().text.replace(
         "        PASS [   0.001s] cache",

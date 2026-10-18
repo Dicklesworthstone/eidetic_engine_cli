@@ -39,10 +39,14 @@ impl GrowthBudget {
 
     fn existing(&mut self, bytes: usize, reembed: bool) -> Result<(), IncrementalFallback> {
         if self.existing >= MAX_LEXICAL_DELTA_DOCUMENTS {
-            return Err(over_limit("bulk intake exceeds the existing-document mutation budget"));
+            return Err(over_limit(
+                "bulk intake exceeds the existing-document mutation budget",
+            ));
         }
         if reembed && self.rewrites >= self.rewrite_limit {
-            return Err(over_limit("bulk intake exceeds the retained-input rewrite budget"));
+            return Err(over_limit(
+                "bulk intake exceeds the retained-input rewrite budget",
+            ));
         }
         // Do not partially spend a budget on a refused operation. Additions,
         // metadata refreshes, body rewrites and removal IDs all charge here.
@@ -106,7 +110,14 @@ fn plan_with_checkpoint(
     identity: String,
     checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
 ) -> Result<Option<Delta>, IncrementalFallback> {
-    plan_with_digest(live, inputs, documents, identity, document_digest, checkpoint)
+    plan_with_digest(
+        live,
+        inputs,
+        documents,
+        identity,
+        document_digest,
+        checkpoint,
+    )
 }
 
 fn plan_with_digest(
@@ -118,7 +129,11 @@ fn plan_with_digest(
     mut checkpoint: impl FnMut() -> Result<(), IncrementalFallback>,
 ) -> Result<Option<Delta>, IncrementalFallback> {
     checkpoint()?;
-    let Some(growth) = documents.len().checked_sub(live.len()).filter(|count| *count > 0) else {
+    let Some(growth) = documents
+        .len()
+        .checked_sub(live.len())
+        .filter(|count| *count > 0)
+    else {
         // No growing import: retain the ordinary planner's refusal and its
         // established metadata/removal behavior, including empty final stores.
         return Ok(None);
@@ -236,11 +251,20 @@ mod tests {
 
     fn planned(original: &[IndexableDocument], current: &[IndexableDocument]) -> Delta {
         // Exercise the production fallback entry, not just the new collector.
-        super::super::diff(&digests(original), &inputs(original), current, IDENTITY.to_owned())
-            .expect("admitted growth")
+        super::super::diff(
+            &digests(original),
+            &inputs(original),
+            current,
+            IDENTITY.to_owned(),
+        )
+        .expect("admitted growth")
     }
 
-    fn assert_reconstructs(original: &[IndexableDocument], current: &[IndexableDocument], delta: &Delta) {
+    fn assert_reconstructs(
+        original: &[IndexableDocument],
+        current: &[IndexableDocument],
+        delta: &Delta,
+    ) {
         let mut applied = digests(original);
         for id in &delta.removals {
             assert!(applied.remove(id).is_some());
@@ -255,12 +279,17 @@ mod tests {
         let mut current = documents(30_000);
         for document in &mut current[..32] {
             document.title = Some("updated session title".to_owned());
-            document.metadata.insert("message_count".to_owned(), "2000".to_owned());
+            document
+                .metadata
+                .insert("message_count".to_owned(), "2000".to_owned());
         }
         let delta = planned(&original, &current);
         assert_eq!(delta.upserts.len(), 10_032);
         assert!(delta.removals.is_empty());
-        assert_eq!(delta.vector_upserts(IDENTITY).expect("same identity").len(), 10_000);
+        assert_eq!(
+            delta.vector_upserts(IDENTITY).expect("same identity").len(),
+            10_000
+        );
         assert_reconstructs(&original, &current, &delta);
         assert!(delta.vector_upserts("other producer").is_err());
     }
@@ -273,7 +302,9 @@ mod tests {
             document.content.push_str(" repaired");
         }
         for document in &mut current[16..48] {
-            document.metadata.insert("revision".to_owned(), "2".to_owned());
+            document
+                .metadata
+                .insert("revision".to_owned(), "2".to_owned());
         }
         current.extend(documents(1524).into_iter().skip(1024));
         current.reverse();
@@ -292,11 +323,19 @@ mod tests {
             document.content.push_str(" changed");
         }
         let delta = planned(&original, &current);
-        assert_eq!(delta.vector_upserts(IDENTITY).expect("exact limit").len(), 20_256);
+        assert_eq!(
+            delta.vector_upserts(IDENTITY).expect("exact limit").len(),
+            20_256
+        );
         current[256].content.push_str(" too much old-corpus churn");
         current.rotate_left(1024);
-        let error = try_plan(&digests(&original), &inputs(&original), &current, IDENTITY.to_owned())
-            .expect_err("large growth does not enlarge the old rewrite budget");
+        let error = try_plan(
+            &digests(&original),
+            &inputs(&original),
+            &current,
+            IDENTITY.to_owned(),
+        )
+        .expect_err("large growth does not enlarge the old rewrite budget");
         assert!(error.detail.contains("retained-input rewrite budget"));
     }
 
@@ -304,7 +343,9 @@ mod tests {
     fn withdrawals_and_metadata_updates_share_one_existing_mutation_budget() {
         let mut budget = GrowthBudget::new(100_000);
         for number in 0..MAX_LEXICAL_DELTA_DOCUMENTS {
-            budget.existing(number % 2, false).expect("exact existing bound");
+            budget
+                .existing(number % 2, false)
+                .expect("exact existing bound");
         }
         assert!(budget.existing(0, false).is_err());
         assert!(budget.existing(0, true).is_err());
@@ -325,9 +366,13 @@ mod tests {
 
         let mut budget = GrowthBudget::new(4);
         let removed_id = "doc-資料é";
-        budget.total.admit(super::super::MAX_LEXICAL_DELTA_BYTES - removed_id.len())
+        budget
+            .total
+            .admit(super::super::MAX_LEXICAL_DELTA_BYTES - removed_id.len())
             .expect("new payload");
-        budget.existing(removed_id.len(), false).expect("removal spends UTF-8 bytes");
+        budget
+            .existing(removed_id.len(), false)
+            .expect("removal spends UTF-8 bytes");
         assert!(budget.total.admit(1).is_err());
         assert!(budget.existing(usize::MAX, false).is_err());
         assert_eq!(budget.existing, 1);
@@ -340,10 +385,16 @@ mod tests {
         let input = inputs(&original);
         for duplicate in [0, 127] {
             let mut current = documents(128);
-            current[0].metadata.insert("revision".to_owned(), "2".to_owned());
+            current[0]
+                .metadata
+                .insert("revision".to_owned(), "2".to_owned());
             current.push(current[duplicate].clone());
-            assert_eq!(try_plan(&live, &input, &current, IDENTITY.to_owned())
-                .expect_err("duplicate").reason, IncrementalFallbackReason::CorpusRevisionMismatch);
+            assert_eq!(
+                try_plan(&live, &input, &current, IDENTITY.to_owned())
+                    .expect_err("duplicate")
+                    .reason,
+                IncrementalFallbackReason::CorpusRevisionMismatch
+            );
         }
         let current = documents(128);
         for replace_key in [false, true] {
@@ -352,9 +403,12 @@ mod tests {
             if replace_key {
                 damaged.insert("foreign-identity".to_owned(), value);
             }
-            assert_eq!(plan_with_checkpoint(&live, &damaged, &current, IDENTITY.to_owned(), || Ok(()))
-                .expect_err("complete inputs required").reason,
-                IncrementalFallbackReason::CorpusRevisionMismatch);
+            assert_eq!(
+                plan_with_checkpoint(&live, &damaged, &current, IDENTITY.to_owned(), || Ok(()))
+                    .expect_err("complete inputs required")
+                    .reason,
+                IncrementalFallbackReason::CorpusRevisionMismatch
+            );
         }
     }
 
@@ -364,13 +418,22 @@ mod tests {
         let mut current = original[1..].to_vec();
         current[0].title = Some("updated".to_owned());
         for number in 0..16 {
-            current.push(IndexableDocument::new(format!("new-{number}"), &original[0].content));
+            current.push(IndexableDocument::new(
+                format!("new-{number}"),
+                &original[0].content,
+            ));
         }
         let mut delta = planned(&original, &current);
         assert_eq!(delta.vector_upserts(IDENTITY).expect("new IDs").len(), 16);
         assert_eq!(delta.removals, [original[0].id.clone()]);
         delta.upserts[0].content.push_str(" changed after planning");
-        assert_eq!(delta.vector_upserts(IDENTITY).expect("use-time digest").len(), 17);
+        assert_eq!(
+            delta
+                .vector_upserts(IDENTITY)
+                .expect("use-time digest")
+                .len(),
+            17
+        );
         assert_reconstructs(&original, &current, &planned(&original, &current));
     }
 
@@ -378,8 +441,17 @@ mod tests {
     fn non_growing_sources_retain_the_ordinary_planner() {
         let original = documents(8);
         for current in [&original[..], &original[..1], &[][..]] {
-            assert!(plan_with_checkpoint(&digests(&original), &inputs(&original), current,
-                IDENTITY.to_owned(), || Ok(())).expect("no growth").is_none());
+            assert!(
+                plan_with_checkpoint(
+                    &digests(&original),
+                    &inputs(&original),
+                    current,
+                    IDENTITY.to_owned(),
+                    || Ok(())
+                )
+                .expect("no growth")
+                .is_none()
+            );
         }
     }
 
@@ -391,21 +463,28 @@ mod tests {
         let live = digests(&original);
         let input = inputs(&original);
         let mut total = 0;
-        assert!(plan_with_checkpoint(&live, &input, &current, IDENTITY.to_owned(), || {
-            total += 1;
-            Ok(())
-        }).expect("count checkpoints").is_some());
+        assert!(
+            plan_with_checkpoint(&live, &input, &current, IDENTITY.to_owned(), || {
+                total += 1;
+                Ok(())
+            })
+            .expect("count checkpoints")
+            .is_some()
+        );
         for stop_at in 1..=total {
             let mut calls = 0;
             let error = plan_with_checkpoint(&live, &input, &current, IDENTITY.to_owned(), || {
                 calls += 1;
                 if calls == stop_at {
-                    Err(incremental_fallback(IncrementalFallbackReason::TierUnavailable,
-                        "cancelled growth planning"))
+                    Err(incremental_fallback(
+                        IncrementalFallbackReason::TierUnavailable,
+                        "cancelled growth planning",
+                    ))
                 } else {
                     Ok(())
                 }
-            }).expect_err("cancelled before ownership escapes");
+            })
+            .expect_err("cancelled before ownership escapes");
             assert_eq!(calls, stop_at);
             assert_eq!(error.detail, "cancelled growth planning");
         }

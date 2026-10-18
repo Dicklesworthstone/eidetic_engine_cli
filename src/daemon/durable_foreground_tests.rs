@@ -111,7 +111,8 @@ fn pre_cancelled_request_does_not_even_recover_an_old_orphan() -> TestResult {
 }
 
 #[test]
-fn production_runner_journals_every_requested_job_without_accumulating_tick_reports() -> TestResult {
+fn production_runner_journals_every_requested_job_without_accumulating_tick_reports() -> TestResult
+{
     let (_temp, options) = fixture()?;
     let root = Path::new(&options.workspace);
     let report = run_daemon_foreground_durable(&options)?;
@@ -130,14 +131,20 @@ fn production_runner_journals_every_requested_job_without_accumulating_tick_repo
         assert_eq!(pair[0].tick, index as u32 / 2 + 1);
         assert_eq!(pair[0].runner_job_id, format!("job-{:06}", index % 2 + 1));
         assert_eq!(pair[0].status, "running");
-        assert_eq!(pair[1].status, if index % 2 == 0 { "success" } else { "skipped" });
+        assert_eq!(
+            pair[1].status,
+            if index % 2 == 0 { "success" } else { "skipped" }
+        );
         assert_eq!(pair[0].daemon_job_key, pair[1].daemon_job_key);
         assert_eq!(pair[1].run_id, report.run_id);
         assert!(!pair[1].durable_mutation);
         assert_eq!(pair[1].items_processed, Some(0));
     }
     assert_eq!(daemon_status_report(root, &[], 0)?.open_job_count, 0);
-    assert_eq!(recover_orphaned_daemon_jobs(root, "completed run")?.open_jobs_cancelled, 0);
+    assert_eq!(
+        recover_orphaned_daemon_jobs(root, "completed run")?.open_jobs_cancelled,
+        0
+    );
     assert!(!root.join(".ee/ee.db").exists());
     Ok(())
 }
@@ -154,12 +161,21 @@ fn real_handler_failure_respects_continue_on_error_and_does_not_invent_future_jo
         assert_eq!(report.failed, if continue_on_error { 3 } else { 1 });
         assert_eq!(report.skipped, if continue_on_error { 3 } else { 0 });
         assert_eq!(report.completed_jobs, if continue_on_error { 6 } else { 1 });
-        assert_eq!(report.completed_ticks, if continue_on_error { 3 } else { 0 });
+        assert_eq!(
+            report.completed_ticks,
+            if continue_on_error { 3 } else { 0 }
+        );
         assert_eq!(report.stopped_early, !continue_on_error);
         let rows = load_daemon_job_rows(&root)?;
         assert_eq!(rows.len() as u64, report.completed_jobs * 2);
         assert_eq!(rows[1].status, "failed");
-        assert!(rows[1].error.as_deref().unwrap_or("").contains("does not exist"));
+        assert!(
+            rows[1]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("does not exist")
+        );
         assert_eq!(daemon_status_report(&root, &[], 0)?.open_job_count, 0);
         assert!(!root.join(".ee/ee.db").exists());
     }
@@ -193,17 +209,28 @@ fn live_daemon_owner_prevents_production_executor_from_recovering_it() -> TestRe
 
 fn report_for(results: Vec<JobRunResult>) -> RunnerReport {
     RunnerReport {
-        results, total_duration_ms: 0, succeeded: 0, failed: 0, skipped: 0,
-        was_cancelled: false, started_at: "start".to_owned(), completed_at: "finish".to_owned(),
+        results,
+        total_duration_ms: 0,
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        was_cancelled: false,
+        started_at: "start".to_owned(),
+        completed_at: "finish".to_owned(),
     }
 }
 
 fn result_for(invocation: &DaemonJobInvocation) -> JobRunResult {
     JobRunResult {
-        job_id: "local-job".to_owned(), job_type: invocation.job_type,
-        outcome: RunOutcome::Success, duration_ms: 12, items_processed: Some(34),
-        error: None, budget_summary: None,
-        details: Some(serde_json::json!({"durableMutation": true})), dry_run: false,
+        job_id: "local-job".to_owned(),
+        job_type: invocation.job_type,
+        outcome: RunOutcome::Success,
+        duration_ms: 12,
+        items_processed: Some(34),
+        error: None,
+        budget_summary: None,
+        details: Some(serde_json::json!({"durableMutation": true})),
+        dry_run: false,
     }
 }
 
@@ -216,7 +243,14 @@ fn invalid_runner_result_shape_or_identity_cannot_be_attached_to_the_journal() -
     let before = fs::read(daemon_job_table_path(root))?;
     let good = result_for(&invocation);
     assert!(take_result(report_for(Vec::new()), "local-job", &invocation).is_err());
-    assert!(take_result(report_for(vec![good.clone(), good.clone()]), "local-job", &invocation).is_err());
+    assert!(
+        take_result(
+            report_for(vec![good.clone(), good.clone()]),
+            "local-job",
+            &invocation
+        )
+        .is_err()
+    );
     let mut wrong_id = good.clone();
     wrong_id.job_id = "unrelated".to_owned();
     let mut wrong_type = good.clone();
@@ -278,7 +312,10 @@ fn cancellation_during_interval_preserves_completed_tick_and_releases_ownership(
         }
         if let Ok(result) = receiver.try_recv() {
             flag.store(true, Ordering::Release);
-            return Err(format!("executor returned before first durable tick was observed: {result:?}").into());
+            return Err(format!(
+                "executor returned before first durable tick was observed: {result:?}"
+            )
+            .into());
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -286,15 +323,23 @@ fn cancellation_during_interval_preserves_completed_tick_and_releases_ownership(
     // sixty-second test task running when the first-tick assertion fails.
     flag.store(true, Ordering::Release);
     let result = receiver.recv_timeout(Duration::from_secs(10))?;
-    worker.join().map_err(|_| "daemon executor test worker panicked")?;
-    assert!(saw_completed_tick, "first tick must be durable before the next one runs");
+    worker
+        .join()
+        .map_err(|_| "daemon executor test worker panicked")?;
+    assert!(
+        saw_completed_tick,
+        "first tick must be durable before the next one runs"
+    );
     assert!(result.unwrap_err().contains("cancelled"));
     let rows = load_daemon_job_rows(&root)?;
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row.tick == 1));
     assert_eq!(rows[1].status, "skipped");
     assert_eq!(daemon_status_report(&root, &[], 0)?.open_job_count, 0);
-    assert_eq!(recover_orphaned_daemon_jobs(&root, "after cancellation")?.open_jobs_cancelled, 0);
+    assert_eq!(
+        recover_orphaned_daemon_jobs(&root, "after cancellation")?.open_jobs_cancelled,
+        0
+    );
     let _next_manual = try_acquire_maintenance_job_lock(&root, "next-manual")
         .map_err(|error| error.message().to_owned())?;
     Ok(())

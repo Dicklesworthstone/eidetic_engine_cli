@@ -711,7 +711,6 @@ fn plain_reader_bodies_retain_their_original_source_roles_and_kinds() {
     );
 }
 
-
 #[test]
 fn obsolete_incident_card_proof_is_withheld_without_hiding_the_observed_turn() {
     let fixture = Fixture::new();
@@ -783,7 +782,13 @@ fn incident_card_lookup_failure_is_reported_and_keeps_original_transcript_candid
     assert!(!preferred[0].incident_card);
     assert!(degraded.iter().any(|entry| {
         entry.code == "context_evidence_hit_unhydrated"
-            && entry.message.contains("original transcript candidates were retained")
+            && entry
+                .message
+                .contains("original transcript candidates were retained")
     }));
-    assert!(degraded.iter().all(|entry| !entry.message.contains("unavailable_incident_sources")));
+    assert!(
+        degraded
+            .iter()
+            .all(|entry| !entry.message.contains("unavailable_incident_sources"))
+    );
 }

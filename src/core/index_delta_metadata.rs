@@ -319,7 +319,10 @@ mod tests {
         let delta = planned(&original, &current).map_err(|error| error.detail)?;
         assert_eq!(delta.upserts.len(), 1025);
         assert!(delta.removals.is_empty());
-        assert_eq!(super::super::digest_map(&delta.upserts), super::super::digest_map(&current[3072..]));
+        assert_eq!(
+            super::super::digest_map(&delta.upserts),
+            super::super::digest_map(&current[3072..])
+        );
         Ok(())
     }
 
@@ -425,7 +428,12 @@ mod tests {
         );
         let maintenance = planned(&original, &changed).map_err(|error| error.detail)?;
         assert_eq!(maintenance.upserts.len(), original.len());
-        assert!(maintenance.vector_upserts(IDENTITY).map_err(|error| error.detail)?.is_empty());
+        assert!(
+            maintenance
+                .vector_upserts(IDENTITY)
+                .map_err(|error| error.detail)?
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -516,7 +524,10 @@ mod tests {
         // every new document identity to receive a vector.
         let delta = planned(&original, &changed).map_err(|error| error.detail)?;
         assert_eq!(
-            delta.vector_upserts(IDENTITY).map_err(|error| error.detail)?.len(),
+            delta
+                .vector_upserts(IDENTITY)
+                .map_err(|error| error.detail)?
+                .len(),
             3
         );
         Ok(())
@@ -575,13 +586,16 @@ mod tests {
         let original = documents(MAX_LEXICAL_DELTA_DOCUMENTS + 8);
         let delta = planned(&original, &original[..8]).map_err(|error| error.detail)?;
         assert_eq!(delta.removals.len(), MAX_LEXICAL_DELTA_DOCUMENTS);
-        assert!(diff_with_digest(
-            &super::super::digest_map(&original),
-            &inputs(&original),
-            &original[..7],
-            IDENTITY.to_owned(),
-            document_digest,
-        ).is_err());
+        assert!(
+            diff_with_digest(
+                &super::super::digest_map(&original),
+                &inputs(&original),
+                &original[..7],
+                IDENTITY.to_owned(),
+                document_digest,
+            )
+            .is_err()
+        );
         let maintenance = planned(&original, &original[..7]).map_err(|error| error.detail)?;
         assert_eq!(maintenance.removals.len(), MAX_LEXICAL_DELTA_DOCUMENTS + 1);
         assert!(maintenance.upserts.is_empty());
@@ -607,7 +621,12 @@ mod tests {
         let maintenance = planned(&original, &changed).map_err(|error| error.detail)?;
         assert_eq!(maintenance.removals.len(), MAX_LEXICAL_DELTA_DOCUMENTS - 1);
         assert_eq!(maintenance.upserts.len(), 2);
-        assert!(maintenance.vector_upserts(IDENTITY).map_err(|error| error.detail)?.is_empty());
+        assert!(
+            maintenance
+                .vector_upserts(IDENTITY)
+                .map_err(|error| error.detail)?
+                .is_empty()
+        );
         Ok(())
     }
 

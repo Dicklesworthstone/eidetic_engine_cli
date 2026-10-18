@@ -6,14 +6,23 @@ use crate::core::incident_card::proof::tests::{Fixture, TestResult, WS};
 use crate::models::MemoryScope;
 use std::collections::BTreeMap;
 
-fn corpus(fixture: &Fixture, scope: MemoryScope) -> TestResult<(Vec<AskCandidate>, BTreeMap<String, String>)> {
+fn corpus(
+    fixture: &Fixture,
+    scope: MemoryScope,
+) -> TestResult<(Vec<AskCandidate>, BTreeMap<String, String>)> {
     fixture.db.begin_read_snapshot()?;
     let mut candidates = Vec::new();
     let mut sources = BTreeMap::new();
     let result = append_evidence(&fixture.db, WS, scope, &mut candidates, &mut sources);
     fixture.db.rollback_read_snapshot()?;
     result.map_err(|error| format!("{error:?}"))?;
-    Ok((candidates, sources.into_iter().map(|(id, source)| (id, source.entity_revision)).collect()))
+    Ok((
+        candidates,
+        sources
+            .into_iter()
+            .map(|(id, source)| (id, source.entity_revision))
+            .collect(),
+    ))
 }
 
 #[test]
@@ -28,7 +37,11 @@ fn ask_withholds_historical_card_without_hiding_the_original_admitted_conversati
         let (candidates, sources) = corpus(&fixture, scope)?;
         assert!(!candidates.iter().any(|candidate| candidate.memory_id == id));
         assert!(!sources.contains_key(&id));
-        assert!(candidates.iter().any(|candidate| candidate.memory_id == fixture.repair));
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.memory_id == fixture.repair)
+        );
         assert!(sources.contains_key(&fixture.repair));
     }
     assert!(fixture.db.get_evidence_span(&id)?.is_some());
@@ -39,26 +52,44 @@ fn ask_withholds_historical_card_without_hiding_the_original_admitted_conversati
 fn ask_keeps_current_card_text_citation_revision_and_neutral_evidence_trust() -> TestResult {
     let fixture = Fixture::new(true)?;
     let card = fixture.current_card()?;
-    let before = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+    let before = fixture
+        .db
+        .list_evidence_spans_for_session(&fixture.session)?;
     let (candidates, sources) = corpus(&fixture, MemoryScope::Workspace)?;
-    let candidate = candidates.iter().find(|candidate| candidate.memory_id == card.id)
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.memory_id == card.id)
         .ok_or("current card must remain available")?;
     assert_eq!(candidate.content, card.reader_text().as_ref());
-    assert_eq!(candidate.provenance_uri.as_deref(), Some(card.canonical_provenance_uri().as_str()));
+    assert_eq!(
+        candidate.provenance_uri.as_deref(),
+        Some(card.canonical_provenance_uri().as_str())
+    );
     assert_eq!(sources.get(&card.id), Some(&card.pack_entity_revision()));
     assert_eq!(candidate.confidence, 0.5);
     assert_eq!(candidate.kind, "evidence");
     assert_eq!(candidate.trust_class, TrustClass::CassEvidence.as_str());
     for original in before {
-        let after = fixture.db.get_evidence_span(&original.id)?.ok_or("source missing")?;
+        let after = fixture
+            .db
+            .get_evidence_span(&original.id)?
+            .ok_or("source missing")?;
         assert_eq!(after.excerpt, original.excerpt);
         assert_eq!(after.content_hash, original.content_hash);
         assert_eq!(after.metadata_json, original.metadata_json);
     }
     let (again, revisions) = corpus(&fixture, MemoryScope::Workspace)?;
     assert_eq!(revisions, sources);
-    assert_eq!(again.iter().map(|item| (&item.memory_id, &item.content)).collect::<Vec<_>>(),
-        candidates.iter().map(|item| (&item.memory_id, &item.content)).collect::<Vec<_>>());
+    assert_eq!(
+        again
+            .iter()
+            .map(|item| (&item.memory_id, &item.content))
+            .collect::<Vec<_>>(),
+        candidates
+            .iter()
+            .map(|item| (&item.memory_id, &item.content))
+            .collect::<Vec<_>>()
+    );
     Ok(())
 }
 
@@ -66,9 +97,17 @@ fn ask_keeps_current_card_text_citation_revision_and_neutral_evidence_trust() ->
 fn ask_does_not_require_failure_proof_for_ordinary_imported_turns() -> TestResult {
     let fixture = Fixture::new(false)?;
     let (candidates, sources) = corpus(&fixture, MemoryScope::Workspace)?;
-    assert!(candidates.iter().any(|candidate| candidate.memory_id == fixture.repair));
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.memory_id == fixture.repair)
+    );
     assert!(sources.contains_key(&fixture.repair));
-    assert!(!candidates.iter().any(|candidate| candidate.memory_id == fixture.proof));
+    assert!(
+        !candidates
+            .iter()
+            .any(|candidate| candidate.memory_id == fixture.proof)
+    );
     Ok(())
 }
 
@@ -78,15 +117,24 @@ fn answer_card_checks_use_caller_snapshot_without_committing_its_mutations() -> 
     let card = fixture.current_card()?;
     let transaction: crate::db::Result<()> = fixture.db.with_transaction(|| {
         fixture.db.execute_raw(&format!(
-            "UPDATE evidence_spans SET excerpt = 'unverifiable failure source' WHERE id = '{}'", fixture.failure
+            "UPDATE evidence_spans SET excerpt = 'unverifiable failure source' WHERE id = '{}'",
+            fixture.failure
         ))?;
         let mut candidates = Vec::new();
         let mut sources = BTreeMap::new();
-        append_evidence(&fixture.db, WS, MemoryScope::Workspace, &mut candidates, &mut sources)
-            .expect("query works but the card proof is refused");
+        append_evidence(
+            &fixture.db,
+            WS,
+            MemoryScope::Workspace,
+            &mut candidates,
+            &mut sources,
+        )
+        .expect("query works but the card proof is refused");
         assert!(!candidates.iter().any(|item| item.memory_id == card.id));
         assert!(!sources.contains_key(&card.id));
-        fixture.db.execute_raw("INSERT INTO unavailable_card_test_rollback VALUES (1)")?;
+        fixture
+            .db
+            .execute_raw("INSERT INTO unavailable_card_test_rollback VALUES (1)")?;
         Ok(())
     });
     assert!(transaction.is_err());
@@ -110,20 +158,35 @@ fn existing_candidate() -> AskCandidate {
 }
 
 #[test]
-fn refusing_a_card_preserves_preexisting_candidates_and_native_citation_consistency() -> TestResult {
+fn refusing_a_card_preserves_preexisting_candidates_and_native_citation_consistency() -> TestResult
+{
     let fixture = Fixture::new(false)?;
     let card = fixture.old_card()?;
     let mut candidates = vec![existing_candidate()];
     let id = candidates[0].memory_id.clone();
     let mut sources = BTreeMap::new();
     fixture.db.begin_read_snapshot()?;
-    append_evidence(&fixture.db, WS, MemoryScope::Workspace, &mut candidates, &mut sources)
-        .map_err(|error| format!("{error:?}"))?;
+    append_evidence(
+        &fixture.db,
+        WS,
+        MemoryScope::Workspace,
+        &mut candidates,
+        &mut sources,
+    )
+    .map_err(|error| format!("{error:?}"))?;
     fixture.db.rollback_read_snapshot()?;
     assert_eq!(candidates[0].memory_id, id);
     assert!(!sources.contains_key(&card));
-    assert!(!candidates.iter().any(|candidate| candidate.memory_id == card));
-    assert!(sources.keys().all(|id| candidates.iter().any(|candidate| &candidate.memory_id == id)));
+    assert!(
+        !candidates
+            .iter()
+            .any(|candidate| candidate.memory_id == card)
+    );
+    assert!(sources.keys().all(|id| {
+        candidates
+            .iter()
+            .any(|candidate| &candidate.memory_id == id)
+    }));
     Ok(())
 }
 
@@ -131,12 +194,20 @@ fn refusing_a_card_preserves_preexisting_candidates_and_native_citation_consiste
 fn storage_failure_cannot_leave_partially_appended_answer_candidates() -> TestResult {
     let fixture = Fixture::new(true)?;
     fixture.current_card()?;
-    fixture.db.execute_raw("ALTER TABLE evidence_spans RENAME TO unavailable_card_answer_sources")?;
+    fixture
+        .db
+        .execute_raw("ALTER TABLE evidence_spans RENAME TO unavailable_card_answer_sources")?;
     let mut candidates = vec![existing_candidate()];
     let id = candidates[0].memory_id.clone();
     let mut sources = BTreeMap::new();
-    let error = append_evidence(&fixture.db, WS, MemoryScope::Workspace, &mut candidates, &mut sources)
-        .expect_err("source authority is unavailable");
+    let error = append_evidence(
+        &fixture.db,
+        WS,
+        MemoryScope::Workspace,
+        &mut candidates,
+        &mut sources,
+    )
+    .expect_err("source authority is unavailable");
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].memory_id, id);
     assert!(sources.is_empty());

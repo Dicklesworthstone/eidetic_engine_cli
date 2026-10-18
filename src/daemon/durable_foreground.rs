@@ -54,13 +54,21 @@ impl DaemonExecutionReport {
         Self {
             run_id: "dry-run".to_owned(),
             workspace: PathBuf::from(&options.workspace),
-            started_at: now.clone(), completed_at: now,
+            started_at: now.clone(),
+            completed_at: now,
             dry_run: options.dry_run,
             requested_ticks: options.tick_limit,
             requested_jobs: u64::from(options.tick_limit) * options.job_types.len() as u64,
-            completed_ticks: 0, completed_jobs: 0,
-            succeeded: 0, failed: 0, cancelled: 0, skipped: 0, timed_out: 0,
-            was_cancelled: false, stopped_early: false, recovered_orphans: 0,
+            completed_ticks: 0,
+            completed_jobs: 0,
+            succeeded: 0,
+            failed: 0,
+            cancelled: 0,
+            skipped: 0,
+            timed_out: 0,
+            was_cancelled: false,
+            stopped_early: false,
+            recovered_orphans: 0,
         }
     }
 
@@ -89,21 +97,29 @@ pub fn run_daemon_foreground_durable(
     if external_cancellation_requested(options) {
         return Err("Daemon supervisor cancelled before execution".to_owned());
     }
-    if options.dry_run { return Ok(DaemonExecutionReport::planned(options)); }
+    if options.dry_run {
+        return Ok(DaemonExecutionReport::planned(options));
+    }
     let runtime = crate::core::build_cli_runtime()
         .map_err(|error| format!("Failed to build Asupersync daemon runtime: {error}"))?;
     let task_options = options.clone();
-    let join = runtime.handle().try_spawn(async move {
-        let Some(cx) = Cx::current() else {
-            return Outcome::Err("Asupersync daemon task started without an ambient Cx".to_owned());
-        };
-        run_daemon_foreground_durable_supervised(&cx, &task_options).await
-    }).map_err(|error| format!("Failed to spawn Asupersync daemon supervisor: {error}"))?;
+    let join = runtime
+        .handle()
+        .try_spawn(async move {
+            let Some(cx) = Cx::current() else {
+                return Outcome::Err(
+                    "Asupersync daemon task started without an ambient Cx".to_owned(),
+                );
+            };
+            run_daemon_foreground_durable_supervised(&cx, &task_options).await
+        })
+        .map_err(|error| format!("Failed to spawn Asupersync daemon supervisor: {error}"))?;
     match runtime.block_on(join) {
         Outcome::Ok(report) => Ok(report),
         Outcome::Err(message) => Err(message),
         Outcome::Cancelled(reason) => Err(format!(
-            "Daemon supervisor cancelled: {}", crate::core::outcome::cancel_message(&reason),
+            "Daemon supervisor cancelled: {}",
+            crate::core::outcome::cancel_message(&reason),
         )),
         Outcome::Panicked(payload) => Err(format!("Daemon supervisor panicked: {payload}")),
     }
@@ -119,10 +135,16 @@ pub async fn run_daemon_foreground_durable_supervised(
     cx: &Cx,
     options: &DaemonForegroundOptions,
 ) -> Outcome<DaemonExecutionReport, String> {
-    if let Err(error) = validate_request(options) { return Outcome::Err(error); }
-    if let Some(reason) = cancellation_reason(cx, options) { return Outcome::Cancelled(reason); }
+    if let Err(error) = validate_request(options) {
+        return Outcome::Err(error);
+    }
+    if let Some(reason) = cancellation_reason(cx, options) {
+        return Outcome::Cancelled(reason);
+    }
     let mut summary = DaemonExecutionReport::planned(options);
-    if options.dry_run { return Outcome::Ok(summary); }
+    if options.dry_run {
+        return Outcome::Ok(summary);
+    }
     let mut execution = match DaemonExecution::begin(options) {
         Ok(execution) => execution,
         Err(error) => return Outcome::Err(error),
@@ -133,19 +155,25 @@ pub async fn run_daemon_foreground_durable_supervised(
 
     loop {
         if let Some(reason) = cancellation_reason(cx, options) {
-            return stop_with(&mut execution, "supervisor cancellation", Outcome::Cancelled(reason));
+            return stop_with(
+                &mut execution,
+                "supervisor cancellation",
+                Outcome::Cancelled(reason),
+            );
         }
         // Share the existing manual/daemon maintenance exclusion contract.
         // Hold this only through the handler and terminal sync, never while
         // waiting for the next tick or yielding to another runtime task.
-        let maintenance = match try_acquire_maintenance_job_lock(
-            execution.workspace(), execution.run_id(),
-        ) {
-            Ok(guard) => guard,
-            Err(error) => return Outcome::Err(format!(
-                "Cannot acquire daemon maintenance ownership: {}", error.message(),
-            )),
-        };
+        let maintenance =
+            match try_acquire_maintenance_job_lock(execution.workspace(), execution.run_id()) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    return Outcome::Err(format!(
+                        "Cannot acquire daemon maintenance ownership: {}",
+                        error.message(),
+                    ));
+                }
+            };
         let invocation = match execution.begin_next_job() {
             Ok(Some(invocation)) => invocation,
             Ok(None) => break,
@@ -156,7 +184,8 @@ pub async fn run_daemon_foreground_durable_supervised(
         runner_options.workspace_path = Some(execution.workspace().to_path_buf());
         let mut runner = ManualRunner::new(runner_options);
         let runner_id = runner.schedule(
-            invocation.job_type, JobPriority::Normal,
+            invocation.job_type,
+            JobPriority::Normal,
             Some(format!("daemon foreground tick {}", invocation.tick)),
         );
         // This is the production handler dispatch, not a synthetic result or
@@ -167,7 +196,11 @@ pub async fn run_daemon_foreground_durable_supervised(
             Ok(result) => result,
             Err(error) => {
                 if let Some(reason) = cancellation_reason(cx, options) {
-                    return stop_with(&mut execution, "handler interrupted", Outcome::Cancelled(reason));
+                    return stop_with(
+                        &mut execution,
+                        "handler interrupted",
+                        Outcome::Cancelled(reason),
+                    );
                 }
                 return stop_with(&mut execution, &error, Outcome::Err(error.clone()));
             }
@@ -188,14 +221,22 @@ pub async fn run_daemon_foreground_durable_supervised(
             if let Err(error) = execution.stop("runner requested stop after durable completion") {
                 return Outcome::Err(error);
             }
-            if let Some(reason) = cancellation_reason(cx, options) { return Outcome::Cancelled(reason); }
+            if let Some(reason) = cancellation_reason(cx, options) {
+                return Outcome::Cancelled(reason);
+            }
             break;
         }
-        if summary.completed_jobs == summary.requested_jobs { break; }
+        if summary.completed_jobs == summary.requested_jobs {
+            break;
+        }
         let last_job_in_tick = summary.completed_jobs % options.job_types.len() as u64 == 0;
         if last_job_in_tick {
             if let Some(reason) = wait_interval(cx, options).await {
-                return stop_with(&mut execution, "cancelled between daemon ticks", Outcome::Cancelled(reason));
+                return stop_with(
+                    &mut execution,
+                    "cancelled between daemon ticks",
+                    Outcome::Cancelled(reason),
+                );
             }
         } else {
             // Also permit fair scheduling and cancellation between jobs when
@@ -222,14 +263,24 @@ fn validate_request(options: &DaemonForegroundOptions) -> Result<(), String> {
 }
 
 fn external_cancellation_requested(options: &DaemonForegroundOptions) -> bool {
-    options.runner_options.cancellation_flag.as_ref()
+    options
+        .runner_options
+        .cancellation_flag
+        .as_ref()
         .is_some_and(|flag| flag.load(Ordering::Acquire))
-        || options.runner_options.cancellation_cx.as_ref().is_some_and(Cx::is_cancel_requested)
+        || options
+            .runner_options
+            .cancellation_cx
+            .as_ref()
+            .is_some_and(Cx::is_cancel_requested)
 }
 
 fn cancellation_reason(cx: &Cx, options: &DaemonForegroundOptions) -> Option<CancelReason> {
     if cx.checkpoint().is_err() {
-        Some(cx.cancel_reason().unwrap_or_else(CancelReason::parent_cancelled))
+        Some(
+            cx.cancel_reason()
+                .unwrap_or_else(CancelReason::parent_cancelled),
+        )
     } else if external_cancellation_requested(options) {
         Some(CancelReason::parent_cancelled())
     } else {
@@ -239,9 +290,13 @@ fn cancellation_reason(cx: &Cx, options: &DaemonForegroundOptions) -> Option<Can
 
 async fn wait_interval(cx: &Cx, options: &DaemonForegroundOptions) -> Option<CancelReason> {
     let mut remaining = options.interval_ms;
-    if remaining == 0 { yield_now().await; }
+    if remaining == 0 {
+        yield_now().await;
+    }
     while remaining > 0 {
-        if let Some(reason) = cancellation_reason(cx, options) { return Some(reason); }
+        if let Some(reason) = cancellation_reason(cx, options) {
+            return Some(reason);
+        }
         let slice = remaining.min(SLEEP_SLICE_MS);
         sleep(cx.now(), Duration::from_millis(slice)).await;
         remaining -= slice;
@@ -250,12 +305,18 @@ async fn wait_interval(cx: &Cx, options: &DaemonForegroundOptions) -> Option<Can
 }
 
 fn take_result(
-    mut report: RunnerReport, runner_id: &str, invocation: &DaemonJobInvocation,
+    mut report: RunnerReport,
+    runner_id: &str,
+    invocation: &DaemonJobInvocation,
 ) -> Result<JobRunResult, String> {
     if report.results.len() != 1 {
-        return Err("Single-job daemon handler did not return exactly one terminal result".to_owned());
+        return Err(
+            "Single-job daemon handler did not return exactly one terminal result".to_owned(),
+        );
     }
-    let mut result = report.results.pop()
+    let mut result = report
+        .results
+        .pop()
         .ok_or_else(|| "Daemon handler result disappeared".to_owned())?;
     if result.job_id != runner_id || result.job_type != invocation.job_type || result.dry_run {
         return Err("Daemon handler returned a result for a different invocation".to_owned());
@@ -267,7 +328,9 @@ fn take_result(
 }
 
 fn stop_with<T>(
-    execution: &mut DaemonExecution, reason: &str, outcome: Outcome<T, String>,
+    execution: &mut DaemonExecution,
+    reason: &str,
+    outcome: Outcome<T, String>,
 ) -> Outcome<T, String> {
     match execution.stop(reason) {
         Ok(()) => outcome,

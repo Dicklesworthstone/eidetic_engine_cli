@@ -12,7 +12,8 @@ use serde_json::json;
 
 const WS: &str = "wsp_01234567890123456789012345";
 const ERROR: &str = "error[E0308]: mismatched types\n --> src/widget.rs:3:5\n";
-const FIX: &str = "I fixed the mismatched types by converting the widget return value in src/widget.rs.";
+const FIX: &str =
+    "I fixed the mismatched types by converting the widget return value in src/widget.rs.";
 
 struct Fixture {
     db: DbConnection,
@@ -24,64 +25,108 @@ impl Fixture {
     fn new() -> Self {
         let db = DbConnection::open_memory().unwrap();
         db.migrate().unwrap();
-        db.insert_workspace(WS, &CreateWorkspaceInput {
-            path: "/tmp/cass-stream-repair".to_owned(), name: None,
-        }).unwrap();
-        let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x60_5100))
-            .to_string();
-        db.insert_session(&session, &CreateSessionInput {
-            workspace_id: WS.to_owned(),
-            cass_session_id: "/sessions/stream-repair.jsonl".to_owned(),
-            source_path: None, agent_name: Some("codex".to_owned()), model: None,
-            started_at: None, ended_at: None, message_count: 0, token_count: None,
-            content_hash: format!("blake3:{}", blake3::hash(b"stream-repair").to_hex()),
-            metadata_json: None,
-        }).unwrap();
-        Self { db, session, line: 0 }
+        db.insert_workspace(
+            WS,
+            &CreateWorkspaceInput {
+                path: "/tmp/cass-stream-repair".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        let session =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x60_5100)).to_string();
+        db.insert_session(
+            &session,
+            &CreateSessionInput {
+                workspace_id: WS.to_owned(),
+                cass_session_id: "/sessions/stream-repair.jsonl".to_owned(),
+                source_path: None,
+                agent_name: Some("codex".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 0,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(b"stream-repair").to_hex()),
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        Self {
+            db,
+            session,
+            line: 0,
+        }
     }
 
     fn add(&mut self, kind: &str, role: &str, value: Value) -> String {
         self.line += 1;
         let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
             0x60_5200 + u128::from(self.line),
-        )).to_string();
+        ))
+        .to_string();
         let excerpt = value.to_string();
-        self.db.insert_evidence_span(&id, &CreateEvidenceSpanInput {
-            workspace_id: WS.to_owned(), session_id: self.session.clone(), memory_id: None,
-            producer_kind: EvidenceProducerKind::CassImport,
-            cass_span_id: format!("stream:{}", self.line), span_kind: kind.to_owned(),
-            start_line: self.line, end_line: self.line, start_byte: None, end_byte: None,
-            role: Some(role.to_owned()),
-            content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
-            excerpt, metadata_json: None, inherited_redaction_classes: Vec::new(),
-        }).unwrap();
+        self.db
+            .insert_evidence_span(
+                &id,
+                &CreateEvidenceSpanInput {
+                    workspace_id: WS.to_owned(),
+                    session_id: self.session.clone(),
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("stream:{}", self.line),
+                    span_kind: kind.to_owned(),
+                    start_line: self.line,
+                    end_line: self.line,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some(role.to_owned()),
+                    content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                    excerpt,
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .unwrap();
         id
     }
 
     fn call(&mut self, id: &str, command: &str) {
-        let _ = self.add("tool_call", "assistant", json!({
-            "type":"response_item","payload":{
-                "type":"function_call","name":"exec_command","call_id":id,
-                "arguments":json!({"cmd":command}).to_string()
-            }
-        }));
+        let _ = self.add(
+            "tool_call",
+            "assistant",
+            json!({
+                "type":"response_item","payload":{
+                    "type":"function_call","name":"exec_command","call_id":id,
+                    "arguments":json!({"cmd":command}).to_string()
+                }
+            }),
+        );
     }
 
     fn poll(&mut self, id: &str, chars: &str) {
-        let _ = self.add("tool_call", "assistant", json!({
-            "type":"response_item","payload":{
-                "type":"function_call","name":"write_stdin","call_id":id,
-                "arguments":json!({"session_id":42,"chars":chars}).to_string()
-            }
-        }));
+        let _ = self.add(
+            "tool_call",
+            "assistant",
+            json!({
+                "type":"response_item","payload":{
+                    "type":"function_call","name":"write_stdin","call_id":id,
+                    "arguments":json!({"session_id":42,"chars":chars}).to_string()
+                }
+            }),
+        );
     }
 
     fn raw_result(&mut self, id: &str, output: &str) -> String {
-        self.add("tool_result", "tool", json!({
-            "type":"response_item","payload":{
-                "type":"function_call_output","call_id":id,"output":output
-            }
-        }))
+        self.add(
+            "tool_result",
+            "tool",
+            json!({
+                "type":"response_item","payload":{
+                    "type":"function_call_output","call_id":id,"output":output
+                }
+            }),
+        )
     }
 
     fn result(&mut self, id: &str, body: &str, code: Option<i32>) -> String {
@@ -89,13 +134,20 @@ impl Fixture {
             || "Process running with session ID 42".to_owned(),
             |code| format!("Process exited with code {code}"),
         );
-        self.raw_result(id, &format!("Wall time: 0.01 seconds\n{status}\nOutput:\n{body}"))
+        self.raw_result(
+            id,
+            &format!("Wall time: 0.01 seconds\n{status}\nOutput:\n{body}"),
+        )
     }
 
     fn repair(&mut self) -> String {
-        self.add("message", "assistant", json!({
-            "type":"assistant","message":{"role":"assistant","content":FIX}
-        }))
+        self.add(
+            "message",
+            "assistant",
+            json!({
+                "type":"assistant","message":{"role":"assistant","content":FIX}
+            }),
+        )
     }
 
     fn derive(&self) -> CassErrorRecallReport {
@@ -176,11 +228,25 @@ fn streamed_retry_closes_the_durable_recall_and_pack_loop_with_original_provenan
     assert!(recall.helpful_repairs.contains(&fix));
     assert!(recall.helpful_repairs.contains(&card));
     assert_eq!(recall.proof_links, vec![proof.clone()]);
-    let links = f.db.list_error_repair_links(WS, &diagnostic().layered_key().key).unwrap();
-    assert!(links.iter().all(|link| link.evidence_ref.as_deref() == Some(failure.as_str())));
+    let links =
+        f.db.list_error_repair_links(WS, &diagnostic().layered_key().key)
+            .unwrap();
+    assert!(
+        links
+            .iter()
+            .all(|link| link.evidence_ref.as_deref() == Some(failure.as_str()))
+    );
     let evidence = recalled_repair_evidence(&f.db, WS, &recall).unwrap();
-    assert!(evidence.iter().any(|item| item.evidence_id == fix && item.text.is_some()));
-    assert!(evidence.iter().any(|item| item.evidence_id == proof && item.text.is_none()));
+    assert!(
+        evidence
+            .iter()
+            .any(|item| item.evidence_id == fix && item.text.is_some())
+    );
+    assert!(
+        evidence
+            .iter()
+            .any(|item| item.evidence_id == proof && item.text.is_none())
+    );
     let seed = pack_error_recall_query_seed(&f.db, WS, &diagnostic()).unwrap();
     assert!(seed.contains("prior fix:"));
     assert!(seed.contains("converting"));
@@ -188,10 +254,18 @@ fn streamed_retry_closes_the_durable_recall_and_pack_loop_with_original_provenan
         let after = f.db.get_evidence_span(&source.id).unwrap().unwrap();
         assert_eq!(after.excerpt, source.excerpt);
         assert_eq!(after.content_hash, source.content_hash);
-        assert_eq!(after.canonical_provenance_uri(), source.canonical_provenance_uri());
+        assert_eq!(
+            after.canonical_provenance_uri(),
+            source.canonical_provenance_uri()
+        );
     }
     assert_eq!(f.derive().incident_cards_recorded, 0);
-    assert_eq!(f.db.list_error_repair_links(WS, &diagnostic().layered_key().key).unwrap().len(), links.len());
+    assert_eq!(
+        f.db.list_error_repair_links(WS, &diagnostic().layered_key().key)
+            .unwrap()
+            .len(),
+        links.len()
+    );
 }
 
 #[test]
@@ -201,13 +275,19 @@ fn a_false_status_inside_captured_json_cannot_poison_the_verified_retry() {
     let _ = f.repair();
     f.call("retry", "cargo check");
     let prefix = "{\"reason\":\"compiler-artifact\",\"filenames\":[\"";
-    let tail = "error: captured artifact label\"]}\n{\"reason\":\"build-finished\",\"success\":true}\n";
+    let tail =
+        "error: captured artifact label\"]}\n{\"reason\":\"build-finished\",\"success\":true}\n";
     let _ = f.result("retry", prefix, None);
     f.no_repair();
     f.poll("end", "");
     let proof = f.result("end", tail, Some(0));
     assert_eq!(f.derive().resolved_failures, 1);
-    assert_eq!(error_recall_report(&f.db, WS, &diagnostic()).unwrap().proof_links, vec![proof]);
+    assert_eq!(
+        error_recall_report(&f.db, WS, &diagnostic())
+            .unwrap()
+            .proof_links,
+        vec![proof]
+    );
 }
 
 #[test]
@@ -219,7 +299,10 @@ fn invalidated_failed_streams_do_not_gain_authority_from_an_unrelated_completion
         if nonempty_stdin {
             let _ = f.result("bad", "", Some(101));
         } else {
-            let _ = f.raw_result("bad", "Wall time: 0.1 seconds\nProcess exited with code unknown\nOutput:\n");
+            let _ = f.raw_result(
+                "bad",
+                "Wall time: 0.1 seconds\nProcess exited with code unknown\nOutput:\n",
+            );
         }
         let _ = f.repair();
         f.call("retry", "cargo check");
@@ -274,6 +357,12 @@ fn unresolved_failures_do_not_block_an_independent_completed_failure() {
     let recall = error_recall_report(&f.db, WS, &diagnostic()).unwrap();
     assert!(recall.helpful_repairs.contains(&fix));
     assert_eq!(recall.proof_links, vec![proof]);
-    let links = f.db.list_error_repair_links(WS, &diagnostic().layered_key().key).unwrap();
-    assert!(links.iter().all(|link| link.evidence_ref.as_deref() == Some(completed_failure.as_str())));
+    let links =
+        f.db.list_error_repair_links(WS, &diagnostic().layered_key().key)
+            .unwrap();
+    assert!(
+        links
+            .iter()
+            .all(|link| link.evidence_ref.as_deref() == Some(completed_failure.as_str()))
+    );
 }

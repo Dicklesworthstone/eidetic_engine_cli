@@ -24,11 +24,7 @@ fn fixture() -> (MemoryGraphProjection, PackDnaInput) {
             CgseValue::String("supports".to_owned()),
         );
         graph
-            .add_edge_with_attrs(
-                &mem(a).to_string(),
-                &mem(b).to_string(),
-                attrs,
-            )
+            .add_edge_with_attrs(&mem(a).to_string(), &mem(b).to_string(), attrs)
             .unwrap();
     }
     (
@@ -106,7 +102,11 @@ fn deadline_retains_real_topology_and_original_snapshot_without_ppr_claims() {
     assert!(dna.ppr_neighbors.is_empty());
     assert_eq!(dna.degraded.len(), 1);
     assert_eq!(dna.degraded[0].code, GRAPH_PACK_DNA_TIMEOUT_CODE);
-    assert!(dna.degraded[0].message.contains("unavailable, not evidence of no neighbors"));
+    assert!(
+        dna.degraded[0]
+            .message
+            .contains("unavailable, not evidence of no neighbors")
+    );
     assert_eq!(projection.graph.edge_count(), 2);
 }
 
@@ -165,7 +165,9 @@ fn malformed_checkpoint_fields_are_rejected_by_the_existing_strict_merger() {
                 topology.parts.pop();
             }
             1 => topology.parts.push(topology.parts[0].clone()),
-            _ => topology.parts.push(PackDnaPartialResult::PprNeighbors(Vec::new())),
+            _ => topology
+                .parts
+                .push(PackDnaPartialResult::PprNeighbors(Vec::new())),
         }
         let error = recover(
             &current_or_testing_cx(),
@@ -262,7 +264,10 @@ fn only_optional_ppr_availability_errors_are_degraded_without_raw_error_text() {
         finish_neighbors(Ok(expected.clone())).unwrap(),
         (expected, None)
     );
-    assert_eq!(finish_neighbors(Ok(Vec::new())).unwrap(), (Vec::new(), None));
+    assert_eq!(
+        finish_neighbors(Ok(Vec::new())).unwrap(),
+        (Vec::new(), None)
+    );
 }
 
 #[test]
@@ -320,7 +325,10 @@ fn partial_json_retains_topology_and_aggregates_its_specific_degradation() {
     assert!(value["egoSubgraph"].is_object());
     assert_eq!(value["pprNeighbors"], serde_json::json!([]));
     assert_eq!(value["degraded"][0]["code"], GRAPH_PACK_DNA_TIMEOUT_CODE);
-    assert_eq!(value["degraded"][0]["sources"], serde_json::json!(["pack_dna"]));
+    assert_eq!(
+        value["degraded"][0]["sources"],
+        serde_json::json!(["pack_dna"])
+    );
     assert!(value.get("packMemoryCount").is_none());
 }
 

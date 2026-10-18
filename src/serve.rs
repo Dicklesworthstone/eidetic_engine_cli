@@ -2757,11 +2757,19 @@ pub fn record_daemon_foreground_start(
     if options.workspace.trim().is_empty() {
         return Err("Daemon workspace must not be empty".to_owned());
     }
-    if options.tick_limit == 0 || options.tick_limit > crate::steward::MAX_DAEMON_FOREGROUND_TICK_LIMIT {
-        return Err(format!("Daemon foreground tick limit must be between 1 and {}", crate::steward::MAX_DAEMON_FOREGROUND_TICK_LIMIT));
+    if options.tick_limit == 0
+        || options.tick_limit > crate::steward::MAX_DAEMON_FOREGROUND_TICK_LIMIT
+    {
+        return Err(format!(
+            "Daemon foreground tick limit must be between 1 and {}",
+            crate::steward::MAX_DAEMON_FOREGROUND_TICK_LIMIT
+        ));
     }
     if options.interval_ms > crate::steward::MAX_DAEMON_FOREGROUND_INTERVAL_MS {
-        return Err(format!("Daemon foreground interval must be no greater than {} ms", crate::steward::MAX_DAEMON_FOREGROUND_INTERVAL_MS));
+        return Err(format!(
+            "Daemon foreground interval must be no greater than {} ms",
+            crate::steward::MAX_DAEMON_FOREGROUND_INTERVAL_MS
+        ));
     }
     if options.job_types.is_empty() {
         return Err("Daemon foreground mode requires at least one steward job type".to_owned());
@@ -2977,7 +2985,8 @@ pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, 
             Err(error) => {
                 return Err(format!(
                     "Failed to parse daemon job row {} in {}: {error}",
-                    index, table_path.display()
+                    index,
+                    table_path.display()
                 ));
             }
         }
@@ -3011,13 +3020,17 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
     let mut existing = open_daemon_job_table_for_read(table_path)
         .map_err(|error| format!("Failed to inspect daemon job tail: {error}"))?;
     use std::io::{Read as _, Seek as _, SeekFrom};
-    let size = existing.metadata()
-        .map_err(|error| format!("Failed to stat daemon job table: {error}"))?.len();
+    let size = existing
+        .metadata()
+        .map_err(|error| format!("Failed to stat daemon job table: {error}"))?
+        .len();
     if size > 0 {
-        existing.seek(SeekFrom::Start(size - 1))
+        existing
+            .seek(SeekFrom::Start(size - 1))
             .map_err(|error| format!("Failed to inspect daemon job tail: {error}"))?;
         let mut last = [0_u8; 1];
-        existing.read_exact(&mut last)
+        existing
+            .read_exact(&mut last)
             .map_err(|error| format!("Failed to inspect daemon job tail: {error}"))?;
         if last[0] != b'\n' {
             // Find the last complete line without reading the whole ledger.
@@ -3025,10 +3038,12 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
             let mut chunk = [0_u8; 8192];
             while boundary > 0 {
                 let start = boundary.saturating_sub(chunk.len() as u64);
-                existing.seek(SeekFrom::Start(start))
+                existing
+                    .seek(SeekFrom::Start(start))
                     .map_err(|error| format!("Failed to seek daemon job tail: {error}"))?;
                 let length = (boundary - start) as usize;
-                existing.read_exact(&mut chunk[..length])
+                existing
+                    .read_exact(&mut chunk[..length])
                     .map_err(|error| format!("Failed to read daemon job tail: {error}"))?;
                 if let Some(pos) = chunk[..length].iter().rposition(|byte| *byte == b'\n') {
                     boundary = start + pos as u64 + 1;
@@ -3040,16 +3055,21 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
             if tail_bytes > 1_048_576 {
                 return Err("Daemon journal tail exceeds safe recovery limit".to_owned());
             }
-            existing.seek(SeekFrom::Start(boundary))
+            existing
+                .seek(SeekFrom::Start(boundary))
                 .map_err(|error| format!("Failed to seek daemon job tail: {error}"))?;
             let mut trailing = Vec::new();
-            existing.read_to_end(&mut trailing)
+            existing
+                .read_to_end(&mut trailing)
                 .map_err(|error| format!("Failed to read daemon job tail: {error}"))?;
             match serde_json::from_slice::<DaemonJobRow>(&trailing) {
-                Err(error) if error.is_eof() => file.set_len(boundary)
-                    .map_err(|error| format!("Failed to repair incomplete daemon job tail: {error}"))?,
+                Err(error) if error.is_eof() => file.set_len(boundary).map_err(|error| {
+                    format!("Failed to repair incomplete daemon job tail: {error}")
+                })?,
                 Err(error) => return Err(format!("Malformed daemon journal tail: {error}")),
-                Ok(_) => return Err("Daemon journal tail lacks a newline; refusing append".to_owned()),
+                Ok(_) => {
+                    return Err("Daemon journal tail lacks a newline; refusing append".to_owned());
+                }
             }
         }
     }
@@ -5840,12 +5860,28 @@ mod tests {
         let mut options = DaemonForegroundOptions::new(temp.path().to_string_lossy().into_owned());
         options.tick_limit = 1_000_000;
         options.job_types = vec![JobType::HealthCheck];
-        ensure(record_daemon_foreground_start(temp.path(), &options).is_err(), true, "large ticks refused")?;
-        ensure(daemon_job_table_path(temp.path()).exists(), false, "no invalid plan persisted")?;
+        ensure(
+            record_daemon_foreground_start(temp.path(), &options).is_err(),
+            true,
+            "large ticks refused",
+        )?;
+        ensure(
+            daemon_job_table_path(temp.path()).exists(),
+            false,
+            "no invalid plan persisted",
+        )?;
         options.tick_limit = 1000;
         options.interval_ms = crate::steward::MAX_DAEMON_FOREGROUND_INTERVAL_MS + 1;
-        ensure(record_daemon_foreground_start(temp.path(), &options).is_err(), true, "interval rejected")?;
-        ensure(daemon_job_table_path(temp.path()).exists(), false, "no invalid interval plan persisted")
+        ensure(
+            record_daemon_foreground_start(temp.path(), &options).is_err(),
+            true,
+            "interval rejected",
+        )?;
+        ensure(
+            daemon_job_table_path(temp.path()).exists(),
+            false,
+            "no invalid interval plan persisted",
+        )
     }
 
     #[test]
@@ -5856,7 +5892,11 @@ mod tests {
         options.job_types = vec![JobType::HealthCheck];
         let plan = record_daemon_foreground_start(temp.path(), &options)?;
         ensure(plan.rows.len(), 1, "only current tick planned")?;
-        ensure(load_daemon_job_rows(temp.path())?.len(), 1, "bounded journal rows")
+        ensure(
+            load_daemon_job_rows(temp.path())?.len(),
+            1,
+            "bounded journal rows",
+        )
     }
 
     #[test]
@@ -5867,7 +5907,9 @@ mod tests {
         let _ = record_daemon_foreground_start(temp.path(), &options)?;
         let path = daemon_job_table_path(temp.path());
         use std::io::Write as _;
-        OpenOptions::new().append(true).open(&path)
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
             .map_err(|error| error.to_string())?
             .write_all(b"{\"status\":\"interrupted")
             .map_err(|error| error.to_string())?;
@@ -5875,7 +5917,11 @@ mod tests {
         ensure(status.open_job_count, 1, "valid preceding row preserved")?;
         let recovered = recover_orphaned_daemon_jobs(temp.path(), "restart")?;
         ensure(recovered.open_jobs_cancelled, 1, "orphan recovered")?;
-        ensure(daemon_status_report(temp.path(), &[JobType::HealthCheck], 5)?.open_job_count, 0, "status after repair")
+        ensure(
+            daemon_status_report(temp.path(), &[JobType::HealthCheck], 5)?.open_job_count,
+            0,
+            "status after repair",
+        )
     }
 
     #[cfg(unix)]

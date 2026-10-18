@@ -19,7 +19,13 @@ fn fixture() -> TestResult<DbConnection> {
     let db = DbConnection::open_memory()?;
     db.migrate()?;
     for (id, path) in [(WS, "/native-rule-repair"), (OTHER, "/other-rule-repair")] {
-        db.insert_workspace(id, &CreateWorkspaceInput { path: path.to_owned(), name: None })?;
+        db.insert_workspace(
+            id,
+            &CreateWorkspaceInput {
+                path: path.to_owned(),
+                name: None,
+            },
+        )?;
     }
     Ok(db)
 }
@@ -54,7 +60,10 @@ fn link(db: &DbConnection, ids: Vec<String>) -> TestResult {
         db,
         WS,
         &from_rustc(Some("E0277"), "trait bound failed"),
-        &ErrorRepairLinkRecording { helpful_repairs: ids, ..Default::default() },
+        &ErrorRepairLinkRecording {
+            helpful_repairs: ids,
+            ..Default::default()
+        },
     )?;
     Ok(())
 }
@@ -83,7 +92,9 @@ fn parent(db: &DbConnection, workspace: &str, number: u128, text: &str) -> TestR
             valid_from: Some(BASE.to_owned()),
             valid_to: None,
         },
-        BASE, BASE, &id,
+        BASE,
+        BASE,
+        &id,
     )?;
     Ok(id)
 }
@@ -144,13 +155,20 @@ fn only_selected_current_native_rule_bodies_are_hydrated() -> TestResult {
     let foreign = rule(&db, OTHER, 5, "Foreign rule text.")?;
     let held = rule(&db, WS, 6, "Held rule text.")?;
     let unlinked = rule(&db, WS, 7, "Unlinked rule text.")?;
-    db.execute_raw(&format!("UPDATE procedural_rules SET tombstoned_at = '{BASE}' WHERE id = '{retired}'"))?;
-    db.execute_raw(&format!("UPDATE procedural_rules SET updated_at = '2999-01-01T00:00:00Z' WHERE id = '{future}'"))?;
+    db.execute_raw(&format!(
+        "UPDATE procedural_rules SET tombstoned_at = '{BASE}' WHERE id = '{retired}'"
+    ))?;
+    db.execute_raw(&format!(
+        "UPDATE procedural_rules SET updated_at = '2999-01-01T00:00:00Z' WHERE id = '{future}'"
+    ))?;
     hold(&db, WS, &held, 1)?;
     let mut loaded = Vec::new();
     let snapshot = super::super::memory::Snapshot::begin_or_borrow(&db)?;
     let actual = read_observed(
-        &db, WS, &[&live, &live, &retired, &future, &oversized, &foreign, &held], Utc::now(),
+        &db,
+        WS,
+        &[&live, &live, &retired, &future, &oversized, &foreign, &held],
+        Utc::now(),
         |ids| loaded = ids.iter().map(|id| (*id).to_owned()).collect(),
     )?;
     snapshot.finish()?;
@@ -174,16 +192,29 @@ fn native_rule_edits_retirement_and_scope_changes_are_visible_without_reindexing
     assert!(seed(&db)?.contains(changed));
     assert!(!seed(&db)?.contains(BODY));
     for maturity in ["draft", "deprecated", "superseded"] {
-        db.execute_raw(&format!("UPDATE procedural_rules SET maturity = '{maturity}' WHERE id = '{id}'"))?;
+        db.execute_raw(&format!(
+            "UPDATE procedural_rules SET maturity = '{maturity}' WHERE id = '{id}'"
+        ))?;
         assert!(!seed(&db)?.contains(&id), "{maturity}");
     }
-    db.execute_raw(&format!("UPDATE procedural_rules SET maturity = 'candidate' WHERE id = '{id}'"))?;
+    db.execute_raw(&format!(
+        "UPDATE procedural_rules SET maturity = 'candidate' WHERE id = '{id}'"
+    ))?;
     assert!(seed(&db)?.contains(changed));
-    db.execute_raw(&format!("UPDATE procedural_rules SET scope = 'directory', scope_pattern = 'src' WHERE id = '{id}'"))?;
-    assert!(!seed(&db)?.contains(&id), "error text does not authorize a task path");
-    db.execute_raw(&format!("UPDATE procedural_rules SET scope = 'workspace', scope_pattern = NULL WHERE id = '{id}'"))?;
+    db.execute_raw(&format!(
+        "UPDATE procedural_rules SET scope = 'directory', scope_pattern = 'src' WHERE id = '{id}'"
+    ))?;
+    assert!(
+        !seed(&db)?.contains(&id),
+        "error text does not authorize a task path"
+    );
+    db.execute_raw(&format!(
+        "UPDATE procedural_rules SET scope = 'workspace', scope_pattern = NULL WHERE id = '{id}'"
+    ))?;
     assert!(seed(&db)?.contains(changed));
-    db.execute_raw(&format!("UPDATE procedural_rules SET tombstoned_at = '{BASE}' WHERE id = '{id}'"))?;
+    db.execute_raw(&format!(
+        "UPDATE procedural_rules SET tombstoned_at = '{BASE}' WHERE id = '{id}'"
+    ))?;
     assert!(!seed(&db)?.contains(&id));
     Ok(())
 }
@@ -211,14 +242,20 @@ fn lineage_ownership_is_required_without_inheriting_parent_retirement_or_body() 
     let id = rule(&db, WS, 1, BODY)?;
     let own = parent(&db, WS, 11, "PRIVATE_PARENT_BODY must not be expanded.")?;
     let foreign = parent(&db, OTHER, 12, "FOREIGN_PARENT_BODY must not be expanded.")?;
-    db.execute_raw(&format!("INSERT INTO rule_source_memories (rule_id, memory_id) VALUES ('{id}', '{own}')"))?;
+    db.execute_raw(&format!(
+        "INSERT INTO rule_source_memories (rule_id, memory_id) VALUES ('{id}', '{own}')"
+    ))?;
     link(&db, vec![id.clone()])?;
-    db.execute_raw(&format!("UPDATE memories SET tombstoned_at = '{BASE}' WHERE id = '{own}'"))?;
+    db.execute_raw(&format!(
+        "UPDATE memories SET tombstoned_at = '{BASE}' WHERE id = '{own}'"
+    ))?;
     let actual = seed(&db)?;
     assert!(actual.contains(BODY));
     assert!(!actual.contains("PRIVATE_PARENT_BODY"));
     assert!(!actual.contains(&own));
-    db.execute_raw(&format!("INSERT INTO rule_source_memories (rule_id, memory_id) VALUES ('{id}', '{foreign}')"))?;
+    db.execute_raw(&format!(
+        "INSERT INTO rule_source_memories (rule_id, memory_id) VALUES ('{id}', '{foreign}')"
+    ))?;
     let actual = seed(&db)?;
     assert!(!actual.contains(&id));
     assert!(!actual.contains(BODY));
@@ -238,8 +275,20 @@ fn full_body_screening_precedes_excerpting_and_typed_aliases_do_not_resolve() ->
         "UPDATE procedural_rules SET content = '{}' WHERE id = '{unsafe_rule}'",
         unsafe_body.replace('\'', "''")
     ))?;
-    let aliased = rule(&db, WS, 3, "ALIASED_RULE_TEXT is not selected by its real identity.")?;
-    link(&db, vec![safe.clone(), unsafe_rule.clone(), format!("{aliased}\0suffix")])?;
+    let aliased = rule(
+        &db,
+        WS,
+        3,
+        "ALIASED_RULE_TEXT is not selected by its real identity.",
+    )?;
+    link(
+        &db,
+        vec![
+            safe.clone(),
+            unsafe_rule.clone(),
+            format!("{aliased}\0suffix"),
+        ],
+    )?;
     let actual = seed(&db)?;
     assert!(actual.contains(&safe));
     assert!(actual.contains(BODY));
@@ -260,7 +309,9 @@ fn rules_share_existing_excerpt_budget_and_deduplicate_with_native_memories() ->
     let mut targets = vec![memory.clone(), duplicate.clone()];
     let mut distinct = Vec::new();
     for number in 2..=7 {
-        let text = format!("Repair choice {number} implements the cache serialization trait before retrying.");
+        let text = format!(
+            "Repair choice {number} implements the cache serialization trait before retrying."
+        );
         let id = rule(&db, WS, number, &text)?;
         targets.push(id.clone());
         distinct.push((id, text));
@@ -269,7 +320,10 @@ fn rules_share_existing_excerpt_budget_and_deduplicate_with_native_memories() ->
     let actual = seed(&db)?;
     assert!(actual.contains(&format!("helpful_repair:{memory}")));
     assert!(!actual.contains(&format!("helpful_repair:{duplicate}")));
-    assert_eq!(actual.matches("\nprior fix: ").count(), super::super::PACK_RECALL_EXCERPT_LIMIT);
+    assert_eq!(
+        actual.matches("\nprior fix: ").count(),
+        super::super::PACK_RECALL_EXCERPT_LIMIT
+    );
     for (id, text) in distinct.iter().take(3) {
         assert!(actual.contains(id));
         assert!(actual.contains(text));
@@ -289,13 +343,25 @@ fn selected_relation_bounds_fail_without_returning_partial_advice() -> TestResul
     link(&db, vec![id.clone()])?;
     assert!(seed(&db)?.contains(BODY));
     for number in 0..=MAX_RELATIONS {
-        db.execute_raw(&format!("INSERT INTO rule_tags (rule_id, tag) VALUES ('{id}', 'tag-{number:04}')"))?;
+        db.execute_raw(&format!(
+            "INSERT INTO rule_tags (rule_id, tag) VALUES ('{id}', 'tag-{number:04}')"
+        ))?;
     }
-    let error = seed(&db).expect_err("over-budget metadata must not return a partial query").to_string();
+    let error = seed(&db)
+        .expect_err("over-budget metadata must not return a partial query")
+        .to_string();
     assert!(!error.contains(BODY));
     assert!(!error.contains(&id));
     assert!(!error.contains("tag-"));
-    assert!(read(&db, WS, &vec![id.as_str(); PACK_RECALL_TARGET_LIMIT as usize + 1], Utc::now()).is_err());
+    assert!(
+        read(
+            &db,
+            WS,
+            &vec![id.as_str(); PACK_RECALL_TARGET_LIMIT as usize + 1],
+            Utc::now()
+        )
+        .is_err()
+    );
     Ok(())
 }
 

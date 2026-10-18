@@ -28,9 +28,14 @@ fn recount(value: &mut Value) {
     value["numPassedTestSuites"] = json!(files - failed_files);
     value["numFailedTestSuites"] = json!(failed_files);
     value["numTotalTests"] = json!(counts.iter().sum::<u64>());
-    for (field, count) in ["numPassedTests", "numFailedTests", "numPendingTests", "numTodoTests"]
-        .into_iter()
-        .zip(counts)
+    for (field, count) in [
+        "numPassedTests",
+        "numFailedTests",
+        "numPendingTests",
+        "numTodoTests",
+    ]
+    .into_iter()
+    .zip(counts)
     {
         value[field] = json!(count);
     }
@@ -87,11 +92,18 @@ fn javascript_growth_keeps_original_subjects_across_files_and_nested_suite_count
 fn javascript_growth_cannot_skip_previously_passing_controls() {
     for with_growth in [false, true] {
         for status in ["pending", "skipped", "disabled", "todo"] {
-            let mut proof = if with_growth { growth() } else { two_tests("passed") };
+            let mut proof = if with_growth {
+                growth()
+            } else {
+                two_tests("passed")
+            };
             proof["testResults"][0]["assertionResults"][1]["status"] = json!(status);
             recount(&mut proof);
             assert!(output(proof.clone()).succeeded(), "other assertions passed");
-            assert!(!verifies(two_tests("failed"), proof), "{status}, growth={with_growth}");
+            assert!(
+                !verifies(two_tests("failed"), proof),
+                "{status}, growth={with_growth}"
+            );
         }
     }
 }
@@ -104,7 +116,10 @@ fn javascript_original_nonexecuted_subjects_are_retained_not_promoted_to_require
         let mut proof = growth();
         add_test(&mut proof, "future coverage", status);
         assert!(verifies(failure.clone(), proof));
-        assert!(!verifies(failure, growth()), "nonexecuted inventory disappeared");
+        assert!(
+            !verifies(failure, growth()),
+            "nonexecuted inventory disappeared"
+        );
     }
 }
 
@@ -138,7 +153,10 @@ fn javascript_growth_cannot_substitute_file_case_ancestor_boundaries_or_controls
     alias["testResults"][0]["assertionResults"][0]["ancestorTitles"] = json!(["cache returns"]);
     alias["testResults"][0]["assertionResults"][0]["title"] = json!("cached value");
     let mut dropped = growth();
-    dropped["testResults"][0]["assertionResults"].as_array_mut().unwrap().remove(1);
+    dropped["testResults"][0]["assertionResults"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
     recount(&mut dropped);
     for proof in [renamed_file, alias, dropped] {
         assert!(output(proof.clone()).succeeded());
@@ -149,11 +167,17 @@ fn javascript_growth_cannot_substitute_file_case_ancestor_boundaries_or_controls
     let mut empty_file = report("passed")["testResults"][0].clone();
     empty_file["name"] = json!("/private/project/empty.test.ts");
     empty_file["assertionResults"] = json!([]);
-    failure["testResults"].as_array_mut().unwrap().push(empty_file.clone());
+    failure["testResults"]
+        .as_array_mut()
+        .unwrap()
+        .push(empty_file.clone());
     recount(&mut failure);
     assert!(!verifies(failure.clone(), growth()));
     let mut proof = growth();
-    proof["testResults"].as_array_mut().unwrap().push(empty_file);
+    proof["testResults"]
+        .as_array_mut()
+        .unwrap()
+        .push(empty_file);
     recount(&mut proof);
     assert!(verifies(failure, proof));
 }
@@ -172,7 +196,10 @@ fn javascript_growth_keeps_executed_controls_beyond_the_diagnostic_cap() {
     assert!(structured_error_diagnostics(&failure.to_string()).len() <= 4);
     assert!(verifies(failure.clone(), proof.clone()));
     proof["testResults"][0]["assertionResults"]
-        .as_array_mut().unwrap().last_mut().unwrap()["status"] = json!("todo");
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["status"] = json!("todo");
     recount(&mut proof);
     assert!(output(proof.clone()).succeeded());
     assert!(!verifies(failure, proof));
@@ -186,15 +213,33 @@ fn javascript_growth_still_requires_complete_processes_and_undamaged_documents()
     assert!(!required.is_verified_by(&Proof::capture(&proof)));
     required.refresh(&failure, true);
     assert!(required.is_verified_by(&Proof::capture(&proof)));
-    for text in [format!("{}\n{{", proof.text), format!("{} trailing", proof.text)] {
-        let damaged = ToolOutput { text, ..proof.clone() };
+    for text in [
+        format!("{}\n{{", proof.text),
+        format!("{} trailing", proof.text),
+    ] {
+        let damaged = ToolOutput {
+            text,
+            ..proof.clone()
+        };
         assert!(!required.is_verified_by(&Proof::capture(&damaged)));
     }
-    let no_exit = ToolOutput { text: proof.text.clone(), ..ToolOutput::default() };
+    let no_exit = ToolOutput {
+        text: proof.text.clone(),
+        ..ToolOutput::default()
+    };
     assert!(!required.is_verified_by(&Proof::capture(&no_exit)));
-    let failed_exit = ToolOutput { exit_code: Some(1), ..proof.clone() };
+    let failed_exit = ToolOutput {
+        exit_code: Some(1),
+        ..proof.clone()
+    };
     assert!(!required.is_verified_by(&Proof::capture(&failed_exit)));
-    required.refresh(&ToolOutput { text: "{}".to_owned(), ..failure }, true);
+    required.refresh(
+        &ToolOutput {
+            text: "{}".to_owned(),
+            ..failure
+        },
+        true,
+    );
     assert!(required.is_guarded());
     assert!(!required.is_verified_by(&Proof::capture(&proof)));
 }
@@ -208,16 +253,24 @@ fn javascript_growth_keeps_the_complete_utf8_byte_bound() {
     let text = value.to_string();
     let cap = crate::core::cass_error_recall::MAX_SCANNED_OUTPUT_BYTES;
     let exact = format!("{text}{}", " ".repeat(cap - text.len()));
-    let proof = ToolOutput { text: exact.clone(), exit_code: Some(0), is_error: Some(false) };
+    let proof = ToolOutput {
+        text: exact.clone(),
+        exit_code: Some(0),
+        is_error: Some(false),
+    };
     assert!(required.is_verified_by(&Proof::capture(&proof)));
     for suffix in [" ", "é"] {
-        let over = ToolOutput { text: format!("{exact}{suffix}"), ..proof.clone() };
+        let over = ToolOutput {
+            text: format!("{exact}{suffix}"),
+            ..proof.clone()
+        };
         assert!(!required.is_verified_by(&Proof::capture(&over)));
     }
 }
 
 #[test]
-fn javascript_growth_records_cited_repairs_and_pack_context_without_changing_sources() -> TestResult {
+fn javascript_growth_records_cited_repairs_and_pack_context_without_changing_sources() -> TestResult
+{
     for command in [COMMAND, "jest --json --runInBand"] {
         let failure = two_tests("failed").to_string();
         let case = episode(command, &failure, command, &growth().to_string())?;
@@ -231,15 +284,30 @@ fn javascript_growth_records_cited_repairs_and_pack_context_without_changing_sou
         assert!(recall.helpful_repairs.contains(&case.repair));
         assert_eq!(recall.proof_links, vec![case.proof]);
         let card = crate::core::incident_card::incident_card_id(WS, &case.failure);
-        assert!(case.db.get_search_admitted_evidence_span(&card, WS)?.is_some());
-        assert!(pack_error_recall_query_seed(&case.db, WS, &diagnostic)?.contains("normalized key"));
+        assert!(
+            case.db
+                .get_search_admitted_evidence_span(&card, WS)?
+                .is_some()
+        );
+        assert!(
+            pack_error_recall_query_seed(&case.db, WS, &diagnostic)?.contains("normalized key")
+        );
         for source in before {
-            let after = case.db.get_evidence_span(&source.id)?.ok_or("source disappeared")?;
+            let after = case
+                .db
+                .get_evidence_span(&source.id)?
+                .ok_or("source disappeared")?;
             assert_eq!(after.excerpt, source.excerpt);
             assert_eq!(after.content_hash, source.content_hash);
-            assert_eq!(after.canonical_provenance_uri(), source.canonical_provenance_uri());
+            assert_eq!(
+                after.canonical_provenance_uri(),
+                source.canonical_provenance_uri()
+            );
         }
-        assert_eq!(record_session_error_recall(&case.db, WS, &case.session)?.incident_cards_recorded, 0);
+        assert_eq!(
+            record_session_error_recall(&case.db, WS, &case.session)?.incident_cards_recorded,
+            0
+        );
     }
     Ok(())
 }
@@ -249,7 +317,11 @@ fn javascript_nonexecuted_controls_never_create_durable_repairs_or_cards() -> Te
     let failure = two_tests("failed").to_string();
     for with_growth in [false, true] {
         for status in ["pending", "skipped", "disabled", "todo"] {
-            let mut proof = if with_growth { growth() } else { two_tests("passed") };
+            let mut proof = if with_growth {
+                growth()
+            } else {
+                two_tests("passed")
+            };
             proof["testResults"][0]["assertionResults"][1]["status"] = json!(status);
             recount(&mut proof);
             let case = episode(COMMAND, &failure, COMMAND, &proof.to_string())?;
@@ -260,7 +332,15 @@ fn javascript_nonexecuted_controls_never_create_durable_repairs_or_cards() -> Te
             assert_eq!(report.incident_cards_recorded, 0);
         }
     }
-    let case = episode(COMMAND, &failure, "vitest run --reporter=json --testNamePattern=cache", &growth().to_string())?;
-    assert_eq!(record_session_error_recall(&case.db, WS, &case.session)?.resolved_failures, 0);
+    let case = episode(
+        COMMAND,
+        &failure,
+        "vitest run --reporter=json --testNamePattern=cache",
+        &growth().to_string(),
+    )?;
+    assert_eq!(
+        record_session_error_recall(&case.db, WS, &case.session)?.resolved_failures,
+        0
+    );
     Ok(())
 }

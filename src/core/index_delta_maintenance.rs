@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::search::IndexableDocument;
 
 use super::{
-    Delta, EmbeddingReuse, IncrementalFallback, IncrementalFallbackReason, append,
-    document_digest, document_payload_bytes, embedding_input_digest, incremental_fallback,
-    invalid_identity_map, over_limit,
+    Delta, EmbeddingReuse, IncrementalFallback, IncrementalFallbackReason, append, document_digest,
+    document_payload_bytes, embedding_input_digest, incremental_fallback, invalid_identity_map,
+    over_limit,
 };
 
 pub(super) fn try_plan(
@@ -96,7 +96,9 @@ fn plan_with_checkpoint(
             // survivor's or a withdrawn document's. No equality hash can
             // establish a live vector record for this previously absent ID.
             if new_inputs == new_input_limit {
-                return Err(over_limit("rolling intake exceeds the new-input inference budget"));
+                return Err(over_limit(
+                    "rolling intake exceeds the new-input inference budget",
+                ));
             }
             new_inputs += 1;
             None

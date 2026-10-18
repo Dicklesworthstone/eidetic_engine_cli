@@ -4,7 +4,8 @@ use super::super::tests::{endpoints, mine, span};
 use super::*;
 
 const FAILURE: &str = "The build failed in src/cache.rs because the workspace cache retained a stale entry while the retry reused the previous identity from the original request";
-const REPAIR: &str = "Fixed src/cache.rs by invalidating the stale entry before retrying the request.";
+const REPAIR: &str =
+    "Fixed src/cache.rs by invalidating the stale entry before retrying the request.";
 
 fn near_failure() -> String {
     FAILURE.replacen("failed in", "failed unexpectedly in", 1)
@@ -37,7 +38,10 @@ fn repeated_failures_with_the_exact_same_repair_share_one_review_pair() {
     let expected = mine(&sources[..2]);
     assert_eq!(expected.len(), 2);
     let rows = mine(&sources);
-    assert_eq!(rows, expected, "do not merge sources or increase confidence");
+    assert_eq!(
+        rows, expected,
+        "do not merge sources or increase confidence"
+    );
     assert_eq!(endpoints(&rows), [("first-failure", "first-repair")]);
     assert_eq!(sources, original, "durable source bytes remain unchanged");
     let mut reversed = sources.to_vec();
@@ -57,7 +61,11 @@ fn repairs_remain_distinct_even_when_symptoms_are_identical() {
         "Fixed src/cache.rs by invalidating the stale entry after retrying the request.",
         "Fixed src/cache.rs by setting CACHE=1 before retrying the request.",
     ] {
-        assert!(!Signature::new(FAILURE, repair).unwrap().duplicates(&earlier));
+        assert!(
+            !Signature::new(FAILURE, repair)
+                .unwrap()
+                .duplicates(&earlier)
+        );
         // Check the pair filter directly as well: the proposal builder's
         // exact-ID collision policy is independent of similarity filtering.
         let mut pairs = episode("first", 1, FAILURE, REPAIR);
@@ -87,7 +95,10 @@ fn technical_resources_literals_and_polarity_never_disappear_in_similarity() {
     }
     let upper = Signature::new(FAILURE, "Fixed src/cache.rs by setting CACHE=1.").unwrap();
     let lower = Signature::new(FAILURE, "Fixed src/cache.rs by setting cache=1.").unwrap();
-    assert!(!upper.duplicates(&lower), "repair identity is case-sensitive");
+    assert!(
+        !upper.duplicates(&lower),
+        "repair identity is case-sensitive"
+    );
 }
 
 #[test]

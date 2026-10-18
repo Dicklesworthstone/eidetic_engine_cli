@@ -65,10 +65,23 @@ fn mixed_window_keeps_the_completed_pair_and_the_unfinished_tail() {
         assert_eq!(sources, original);
         let tail = rows
             .iter()
-            .find(|row| row.session_arc.as_ref().unwrap().resolution_span.evidence_span_id == "repair")
+            .find(|row| {
+                row.session_arc
+                    .as_ref()
+                    .unwrap()
+                    .resolution_span
+                    .evidence_span_id
+                    == "repair"
+            })
             .unwrap();
-        assert_eq!(tail.session_arc.as_ref().unwrap().failure_span.excerpt, TAIL);
-        assert_eq!(tail.session_arc.as_ref().unwrap().resolution_span.excerpt, TAIL_REPAIR);
+        assert_eq!(
+            tail.session_arc.as_ref().unwrap().failure_span.excerpt,
+            TAIL
+        );
+        assert_eq!(
+            tail.session_arc.as_ref().unwrap().resolution_span.excerpt,
+            TAIL_REPAIR
+        );
         check_source_bindings(&rows, &sources);
         assert_eq!(mine(&[sources[1].clone(), sources[0].clone()]), rows);
     }
@@ -77,18 +90,25 @@ fn mixed_window_keeps_the_completed_pair_and_the_unfinished_tail() {
 #[test]
 fn multiple_trailing_failures_remain_independent_and_are_consumed_once() {
     let sources = [
-        span("mixed", 1, &format!(
-            "{FAILURE}\n{REPAIR}\n{TAIL}\ncargo test src/ui.rs failed."
-        )),
+        span(
+            "mixed",
+            1,
+            &format!("{FAILURE}\n{REPAIR}\n{TAIL}\ncargo test src/ui.rs failed."),
+        ),
         span("ui-repair", 2, "Fixed src/ui.rs by restoring its state."),
         span("cache-repair", 3, TAIL_REPAIR),
         span("repeated-repair", 4, TAIL_REPAIR),
     ];
     let rows = mine(&sources);
     assert_eq!(rows.len(), 6);
-    assert_eq!(endpoints(&rows), [
-        ("mixed", "mixed"), ("mixed", "ui-repair"), ("mixed", "cache-repair")
-    ]);
+    assert_eq!(
+        endpoints(&rows),
+        [
+            ("mixed", "mixed"),
+            ("mixed", "ui-repair"),
+            ("mixed", "cache-repair")
+        ]
+    );
     check_source_bindings(&rows, &sources);
 }
 
@@ -97,16 +117,24 @@ fn a_reopened_subject_and_repeated_failures_keep_the_latest_actual_attempt() {
     let latest = "cargo test src/api.rs failed because the new input bypassed validation.";
     let repair = "Fixed src/api.rs by validating the new input.";
     let sources = [
-        span("mixed", 1, &format!(
-            "{FAILURE}\n{REPAIR}\ncargo test src/api.rs failed again.\n{latest}"
-        )),
+        span(
+            "mixed",
+            1,
+            &format!("{FAILURE}\n{REPAIR}\ncargo test src/api.rs failed again.\n{latest}"),
+        ),
         span("later", 2, repair),
     ];
     let rows = mine(&sources);
     assert_eq!(rows.len(), 4);
     for row in &rows[2..] {
-        assert_eq!(row.session_arc.as_ref().unwrap().failure_span.excerpt, latest);
-        assert_eq!(row.session_arc.as_ref().unwrap().resolution_span.excerpt, repair);
+        assert_eq!(
+            row.session_arc.as_ref().unwrap().failure_span.excerpt,
+            latest
+        );
+        assert_eq!(
+            row.session_arc.as_ref().unwrap().resolution_span.excerpt,
+            repair
+        );
     }
     check_source_bindings(&rows, &sources);
 }
@@ -126,7 +154,11 @@ fn tail_cannot_use_topic_markers_pronouns_or_different_resource_spellings() {
             span("exact", 3, TAIL_REPAIR),
         ];
         let rows = mine(&sources);
-        assert_eq!(endpoints(&rows), [("mixed", "mixed"), ("mixed", "exact")], "{false_repair}");
+        assert_eq!(
+            endpoints(&rows),
+            [("mixed", "mixed"), ("mixed", "exact")],
+            "{false_repair}"
+        );
     }
 }
 
@@ -142,8 +174,15 @@ fn positive_or_unnamed_outcomes_are_tail_boundaries_not_new_failures() {
             span("later", 2, TAIL_REPAIR),
         ];
         let rows = mine(&sources);
-        assert!(!rows.is_empty(), "the original inline pair is still present");
-        assert!(endpoints(&rows).iter().all(|(_, repair)| *repair == "mixed"));
+        assert!(
+            !rows.is_empty(),
+            "the original inline pair is still present"
+        );
+        assert!(
+            endpoints(&rows)
+                .iter()
+                .all(|(_, repair)| *repair == "mixed")
+        );
     }
 }
 
@@ -160,7 +199,11 @@ fn unsafe_or_unreadable_windows_still_break_a_carried_episode() {
             span("barrier", 2, barrier),
             span("later", 3, TAIL_REPAIR),
         ];
-        assert_eq!(endpoints(&mine(&sources)), [("mixed", "mixed")], "{barrier}");
+        assert_eq!(
+            endpoints(&mine(&sources)),
+            [("mixed", "mixed")],
+            "{barrier}"
+        );
     }
 }
 
@@ -174,9 +217,15 @@ fn reported_failure_vetoes_inline_success_without_erasing_a_real_tail_failure() 
         ];
         let rows = mine(&sources);
         assert_eq!(endpoints(&rows), [("mixed", "later")]);
-        assert_eq!(rows[0].session_arc.as_ref().unwrap().failure_span.excerpt, TAIL);
+        assert_eq!(
+            rows[0].session_arc.as_ref().unwrap().failure_span.excerpt,
+            TAIL
+        );
         // The outcome trailer is a veto, never invented failure/repair evidence.
-        assert!(rows.iter().all(|row| !row.source_ids.contains(&"report".to_owned())));
+        assert!(
+            rows.iter()
+                .all(|row| !row.source_ids.contains(&"report".to_owned()))
+        );
     }
 }
 
@@ -204,7 +253,12 @@ fn a_prefix_repair_completes_previous_work_before_the_inline_episode() {
     for structured in [false, true] {
         let sources = [
             window("earlier", 1, TAIL, structured),
-            window("mixed", 2, &format!("{TAIL_REPAIR}\n{FAILURE}\n{REPAIR}"), structured),
+            window(
+                "mixed",
+                2,
+                &format!("{TAIL_REPAIR}\n{FAILURE}\n{REPAIR}"),
+                structured,
+            ),
         ];
         let original = sources.clone();
         let before = crate::cass::transcript::projection_calls_for_test();
@@ -230,16 +284,19 @@ fn a_mixed_window_can_close_previous_work_and_open_the_next_episode() {
     let repair = "Fixed src/ui.rs by retaining its state.";
     let sources = [
         span("earlier", 1, TAIL),
-        span("mixed", 2, &format!(
-            "{TAIL_REPAIR}\n{FAILURE}\n{REPAIR}\n{trailing}"
-        )),
+        span(
+            "mixed",
+            2,
+            &format!("{TAIL_REPAIR}\n{FAILURE}\n{REPAIR}\n{trailing}"),
+        ),
         span("later", 3, repair),
     ];
     let rows = mine(&sources);
     assert_eq!(rows.len(), 6);
-    assert_eq!(endpoints(&rows), [
-        ("earlier", "mixed"), ("mixed", "mixed"), ("mixed", "later")
-    ]);
+    assert_eq!(
+        endpoints(&rows),
+        [("earlier", "mixed"), ("mixed", "mixed"), ("mixed", "later")]
+    );
     check_source_bindings(&rows, &sources);
 }
 
@@ -264,10 +321,17 @@ fn prefix_repairs_preserve_ambiguity_and_need_exact_named_antecedents() {
     ];
     assert_eq!(endpoints(&mine(&ambiguous)), [("mixed", "mixed")]);
     let mut named = ambiguous.clone();
-    named[2] = span("mixed", 3, &format!(
-        "cargo fmt src/cache.rs passed after normalizing whitespace.\n{FAILURE}\n{REPAIR}"
-    ));
-    assert_eq!(endpoints(&mine(&named)), [("format", "mixed"), ("mixed", "mixed")]);
+    named[2] = span(
+        "mixed",
+        3,
+        &format!(
+            "cargo fmt src/cache.rs passed after normalizing whitespace.\n{FAILURE}\n{REPAIR}"
+        ),
+    );
+    assert_eq!(
+        endpoints(&mine(&named)),
+        [("format", "mixed"), ("mixed", "mixed")]
+    );
 }
 
 #[test]
@@ -279,9 +343,11 @@ fn a_failed_prefix_report_cannot_be_skipped_to_salvage_a_later_repair() {
     ] {
         let sources = [
             span("earlier", 1, TAIL),
-            span("mixed", 2, &format!(
-                "{TAIL_REPAIR}\n{report}\n{FAILURE}\n{REPAIR}"
-            )),
+            span(
+                "mixed",
+                2,
+                &format!("{TAIL_REPAIR}\n{report}\n{FAILURE}\n{REPAIR}"),
+            ),
         ];
         let rows = mine(&sources);
         assert_eq!(endpoints(&rows), [("mixed", "mixed")], "{report}");
@@ -289,11 +355,16 @@ fn a_failed_prefix_report_cannot_be_skipped_to_salvage_a_later_repair() {
     // The same declared repair with a clean result is not vacuously rejected.
     let sources = [
         span("earlier", 1, TAIL),
-        span("mixed", 2, &format!(
-            "{TAIL_REPAIR}\nProcess exited with code 0.\n{FAILURE}\n{REPAIR}"
-        )),
+        span(
+            "mixed",
+            2,
+            &format!("{TAIL_REPAIR}\nProcess exited with code 0.\n{FAILURE}\n{REPAIR}"),
+        ),
     ];
-    assert_eq!(endpoints(&mine(&sources)), [("earlier", "mixed"), ("mixed", "mixed")]);
+    assert_eq!(
+        endpoints(&mine(&sources)),
+        [("earlier", "mixed"), ("mixed", "mixed")]
+    );
 }
 
 #[test]
@@ -311,19 +382,27 @@ fn window_level_veto_and_temporal_guards_also_cover_prefix_repairs() {
     earlier.end_line = 3;
     let rows = mine(&[earlier, span("mixed", 2, &mixed)]);
     assert_eq!(endpoints(&rows), [("mixed", "mixed")]);
-    assert_eq!(mine(&[span("earlier", 1, TAIL), span("mixed", 2, &mixed)]).len(), 4);
+    assert_eq!(
+        mine(&[span("earlier", 1, TAIL), span("mixed", 2, &mixed)]).len(),
+        4
+    );
 }
 
 #[test]
 fn prefix_cannot_reuse_an_antecedent_or_reach_past_an_interior_failure() {
     let sources = [
         span("earlier", 1, TAIL),
-        span("mixed", 2, &format!(
-            "{TAIL_REPAIR}\n{TAIL_REPAIR}\n{FAILURE}\n{REPAIR}"
-        )),
+        span(
+            "mixed",
+            2,
+            &format!("{TAIL_REPAIR}\n{TAIL_REPAIR}\n{FAILURE}\n{REPAIR}"),
+        ),
         span("repeat", 3, TAIL_REPAIR),
     ];
-    assert_eq!(endpoints(&mine(&sources)), [("earlier", "mixed"), ("mixed", "mixed")]);
+    assert_eq!(
+        endpoints(&mine(&sources)),
+        [("earlier", "mixed"), ("mixed", "mixed")]
+    );
     let sources = [
         span("earlier", 1, TAIL),
         span("mixed", 2, &format!("{FAILURE}\n{TAIL_REPAIR}\n{REPAIR}")),
@@ -339,7 +418,12 @@ fn consecutive_straddling_windows_recover_the_complete_episode_chain() {
         let sources = [
             window("first", 1, FAILURE, structured),
             window("second", 2, &format!("{REPAIR}\n{TAIL}"), structured),
-            window("third", 3, &format!("{TAIL_REPAIR}\n{third_failure}"), structured),
+            window(
+                "third",
+                3,
+                &format!("{TAIL_REPAIR}\n{third_failure}"),
+                structured,
+            ),
             window("fourth", 4, third_repair, structured),
         ];
         let original = sources.clone();
@@ -348,9 +432,14 @@ fn consecutive_straddling_windows_recover_the_complete_episode_chain() {
         let after = crate::cass::transcript::projection_calls_for_test();
         assert_eq!(after - before, 4);
         assert_eq!(rows.len(), 6);
-        assert_eq!(endpoints(&rows), [
-            ("first", "second"), ("second", "third"), ("third", "fourth")
-        ]);
+        assert_eq!(
+            endpoints(&rows),
+            [
+                ("first", "second"),
+                ("second", "third"),
+                ("third", "fourth")
+            ]
+        );
         check_source_bindings(&rows, &sources);
         assert_eq!(sources, original);
         let mut reversed = sources.clone();
@@ -379,7 +468,10 @@ fn straddling_detection_does_not_rewrite_ordinary_or_contradicted_observations()
     let rows = mine(&sources);
     assert_eq!(rows.len(), 2);
     for row in &rows {
-        assert_eq!(row.session_arc.as_ref().unwrap().resolution_span.excerpt, repair);
+        assert_eq!(
+            row.session_arc.as_ref().unwrap().resolution_span.excerpt,
+            repair
+        );
     }
     check_source_bindings(&rows, &sources);
 }

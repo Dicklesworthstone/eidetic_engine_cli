@@ -42,10 +42,12 @@ fn unstarted_tests_are_not_skips_and_all_observed_subjects_must_survive() {
         passed().text,
         good.replace("cache cache::round_trip", "replacement cache::round_trip"),
         good.replace("other case", "other replacement"),
-        good.replace("3 tests skipped", "4 tests skipped").replace("3 skipped", "4 skipped"),
+        good.replace("3 tests skipped", "4 tests skipped")
+            .replace("3 skipped", "4 skipped"),
         good.replace("2 binaries", "3 binaries"),
         good.replace("        PASS [   0.001s] other previously_unstarted\n", ""),
-        good.replace("3 tests run", "2/3 tests run").replace("3 passed", "2 passed"),
+        good.replace("3 tests run", "2/3 tests run")
+            .replace("3 passed", "2 passed"),
     ] {
         assert!(!required.is_verified_by(&Proof::capture(&output(bad))));
     }
@@ -58,13 +60,19 @@ fn signal_timeout_cancel_reason_and_partial_summary_contradictions_abstain() {
     for bad in [
         failed.replace("due to test failure", "due to signal"),
         failed.replace("due to test failure", "due to global timeout"),
-        failed.replace("  Cancelling due to test failure: 1 test still running\n", ""),
+        failed.replace(
+            "  Cancelling due to test failure: 1 test still running\n",
+            "",
+        ),
         failed.replace("2/3 tests run", "2/4 tests run"),
         failed.replace("2/3 tests run", "3/3 tests run"),
         failed.replace("1/3 tests were", "2/3 tests were"),
         failed.replace("1 test still running", "4 tests still running"),
         failed.replace("1 passed, 1 failed", "2 passed, 0 failed"),
-        failed.replace("  Cancelling due to test failure:", "  Cancelling due to test failure\n  Cancelling due to test failure:"),
+        failed.replace(
+            "  Cancelling due to test failure:",
+            "  Cancelling due to test failure\n  Cancelling due to test failure:",
+        ),
         failed.replace("3 tests across", "4 tests across"),
         format!("{failed}warning: 1/3 tests were not run due to signal\n"),
     ] {
@@ -82,7 +90,10 @@ fn fail_fast_coverage_waits_for_final_process_observation_and_never_downgrades()
     assert!(!required.is_verified_by(&proof));
     required.refresh(&failure, true);
     assert!(required.is_verified_by(&proof));
-    required.refresh(&output(failure_report().replace("1/3 tests were", "2/3 tests were")), true);
+    required.refresh(
+        &output(failure_report().replace("1/3 tests were", "2/3 tests were")),
+        true,
+    );
     assert!(required.is_guarded());
     assert!(!required.is_verified_by(&proof));
 }
@@ -116,7 +127,8 @@ fn genuine_header_styling_cannot_bypass_native_failure_or_completion_guards() {
 fn native_slow_summary_and_final_slow_listing_do_not_invent_an_extra_test() {
     // Shape retained from nextest's published slow-output.ansi: a SLOW
     // notification, terminal PASS, annotated summary, then final SLOW listing.
-    let good = passed().text
+    let good = passed()
+        .text
         .replace(
             "        PASS [   0.001s] cache",
             "        SLOW [> 60.000s] cache cache::round_trip\n        PASS [   0.001s] cache",
@@ -129,7 +141,10 @@ fn native_slow_summary_and_final_slow_listing_do_not_invent_an_extra_test() {
         good.replace("1 slow", "2 slow"),
         good.replace("1 slow", "1 flaky"),
         good.replace("1 slow", "1 leaky"),
-        good.replace("SLOW [  90.001s] cache cache::round_trip", "SLOW [  90.001s] cache fabricated"),
+        good.replace(
+            "SLOW [  90.001s] cache cache::round_trip",
+            "SLOW [  90.001s] cache fabricated",
+        ),
     ] {
         assert!(!required.is_verified_by(&Proof::capture(&output(bad))));
     }

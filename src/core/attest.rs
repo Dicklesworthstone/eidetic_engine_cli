@@ -1254,7 +1254,10 @@ mod tests {
         }));
         let refs = pack_ledger_item_evidence_refs(&record, &ledger);
         assert_eq!(refs.len(), 3);
-        let ids = refs.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>();
+        let ids = refs
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(
             ids,
             [

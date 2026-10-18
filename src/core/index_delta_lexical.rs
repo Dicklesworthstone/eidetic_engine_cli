@@ -141,7 +141,10 @@ fn compaction_candidates(states: &SegmentStates, max_segments: usize) -> Vec<Seg
     let minimum = states.len() - target + 1;
     let mut ordered = states.iter().collect::<Vec<_>>();
     ordered.sort_unstable_by(|left, right| {
-        left.1.max_doc.cmp(&right.1.max_doc).then_with(|| left.0.cmp(right.0))
+        left.1
+            .max_doc
+            .cmp(&right.1.max_doc)
+            .then_with(|| left.0.cmp(right.0))
     });
     let boundary = ordered[minimum - 1].1.max_doc;
     ordered
@@ -175,7 +178,10 @@ fn validate_compaction(
     }
     if let Some(id) = replacement {
         if before.contains_key(&id) {
-            return Err(failure("validation", "merge reused an existing segment identity"));
+            return Err(failure(
+                "validation",
+                "merge reused an existing segment identity",
+            ));
         }
         expected.insert(id);
     }

@@ -15,7 +15,9 @@ fn archive() -> Vec<IndexableDocument> {
                 format!("doc-{number:05}"),
                 format!("lesson {number} historicalmarker"),
             );
-            document.metadata.insert("origin".to_owned(), format!("source-{number}"));
+            document
+                .metadata
+                .insert("origin".to_owned(), format!("source-{number}"));
             document
         })
         .collect()
@@ -23,7 +25,10 @@ fn archive() -> Vec<IndexableDocument> {
 
 fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+    let parent = root
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     crate::core::run_cli_with_cx(Duration::from_secs(180), |cx| async move {
         let _root = root;
         let live = parent.join("index");
@@ -31,10 +36,14 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
         let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
         db.migrate().map_err(|error| error.to_string())?;
         let workspace = "wsp_01234567890123456789012345";
-        db.insert_workspace(workspace, &CreateWorkspaceInput {
-            path: parent.to_string_lossy().into_owned(),
-            name: Some("bulk maintenance publication".to_owned()),
-        }).map_err(|error| error.to_string())?;
+        db.insert_workspace(
+            workspace,
+            &CreateWorkspaceInput {
+                path: parent.to_string_lossy().into_owned(),
+                name: Some("bulk maintenance publication".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
         let lock = index::IndexPublishLockOwner::acquire(&cx, &db, workspace)
             .map_err(|error| error.to_string())?;
         let fast = Arc::new(CountingHash::new(HashEmbedder::default_256()));
@@ -42,9 +51,16 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
         let stack = EmbedderStack::from_parts(fast.clone(), Some(quality.clone()));
         let original = archive();
         index::publish_full_index_generation_with_stack(
-            &lock, &live, stack.clone(), original.clone(), 1,
-            index::IndexDocumentCounts::memory_only(ORIGINAL_COUNT), || Ok(()),
-        ).await.map_err(|error| error.to_string())?;
+            &lock,
+            &live,
+            stack.clone(),
+            original.clone(),
+            1,
+            index::IndexDocumentCounts::memory_only(ORIGINAL_COUNT),
+            || Ok(()),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         assert!(fast.inputs.load(Ordering::SeqCst) >= original.len());
         assert!(quality.inputs.load(Ordering::SeqCst) >= original.len());
         index::verify_published_tier_counts(&live, ORIGINAL_COUNT, true)?;
@@ -53,12 +69,14 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
         let old_quality = tier_rows(&live, true)?;
         assert_eq!(old_fast.len(), original.len());
         assert_eq!(old_quality.len(), original.len());
-        let first_survivor = usize::try_from(ORIGINAL_COUNT - retained)
-            .map_err(|error| error.to_string())?;
+        let first_survivor =
+            usize::try_from(ORIGINAL_COUNT - retained).map_err(|error| error.to_string())?;
         let mut current = original[first_survivor..].to_vec();
         for document in &mut current {
             document.title = Some("updatedmarker".to_owned());
-            document.metadata.insert("revision".to_owned(), "2".to_owned());
+            document
+                .metadata
+                .insert("revision".to_owned(), "2".to_owned());
         }
         current.reverse();
         let identity = embedder_identity(&stack).ok_or("complete stack identity")?;
@@ -66,7 +84,12 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
         assert_eq!(delta.upserts.len(), current.len());
         assert_eq!(delta.removals.len(), original.len() - current.len());
         assert_eq!(delta.upserts.len() + delta.removals.len(), 9000);
-        assert!(delta.vector_upserts(&identity).map_err(|error| error.detail)?.is_empty());
+        assert!(
+            delta
+                .vector_upserts(&identity)
+                .map_err(|error| error.detail)?
+                .is_empty()
+        );
         assert!(delta.vector_upserts("changed producer").is_err());
         let reset = || {
             fast.inputs.store(0, Ordering::SeqCst);
@@ -81,13 +104,25 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
             reset();
             let mut commits = 0;
             let failed = index::publish_index_generation_preferring_delta(
-                &lock, &live, stack.clone(), current.clone(), 2, counts, || {
+                &lock,
+                &live,
+                stack.clone(),
+                current.clone(),
+                2,
+                counts,
+                || {
                     commits += 1;
-                    Err(index::IndexRebuildError::Index("injected maintenance commit refusal".to_owned()))
+                    Err(index::IndexRebuildError::Index(
+                        "injected maintenance commit refusal".to_owned(),
+                    ))
                 },
-            ).await;
+            )
+            .await;
             assert!(failed.is_err());
-            assert_eq!(commits, 1, "complete maintenance must reach the commit tail");
+            assert_eq!(
+                commits, 1,
+                "complete maintenance must reach the commit tail"
+            );
             assert_no_inference();
             assert_eq!(index::validated_index_generation(&live)?, 1);
             assert_eq!(generation_files(&live)?, before);
@@ -98,8 +133,16 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
         }
         reset();
         let (_, kind) = index::publish_index_generation_preferring_delta(
-            &lock, &live, stack.clone(), current.clone(), 2, counts, || Ok(()),
-        ).await.map_err(|error| error.to_string())?;
+            &lock,
+            &live,
+            stack.clone(),
+            current.clone(),
+            2,
+            counts,
+            || Ok(()),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         assert!(matches!(kind, index::PublishedGenerationKind::Delta));
         assert_no_inference();
         assert_eq!(index::validated_index_generation(&live)?, 2);
@@ -108,18 +151,38 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
         let quality_rows = tier_rows(&live, true)?;
         // Compare every survivor to its actual previous vector, including IDs;
         // neither recomputed vectors nor a count-only empty pass can satisfy it.
-        let expected_fast: BTreeMap<_, _> = current.iter()
-            .map(|doc| Ok((doc.id.clone(), old_fast.get(&doc.id).ok_or("missing fast source")?.clone())))
+        let expected_fast: BTreeMap<_, _> = current
+            .iter()
+            .map(|doc| {
+                Ok((
+                    doc.id.clone(),
+                    old_fast.get(&doc.id).ok_or("missing fast source")?.clone(),
+                ))
+            })
             .collect::<Result<_, &str>>()?;
-        let expected_quality: BTreeMap<_, _> = current.iter()
-            .map(|doc| Ok((doc.id.clone(), old_quality.get(&doc.id).ok_or("missing quality source")?.clone())))
+        let expected_quality: BTreeMap<_, _> = current
+            .iter()
+            .map(|doc| {
+                Ok((
+                    doc.id.clone(),
+                    old_quality
+                        .get(&doc.id)
+                        .ok_or("missing quality source")?
+                        .clone(),
+                ))
+            })
             .collect::<Result<_, &str>>()?;
         assert_eq!(fast_rows, expected_fast);
         assert_eq!(quality_rows, expected_quality);
         if retained == ORIGINAL_COUNT {
             for file in ["vector.fast.idx", "vector.quality.idx"] {
-                let old = before.get(Path::new(file)).ok_or("missing original vector file")?;
-                assert_eq!(&std::fs::read(live.join(file)).map_err(|error| error.to_string())?, old);
+                let old = before
+                    .get(Path::new(file))
+                    .ok_or("missing original vector file")?;
+                assert_eq!(
+                    &std::fs::read(live.join(file)).map_err(|error| error.to_string())?,
+                    old
+                );
             }
         }
         #[cfg(feature = "lexical-bm25")]
@@ -128,8 +191,16 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
         assert!(repeated.upserts.is_empty() && repeated.removals.is_empty());
         reset();
         let (_, kind) = index::publish_index_generation_preferring_delta(
-            &lock, &live, stack.clone(), current.clone(), 3, counts, || Ok(()),
-        ).await.map_err(|error| error.to_string())?;
+            &lock,
+            &live,
+            stack.clone(),
+            current.clone(),
+            3,
+            counts,
+            || Ok(()),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         assert!(matches!(kind, index::PublishedGenerationKind::Delta));
         assert_no_inference();
         assert_eq!(index::validated_index_generation(&live)?, 3);
@@ -139,7 +210,10 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
             let builder = index::IndexBuilder::new(&reference).with_embedder_stack(stack);
             #[cfg(feature = "lexical-bm25")]
             let builder = builder.with_tantivy_lexical();
-            builder.add_documents(current.clone()).build(&cx).await
+            builder
+                .add_documents(current.clone())
+                .build(&cx)
+                .await
                 .map_err(|error| error.to_string())?;
             assert_eq!(tier_rows(&reference, false)?, fast_rows);
             assert_eq!(tier_rows(&reference, true)?, quality_rows);
@@ -147,7 +221,8 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
             assert_lexical(&cx, &reference, &current).await?;
         }
         Ok(())
-    }).map_err(|error| error.to_string())?
+    })
+    .map_err(|error| error.to_string())?
 }
 
 #[test]
@@ -173,29 +248,49 @@ fn native_bulk_maintenance_commit_refusal_restores_files_before_retry() -> TestR
 #[test]
 fn bulk_maintenance_requires_current_v3_inputs_and_the_actual_producer() -> TestResult {
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let directory = root.path().canonicalize().map_err(|error| error.to_string())?;
+    let directory = root
+        .path()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let stack = index::hash_fallback_embedder_stack();
     let original = archive();
     let mut current = original.clone();
-    for document in &mut current { document.title = Some("updatedmarker".to_owned()); }
+    for document in &mut current {
+        document.title = Some("updatedmarker".to_owned());
+    }
     let mut legacy = DocDigests::new(&stack, &original);
     legacy.schema = DOC_DIGESTS_SCHEMA_V2.to_owned();
     legacy.embedding_inputs = None;
-    legacy.write(&directory).map_err(|error| error.to_string())?;
+    legacy
+        .write(&directory)
+        .map_err(|error| error.to_string())?;
     assert!(plan(&directory, &stack, &current).is_err());
-    DocDigests::new(&stack, &original).write(&directory).map_err(|error| error.to_string())?;
+    DocDigests::new(&stack, &original)
+        .write(&directory)
+        .map_err(|error| error.to_string())?;
     let delta = plan(&directory, &stack, &current).map_err(|error| error.detail)?;
     let identity = embedder_identity(&stack).ok_or("complete identity")?;
     assert_eq!(delta.upserts.len(), 9000);
-    assert!(delta.vector_upserts(&identity).map_err(|error| error.detail)?.is_empty());
+    assert!(
+        delta
+            .vector_upserts(&identity)
+            .map_err(|error| error.detail)?
+            .is_empty()
+    );
     for incomplete in [false, true] {
         let mut invalid = DocDigests::new(&stack, &original);
         if incomplete {
-            let _ = invalid.embedding_inputs.as_mut().ok_or("v3 map")?.pop_first();
+            let _ = invalid
+                .embedding_inputs
+                .as_mut()
+                .ok_or("v3 map")?
+                .pop_first();
         } else {
             invalid.embedder = Some("different producer".to_owned());
         }
-        invalid.write(&directory).map_err(|error| error.to_string())?;
+        invalid
+            .write(&directory)
+            .map_err(|error| error.to_string())?;
         assert!(plan(&directory, &stack, &current).is_err());
     }
     Ok(())

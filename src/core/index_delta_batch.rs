@@ -647,7 +647,8 @@ mod tests {
     }
 
     #[test]
-    fn late_inputs_are_reused_and_evicted_inputs_recomputed_without_losing_wal_entries() -> TestResult {
+    fn late_inputs_are_reused_and_evicted_inputs_recomputed_without_losing_wal_entries()
+    -> TestResult {
         crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
             let embedder = ObservedHash::new();
             let identity = embedder
@@ -809,10 +810,7 @@ mod tests {
         cache.remember(newest, hash.embed_sync(newest));
         assert!(cache.get(&docs[0].content).is_some());
         assert!(cache.get(&docs[1].content).is_none());
-        assert_eq!(
-            cache.get(newest),
-            Some(hash.embed_sync(newest).as_slice())
-        );
+        assert_eq!(cache.get(newest), Some(hash.embed_sync(newest).as_slice()));
         assert_eq!(cache.vectors.len(), MAX_CACHED_INPUTS);
         assert_eq!(cache.vector_bytes, MAX_CACHED_INPUTS * 256 * 4);
     }
@@ -900,7 +898,10 @@ mod tests {
                 .iter()
                 .map(|id| docs[*id].content.as_str())
                 .collect::<BTreeSet<_>>();
-            assert_eq!(cache.vectors.keys().copied().collect::<BTreeSet<_>>(), expected);
+            assert_eq!(
+                cache.vectors.keys().copied().collect::<BTreeSet<_>>(),
+                expected
+            );
             assert_eq!(cache.vector_bytes, order.len() * 256 * 4);
             assert!(cache.vectors.len() <= MAX_CACHED_INPUTS);
             assert!(cache.vector_bytes <= MAX_CACHED_VECTOR_BYTES);
@@ -908,39 +909,59 @@ mod tests {
     }
 
     #[test]
-    fn repeated_late_phase_does_not_reembed_after_an_unrelated_prefix_fills_the_cache() -> TestResult {
+    fn repeated_late_phase_does_not_reembed_after_an_unrelated_prefix_fills_the_cache() -> TestResult
+    {
         crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
             let embedder = ObservedHash::new();
-            let identity = embedder.identity().map_err(|error| error.to_string())?.fingerprint();
+            let identity = embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint();
             let mut docs = documents(160);
             for number in 0..512 {
                 let text = docs[128 + number % 32].content.clone();
                 docs.push(IndexableDocument::new(format!("late_{number}"), text));
             }
-            let expected = docs.iter().map(|document| {
-                (document.id.clone(), embedder.inner.embed_sync(&document.content))
-            }).collect::<Vec<_>>();
+            let expected = docs
+                .iter()
+                .map(|document| {
+                    (
+                        document.id.clone(),
+                        embedder.inner.embed_sync(&document.content),
+                    )
+                })
+                .collect::<Vec<_>>();
             let mut written = Vec::new();
             embed_batches_with(&cx, &embedder, &docs, &identity, "fast", |entries| {
                 assert!(entries.len() <= MAX_BATCH_DOCUMENTS);
                 written.extend(entries);
                 Ok(())
-            }).await.map_err(|error| error.detail)?;
+            })
+            .await
+            .map_err(|error| error.detail)?;
             assert_eq!(written, expected);
             assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![32; 5]);
             Ok(())
-        }).map_err(|error| error.to_string())?
+        })
+        .map_err(|error| error.to_string())?
     }
 
     #[test]
-    fn cancellation_after_cache_replacement_stops_before_another_cached_batch_is_written() -> TestResult {
+    fn cancellation_after_cache_replacement_stops_before_another_cached_batch_is_written()
+    -> TestResult {
         crate::core::run_cli_with_cx(Duration::from_secs(30), |_runtime_cx| async move {
             let cx = asupersync::Cx::for_testing();
             let embedder = ObservedHash::new();
-            let identity = embedder.identity().map_err(|error| error.to_string())?.fingerprint();
+            let identity = embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint();
             let mut docs = documents(MAX_CACHED_INPUTS);
             for number in 0..96 {
-                docs.push(IndexableDocument::new(format!("late_{number}"), "late repeated body"));
+                docs.push(IndexableDocument::new(
+                    format!("late_{number}"),
+                    "late repeated body",
+                ));
             }
             let mut writes = 0;
             let result = embed_batches_with(&cx, &embedder, &docs, &identity, "fast", |_| {
@@ -949,12 +970,17 @@ mod tests {
                     cx.set_cancel_reason(asupersync::CancelReason::user("stop late cache reuse"));
                 }
                 Ok(())
-            }).await;
+            })
+            .await;
             assert!(result.is_err());
             assert_eq!(writes, 6);
-            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![32, 32, 32, 32, 1]);
+            assert_eq!(
+                *embedder.sizes.lock().expect("sizes"),
+                vec![32, 32, 32, 32, 1]
+            );
             Ok(())
-        }).map_err(|error| error.to_string())?
+        })
+        .map_err(|error| error.to_string())?
     }
 
     #[test]
@@ -966,7 +992,10 @@ mod tests {
         use std::path::Path;
 
         let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let parent = root.path().canonicalize().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         crate::core::run_cli_with_cx(Duration::from_secs(120), |cx| async move {
             let _root = root;
             let live = parent.join("live");
@@ -974,17 +1003,27 @@ mod tests {
             let rebuilt = parent.join("rebuilt");
             let original = documents(160);
             let stack = hash_fallback_embedder_stack();
-            IndexBuilder::new(&live).with_embedder_stack(stack.clone())
-                .add_documents(original.clone()).build(&cx).await
+            IndexBuilder::new(&live)
+                .with_embedder_stack(stack.clone())
+                .add_documents(original.clone())
+                .build(&cx)
+                .await
                 .map_err(|error| error.to_string())?;
             let read_vectors = |path: &Path| -> Result<BTreeMap<String, Vec<f32>>, String> {
                 let index = open_fast_vector_index_read_only(path).map_err(|error| error.detail)?;
-                (0..index.record_count()).map(|position| {
-                    Ok((
-                        index.doc_id_at(position).map_err(|error| error.to_string())?.to_owned(),
-                        index.vector_at_f32(position).map_err(|error| error.to_string())?,
-                    ))
-                }).collect()
+                (0..index.record_count())
+                    .map(|position| {
+                        Ok((
+                            index
+                                .doc_id_at(position)
+                                .map_err(|error| error.to_string())?
+                                .to_owned(),
+                            index
+                                .vector_at_f32(position)
+                                .map_err(|error| error.to_string())?,
+                        ))
+                    })
+                    .collect()
             };
             let original_vectors = read_vectors(&live)?;
             std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
@@ -998,22 +1037,30 @@ mod tests {
                 updated.push(IndexableDocument::new(format!("late_{number}"), text));
             }
             let embedder = ObservedHash::new();
-            let identity = embedder.identity().map_err(|error| error.to_string())?.fingerprint();
+            let identity = embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint();
             let mut index = open_fast_vector_index(&staged).map_err(|error| error.detail)?;
             upsert(&cx, &mut index, &embedder, &updated, &identity, "fast")
-                .await.map_err(|error| error.detail)?;
+                .await
+                .map_err(|error| error.detail)?;
             compact_incremental_vector_index(&mut index, "fast").map_err(|error| error.detail)?;
             drop(index);
             assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![32; 5]);
-            IndexBuilder::new(&rebuilt).with_embedder_stack(stack)
-                .add_documents(updated).build(&cx).await
+            IndexBuilder::new(&rebuilt)
+                .with_embedder_stack(stack)
+                .add_documents(updated)
+                .build(&cx)
+                .await
                 .map_err(|error| error.to_string())?;
             let staged_vectors = read_vectors(&staged)?;
             assert_eq!(staged_vectors.len(), 256);
             assert_eq!(staged_vectors, read_vectors(&rebuilt)?);
             assert_eq!(read_vectors(&live)?, original_vectors);
             Ok(())
-        }).map_err(|error| error.to_string())?
+        })
+        .map_err(|error| error.to_string())?
     }
 
     fn assert_staged_updates(repeat_content: bool) -> TestResult {

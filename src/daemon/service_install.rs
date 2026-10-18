@@ -125,9 +125,9 @@ pub fn render_unit_body_for_workspace(
     // systemd rejects these in argv[0] even after valid unit-file unquoting.
     // Ordinary arguments do not share that executable-name restriction.
     if kind == DaemonServiceKind::SystemdUser
-        && binary_text.chars().any(|ch| {
-            ch < ' ' || matches!(ch, '\u{7f}' | '\\' | '\'' | '"')
-        })
+        && binary_text
+            .chars()
+            .any(|ch| ch < ' ' || matches!(ch, '\u{7f}' | '\\' | '\'' | '"'))
     {
         return None;
     }
@@ -673,9 +673,14 @@ fn prove_windows_user_task_load(home: &Path, unit_stem: &str) -> Result<String, 
 /// Restart=always service. This does not stop a separately started RPC daemon.
 pub fn deactivate_daemon_service(kind: DaemonServiceKind) -> Result<(), String> {
     if kind == DaemonServiceKind::Launchd && super::current_euid() == 0 {
-        return Err("launchd steward deactivation must run as the signed-in user, not root".to_owned());
+        return Err(
+            "launchd steward deactivation must run as the signed-in user, not root".to_owned(),
+        );
     }
-    if matches!(kind, DaemonServiceKind::Launchd | DaemonServiceKind::SystemdUser) {
+    if matches!(
+        kind,
+        DaemonServiceKind::Launchd | DaemonServiceKind::SystemdUser
+    ) {
         return deactivate_unix_service_with(kind, run_deactivation_command);
     }
     match kind {
@@ -729,20 +734,39 @@ fn deactivate_unix_service_with(
     match kind {
         DaemonServiceKind::SystemdUser => {
             let inspect = [
-                "--user", "--no-ask-password", "--no-pager", "show", "--all",
-                "--property=Id", "--property=LoadState", "--property=ActiveState",
-                "--property=UnitFileState", "--", SYSTEMD_UNIT_NAME,
+                "--user",
+                "--no-ask-password",
+                "--no-pager",
+                "show",
+                "--all",
+                "--property=Id",
+                "--property=LoadState",
+                "--property=ActiveState",
+                "--property=UnitFileState",
+                "--",
+                SYSTEMD_UNIT_NAME,
             ];
             if systemd_service_is_stopped(&run("systemctl", &inspect)?)? {
                 return Ok(());
             }
             // --now waits for the stop job as well as removing startup links.
             // No system-wide manager, wildcard, sudo, kill or reboot is used.
-            run("systemctl", &[
-                "--user", "--no-ask-password", "disable", "--now", "--", SYSTEMD_UNIT_NAME,
-            ])?;
+            run(
+                "systemctl",
+                &[
+                    "--user",
+                    "--no-ask-password",
+                    "disable",
+                    "--now",
+                    "--",
+                    SYSTEMD_UNIT_NAME,
+                ],
+            )?;
             if !systemd_service_is_stopped(&run("systemctl", &inspect)?)? {
-                return Err("systemd still reports the steward active or enabled after deactivation".to_owned());
+                return Err(
+                    "systemd still reports the steward active or enabled after deactivation"
+                        .to_owned(),
+                );
             }
             Ok(())
         }
@@ -782,7 +806,10 @@ fn systemd_service_is_stopped(output: &str) -> Result<bool, String> {
     }
     Ok(fields.get("ActiveState").copied() == Some("inactive")
         && matches!(
-            (fields.get("LoadState").copied(), fields.get("UnitFileState").copied()),
+            (
+                fields.get("LoadState").copied(),
+                fields.get("UnitFileState").copied()
+            ),
             (Some("not-found"), Some(""))
                 | (Some("loaded"), Some("disabled" | "static"))
                 | (Some("masked"), Some("masked" | "masked-runtime"))
@@ -927,7 +954,10 @@ mod tests {
     fn systemd_deactivation_disables_and_stops_only_the_user_unit_then_rechecks() {
         let mut calls = Vec::new();
         deactivate_unix_service_with(DaemonServiceKind::SystemdUser, |program, args| {
-            calls.push((program.to_owned(), args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>()));
+            calls.push((
+                program.to_owned(),
+                args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+            ));
             Ok(match calls.len() {
                 1 => systemd_state("loaded", "active", "enabled"),
                 2 => String::new(),
@@ -939,12 +969,28 @@ mod tests {
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[0], calls[2]);
         assert!(calls.iter().all(|(program, args)| {
-            program == "systemctl" && args[0] == "--user"
+            program == "systemctl"
+                && args[0] == "--user"
                 && args.last().map(String::as_str) == Some(SYSTEMD_UNIT_NAME)
         }));
-        assert_eq!(calls[1].1, ["--user", "--no-ask-password", "disable", "--now", "--", SYSTEMD_UNIT_NAME]);
+        assert_eq!(
+            calls[1].1,
+            [
+                "--user",
+                "--no-ask-password",
+                "disable",
+                "--now",
+                "--",
+                SYSTEMD_UNIT_NAME
+            ]
+        );
         assert!(calls[0].1.iter().any(|arg| arg == "--property=ActiveState"));
-        assert!(calls[0].1.iter().any(|arg| arg == "--property=UnitFileState"));
+        assert!(
+            calls[0]
+                .1
+                .iter()
+                .any(|arg| arg == "--property=UnitFileState")
+        );
     }
 
     #[test]
@@ -1027,7 +1073,10 @@ mod tests {
             })
         })
         .expect("registration removed");
-        assert_eq!(calls, vec![vec!["list"], vec!["remove", LAUNCHD_LABEL], vec!["list"]]);
+        assert_eq!(
+            calls,
+            vec![vec!["list"], vec!["remove", LAUNCHD_LABEL], vec!["list"]]
+        );
     }
 
     #[test]
@@ -1050,15 +1099,21 @@ mod tests {
     fn invalid_inspection_cannot_authorize_a_supervisor_mutation() {
         for kind in [DaemonServiceKind::SystemdUser, DaemonServiceKind::Launchd] {
             let mut calls = 0;
-            assert!(deactivate_unix_service_with(kind, |_, _| {
-                calls += 1;
-                Ok(String::new())
-            }).is_err());
+            assert!(
+                deactivate_unix_service_with(kind, |_, _| {
+                    calls += 1;
+                    Ok(String::new())
+                })
+                .is_err()
+            );
             assert_eq!(calls, 1);
         }
-        assert!(deactivate_unix_service_with(DaemonServiceKind::WindowsUserTask, |_, _| {
-            panic!("a Unix helper must never control a Windows task")
-        }).is_err());
+        assert!(
+            deactivate_unix_service_with(DaemonServiceKind::WindowsUserTask, |_, _| {
+                panic!("a Unix helper must never control a Windows task")
+            })
+            .is_err()
+        );
         assert!(deactivate_daemon_service(DaemonServiceKind::Unsupported).is_ok());
     }
 
@@ -1066,17 +1121,19 @@ mod tests {
     fn systemd_paths_are_literal_single_arguments_not_unit_or_environment_syntax() {
         let binary = Path::new("/opt/ee tools/$release%h/ee");
         let workspace = Path::new("/work/資料 \"quoted\"\\${HOME}%h\nExecStart=/bin/false\r\t");
-        let body = render_unit_body_for_workspace(
-            DaemonServiceKind::SystemdUser,
-            binary,
-            workspace,
-        )
-        .expect("literal paths");
+        let body =
+            render_unit_body_for_workspace(DaemonServiceKind::SystemdUser, binary, workspace)
+                .expect("literal paths");
         assert!(body.contains("ExecStart=:\"/opt/ee tools/$release%%h/ee\" daemon"));
         assert!(body.contains(
             "--workspace \"/work/資料 \\\"quoted\\\"\\\\${HOME}%%h\\nExecStart=/bin/false\\r\\t\" --job"
         ));
-        assert_eq!(body.lines().filter(|line| line.starts_with("ExecStart=")).count(), 1);
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.starts_with("ExecStart="))
+                .count(),
+            1
+        );
         assert!(body.contains("Restart=always\nRestartSec=5\n"));
     }
 
@@ -1089,9 +1146,11 @@ mod tests {
         )
         .expect("XML paths");
         assert!(body.contains("<string>/opt/ee &amp; &lt;tools&gt;/ee</string>"));
-        assert!(body.contains(
-            "<string>/work/資料 &quot;quoted&quot;&#13;&#10;&#9;&amp;%${HOME}</string>"
-        ));
+        assert!(
+            body.contains(
+                "<string>/work/資料 &quot;quoted&quot;&#13;&#10;&#9;&amp;%${HOME}</string>"
+            )
+        );
         assert_eq!(body.matches("<string>--workspace</string>").count(), 1);
         assert!(body.contains("<key>KeepAlive</key>\n  <true/>"));
     }
@@ -1114,18 +1173,24 @@ mod tests {
             Path::new(r"C:\work & projects\"),
         )
         .expect("Windows workspace");
-        assert!(body.contains(
-            r"--workspace &quot;C:\work &amp; projects\\&quot; --job team_steward"
-        ));
+        assert!(
+            body.contains(r"--workspace &quot;C:\work &amp; projects\\&quot; --job team_steward")
+        );
     }
 
     #[test]
     fn windows_verbatim_unc_executable_keeps_its_network_root() {
         for (path, expected) in [
             (r"\\?\C:\tools\ee.exe", r"C:\tools\ee.exe"),
-            (r"\\?\UNC\server\ee tools\ee.exe", r"\\server\ee tools\ee.exe"),
+            (
+                r"\\?\UNC\server\ee tools\ee.exe",
+                r"\\server\ee tools\ee.exe",
+            ),
             ("//?/UNC/server/ee tools/ee.exe", "//server/ee tools/ee.exe"),
-            (r"\\server\share & tools\ee.exe", r"\\server\share &amp; tools\ee.exe"),
+            (
+                r"\\server\share & tools\ee.exe",
+                r"\\server\share &amp; tools\ee.exe",
+            ),
         ] {
             assert_eq!(windows_command_path(Path::new(path)), expected);
         }
@@ -1169,14 +1234,30 @@ mod tests {
             DaemonServiceKind::WindowsUserTask,
         ] {
             for bad in ["", "/bad\0path", "/bad\u{1f}path", "/bad\u{fffe}path"] {
-                assert!(render_unit_body_for_workspace(kind, Path::new(bad), Path::new("/work")).is_none());
-                assert!(render_unit_body_for_workspace(kind, Path::new("/ee"), Path::new(bad)).is_none());
+                assert!(
+                    render_unit_body_for_workspace(kind, Path::new(bad), Path::new("/work"))
+                        .is_none()
+                );
+                assert!(
+                    render_unit_body_for_workspace(kind, Path::new("/ee"), Path::new(bad))
+                        .is_none()
+                );
             }
         }
-        for bad in ["/bin/ee'quoted", "/bin/ee\"quoted", "/bin/ee\\quoted", "/bin/ee\nname"] {
-            assert!(render_unit_body_for_workspace(
-                DaemonServiceKind::SystemdUser, Path::new(bad), Path::new("/work")
-            ).is_none());
+        for bad in [
+            "/bin/ee'quoted",
+            "/bin/ee\"quoted",
+            "/bin/ee\\quoted",
+            "/bin/ee\nname",
+        ] {
+            assert!(
+                render_unit_body_for_workspace(
+                    DaemonServiceKind::SystemdUser,
+                    Path::new(bad),
+                    Path::new("/work")
+                )
+                .is_none()
+            );
         }
     }
 
@@ -1221,7 +1302,8 @@ mod tests {
             DaemonServiceKind::SystemdUser,
             Path::new("/usr/bin/ee"),
             workspace,
-        ).expect("systemd");
+        )
+        .expect("systemd");
         assert!(systemd.contains("--workspace \"/home/ubuntu/main\""));
         assert!(systemd.contains("Restart=always"));
         assert!(systemd.contains("--once"));
@@ -1229,13 +1311,22 @@ mod tests {
             DaemonServiceKind::Launchd,
             Path::new("/usr/bin/ee"),
             workspace,
-        ).expect("launchd");
+        )
+        .expect("launchd");
         assert!(launchd.contains("<string>/home/ubuntu/main</string>"));
         let plan = plan_daemon_service_for_workspace(
-            "daemon install", DaemonServiceKind::SystemdUser,
-            Path::new("/home/ubuntu"), Path::new("/usr/bin/ee"), workspace, false,
+            "daemon install",
+            DaemonServiceKind::SystemdUser,
+            Path::new("/home/ubuntu"),
+            Path::new("/usr/bin/ee"),
+            workspace,
+            false,
         );
-        assert!(plan.unit_body.expect("body").contains("--workspace \"/home/ubuntu/main\""));
+        assert!(
+            plan.unit_body
+                .expect("body")
+                .contains("--workspace \"/home/ubuntu/main\"")
+        );
     }
 
     #[test]

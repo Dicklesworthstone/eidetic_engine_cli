@@ -32,8 +32,7 @@ impl<T> Default for Reported<T> {
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Reported<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Option::<T>::deserialize(deserializer)
-            .map(|value| value.map_or(Self::Unknown, Self::Value))
+        Option::<T>::deserialize(deserializer).map(|value| value.map_or(Self::Unknown, Self::Value))
     }
 }
 

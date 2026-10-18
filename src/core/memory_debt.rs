@@ -815,10 +815,12 @@ fn ingest_pack_reads(
             }
             admitted_items = admitted_items.saturating_add(1);
             let memory_id = match crate::core::pack_selection_identity::classify(item) {
-                Ok(crate::core::pack_selection_identity::PackSelectionIdentity::Memory(memory_id)) => {
-                    memory_id
-                }
-                Ok(crate::core::pack_selection_identity::PackSelectionIdentity::Native { .. }) => continue,
+                Ok(crate::core::pack_selection_identity::PackSelectionIdentity::Memory(
+                    memory_id,
+                )) => memory_id,
+                Ok(crate::core::pack_selection_identity::PackSelectionIdentity::Native {
+                    ..
+                }) => continue,
                 Err(message) => {
                     return Err(DomainError::Storage {
                         message: format!("Verified pack selection evidence {message}."),

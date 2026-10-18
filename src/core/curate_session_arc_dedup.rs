@@ -53,14 +53,10 @@ impl Signature {
         let repair = repair.to_owned();
         // Include string capacity, collection entries and conservative node
         // overhead. This is an owned-payload allowance, not an RSS promise.
-        let retained_bytes = resources
-            .iter()
-            .chain(&protected)
-            .chain(&shingles)
-            .fold(
-                failure.capacity() + repair.capacity() + std::mem::size_of::<Self>(),
-                |total, text| total.saturating_add(text.capacity() + 128),
-            );
+        let retained_bytes = resources.iter().chain(&protected).chain(&shingles).fold(
+            failure.capacity() + repair.capacity() + std::mem::size_of::<Self>(),
+            |total, text| total.saturating_add(text.capacity() + 128),
+        );
         Some(Self {
             failure,
             repair,
@@ -108,10 +104,26 @@ fn protected_tokens(text: &str) -> Vec<String> {
             let lower = word.to_ascii_lowercase();
             matches!(
                 lower.as_str(),
-                "no" | "not" | "never" | "without" | "cannot" | "can't"
-                    | "before" | "after" | "only" | "unless" | "except"
-                    | "increase" | "decrease" | "enable" | "disable"
-                    | "enabled" | "disabled" | "true" | "false" | "null" | "none"
+                "no" | "not"
+                    | "never"
+                    | "without"
+                    | "cannot"
+                    | "can't"
+                    | "before"
+                    | "after"
+                    | "only"
+                    | "unless"
+                    | "except"
+                    | "increase"
+                    | "decrease"
+                    | "enable"
+                    | "disable"
+                    | "enabled"
+                    | "disabled"
+                    | "true"
+                    | "false"
+                    | "null"
+                    | "none"
             ) || token.chars().any(|ch| ch.is_ascii_digit())
                 || token.contains(['_', '/', '\\', ':', '=', '`', '"', '\'', '$'])
                 || token.starts_with('-')
@@ -155,7 +167,10 @@ impl PairIndex {
     }
 }
 
-fn pair_signature(left: &ReviewSessionCandidate, right: &ReviewSessionCandidate) -> Option<Signature> {
+fn pair_signature(
+    left: &ReviewSessionCandidate,
+    right: &ReviewSessionCandidate,
+) -> Option<Signature> {
     let left = left.session_arc.as_ref()?;
     let right = right.session_arc.as_ref()?;
     for (left, right) in [
@@ -172,7 +187,9 @@ fn pair_signature(left: &ReviewSessionCandidate, right: &ReviewSessionCandidate)
     Signature::new(&left.failure_span.excerpt, &left.resolution_span.excerpt)
 }
 
-pub(super) fn retain_distinct_pairs(rows: Vec<ReviewSessionCandidate>) -> Vec<ReviewSessionCandidate> {
+pub(super) fn retain_distinct_pairs(
+    rows: Vec<ReviewSessionCandidate>,
+) -> Vec<ReviewSessionCandidate> {
     let mut index = PairIndex::default();
     let mut output = Vec::new();
     let mut rows = rows.into_iter();

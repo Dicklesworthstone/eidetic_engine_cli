@@ -13,7 +13,10 @@ const WS: &str = "wsp_01234567890123456789012345";
 const COMMAND: &str = "cargo nextest run";
 const REPAIR: &str = "The cache round_trip test failed because writes were not flushed. I fixed round_trip by flushing pending cache writes before reads in src/cache.rs.";
 
-fn episode(proof: &str, proof_command: &str) -> Result<(DbConnection, String, Vec<String>), Box<dyn std::error::Error>> {
+fn episode(
+    proof: &str,
+    proof_command: &str,
+) -> Result<(DbConnection, String, Vec<String>), Box<dyn std::error::Error>> {
     episode_with_failure(&failed().text, proof, proof_command)
 }
 
@@ -24,39 +27,80 @@ fn episode_with_failure(
 ) -> Result<(DbConnection, String, Vec<String>), Box<dyn std::error::Error>> {
     let connection = DbConnection::open_memory()?;
     connection.migrate()?;
-    connection.insert_workspace(WS, &CreateWorkspaceInput {
-        path: "/tmp/nextest-recall-store".to_owned(), name: None,
-    })?;
+    connection.insert_workspace(
+        WS,
+        &CreateWorkspaceInput {
+            path: "/tmp/nextest-recall-store".to_owned(),
+            name: None,
+        },
+    )?;
     let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(5100)).to_string();
-    connection.insert_session(&session, &CreateSessionInput {
-        workspace_id: WS.to_owned(),
-        cass_session_id: "/sessions/nextest-recall.jsonl".to_owned(),
-        source_path: None, agent_name: Some("claude_code".to_owned()), model: None,
-        started_at: None, ended_at: None, message_count: 5, token_count: None,
-        content_hash: format!("blake3:{}", blake3::hash(b"nextest-recall-store").to_hex()),
-        metadata_json: None,
-    })?;
+    connection.insert_session(
+        &session,
+        &CreateSessionInput {
+            workspace_id: WS.to_owned(),
+            cass_session_id: "/sessions/nextest-recall.jsonl".to_owned(),
+            source_path: None,
+            agent_name: Some("claude_code".to_owned()),
+            model: None,
+            started_at: None,
+            ended_at: None,
+            message_count: 5,
+            token_count: None,
+            content_hash: format!("blake3:{}", blake3::hash(b"nextest-recall-store").to_hex()),
+            metadata_json: None,
+        },
+    )?;
     let rows = [
-        ("tool_call", "assistant", json!({"type":"tool_use","id":"fail","name":"Bash","input":{"command":COMMAND}})),
-        ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"fail","content":failure,"is_error":true})),
+        (
+            "tool_call",
+            "assistant",
+            json!({"type":"tool_use","id":"fail","name":"Bash","input":{"command":COMMAND}}),
+        ),
+        (
+            "tool_result",
+            "user",
+            json!({"type":"tool_result","tool_use_id":"fail","content":failure,"is_error":true}),
+        ),
         ("message", "assistant", json!({"type":"text","text":REPAIR})),
-        ("tool_call", "assistant", json!({"type":"tool_use","id":"verify","name":"Bash","input":{"command":proof_command}})),
-        ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"verify","content":proof,"is_error":false})),
+        (
+            "tool_call",
+            "assistant",
+            json!({"type":"tool_use","id":"verify","name":"Bash","input":{"command":proof_command}}),
+        ),
+        (
+            "tool_result",
+            "user",
+            json!({"type":"tool_result","tool_use_id":"verify","content":proof,"is_error":false}),
+        ),
     ];
     let mut ids = Vec::new();
     for (offset, (kind, role, block)) in rows.iter().enumerate() {
         let line = u32::try_from(offset + 1)?;
-        let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(5200 + u128::from(line))).to_string();
+        let id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(5200 + u128::from(line)))
+                .to_string();
         let excerpt = json!({"type":role,"message":{"role":role,"content":[block]}}).to_string();
-        connection.insert_evidence_span(&id, &CreateEvidenceSpanInput {
-            workspace_id: WS.to_owned(), session_id: session.clone(), memory_id: None,
-            producer_kind: EvidenceProducerKind::CassImport,
-            cass_span_id: format!("{session}:{line}"), span_kind: (*kind).to_owned(),
-            start_line: line, end_line: line, start_byte: None, end_byte: None,
-            role: Some((*role).to_owned()),
-            content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
-            excerpt, metadata_json: None, inherited_redaction_classes: Vec::new(),
-        })?;
+        connection.insert_evidence_span(
+            &id,
+            &CreateEvidenceSpanInput {
+                workspace_id: WS.to_owned(),
+                session_id: session.clone(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: format!("{session}:{line}"),
+                span_kind: (*kind).to_owned(),
+                start_line: line,
+                end_line: line,
+                start_byte: None,
+                end_byte: None,
+                role: Some((*role).to_owned()),
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                excerpt,
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )?;
         ids.push(id);
     }
     Ok((connection, session, ids))
@@ -84,16 +128,29 @@ fn nextest_import_recall_card_and_pack_context_share_provenance_and_are_idempote
     assert!(seed.contains("flushing"));
     let links = db.list_error_repair_links(WS, &diagnostic.layered_key().key)?;
     assert_eq!(links.len(), 3);
-    assert!(links.iter().all(|link| link.evidence_ref.as_deref() == Some(ids[1].as_str())));
+    assert!(
+        links
+            .iter()
+            .all(|link| link.evidence_ref.as_deref() == Some(ids[1].as_str()))
+    );
     for source in before {
-        let after = db.get_evidence_span(&source.id)?.ok_or("source disappeared")?;
+        let after = db
+            .get_evidence_span(&source.id)?
+            .ok_or("source disappeared")?;
         assert_eq!(source.excerpt, after.excerpt);
         assert_eq!(source.content_hash, after.content_hash);
-        assert_eq!(source.canonical_provenance_uri(), after.canonical_provenance_uri());
+        assert_eq!(
+            source.canonical_provenance_uri(),
+            after.canonical_provenance_uri()
+        );
     }
     let rerun = record_session_error_recall(&db, WS, &session)?;
     assert_eq!(rerun.incident_cards_recorded, 0);
-    assert_eq!(db.list_error_repair_links(WS, &diagnostic.layered_key().key)?.len(), 3);
+    assert_eq!(
+        db.list_error_repair_links(WS, &diagnostic.layered_key().key)?
+            .len(),
+        3
+    );
     Ok(())
 }
 
@@ -101,7 +158,12 @@ fn nextest_import_recall_card_and_pack_context_share_provenance_and_are_idempote
 fn changed_commands_or_missing_subjects_keep_real_store_failures_unresolved() -> TestResult {
     for (proof, command) in [
         (passed().text, "cargo nextest run --no-fail-fast --lib"),
-        (passed().text.replace("cache cache::round_trip", "other cache::round_trip"), COMMAND),
+        (
+            passed()
+                .text
+                .replace("cache cache::round_trip", "other cache::round_trip"),
+            COMMAND,
+        ),
         (report(&[], 5), COMMAND),
         ("Process exited with code 0".to_owned(), COMMAND),
     ] {

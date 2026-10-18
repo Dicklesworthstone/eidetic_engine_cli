@@ -54,13 +54,11 @@ impl Diagnostic {
             && self.code.as_deref().is_none_or(|code| {
                 (1..=128).contains(&code.len())
                     && code.as_bytes()[0].is_ascii_lowercase()
-                    && code
-                        .bytes()
-                        .all(|byte| {
-                            byte.is_ascii_lowercase()
-                                || byte.is_ascii_digit()
-                                || matches!(byte, b'-' | b'_')
-                        })
+                    && code.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'-' | b'_')
+                    })
             })
             && matches!(self.severity.as_str(), "error" | "note")
     }
@@ -317,11 +315,7 @@ mod tests {
         let too_many = vec![compact_note.to_string(); MAX_COMPILER_RECORDS + 1].join("\n");
         assert!(too_many.len() < MAX_SCANNED_OUTPUT_BYTES);
         assert!(inspect(&too_many).is_err());
-        let oversized = format!(
-            "{}{}",
-            record("note"),
-            " ".repeat(MAX_SCANNED_OUTPUT_BYTES)
-        );
+        let oversized = format!("{}{}", record("note"), " ".repeat(MAX_SCANNED_OUTPUT_BYTES));
         assert!(inspect(&oversized).is_err());
         assert!(!optimistic(oversized).succeeded());
     }
