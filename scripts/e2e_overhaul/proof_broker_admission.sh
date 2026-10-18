@@ -210,8 +210,15 @@ run_proof_case() {
     local command_text="$EE_BINARY --workspace $EPIC_WORKSPACE --json $*"
 
     started="$(now_ms)"
-    "$EE_BINARY" --workspace "$EPIC_WORKSPACE" --json "$@" >"$stdout_path" 2>"$stderr_path"
-    exit_code=$?
+    # `|| exit_code=$?` or the assertion below can never fail. Under
+    # `set -euo pipefail` (:29) a non-zero exit from the binary aborts here,
+    # so `exit_code=$?` never runs and `${label}_exit_zero` -- which exists
+    # precisely to catch a non-zero exit -- is only reached when the exit was
+    # zero and the assertion is trivially true. run_proof_case() is called
+    # bare at every call site, so nothing suspended -e on its behalf.
+    exit_code=0
+    "$EE_BINARY" --workspace "$EPIC_WORKSPACE" --json "$@" \
+        >"$stdout_path" 2>"$stderr_path" || exit_code=$?
     elapsed_ms="$(elapsed_ms_since "$started")"
 
     local response
