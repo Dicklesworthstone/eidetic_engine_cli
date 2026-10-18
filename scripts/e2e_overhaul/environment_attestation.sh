@@ -328,8 +328,28 @@ validate_event_log() {
     local lines=0
     local line
     local event_lines=()
-    mapfile -t event_lines <"$EVENT_LOG"
-    for line in "${event_lines[@]}"; do
+    # BASH 3.2 COMPATIBILITY (bd-zr89q). Two separate breakages lived here, and
+    # `mapfile` is the one that fires FIRST -- the bead names only the second.
+    #
+    #   1. `mapfile`/`readarray` is a BASH 4.0 BUILTIN. macOS still ships bash
+    #      3.2.57 as /bin/bash, and this script's shebang is
+    #      `#!/usr/bin/env bash`, so it takes whatever bash is first on PATH.
+    #      Measured on 3.2.57: `mapfile: command not found`, exit 127 -- before
+    #      the loop below is ever reached.
+    #   2. Expanding an EMPTY array under `set -u` is an error on 3.2.
+    #      Measured: `arr[@]: unbound variable`. Bash 5.x permits it, which is
+    #      why this survives on the Linux workers and would not here.
+    #
+    # The read loop replaces mapfile without changing semantics: -r keeps
+    # backslashes literal, IFS= keeps leading and trailing whitespace, and the
+    # `|| [ -n "$line" ]` tail admits a final line with no trailing newline,
+    # which mapfile also admits.
+    while IFS= read -r line || [ -n "$line" ]; do
+        event_lines+=("$line")
+    done <"$EVENT_LOG"
+    # `${a[@]+"${a[@]}"}` expands to nothing when the array is unset or empty
+    # and to the elements otherwise, which is the 3.2-safe spelling.
+    for line in ${event_lines[@]+"${event_lines[@]}"}; do
         lines=$((lines + 1))
         if ! printf '%s\n' "$line" | jq -e '
           .schema == "ee.test_event.v1"
