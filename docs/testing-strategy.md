@@ -1079,6 +1079,33 @@ rustfmt's population — not re-declaring the file — is the tractable directio
 - When a gate reports a caveat on a non-failing line, that caveat is a finding
   with no owner. File it.
 
+**Three more, examined 2026-10-18, and all three share one mechanism the
+2026-09-21 set only touched once: a gate matching TEXT, where a name written in
+a COMMENT is counted as the thing the name refers to.**
+
+| gate | population is actually | how it came apart |
+|---|---|---|
+| `check-production-reachability.py` | a hardcoded 31-entry `SURFACES` list, scanned line-by-line with no comment handling | a comment added to the doctor dispatch table to record that two fixers are NOT dispatched made the gate report them as wired, FAIL, and instruct deleting two accurate baseline rows. Writing down a hole closed the report of it. Fixed by stripping `//` before counting (`24f097272`). |
+| `check-production-reachability.py` (second defect) | fns NOT preceded by a blank line | `^\s*fn` under `re.M`: `\s` matches newlines, so the match could anchor on the blank line ABOVE a definition, `def_line` came out one short, and the fn counted as referencing ITSELF from production — so it could never be flagged. Masked because Rust style puts a `///` above most fns and `\s*` cannot cross it. Found by the positive control planted for the defect above (`24f097272`). |
+| `check-step-assertion-isolation.py` | steps whose body contains the accumulator's flag assignment anywhere, comments included | the accumulation test is a plain substring match over the whole `run:` block, so a step could be classified "accumulating" by naming the flag in a comment while still dying on its first assertion. Not yet observed; filed as `bd-step-isolation-mention-counts-2zj71` rather than widened blind, because tightening it can reclassify steps nobody has examined. |
+
+`e2e_invocation_audit.sh` has a fourth instance of the same shape that its row
+above does not cover: its predicate is "named on a non-comment line by some
+file other than itself", which is **not** a closure from gate roots, so **any
+two `scripts/e2e_*.sh` files that name each other are both "invoked" while
+nothing runs either.** Found by nearly shipping that pair — a partition runner
+whose `--self-test` names its self-test, and a self-test naming the runner.
+With both present the audit reported `52 orphaned of 211` and exited 0. They
+ship as `scripts/audit_e2e_orphan_partition*.sh`, outside the `e2e_*` glob,
+which is the right classification anyway (the audit already exempts itself as
+"a tool, not an e2e suite, despite matching the glob") but is an avoidance
+rather than a fix.
+
+The rule these add: **when a gate tells you to DELETE a baseline entry, verify
+the entry is really wired before obeying.** The gate may be reporting your own
+prose. The same applies in reverse to a gate that newly passes after an edit
+that only added a comment.
+
 ### Declare a contract, not a list
 
 The population defects above are the runtime half of one problem. The other half
