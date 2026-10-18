@@ -87,9 +87,18 @@ fn rerank_model_manifest_has_stable_fetch_contract() -> TestResult {
     )?;
     ensure(
         manifest
-            .pointer("/signed_attestation/sigstore_bundle")
+            .pointer("/signed_attestation/status")
             .and_then(Value::as_str)
-            == Some("src/data/rerank_model_manifest.sigstore.json"),
-        "signed_attestation should point at the committed sigstore bundle path",
-    )
+            == Some("unavailable"),
+        "signed_attestation status must be honest when no verifiable bundle is shipped",
+    )?;
+    for field in ["sigstore_bundle", "signer_identity", "signed_at"] {
+        ensure(
+            manifest
+                .pointer(&format!("/signed_attestation/{field}"))
+                .is_some_and(Value::is_null),
+            format!("unavailable signed_attestation must not claim {field}"),
+        )?;
+    }
+    Ok(())
 }

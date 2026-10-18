@@ -16,8 +16,9 @@
     "output_dimension": 1
   },
   "signed_attestation": {
-    "sigstore_bundle": "src/data/rerank_model_manifest.sigstore.json",
-    "signer_identity": "release-bot@github.com",
-    "signed_at": "2026-05-21T00:00:00Z"
+    "status": "unavailable",
+    "sigstore_bundle": null,
+    "signer_identity": null,
+    "signed_at": null
   }
 }
