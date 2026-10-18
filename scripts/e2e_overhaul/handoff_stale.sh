@@ -70,9 +70,14 @@ assert_jq "$EXPIRED_RESUME" \
 
 CLEAN_CAPSULE=$(capsule_path "clean")
 create_capsule "$CLEAN_CAPSULE"
+# This case EXPECTS 0, so the bare form worked on the happy path -- which is why
+# it survived. It failed in the direction that matters least often and hurts
+# most: a regression here aborted the script at `set -e` (:4) instead of
+# reporting `m4_handoff_require_fresh_clean_exit`, turning a specific assertion
+# failure into a dead epic. Capturing the rc reports it either way.
+CLEAN_STRICT_RC=0
 CLEAN_STRICT_JSON=$(e2e_log_command "$EE_BINARY" handoff resume "$CLEAN_CAPSULE" \
-    --workspace "$EPIC_WORKSPACE" --require-fresh --json)
-CLEAN_STRICT_RC=$?
+    --workspace "$EPIC_WORKSPACE" --require-fresh --json) || CLEAN_STRICT_RC=$?
 e2e_log_assert_eq "$CLEAN_STRICT_RC" "0" "m4_handoff_require_fresh_clean_exit"
 assert_jq "$CLEAN_STRICT_JSON" '.stale_snapshot.drift_detected' "false" \
     "m4_handoff_require_fresh_clean_no_drift"
@@ -93,9 +98,11 @@ DRIFT_CAPSULE=$(capsule_path "strict-drift")
 create_capsule "$DRIFT_CAPSULE"
 sleep 1
 remember_handoff_memory "M4 one-memory strict drift after capsule capture." >/dev/null
+# NEGATIVE path: drift under --require-fresh is EXPECTED to exit 6, so the bare
+# form aborted on precisely the outcome being asserted.
+DRIFT_STRICT_RC=0
 DRIFT_STRICT_JSON=$(e2e_log_command "$EE_BINARY" handoff resume "$DRIFT_CAPSULE" \
-    --workspace "$EPIC_WORKSPACE" --require-fresh --json)
-DRIFT_STRICT_RC=$?
+    --workspace "$EPIC_WORKSPACE" --require-fresh --json) || DRIFT_STRICT_RC=$?
 e2e_log_assert_eq "$DRIFT_STRICT_RC" "6" "m4_handoff_require_fresh_drift_exit"
 
 DET_ONE=$(resume_capsule "$ADDED_CAPSULE" | jq -S -c '.stale_snapshot | del(.computed_at)')
