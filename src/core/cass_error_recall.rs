@@ -104,6 +104,10 @@ pub fn record_session_error_recall(
     if arcs.is_empty() {
         return Ok(report);
     }
+    // One card can use the allocation-free linear path. Multiple incidents
+    // share a lazy borrowed index instead of rescanning every source per facet.
+    let card_sources = (arcs.len() > 1)
+        .then(|| crate::core::incident_card::IncidentCardSources::new(&spans));
     connection.with_transaction(|| {
         for arc in &arcs {
             report.failures_seen = report.failures_seen.saturating_add(1);
@@ -121,12 +125,16 @@ pub fn record_session_error_recall(
                     .repair_links_recorded
                     .saturating_add(u32::try_from(receipt.links_submitted).unwrap_or(u32::MAX));
             }
-            let Some(card) = crate::core::incident_card::draft_incident_card(
-                workspace_id,
-                session_id,
-                &spans,
-                arc,
-            ) else {
+            let card = match &card_sources {
+                Some(sources) => sources.draft(workspace_id, session_id, arc),
+                None => crate::core::incident_card::draft_incident_card(
+                    workspace_id,
+                    session_id,
+                    &spans,
+                    arc,
+                ),
+            };
+            let Some(card) = card else {
                 continue;
             };
             if connection.get_evidence_span(&card.id)?.is_none() {
@@ -1557,3 +1565,114 @@ mod stream_tests;
 #[cfg(test)]
 #[path = "cass_error_recall_stream_store_tests.rs"]
 mod stream_store_tests;
+
+#[cfg(test)]
+mod source_index_intake_tests {
+    use super::*;
+    use crate::core::incident_card::proof;
+    use crate::core::incident_card::proof::tests::{Fixture, TestResult, WS};
+    use crate::db::{CreateEvidenceSpanInput, CreateSessionInput, EvidenceProducerKind};
+    use crate::models::{EvidenceId, SessionId};
+
+    #[test]
+    fn multiple_incidents_share_source_lookup_and_keep_idempotent_proofs() -> TestResult {
+        let fixture = Fixture::new_public(true)?;
+        let templates = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        assert_eq!(templates.len(), 5);
+        let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(0x17600)).to_string();
+        fixture.db.insert_session(
+            &session_id,
+            &CreateSessionInput {
+                workspace_id: WS.to_owned(),
+                cass_session_id: "/sessions/indexed-incidents.jsonl".to_owned(),
+                source_path: None,
+                agent_name: Some("claude_code".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 20,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(b"indexed-incidents").to_hex()),
+                metadata_json: None,
+            },
+        )?;
+        for episode in 0_u32..4 {
+            for (offset, template) in templates.iter().enumerate() {
+                let line = episode * 5 + u32::try_from(offset)? + 1;
+                let mut record: Value = serde_json::from_str(&template.excerpt)?;
+                let block = &mut record["message"]["content"][0];
+                for key in ["id", "tool_use_id"] {
+                    if let Some(original) = block.get(key).and_then(Value::as_str) {
+                        block[key] = Value::String(format!("{original}-{episode}"));
+                    }
+                }
+                let excerpt = record.to_string();
+                let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                    0x18000 + u128::from(line),
+                ))
+                .to_string();
+                fixture.db.insert_evidence_span(
+                    &id,
+                    &CreateEvidenceSpanInput {
+                        workspace_id: WS.to_owned(),
+                        session_id: session_id.clone(),
+                        memory_id: None,
+                        producer_kind: EvidenceProducerKind::CassImport,
+                        cass_span_id: format!("{session_id}:{line}"),
+                        span_kind: template.span_kind.clone(),
+                        start_line: line,
+                        end_line: line,
+                        start_byte: None,
+                        end_byte: None,
+                        role: template.role.clone(),
+                        content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                        excerpt,
+                        metadata_json: None,
+                        inherited_redaction_classes: Vec::new(),
+                    },
+                )?;
+            }
+        }
+        let before = fixture.db.list_evidence_spans_for_session(&session_id)?;
+        let session = fixture.db.get_session(&session_id)?.ok_or("session")?;
+        let arcs = session_failure_arcs(WS, &session, &before);
+        assert_eq!(arcs.len(), 4);
+        assert!(arcs.iter().all(|arc| arc.resolution.is_some()));
+        let first = record_session_error_recall(&fixture.db, WS, &session_id)?;
+        assert_eq!(first.failures_seen, 4);
+        assert_eq!(first.resolved_failures, 4);
+        assert_eq!(first.incident_cards_recorded, 4);
+        let second = record_session_error_recall(&fixture.db, WS, &session_id)?;
+        assert_eq!(second.failures_seen, first.failures_seen);
+        assert_eq!(second.resolved_failures, first.resolved_failures);
+        assert_eq!(second.incident_cards_recorded, 0);
+        let proofs = proof::session_proofs(&fixture.db, WS, None, &session_id)?;
+        for arc in &arcs {
+            let expected = crate::core::incident_card::draft_incident_card(
+                WS,
+                &session_id,
+                &before,
+                arc,
+            )
+            .ok_or("linear card")?;
+            let stored = fixture.db.get_evidence_span(&expected.id)?.ok_or("stored card")?;
+            assert!(stored.matches_screened_input(&expected.input)?);
+            assert!(proofs.claims.contains(&proof::Claim {
+                failure: arc.failure_id.clone(),
+                target: expected.id,
+                card: true,
+            }));
+        }
+        let after = fixture.db.list_evidence_spans_for_session(&session_id)?;
+        assert_eq!(after.len(), before.len() + 4);
+        for original in &before {
+            let current = after.iter().find(|span| span.id == original.id).ok_or("source")?;
+            assert_eq!(current.excerpt, original.excerpt);
+            assert_eq!(current.content_hash, original.content_hash);
+            assert_eq!(current.metadata_json, original.metadata_json);
+            assert_eq!(current.start_line, original.start_line);
+            assert_eq!(current.end_line, original.end_line);
+        }
+        Ok(())
+    }
+}
