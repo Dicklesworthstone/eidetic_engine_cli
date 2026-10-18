@@ -20,9 +20,16 @@ fn call(workspace: &str, args: &[&str]) -> Result<Value, String> {
         .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| error.to_string())?;
+    // bd-w5bza: print all THREE facts. `output.status` Display renders
+    // "signal: 9" where `.code()` is None, and `.code()` is what the drift
+    // guard credits, so both are spelled. Comment sits ABOVE the `if`: the
+    // guard's assertion_window caps a site at 14 lines from the condition and
+    // a comment inside the block would push the tokens out of scope.
     if !output.status.success() {
         return Err(format!(
-            "ee {args:?}: {}\n{}",
+            "ee {args:?} failed: {} (code {:?})\nstdout: {}\nstderr: {}",
+            output.status,
+            output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ));

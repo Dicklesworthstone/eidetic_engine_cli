@@ -434,16 +434,23 @@ fn rebuild_search_index_with_expected(
 
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("index rebuild stdout was not UTF-8: {error}"))?;
+    // bd-w5bza: this printed exit code and stdout but not stderr, so a
+    // cancellation (exit 130, Outcome::Cancelled) was indistinguishable from a
+    // rejection. All three facts now.
     ensure(
         output.status.success(),
         format!(
-            "index rebuild should succeed; exit {:?}; stdout: {}",
+            "index rebuild should succeed; exit {:?}; stdout: {}; stderr: {}",
             output.status.code(),
             if stdout.trim().is_empty() {
                 "<empty>".to_owned()
             } else {
                 stdout.chars().take(400).collect::<String>()
-            }
+            },
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(400)
+                .collect::<String>()
         ),
     )?;
 
