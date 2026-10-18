@@ -207,6 +207,7 @@ async fn infer_inputs(
     // Identity/cardinality validation below retains useful, bounded diagnostics.
     let failed = |_| tier_error(format!("{tier}-tier bound embedding inference failed"));
     if embedder.bound_batch_is_native() {
+        validate_producer(cx, embedder, expected_identity, tier)?;
         let outcome = embedder.embed_batch_bound(cx, texts).await;
         // Inspect the caller before propagating even an ordinary provider error.
         validate_producer(cx, embedder, expected_identity, tier)?;
