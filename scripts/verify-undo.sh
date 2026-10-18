@@ -108,12 +108,25 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
     # the variable (:55); it repairs the standalone path that the header above
     # warns "used to grade an installed binary while printing nothing about
     # which one it used".
-    if ! EE_DOCTOR_FIXTURE_TARGET="$target" \
+    # bd-2oh15: capture rather than discard. This used to be `>/dev/null 2>&1`,
+    # so "corrupt.sh failed; counted as SKIP" was the WHOLE story -- a wedged
+    # fixture root, a missing binary and a genuine script bug all produced that
+    # one line, and telling them apart cost a fresh ~24-minute fleet dispatch
+    # every time. It has cost this bead at least four.
+    #
+    # Captured into a VARIABLE, not a file under "$target" as the assert.sh
+    # branch below does: corrupt.sh is what takes the baseline digest, so a file
+    # created here would exist before that digest and would have to be added to
+    # the exclusion list to avoid perturbing the undo comparison. A variable
+    # cannot perturb anything.
+    corrupt_output=""
+    if ! corrupt_output="$(EE_DOCTOR_FIXTURE_TARGET="$target" \
         EE_DOCTOR_FIXTURE_BINARY="$EE_BIN" \
-        "$fm_dir/corrupt.sh" >/dev/null 2>&1; then
+        "$fm_dir/corrupt.sh" 2>&1)"; then
         SKIP=$((SKIP + 1))
         FAILED_FMS="$FAILED_FMS $fm_id(corrupt.sh)"
         echo "verify-undo[$fm_id]: corrupt.sh failed; counted as SKIP" >&2
+        printf '%s\n' "$corrupt_output" | tail -6 | sed "s|^|verify-undo[$fm_id]: corrupt.sh: |" >&2
         continue
     fi
 
