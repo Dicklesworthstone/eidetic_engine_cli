@@ -71,6 +71,14 @@ HANDLER = re.compile(
     r"^(?:local\s+|declare\s+|export\s+)?[A-Za-z_][A-Za-z0-9_]*=\"?\$\?"
     r"|^(?:case|if|while|until|elif|test|\[\[|\[)\b[^|&]*\$\?"
 )
+# The capture form alone. Shape 4 requires this rather than the full HANDLER:
+# an `if`/`case` line merely CONTAINING `$?` may be consuming its own
+# condition's status, which is not evidence about the line above it.
+PURE_HANDLER = re.compile(
+    r"^(?:local\s+|declare\s+|export\s+)?[A-Za-z_][A-Za-z0-9_]*=\"?\$\?"
+)
+# `n=$((...))` is arithmetic, not a spawned command.
+ARITH = re.compile(r"^(?:local\s+|declare\s+|export\s+)?[A-Za-z_][A-Za-z0-9_]*=\$\(\(")
 SET_E = re.compile(r"^\s*set\s+-[a-zA-Z]*e[a-zA-Z]*\b|^\s*set\s+-o\s+errexit")
 SET_PLUS_E = re.compile(r"^\s*set\s+\+[a-zA-Z]*e")
 IF_COND = re.compile(r"^\s*(?:if|while|until|elif)\s")
@@ -191,9 +199,57 @@ def census(root):
         for i, line in enumerate(lines):
             if shell[i] is None:
                 continue
+            # SHAPE 4, previously unimplemented and documented as such at the
+            # top of this file: `<cmd>` then `$?` with NO assignment. `$?`
+            # refers to whatever command preceded it, so requiring `VAR=$(` was
+            # an arbitrary narrowing of the same defect. The canonical specimen
+            # is scripts/lib/e2e_logger.sh, which runs `"$@"` BARE and then
+            # `local rc=$?` -- measured 2026-10-18, that rc plumbing is dead
+            # whenever -e is live through the call, which is what made four
+            # handoff assertions unreachable (2552809ee).
+            #
+            # The rule is therefore "the command before a handler", and the
+            # handler test below (next effective line, must CONSUME `$?`) is
+            # what keeps that from matching everything.
+            # A CONTINUATION LINE IS NOT A COMMAND. Shape 1 never hit this
+            # because `VAR=$(` only matches a command's FIRST line, but shape 4
+            # accepts bare commands, so every `\`-continued argument line
+            # started its own candidate and they all joined forward to the same
+            # handler. Measured: rch_verify.sh:4969-4984 produced sixteen
+            # consecutive rows for ONE `run_process_with_timeout` invocation,
+            # and the census jumped from 17 candidates to 316.
+            if i > 0:
+                prev = lines[i - 1]
+                if shell[i - 1] is not None and prev.rstrip().endswith("\\"):
+                    continue
             m = ASSIGN.match(line)
-            if not m:
+            stripped = _decomment(line).strip()
+            if not stripped or stripped in {"fi", "done", "esac", "}", "{", "else", "do", "then"}:
                 continue
+            # SHAPE 4 IS DELIBERATELY NARROWER THAN SHAPE 1, because "any
+            # command before a `$?`" over-matches in two measured ways:
+            #   `set -euo pipefail` followed by `if ...; else rc=$?; fi` -- the
+            #       `$?` belongs to the `if`'s own condition, not to `set`.
+            #   `n=$((n + 1))` -- arithmetic, not a spawned command, and this
+            #       file already carries an arm asserting it is not flagged.
+            # So a shape-4 candidate must be a real command AND its handler
+            # must be the pure `rc=$?` capture, not a test that merely mentions
+            # `$?` somewhere in a compound line.
+            if m is None:
+                if ARITH.match(stripped) or stripped.startswith("set "):
+                    continue
+                # A FUNCTION DEFINITION IS NOT A COMMAND EXECUTION, and the
+                # `$?` on the line after it is the TRAP-HANDLER idiom:
+                #     cleanup() { local exit_code=$?; ...; exit "$exit_code"; }
+                # There `$?` holds the status of whatever triggered the trap,
+                # which is correct and deliberate. Flagging it inverts the
+                # finding -- it would report the one place that handles exit
+                # status properly as the place that does not.
+                if FUNC_DEF.match(stripped):
+                    continue
+                require_pure_handler = True
+            else:
+                require_pure_handler = False
             # JOIN CONTINUATIONS BEFORE JUDGING THE GUARD. A command that wraps
             # carries its `|| RC=$?` on the NEXT physical line, so testing
             # `line` alone declared a guarded assignment unguarded -- the shape
@@ -232,10 +288,19 @@ def census(root):
                     continue
                 nxt = body
                 break
-            if nxt is None or not HANDLER.match(nxt):
+            if nxt is None:
                 continue
+            if require_pure_handler:
+                if not PURE_HANDLER.match(nxt):
+                    continue
+            elif not HANDLER.match(nxt):
+                continue
+            # A shape-4 row has no assigned variable; name the shape instead so
+            # the two are distinguishable in the output rather than silently
+            # merged.
             rows.append({"file": os.path.relpath(path, root), "line": i + 1,
-                         "var": m.group(1), "live": active[i], "_lines": lines,
+                         "var": m.group(1) if m else "<bare-cmd>",
+                         "live": active[i], "_lines": lines,
                          "snippet": line.strip()[:78]})
     # Second pass: attribute each candidate to its enclosing function and decide
     # whether that function is ever invoked in a context that suppresses -e.
