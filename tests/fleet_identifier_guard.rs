@@ -404,8 +404,33 @@ struct ScanReport {
     /// FAILS CLOSED on false rather than reporting a green it cannot support.
     scanned_tracker: bool,
     files_scanned: usize,
-    violations: Vec<Violation>,
+    /// EVERY carrying line in the scanned population. Uncapped: this is the
+    /// number an operator uses to tell whether a scrubbing pass made progress.
+    total_violations: usize,
+    /// Per-file carrying-line counts for EVERY affected file, in path order,
+    /// uncapped and independent of `excerpts`.
+    ///
+    /// THIS IS THE FIELD THAT STOPS A FILE BEING INVISIBLE (bd-vejqk). `scan`
+    /// sorts `files`, so the previous early-return at 200 violations stopped
+    /// the walk inside the first affected file and no later one was ever
+    /// opened. `.beads/issues.jsonl` sorts before `proofs/...` and carried
+    /// 1149 lines by itself, so the cap was always reached there and two
+    /// affected files under `proofs/oracle/` were omitted DETERMINISTICALLY,
+    /// not by sampling. Measured 2026-10-14: 1163 carrying lines across 3
+    /// files reported as "200 place(s)" naming 1 file, a 5.8x understatement
+    /// that does not move as the first file is scrubbed.
+    per_file: Vec<(String, usize)>,
+    /// Bounded sample for the failure body only.
+    ///
+    /// Still capped, and deliberately: an excerpt is the one part of this
+    /// report that reproduces an identifier VALUE, so the cap is a disclosure
+    /// control as much as a readability one. What must not be capped is the
+    /// count and the file list, which carry no values.
+    excerpts: Vec<Violation>,
 }
+
+/// Maximum number of excerpt lines reproduced in the failure body.
+const EXCERPT_CAP: usize = 200;
 
 fn scan(root: &Path) -> ScanReport {
     let (mut files, source, scanned_tracker) = match tracked_files(root) {
@@ -428,8 +453,11 @@ fn scan(root: &Path) -> ScanReport {
     files.sort();
     let files_scanned = files.len();
 
-    let mut violations = Vec::new();
+    let mut excerpts: Vec<Violation> = Vec::new();
+    let mut total_violations = 0usize;
+    let mut per_file: Vec<(String, usize)> = Vec::new();
     for path in files {
+        let mut this_file = 0usize;
         // Names count too: a fixture directory called after a worker leaks the
         // same information as a line of prose, and content-only scrubbing
         // silently leaves the code pointing at a path that no longer exists.
@@ -438,43 +466,58 @@ fn scan(root: &Path) -> ScanReport {
             .map(|rest| rest.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| path.to_string_lossy().into_owned());
         if let Some(token) = banned_token_in_line(&relative_path) {
-            violations.push(Violation {
-                path: relative_path.clone(),
-                line: 0,
-                token,
-                excerpt: "(in the path itself)".to_owned(),
-            });
+            total_violations += 1;
+            this_file += 1;
+            if excerpts.len() < EXCERPT_CAP {
+                excerpts.push(Violation {
+                    path: relative_path.clone(),
+                    line: 0,
+                    token,
+                    excerpt: "(in the path itself)".to_owned(),
+                });
+            }
         }
 
         // Binary blobs (databases, images, compiled artefacts) are not prose;
         // anything that is not valid UTF-8 is skipped rather than guessed at.
+        // A binary file can still carry a violation IN ITS PATH, so the
+        // per-file tally is recorded before this skip rather than after it.
         let Ok(contents) = fs::read_to_string(&path) else {
+            if this_file > 0 {
+                per_file.push((relative_path, this_file));
+            }
             continue;
         };
         for (index, line) in contents.lines().enumerate() {
             if let Some(token) = banned_token_in_line(line) {
-                violations.push(Violation {
-                    path: relative_path.clone(),
-                    line: index + 1,
-                    token,
-                    excerpt: line.chars().take(160).collect(),
-                });
-                if violations.len() >= 200 {
-                    return ScanReport {
-                        source,
-                        scanned_tracker,
-                        files_scanned,
-                        violations,
-                    };
+                total_violations += 1;
+                this_file += 1;
+                // NO EARLY RETURN. Reaching the cap stops us COLLECTING
+                // excerpts, never WALKING: the walk is what discovers which
+                // files are affected, and abandoning it is what hid two of
+                // three affected files for as long as the first one carried
+                // 200 lines by itself.
+                if excerpts.len() < EXCERPT_CAP {
+                    excerpts.push(Violation {
+                        path: relative_path.clone(),
+                        line: index + 1,
+                        token,
+                        excerpt: line.chars().take(160).collect(),
+                    });
                 }
             }
+        }
+        if this_file > 0 {
+            per_file.push((relative_path, this_file));
         }
     }
     ScanReport {
         source,
         scanned_tracker,
         files_scanned,
-        violations,
+        total_violations,
+        per_file,
+        excerpts,
     }
 }
 
@@ -485,7 +528,9 @@ fn no_private_fleet_identifiers_are_published() {
         source,
         scanned_tracker,
         files_scanned,
-        violations,
+        total_violations,
+        per_file,
+        excerpts,
     } = scan(&root);
     // FAIL CLOSED when the scan could not reach `.beads/issues.jsonl`.
     //
@@ -507,15 +552,33 @@ fn no_private_fleet_identifiers_are_published() {
          .git, and bd-3ghvw measured that `rch exec --job` ships none either, so \
          BOTH remote lanes hit the fallback."
     );
+    // The failure message is the ONLY artifact an operator sees, so it reports
+    // three separate things that used to be conflated into one capped number:
+    // the true total, every affected file, and a bounded sample of excerpts
+    // that says so when it is bounded.
+    let affected_files = per_file.len();
+    let per_file_summary = per_file
+        .iter()
+        .map(|(path, count)| format!("  {path}: {count} carrying line(s)"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let truncation_note = if total_violations > excerpts.len() {
+        format!(
+            "\nshowing the first {} of {} place(s); the per-file summary above is COMPLETE",
+            excerpts.len(),
+            total_violations
+        )
+    } else {
+        String::new()
+    };
     assert!(
-        violations.is_empty(),
-        "private fleet identifiers found in {} place(s) across {} file(s), scanned via {}; \
-         replace them with \
-         neutral placeholders such as worker-01 / worker-a / windows-host-1:\n{}",
-        violations.len(),
-        files_scanned,
-        source,
-        violations
+        total_violations == 0,
+        "private fleet identifiers found in {total_violations} place(s) across \
+         {affected_files} file(s), of {files_scanned} scanned via {source}; \
+         replace them with neutral placeholders such as \
+         worker-01 / worker-a / windows-host-1.\n\
+         every affected file:\n{per_file_summary}{truncation_note}\n{}",
+        excerpts
             .iter()
             .map(|violation| {
                 let line = if violation.line == 0 {
@@ -530,6 +593,76 @@ fn no_private_fleet_identifiers_are_published() {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+/// Positive control for bd-vejqk: the cap must bound only the PRINTED
+/// excerpts, never the count and never the file list.
+///
+/// THIS TEST FAILS ON THE PRE-FIX CODE, which is the only reason it is worth
+/// having. Before the fix `scan` returned early once it had collected 200
+/// violations, and because it sorts `files` first, the return happened inside
+/// whichever affected file sorted lowest -- so every later affected file went
+/// unopened and unnamed. On the real tree that was `.beads/issues.jsonl`
+/// carrying 1149 lines by itself, which hid two files under `proofs/oracle/`
+/// deterministically and reported 1163 places as "200".
+///
+/// The synthetic root reproduces exactly that shape: a low-sorting file that
+/// exceeds the cap on its own, plus one carrying line in a high-sorting file
+/// that the old walk could never reach.
+///
+/// `vmi1234567` is a SHAPE match, not a real host: the guard matches `vmi`
+/// followed by digits, and this spelling is already used by
+/// `guard_detects_each_banned_identifier_shape` below for the same reason. No
+/// identifier value from the fleet is introduced by this test.
+#[test]
+fn cap_bounds_the_printed_excerpts_but_never_the_count_or_the_file_list() {
+    let root = tempfile::tempdir().expect("temp root");
+    let carrying = "worker_id = \"vmi1234567\"\n";
+
+    // Sorts first, and on its own exceeds the cap.
+    let low_lines = EXCERPT_CAP + 50;
+    let low_body = carrying.repeat(low_lines);
+    fs::write(root.path().join("aaa_low_sorting.txt"), &low_body).expect("write low-sorting file");
+    // Sorts last, carries one line. The file the old code could not name.
+    fs::write(root.path().join("zzz_high_sorting.txt"), carrying).expect("write high-sorting file");
+
+    let report = scan(root.path());
+
+    assert_eq!(
+        report.total_violations,
+        low_lines + 1,
+        "the count must be the TRUE total, not the excerpt cap; got {} with cap {EXCERPT_CAP}",
+        report.total_violations
+    );
+    assert_eq!(
+        report.excerpts.len(),
+        EXCERPT_CAP,
+        "the printed body must still be capped -- excerpts are where identifier \
+         values would be reproduced"
+    );
+    let named: Vec<&str> = report
+        .per_file
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect();
+    assert!(
+        named.contains(&"zzz_high_sorting.txt"),
+        "a file that sorts after a cap-exceeding file must still be named; per_file named {named:?}"
+    );
+    assert_eq!(
+        report.per_file.len(),
+        2,
+        "both affected files must appear in the per-file summary; got {named:?}"
+    );
+    assert_eq!(
+        report
+            .per_file
+            .iter()
+            .find(|(path, _)| path == "aaa_low_sorting.txt")
+            .map(|(_, count)| *count),
+        Some(low_lines),
+        "the per-file tally must be the file's true count, not its capped share"
     );
 }
 
