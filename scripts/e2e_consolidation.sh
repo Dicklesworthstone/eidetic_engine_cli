@@ -308,6 +308,36 @@ count_pack_id() {
     printf '%s' "$pack_out" | jq -r --arg id "$1" \
         '[.data.pack.items[]? | select(.memoryId == $id)] | length' 2>/dev/null || echo -1
 }
+
+# bd-kcpda. A pack count of 0 is UNDIAGNOSABLE from the number alone: it spans a
+# token-budget cut, a relevance-floor rejection and a supersession, and the
+# assertion below can only say "expected 0 -eq 1". Pack already records WHY it
+# omitted each candidate, so print that before any of these assertions can fail.
+#
+# Field names read from `build_pack_skipped_item` (src/output/mod.rs:4450):
+# memoryId, tokens, reason, rejectedAt, feasible, couldFitWithBudget. The array
+# is emitted whenever `include_skipped` is set, which is its default.
+#
+# This is the same repair that cracked this bead's first half: the rc=3 was
+# undiagnosable until `ee_json` recorded the error envelope (1d41d7963). Printed
+# unconditionally rather than only on mismatch, so a PASSING run still shows
+# what pack rejected and why -- which is how a future narrowing starts.
+pack_omission_report() {
+    printf '[diagnostic] pack selection: items=%s skippedTotal=%s\n' \
+        "$(json_scalar "$pack_out" '[.data.pack.items[]?] | length')" \
+        "$(json_scalar "$pack_out" '.data.pack.skippedTotal // "absent"')"
+    local label id
+    for label in survivor:"$SURVIVOR_ID" duplicate:"$DUPLICATE_ID" \
+                 wording_control:"$WORDING_CONTROL_ID" kind_control:"$KIND_CONTROL_ID"; do
+        id="${label#*:}"
+        printf '[diagnostic] pack omission for %-16s %s\n' "${label%%:*}" \
+            "$(printf '%s' "$pack_out" | jq -c --arg id "$id" \
+                '[.data.pack.skipped[]? | select(.memoryId == $id)
+                  | {reason, rejectedAt, feasible, tokens, couldFitWithBudget}]' \
+                2>/dev/null || printf 'unreadable')"
+    done
+}
+pack_omission_report
 assert_num "$(count_pack_id "$SURVIVOR_ID")" -eq 1 \
     "pack contains the consolidated survivor as exactly one item"
 assert_num "$(count_pack_id "$DUPLICATE_ID")" -eq 0 \
