@@ -67,7 +67,12 @@ READS_Q = re.compile(r"\$\?")
 SET_E = re.compile(r"^\s*set\s+-[a-zA-Z]*e[a-zA-Z]*\b|^\s*set\s+-o\s+errexit")
 SET_PLUS_E = re.compile(r"^\s*set\s+\+[a-zA-Z]*e")
 IF_COND = re.compile(r"^\s*(?:if|while|until|elif)\s")
-GUARDED = re.compile(r"\|\|\s*(?:true|:|rc=|status=|echo)|\|\|\s*\{")
+# `|| <anything>=` rather than a vocabulary of variable names. The old form
+# listed `rc=` and `status=` literally and so did not recognise
+# `|| TAMPERED_RC=$?` -- the exact repair this census asks callers to make,
+# spelled in the UPPERCASE convention the e2e scripts use. A detector that
+# flags its own fix shape trains people to revert correct code.
+GUARDED = re.compile(r"\|\|\s*(?:true|:|echo)|\|\|\s*[A-Za-z_][A-Za-z0-9_]*=|\|\|\s*\{")
 
 
 FUNC_DEF = re.compile(r"^([A-Za-z_][A-Za-z0-9_:-]*)\s*\(\)\s*\{")
@@ -77,6 +82,29 @@ FUNC_DEF = re.compile(r"^([A-Za-z_][A-Za-z0-9_:-]*)\s*\(\)\s*\{")
 # Proven by execution 2026-10-05: a bare call aborted at the assignment and the
 # handler never ran; the same function called `f || ...` ran its handler.
 TEST_CTX = re.compile(r"^\s*(?:if|while|until|elif)\s+(?:!\s*)?(\S+)|^\s*!\s*(\S+)|^\s*(\S+)[^|&]*(?:\|\||&&)")
+
+
+def _decomment(line):
+    """Drop a shell comment, respecting quotes.
+
+    Quote tracking is not pedantry here: `RC=$?  # capture` must KEEP its
+    handler, and a '#' inside "...#..." must not truncate real code.
+    """
+    in_s = None
+    esc = False
+    for i, c in enumerate(line):
+        if esc:
+            esc = False
+        elif c == "\\":
+            esc = True
+        elif in_s:
+            if c == in_s:
+                in_s = None
+        elif c in "\"'":
+            in_s = c
+        elif c == "#":
+            return line[:i]
+    return line
 
 
 def function_ranges(lines):
@@ -157,9 +185,27 @@ def census(root):
             if shell[i] is None:
                 continue
             m = ASSIGN.match(line)
-            if not m or IF_COND.match(line) or GUARDED.search(line):
+            if not m:
                 continue
-            if not any(READS_Q.search(w) for w in lines[i + 1:i + 4]):
+            # JOIN CONTINUATIONS BEFORE JUDGING THE GUARD. A command that wraps
+            # carries its `|| RC=$?` on the NEXT physical line, so testing
+            # `line` alone declared a guarded assignment unguarded -- the shape
+            # produced by wrapping a long `ee` invocation, which is most of
+            # them.
+            logical, last = line, i
+            while logical.rstrip().endswith("\\") and last + 1 < len(lines):
+                last += 1
+                logical = logical.rstrip()[:-1] + " " + lines[last]
+            if IF_COND.match(logical) or GUARDED.search(logical):
+                continue
+            # AND LOOK FOR THE HANDLER IN CODE, NOT PROSE. This window read raw
+            # lines, so a COMMENT mentioning `$?` -- including one explaining a
+            # repair -- counted as the handler and manufactured a candidate out
+            # of the assignment above it. Same substitution this repo keeps
+            # finding elsewhere: a sentence about the mechanism read as the
+            # mechanism.
+            if not any(READS_Q.search(_decomment(w))
+                       for w in lines[last + 1:last + 4]):
                 continue
             rows.append({"file": os.path.relpath(path, root), "line": i + 1,
                          "var": m.group(1), "live": active[i], "_lines": lines,
@@ -227,6 +273,32 @@ def self_test():
         open(os.path.join(d, "heredoc.sh"), "w").write(
             'set -uo pipefail\npython3 - <<\'PY\'\nbody = """\nset -eu\nout=$(false)\n'
             'rc=$?\n"""\nPY\necho done\n')
+        # NEGATIVE 7: the guard names an UPPERCASE variable. The old GUARDED
+        # listed `rc=` and `status=` literally, so the e2e scripts' own
+        # convention (`|| TAMPERED_RC=$?`) read as unguarded.
+        # The trailing line MUST also read `$?`, or this arm proves nothing: with
+        # the handler only on the assignment line, the window finds no `$?` and
+        # the fixture passes whatever GUARDED says. Measured -- the first
+        # version of this arm survived a full reversion of GUARDED to the old
+        # vocabulary, i.e. it was decoration.
+        open(os.path.join(d, "upper.sh"), "w").write(
+            'set -e\nOUT="$(false)" || TAMPERED_RC=$?\necho "also reads $? later"\n')
+        # NEGATIVE 8: the guard sits on a CONTINUATION line, which is what a
+        # wrapped command produces. Judging the first physical line alone called
+        # this unguarded.
+        open(os.path.join(d, "cont.sh"), "w").write(
+            'set -e\nOUT="$(some_cmd --flag \\\n    --other)" || RC=$?\necho "$RC"\n')
+        # NEGATIVE 9: the only nearby `$?` is inside a COMMENT. Prose about a
+        # handler is not a handler -- and a comment EXPLAINING this repair was
+        # what manufactured a real false positive.
+        open(os.path.join(d, "comment.sh"), "w").write(
+            'set -e\nout="$(date)"\n# the rc=$? handler belongs here one day\necho done\n')
+        # POSITIVE 2 -- THE TWIN HOLE of NEGATIVE 9. Stripping comments must not
+        # eat a REAL handler that carries a trailing comment. Without this arm,
+        # `_decomment` could be written to blank the whole line and every
+        # negative above would still pass while the census went blind.
+        open(os.path.join(d, "trailcomment.sh"), "w").write(
+            'set -e\nout="$(false)"\nrc=$?  # keep the status\necho "$rc"\n')
         rows = census(tmp)
         got = {r["file"] for r in rows}
         arm("arithmetic `n=$((n + 1))` is NOT mistaken for a subshell",
@@ -238,7 +310,15 @@ def self_test():
         arm("a file without set -e is NOT flagged", "scripts/nosete.sh" not in got)
         arm("`|| true` guarded assignment is NOT flagged", "scripts/guarded.sh" not in got)
         arm("an assignment with no nearby $? is NOT flagged", "scripts/noq.sh" not in got)
-        arm("exactly one candidate across five fixtures", len(rows) == 1)
+        arm("`|| UPPERCASE_RC=$?` is recognised as a guard",
+            "scripts/upper.sh" not in got)
+        arm("a guard on a CONTINUATION line is recognised",
+            "scripts/cont.sh" not in got)
+        arm("a $? inside a COMMENT is not counted as a handler",
+            "scripts/comment.sh" not in got)
+        arm("a real handler with a TRAILING comment is still flagged",
+            "scripts/trailcomment.sh" in got)
+        arm("exactly two candidates across the fixtures", len(rows) == 2)
     print(f"\n[set-e-census] self-test: {sum(arms)}/{len(arms)} arms passed")
     return 0 if all(arms) else 1
 
