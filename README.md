@@ -600,7 +600,7 @@ This runs all readiness gates in order, stopping at the first failure:
 | 6 | Unit, contract, golden, binary, test, and example targets |
 | 6 | Basic E2E |
 | 6.06 | Replay lab smoke E2E |
-| 6.5 | Overhaul integration when `VERIFY_OVERHAUL` is enabled |
+| 6.5 | Overhaul integration (runs by default; `VERIFY_OVERHAUL` is never set — bd-e4ymh) |
 | 6.6 | Fake Tailscale harness |
 | 6.7 | Fake OIDC happy-path, defect, and deterministic capability/privacy/time matrix harnesses |
 | 7 | Advanced E2E |

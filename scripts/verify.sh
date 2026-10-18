@@ -108,7 +108,7 @@ set -euo pipefail
 #   6.1296 Bundled Embeddings E2E - scripts/e2e_bundled_embeddings.sh
 #   6.1297 Native Reranker E2E - scripts/e2e_native_reranker.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
-#   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
+#   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (NOT gated; bd-e4ymh)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
 #   6.7a-c Fake OIDC IdP Harness - protocol, defect, and matrix self-tests (T7.7)
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
@@ -2459,10 +2459,22 @@ if [ "$CI_SMOKE" != "true" ]; then
     # are reported as skips until their implementation beads land.
     run_stage "Agent Ergonomics E2E (F1-F5)" "./scripts/e2e_lib/run_agent_ergonomics_e2e.sh"
 
-    # Gate 6.5: Overhaul Integration (J4). Gated behind VERIFY_OVERHAUL=1
-    # until enough implementation beads ship to make the suite reliably
-    # pass across CI. The driver itself respects VERIFY_OVERHAUL=0 and
-    # exits 0 without running, so this stage stays fast in default CI.
+    # Gate 6.5: Overhaul Integration (J4).
+    #
+    # THIS STAGE IS NOT GATED, despite what this comment said until 2026-10-18
+    # and what README.md and docs/operator-swarm-slo.md still implied. The
+    # driver DOES honour VERIFY_OVERHAUL=0 (scripts/e2e_overhaul.sh:165) and
+    # NOTHING IN THE TREE EVER ASSIGNS THAT VARIABLE -- measured tree-wide
+    # across *.sh, *.yml, *.rs, *.toml and *.md: every occurrence is prose or
+    # the driver's own handling, and `VERIFY_OVERHAUL=` outside a `:-` default
+    # matches only two comments and one echo string. The driver's default is
+    # `${VERIFY_OVERHAUL:-1}`, so the no-op branch is unreachable from here and
+    # the line below selects all 23 epics in its EPIC_SCRIPTS registry.
+    #
+    # It was never wired: 232f6759a (2026-05-11) added this comment and the
+    # run_stage line in the same commit, and the line has never carried the
+    # prefix. Whether the gate should exist at all is bd-e4ymh -- turning it on
+    # now would silence 23 e2e epics, which is a decision, not a cleanup.
     run_stage "Overhaul Integration E2E (J4)" "./scripts/e2e_overhaul.sh"
 
     # Gate 6.5.2: Lightweight swarm next-action recommendation-card contract.
