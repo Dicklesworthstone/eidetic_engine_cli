@@ -195,7 +195,21 @@ snapshot_workspace_files() {
 #      explicit check does not depend on that invariant holding.
 capture_worktrees() {
     local output_path="$1" err
-    err="$(git -C "${REPO_ROOT}" worktree list --porcelain >"${output_path}" 2>&1)" || {
+    # `2>&1 >file`, NOT `>file 2>&1`, AND THE ORDER IS THE WHOLE POINT.
+    # Redirections apply left to right. The old form sent stdout to the file
+    # FIRST, so the following `2>&1` pointed stderr at the file as well: `$err`
+    # captured NOTHING and the snapshot gained the error text. Both halves of
+    # this function's contract broke silently --
+    #   - the CANNOT RUN message below printed an EMPTY reason, so an
+    #     environment failure reported itself as having no cause;
+    #   - stderr landed in "${output_path}", i.e. in the snapshot that the
+    #     NO-WORKTREES assertion compares, which is exactly the vacuity the
+    #     comment above this function exists to prevent.
+    # This order dups stderr to the substitution's pipe while it is still the
+    # pipe, then points stdout at the file. Proven by execution: the old form
+    # captures '' with both streams in the file; this one captures the stderr
+    # text with only stdout in the file. shellcheck SC2328.
+    err="$(git -C "${REPO_ROOT}" worktree list --porcelain 2>&1 >"${output_path}")" || {
         printf 'boundary_migration: CANNOT RUN -- `git worktree list` failed in %s: %s\n' \
             "${REPO_ROOT}" "${err}" >&2
         printf 'boundary_migration: this is an ENVIRONMENT error, not a worktree finding.\n' >&2
