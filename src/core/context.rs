@@ -3501,13 +3501,13 @@ async fn run_context_pack_with_performance_inner(
     let graph_hint_start = Instant::now();
     let graph_metrics = apply_graph_hints(
         read_connection,
-        &options.workspace_path,
+        &search_options,
         &effective_filters,
         options.include_tombstoned,
         &mut candidates,
         &mut degraded,
         request.reference_time,
-    );
+    )?;
     candidate_metrics.subspans.graph_hints = graph_hint_start.elapsed();
     candidate_metrics.graph_boosted_candidates = graph_metrics.boosted_candidates;
     candidate_metrics.graph_expanded_candidates = graph_metrics.expanded_candidates;
@@ -8514,6 +8514,9 @@ fn context_pack_l2_feature_flags_hash(
     hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
     // Cached packs from before caller floors reached assembly must be rebuilt.
     hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v1");
+    // Graph expansion now uses the canonical quality scorer; older cached
+    // packs did not apply confidence or harmful-feedback penalties to graph hints.
+    hash_labeled_bytes(&mut hasher, "graph_hint_quality_policy", b"v1");
     // Native sources share memory's budget and warning reservation. Cached
     // packs from before native warnings had priority must be reassembled.
     hash_labeled_bytes(&mut hasher, "mixed_source_budget_policy", b"v2");
@@ -12037,18 +12040,19 @@ fn positive_f32_score(value: f32) -> Option<f64> {
 
 fn apply_graph_hints(
     connection: &DbConnection,
-    workspace_path: &Path,
+    search_options: &SearchOptions,
     filters: &crate::models::QueryFilters,
     include_tombstoned: bool,
     candidates: &mut Vec<PackCandidate>,
     degraded: &mut Vec<ContextResponseDegradation>,
     reference_time: Option<DateTime<Utc>>,
-) -> GraphHintApplicationMetrics {
+) -> Result<GraphHintApplicationMetrics, ContextPackError> {
     let graph = &filters.graph;
     if graph.is_empty() {
-        return GraphHintApplicationMetrics::default();
+        return Ok(GraphHintApplicationMetrics::default());
     }
 
+    let workspace_path = &search_options.workspace_path;
     let workspace_ids = graph_context_workspace_ids(connection, workspace_path, degraded);
     push_graph_snapshot_posture(connection, &workspace_ids, degraded);
 
@@ -12079,7 +12083,7 @@ fn apply_graph_hints(
             candidates.clear();
             metrics.filtered_candidates = filtered;
         }
-        return metrics;
+        return Ok(metrics);
     }
 
     let graph_ids: BTreeSet<String> = graph_nodes.keys().cloned().collect();
@@ -12122,11 +12126,12 @@ fn apply_graph_hints(
         .cloned()
         .collect();
     if expansion_ids.is_empty() {
-        return metrics;
+        return Ok(metrics);
     }
 
     let expansion_refs: Vec<&str> = expansion_ids.iter().map(String::as_str).collect();
     let (memories, tags_map) = load_candidate_batch_maps(connection, &expansion_refs, degraded);
+    let mut expanded_candidates = Vec::with_capacity(expansion_ids.len());
     for memory_id in expansion_ids {
         let Some(memory) = memories.get(&memory_id) else {
             metrics.missing_seeds = metrics.missing_seeds.saturating_add(1);
@@ -12196,11 +12201,25 @@ fn apply_graph_hints(
             Some(memory.workspace_id.as_str()),
             degraded,
         ) {
-            metrics.expanded_candidates = metrics.expanded_candidates.saturating_add(1);
-            candidates
+            expanded_candidates
                 .push(candidate.with_lifecycle(pack_lifecycle_for_memory(memory, reference_time)));
         }
     }
+
+    let before_quality = expanded_candidates.len();
+    quality_score_graph_candidates(
+        connection,
+        search_options,
+        reference_time,
+        &memories,
+        &mut expanded_candidates,
+        degraded,
+    )?;
+    metrics.expanded_candidates = expanded_candidates.len();
+    metrics.filtered_candidates = metrics
+        .filtered_candidates
+        .saturating_add(before_quality.saturating_sub(expanded_candidates.len()));
+    candidates.extend(expanded_candidates);
 
     if metrics.expanded_candidates > 0 {
         push_degradation(
@@ -12216,7 +12235,82 @@ fn apply_graph_hints(
         );
     }
 
-    metrics
+    Ok(metrics)
+}
+
+/// Graph topology is a retrieval prior, not an exemption from memory quality.
+/// Score graph-only candidates with the canonical confidence, utility, recency,
+/// maturity and harmful-feedback policy before inserting them into the pack.
+fn quality_score_graph_candidates(
+    connection: &DbConnection,
+    options: &SearchOptions,
+    reference_time: Option<DateTime<Utc>>,
+    memories: &BTreeMap<String, StoredMemory>,
+    candidates: &mut Vec<PackCandidate>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Result<(), ContextPackError> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let config = crate::core::search::resolved_search_scoring_config(&options.workspace_path)
+        .map_err(ContextPackError::Search)?;
+    let reference_time = reference_time.or(options.as_of).unwrap_or_else(Utc::now);
+    let mut hits: Vec<SearchHit> = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let memory_id = candidate.memory_id.to_string();
+            let memory = memories.get(&memory_id)?;
+            Some(SearchHit {
+                doc_id: memory_id,
+                score: candidate.relevance.into_inner(),
+                // Internal scoring adapter; graph-only hits do not claim an
+                // observed lexical/embedding/reranker source in pack metadata.
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: Some(public_memory_fallback_metadata(memory, reference_time)),
+                explanation: None,
+            })
+        })
+        .collect();
+
+    let mut search_degraded = Vec::new();
+    crate::core::search::apply_quality_scoring(
+        options,
+        &mut hits,
+        config,
+        reference_time,
+        Some(connection),
+        Some(memories),
+        None,
+        &mut search_degraded,
+    );
+    push_search_degradations(degraded, &search_degraded);
+    let scored_relevance: BTreeMap<String, UnitScore> = hits
+        .into_iter()
+        .filter_map(|hit| {
+            pack_candidate_relevance_from_search_hit(&hit)
+                .map(|relevance| (hit.doc_id, relevance))
+        })
+        .collect();
+    candidates.retain_mut(|candidate| {
+        let Some(relevance) = scored_relevance.get(&candidate.memory_id.to_string()) else {
+            return false;
+        };
+        let graph_relevance = candidate.relevance.into_inner();
+        candidate.relevance = *relevance;
+        candidate.why = format!(
+            "{} Graph-hint relevance {:.3} adjusted to {:.3} by the active memory-quality policy.",
+            candidate.why,
+            graph_relevance,
+            relevance.into_inner(),
+        );
+        true
+    });
+    Ok(())
 }
 
 fn push_graph_snapshot_posture(
