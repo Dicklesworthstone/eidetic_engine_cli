@@ -69,6 +69,19 @@ def shard_letter_map(workflow_text: str) -> dict[str, list[str]]:
         for body in lines[index + 1 : index + 12]:
             if body.strip() == ";;":
                 break
+            # A COMMENT IS NOT A FILTER. Without this, a line like
+            #     # was: cargo test --lib -- core::z   (dropped in <commit>)
+            # supplies `z` to this shard's letter set, and the partition check
+            # then reports a module as covered by a filter nobody runs.
+            #
+            # Latent here when written -- dropping comment lines changed no
+            # shard's letters on ci.yml -- but this exact class has fired
+            # twice in this repo: scripts/check-production-reachability.py
+            # (for real, 24f097272) and scripts/check-step-assertion-isolation.py
+            # (b27931e2c). Three gates deciding on prose is a pattern, not a
+            # coincidence.
+            if body.lstrip().startswith("#"):
+                continue
             # Only the filters AFTER `--` are test filters. Anything before it is
             # a cargo argument, and `core::` can legitimately appear in the
             # run_test label, so split on the separator first.
@@ -211,6 +224,20 @@ GOOD_ARMS = """
 """
 
 
+# `core::i` appears ONLY in a comment, so `i` is uncovered and the gate must
+# report it. The comment carries " -- " so it reaches the filter tail exactly
+# the way a real line would.
+COMMENTED_ARMS = """
+            lib-core-a)
+              run_test "x" cargo test --lib -- --test-threads=1 core::a
+              # was: run_test "x" cargo test --lib -- --test-threads=1 core::i
+              ;;
+            lib-core-rest)
+              run_test "y" cargo test --lib -- --test-threads=1 core::b core::c core::d core::e core::f core::g core::h core::j core::k core::l core::m core::n core::o core::p core::q core::r core::s core::t core::u core::v core::w core::x core::y core::z
+              ;;
+"""
+
+
 def _plant(root: Path, arms: str, modules: list[str]) -> None:
     (root / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
     (root / WORKFLOW).write_text("jobs:\n  verify-tests:\n" + arms, encoding="utf-8")
@@ -232,6 +259,16 @@ def self_test() -> int:
         clean = audit(root)
         arm("a complete partition passes", report_silent(clean) == 0)
         arm("it reads both arms", len(clean["shards"]) == 2)
+
+        # A COMMENT MUST NOT SUPPLY A LETTER. The `rest` arm here has `core::i`
+        # only in a comment, so `i` is genuinely uncovered and the gate must
+        # say so. Before the comment skip in shard_letter_map this passed --
+        # the prose filled the hole it was describing.
+        root_c = Path(tempfile.mkdtemp(dir=tmp))
+        _plant(root_c, COMMENTED_ARMS, ["alpha", "index"])
+        commented = audit(root_c)
+        arm("a letter named ONLY in a comment does not count as covered",
+            report_silent(commented) != 0)
 
         # REFUSAL 1: a live module whose letter no arm claims.
         root2 = Path(tempfile.mkdtemp(dir=tmp))
