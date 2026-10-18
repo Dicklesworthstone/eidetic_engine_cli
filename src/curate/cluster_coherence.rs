@@ -601,9 +601,8 @@ mod tests {
         let similarities = pairwise_cosine_matrix(&points).unwrap();
         let clusters = vec![vec![0, 1], vec![2], vec![3]];
         let score = silhouette_score(&clusters[0], &clusters, &similarities).unwrap();
-        let expected = (1.0 - 1.0_f64.to_radians().cos())
-            / (1.0 - 20.0_f64.to_radians().cos())
-            - 1.0;
+        let expected =
+            (1.0 - 1.0_f64.to_radians().cos()) / (1.0 - 20.0_f64.to_radians().cos()) - 1.0;
         assert!((score - expected).abs() < 1.0e-12);
         assert!(score < -0.99);
     }

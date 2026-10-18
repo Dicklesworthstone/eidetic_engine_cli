@@ -1,5 +1,7 @@
 use super::*;
-use crate::serve::{DaemonExecution, daemon_job_table_path, daemon_status_report, load_daemon_job_rows};
+use crate::serve::{
+    DaemonExecution, daemon_job_table_path, daemon_status_report, load_daemon_job_rows,
+};
 use std::sync::mpsc;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -31,18 +33,25 @@ fn public_scheduler_route_selects_the_durable_entrypoint() {
 }
 
 #[test]
-fn missing_store_planning_preserves_job_order_scope_and_shared_shutdown_without_writes() -> TestResult {
+fn missing_store_planning_preserves_job_order_scope_and_shared_shutdown_without_writes()
+-> TestResult {
     let (_temporary, workspace) = fixture()?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let options = tick_options(&workspace, Arc::clone(&shutdown))?;
     assert_eq!(options.job_types, BACKGROUND_JOBS);
     assert_eq!(options.workspace, workspace.to_str().unwrap());
-    assert_eq!(options.runner_options.workspace_path.as_deref(), Some(workspace.as_path()));
+    assert_eq!(
+        options.runner_options.workspace_path.as_deref(),
+        Some(workspace.as_path())
+    );
     assert_eq!(options.tick_limit, 1);
     assert_eq!(options.interval_ms, 0);
     assert!(!options.dry_run);
     assert!(options.runner_options.continue_on_error);
-    assert!(Arc::ptr_eq(options.runner_options.cancellation_flag.as_ref().unwrap(), &shutdown));
+    assert!(Arc::ptr_eq(
+        options.runner_options.cancellation_flag.as_ref().unwrap(),
+        &shutdown
+    ));
     assert!(!workspace.join(".ee").exists());
     assert!(!index_jobs_need_processing(&workspace)?);
     Ok(())
@@ -101,12 +110,17 @@ fn real_scheduler_tick_syncs_start_and_completion_and_releases_execution_ownersh
     let (_temporary, workspace) = fixture()?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut observed = None;
-    run_scheduler(workspace.to_str().unwrap(), Arc::clone(&shutdown), Duration::ZERO, |options| {
-        let report = run_daemon_foreground_durable(&custom_options(options));
-        shutdown.store(true, Ordering::Release);
-        observed = Some(report.clone());
-        report
-    });
+    run_scheduler(
+        workspace.to_str().unwrap(),
+        Arc::clone(&shutdown),
+        Duration::ZERO,
+        |options| {
+            let report = run_daemon_foreground_durable(&custom_options(options));
+            shutdown.store(true, Ordering::Release);
+            observed = Some(report.clone());
+            report
+        },
+    );
     let report = observed.ok_or("executor was not called")??;
     assert_eq!(report.completed_ticks, 1);
     assert_eq!(report.completed_jobs, 1);
@@ -131,18 +145,26 @@ fn transient_tick_failure_is_retried_without_stopping_the_scheduler() -> TestRes
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut calls = 0;
     let mut completed = None;
-    run_scheduler(workspace.to_str().unwrap(), Arc::clone(&shutdown), Duration::ZERO, |options| {
-        calls += 1;
-        if calls == 1 {
-            return Err("temporary admission failure".to_owned());
-        }
-        let result = run_daemon_foreground_durable(&custom_options(options));
-        shutdown.store(true, Ordering::Release);
-        completed = Some(result.clone());
-        result
-    });
+    run_scheduler(
+        workspace.to_str().unwrap(),
+        Arc::clone(&shutdown),
+        Duration::ZERO,
+        |options| {
+            calls += 1;
+            if calls == 1 {
+                return Err("temporary admission failure".to_owned());
+            }
+            let result = run_daemon_foreground_durable(&custom_options(options));
+            shutdown.store(true, Ordering::Release);
+            completed = Some(result.clone());
+            result
+        },
+    );
     assert_eq!(calls, 2);
-    assert_eq!(completed.ok_or("retry was not executed")??.completed_jobs, 1);
+    assert_eq!(
+        completed.ok_or("retry was not executed")??.completed_jobs,
+        1
+    );
     assert_eq!(load_daemon_job_rows(&workspace)?.len(), 2);
     Ok(())
 }
@@ -158,12 +180,17 @@ fn next_background_tick_recovers_only_abandoned_work_before_new_handlers() -> Te
     drop(prior);
     let prefix = std::fs::read(daemon_job_table_path(&workspace))?;
     let mut completed = None;
-    run_scheduler(workspace.to_str().unwrap(), Arc::clone(&shutdown), Duration::ZERO, |options| {
-        let result = run_daemon_foreground_durable(&custom_options(options));
-        shutdown.store(true, Ordering::Release);
-        completed = Some(result.clone());
-        result
-    });
+    run_scheduler(
+        workspace.to_str().unwrap(),
+        Arc::clone(&shutdown),
+        Duration::ZERO,
+        |options| {
+            let result = run_daemon_foreground_durable(&custom_options(options));
+            shutdown.store(true, Ordering::Release);
+            completed = Some(result.clone());
+            result
+        },
+    );
     let report = completed.ok_or("tick did not execute")??;
     assert_eq!(report.recovered_orphans, 1);
     assert_ne!(report.run_id, old_run);
@@ -186,12 +213,17 @@ fn live_execution_owner_excludes_background_recovery_and_handler_admission() -> 
     live.begin_next_job()?;
     let prefix = std::fs::read(daemon_job_table_path(&workspace))?;
     let mut observed = None;
-    run_scheduler(workspace.to_str().unwrap(), Arc::clone(&shutdown), Duration::ZERO, |options| {
-        let result = run_daemon_foreground_durable(&custom_options(options));
-        shutdown.store(true, Ordering::Release);
-        observed = Some(result.clone());
-        result
-    });
+    run_scheduler(
+        workspace.to_str().unwrap(),
+        Arc::clone(&shutdown),
+        Duration::ZERO,
+        |options| {
+            let result = run_daemon_foreground_durable(&custom_options(options));
+            shutdown.store(true, Ordering::Release);
+            observed = Some(result.clone());
+            result
+        },
+    );
     assert!(observed.ok_or("tick was not attempted")?.is_err());
     assert_eq!(std::fs::read(daemon_job_table_path(&workspace))?, prefix);
     assert_eq!(daemon_status_report(&workspace, &[], 0)?.open_job_count, 1);
@@ -213,14 +245,20 @@ fn canonical_workspace_rejects_file_and_missing_paths_without_creating_state() -
 #[test]
 fn explicit_rebuild_takes_precedence_without_probing_or_publishing_the_queue() {
     assert_eq!(
-        select_index_job(true, || panic!("rebuild must not inspect the coalesce queue")).unwrap(),
+        select_index_job(true, || panic!(
+            "rebuild must not inspect the coalesce queue"
+        ))
+        .unwrap(),
         Some(JobType::IndexRebuild),
     );
 }
 
 #[test]
 fn only_pending_queue_work_schedules_coalesce_and_never_an_unrequested_rebuild() {
-    assert_eq!(select_index_job(false, || Ok(true)).unwrap(), Some(JobType::IndexCoalesce));
+    assert_eq!(
+        select_index_job(false, || Ok(true)).unwrap(),
+        Some(JobType::IndexCoalesce)
+    );
     assert_eq!(select_index_job(false, || Ok(false)).unwrap(), None);
     assert_eq!(
         select_index_job(false, || Err("queue unavailable".to_owned())).unwrap_err(),

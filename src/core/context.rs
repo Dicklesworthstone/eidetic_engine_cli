@@ -3528,7 +3528,8 @@ async fn run_context_pack_with_performance_inner(
                     .into_iter()
                     .collect::<BTreeSet<_>>();
             let validity_reference_time =
-                context_validity_reference_time(options, &effective_filters).unwrap_or_else(Utc::now);
+                context_validity_reference_time(options, &effective_filters)
+                    .unwrap_or_else(Utc::now);
             let mut focus_candidates = focus_candidates_from_state(
                 read_connection,
                 &options.workspace_path,
@@ -12343,8 +12344,7 @@ fn quality_score_direct_memory_candidates(
     let scored_relevance: BTreeMap<String, UnitScore> = hits
         .into_iter()
         .filter_map(|hit| {
-            pack_candidate_relevance_from_search_hit(&hit)
-                .map(|relevance| (hit.doc_id, relevance))
+            pack_candidate_relevance_from_search_hit(&hit).map(|relevance| (hit.doc_id, relevance))
         })
         .collect();
     candidates.retain_mut(|candidate| {
@@ -16262,9 +16262,11 @@ mod relevance_floor_tests {
                 assert!((candidate.relevance.into_inner() - expected).abs() < 1.0e-6);
                 assert_eq!(changed, original < 1.0);
             }
-            assert!(candidates.windows(2).all(|pair| {
-                pair[0].relevance.into_inner() <= pair[1].relevance.into_inner()
-            }));
+            assert!(
+                candidates.windows(2).all(|pair| {
+                    pair[0].relevance.into_inner() <= pair[1].relevance.into_inner()
+                })
+            );
         }
     }
 

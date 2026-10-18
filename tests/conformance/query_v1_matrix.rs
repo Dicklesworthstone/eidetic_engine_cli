@@ -349,16 +349,8 @@ fn pack_item_contents(json: &serde_json::Value, context: &str) -> Result<Vec<Str
 
 #[test]
 fn matrix_passive_focus_cannot_bypass_explicit_query_filters() -> TestResult {
-    let (tempdir, workspace, _seed, outbound, _inbound, orphan) =
-        setup_workspace_with_graph()?;
-    let add = run_ee(&[
-        "--workspace",
-        &workspace,
-        "focus",
-        "add",
-        &orphan,
-        "--json",
-    ])?;
+    let (tempdir, workspace, _seed, outbound, _inbound, orphan) = setup_workspace_with_graph()?;
+    let add = run_ee(&["--workspace", &workspace, "focus", "add", &orphan, "--json"])?;
     ensure_equal(&add.status.code(), &Some(EXIT_SUCCESS), "focus add")?;
     assert_response_envelope(&stdout_json(&add)?, "focus add")?;
 
@@ -376,7 +368,9 @@ fn matrix_passive_focus_cannot_bypass_explicit_query_filters() -> TestResult {
     )?;
     let baseline_contents = pack_item_contents(&stdout_json(&baseline)?, "unfiltered focus")?;
     ensure(
-        baseline_contents.iter().any(|item| item == "graph traversal orphan memory unrelated"),
+        baseline_contents
+            .iter()
+            .any(|item| item == "graph traversal orphan memory unrelated"),
         "negative control: unfiltered pack must include the active focus memory",
     )?;
 
@@ -414,11 +408,15 @@ fn matrix_passive_focus_cannot_bypass_explicit_query_filters() -> TestResult {
         assert_response_envelope(&json, label)?;
         let contents = pack_item_contents(&json, label)?;
         ensure(
-            contents.iter().any(|item| item == "outbound expansion only"),
+            contents
+                .iter()
+                .any(|item| item == "outbound expansion only"),
             format!("{label}: an authorized graph-tagged memory must survive"),
         )?;
         ensure(
-            contents.iter().all(|item| item != "graph traversal orphan memory unrelated"),
+            contents
+                .iter()
+                .all(|item| item != "graph traversal orphan memory unrelated"),
             format!("{label}: active focus must not bypass the explicit query"),
         )?;
     }
@@ -427,8 +425,7 @@ fn matrix_passive_focus_cannot_bypass_explicit_query_filters() -> TestResult {
 
 #[test]
 fn matrix_graph_hint_quality_uses_resolved_confidence_policy() -> TestResult {
-    let (tempdir, workspace, _seed, outbound, _inbound, _orphan) =
-        setup_workspace_with_graph()?;
+    let (tempdir, workspace, _seed, outbound, _inbound, _orphan) = setup_workspace_with_graph()?;
     let weak = "mem_00000000000000000000000200";
     let database_path = Path::new(&workspace).join(".ee").join("ee.db");
     let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
@@ -486,7 +483,10 @@ fn matrix_graph_hint_quality_uses_resolved_confidence_policy() -> TestResult {
         config["scoring"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
 
-    for (floor, expected) in [(0.1, "outbound expansion only"), (1.0, "prism ordinal necklace")] {
+    for (floor, expected) in [
+        (0.1, "outbound expansion only"),
+        (1.0, "prism ordinal necklace"),
+    ] {
         config["scoring"]["confidence_floor"] = toml_edit::value(floor);
         fs::write(&config_path, config.to_string()).map_err(|error| error.to_string())?;
         let output = run_ee_pack_query_file(&workspace, &query_file)?;

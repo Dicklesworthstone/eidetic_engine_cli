@@ -105,13 +105,16 @@ fn run_scheduler(
 }
 
 fn canonical_workspace(workspace: &Path) -> Result<PathBuf, String> {
-    let path = workspace.canonicalize()
+    let path = workspace
+        .canonicalize()
         .map_err(|error| format!("Resolve background workspace: {error}"))?;
     if !path.is_dir() {
         return Err("Background workspace is not a directory".to_owned());
     }
     if path.to_str().is_none() {
-        return Err("Background workspace cannot be represented without losing path bytes".to_owned());
+        return Err(
+            "Background workspace cannot be represented without losing path bytes".to_owned(),
+        );
     }
     Ok(path)
 }
@@ -120,7 +123,8 @@ fn tick_options(
     workspace: &Path,
     shutdown: Arc<AtomicBool>,
 ) -> Result<DaemonForegroundOptions, String> {
-    let workspace_text = workspace.to_str()
+    let workspace_text = workspace
+        .to_str()
         .ok_or_else(|| "Background workspace is not UTF-8".to_owned())?;
     let mut jobs = BACKGROUND_JOBS.to_vec();
     // Preserve rebuild-on-fallback and deferred queue processing. Do not
@@ -169,10 +173,12 @@ fn index_jobs_need_processing(workspace: &Path) -> Result<bool, String> {
     }
     let connection = DbConnection::open_file_read_only(&database_path)
         .map_err(|error| format!("Open background index store: {error}"))?;
-    let workspace = crate::core::workspace::addressed_workspace_row(
-        &connection, workspace, &database_path,
-    ).map_err(|error| error.message().to_owned())?;
-    let Some(workspace) = workspace else { return Ok(false); };
+    let workspace =
+        crate::core::workspace::addressed_workspace_row(&connection, workspace, &database_path)
+            .map_err(|error| error.message().to_owned())?;
+    let Some(workspace) = workspace else {
+        return Ok(false);
+    };
     connection.query(
         "SELECT id FROM search_index_jobs WHERE workspace_id = ?1 AND status IN ('pending', 'running', 'failed', 'cancelled') LIMIT 1",
         &[sqlmodel_core::Value::Text(workspace.id)],

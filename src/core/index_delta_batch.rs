@@ -1392,15 +1392,11 @@ mod tests {
                     let at = if native { 1 } else { 2 };
                     let model = ContractHash::new(native, fault, at);
                     let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
-                    let result = embed_batches_with(
-                        &cx,
-                        &model,
-                        &documents(65),
-                        &identity,
-                        "fast",
-                        |_| panic!("malformed bound response cannot reach a WAL write"),
-                    )
-                    .await;
+                    let result =
+                        embed_batches_with(&cx, &model, &documents(65), &identity, "fast", |_| {
+                            panic!("malformed bound response cannot reach a WAL write")
+                        })
+                        .await;
                     let error = result.expect_err("invalid bound response");
                     assert_eq!(
                         error.reason,
@@ -1434,15 +1430,11 @@ mod tests {
                     let model = ContractHash::new(native, fault, 1);
                     let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
                     assert_eq!(model.inner.dimension(), model.alternate.dimension());
-                    let result = embed_batches_with(
-                        &cx,
-                        &model,
-                        &documents(65),
-                        &identity,
-                        "fast",
-                        |_| panic!("producer drift must discard even otherwise valid vectors"),
-                    )
-                    .await;
+                    let result =
+                        embed_batches_with(&cx, &model, &documents(65), &identity, "fast", |_| {
+                            panic!("producer drift must discard even otherwise valid vectors")
+                        })
+                        .await;
                     let error = result.expect_err("producer changed during bound inference");
                     assert_eq!(
                         error.reason,
@@ -1514,15 +1506,11 @@ mod tests {
                     let cx = asupersync::Cx::for_testing();
                     let model = ContractHash::new(native, fault, 1);
                     let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
-                    let result = embed_batches_with(
-                        &cx,
-                        &model,
-                        &documents(65),
-                        &identity,
-                        "fast",
-                        |_| panic!("cancelled inference cannot write its successful prefix"),
-                    )
-                    .await;
+                    let result =
+                        embed_batches_with(&cx, &model, &documents(65), &identity, "fast", |_| {
+                            panic!("cancelled inference cannot write its successful prefix")
+                        })
+                        .await;
                     let error = result.expect_err("original caller cancellation");
                     assert!(error.detail.contains("interrupted"));
                     assert!(!error.detail.contains("PRIVATE-PROVIDER-ERROR"));
@@ -1589,14 +1577,9 @@ mod tests {
             let model = ContractHash::new(false, ProviderFault::Unavailable, 1);
             let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
             model.changed.store(true, Ordering::SeqCst);
-            let result = embed_batches_with(
-                &cx,
-                &model,
-                &documents(2),
-                &identity,
-                "fast",
-                |_| panic!("missing identity cannot enter inference or the writer"),
-            )
+            let result = embed_batches_with(&cx, &model, &documents(2), &identity, "fast", |_| {
+                panic!("missing identity cannot enter inference or the writer")
+            })
             .await;
             let error = result.expect_err("unavailable producer");
             assert_eq!(

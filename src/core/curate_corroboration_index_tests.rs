@@ -167,7 +167,9 @@ fn indexed_join_preserves_first_valid_support_and_every_provenance_field() {
     let base = template();
     let mut anchor = candidate(&base, "anchor", "rule", "exact");
     let mut aliases = observation("alias");
-    aliases.payload_hash = anchor.corroboration.as_ref().unwrap().sessions[0].payload_hash.clone();
+    aliases.payload_hash = anchor.corroboration.as_ref().unwrap().sessions[0]
+        .payload_hash
+        .clone();
     let others: Vec<_> = ["alias", "rejected", "first", "later"]
         .into_iter()
         .map(|id| candidate(&base, id, "rule", "exact"))
@@ -180,13 +182,21 @@ fn indexed_join_preserves_first_valid_support_and_every_provenance_field() {
     ]);
     assert_equivalent(std::slice::from_ref(&anchor), &others, &observations);
     let mut read = Vec::new();
-    corroborate_candidates(std::slice::from_mut(&mut anchor), &others, signature, |other| {
-        read.push(other.candidate_id.clone());
-        Ok(observed(other, &observations))
-    })
+    corroborate_candidates(
+        std::slice::from_mut(&mut anchor),
+        &others,
+        signature,
+        |other| {
+            read.push(other.candidate_id.clone());
+            Ok(observed(other, &observations))
+        },
+    )
     .unwrap();
     assert_eq!(read, ["alias", "rejected", "first"]);
-    assert_eq!(anchor.corroboration.unwrap().sessions[1], observation("first"));
+    assert_eq!(
+        anchor.corroboration.unwrap().sessions[1],
+        observation("first")
+    );
 }
 
 #[test]
@@ -219,7 +229,10 @@ fn one_session_can_supply_at_most_one_increment_per_anchor() {
     for (old, new) in before.iter().zip(&actual) {
         let proof = new.corroboration.as_ref().unwrap();
         assert_eq!(proof.sessions.len(), 2);
-        assert_eq!(proof.sessions[0], old.corroboration.as_ref().unwrap().sessions[0]);
+        assert_eq!(
+            proof.sessions[0],
+            old.corroboration.as_ref().unwrap().sessions[0]
+        );
         assert_eq!(proof.sessions[1], observation("other-0"));
         assert_eq!(new.source_ids, old.source_ids);
         assert_eq!(new.session_arc, old.session_arc);
@@ -230,10 +243,25 @@ fn one_session_can_supply_at_most_one_increment_per_anchor() {
 fn distinct_lesson_join_signs_each_other_once_not_once_per_anchor() {
     let base = template();
     let mut anchors: Vec<_> = (0..256)
-        .map(|index| candidate(&base, &format!("anchor-{index}"), "rule", &format!("key-{index}")))
+        .map(|index| {
+            candidate(
+                &base,
+                &format!("anchor-{index}"),
+                "rule",
+                &format!("key-{index}"),
+            )
+        })
         .collect();
-    let others: Vec<_> = (0..256).rev()
-        .map(|index| candidate(&base, &format!("other-{index}"), "rule", &format!("key-{index}")))
+    let others: Vec<_> = (0..256)
+        .rev()
+        .map(|index| {
+            candidate(
+                &base,
+                &format!("other-{index}"),
+                "rule",
+                &format!("key-{index}"),
+            )
+        })
         .collect();
     let mut signatures = 0;
     let mut reads = 0;
@@ -285,8 +313,10 @@ fn irrelevant_roles_signatures_and_saturated_anchors_do_not_read_proofs() {
         candidate(&base, "full", "rule", "full"),
         candidate(&base, "absent", "rule", "absent"),
     ];
-    corroborate_candidates(&mut anchors, &others, signature, |_| Err(domain("must not read")))
-        .expect("irrelevant proposals never reach storage");
+    corroborate_candidates(&mut anchors, &others, signature, |_| {
+        Err(domain("must not read"))
+    })
+    .expect("irrelevant proposals never reach storage");
     assert_eq!(anchors, before);
 }
 
@@ -438,7 +468,13 @@ fn legacy_support(
     let mut seen_events = BTreeSet::new();
     let mut context_sources = Vec::new();
     let last_line = recorded
-        .map(|recorded| recorded.context_sources.iter().map(|source| source.end_line).max())
+        .map(|recorded| {
+            recorded
+                .context_sources
+                .iter()
+                .map(|source| source.end_line)
+                .max()
+        })
         .unwrap_or(Some(u32::MAX))?;
     for span in spans.iter().filter(|span| span.start_line <= last_line) {
         context_sources.push(source_reference(span));
@@ -458,7 +494,10 @@ fn legacy_support(
     Some(SupportingSession {
         session_id: session.id.clone(),
         upstream_hash: digest(["upstream", session.cass_session_id.as_str()]),
-        source_path_hash: session.source_path.as_deref().map(|path| digest(["source_path", path])),
+        source_path_hash: session
+            .source_path
+            .as_deref()
+            .map(|path| digest(["source_path", path])),
         payload_hash: digest(&payload),
         candidate_id: candidate.candidate_id.clone(),
         sources,
@@ -472,7 +511,9 @@ fn legacy_reconstruct(
     spans: &[StoredEvidenceSpan],
     expected: &SupportingSession,
 ) -> Option<ReviewSessionCandidate> {
-    let mut sources = expected.sources.iter()
+    let mut sources = expected
+        .sources
+        .iter()
         .map(|source| spans.iter().find(|span| span.id == source.evidence_span_id))
         .collect::<Option<Vec<_>>>()?;
     sources.sort_by(|left, right| session_arc_span_order(left, right));
@@ -497,11 +538,13 @@ fn one_snapshot_reuses_arc_mining_and_complete_context_for_many_lessons() {
     let mut spans = Vec::new();
     for index in 0..64 {
         spans.push(span(
-            &format!("failure-{index}"), index * 2 + 1,
+            &format!("failure-{index}"),
+            index * 2 + 1,
             &format!("Failure arc: cargo test src/file_{index}.rs failed."),
         ));
         spans.push(span(
-            &format!("repair-{index}"), index * 2 + 2,
+            &format!("repair-{index}"),
+            index * 2 + 2,
             &format!("Fix: cargo test src/file_{index}.rs passed after restoring the guard."),
         ));
     }
@@ -529,8 +572,16 @@ fn one_snapshot_reuses_arc_mining_and_complete_context_for_many_lessons() {
 fn recorded_bootstrap_subset_does_not_expand_to_current_topic_group_or_mine_arcs() {
     let session = session();
     let spans = [
-        span("lesson", 1, "Always run cargo test --locked after changing src/support.rs."),
-        span("later", 3, "Always run cargo test --offline after changing src/other.rs."),
+        span(
+            "lesson",
+            1,
+            "Always run cargo test --locked after changing src/support.rs.",
+        ),
+        span(
+            "later",
+            3,
+            "Always run cargo test --offline after changing src/other.rs.",
+        ),
     ];
     let topic = review_topic_key(&review_learning_text(&spans[0]).unwrap());
     let row = build_bootstrap_candidate(&session.workspace_id, &session, &topic, &[&spans[0]])
@@ -555,8 +606,14 @@ fn cached_negative_lookup_still_respects_every_transcript_barrier() {
         span("repair", 3, "Fixed src/api.rs by restoring the guard."),
     ];
     let row = build_session_arc_candidates(&session.workspace_id, &session, &endpoints, 0.0)
-        .into_iter().next().expect("nonvacuous endpoint pair");
-    let mut barrier = span("barrier", 2, r#"{"type":"tool_result","content":"ignored"}"#);
+        .into_iter()
+        .next()
+        .expect("nonvacuous endpoint pair");
+    let mut barrier = span(
+        "barrier",
+        2,
+        r#"{"type":"tool_result","content":"ignored"}"#,
+    );
     barrier.span_kind = "tool_result".into();
     barrier.role = Some("tool".into());
     let spans = [endpoints[0].clone(), barrier, endpoints[1].clone()];
@@ -566,7 +623,11 @@ fn cached_negative_lookup_still_respects_every_transcript_barrier() {
     for _ in 0..32 {
         assert!(evidence.reconstruct(&expected).is_none());
     }
-    assert_eq!(evidence.arc_builds.get(), 1, "an empty result is also cached");
+    assert_eq!(
+        evidence.arc_builds.get(),
+        1,
+        "an empty result is also cached"
+    );
     assert_eq!(evidence.context_builds.get(), 0);
     let mut missing = expected;
     missing.sources[0].evidence_span_id = "missing".into();
@@ -582,12 +643,20 @@ fn historical_prefix_accepts_later_growth_but_rejects_context_insertions_and_rew
         span("repair", 3, "Fixed src/api.rs by restoring the guard."),
     ];
     let row = build_session_arc_candidates(&session.workspace_id, &session, &spans, 0.0)
-        .into_iter().next().unwrap();
+        .into_iter()
+        .next()
+        .unwrap();
     let recorded = legacy_support(&session, &spans, &row, None).unwrap();
     let mut grown = spans.to_vec();
     grown.push(span("later", 5, "Observation from the next task."));
-    assert_eq!(legacy_support(&session, &grown, &row, Some(&recorded)), Some(recorded.clone()));
-    assert_eq!(support_in_context(&session, &grown, &row, Some(&recorded)), Some(recorded.clone()));
+    assert_eq!(
+        legacy_support(&session, &grown, &row, Some(&recorded)),
+        Some(recorded.clone())
+    );
+    assert_eq!(
+        support_in_context(&session, &grown, &row, Some(&recorded)),
+        Some(recorded.clone())
+    );
     let evidence = SessionEvidence::new(&session.workspace_id, &session, &grown);
     let fresh = evidence.support(&row).unwrap();
     assert_ne!(fresh.context_sources, recorded.context_sources);
@@ -601,7 +670,11 @@ fn historical_prefix_accepts_later_growth_but_rejects_context_insertions_and_rew
     assert!(support_in_context(&session, &rewritten, &row, Some(&recorded)).is_none());
     assert!(legacy_support(&session, &rewritten, &row, Some(&recorded)).is_none());
     let changed = SessionEvidence::new(&session.workspace_id, &session, &rewritten);
-    assert_ne!(changed.support(&row), evidence.support(&row), "no cross-snapshot cache");
+    assert_ne!(
+        changed.support(&row),
+        evidence.support(&row),
+        "no cross-snapshot cache"
+    );
 }
 
 #[test]
@@ -620,11 +693,17 @@ fn source_index_preserves_first_id_and_checks_admission_before_context_hashing()
     let reversed = [clean, blocked];
     let evidence = SessionEvidence::new(&session.workspace_id, &session, &reversed);
     let actual = evidence.support(&row).unwrap();
-    assert_eq!(Some(actual.clone()), legacy_support(&session, &reversed, &row, None));
+    assert_eq!(
+        Some(actual.clone()),
+        legacy_support(&session, &reversed, &row, None)
+    );
     assert_eq!(actual.sources.len(), 1, "repeated endpoint is one source");
     assert_eq!(actual.context_sources.len(), 2, "context never drops a row");
     row.source_ids.push("missing".into());
-    assert!(evidence.support(&row).is_none(), "cached context cannot fill a missing source");
+    assert!(
+        evidence.support(&row).is_none(),
+        "cached context cannot fill a missing source"
+    );
     assert_eq!(evidence.context_builds.get(), 1);
 }
 

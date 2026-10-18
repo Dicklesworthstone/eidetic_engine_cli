@@ -196,7 +196,8 @@ impl RerankModelManifest {
                         .is_some_and(|value| !value.trim().is_empty());
                 if !complete {
                     return Err(
-                        "verified rerank model attestation is missing provenance fields".to_string(),
+                        "verified rerank model attestation is missing provenance fields"
+                            .to_string(),
                     );
                 }
             }
