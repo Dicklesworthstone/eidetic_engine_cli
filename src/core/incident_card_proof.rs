@@ -10,7 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sqlmodel_core::Value;
 
-use super::{IncidentCardDraft, draft_incident_card};
+#[cfg(test)]
+use super::draft_incident_card;
+use super::{IncidentCardDraft, IncidentCardSources};
 use crate::core::cass_error_recall::session_failure_arcs;
 use crate::db::{DbConnection, DbError, DbOperation, Result, StoredEvidenceSpan};
 use crate::models::{EvidenceId, SessionId};
@@ -274,6 +276,7 @@ fn load_session_proofs(
         .into_iter()
         .map(|card| (card.id.clone(), card))
         .collect();
+    let card_sources = IncidentCardSources::new(&sources);
     let mut proofs = SessionProofs::default();
     for arc in session_failure_arcs(workspace, &session, &sources) {
         if fingerprint.is_some_and(|key| {
@@ -293,12 +296,13 @@ fn load_session_proofs(
                 card: false,
             });
         }
-        if let Some(draft) = draft_incident_card(workspace, session_id, &sources, &arc)
-            && cards
-                .get(&draft.id)
-                .is_some_and(|card| matches_draft(card, &draft))
+        // The complete interpreter still establishes ordinary repair claims.
+        // A nonexistent stored card needs no tokenization or facet rendering.
+        let card_id = super::incident_card_id(workspace, &arc.failure_id);
+        if let Some(card) = cards.get(&card_id)
+            && let Some(draft) = card_sources.draft(workspace, session_id, &arc)
+            && matches_draft(card, &draft)
         {
-            let card = cards.get(&draft.id).ok_or_else(unavailable)?;
             proofs.cards.insert(draft.id.clone(), card_signature(card)?);
             proofs.claims.insert(Claim {
                 failure: arc.failure_id,
@@ -321,6 +325,24 @@ pub(crate) mod tests;
 mod reader_visit_tests {
     use super::tests::{Fixture, TestResult, WS};
     use super::*;
+
+    #[test]
+    fn source_proofs_without_stored_cards_keep_repair_claims_without_writing_cards() -> TestResult {
+        let fixture = Fixture::new_public(true)?;
+        let before = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        assert!(before.iter().all(|span| !requires_proof(span)));
+        let proofs = session_proofs(&fixture.db, WS, None, &fixture.session)?;
+        assert!(proofs.cards.is_empty());
+        assert!(proofs.claims.contains(&Claim {
+            failure: fixture.failure.clone(),
+            target: fixture.repair.clone(),
+            card: false,
+        }));
+        let after = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        assert_eq!(after.len(), before.len());
+        assert!(after.iter().all(|span| !requires_proof(span)));
+        Ok(())
+    }
 
     #[test]
     fn verified_visit_agrees_with_withheld_and_keeps_exact_native_card_fields() -> TestResult {

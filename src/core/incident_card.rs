@@ -27,7 +27,8 @@
 #[path = "incident_card_proof.rs"]
 pub(crate) mod proof;
 
-use std::collections::BTreeSet;
+use std::cell::OnceCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::cass_error_recall::FailureArc;
 use crate::db::{CreateEvidenceSpanInput, EvidenceProducerKind, StoredEvidenceSpan};
@@ -79,16 +80,73 @@ pub(crate) struct IncidentCardDraft {
     pub input: CreateEvidenceSpanInput,
 }
 
-/// Build the card for one resolved arc, or `None` when the arc is unresolved,
-/// has no admitted explanation of its fix, or its text would not be admitted.
+/// Borrowed lookup shared by every card derived from one source-row slice.
+///
+/// The first resolved arc with repair references builds the index. Repeated
+/// cards then do logarithmic lookups instead of scanning the transcript for
+/// each attempt, failure, proof and repair. No source text is copied or cached
+/// across calls with different source slices. Callers still own source
+/// admission, transcript interpretation and database snapshot consistency.
+pub(crate) struct IncidentCardSources<'a> {
+    spans: &'a [StoredEvidenceSpan],
+    by_id: OnceCell<BTreeMap<&'a str, &'a StoredEvidenceSpan>>,
+}
+
+impl<'a> IncidentCardSources<'a> {
+    pub(crate) fn new(spans: &'a [StoredEvidenceSpan]) -> Self {
+        Self {
+            spans,
+            by_id: OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn draft(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        arc: &FailureArc,
+    ) -> Option<IncidentCardDraft> {
+        if arc.resolution.as_ref()?.repair_ids.is_empty() {
+            return None;
+        }
+        let by_id = self.by_id.get_or_init(|| {
+            let mut by_id = BTreeMap::new();
+            for span in self.spans {
+                // Match the original slice::iter().find(): a later duplicate
+                // must not replace the first observation under the same ID.
+                by_id.entry(span.id.as_str()).or_insert(span);
+            }
+            by_id
+        });
+        draft_incident_card_with_lookup(workspace_id, session_id, arc, |id| {
+            by_id.get(id).copied()
+        })
+    }
+}
+
+/// Render a single card without allocating a session index. Multi-card proof
+/// evaluation uses IncidentCardSources; both paths share the unchanged renderer
+/// and admission checks below. Tests retain this linear lookup as their oracle.
 pub(crate) fn draft_incident_card(
     workspace_id: &str,
     session_id: &str,
     spans: &[StoredEvidenceSpan],
     arc: &FailureArc,
 ) -> Option<IncidentCardDraft> {
+    draft_incident_card_with_lookup(workspace_id, session_id, arc, |id| {
+        spans.iter().find(|span| span.id == id)
+    })
+}
+
+/// Render one resolved arc using exact source references. The lookup strategy
+/// cannot change facet selection, token budgets, identities or source metadata.
+fn draft_incident_card_with_lookup<'a>(
+    workspace_id: &str,
+    session_id: &str,
+    arc: &FailureArc,
+    mut by_id: impl FnMut(&str) -> Option<&'a StoredEvidenceSpan>,
+) -> Option<IncidentCardDraft> {
     let resolution = arc.resolution.as_ref()?;
-    let by_id = |id: &str| spans.iter().find(|span| span.id == id);
     let attempt = by_id(&arc.attempt_id)?;
     let failure = by_id(&arc.failure_id)?;
     let proof = by_id(&resolution.proof_id)?;
@@ -466,6 +524,276 @@ fn bounded_chars(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cass_error_recall::{record_session_error_recall, session_failure_arcs};
+    use crate::core::incident_card::proof::tests::{Fixture, TestResult, WS};
+
+    fn source_index_fixture() -> TestResult<(Fixture, Vec<StoredEvidenceSpan>, FailureArc)> {
+        let fixture = Fixture::new_public(true)?;
+        let spans = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let session = fixture.db.get_session(&fixture.session)?.ok_or("session")?;
+        let arc = session_failure_arcs(WS, &session, &spans)
+            .into_iter()
+            .find(|arc| arc.resolution.is_some())
+            .ok_or("resolved source arc")?;
+        Ok((fixture, spans, arc))
+    }
+
+    // Compare every persisted field, not just readable text or a declared hash.
+    fn draft_fields(draft: Option<IncidentCardDraft>) -> Option<serde_json::Value> {
+        draft.map(|draft| {
+            let input = draft.input;
+            serde_json::json!({
+                "id": draft.id,
+                "workspace_id": input.workspace_id,
+                "session_id": input.session_id,
+                "memory_id": input.memory_id,
+                "producer_kind": input.producer_kind.as_str(),
+                "cass_span_id": input.cass_span_id,
+                "span_kind": input.span_kind,
+                "start_line": input.start_line,
+                "end_line": input.end_line,
+                "start_byte": input.start_byte,
+                "end_byte": input.end_byte,
+                "role": input.role,
+                "excerpt": input.excerpt,
+                "content_hash": input.content_hash,
+                "metadata_json": input.metadata_json,
+                "inherited_redaction_classes": input.inherited_redaction_classes,
+            })
+        })
+    }
+
+    #[test]
+    fn source_index_matches_linear_card_on_real_migrated_evidence() -> TestResult {
+        let (fixture, spans, arc) = source_index_fixture()?;
+        let expected = draft_fields(draft_incident_card(WS, &fixture.session, &spans, &arc));
+        assert!(expected.is_some(), "positive control must produce a card");
+        let sources = IncidentCardSources::new(&spans);
+        assert!(sources.by_id.get().is_none());
+        assert_eq!(
+            draft_fields(sources.draft(WS, &fixture.session, &arc)),
+            expected,
+        );
+        assert_eq!(sources.by_id.get().ok_or("built index")?.len(), spans.len());
+        Ok(())
+    }
+
+    #[test]
+    fn source_index_preserves_first_duplicate_source_identity() -> TestResult {
+        let (fixture, spans, arc) = source_index_fixture()?;
+        let proof = spans
+            .iter()
+            .find(|span| span.id == fixture.proof)
+            .ok_or("proof source")?;
+        let mut changed = proof.clone();
+        changed.end_line += 3;
+        let mut first_original = spans.clone();
+        first_original.push(changed.clone());
+        let mut first_changed = vec![changed];
+        first_changed.extend(spans);
+        let mut rendered = Vec::new();
+        for rows in [&first_original, &first_changed] {
+            let sources = IncidentCardSources::new(rows);
+            let actual = draft_fields(sources.draft(WS, &fixture.session, &arc));
+            assert!(actual.is_some());
+            assert_eq!(
+                actual,
+                draft_fields(draft_incident_card(WS, &fixture.session, rows, &arc)),
+            );
+            let first = rows
+                .iter()
+                .find(|span| span.id == fixture.proof)
+                .ok_or("first proof")?;
+            let indexed = sources
+                .by_id
+                .get()
+                .and_then(|by_id| by_id.get(fixture.proof.as_str()))
+                .copied()
+                .ok_or("indexed proof")?;
+            assert!(std::ptr::eq(first, indexed));
+            rendered.push(actual);
+        }
+        assert_ne!(
+            rendered[0], rendered[1],
+            "source coordinates are load-bearing",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_index_keeps_missing_reference_and_partial_repair_semantics() -> TestResult {
+        let (fixture, spans, arc) = source_index_fixture()?;
+        for missing in [
+            &fixture.attempt,
+            &fixture.failure,
+            &fixture.proof,
+            &fixture.repair,
+        ] {
+            let rows = spans
+                .iter()
+                .filter(|span| &span.id != missing)
+                .cloned()
+                .collect::<Vec<_>>();
+            let sources = IncidentCardSources::new(&rows);
+            let actual = draft_fields(sources.draft(WS, &fixture.session, &arc));
+            assert_eq!(actual, None);
+            assert_eq!(
+                actual,
+                draft_fields(draft_incident_card(WS, &fixture.session, &rows, &arc)),
+            );
+        }
+        let mut partial = arc;
+        partial
+            .resolution
+            .as_mut()
+            .ok_or("resolution")?
+            .repair_ids
+            .push("ev_missing_optional_repair".to_owned());
+        let sources = IncidentCardSources::new(&spans);
+        let actual = draft_fields(sources.draft(WS, &fixture.session, &partial));
+        assert!(
+            actual.is_some(),
+            "the surviving admitted explanation still renders",
+        );
+        assert_eq!(
+            actual,
+            draft_fields(draft_incident_card(WS, &fixture.session, &spans, &partial)),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_index_is_lazy_for_unresolved_and_explanation_free_arcs() -> TestResult {
+        let (fixture, spans, arc) = source_index_fixture()?;
+        let sources = IncidentCardSources::new(&spans);
+        let mut unresolved = arc.clone();
+        unresolved.resolution = None;
+        assert!(sources.draft(WS, &fixture.session, &unresolved).is_none());
+        assert!(sources.by_id.get().is_none());
+        let mut unexplained = arc;
+        unexplained
+            .resolution
+            .as_mut()
+            .ok_or("resolution")?
+            .repair_ids
+            .clear();
+        assert!(sources.draft(WS, &fixture.session, &unexplained).is_none());
+        assert!(sources.by_id.get().is_none());
+        let empty = IncidentCardSources::new(&[]);
+        assert!(empty.draft(WS, &fixture.session, &unexplained).is_none());
+        assert!(empty.by_id.get().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn source_index_is_reused_across_many_cards_without_copying_rows() -> TestResult {
+        let (fixture, mut spans, arc) = source_index_fixture()?;
+        let template = spans.first().ok_or("source template")?.clone();
+        for index in 0_u128..512 {
+            let mut unrelated = template.clone();
+            unrelated.id =
+                crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x100000 + index))
+                    .to_string();
+            spans.insert(0, unrelated);
+        }
+        let sources = IncidentCardSources::new(&spans);
+        let expected = draft_fields(draft_incident_card(WS, &fixture.session, &spans, &arc));
+        assert!(expected.is_some());
+        assert_eq!(
+            draft_fields(sources.draft(WS, &fixture.session, &arc)),
+            expected,
+        );
+        let initial = sources.by_id.get().ok_or("built index")?;
+        for _ in 0..64 {
+            assert_eq!(
+                draft_fields(sources.draft(WS, &fixture.session, &arc)),
+                expected,
+            );
+            assert!(std::ptr::eq(
+                initial,
+                sources.by_id.get().ok_or("reused index")?,
+            ));
+        }
+        for span in &spans {
+            let indexed = initial
+                .get(span.id.as_str())
+                .copied()
+                .ok_or("indexed source")?;
+            assert!(std::ptr::eq(span, indexed));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_index_preserves_unique_row_permutations_and_does_not_cross_snapshots() -> TestResult {
+        let (fixture, spans, arc) = source_index_fixture()?;
+        let expected = draft_fields(draft_incident_card(WS, &fixture.session, &spans, &arc));
+        assert!(expected.is_some());
+        for shift in 0..spans.len() {
+            let mut reordered = spans.clone();
+            reordered.rotate_left(shift);
+            let sources = IncidentCardSources::new(&reordered);
+            assert_eq!(
+                draft_fields(sources.draft(WS, &fixture.session, &arc)),
+                expected,
+            );
+        }
+        let original = IncidentCardSources::new(&spans);
+        assert_eq!(
+            draft_fields(original.draft(WS, &fixture.session, &arc)),
+            expected,
+        );
+        let mut changed = spans.clone();
+        changed
+            .iter_mut()
+            .find(|span| span.id == fixture.proof)
+            .ok_or("changed proof")?
+            .end_line += 4;
+        let updated = IncidentCardSources::new(&changed);
+        let actual = draft_fields(updated.draft(WS, &fixture.session, &arc));
+        assert!(actual.is_some());
+        assert_ne!(actual, expected);
+        assert_eq!(
+            actual,
+            draft_fields(draft_incident_card(WS, &fixture.session, &changed, &arc)),
+        );
+        assert_eq!(
+            draft_fields(original.draft(WS, &fixture.session, &arc)),
+            expected,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_index_agrees_with_idempotent_import_and_current_source_proof() -> TestResult {
+        let (fixture, spans, arc) = source_index_fixture()?;
+        let expected = draft_incident_card(WS, &fixture.session, &spans, &arc).ok_or("card")?;
+        let first = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(first.resolved_failures, 1);
+        assert_eq!(first.incident_cards_recorded, 1);
+        let stored = fixture
+            .db
+            .get_evidence_span(&expected.id)?
+            .ok_or("stored card")?;
+        assert!(stored.matches_screened_input(&expected.input)?);
+        let second = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(second.resolved_failures, 1);
+        assert_eq!(second.incident_cards_recorded, 0);
+        let proofs = proof::session_proofs(&fixture.db, WS, None, &fixture.session)?;
+        assert!(proofs.claims.contains(&proof::Claim {
+            failure: fixture.failure.clone(),
+            target: expected.id,
+            card: true,
+        }));
+        assert_eq!(
+            fixture
+                .db
+                .list_evidence_spans_for_session(&fixture.session)?
+                .len(),
+            spans.len() + 1,
+        );
+        Ok(())
+    }
 
     #[test]
     fn fix_facet_prefers_sentences_that_explain_the_fix_and_keeps_order() {
