@@ -89,6 +89,50 @@ PUBLISH_RE = re.compile(r"\bgit\s+push\b|\bgit\s+commit\b|\bgh\s+release\b")
 STEP_RE = re.compile(r"^(\s*)-\s+name:\s*(.+?)$", re.M)
 
 
+def strip_comments(body: str) -> str:
+    """Remove YAML/shell comments from a step body, respecting quotes.
+
+    THE GATE DECIDED ON PROSE WITHOUT THIS. Every classification below matched
+    over the raw body, so a step could be called "accumulating" purely by
+    naming `failed=1` inside a COMMENT while still dying on its first
+    assertion -- and a comment mentioning `git push` could mark a step
+    publish-gated that pushes nothing.
+
+    This is the same hole scripts/check-production-reachability.py had, fixed
+    there at 24f097272 after it fired for real: a comment added to the doctor
+    dispatch table to record that two fixers are NOT wired made that gate
+    report them as wired and instruct the operator to delete two accurate
+    baseline rows.
+
+    Quote tracking is load-bearing in both directions: a '#' inside
+    "sha256:ab#cd" must not truncate real content, and `failed=1  # why`
+    must keep its assignment.
+    """
+    out = []
+    for line in body.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        in_s = None
+        esc = False
+        cut = len(line)
+        for i, ch in enumerate(line):
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif in_s:
+                if ch == in_s:
+                    in_s = None
+            elif ch in "\"'":
+                in_s = ch
+            elif ch == "#":
+                cut = i
+                break
+        out.append(line[:cut])
+    return "\n".join(out)
+
+
 def steps(text: str):
     """Yield (name, body) for each step that has a `run:` block."""
     marks = [(m.start(), m.group(1), m.group(2).strip()) for m in STEP_RE.finditer(text)]
@@ -110,7 +154,11 @@ def audit(root: Path) -> dict:
             text = Path(path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for name, body in steps(text):
+        for name, raw_body in steps(text):
+            # EVERY predicate reads the de-commented body. Counting assertions
+            # in prose would inflate `count`; classifying on prose decides a
+            # step's posture from a sentence about the posture.
+            body = strip_comments(raw_body)
             count = len(ASSERT_RE.findall(body))
             if count < 2:
                 continue
@@ -242,6 +290,39 @@ ABORTING = """jobs:
           grep -Fq 'test result: ok. 3 passed' a.log
           cargo test --lib b | tee b.log
           grep -Fq 'test result: ok. 4 passed' b.log
+"""
+
+# bd-step-isolation-mention-counts-2zj71: aborts for real, only TALKS about
+# accumulating. The comment deliberately spells both idioms ACCUM_RE looks for.
+COMMENT_ONLY_ACCUM = """jobs:
+  verify:
+    steps:
+      - name: Aborting step whose comments mention the flag
+        run: |
+          set -euo pipefail
+          # historical note: this used to accumulate with failed=1
+          # and read status=$? after each suite before it was simplified
+          cargo test --lib a > a.log
+          grep -Fq 'test result: ok. 3 passed' a.log
+          cargo test --lib b > b.log
+          grep -Fq 'test result: ok. 4 passed' b.log
+"""
+
+# The converse: a REAL accumulator whose lines carry trailing comments, plus a
+# '#' inside a quoted assertion so the stripper cannot be line-blanking.
+ACCUM_WITH_TRAILING_COMMENT = """jobs:
+  verify:
+    steps:
+      - name: Accumulating with trailing comments
+        run: |
+          set -uo pipefail
+          failed=0
+          cargo test --lib a > a.log || failed=1  # first suite
+          grep -Fq 'test result: ok. 3 passed' a.log || failed=1  # assert a
+          echo 'marker#not-a-comment'
+          cargo test --lib b > b.log || failed=1  # second suite
+          grep -Fq 'test result: ok. 4 passed' b.log || failed=1  # assert b
+          exit "$failed"
 """
 
 ACCUMULATING = """jobs:
@@ -378,6 +459,34 @@ def self_test() -> int:
         a8 = audit(r8)
         arm("CONTROL: the same step with the publish verbs removed is flagged "
             "again", len(a8["atRisk"]) == 1)
+
+        # COMMENT HANDLING (bd-step-isolation-mention-counts-2zj71).
+        #
+        # THE POSITIVE CONTROL. This step ABORTS on its first failure and only
+        # MENTIONS the accumulation idiom, in comments. Before strip_comments
+        # it was classified "accumulating" and reported safe, so an aborting
+        # step hid behind a sentence about accumulating. This arm fails on the
+        # pre-fix code, which is what makes it a control rather than decoration.
+        r10 = Path(tempfile.mkdtemp(dir=tmp))
+        _plant(r10, "h.yml", COMMENT_ONLY_ACCUM)
+        a10 = audit(r10)
+        arm("a step that names the failure flag ONLY in a comment is still "
+            "reported at risk", len(a10["atRisk"]) == 1)
+
+        # THE CONVERSE, so the fix cannot be an over-broad silencer: a GENUINE
+        # accumulator whose lines carry trailing comments must still read as
+        # accumulating. A stripper that blanked whole lines would satisfy the
+        # arm above and break this one.
+        r11 = Path(tempfile.mkdtemp(dir=tmp))
+        _plant(r11, "i.yml", ACCUM_WITH_TRAILING_COMMENT)
+        a11 = audit(r11)
+        arm("a real accumulation carrying trailing comments is NOT flagged",
+            a11["atRisk"] == [] and len(a11["safe"]) == 1)
+
+        # And a '#' inside a quoted string must not truncate the line it sits
+        # on: the assertion pattern itself has to survive.
+        arm("quoted '#' does not eat the assertion count",
+            a11["multiAssertionSteps"] == 1)
 
         # --json must be a parseable document on BOTH exit paths. It was not:
         # the trailing "OK" line made the clean run fail with "Extra data".
