@@ -348,6 +348,84 @@ fn pack_item_contents(json: &serde_json::Value, context: &str) -> Result<Vec<Str
 // ============================================================================
 
 #[test]
+fn matrix_passive_focus_cannot_bypass_explicit_query_filters() -> TestResult {
+    let (tempdir, workspace, _seed, outbound, _inbound, orphan) =
+        setup_workspace_with_graph()?;
+    let add = run_ee(&[
+        "--workspace",
+        &workspace,
+        "focus",
+        "add",
+        &orphan,
+        "--json",
+    ])?;
+    ensure_equal(&add.status.code(), &Some(EXIT_SUCCESS), "focus add")?;
+    assert_response_envelope(&stdout_json(&add)?, "focus add")?;
+
+    let unfiltered = serde_json::json!({
+        "version": "ee.query.v1",
+        "query": {"text": "graph traversal anchor"},
+        "budget": {"maxTokens": 4000, "maxResults": 10}
+    });
+    let query_file = write_query_file(&tempdir, &unfiltered.to_string())?;
+    let baseline = run_ee_pack_query_file(&workspace, &query_file)?;
+    ensure_equal(
+        &baseline.status.code(),
+        &Some(EXIT_SUCCESS),
+        "unfiltered focus pack",
+    )?;
+    let baseline_contents = pack_item_contents(&stdout_json(&baseline)?, "unfiltered focus")?;
+    ensure(
+        baseline_contents.iter().any(|item| item == "graph traversal orphan memory unrelated"),
+        "negative control: unfiltered pack must include the active focus memory",
+    )?;
+
+    let cases = [
+        (
+            "graph neighborhood",
+            serde_json::json!({
+                "version": "ee.query.v1",
+                "query": {"text": "graph traversal anchor"},
+                "graph": {
+                    "seedMemories": [outbound],
+                    "traversal": "outbound",
+                    "maxHops": 1,
+                    "linkTypes": ["supports"],
+                    "includeOrphans": false
+                },
+                "budget": {"maxTokens": 4000, "maxResults": 10}
+            }),
+        ),
+        (
+            "required tag",
+            serde_json::json!({
+                "version": "ee.query.v1",
+                "query": {"text": "graph traversal anchor"},
+                "tags": {"require": ["graph"]},
+                "budget": {"maxTokens": 4000, "maxResults": 10}
+            }),
+        ),
+    ];
+    for (label, query) in cases {
+        fs::write(&query_file, query.to_string()).map_err(|e| e.to_string())?;
+        let output = run_ee_pack_query_file(&workspace, &query_file)?;
+        ensure_equal(&output.status.code(), &Some(EXIT_SUCCESS), label)?;
+        let json = stdout_json(&output)?;
+        assert_response_envelope(&json, label)?;
+        let contents = pack_item_contents(&json, label)?;
+        ensure(
+            contents.iter().any(|item| item == "outbound expansion only"),
+            format!("{label}: an authorized graph-tagged memory must survive"),
+        )?;
+        ensure(
+            contents.iter().all(|item| item != "graph traversal orphan memory unrelated"),
+            format!("{label}: active focus must not bypass the explicit query"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn matrix_graph_hint_quality_uses_resolved_confidence_policy() -> TestResult {
     let (tempdir, workspace, _seed, outbound, _inbound, _orphan) =
         setup_workspace_with_graph()?;

@@ -3527,18 +3527,65 @@ async fn run_context_pack_with_performance_inner(
                 context_workspace_ids(read_connection, &options.workspace_path, &mut degraded)
                     .into_iter()
                     .collect::<BTreeSet<_>>();
-            let focus_candidates = focus_candidates_from_state(
+            let validity_reference_time =
+                context_validity_reference_time(options, &effective_filters).unwrap_or_else(Utc::now);
+            let mut focus_candidates = focus_candidates_from_state(
                 read_connection,
                 &options.workspace_path,
                 &focus_state,
                 options.include_tombstoned,
                 context_include_expired(options, &effective_filters),
                 context_include_future(options, &effective_filters),
-                context_validity_reference_time(options, &effective_filters)
-                    .unwrap_or_else(Utc::now),
+                validity_reference_time,
                 &focus_workspace_ids,
+                &effective_filters,
                 &mut degraded,
             );
+            // Focus is an input to retrieval, not an exemption from an explicit
+            // ee.query.v1 graph neighborhood restriction. Graph admission has
+            // already removed out-of-neighborhood search and expansion hits.
+            if !effective_filters.graph.is_empty() && !effective_filters.graph.include_orphans {
+                let graph_admitted_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.memory_id)
+                    .collect::<BTreeSet<_>>();
+                let before = focus_candidates.len();
+                focus_candidates
+                    .retain(|candidate| graph_admitted_ids.contains(&candidate.memory_id));
+                let omitted = before.saturating_sub(focus_candidates.len());
+                if omitted > 0 {
+                    push_degradation(
+                        &mut degraded,
+                        "context_graph_orphans_filtered",
+                        ContextResponseSeverity::Low,
+                        format!(
+                            "{omitted} passive-focus candidate(s) excluded by graph.includeOrphans=false."
+                        ),
+                        Some(
+                            "Set graph.includeOrphans=true to include focused memories outside the graph neighborhood."
+                                .to_string(),
+                        ),
+                    );
+                }
+            }
+            if !focus_candidates.is_empty() {
+                let focus_ids = focus_candidates
+                    .iter()
+                    .map(|candidate| candidate.memory_id.to_string())
+                    .collect::<Vec<_>>();
+                let focus_refs = focus_ids.iter().map(String::as_str).collect::<Vec<_>>();
+                let (focus_memories, _) =
+                    load_candidate_batch_maps(read_connection, &focus_refs, &mut degraded);
+                quality_score_direct_memory_candidates(
+                    read_connection,
+                    &search_options,
+                    Some(validity_reference_time),
+                    &focus_memories,
+                    &mut focus_candidates,
+                    "Passive-focus",
+                    &mut degraded,
+                )?;
+            }
             trace.focus_candidate_count = focus_candidates.len();
             candidates.extend(focus_candidates);
         }
@@ -8517,6 +8564,8 @@ fn context_pack_l2_feature_flags_hash(
     // Graph expansion now uses the canonical quality scorer; older cached
     // packs did not apply confidence or harmful-feedback penalties to graph hints.
     hash_labeled_bytes(&mut hasher, "graph_hint_quality_policy", b"v1");
+    // Focus inputs now respect query filters and quality penalties.
+    hash_labeled_bytes(&mut hasher, "passive_focus_admission_policy", b"v1");
     // Native sources share memory's budget and warning reservation. Cached
     // packs from before native warnings had priority must be reassembled.
     hash_labeled_bytes(&mut hasher, "mixed_source_budget_policy", b"v2");
@@ -12207,12 +12256,13 @@ fn apply_graph_hints(
     }
 
     let before_quality = expanded_candidates.len();
-    quality_score_graph_candidates(
+    quality_score_direct_memory_candidates(
         connection,
         search_options,
         reference_time,
         &memories,
         &mut expanded_candidates,
+        "Graph-hint",
         degraded,
     )?;
     metrics.expanded_candidates = expanded_candidates.len();
@@ -12238,15 +12288,16 @@ fn apply_graph_hints(
     Ok(metrics)
 }
 
-/// Graph topology is a retrieval prior, not an exemption from memory quality.
-/// Score graph-only candidates with the canonical confidence, utility, recency,
-/// maturity and harmful-feedback policy before inserting them into the pack.
-fn quality_score_graph_candidates(
+/// Graph topology and passive focus are retrieval priors, not exemptions from
+/// memory quality. Score direct-source candidates with the same policy as
+/// indexed search before admitting them into the shared context pack.
+fn quality_score_direct_memory_candidates(
     connection: &DbConnection,
     options: &SearchOptions,
     reference_time: Option<DateTime<Utc>>,
     memories: &BTreeMap<String, StoredMemory>,
     candidates: &mut Vec<PackCandidate>,
+    source_label: &str,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Result<(), ContextPackError> {
     if candidates.is_empty() {
@@ -12303,7 +12354,7 @@ fn quality_score_graph_candidates(
         let graph_relevance = candidate.relevance.into_inner();
         candidate.relevance = *relevance;
         candidate.why = format!(
-            "{} Graph-hint relevance {:.3} adjusted to {:.3} by the active memory-quality policy.",
+            "{} {source_label} relevance {:.3} adjusted to {:.3} by the active memory-quality policy.",
             candidate.why,
             graph_relevance,
             relevance.into_inner(),
@@ -13516,6 +13567,7 @@ struct FocusCandidateSource<'a> {
     focus_state: &'a crate::models::FocusState,
     workspace_path: &'a Path,
     workspace_ids: &'a BTreeSet<String>,
+    filters: &'a crate::models::QueryFilters,
     focus_hash: &'a str,
     storage_path: &'a str,
     include_tombstoned: bool,
@@ -13623,6 +13675,7 @@ fn focus_candidates_from_state(
     include_future: bool,
     validity_reference_time: DateTime<Utc>,
     workspace_ids: &BTreeSet<String>,
+    filters: &crate::models::QueryFilters,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<PackCandidate> {
     let mut candidates = Vec::new();
@@ -13633,6 +13686,7 @@ fn focus_candidates_from_state(
         focus_state,
         workspace_path,
         workspace_ids,
+        filters,
         focus_hash: &focus_hash,
         storage_path: &storage_path,
         include_tombstoned,
@@ -13788,6 +13842,16 @@ fn focus_candidate_from_item(
         .connection
         .get_memory_tags(&memory.id)
         .unwrap_or_else(|_| Vec::new());
+    // The active typed query's tags, trust, temporal and metadata filters
+    // constrain passive focus just as they constrain graph expansion.
+    if !graph_memory_matches_filters(
+        &memory,
+        &tags,
+        source.filters,
+        Some(source.validity_reference_time),
+    ) {
+        return None;
+    }
     let mut provenance = Vec::new();
     let mut source_signals = None;
     if let Some(memory_provenance) = provenance_for_memory(
