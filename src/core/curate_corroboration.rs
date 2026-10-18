@@ -379,6 +379,73 @@ fn rejected(
         .is_some_and(|stored| stored.status == CandidateStatus::Rejected.as_str()))
 }
 
+/// Index the still-unfilled anchors, not a Cartesian product of transcripts.
+/// Each other lesson is hashed once and its admission/proof is read only when
+/// an exact kind/signature match needs it. The source order still chooses each
+/// anchor's first independent, non-rejected observation from this session.
+/// Retire an anchor after one increment even when spare support slots remain.
+/// Only small keys and positions are indexed; source bodies are never copied.
+fn corroborate_candidates(
+    candidates: &mut [ReviewSessionCandidate],
+    others: &[ReviewSessionCandidate],
+    mut signature: impl FnMut(&ReviewSessionCandidate) -> Option<String>,
+    mut observe: impl FnMut(&ReviewSessionCandidate) -> Result<Option<SupportingSession>, DomainError>,
+) -> Result<(), DomainError> {
+    let mut targets: BTreeMap<String, BTreeMap<String, Vec<usize>>> = BTreeMap::new();
+    let mut remaining = 0;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some(proof) = &candidate.corroboration else {
+            continue;
+        };
+        if proof.sessions.is_empty() || proof.sessions.len() >= MAX_SUPPORT {
+            continue;
+        }
+        targets
+            .entry(candidate.candidate_kind.clone())
+            .or_default()
+            .entry(proof.signature.clone())
+            .or_default()
+            .push(index);
+        remaining += 1;
+    }
+    for other in others {
+        if remaining == 0 {
+            break;
+        }
+        let Some(signatures) = targets.get_mut(&other.candidate_kind) else {
+            continue;
+        };
+        if signatures.is_empty() {
+            continue;
+        }
+        let Some(key) = signature(other) else {
+            continue;
+        };
+        let Some(indices) = signatures.get_mut(&key) else {
+            continue;
+        };
+        let Some(additional) = observe(other)? else {
+            continue;
+        };
+        let before = indices.len();
+        indices.retain(|&index| {
+            let Some(proof) = candidates[index].corroboration.as_mut() else {
+                return false;
+            };
+            if !independent(&additional, &proof.sessions) {
+                return true;
+            }
+            proof.sessions.push(additional.clone());
+            false
+        });
+        remaining -= before - indices.len();
+        if indices.is_empty() {
+            signatures.remove(&key);
+        }
+    }
+    Ok(())
+}
+
 /// Called before the caller's confidence floor or candidate limit. One bounded
 /// read snapshot supplies the exact source proof. Historical rows are frozen
 /// before selection, so reports cannot advertise fresh support as persisted.
@@ -454,28 +521,18 @@ pub(super) fn score_candidates(
                 continue;
             }
             let other_candidates = source_candidates(workspace_id, other_session, spans);
-            for candidate in candidates.iter_mut() {
-                let Some(proof) = candidate.corroboration.as_mut() else {
-                    continue;
-                };
-                if proof.sessions.is_empty() || proof.sessions.len() >= MAX_SUPPORT {
-                    continue;
-                }
-                for other in &other_candidates {
-                    if other.candidate_kind != candidate.candidate_kind
-                        || full_signature(other, spans).as_ref() != Some(&proof.signature)
-                        || rejected(connection, workspace_id, other)?
-                    {
-                        continue;
+            corroborate_candidates(
+                candidates,
+                &other_candidates,
+                |other| full_signature(other, spans),
+                |other| {
+                    if rejected(connection, workspace_id, other)? {
+                        Ok(None)
+                    } else {
+                        Ok(support(other_session, spans, other))
                     }
-                    if let Some(additional) = support(other_session, spans, other)
-                        && independent(&additional, &proof.sessions)
-                    {
-                        proof.sessions.push(additional);
-                        break;
-                    }
-                }
-            }
+                },
+            )?;
         }
     }
     for candidate in candidates.iter_mut() {
@@ -839,3 +896,7 @@ pub(super) fn expected_for_recorded(
     }
     Ok(expected)
 }
+
+#[cfg(test)]
+#[path = "curate_corroboration_index_tests.rs"]
+mod index_tests;
