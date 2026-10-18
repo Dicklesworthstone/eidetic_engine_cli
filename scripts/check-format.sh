@@ -216,7 +216,30 @@ run_cargo_fmt_check() {
     fi
     # Same discrimination as before, and for the same reason: a parse error
     # mid-edit is not formatting drift and must not block.
-    if printf '%s' "$out" | grep -q '^Diff in '; then
+    #
+    # HERESTRING, NOT A PIPE, AND THIS IS THE DIFFERENCE BETWEEN A GATE AND A
+    # DECORATION. `printf '%s' "$out" | grep -q` made this check FAIL OPEN on
+    # exactly the input it exists to catch. `grep -q` exits 0 at the first
+    # match and closes the pipe; `printf`, still writing, takes SIGPIPE and
+    # exits 141; `set -uo pipefail` (:54) then reports 141 for the pipeline, so
+    # the `if` is FALSE even though the pattern matched, and real drift fell
+    # through to "inconclusive, not blocking" and exit 0.
+    #
+    # IT IS SIZE-DEPENDENT, which is why nothing caught it. Measured
+    # 2026-10-18 under `set -uo pipefail`:
+    #
+    #     30 bytes    pipe -> MATCH      herestring -> MATCH
+    #     368 KB      pipe -> NO MATCH   herestring -> MATCH
+    #
+    # Small drift blocked correctly; large drift did not. On this tree
+    # `cargo fmt --check` emits 623 KB (76 files, 734 hunks) and this script
+    # exited 0 while `cargo fmt --check` exited 1. The self-test passes 6/6
+    # because its fixtures are a few hundred bytes -- a production failure its
+    # own controls are structurally unable to observe.
+    #
+    # `<<<` writes through a temp file rather than a pipe, so there is no
+    # writer to signal and the status is grep's alone.
+    if grep -q '^Diff in ' <<<"$out"; then
         printf '%s\n' "$out"
         return 1
     fi
@@ -259,7 +282,12 @@ run_rustfmt_check() {
     # Only the former is this script's business. Discriminating on the OUTPUT
     # rather than the exit code is deliberate: a syntax error mid-edit must not
     # be reported as formatting drift, and must not block.
-    if printf '%s' "$out" | grep -q '^Diff in '; then
+    # Herestring for the same SIGPIPE-under-pipefail reason documented at the
+    # cargo-path site above. This function only runs against --self-test
+    # fixtures today, so its output is small and the pipe happened to work --
+    # which is precisely how the defect stayed invisible. Fixed here too so it
+    # cannot come back when something larger is passed through it.
+    if grep -q '^Diff in ' <<<"$out"; then
         printf '%s\n' "$out"
         return 1
     fi
@@ -355,11 +383,40 @@ self_test() {
         failures=$((failures + 1))
     fi
 
+    # arm7: THE DRIFT DISCRIMINATION MUST SURVIVE A LARGE DIFF.
+    #
+    # Arms 1-6 all use fixtures of a few hundred bytes, and that is exactly why
+    # they could not see the defect this arm guards: with
+    # `printf '%s' "$out" | grep -q`, grep exits at the first match and closes
+    # the pipe, printf takes SIGPIPE, and `set -uo pipefail` (:54) turns the
+    # matched pattern into a FALSE condition. Small output wins the race and
+    # matches; 623 KB of real `cargo fmt --check` output did not, so the whole
+    # gate reported "inconclusive, not blocking" and exited 0 on 76 drifted
+    # files. A size-independent arm is the only kind that can catch it.
+    #
+    # Deliberately tests the IDIOM rather than building a 600 KB fixture crate:
+    # the bug lives in how the output is searched, not in what produced it, and
+    # a fast deterministic arm is one that will still be run.
+    local big_drift="Diff in /fixture/a.rs:1:"
+    local filler_i=0
+    while [ "$filler_i" -lt 20000 ]; do
+        big_drift="$big_drift
+ filler line $filler_i"
+        filler_i=$((filler_i + 1))
+    done
+    if grep -q '^Diff in ' <<<"$big_drift"; then
+        note "self-test arm7 OK: drift detected in a ${#big_drift}-byte diff"
+    else
+        warn "SELF-TEST FAIL arm7: a ${#big_drift}-byte diff was not detected"
+        warn "  this is the SIGPIPE-under-pipefail regression; use <<< not a pipe"
+        failures=$((failures + 1))
+    fi
+
     if [ "$failures" -ne 0 ]; then
-        warn "SELF-TEST FAILED: ${failures} of 6 arms (logs retained in $tmp)"
+        warn "SELF-TEST FAILED: ${failures} of 7 arms (logs retained in $tmp)"
         return 1
     fi
-    note "self-test: 6 of 6 arms passed (fixtures retained in $tmp)"
+    note "self-test: 7 of 7 arms passed (fixtures retained in $tmp)"
     return 0
 }
 
