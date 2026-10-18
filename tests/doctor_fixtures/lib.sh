@@ -31,6 +31,24 @@ doctor_fixture_content_digest() {
     #   that no honest undo can restore.
     # Everything else, including ee.db, ee.db-wal and .doctor.lock, stays
     # byte-compared.
+    doctor_fixture_content_manifest "$target" | shasum -a 256
+}
+
+# The PER-FILE listing the digest above rolls up. Same exclusions, same sort,
+# emitted one `<hash>  <path>` line per file instead of a single aggregate.
+#
+# bd-2oh15: the digest is a single rollup, so a failed `cmp` of two digests can
+# say THAT the tree differs and never WHICH file differs -- the information is
+# destroyed by the final shasum. That is why this bead's two COVERAGE failures
+# ("undo contents differ from the baseline" for
+# fm-state_files-merge-conflict-markers and
+# fm-workspace_config-config-toml-malformed) stayed unnamed across runs, each
+# costing a fresh fleet dispatch to re-learn nothing new.
+#
+# Keeping both means the cheap aggregate stays the assertion while the manifest
+# makes a failure self-explaining.
+doctor_fixture_content_manifest() {
+    local target="${1:?target required}"
     find "$target" -type f \
         -not -path '*/.doctor/*' \
         -not -path '*/.fixture_baseline/*' \
@@ -40,7 +58,7 @@ doctor_fixture_content_digest() {
         -not -name '.assert.stdout' \
         -not -name '.assert.stderr' \
         -not -name '._*' \
-        -exec shasum -a 256 -- {} + | LC_ALL=C sort | shasum -a 256
+        -exec shasum -a 256 -- {} + | LC_ALL=C sort
 }
 
 # Print the flock-gate epoch stored in an ee.write.lock file, or fail. Format
@@ -112,6 +130,9 @@ doctor_fixture_corrupt() {
     # Hash each regular file's bytes AND its pathname, then hash the sorted
     # manifest. A same-name content change must not survive undo unnoticed.
     doctor_fixture_content_digest "$target" > "$target/.fixture_baseline/before.sha256"
+    # bd-2oh15: keep the per-file listing beside the rollup so a later mismatch
+    # can name the file instead of only reporting that one exists.
+    doctor_fixture_content_manifest "$target" > "$target/.fixture_baseline/before.manifest"
     doctor_fixture_record_write_lock "$target"
     printf '{"schema":"ee.doctor_fixture_marker.v1","fmId":"%s","severity":"%s","subsystem":"%s","state":"corrupt"}\n' \
         "$fm_id" "$severity" "$subsystem" > "$marker_dir/$fm_id.json"
@@ -232,8 +253,19 @@ doctor_fixture_assert() {
         fi
         "$ee_bin" doctor --workspace "$target" --undo "$run_id" --json > "$target/.fixture_baseline/doctor-undo.json"
         doctor_fixture_content_digest "$target" > "$target/.fixture_baseline/after-undo.sha256"
+        doctor_fixture_content_manifest "$target" > "$target/.fixture_baseline/after-undo.manifest"
         if ! cmp "$target/.fixture_baseline/before.sha256" "$target/.fixture_baseline/after-undo.sha256"; then
             printf 'fixture assert: undo contents differ from the baseline for %s\n' "$fm_id" >&2
+            # bd-2oh15: NAME THE FILES. The digests above are rollups, so the
+            # line before this one can only report that something differs. The
+            # manifests are the same data pre-aggregation, so diffing them says
+            # which paths changed and in which direction:
+            #   `<` only in the pre-fix baseline, so undo failed to restore it
+            #   `>` only after undo, so undo left something behind
+            # A path on BOTH sides changed content rather than existence.
+            printf 'fixture assert: differing entries (< baseline, > after undo):\n' >&2
+            diff "$target/.fixture_baseline/before.manifest" \
+                 "$target/.fixture_baseline/after-undo.manifest" >&2 || true
             return 1
         fi
         doctor_fixture_assert_write_lock_monotonic "$fm_id" "$target"
