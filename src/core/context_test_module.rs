@@ -8277,17 +8277,69 @@ pub fn unrelated_context() -> u64 {{
                 .hash
                 .clone()
                 .ok_or_else(|| format!("pool_size={pool_size} response missing pack hash"))?;
-            hashes_by_pool_size.insert(pool_size, hash);
+            // bd-verzk: keep the COMPONENT digests and the degraded codes, not
+            // just the composite. A bare hash mismatch prints two blake3
+            // strings and names nothing, which is why that bead has carried
+            // three unresolved hypotheses since 2026-09-25 and lists "print
+            // both packs' phase-1 component digests" as its own first step.
+            // `differing_components` already answers it; this test was simply
+            // throwing the answer away.
+            let degraded_codes: Vec<String> = response
+                .data
+                .degraded
+                .iter()
+                .map(|entry| entry.code.clone())
+                .collect();
+            hashes_by_pool_size.insert(
+                pool_size,
+                (
+                    hash,
+                    response.data.pack_hash_components.clone(),
+                    degraded_codes,
+                ),
+            );
         }
 
-        let single_hash = hashes_by_pool_size
+        let (single_hash, single_components, single_degraded) = hashes_by_pool_size
             .get(&1)
             .ok_or_else(|| "pool_size=1 hash missing".to_string())?;
         for pool_size in [4_u32, 8] {
-            assert_eq!(
-                hashes_by_pool_size.get(&pool_size),
-                Some(single_hash),
-                "pool_size={pool_size} must preserve the pool_size=1 pack hash"
+            let (hash, components, degraded) = hashes_by_pool_size
+                .get(&pool_size)
+                .ok_or_else(|| format!("pool_size={pool_size} hash missing"))?;
+            if hash == single_hash {
+                continue;
+            }
+            // Name the differing component rather than leaving the reader with
+            // two opaque digests. `degraded` differing points at bd-ve7c6 (two
+            // surviving degradations interpolate run-properties -- queue depth,
+            // retry delay, scanned counts -- into hash-bearing prose); `items`
+            // differing points instead at read-pool size genuinely changing
+            // retrieval or ordering, which is a different and worse defect.
+            // The digests carry no raw inputs, so printing them discloses
+            // nothing.
+            let named = match (single_components.as_ref(), components.as_ref()) {
+                (Some(base), Some(other)) => {
+                    let differing = base.differing_components(other);
+                    if differing.is_empty() {
+                        "none -- components all equal while the composite differs, \
+                         which would indicate a defect in the composite itself"
+                            .to_owned()
+                    } else {
+                        differing.join(", ")
+                    }
+                }
+                _ => "<unavailable: at least one response was served from the L2 \
+                      cache, which carries its own snapshot identity>"
+                    .to_owned(),
+            };
+            panic!(
+                "pool_size={pool_size} must preserve the pool_size=1 pack hash\n\
+                 differing components: {named}\n\
+                 pool_size=1 hash: {single_hash}\n\
+                 pool_size={pool_size} hash: {hash}\n\
+                 pool_size=1 degraded codes: {single_degraded:?}\n\
+                 pool_size={pool_size} degraded codes: {degraded:?}"
             );
         }
         Ok(())
