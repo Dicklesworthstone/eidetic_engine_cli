@@ -423,7 +423,6 @@ fn retain_diagnostic(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1200,3 +1199,7 @@ mod numeric_tests {
         assert!(decoded.diagnostics.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "cass_error_recall_go_numeric_store_tests.rs"]
+mod numeric_store_tests;

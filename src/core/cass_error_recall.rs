@@ -50,7 +50,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Imports reconsider older derivations without changing source identities.
 /// V12 admits uniquely attributable libtest suite growth while retaining every
 /// prior selected subject and requiring prior executed subjects to pass.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v12";
+/// V13 reconsiders native Go streams whose fractional Elapsed fields were
+/// rejected by untagged buffering under arbitrary-precision JSON.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v13";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
