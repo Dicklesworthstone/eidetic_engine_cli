@@ -408,7 +408,7 @@ focus_suggest_schema::focus_suggest_task_frame_flag_accepted [code+stdout]	1
 global_store_e2e::memory_curation_verbs_reach_global_store [code+stderr]	1
 global_store_e2e::stdout_json [stdout]	1
 golden::normalize_json_for_comparison [code+stdout+stderr]	3
-golden::normalize_json_for_comparison [code+stdout]	13
+golden::normalize_json_for_comparison [code+stdout]	12
 golden::normalize_json_for_comparison [stdout]	2
 graph_determinism::graph_louvain_output_is_deterministic [code+stdout]	1
 graph_determinism::graph_snapshot_refresh_accepts_each_graph_target [code+stdout]	1
@@ -543,7 +543,6 @@ rule_mark_update_e2e::run_step [code]	1
 rule_provenance_integration::run_ee [code]	1
 rule_provenance_unit::run_ee [code]	1
 search_conformal_e2e::assert_success [stdout]	1
-search_deterministic_golden::run_search_json_for_query [code+stdout]	1
 smoke::artifact_registry_registers_indexes_exports_and_supports_context [code+stdout]	12
 smoke::backup_create_json_writes_redacted_artifacts_and_manifest [code+stdout]	2
 smoke::backup_create_json_writes_redacted_artifacts_and_manifest [code]	1
