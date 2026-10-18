@@ -14,9 +14,15 @@
 #
 # Env:
 #   EE_BINARY            path to ee binary (default: Cargo target/release/ee)
-#   VERIFY_OVERHAUL      if "0" the driver is a no-op (used by verify.sh to
-#                        gate the suite while implementation beads are still
-#                        in flight; default: "1")
+#   VERIFY_OVERHAUL      if "0" the driver is a no-op. An OPERATOR override,
+#                        set at invocation: `VERIFY_OVERHAUL=0 ./scripts/verify.sh`
+#                        skips this suite. Default "1".
+#
+#                        NOT set by verify.sh. This text said "(used by
+#                        verify.sh to gate the suite)" until 2026-10-18 and
+#                        that was never true -- nothing in the tree assigns
+#                        the variable, so the stage runs all 23 epics on every
+#                        default pass. See bd-e4ymh.
 #
 # Exit codes:
 #   0  every selected epic passed
@@ -124,7 +130,8 @@ Options:
 
 Env:
   EE_BINARY        Path to the ee binary (default: Cargo target/release/ee).
-  VERIFY_OVERHAUL  Set to 0 to make this script a no-op (used by verify.sh).
+  VERIFY_OVERHAUL  Set to 0 to make this script a no-op. An operator override;
+                   verify.sh does NOT set it, so the suite runs by default.
 EOF
 }
 
