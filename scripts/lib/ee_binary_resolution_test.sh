@@ -449,3 +449,72 @@ ee_assert_target_os_supported "linu" "macos linux" "selftest" >/dev/null 2>&1
 os_sub_rc=$?
 set -e
 assert_eq "$os_sub_rc" "1" "substring of a declared OS is not a member"
+
+# 18-22. BUILD FEATURES (1azkt.5 bullet 5, "features"; bd-sb2pl). This property
+#    had ZERO arms until now -- measured 2026-10-18, 36 arms in this file and
+#    none touching the feature comparison, while hash, triple and OS had four
+#    each. It was also the only one of the four whose comparison was an inline
+#    chain in verify.sh, and those two facts are the same fact.
+set +e
+feat_match_rc=0
+ee_assert_feature_set_matches_manifest \
+    "fts5 graph json" "fts5 graph json" "/fake/ee" "selftest" >/dev/null 2>&1
+feat_match_rc=$?
+set -e
+assert_eq "$feat_match_rc" "0" "identical feature sets match"
+
+set +e
+feat_diff_log="$(
+    ee_assert_feature_set_matches_manifest \
+        "fts5 json" "fts5 graph json" "/fake/ee" "selftest" 2>&1 >/dev/null
+)"
+feat_diff_rc=$?
+set -e
+assert_eq "$feat_diff_rc" "1" "differing feature sets are a mismatch"
+# The message must carry BOTH sets. A code alone cannot tell a reader WHICH
+# feature is missing, which is the only actionable part of the refusal.
+case "$feat_diff_log" in
+    *"fts5 graph json"*"fts5 json"*|*"fts5 json"*"fts5 graph json"*) ;;
+    *) printf 'FAIL feature mismatch must quote BOTH sets\n%s\n' "$feat_diff_log" >&2; exit 1 ;;
+esac
+
+# THE bd-sb2pl ARM. `default = []` in Cargo.toml MATCHES verify.sh's regex, so
+# the helper exits 0 having printed nothing and the old guard -- which tested
+# exit status only -- accepted it. Against a binary with no features enabled,
+# "" == "" compared equal and the check certified a binary it never examined.
+# This is the arm that makes an absent expectation a refusal instead of a pass.
+set +e
+ee_assert_feature_set_matches_manifest "" "" "/fake/ee" "selftest" >/dev/null 2>&1
+feat_empty_rc=$?
+set -e
+assert_eq "$feat_empty_rc" "3" "empty expectation is not a match with an empty binary"
+
+# AND IT MUST NOT BE A BLANKET EMPTINESS RULE. An empty ACTUAL is a legitimate
+# reading -- a --no-default-features build genuinely enables nothing -- so
+# against a real expectation it is a MISMATCH (1), not an unreadable world (3).
+# Collapsing these two would turn the most interesting failure the check can
+# catch into "not checked", which is how a guard stops guarding.
+set +e
+feat_none_log="$(
+    ee_assert_feature_set_matches_manifest \
+        "" "fts5 graph" "/fake/ee" "selftest" 2>&1 >/dev/null
+)"
+feat_none_rc=$?
+set -e
+assert_eq "$feat_none_rc" "1" "featureless binary vs a real expectation is a mismatch"
+# ...and it must be READABLE: an empty side printed as nothing gives
+# "actual (/fake/ee): " with a blank where the answer goes.
+case "$feat_none_log" in
+    *'<none>'*) ;;
+    *) printf 'FAIL empty actual must render as <none>\n%s\n' "$feat_none_log" >&2; exit 1 ;;
+esac
+
+# NEGATIVE CONTROL -- a SUBSET is not a match. The sibling OS check matches by
+# token and needed an arm proving "linu" is not "linux"; the equality here must
+# likewise refuse a binary carrying only some of the declared features.
+set +e
+ee_assert_feature_set_matches_manifest \
+    "fts5" "fts5 graph" "/fake/ee" "selftest" >/dev/null 2>&1
+feat_subset_rc=$?
+set -e
+assert_eq "$feat_subset_rc" "1" "a subset of the declared features is not a match"

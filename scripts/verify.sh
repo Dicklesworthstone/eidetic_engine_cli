@@ -492,12 +492,17 @@ if ! EE_ACTUAL_FEATURES="$(ee_binary_enabled_features)"; then
     exit 1
 fi
 printf 'verify: ee_binary_features=%s\n' "${EE_ACTUAL_FEATURES}" >&2
-if [ "${EE_ACTUAL_FEATURES}" != "${EE_EXPECTED_FEATURES}" ]; then
-    printf 'verify: refusing: candidate binary feature set does not match Cargo.toml.\n' >&2
-    printf 'verify:   expected (Cargo.toml default): %s\n' "${EE_EXPECTED_FEATURES}" >&2
-    printf 'verify:   actual   (%s): %s\n' "${EE_BINARY}" "${EE_ACTUAL_FEATURES}" >&2
-    printf 'verify: stages would run against a binary built differently from the\n' >&2
-    printf 'verify: one this manifest describes.\n' >&2
+# The comparison lives in the resolution lib for the same reason the triple
+# comparison below does: an inline chain here could only be exercised by running
+# the whole script. This one never was -- measured 2026-10-18, 0 of the suite's
+# 36 arms touched it, against 4 each for hash, triple and OS.
+#
+# bd-sb2pl: both reads above test EXIT STATUS only, and `default = []` exits 0
+# having printed nothing, so EE_EXPECTED_FEATURES was "" and a featureless
+# binary compared equal to it. The helper's arm 3 is what refuses that.
+if ! ee_assert_feature_set_matches_manifest \
+        "${EE_ACTUAL_FEATURES}" "${EE_EXPECTED_FEATURES}" "${EE_BINARY}" "verify"; then
+    printf 'verify: refusing to run stages against that binary.\n' >&2
     exit 1
 fi
 export EE_BINARY_FEATURES="${EE_ACTUAL_FEATURES}"
