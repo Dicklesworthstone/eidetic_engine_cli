@@ -4,6 +4,8 @@
 //! appends. Each bounded group writes every document, but only byte-distinct
 //! uncached inputs need inference. Every fresh output's identity and the whole
 //! response cardinality are checked before any vector reaches the writer.
+//! Batch equivalence is a provider capability, not a property of Vec outputs:
+//! match IndexBuilder's bound single/batch dispatch on every cache miss.
 
 use std::collections::{BTreeMap, btree_map::Entry};
 
@@ -165,6 +167,68 @@ fn validate_batch(
     Ok(())
 }
 
+/// A cache hit proves which producer made the retained vector, not which
+/// producer this invocation is still using. Check the live contract even for
+/// cache-only batches and at completion. Descriptor names are not identities.
+fn validate_producer(
+    cx: &asupersync::Cx,
+    embedder: &dyn Embedder,
+    expected_identity: &str,
+    tier: &str,
+) -> Result<(), IncrementalFallback> {
+    checkpoint(cx, tier)?;
+    let identity = super::verified_embedder_identity(embedder);
+    checkpoint(cx, tier)?;
+    if identity.as_deref() != Some(expected_identity) {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::CorpusRevisionMismatch,
+            format!("{tier}-tier embedding producer no longer matches the planned identity"),
+        ));
+    }
+    Ok(())
+}
+
+/// The full builder uses bound batches only with an explicit equivalence
+/// guarantee. Otherwise a provider's overridden embed_bound can supply checks
+/// or transformations absent from its raw batch method. Preserve that boundary
+/// here too; native batching, deduplication and one WAL write per group remain.
+async fn infer_inputs(
+    cx: &asupersync::Cx,
+    embedder: &dyn Embedder,
+    texts: &[&str],
+    expected_identity: &str,
+    tier: &str,
+) -> Result<Vec<IdentityBoundEmbedding>, IncrementalFallback> {
+    validate_producer(cx, embedder, expected_identity, tier)?;
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Provider errors can include private source text or endpoint details.
+    // Identity/cardinality validation below retains useful, bounded diagnostics.
+    let failed = |_| tier_error(format!("{tier}-tier bound embedding inference failed"));
+    if embedder.bound_batch_is_native() {
+        let outcome = embedder.embed_batch_bound(cx, texts).await;
+        // Inspect the caller before propagating even an ordinary provider error.
+        validate_producer(cx, embedder, expected_identity, tier)?;
+        let vectors = outcome.map_err(failed)?;
+        validate_batch(&vectors, texts.len(), expected_identity, tier)?;
+        return Ok(vectors);
+    }
+
+    let mut vectors = Vec::with_capacity(texts.len());
+    for text in texts {
+        validate_producer(cx, embedder, expected_identity, tier)?;
+        let outcome = embedder.embed_bound(cx, text).await;
+        validate_producer(cx, embedder, expected_identity, tier)?;
+        let vector = outcome.map_err(failed)?;
+        // Custom bound implementations are not assumed to perform validation.
+        // Refuse a bad prefix now rather than inferring the rest of the group.
+        super::validate_bound_embedding(&vector, expected_identity, tier)?;
+        vectors.push(vector);
+    }
+    Ok(vectors)
+}
+
 pub(super) async fn upsert(
     cx: &asupersync::Cx,
     index: &mut VectorIndex,
@@ -198,9 +262,13 @@ async fn embed_batches_with(
     tier: &str,
     mut write: impl FnMut(Vec<(String, Vec<f32>)>) -> Result<(), IncrementalFallback>,
 ) -> Result<(), IncrementalFallback> {
+    if documents.is_empty() {
+        // A no-op has no producer or cache to validate, but cannot reset Cx.
+        return checkpoint(cx, tier);
+    }
     let mut cache = ValidatedInputCache::default();
     while !documents.is_empty() {
-        checkpoint(cx, tier)?;
+        validate_producer(cx, embedder, expected_identity, tier)?;
         let count = batch_len(documents, embedder.dimension());
         let (batch, remainder) = documents.split_at(count);
         let mut missing = BTreeMap::new();
@@ -216,20 +284,11 @@ async fn embed_batches_with(
                 texts.push(text);
             }
         }
-        let vectors = if texts.is_empty() {
-            Vec::new()
-        } else {
-            embedder
-                .embed_batch_bound(cx, &texts)
-                .await
-                .map_err(|error| {
-                    tier_error(format!("{tier}-tier batch embedding failed: {error}"))
-                })?
-        };
+        let vectors = infer_inputs(cx, embedder, &texts, expected_identity, tier).await?;
         // Cancellation during inference must be seen before a WAL write even
         // when a custom embedder returns Ok without checking its caller Cx.
         // Cache-only batches take this checkpoint too; they cannot renew Cx.
-        checkpoint(cx, tier)?;
+        validate_producer(cx, embedder, expected_identity, tier)?;
         validate_batch(&vectors, texts.len(), expected_identity, tier)?;
         let entries = batch
             .iter()
@@ -251,8 +310,10 @@ async fn embed_batches_with(
                 Ok((document.id.clone(), values.to_vec()))
             })
             .collect::<Result<Vec<_>, IncrementalFallback>>()?;
+        validate_producer(cx, embedder, expected_identity, tier)?;
+        let written = write(entries);
         checkpoint(cx, tier)?;
-        write(entries)?;
+        written?;
         for (text, vector) in texts.into_iter().zip(vectors) {
             // All fresh vectors were validated against this invocation's one
             // expected identity before the write. A failure above caches none.
@@ -260,7 +321,9 @@ async fn embed_batches_with(
         }
         documents = remainder;
     }
-    Ok(())
+    // A final cache-only write can also race cancellation or provider drift.
+    // Earlier writes are private staging state; errors still abandon the stage.
+    validate_producer(cx, embedder, expected_identity, tier)
 }
 
 #[cfg(test)]
@@ -270,6 +333,7 @@ mod tests {
     use frankensearch::core::generation::EmbeddingIdentityBundleV1;
     use frankensearch::core::traits::{ModelCategory, SearchFuture};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     type TestResult = Result<(), String>;
@@ -281,6 +345,7 @@ mod tests {
         inner: HashEmbedder,
         sizes: Mutex<Vec<usize>>,
         truncate_response: bool,
+        native_batch: bool,
     }
 
     impl ObservedHash {
@@ -289,11 +354,17 @@ mod tests {
                 inner: HashEmbedder::default_256(),
                 sizes: Mutex::new(Vec::new()),
                 truncate_response: false,
+                native_batch: true,
             }
         }
     }
 
     impl Embedder for ObservedHash {
+        fn bound_batch_is_native(&self) -> bool {
+            // Both bound methods use the core defaults over this real provider.
+            self.native_batch
+        }
+
         fn embed<'a>(
             &'a self,
             cx: &'a asupersync::Cx,
@@ -504,7 +575,7 @@ mod tests {
                 result.expect_err("producer drift").reason,
                 IncrementalFallbackReason::CorpusRevisionMismatch
             );
-            assert_eq!(*embedder.sizes.lock().expect("sizes"), vec![3]);
+            assert!(embedder.sizes.lock().expect("sizes").is_empty());
             Ok(())
         })
         .map_err(|error| error.to_string())?
@@ -789,12 +860,18 @@ mod tests {
 
     #[test]
     fn staged_batch_updates_match_a_full_build_and_leave_the_live_index_unchanged() -> TestResult {
-        assert_staged_updates(false)
+        assert_staged_updates(false, true)
     }
 
     #[test]
     fn staged_duplicate_inputs_match_a_full_build_without_merging_index_identities() -> TestResult {
-        assert_staged_updates(true)
+        assert_staged_updates(true, true)
+    }
+
+    #[test]
+    fn bound_single_staging_matches_a_full_build_with_duplicate_input_and_withdrawals() -> TestResult
+    {
+        assert_staged_updates(true, false)
     }
 
     #[test]
@@ -1063,7 +1140,484 @@ mod tests {
         .map_err(|error| error.to_string())?
     }
 
-    fn assert_staged_updates(repeat_content: bool) -> TestResult {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ProviderFault {
+        None,
+        Refuse,
+        ShortVector,
+        NonFinite,
+        ForeignResponse,
+        Drift,
+        Unavailable,
+        Cancel,
+        CancelAndRefuse,
+    }
+
+    // Genuine JL inference with same-dimensional, different-seed identities.
+    // Bound entry points alone may run; faults alter only the declared boundary
+    // under test. No model downloads or substitute vector store are involved.
+    struct ContractHash {
+        inner: HashEmbedder,
+        alternate: HashEmbedder,
+        native_batch: bool,
+        fault: ProviderFault,
+        fault_at: usize,
+        changed: AtomicBool,
+        single_calls: AtomicUsize,
+        batch_calls: AtomicUsize,
+    }
+
+    fn provider_error() -> frankensearch::SearchError {
+        frankensearch::SearchError::InvalidConfig {
+            field: "test.bound-provider".to_owned(),
+            value: "PRIVATE-PROVIDER-ERROR".to_owned(),
+            reason: "bound inference refused".to_owned(),
+        }
+    }
+
+    impl ContractHash {
+        fn new(native_batch: bool, fault: ProviderFault, fault_at: usize) -> Self {
+            Self {
+                inner: HashEmbedder::jl_384(11),
+                alternate: HashEmbedder::jl_384(12),
+                native_batch,
+                fault,
+                fault_at,
+                changed: AtomicBool::new(false),
+                single_calls: AtomicUsize::new(0),
+                batch_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn finish(
+            &self,
+            cx: &asupersync::Cx,
+            vectors: &mut [IdentityBoundEmbedding],
+            call: usize,
+        ) -> frankensearch::SearchResult<()> {
+            if call != self.fault_at {
+                return Ok(());
+            }
+            match self.fault {
+                ProviderFault::None => {}
+                ProviderFault::Refuse => return Err(provider_error()),
+                ProviderFault::Drift | ProviderFault::Unavailable => {
+                    self.changed.store(true, Ordering::SeqCst);
+                }
+                ProviderFault::Cancel | ProviderFault::CancelAndRefuse => {
+                    cx.set_cancel_reason(asupersync::CancelReason::user("stop delta provider"));
+                    if self.fault == ProviderFault::CancelAndRefuse {
+                        return Err(provider_error());
+                    }
+                }
+                fault => {
+                    let vector = vectors.first_mut().expect("nonempty inference request");
+                    match fault {
+                        ProviderFault::ShortVector => {
+                            let _ = vector.values.pop();
+                        }
+                        ProviderFault::NonFinite => vector.values[0] = f32::NAN,
+                        ProviderFault::ForeignResponse => {
+                            vector.identity = self.alternate.identity()?.clone();
+                        }
+                        _ => unreachable!("other fault arms were handled above"),
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Embedder for ContractHash {
+        fn embed<'a>(
+            &'a self,
+            _cx: &'a asupersync::Cx,
+            _text: &'a str,
+        ) -> SearchFuture<'a, Vec<f32>> {
+            panic!("delta intake must not bypass the bound single implementation")
+        }
+
+        fn embed_bound<'a>(
+            &'a self,
+            cx: &'a asupersync::Cx,
+            text: &'a str,
+        ) -> SearchFuture<'a, IdentityBoundEmbedding> {
+            Box::pin(async move {
+                let call = self.single_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut vector = self.inner.embed_bound(cx, text).await?;
+                self.finish(cx, std::slice::from_mut(&mut vector), call)?;
+                Ok(vector)
+            })
+        }
+
+        fn embed_batch_bound<'a>(
+            &'a self,
+            cx: &'a asupersync::Cx,
+            texts: &'a [&'a str],
+        ) -> SearchFuture<'a, Vec<IdentityBoundEmbedding>> {
+            assert!(self.native_batch, "non-equivalent bound batch must not run");
+            Box::pin(async move {
+                let call = self.batch_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut vectors = self.inner.embed_batch_bound(cx, texts).await?;
+                self.finish(cx, &mut vectors, call)?;
+                Ok(vectors)
+            })
+        }
+
+        fn bound_batch_is_native(&self) -> bool {
+            self.native_batch
+        }
+
+        fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+            if self.changed.load(Ordering::SeqCst) {
+                if self.fault == ProviderFault::Unavailable {
+                    Err(provider_error())
+                } else {
+                    self.alternate.identity()
+                }
+            } else {
+                self.inner.identity()
+            }
+        }
+
+        fn dimension(&self) -> usize {
+            self.inner.dimension()
+        }
+
+        fn id(&self) -> &str {
+            "descriptor-unchanged"
+        }
+
+        fn model_name(&self) -> &str {
+            "descriptor-unchanged"
+        }
+
+        fn is_semantic(&self) -> bool {
+            self.inner.is_semantic()
+        }
+
+        fn category(&self) -> ModelCategory {
+            self.inner.category()
+        }
+    }
+
+    #[test]
+    fn bound_single_and_native_batches_preserve_vectors_deduplication_and_wal_groups() -> TestResult
+    {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            for native in [false, true] {
+                let model = ContractHash::new(native, ProviderFault::None, 0);
+                let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
+                let mut docs = documents(65);
+                for (number, document) in docs.iter_mut().enumerate() {
+                    document.content = format!("shared input {}", number % 3);
+                }
+                let expected = docs
+                    .iter()
+                    .map(|doc| (doc.id.clone(), model.inner.embed_sync(&doc.content)))
+                    .collect::<Vec<_>>();
+                let mut written = Vec::new();
+                let mut sizes = Vec::new();
+                embed_batches_with(&cx, &model, &docs, &identity, "fast", |entries| {
+                    sizes.push(entries.len());
+                    written.extend(entries);
+                    Ok(())
+                })
+                .await
+                .map_err(|error| error.detail)?;
+                assert_eq!(written, expected);
+                assert_eq!(sizes, [32, 32, 1]);
+                assert_eq!(
+                    model.single_calls.load(Ordering::SeqCst),
+                    if native { 0 } else { 3 }
+                );
+                assert_eq!(
+                    model.batch_calls.load(Ordering::SeqCst),
+                    usize::from(native)
+                );
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn bound_single_refusal_stops_the_group_without_writing_its_valid_prefix() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            for (native, at) in [
+                (false, 1),
+                (false, 2),
+                (false, 32),
+                (false, 34),
+                (true, 1),
+                (true, 2),
+            ] {
+                let model = ContractHash::new(native, ProviderFault::Refuse, at);
+                let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
+                let mut writes = 0;
+                let result =
+                    embed_batches_with(&cx, &model, &documents(65), &identity, "fast", |_| {
+                        writes += 1;
+                        Ok(())
+                    })
+                    .await;
+                let error = result.expect_err("bound provider refusal must survive batching");
+                assert_eq!(error.reason, IncrementalFallbackReason::TierUnavailable);
+                assert!(!error.detail.contains("PRIVATE-PROVIDER-ERROR"));
+                assert_eq!(writes, if native { at - 1 } else { (at - 1) / 32 });
+                assert_eq!(
+                    model.single_calls.load(Ordering::SeqCst),
+                    if native { 0 } else { at }
+                );
+                assert_eq!(
+                    model.batch_calls.load(Ordering::SeqCst),
+                    if native { at } else { 0 }
+                );
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn custom_bound_responses_are_validated_in_both_inference_lanes() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            for native in [false, true] {
+                for fault in [
+                    ProviderFault::ShortVector,
+                    ProviderFault::NonFinite,
+                    ProviderFault::ForeignResponse,
+                ] {
+                    let at = if native { 1 } else { 2 };
+                    let model = ContractHash::new(native, fault, at);
+                    let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
+                    let result = embed_batches_with(
+                        &cx,
+                        &model,
+                        &documents(65),
+                        &identity,
+                        "fast",
+                        |_| panic!("malformed bound response cannot reach a WAL write"),
+                    )
+                    .await;
+                    let error = result.expect_err("invalid bound response");
+                    assert_eq!(
+                        error.reason,
+                        if fault == ProviderFault::ForeignResponse {
+                            IncrementalFallbackReason::CorpusRevisionMismatch
+                        } else {
+                            IncrementalFallbackReason::TierUnavailable
+                        }
+                    );
+                    assert_eq!(
+                        model.single_calls.load(Ordering::SeqCst),
+                        if native { 0 } else { 2 }
+                    );
+                    assert_eq!(
+                        model.batch_calls.load(Ordering::SeqCst),
+                        usize::from(native)
+                    );
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn descriptor_identical_drift_or_lost_identity_cannot_authorize_a_bound_response() -> TestResult
+    {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            for native in [false, true] {
+                for fault in [ProviderFault::Drift, ProviderFault::Unavailable] {
+                    let model = ContractHash::new(native, fault, 1);
+                    let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
+                    assert_eq!(model.inner.dimension(), model.alternate.dimension());
+                    let result = embed_batches_with(
+                        &cx,
+                        &model,
+                        &documents(65),
+                        &identity,
+                        "fast",
+                        |_| panic!("producer drift must discard even otherwise valid vectors"),
+                    )
+                    .await;
+                    let error = result.expect_err("producer changed during bound inference");
+                    assert_eq!(
+                        error.reason,
+                        IncrementalFallbackReason::CorpusRevisionMismatch
+                    );
+                    assert!(!error.detail.contains("PRIVATE-PROVIDER-ERROR"));
+                    assert_eq!(model.id(), "descriptor-unchanged");
+                    assert_eq!(model.model_name(), "descriptor-unchanged");
+                    assert_eq!(
+                        model.single_calls.load(Ordering::SeqCst),
+                        usize::from(!native)
+                    );
+                    assert_eq!(
+                        model.batch_calls.load(Ordering::SeqCst),
+                        usize::from(native)
+                    );
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn cached_only_batches_and_final_completion_recheck_the_live_producer() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            for native in [false, true] {
+                for change_at in [1, 3] {
+                    let model = ContractHash::new(native, ProviderFault::None, 0);
+                    let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
+                    let mut docs = documents(65);
+                    for document in &mut docs {
+                        document.content = "one cached body".to_owned();
+                    }
+                    let mut writes = 0;
+                    let result = embed_batches_with(&cx, &model, &docs, &identity, "fast", |_| {
+                        writes += 1;
+                        if writes == change_at {
+                            model.changed.store(true, Ordering::SeqCst);
+                        }
+                        Ok(())
+                    })
+                    .await;
+                    assert_eq!(
+                        result.expect_err("cache is not producer authority").reason,
+                        IncrementalFallbackReason::CorpusRevisionMismatch
+                    );
+                    assert_eq!(writes, change_at);
+                    assert_eq!(
+                        model.single_calls.load(Ordering::SeqCst),
+                        usize::from(!native)
+                    );
+                    assert_eq!(
+                        model.batch_calls.load(Ordering::SeqCst),
+                        usize::from(native)
+                    );
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn cancellation_outranks_success_or_failure_from_either_bound_method() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |_runtime_cx| async move {
+            for native in [false, true] {
+                for fault in [ProviderFault::Cancel, ProviderFault::CancelAndRefuse] {
+                    let cx = asupersync::Cx::for_testing();
+                    let model = ContractHash::new(native, fault, 1);
+                    let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
+                    let result = embed_batches_with(
+                        &cx,
+                        &model,
+                        &documents(65),
+                        &identity,
+                        "fast",
+                        |_| panic!("cancelled inference cannot write its successful prefix"),
+                    )
+                    .await;
+                    let error = result.expect_err("original caller cancellation");
+                    assert!(error.detail.contains("interrupted"));
+                    assert!(!error.detail.contains("PRIVATE-PROVIDER-ERROR"));
+                    assert!(cx.checkpoint().is_err());
+                    assert_eq!(
+                        model.single_calls.load(Ordering::SeqCst),
+                        usize::from(!native)
+                    );
+                    assert_eq!(
+                        model.batch_calls.load(Ordering::SeqCst),
+                        usize::from(native)
+                    );
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn cancellation_during_the_final_wal_write_is_not_reported_as_success() -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |_runtime_cx| async move {
+            for count in [32, 65] {
+                for fail in [false, true] {
+                    let cx = asupersync::Cx::for_testing();
+                    let model = ContractHash::new(true, ProviderFault::None, 0);
+                    let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
+                    let mut docs = documents(count);
+                    for document in &mut docs {
+                        document.content = "one cached body".to_owned();
+                    }
+                    let mut writes = 0;
+                    let last_write = count.div_ceil(MAX_BATCH_DOCUMENTS);
+                    let result = embed_batches_with(&cx, &model, &docs, &identity, "fast", |_| {
+                        writes += 1;
+                        if writes == last_write {
+                            cx.set_cancel_reason(asupersync::CancelReason::user(
+                                "stop final WAL write",
+                            ));
+                            if fail {
+                                return Err(tier_error("PRIVATE-WRITER-ERROR".to_owned()));
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await;
+                    let error = result.expect_err("private staging must not be accepted");
+                    assert!(error.detail.contains("interrupted"));
+                    assert!(!error.detail.contains("PRIVATE-WRITER-ERROR"));
+                    assert_eq!(writes, last_write);
+                    assert_eq!(model.batch_calls.load(Ordering::SeqCst), 1);
+                }
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
+    fn missing_producer_is_rejected_before_inference_and_cancelled_empty_work_stays_cancelled()
+    -> TestResult {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |_runtime_cx| async move {
+            let cx = asupersync::Cx::for_testing();
+            let model = ContractHash::new(false, ProviderFault::Unavailable, 1);
+            let identity = model.identity().map_err(|e| e.to_string())?.fingerprint();
+            model.changed.store(true, Ordering::SeqCst);
+            let result = embed_batches_with(
+                &cx,
+                &model,
+                &documents(2),
+                &identity,
+                "fast",
+                |_| panic!("missing identity cannot enter inference or the writer"),
+            )
+            .await;
+            let error = result.expect_err("unavailable producer");
+            assert_eq!(
+                error.reason,
+                IncrementalFallbackReason::CorpusRevisionMismatch
+            );
+            assert!(!error.detail.contains("PRIVATE-PROVIDER-ERROR"));
+            cx.set_cancel_reason(asupersync::CancelReason::user("stop no-op delta"));
+            let error = embed_batches_with(&cx, &model, &[], "unused", "fast", |_| {
+                panic!("empty work must not write")
+            })
+            .await
+            .expect_err("no-op must not renew a cancelled request");
+            assert!(error.detail.contains("interrupted"));
+            assert_eq!(model.single_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(model.batch_calls.load(Ordering::SeqCst), 0);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    fn assert_staged_updates(repeat_content: bool, native_batch: bool) -> TestResult {
         use super::super::super::{
             IndexBuilder, compact_incremental_vector_index, hash_fallback_embedder_stack,
             open_fast_vector_index,
@@ -1118,7 +1672,8 @@ mod tests {
             );
             super::super::super::vacuum_incremental_vector_index(&mut index, "fast")
                 .map_err(|error| error.detail)?;
-            let embedder = ObservedHash::new();
+            let mut embedder = ObservedHash::new();
+            embedder.native_batch = native_batch;
             let identity = embedder
                 .identity()
                 .map_err(|error| error.to_string())?
@@ -1137,7 +1692,9 @@ mod tests {
             drop(index);
             assert_eq!(
                 *embedder.sizes.lock().expect("sizes"),
-                if repeat_content {
+                if !native_batch {
+                    Vec::<usize>::new()
+                } else if repeat_content {
                     vec![17, 16]
                 } else {
                     vec![32, 32, 1]
