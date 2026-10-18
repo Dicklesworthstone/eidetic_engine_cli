@@ -42,6 +42,9 @@ mod compiler;
 #[path = "cass_error_recall_test_coverage.rs"]
 mod test_coverage;
 
+#[path = "cass_error_recall_typescript.rs"]
+mod typescript;
+
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
@@ -52,7 +55,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// prior selected subject and requiring prior executed subjects to pass.
 /// V13 reconsiders native Go streams whose fractional Elapsed fields were
 /// rejected by untagged buffering under arbitrary-precision JSON.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v13";
+/// V14 mines native TypeScript diagnostics using the same error class for
+/// imported failures and later interactive diagnosis.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v14";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -925,6 +930,11 @@ impl ToolOutput {
             Err(()) => return self.metadata_failed(),
             Ok(None) => {}
         }
+        match typescript::decode(&self.text) {
+            Ok(Some(_)) => return true,
+            Err(()) => return self.metadata_failed(),
+            Ok(None) => {}
+        }
         outcome::failed(self)
             || test_coverage::python::decode(&self.text)
                 .is_ok_and(|decoded| decoded.is_some_and(|decoded| decoded.failed))
@@ -1164,6 +1174,11 @@ pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnosti
         Err(()) => return Vec::new(),
         Ok(None) => {}
     }
+    match typescript::decode(&output.text) {
+        Ok(Some(diagnostics)) => return diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     if output.text.trim_start().starts_with(['{', '[']) {
         // A diagnostic-looking string inside arbitrary JSON is data, not a
         // compiler failure. Structured output must match its complete schema.
@@ -1261,6 +1276,11 @@ pub(crate) fn structured_error_diagnostics(text: &str) -> Vec<CanonicalDiagnosti
     }
     match test_coverage::python::decode(text) {
         Ok(Some(decoded)) => return decoded.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
+    match typescript::decode(text) {
+        Ok(Some(diagnostics)) => return diagnostics,
         Err(()) => return Vec::new(),
         Ok(None) => {}
     }
@@ -1381,6 +1401,11 @@ fn structured_error_reports_failure(text: &str) -> bool {
 /// completion at the end of an invocation without latching an incomplete JSON
 /// chunk as failure while more bytes are still arriving.
 fn structured_output_allows_completion(text: &str) -> bool {
+    // A malformed native report is not a clean run, even when its wrapper
+    // claims exit zero. Quiet stdout still requires independent completion.
+    if !matches!(typescript::decode(text), Ok(None)) {
+        return false;
+    }
     let start = text.trim_start();
     if !start.starts_with(['{', '[']) {
         return true;
@@ -1479,6 +1504,19 @@ fn symptom_line(output: &ToolOutput) -> Option<String> {
     }
     match test_coverage::python::decode(&output.text) {
         Ok(Some(decoded)) => return decoded.symptom,
+        Err(()) => return None,
+        Ok(None) => {}
+    }
+    match typescript::decode(&output.text) {
+        Ok(Some(diagnostics)) => {
+            return diagnostics.first().map(|diagnostic| {
+                format!(
+                    "{}: {}",
+                    diagnostic.layered_key().key,
+                    diagnostic.message_template
+                )
+            });
+        }
         Err(()) => return None,
         Ok(None) => {}
     }
