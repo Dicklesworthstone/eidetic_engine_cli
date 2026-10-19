@@ -4360,12 +4360,8 @@ impl ReviewLessons {
         let mut seen = BTreeSet::new();
         let mut supporting_spans = 0_usize;
         for span in spans {
-            let Some(text) = review_learning_text(span) else {
-                continue;
-            };
             let mut supported = false;
-            let from_user = span.role.as_deref() == Some("user");
-            for sentence in review_lesson_sentences(&text, from_user) {
+            for sentence in review_span_lesson_sentences(span) {
                 supported = true;
                 let key = sentence.to_ascii_lowercase();
                 if sentences.len() < REVIEW_LESSON_MAX_SENTENCES && seen.insert(key) {
@@ -4394,6 +4390,28 @@ impl ReviewLessons {
             self.confidence()
         )
     }
+}
+
+/// A CASS window can contain both sides of a conversation. Its stored role is
+/// only a fallback for unstructured excerpts; applying it to every decoded turn
+/// would promote user task requests or suppress assistant lessons depending on
+/// how that window was imported. The learning projector validates the entire
+/// window before any record can contribute a sentence.
+fn review_span_lesson_sentences(span: &StoredEvidenceSpan) -> Vec<String> {
+    if EvidenceProducerKind::parse(&span.producer_kind) == Some(EvidenceProducerKind::CassImport) {
+        return crate::cass::transcript::learning_projections(&span.excerpt)
+            .into_iter()
+            .flatten()
+            .flat_map(|projection| {
+                let role = projection
+                    .role
+                    .map(crate::cass::CassRole::as_str)
+                    .or(span.role.as_deref());
+                review_lesson_sentences(&projection.text, role == Some("user"))
+            })
+            .collect();
+    }
+    review_lesson_sentences(&span.reader_body(), span.role.as_deref() == Some("user"))
 }
 
 /// Directive sentences in projected conversation text, in source order.
