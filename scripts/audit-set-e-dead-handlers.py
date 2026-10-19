@@ -456,14 +456,96 @@ def self_test():
             bool(setpluse_rows)
             and all("EXEMPT" in r["verdict"] for r in setpluse_rows))
         arm("exactly three candidates across the fixtures", len(rows) == 3)
+
+        # --- GATE ARMS (bd-w6849) ------------------------------------------
+        # The census had no exit statement at all: it fell off the end of
+        # __main__ and ALWAYS exited 0. So wiring it to a root as "assert exit
+        # 0" would have been unfalsifiable -- a check that cannot red is worse
+        # than an unwired tool, because it reads as coverage. `--gate` is what
+        # makes the wiring mean something, and these arms are what make the
+        # gate mean something.
+        #
+        # The first is the positive control and it is the only one that could
+        # have caught a gate wired to the wrong verdict set.
+        arm(
+            "the gate BLOCKS on a DEAD verdict",
+            gate_blocking_rows(
+                [{"live": True, "verdict": "DEAD: f() only ever called bare"}]
+            )
+            != [],
+        )
+        arm(
+            "the gate BLOCKS on a TOP-LEVEL dead handler",
+            gate_blocking_rows(
+                [{"live": True, "verdict": "TOP-LEVEL: -e applies, handler DEAD"}]
+            )
+            != [],
+        )
+        arm(
+            "the gate does NOT block on EXEMPT, the verdict the real tree has",
+            gate_blocking_rows(
+                [{"live": True, "verdict": "EXEMPT: f() is called in a tested context"}]
+            )
+            == [],
+        )
+        arm(
+            "the gate does NOT block on UNKNOWN (no call site found is not a defect)",
+            gate_blocking_rows(
+                [{"live": True, "verdict": "UNKNOWN: no call site found for f()"}]
+            )
+            == [],
+        )
+        arm(
+            "a DORMANT row is never blocking, whatever its verdict",
+            gate_blocking_rows(
+                [{"live": False, "verdict": "DEAD: f() only ever called bare"}]
+            )
+            == [],
+        )
+        arm(
+            "the gate is clean on the live tree as measured today",
+            gate_blocking_rows(census(".")) == [],
+        )
     print(f"\n[set-e-census] self-test: {sum(arms)}/{len(arms)} arms passed")
     return 0 if all(arms) else 1
+
+
+#: Verdict prefixes that mean "this handler cannot run and that is a defect".
+#:
+#: UNKNOWN is DELIBERATELY not here. It means no call site was found for the
+#: enclosing function, which is as likely to be a limitation of the call-site
+#: search as a real dead handler -- and this census has already shipped four
+#: false-positive classes (b9727a932, 8c24ce49c), three quarters of its
+#: headline DEAD rows at one point. A gate that reds on UNKNOWN would red on
+#: the instrument's own uncertainty. They are still PRINTED by the census.
+GATE_BLOCKING_VERDICTS = ("DEAD", "TOP-LEVEL")
+
+
+def gate_blocking_rows(rows):
+    """Rows that must fail `--gate`: `set -e` live at the line AND a verdict
+    saying the handler cannot run.
+
+    Pure, so the self-test can assert both polarities without a repository.
+    """
+    return [
+        r
+        for r in rows
+        if r.get("live") and r["verdict"].startswith(GATE_BLOCKING_VERDICTS)
+    ]
 
 
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         sys.exit(self_test())
-    rows = census(".")
+    gate = "--gate" in sys.argv
+    # `--root DIR` exists so the gate's RED direction can be demonstrated
+    # end-to-end against a fixture tree. Without it the only proof that
+    # `--gate` fails is the self-test's synthetic verdict dicts, which cannot
+    # catch a gate wired correctly to the wrong census.
+    root = "."
+    if "--root" in sys.argv:
+        root = sys.argv[sys.argv.index("--root") + 1]
+    rows = census(root)
     live = [r for r in rows if r["live"]]
     print(f"candidate sites: {len(rows)}  (set -e active at the line: {len(live)})")
     import collections
@@ -479,3 +561,30 @@ if __name__ == "__main__":
         print("\n  -- set +e in scope at the line, so the handler CAN run --")
         for r in sorted(dormant, key=lambda r: (r["file"], r["line"])):
             print(f"  {r['file']:<{w}} :{r['line']:<5} {r['var']}")
+
+    # Default stays a CENSUS and still exits 0 whatever it found: a red census
+    # is indistinguishable from a broken one. `--gate` is the opt-in verdict.
+    if not gate:
+        sys.exit(0)
+    blocking = gate_blocking_rows(rows)
+    if not blocking:
+        print(
+            f"\n[set-e-census] GATE PASS -- 0 dead handlers among "
+            f"{len(live)} site(s) where `set -e` is live, of {len(rows)} "
+            f"candidate(s). Verdicts that block: {'/'.join(GATE_BLOCKING_VERDICTS)}; "
+            f"UNKNOWN is reported but does not block."
+        )
+        sys.exit(0)
+    print(
+        f"\n[set-e-census] GATE FAIL -- {len(blocking)} handler(s) cannot run "
+        f"because `set -e` aborts first:",
+        file=sys.stderr,
+    )
+    for r in sorted(blocking, key=lambda r: (r["file"], r["line"])):
+        print(f"    {r['file']}:{r['line']}  {r['var']}  {r['verdict']}", file=sys.stderr)
+    print(
+        "  Put the assignment to the LEFT of `||` so -e is suspended through "
+        "the call, e.g. `out=$(cmd) || rc=$?`.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
