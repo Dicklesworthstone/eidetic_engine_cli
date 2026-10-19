@@ -69,6 +69,8 @@ mod rollback_manifest;
 #[path = "index_generation_watermark.rs"]
 mod generation_watermark;
 
+#[path = "index_delta_source.rs"]
+mod delta_source;
 #[path = "index_source_snapshot.rs"]
 mod source_snapshot;
 #[cfg(feature = "lexical-bm25")]
@@ -2641,6 +2643,36 @@ where
         return Ok(reports);
     }
 
+    // Small deltas can reconcile the complete source without retaining every
+    // unchanged document body. A refused plan or stage returns here before
+    // the snapshot hook; the existing path then captures a complete new
+    // snapshot, including its generation and counts, for fallback.
+    if max_corpus_documents.is_none() {
+        let prepared = delta_source::prepare(&_publish_lock, db, workspace_id, index_dir).await;
+        match prepared {
+            Ok(Some(prepared)) => {
+                let completed = delta_source::publish(
+                    &_publish_lock,
+                    db,
+                    index_dir,
+                    &claimed,
+                    &mut job_finalizers,
+                    prepared,
+                    COALESCED_MODE,
+                    after_snapshot,
+                )
+                .await?;
+                reports.extend(completed);
+                return Ok(reports);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
+                return Err(error);
+            }
+        }
+    }
+
     // The ceiling belongs inside source capture, before bodies, anchors and
     // evidence projections are hydrated. The collector checks it in the same
     // database snapshot as generation capture, closing the preflight/write race.
@@ -2950,6 +2982,35 @@ where
         job_id: job.id.clone(),
         explicitly_cancelled: false,
     };
+
+    match delta_source::prepare(&_publish_lock, db, &job.workspace_id, index_dir).await {
+        Ok(Some(prepared)) => {
+            let mut reports = delta_source::publish(
+                &_publish_lock,
+                db,
+                index_dir,
+                std::slice::from_ref(job),
+                std::slice::from_mut(&mut job_finalizer),
+                prepared,
+                &processing_mode,
+                after_snapshot,
+            )
+            .await?;
+            return reports.pop().ok_or_else(|| {
+                IndexRebuildError::Index("prepared index job report is missing".to_owned())
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            finalize_coalesced_claimed_jobs(
+                db,
+                std::slice::from_ref(job),
+                std::slice::from_mut(&mut job_finalizer),
+                &error,
+            );
+            return Err(error);
+        }
+    }
 
     let captured = collect_workspace_index_source_snapshot(db, &job.workspace_id);
     // Source queries can return an interrupted-storage error after the request
@@ -3420,6 +3481,19 @@ async fn stage_delta_generation(
     // the digest diff, not the job list, decides what changed.
     validate_incremental_index_metadata(index_dir, generation, u64::MAX).map_err(refused)?;
     let applied = delta::plan(index_dir, stack, documents).map_err(refused)?;
+    let digests = delta::DocDigests::new(stack, documents);
+    stage_planned_index_delta(cx, index_dir, stack, applied, digests, document_counts).await
+}
+
+async fn stage_planned_index_delta(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    stack: &EmbedderStack,
+    applied: delta::Delta,
+    digests: delta::DocDigests,
+    document_counts: IndexDocumentCounts,
+) -> Result<(UnpublishedIndexStage, delta::Delta), DeltaStageError> {
+    let producer = delta::embedder_identity(stack);
     let staging = UnpublishedIndexStage::create(index_dir)
         .map_err(|error| DeltaStageError::Refused(error.to_string()))?;
     let staged = async {
@@ -3441,7 +3515,12 @@ async fn stage_delta_generation(
             stack.quality().is_some(),
         )
         .map_err(IndexRebuildError::Index)?;
-        delta::DocDigests::new(stack, documents).write(staging.path())?;
+        if delta::embedder_identity(stack) != producer {
+            return Err(IndexRebuildError::Index(
+                "embedding producer changed while staging an index delta".to_owned(),
+            ));
+        }
+        digests.write(staging.path())?;
         sync_index_generation(staging.path(), || index_checkpoint(cx))?;
         Ok::<(), IndexRebuildError>(())
     }

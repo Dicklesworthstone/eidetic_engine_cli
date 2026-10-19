@@ -470,6 +470,9 @@ jobs:
           index-repair core::index::tests::requested_index_repair_
           search-empty-generation-parallel core::search::tests::empty_generations::
           index-source-snapshot core::index::source_snapshot::tests::
+          index-streamed-source core::index::delta_source::tests::
+          index-streamed-reconcile core::index::delta::stream::tests::
+          index-v2-producer-binding core::index::delta::tests::v2_delta_rechecks_planned_producer_before_native_tier_mutation
           index-anchor-backfill core::index::tests::index_rebuild_backfills_anchors_for_unanchored_memory
           index-reembed core::index::tests::index_reembed_
           index-isolation core::index::tests::index_mutations_refuse_unregistered_workspace_in_shared_database
