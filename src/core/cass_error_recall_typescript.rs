@@ -1,16 +1,16 @@
 //! Native TypeScript compiler diagnostics, without a compiler subprocess.
 //!
-//! `tsc --pretty false` emits located or global `error TS<code>` records.
-//! A message chain is indented beneath its diagnostic, not another error.
-//! Validate the complete report before returning any fingerprints. Paths,
-//! positions and quoted type/identifier values are never part of the key.
+//! Plain and color/context reports share one complete-report decoder. Message
+//! chains, source gutters and related information are data, not extra errors.
+//! Paths, positions and quoted values never become native fingerprint keys.
 //! This decoder grants no completion authority: only the existing completed
 //! invocation/context check may connect a failed run to its later repair.
 
-use std::collections::BTreeSet;
-
 use super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES};
 use crate::core::error_recall::{DiagnosticTool, canonical_message_template};
+
+#[path = "cass_error_recall_typescript_pretty.rs"]
+mod pretty;
 
 const MAX_RECORDS: usize = 256;
 
@@ -118,35 +118,7 @@ fn canonical(header: &Header<'_>) -> CanonicalDiagnostic {
 /// contains at least one real error. Malformed claimed reports are refused as
 /// a whole, including errors after the presentation/diagnostic cap.
 pub(super) fn decode(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()> {
-    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
-    let Some(first) = lines.next() else {
-        return Ok(None);
-    };
-    let Some(first) = header(first)? else {
-        return Ok(None);
-    };
-    if text.len() > MAX_SCANNED_OUTPUT_BYTES {
-        return Err(());
-    }
-    let mut keys = BTreeSet::from([first.code]);
-    let mut diagnostics = vec![canonical(&first)];
-    let mut records = 1;
-    for line in lines {
-        if let Some(next) = header(line)? {
-            records += 1;
-            if records > MAX_RECORDS {
-                return Err(());
-            }
-            if keys.insert(next.code) && diagnostics.len() < MAX_DIAGNOSTICS_PER_FAILURE {
-                diagnostics.push(canonical(&next));
-            }
-        } else if !line.starts_with("  ") || line.chars().any(char::is_control) {
-            // Plain TypeScript only adds indented message-chain text. A shell
-            // trailer, mixed producer or truncated next record is not that.
-            return Err(());
-        }
-    }
-    Ok(Some(diagnostics))
+    pretty::decode(text)
 }
 
 #[cfg(test)]
@@ -297,7 +269,7 @@ mod tests {
             "{\"success\":true}",
             "src/other.ts(1,1): error TS",
             "another producer succeeded",
-            "\u{1b}[0m",
+            "\u{1b}[2J",
         ] {
             let text = format!("{ERROR}\n{tail}");
             assert!(decode(&text).is_err(), "{tail}");
