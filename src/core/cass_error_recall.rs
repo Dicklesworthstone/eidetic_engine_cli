@@ -45,6 +45,9 @@ mod test_coverage;
 #[path = "cass_error_recall_typescript.rs"]
 mod typescript;
 
+#[path = "cass_error_recall_cargo_text.rs"]
+mod cargo_text;
+
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
@@ -59,7 +62,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// imported failures and later interactive diagnosis.
 /// V15 reconsiders TypeScript color/context reports and complete summaries
 /// previously missed by the plain-only decoder, preserving source/card IDs.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v15";
+/// V16 also derives code-less Cargo/build/linker failures from native reports,
+/// retaining cause-specific templates and the existing exact retry proof gate.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v16";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -1181,6 +1186,11 @@ pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnosti
         Err(()) => return Vec::new(),
         Ok(None) => {}
     }
+    match cargo_text::decode(&output.text) {
+        Ok(Some(diagnostics)) => return diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     if output.text.trim_start().starts_with(['{', '[']) {
         // A diagnostic-looking string inside arbitrary JSON is data, not a
         // compiler failure. Structured output must match its complete schema.
@@ -1282,6 +1292,11 @@ pub(crate) fn structured_error_diagnostics(text: &str) -> Vec<CanonicalDiagnosti
         Ok(None) => {}
     }
     match typescript::decode(text) {
+        Ok(Some(diagnostics)) => return diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
+    match cargo_text::decode(text) {
         Ok(Some(diagnostics)) => return diagnostics,
         Err(()) => return Vec::new(),
         Ok(None) => {}
@@ -1517,6 +1532,15 @@ fn symptom_line(output: &ToolOutput) -> Option<String> {
                     diagnostic.layered_key().key,
                     diagnostic.message_template
                 )
+            });
+        }
+        Err(()) => return None,
+        Ok(None) => {}
+    }
+    match cargo_text::decode(&output.text) {
+        Ok(Some(diagnostics)) => {
+            return diagnostics.first().map(|diagnostic| {
+                format!("{}: {}", diagnostic.tool.as_str(), diagnostic.message_template)
             });
         }
         Err(()) => return None,
