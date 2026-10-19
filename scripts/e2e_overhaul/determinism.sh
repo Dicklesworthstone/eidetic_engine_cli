@@ -319,6 +319,46 @@ run_3x_assert_identical() {
 }
 
 # ---------------------------------------------------------------------------
+# bd-v918u: why every capture below carries `|| ee_capture_failed <label>`.
+#
+# `ee` writes its error envelope to STDOUT, not stderr. Measured 2026-10-19
+# against ee 0.14.2: a failing `--json` call exits non-zero having put 2116
+# bytes of `{"schema":"ee.error.v2", ... "repair": ...}` on stdout and NOTHING
+# on stderr. Each capture below pipes that stdout into `jq`, which consumes it,
+# and most add `2>/dev/null` as well -- so on failure there is nothing left to
+# read anywhere.
+#
+# `set -euo pipefail` is live from :33, so `pipefail` propagates ee's status and
+# -e aborts AT the assignment. The result is a nonzero exit with zero bytes of
+# explanation, which is the class measured on bd-63mua.
+#
+# THE TOLERANT READS BELOW WERE ALREADY DEAD, and that is the sharper problem.
+# These captures use `// empty` filters and then `${VAR:-?}` readers, so the
+# author plainly intended an empty value to be survivable and reported by the
+# assertion. `pipefail` means the script never reaches those readers -- the
+# tolerance is unreachable code, the same shape this file already repaired
+# inside run_3x_assert_identical() above.
+#
+# WHAT THIS HELPER CAN AND CANNOT RECOVER. It converts a silent abort into a
+# NAMED failure. It cannot reproduce the envelope: by the time the pipeline
+# fails, jq has already consumed ee's stdout and `2>/dev/null` has discarded
+# stderr. Recovering the envelope needs each site restructured to capture raw
+# output before filtering it, which is a larger change than this defect
+# justifies on its own. A named failure is the difference between "bisect the
+# script" and "read one line".
+ee_capture_failed() {
+    local label="$1"
+    printf 'determinism: capture FAILED: %s (pipeline exit %s)\n' \
+        "$label" "${2:-unknown}" >&2
+    printf 'determinism: ee writes ee.error.v2 to STDOUT; this capture piped it\n' >&2
+    printf 'determinism: into jq, so the envelope is gone. Re-run that one ee\n' >&2
+    printf 'determinism: command without the pipe to see it.\n' >&2
+    e2e_log_assert_eq "capture_exit=${2:-unknown}" "capture_exit=0" \
+        "determinism_${label}_capture_ok"
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
 # Seed the workspace with the 2026-05-10 reference corpus + a deterministic
 # tie pair (two memories that hash-embed identically because the only
 # difference is the leading punctuation).
@@ -326,15 +366,18 @@ run_3x_assert_identical() {
 seed_corpus
 TIE_A=$("$EE_BINARY" remember "Run cargo fmt before release v0.1.0." \
     --workspace "$EPIC_WORKSPACE" --level procedural --kind rule --json \
-    | jq -r '.data.memory.id // .data.memoryId // .data.id // empty')
+    | jq -r '.data.memory.id // .data.memoryId // .data.id // empty') \
+    || ee_capture_failed TIE_A $?
 TIE_B=$("$EE_BINARY" remember "Run cargo fmt before release v0.2.0." \
     --workspace "$EPIC_WORKSPACE" --level procedural --kind rule --json \
-    | jq -r '.data.memory.id // .data.memoryId // .data.id // empty')
+    | jq -r '.data.memory.id // .data.memoryId // .data.id // empty') \
+    || ee_capture_failed TIE_B $?
 e2e_log_note "tie_pair tie_a=${TIE_A:-?} tie_b=${TIE_B:-?}"
 
 # Pick a memory id to drive ee why. Use the first listed memory.
 ANY_MEM=$("$EE_BINARY" memory list --workspace "$EPIC_WORKSPACE" --json 2>/dev/null \
-    | jq -r '(.data.memories // .data.items // []) | .[0].id // .[0].memoryId // empty')
+    | jq -r '(.data.memories // .data.items // []) | .[0].id // .[0].memoryId // empty') \
+    || ee_capture_failed ANY_MEM $?
 e2e_log_note "why_target=${ANY_MEM:-?}"
 
 # ---------------------------------------------------------------------------
@@ -362,13 +405,16 @@ run_3x_assert_identical \
 # and assert it is a single value with no variation.
 PACK_HASH_1=$("$EE_BINARY" context "prepare release v0.2.0" \
     --workspace "$EPIC_WORKSPACE" --max-tokens 1000 --json 2>/dev/null \
-    | jq -r '.data.pack.hash // empty')
+    | jq -r '.data.pack.hash // empty') \
+    || ee_capture_failed PACK_HASH_1 $?
 PACK_HASH_2=$("$EE_BINARY" context "prepare release v0.2.0" \
     --workspace "$EPIC_WORKSPACE" --max-tokens 1000 --json 2>/dev/null \
-    | jq -r '.data.pack.hash // empty')
+    | jq -r '.data.pack.hash // empty') \
+    || ee_capture_failed PACK_HASH_2 $?
 PACK_HASH_3=$("$EE_BINARY" context "prepare release v0.2.0" \
     --workspace "$EPIC_WORKSPACE" --max-tokens 1000 --json 2>/dev/null \
-    | jq -r '.data.pack.hash // empty')
+    | jq -r '.data.pack.hash // empty') \
+    || ee_capture_failed PACK_HASH_3 $?
 if [ -n "$PACK_HASH_1" ] && [ "$PACK_HASH_1" = "$PACK_HASH_2" ] && [ "$PACK_HASH_2" = "$PACK_HASH_3" ]; then
     e2e_log_assert_eq "true" "true" "determinism_pack_hash_reproducible"
     e2e_log_note "pack_hash=$PACK_HASH_1"
@@ -394,11 +440,14 @@ run_3x_assert_identical "doctor_json" doctor --json
 # ---------------------------------------------------------------------------
 if [ -n "${ANY_MEM:-}" ]; then
     WHY_1=$("$EE_BINARY" why "$ANY_MEM" --workspace "$EPIC_WORKSPACE" --json 2>/dev/null \
-        | strip_variable_fields | jq -S '.' | hash_stdin)
+        | strip_variable_fields | jq -S '.' | hash_stdin) \
+        || ee_capture_failed WHY_1 $?
     WHY_2=$("$EE_BINARY" why "$ANY_MEM" --workspace "$EPIC_WORKSPACE" --json 2>/dev/null \
-        | strip_variable_fields | jq -S '.' | hash_stdin)
+        | strip_variable_fields | jq -S '.' | hash_stdin) \
+        || ee_capture_failed WHY_2 $?
     WHY_3=$("$EE_BINARY" why "$ANY_MEM" --workspace "$EPIC_WORKSPACE" --json 2>/dev/null \
-        | strip_variable_fields | jq -S '.' | hash_stdin)
+        | strip_variable_fields | jq -S '.' | hash_stdin) \
+        || ee_capture_failed WHY_3 $?
     if [ "$WHY_1" = "$WHY_2" ] && [ "$WHY_2" = "$WHY_3" ]; then
         e2e_log_assert_eq "true" "true" "determinism_why_json"
         e2e_log_note "why_hash=$WHY_1"
@@ -419,7 +468,8 @@ for run in 1 2 3; do
     out="$EPIC_WORKSPACE/export_run_$run"
     mkdir -p "$out"
     H=$("$EE_BINARY" export --workspace "$EPIC_WORKSPACE" --output-dir "$out" --json 2>/dev/null \
-        | jq -r '.data.manifestHash // .data.manifest_hash // empty')
+        | jq -r '.data.manifestHash // .data.manifest_hash // empty') \
+        || ee_capture_failed "export_run_$run" $?
     EXPORT_HASHES="$EXPORT_HASHES $H"
 done
 IFS=' ' read -r EH1 EH2 EH3 <<< "$(echo "$EXPORT_HASHES" | xargs)"
@@ -437,13 +487,16 @@ fi
 # ---------------------------------------------------------------------------
 TIE_ORDER_1=$("$EE_BINARY" search "cargo fmt before release" \
     --workspace "$EPIC_WORKSPACE" --limit 10 --relevance-floor 0 --json 2>/dev/null \
-    | jq -r '[.data.results[].docId] | join(",")')
+    | jq -r '[.data.results[].docId] | join(",")') \
+    || ee_capture_failed TIE_ORDER_1 $?
 TIE_ORDER_2=$("$EE_BINARY" search "cargo fmt before release" \
     --workspace "$EPIC_WORKSPACE" --limit 10 --relevance-floor 0 --json 2>/dev/null \
-    | jq -r '[.data.results[].docId] | join(",")')
+    | jq -r '[.data.results[].docId] | join(",")') \
+    || ee_capture_failed TIE_ORDER_2 $?
 TIE_ORDER_3=$("$EE_BINARY" search "cargo fmt before release" \
     --workspace "$EPIC_WORKSPACE" --limit 10 --relevance-floor 0 --json 2>/dev/null \
-    | jq -r '[.data.results[].docId] | join(",")')
+    | jq -r '[.data.results[].docId] | join(",")') \
+    || ee_capture_failed TIE_ORDER_3 $?
 if [ -n "$TIE_ORDER_1" ] && [ "$TIE_ORDER_1" = "$TIE_ORDER_2" ] && [ "$TIE_ORDER_2" = "$TIE_ORDER_3" ]; then
     e2e_log_assert_eq "true" "true" "determinism_tie_break_order_stable"
     e2e_log_note "tie_order=$TIE_ORDER_1"

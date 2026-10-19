@@ -40,6 +40,26 @@ require_jq_value() {
     return 1
 }
 
+# bd-v918u. `ee` writes its error envelope to STDOUT, so a bare
+# `VAR="$( "$EE_BIN" ... --json )"` takes the whole diagnostic into VAR and
+# `set -e` then aborts AT the assignment -- nonzero exit, zero bytes, and the
+# `require_jq_value "$VAR" '.success' "true" "<label>"` that follows every one
+# of these captures never runs. That assertion is this file's entire reporting
+# mechanism, so the abort removed the report along with the evidence.
+#
+# This helper deliberately RETURNS 0 rather than exiting, because this file
+# accumulates failures (`record_failure`) and reports them at the end. Exiting
+# here would convert a labelled, counted failure into an early abort and lose
+# every later assertion -- a different kind of silence. The envelope goes to
+# stderr; `require_jq_value` then sees a body with no `.success` and records
+# the labelled failure it was always meant to record.
+ee_capture_note() {
+    local label="$1"
+    printf 'rule_validation: capture `%s` failed (ee exit %s). ee writes ee.error.v2 to STDOUT, so the envelope is in the capture and the assertion below will report it.\n' \
+        "$label" "${2:-unknown}" >&2
+    return 0
+}
+
 require_contains_text() {
     local haystack="${1:-}"
     local needle="${2:?needle required}"
@@ -250,7 +270,8 @@ restore_path="$WORKSPACE-restored"
 restore_out="$(ee_workspace backup restore "$backup_path" --side-path "$restore_path" --json)"
 require_jq_value "$restore_out" '.success' "true" "learn-loop backup restore succeeds"
 
-restored_rule="$( "$EE_BIN" --workspace "$restore_path" rule show "$learn_rule_id" --json )"
+restored_rule="$( "$EE_BIN" --workspace "$restore_path" rule show "$learn_rule_id" --json )" \
+    || ee_capture_note restored_rule $?
 require_jq_value "$restored_rule" '.success' "true" "restored native rule show succeeds"
 require_jq_value "$restored_rule" '.data.rule.id // .data.rule.ruleId // empty' "$learn_rule_id" \
     "restored native rule preserves RuleId"
@@ -265,12 +286,15 @@ require_jq_value "$restored_rule" \
 require_jq_value "$restored_rule" '.data.rule.maturity // empty' "candidate" \
     "restored native rule preserves maturity"
 
-restored_rebuild="$( "$EE_BIN" --workspace "$restore_path" index rebuild --json )"
+restored_rebuild="$( "$EE_BIN" --workspace "$restore_path" index rebuild --json )" \
+    || ee_capture_note restored_rebuild $?
 require_jq_value "$restored_rebuild" '.success' "true" "restored rule index rebuild succeeds"
-restored_search="$( "$EE_BIN" --workspace "$restore_path" search "zephyr frobnicator fmt gate" --limit 20 --json )"
+restored_search="$( "$EE_BIN" --workspace "$restore_path" search "zephyr frobnicator fmt gate" --limit 20 --json )" \
+    || ee_capture_note restored_search $?
 require_jq_value "$restored_search" '.success' "true" "restored rule search succeeds"
 require_jq_value "$restored_search"     "any(.data.results[]?; ((.docId // .memoryId // \"\") == \"$learn_rule_id\") or ((.content // .contentPreview // \"\") | contains(\"zephyr frobnicator fmt gate\")))"     "true" "restored native rule is searchable by its own content"
 
-restored_pack="$( "$EE_BIN" --workspace "$restore_path" pack "zephyr frobnicator fmt gate" --max-tokens 2000 --json )"
+restored_pack="$( "$EE_BIN" --workspace "$restore_path" pack "zephyr frobnicator fmt gate" --max-tokens 2000 --json )" \
+    || ee_capture_note restored_pack $?
 require_jq_value "$restored_pack" '.success' "true" "restored rule pack succeeds"
 require_jq_value "$restored_pack"     "any(.data.pack.items[]?; ((.why // \"\") | contains(\"$learn_rule_id\")))"     "true" "restored pack retains rule attribution"

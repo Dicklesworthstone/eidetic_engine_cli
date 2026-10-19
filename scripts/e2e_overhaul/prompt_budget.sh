@@ -78,7 +78,17 @@ if ! "$EE_BIN" --version >/dev/null 2>&1; then
 fi
 
 emit_event "run" "begin" "ee perf prompt-budget --trace=$TRACE_FIXTURE --json"
-report_json="$("$EE_BIN" perf prompt-budget --trace "$TRACE_FIXTURE" --json)"
+# bd-v918u: `ee` writes its error envelope to STDOUT, so a bare capture takes
+# the diagnostic into `report_json` and `set -e` then discards it at the
+# assignment -- nonzero exit, zero bytes. Guarded, the envelope is still IN the
+# capture (the assignment completes; only the status is non-zero), so printing
+# it costs one line and is the whole difference between a triagable failure and
+# a silent one.
+report_json="$("$EE_BIN" perf prompt-budget --trace "$TRACE_FIXTURE" --json)" || {
+    printf 'prompt_budget: `ee perf prompt-budget` failed. ee writes ee.error.v2 to STDOUT, so the envelope is what the capture holds:\n%s\n' \
+        "$report_json" >&2
+    exit 1
+}
 
 schema="$(printf '%s' "$report_json" | jq -r '.schema')"
 if [ "$schema" != "ee.prompt_budget_report.v1" ]; then

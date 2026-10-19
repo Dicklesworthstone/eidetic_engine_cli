@@ -100,7 +100,17 @@ probe_binary() {
 run_fix() {
   emit_event "fix" "begin" "ee doctor --fix --workspace=$WORKSPACE --json"
   local fix_json
-  fix_json="$("$EE_BIN" --workspace "$WORKSPACE" --json doctor --fix)"
+  # bd-v918u: `ee` writes ee.error.v2 to STDOUT, so a bare capture takes the
+  # diagnostic into fix_json and `set -e` aborts AT the assignment -- which
+  # also means the `> fix.json` write on the next line never happens, so the
+  # post-mortem artifact this harness exists to leave behind is lost too. The
+  # guard persists the envelope AND prints it.
+  fix_json="$("$EE_BIN" --workspace "$WORKSPACE" --json doctor --fix)" || {
+    printf '%s\n' "$fix_json" > "$WORKSPACE/fix.json"
+    printf 'doctor_undo_replay: `ee doctor --fix` failed. The ee.error.v2 envelope is the capture; written to %s and reproduced here:\n%s\n' \
+      "$WORKSPACE/fix.json" "$fix_json" >&2
+    return 1
+  }
   printf '%s\n' "$fix_json" > "$WORKSPACE/fix.json"
   local response_schema success data_schema run_id status pending
   response_schema="$(printf '%s' "$fix_json" | jq -r '.schema')"
@@ -174,7 +184,14 @@ run_undo() {
   local workspace="${2:-$WORKSPACE}"
   emit_event "undo" "begin" "ee doctor --undo $run_id --workspace=$workspace --json"
   local undo_json
-  undo_json="$("$EE_BIN" --workspace "$workspace" --json doctor --undo "$run_id")"
+  # bd-v918u, same shape as run_fix() above: the abort would take both the
+  # diagnostic and the post-mortem artifact.
+  undo_json="$("$EE_BIN" --workspace "$workspace" --json doctor --undo "$run_id")" || {
+    printf '%s\n' "$undo_json" > "$workspace/undo.json"
+    printf 'doctor_undo_replay: `ee doctor --undo %s` failed. The ee.error.v2 envelope is the capture; written to %s and reproduced here:\n%s\n' \
+      "$run_id" "$workspace/undo.json" "$undo_json" >&2
+    return 1
+  }
   printf '%s\n' "$undo_json" > "$workspace/undo.json"
   local schema actions_undone first_error
   schema="$(printf '%s' "$undo_json" | jq -r '.schema')"
