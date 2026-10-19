@@ -1046,27 +1046,12 @@ fn persist_session_import_if_absent(
                     message: "imported session row is missing inside its own transaction"
                         .to_owned(),
                 })?;
-        // One screened multi-row write per batch instead of one INSERT per
-        // span (bd-reality-core-convergence-1azkt.48).
-        let rows = spans
-            .iter()
-            .map(|span| {
-                (
-                    stable_evidence_id(&session_id, &span.cass_span_id),
-                    evidence_input(workspace_id, &session_id, span),
-                )
-            })
-            .collect::<Vec<_>>();
-        let admission = connection.insert_evidence_spans_in_session(&rows, &stored_session)?;
-        for span in spans {
-            let evidence_id = stable_evidence_id(&session_id, &span.cass_span_id);
-            if span.redacted {
-                connection.insert_audit(
-                    &stable_cass_redaction_audit_id(&evidence_id),
-                    &cass_redaction_audit_input(workspace_id, &session_id, &evidence_id, span),
-                )?;
-            }
-        }
+        // The complete source is retained for history checks, but preparing
+        // another session-sized copy (then another in the DB writer) defeats
+        // the streaming capture's memory bound. Initial and growing imports
+        // share bounded preparation inside this one session transaction.
+        let admission =
+            refresh::insert_initial_spans(connection, workspace_id, &stored_session, spans)?;
         connection.insert_search_index_job(
             &index_job_id,
             &search_index_job_input(workspace_id, &session_id),

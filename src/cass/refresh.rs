@@ -26,6 +26,8 @@ const CHECKPOINT_SCHEMA: &str = "ee.cass.session_checkpoint.v1";
 #[path = "refresh_batch.rs"]
 mod batch;
 
+pub(super) use batch::insert_initial_spans;
+
 type SessionMetadata = serde_json::Map<String, serde_json::Value>;
 
 struct MetadataRefresh {
