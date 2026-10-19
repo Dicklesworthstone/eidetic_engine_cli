@@ -180,11 +180,13 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
 
     findings = []
     examined = 0
+    resolved = 0
     for rel, name_pat in surfaces:
         path = root / rel
         if path not in cache:
             findings.append({"surface": rel, "name": None, "issue": "surface file not found"})
             continue
+        resolved += 1
         text, lines, tranges = cache[path]
         def_re = re.compile(DEF_RE_TEMPLATE.format(name=name_pat), re.M)
         for m in def_re.finditer(text):
@@ -229,6 +231,23 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
     return {
         "schema": "ee.production_reachability.v1",
         "surfacesExamined": examined,
+        # SCOPE, reported because this gate's pass is scoped and its wording
+        # was not. `SURFACES` is a hand-maintained list of file/pattern pairs,
+        # one per bead that already suspected a defect, so a green here means
+        # "no test-only fn among the surfaces someone already enumerated" and
+        # NOT "nothing in this tree is test-only". On 2026-10-18 the gate
+        # reported `OK` across 31 surfaces drawn from 2 of 672 scanned .rs
+        # files, while src/core/explanation_latency_budget.rs (572 lines, 8
+        # inline tests) had no production consumer at all -- outside the
+        # population, so invisible by construction rather than by oversight.
+        #
+        # This mirrors the defect bd-vejqk fixed in the fleet-identifier guard
+        # one layer down: a count that reads as "the published set" while
+        # describing a subset of it. The repair there is the repair here --
+        # report the source and the denominator so it cannot be misread.
+        "surfaceFilesDeclared": len(surfaces),
+        "surfaceFilesResolved": resolved,
+        "rustFilesScanned": len(files),
         "testOnly": findings,
     }
 
@@ -277,6 +296,14 @@ def main() -> int:
             f"[reachability] surfaces examined: {report['surfacesExamined']}; "
             f"test-only: {len(found)}; baseline: {len(baseline)}"
         )
+        print(
+            f"[reachability] SCOPE: those surfaces come from "
+            f"{report['surfaceFilesResolved']} of {report['surfaceFilesDeclared']} "
+            f"declared surface file(s), against {report['rustFilesScanned']} .rs "
+            f"file(s) scanned for references. Every other file in the tree is "
+            f"OUTSIDE this gate's population, so a pass is NOT a tree-wide "
+            f"reachability result."
+        )
         for f in report["testOnly"]:
             mark = "NEW" if f.get("name") in new else "baselined"
             print(f"   [{mark}] {f.get('name')}  ({f.get('defined_at')}) "
@@ -299,7 +326,12 @@ def main() -> int:
         print("  A baseline that keeps wired entries is an ignore-list.", file=sys.stderr)
         status = 1
     if status == 0:
-        print("[reachability] OK -- no test-only surface beyond the accepted baseline")
+        print(
+            "[reachability] OK -- no test-only surface beyond the accepted baseline, "
+            f"WITHIN the {report['surfaceFilesResolved']} declared surface file(s). "
+            "Unlisted files were not examined; add a (path, pattern) pair to "
+            "SURFACES to bring one into scope."
+        )
     return status
 
 
@@ -375,6 +407,19 @@ def self_test() -> int:
             "pub fn table_v3() -> u32 { fix_called_with_trailing_comment() } // see above\n",
             encoding="utf-8",
         )
+        # F: an UNLISTED file carrying the same shape of defect. This is the
+        # positive control for the scope report: the gate must not flag it
+        # (it is outside SURFACES), and the scope numbers must say so. Without
+        # this arm the scope line is an unchecked claim.
+        (root / "src" / "unlisted.rs").write_text(
+            "fn fix_unlisted_and_test_only() -> u32 { 9 }\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    #[test]\n"
+            "    fn t() { assert_eq!(super::fix_unlisted_and_test_only(), 9); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
         surfaces = [("src/surface.rs", r"fix_[a-z0-9_]+")]
         rep = audit(root, surfaces)
         names = {f["name"] for f in rep["testOnly"]}
@@ -397,6 +442,23 @@ def self_test() -> int:
             "fix_called_with_trailing_comment" not in names,
         )
         arm("all five surface fns were examined", rep["surfacesExamined"] == 5)
+
+        # SCOPE ARMS. The three together are what make the pass line's new
+        # wording true rather than decorative: a defect of exactly the flagged
+        # shape, in a file nobody listed, is invisible to this gate -- and the
+        # denominator has to admit that the file was there to be missed.
+        arm(
+            "a test-only fn in an UNLISTED file is NOT flagged (the scope limit is real)",
+            "fix_unlisted_and_test_only" not in names,
+        )
+        arm(
+            "the scope report names the declared surface count, not the tree",
+            rep["surfaceFilesDeclared"] == 1 and rep["surfaceFilesResolved"] == 1,
+        )
+        arm(
+            "the reference denominator counts the unlisted file it did not examine",
+            rep["rustFilesScanned"] >= 2,
+        )
 
         ranges = test_line_ranges(read(root / "src" / "surface.rs"))
         arm("every test module is found, not just the first", len(ranges) == 3)
