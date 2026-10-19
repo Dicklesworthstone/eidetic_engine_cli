@@ -1,0 +1,316 @@
+//! Real-store code-less recall and authoritative final streamed diagnostics.
+
+use super::{record_session_error_recall, structured_error_diagnostics};
+use crate::core::error_diagnosis::{error_recall_report, pack_error_recall_query_seed};
+use crate::core::incident_card::{incident_card_id, proof::CardChecks};
+use crate::db::{
+    CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
+    EvidenceProducerKind,
+};
+use serde_json::{Value, json};
+
+type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+type TestResult = Fallible<()>;
+const WS: &str = "wsp_01234567890123456789012345";
+const CWD: &str = "/tmp/cargo-text-recall";
+const COMMAND: &str = "cargo check --locked";
+const ROOT: &str = "error: failed to run custom build command for `widget v1.0.0`";
+const CAUSE: &str = "\nCaused by:\n  missing generated native header\n";
+const FIX: &str = "I fixed the build script failure by adding the missing generated native header before compiling the widget library.";
+
+struct Fixture {
+    db: DbConnection,
+    session: String,
+    line: u32,
+}
+
+impl Fixture {
+    fn new() -> Fallible<Self> {
+        let db = DbConnection::open_memory()?;
+        db.migrate()?;
+        db.insert_workspace(
+            WS,
+            &CreateWorkspaceInput {
+                path: CWD.to_owned(),
+                name: None,
+            },
+        )?;
+        let session =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x751100)).to_string();
+        db.insert_session(
+            &session,
+            &CreateSessionInput {
+                workspace_id: WS.to_owned(),
+                cass_session_id: "/sessions/cargo-text-recall.jsonl".to_owned(),
+                source_path: None,
+                agent_name: Some("codex".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 0,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(b"cargo-text-recall").to_hex()),
+                metadata_json: None,
+            },
+        )?;
+        Ok(Self {
+            db,
+            session,
+            line: 0,
+        })
+    }
+
+    fn add(&mut self, kind: &str, role: &str, record: Value) -> Fallible<String> {
+        self.line += 1;
+        let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+            0x751200 + u128::from(self.line),
+        ))
+        .to_string();
+        let excerpt = record.to_string();
+        self.db.insert_evidence_span(
+            &id,
+            &CreateEvidenceSpanInput {
+                workspace_id: WS.to_owned(),
+                session_id: self.session.clone(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: format!("cargo-text:{}", self.line),
+                span_kind: kind.to_owned(),
+                start_line: self.line,
+                end_line: self.line,
+                start_byte: None,
+                end_byte: None,
+                role: Some(role.to_owned()),
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                excerpt,
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )?;
+        Ok(id)
+    }
+
+    fn call(&mut self, id: &str, command: &str, cwd: &str) -> Fallible<String> {
+        self.add(
+            "tool_call",
+            "assistant",
+            json!({"type":"response_item","payload":{
+                "type":"function_call","name":"exec_command","call_id":id,
+                "arguments":json!({"cmd":command,"workdir":cwd}).to_string()
+            }}),
+        )
+    }
+
+    fn poll(&mut self, id: &str) -> Fallible<String> {
+        self.add(
+            "tool_call",
+            "assistant",
+            json!({"type":"response_item","payload":{
+                "type":"function_call","name":"write_stdin","call_id":id,
+                "arguments":json!({"session_id":42,"chars":""}).to_string()
+            }}),
+        )
+    }
+
+    fn result(&mut self, id: &str, body: &str, code: Option<i32>) -> Fallible<String> {
+        let status = code.map_or_else(
+            || "Process running with session ID 42".to_owned(),
+            |code| format!("Process exited with code {code}"),
+        );
+        self.add(
+            "tool_result",
+            "tool",
+            json!({"type":"response_item","payload":{
+                "type":"function_call_output","call_id":id,
+                "output":format!("Wall time: 0.01 seconds\n{status}\nOutput:\n{body}")
+            }}),
+        )
+    }
+
+    fn repair(&mut self) -> Fallible<String> {
+        self.add(
+            "message",
+            "assistant",
+            json!({"type":"assistant","message":{"role":"assistant","content":FIX}}),
+        )
+    }
+
+    fn verify(&mut self) -> Fallible<String> {
+        self.call("verify", COMMAND, CWD)?;
+        self.result("verify", "", Some(0))
+    }
+}
+
+#[test]
+fn code_less_failures_persist_cited_repairs_and_packable_cards_idempotently() -> TestResult {
+    let output = format!("{ROOT}{CAUSE}");
+    let mut fixture = Fixture::new()?;
+    fixture.call("fail", COMMAND, CWD)?;
+    let failure = fixture.result("fail", &output, Some(101))?;
+    let repair = fixture.repair()?;
+    let proof = fixture.verify()?;
+    let before = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+    let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.fingerprints_recorded, 1);
+    assert_eq!(report.repair_links_recorded, 2);
+    assert_eq!(report.incident_cards_recorded, 1);
+    let diagnostic = structured_error_diagnostics(&output).into_iter().next().ok_or("diagnostic")?;
+    let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+    assert!(recall.exact);
+    assert!(recall.helpful_repairs.contains(&repair));
+    assert_eq!(recall.proof_links, vec![proof]);
+    let card_id = incident_card_id(WS, &failure);
+    assert!(recall.helpful_repairs.contains(&card_id));
+    let card = fixture.db.get_evidence_span(&card_id)?.ok_or("card")?;
+    let mut checks = CardChecks::default();
+    checks.observe(&card)?;
+    assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+    let seed = pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?;
+    assert!(seed.contains("prior fix:"));
+    assert!(seed.contains("generated native header"));
+    for source in before {
+        let after = fixture.db.get_evidence_span(&source.id)?.ok_or("source")?;
+        assert_eq!(source.excerpt, after.excerpt);
+        assert_eq!(source.content_hash, after.content_hash);
+        assert_eq!(source.metadata_json, after.metadata_json);
+        assert_eq!(source.canonical_provenance_uri(), after.canonical_provenance_uri());
+    }
+    let second = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(second.incident_cards_recorded, 0);
+    assert_eq!(fixture.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn final_streamed_causes_replace_provisional_template_keys_without_changing_the_anchor() -> TestResult {
+    let mut fixture = Fixture::new()?;
+    fixture.call("fail", COMMAND, CWD)?;
+    let failure = fixture.result("fail", ROOT, None)?;
+    fixture.poll("finish")?;
+    fixture.result("finish", CAUSE, Some(101))?;
+    fixture.repair()?;
+    let proof = fixture.verify()?;
+    let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.fingerprints_recorded, 1);
+    assert_eq!(report.incident_cards_recorded, 1);
+    let final_diagnostic = structured_error_diagnostics(&format!("{ROOT}{CAUSE}"))
+        .into_iter().next().ok_or("final diagnostic")?;
+    let provisional = structured_error_diagnostics(ROOT).into_iter().next().ok_or("prefix")?;
+    assert_ne!(final_diagnostic.layered_key().key, provisional.layered_key().key);
+    assert!(fixture.db.get_error_fingerprint(WS, &provisional.layered_key().key)?.is_none());
+    let recall = error_recall_report(&fixture.db, WS, &final_diagnostic)?;
+    assert!(recall.exact);
+    assert_eq!(recall.proof_links, vec![proof]);
+    let card_id = incident_card_id(WS, &failure);
+    assert!(recall.helpful_repairs.contains(&card_id));
+    let card = fixture.db.get_evidence_span(&card_id)?.ok_or("card")?;
+    assert!(card.excerpt.contains("missing generated native header"));
+    let mut checks = CardChecks::default();
+    checks.observe(&card)?;
+    assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+    assert!(fixture.db.list_error_repair_links(WS, &final_diagnostic.layered_key().key)?
+        .iter().all(|link| link.evidence_ref.as_deref() == Some(failure.as_str())));
+    Ok(())
+}
+
+#[test]
+fn later_polled_rustc_errors_are_retained_in_the_same_failed_invocation() -> TestResult {
+    let mut fixture = Fixture::new()?;
+    fixture.call("fail", COMMAND, CWD)?;
+    let failure = fixture.result("fail", "error[E0308]: mismatched types\n", None)?;
+    fixture.poll("finish")?;
+    fixture.result("finish", "error[E0277]: missing trait bound\n", Some(101))?;
+    fixture.repair()?;
+    fixture.verify()?;
+    let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.fingerprints_recorded, 2);
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.incident_cards_recorded, 1);
+    for key in ["rustc:E0308", "rustc:E0277"] {
+        assert!(fixture.db.get_error_fingerprint(WS, key)?.is_some());
+        let links = fixture.db.list_error_repair_links(WS, key)?;
+        assert_eq!(links.len(), 3);
+        assert!(links.iter().any(|link| link.target_id == incident_card_id(WS, &failure)));
+    }
+    Ok(())
+}
+
+#[test]
+fn an_invalid_final_native_report_cannot_authorize_a_later_successful_retry() -> TestResult {
+    for (prefix, tail) in [
+        (ROOT.to_owned(), "\nCaused by:".to_owned()),
+        (json!({"reason":"compiler-message","message":{
+            "code":{"code":"E0308"},"level":"error","message":"mismatched types"
+        }}).to_string(), "\n{unfinished".to_owned()),
+    ] {
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        fixture.result("fail", &prefix, None)?;
+        fixture.poll("finish")?;
+        fixture.result("finish", &tail, Some(101))?;
+        fixture.repair()?;
+        fixture.verify()?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.fingerprints_recorded, 1);
+        assert_eq!(report.resolved_failures, 0);
+        assert_eq!(report.repair_links_recorded, 0);
+        assert_eq!(report.incident_cards_recorded, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_still_running_failure_cannot_be_verified_by_an_overlapping_retry() -> TestResult {
+    let mut fixture = Fixture::new()?;
+    fixture.call("fail", COMMAND, CWD)?;
+    fixture.result("fail", ROOT, None)?;
+    fixture.repair()?;
+    fixture.verify()?;
+    fixture.poll("finish")?;
+    fixture.result("finish", CAUSE, Some(101))?;
+    let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.resolved_failures, 0);
+    assert_eq!(report.incident_cards_recorded, 0);
+    Ok(())
+}
+
+#[test]
+fn changed_commands_or_working_directories_do_not_verify_code_less_repairs() -> TestResult {
+    for (command, cwd) in [("cargo check --locked --lib", CWD), (COMMAND, "/tmp/other-cargo")] {
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        fixture.result("fail", &format!("{ROOT}{CAUSE}"), Some(101))?;
+        fixture.repair()?;
+        fixture.call("verify", command, cwd)?;
+        fixture.result("verify", "", Some(0))?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.resolved_failures, 0);
+        assert_eq!(report.repair_links_recorded, 0);
+        assert_eq!(report.incident_cards_recorded, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn quiet_retry_completion_does_not_accept_a_zero_exit_wrapping_another_cargo_failure() -> TestResult {
+    let mut fixture = Fixture::new()?;
+    fixture.call("fail", COMMAND, CWD)?;
+    fixture.result("fail", &format!("{ROOT}{CAUSE}"), Some(101))?;
+    fixture.repair()?;
+    fixture.call("verify", COMMAND, CWD)?;
+    fixture.result("verify", "error: failed to parse manifest at `Cargo.toml`", Some(0))?;
+    let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(report.failures_seen, 2);
+    assert_eq!(report.resolved_failures, 0);
+    assert_eq!(report.repair_links_recorded, 0);
+    assert_eq!(report.incident_cards_recorded, 0);
+    Ok(())
+}

@@ -64,7 +64,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// previously missed by the plain-only decoder, preserving source/card IDs.
 /// V16 also derives code-less Cargo/build/linker failures from native reports,
 /// retaining cause-specific templates and the existing exact retry proof gate.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v16";
+/// V17 refreshes final streamed diagnostic snapshots and withholds repair
+/// credit when a formerly valid prefix ends in a malformed native report.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v17";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -229,6 +231,28 @@ struct PendingFailure {
 }
 
 impl PendingFailure {
+    fn refresh(
+        &mut self,
+        observation: &InvocationObservation,
+        index: usize,
+        diagnostics: &[CanonicalDiagnostic],
+    ) {
+        self.test_requirement
+            .refresh(&observation.output, observation.complete);
+        // A valid prefix cannot certify the complete failed run when later
+        // bytes invalidate its native report. Retain that observation only as
+        // an unresolved fingerprint; a later retry cannot turn it into proof.
+        self.complete = observation.complete && !diagnostics.is_empty();
+        self.index = index;
+        if !diagnostics.is_empty() {
+            // Polls may add error codes or finish a message/cause chain. The
+            // complete snapshot must agree with a later interactive diagnosis.
+            // Keep the original failure and attempt IDs as provenance anchors.
+            self.diagnostics = diagnostics.to_vec();
+            self.symptom = symptom_line(&observation.output);
+        }
+    }
+
     fn into_arc(self, resolution: Option<Resolution>) -> FailureArc {
         FailureArc {
             failure_id: self.failure_id,
@@ -580,27 +604,15 @@ pub(crate) fn session_failure_arcs(
             ) else {
                 continue;
             };
-            // A running failure can reveal more failed subjects on later polls.
-            // Refresh coverage even after its first diagnostics were recorded;
-            // the final output, not the four-diagnostic cap, defines the proof.
+            // The final output, not the first useful poll, owns both the
+            // diagnostic snapshot and the complete failure's proof boundary.
+            let diagnostics = failure_diagnostics(&observed.output);
             for failure in pending
                 .iter_mut()
                 .filter(|failure| failure.attempt_id == spans[observed.call_index].id)
             {
-                failure
-                    .test_requirement
-                    .refresh(&observed.output, observed.complete);
-                // This ordering belongs to every command family, not only
-                // test inventories. A compiler can still be emitting errors
-                // while another invocation has already returned successfully.
-                failure.complete = observed.complete;
-                failure.index = index;
+                failure.refresh(&observed, index, &diagnostics);
             }
-            let diagnostics = if observed.new_failure {
-                failure_diagnostics(&observed.output)
-            } else {
-                Vec::new()
-            };
             if diagnostics.is_empty() {
                 if observed.complete && observed.output.succeeded() {
                     resolve_pending(
@@ -616,6 +628,10 @@ pub(crate) fn session_failure_arcs(
                         session,
                     );
                 }
+                continue;
+            }
+            if !observed.new_failure {
+                // Refresh the existing incident, never create one per poll.
                 continue;
             }
             if pending.len() == MAX_PENDING_FAILURES {
@@ -1633,6 +1649,10 @@ mod stream_store_tests;
 #[cfg(test)]
 #[path = "cass_error_recall_typescript_store_tests.rs"]
 mod typescript_store_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_cargo_store_tests.rs"]
+mod cargo_store_tests;
 
 #[cfg(test)]
 mod source_index_intake_tests {
