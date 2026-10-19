@@ -251,12 +251,14 @@ mod tests {
         let connection = db()?;
         let session = session(&connection, WS, 900)?;
         let mut report = report();
+        // Plain notes isolate the batching contract. Source-backed card
+        // preference and unproved-card refusal have separate real-arc tests.
         for number in 1..=130 {
             report
                 .helpful_repairs
-                .push(span(&connection, WS, &session, number, number == 130)?);
+                .push(span(&connection, WS, &session, number, false)?);
         }
-        let card = report.helpful_repairs[129].clone();
+        let last = report.helpful_repairs[129].clone();
         let first = report.helpful_repairs[0].clone();
         report.helpful_repairs.reverse();
         report.helpful_repairs.push(first.clone());
@@ -268,9 +270,9 @@ mod tests {
         })?;
         assert_eq!(batches, [128, 2]);
         assert_eq!(actual.len(), 131);
-        assert_eq!(actual[0].evidence_id, card);
-        assert_eq!(actual[0].role, "incident_card");
-        assert_eq!(actual[1].evidence_id, first);
+        assert_eq!(actual[0].evidence_id, first);
+        assert_eq!(actual[0].role, "repair");
+        assert_eq!(actual[129].evidence_id, last);
         assert_eq!(actual[130].role, "proof");
         assert_eq!(actual[130].evidence_id, first);
         assert_eq!(actual[130].text, None);

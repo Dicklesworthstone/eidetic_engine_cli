@@ -1,11 +1,12 @@
-//! Recheck CASS-derived positive claims before error-recall text is exposed.
+//! Recheck positive claims before error-recall text is exposed.
 //!
 //! Stored helpful links are history, not a permanent proof certificate. Reuse
 //! the current session interpreter for the exact failure/error/target tuple.
-//! Manual feedback is not reclassified; no link, card or source row is changed.
+//! Manual feedback on ordinary notes is not reclassified. Derived cards still
+//! require their own current-source proof, irrespective of link authorship.
 //! The caller owns one read snapshot spanning this gate and final hydration.
-//! Failure owners are batched; each referenced session is interpreted at most
-//! once per batch even when target ordering interleaves many source sessions.
+//! Failure owners and unclassified card checks are each grouped by session;
+//! no link, card or source row is changed by these reads.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -56,7 +57,7 @@ impl<'a> Gate<'a> {
         }
     }
 
-    /// Explicit harmful feedback always wins. Other rejected CASS claims are
+    /// Explicit harmful feedback always wins. Other rejected claims are
     /// withheld, not relabeled harmful or erased from the diagnostic history.
     pub(in crate::core::error_diagnosis) fn withheld(
         &mut self,
@@ -123,8 +124,65 @@ impl<'a> Gate<'a> {
         // A malformed twin has already refused this target. Do not spend
         // source I/O on another row that cannot reverse that decision.
         claims.retain(|claim| !withheld.contains(&claim.target));
+        let classified: BTreeSet<_> = claims.iter().map(|claim| claim.target.clone()).collect();
         self.verify_batch(claims, &mut withheld)?;
+
+        // Link authorship determines whether a relationship is an automatic
+        // claim, not whether its target is a machine-derived document. A
+        // manual/unlabeled link, or a supplied report without a stored link,
+        // must not turn an unproved card into an ordinary repair note.
+        // Already classified targets either passed the full interpreter or
+        // were withheld above. Do not hydrate and recheck that normal path.
+        let unchecked: Vec<_> = selected
+            .into_iter()
+            .filter(|target| {
+                canonical_evidence(target)
+                    && !withheld.contains(*target)
+                    && !classified.contains(*target)
+            })
+            .collect();
+        self.withhold_unclassified_cards(&unchecked, &mut withheld)?;
         Ok(withheld)
+    }
+
+    /// Inspect only the unclassified evidence subset of this bounded batch.
+    /// CardChecks recognizes both the derived row shape and reserved locators;
+    /// it commits to every field and uses the complete current source proof.
+    /// Ordinary notes are unaffected. The caller's snapshot covers these rows
+    /// and the later body hydration, so a verdict cannot certify another row.
+    fn withhold_unclassified_cards(
+        &self,
+        targets: &[&str],
+        withheld: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let selected: BTreeSet<_> = targets.iter().copied().collect();
+        let rows = self
+            .connection
+            .get_evidence_spans_with_sessions(targets)
+            .map_err(|_| unavailable())?;
+        if rows.len() > selected.len() {
+            return Err(unavailable());
+        }
+        let mut seen = BTreeSet::new();
+        let mut checks = proof::CardChecks::default();
+        for row in rows {
+            let span = &row.span;
+            if !selected.contains(span.id.as_str()) || !seen.insert(span.id.clone()) {
+                return Err(unavailable());
+            }
+            if span.workspace_id == self.workspace {
+                checks.observe(span).map_err(|_| unavailable())?;
+            }
+        }
+        withheld.extend(
+            checks
+                .withheld(self.connection, self.workspace)
+                .map_err(|_| unavailable())?,
+        );
+        Ok(())
     }
 
     /// Resolve at most one batch of exact failure owners without reading their
@@ -255,3 +313,178 @@ fn session_claims(
 #[cfg(test)]
 #[path = "error_recall_revalidate_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod unclassified_card_tests {
+    use super::*;
+    use crate::core::error_diagnosis::{
+        ErrorRepairLinkRecording, error_recall_report, pack_error_recall_query_seed,
+        recalled_repair_evidence, record_error_repair_links,
+    };
+    use crate::core::error_recall::from_rustc;
+    use crate::core::incident_card::proof::tests::{Fixture, TestResult, WS};
+    use crate::db::{CreateEvidenceSpanInput, EvidenceProducerKind};
+
+    #[test]
+    fn unproved_cards_cannot_borrow_manual_or_missing_link_authorship() -> TestResult {
+        for actor in [None, Some("operator-review"), Some("older-importer")] {
+            let fixture = Fixture::new_public(false)?;
+            let card = fixture.old_card()?;
+            assert!(fixture.db.get_search_admitted_evidence_span(&card, WS)?.is_some());
+            let diagnostic = from_rustc(Some("E0308"), "mismatched types");
+            record_error_repair_links(
+                &fixture.db,
+                WS,
+                &diagnostic,
+                &ErrorRepairLinkRecording {
+                    helpful_repairs: vec![card.clone()],
+                    proof_links: vec![fixture.proof.clone()],
+                    created_by: actor.map(str::to_owned),
+                    ..Default::default()
+                },
+            )?;
+            let history = fixture.db.list_error_repair_links(WS, "rustc:E0308")?;
+            let report = error_recall_report(&fixture.db, WS, &diagnostic)?;
+            assert!(report.helpful_repairs.contains(&card));
+            let evidence = recalled_repair_evidence(&fixture.db, WS, &report)?;
+            assert_eq!(evidence.len(), 1);
+            assert_eq!(evidence[0].role, "proof");
+            assert!(evidence[0].text.is_none());
+            let query = pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?;
+            assert!(!query.contains("prior fix:"));
+            assert!(!query.contains(&card));
+            assert_eq!(fixture.db.list_error_repair_links(WS, "rustc:E0308")?, history);
+            assert!(fixture.db.get_evidence_span(&card)?.is_some());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_supplied_report_without_helpful_rows_still_checks_derived_cards() -> TestResult {
+        let fixture = Fixture::new_public(false)?;
+        let card = fixture.old_card()?;
+        let diagnostic = from_rustc(Some("E0308"), "mismatched types");
+        let mut report = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        assert!(report.helpful_repairs.is_empty());
+        report.helpful_repairs.push(card);
+        report.helpful_repairs.push(fixture.repair.clone());
+        let evidence = recalled_repair_evidence(&fixture.db, WS, &report)?;
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].evidence_id, fixture.repair);
+        assert_eq!(evidence[0].role, "repair");
+        Ok(())
+    }
+
+    #[test]
+    fn proved_manual_cards_still_precede_notes_and_harm_still_wins() -> TestResult {
+        let fixture = Fixture::new_public(true)?;
+        let card = fixture.current_card()?;
+        let diagnostic = from_rustc(Some("E0308"), "mismatched types");
+        fixture.db.execute_raw(&format!(
+            "UPDATE error_repair_links SET created_by = 'operator-review' WHERE target_id = '{}'",
+            card.id,
+        ))?;
+        let report = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        let evidence = recalled_repair_evidence(&fixture.db, WS, &report)?;
+        assert_eq!(evidence[0].evidence_id, card.id);
+        assert_eq!(evidence[0].role, "incident_card");
+        assert_eq!(evidence[0].text.as_deref(), Some(card.reader_text().as_ref()));
+        assert!(evidence.iter().any(|item| item.evidence_id == fixture.repair));
+        let query = pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?;
+        assert!(query.contains(&format!("helpful_repair:{}", card.id)));
+        record_error_repair_links(
+            &fixture.db,
+            WS,
+            &diagnostic,
+            &ErrorRepairLinkRecording {
+                harmful_repairs: vec![card.id.clone()],
+                ..Default::default()
+            },
+        )?;
+        let evidence = recalled_repair_evidence(&fixture.db, WS, &report)?;
+        assert!(evidence.iter().all(|item| item.evidence_id != card.id));
+        assert!(evidence.iter().any(|item| item.evidence_id == fixture.repair));
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_manual_cards_refill_the_pack_window_instead_of_hiding_later_repairs()
+    -> TestResult {
+        let fixture = Fixture::new_public(false)?;
+        let old = fixture.old_card()?;
+        let template = fixture.db.get_evidence_span(&old)?.ok_or("old card")?;
+        let mut targets = Vec::new();
+        for number in 1_u128..=40 {
+            let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+            fixture.db.insert_evidence_span(
+                &id,
+                &CreateEvidenceSpanInput {
+                    workspace_id: WS.to_owned(),
+                    session_id: fixture.session.clone(),
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("ee-incident-card:incident_card.v1:{id}"),
+                    span_kind: "summary".to_owned(),
+                    start_line: template.start_line,
+                    end_line: template.end_line,
+                    start_byte: None,
+                    end_byte: None,
+                    role: None,
+                    content_hash: template.content_hash.clone(),
+                    excerpt: template.excerpt.clone(),
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )?;
+            assert!(id < fixture.repair);
+            targets.push(id);
+        }
+        targets.push(fixture.repair.clone());
+        let diagnostic = from_rustc(Some("E0308"), "mismatched types");
+        record_error_repair_links(
+            &fixture.db,
+            WS,
+            &diagnostic,
+            &ErrorRepairLinkRecording {
+                helpful_repairs: targets.clone(),
+                created_by: Some("operator-review".to_owned()),
+                ..Default::default()
+            },
+        )?;
+        let query = pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?;
+        assert!(query.contains(&format!("helpful_repair:{}", fixture.repair)));
+        assert!(query.contains("flushing pending writes"));
+        assert_eq!(query.matches("\nprior fix: ").count(), 1);
+        for id in &targets[..40] {
+            assert!(!query.contains(id));
+        }
+        assert_eq!(error_recall_report(&fixture.db, WS, &diagnostic)?.helpful_repairs.len(), 41);
+        Ok(())
+    }
+
+    #[test]
+    fn a_manual_card_with_changed_current_sources_is_withheld_from_a_cached_report()
+    -> TestResult {
+        let fixture = Fixture::new_public(true)?;
+        let card = fixture.current_card()?;
+        let diagnostic = from_rustc(Some("E0308"), "mismatched types");
+        fixture.db.execute_raw(&format!(
+            "UPDATE error_repair_links SET created_by = NULL WHERE target_id = '{}'",
+            card.id,
+        ))?;
+        let report = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        assert!(recalled_repair_evidence(&fixture.db, WS, &report)?
+            .iter().any(|item| item.evidence_id == card.id));
+        fixture.db.execute_raw(&format!(
+            "UPDATE evidence_spans SET excerpt = 'changed source result' WHERE id = '{}'",
+            fixture.proof,
+        ))?;
+        let history = fixture.db.list_error_repair_links(WS, "rustc:E0308")?;
+        let evidence = recalled_repair_evidence(&fixture.db, WS, &report)?;
+        assert!(evidence.iter().all(|item| item.role == "proof"));
+        assert!(!pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?.contains("prior fix:"));
+        assert_eq!(fixture.db.list_error_repair_links(WS, "rustc:E0308")?, history);
+        assert_eq!(fixture.db.get_evidence_span(&card.id)?.ok_or("preserved card")?.excerpt, card.excerpt);
+        Ok(())
+    }
+}

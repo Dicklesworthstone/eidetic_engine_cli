@@ -919,18 +919,23 @@ mod tests {
             seed.matches("\nprior fix: ").count(),
             PACK_RECALL_EXCERPT_LIMIT
         );
-        let card_position = seed.find("Card repair 6").ok_or("first card missing")?;
-        let next_card_position = seed.find("Card repair 8").ok_or("second card missing")?;
-        let turn_position = seed.find("Unicode repair 1").ok_or("repair turn missing")?;
-        assert!(card_position < next_card_position && next_card_position < turn_position);
+        // These two synthetic summaries have no source episodes. Manual links
+        // cannot make them proved cards; valid-card preference is covered by
+        // the real-source tests in error_recall_revalidate.rs.
+        assert!(!seed.contains("Card repair 6"));
+        assert!(!seed.contains("Card repair 8"));
+        let first_position = seed.find("Unicode repair 1").ok_or("first repair missing")?;
+        let last_position = seed.find("Unicode repair 4").ok_or("fourth repair missing")?;
+        assert!(first_position < last_position);
         assert!(seed.contains("Unicode repair 2"));
-        assert!(!seed.contains("Unicode repair 3"));
+        assert!(seed.contains("Unicode repair 3"));
+        assert!(!seed.contains("Unicode repair 5"));
         assert!(seed.contains('🦀'));
         assert!(
             !seed.contains(&"🦀".repeat(200)),
             "excerpt bytes were not bounded"
         );
-        assert_eq!(seed.matches(" [truncated]").count(), 2);
+        assert_eq!(seed.matches(" [truncated]").count(), 4);
         for forbidden in [
             "UNTRUSTED_LINK_TEXT",
             "UNTRUSTED_HARMFUL_TEXT",
