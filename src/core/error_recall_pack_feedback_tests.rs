@@ -147,7 +147,9 @@ fn selection_skips_a_harmful_prefix_before_the_shared_target_limit() -> TestResu
     let id = |number: u128| EvidenceId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
     let bad: Vec<_> = (1..=128).map(id).collect();
     let good: Vec<_> = (129..=164).map(id).collect();
-    for number in 129..=132 {
+    // Every target expected in the admitted window must have a live source.
+    // Missing-source refill has separate regressions in error_recall_feedback.
+    for number in 129..=164 {
         span(&connection, WS, &session, number, false)?;
     }
     let mut all = bad.clone();
