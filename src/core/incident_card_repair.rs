@@ -81,7 +81,7 @@ pub(super) fn excluded(sentence: &str) -> bool {
     if words.iter().any(|word| {
         matches!(
             word.as_str(),
-            "will" | "would" | "should" | "could" | "might" | "maybe" | "perhaps"
+            "will" | "would" | "should" | "could" | "may" | "might" | "maybe" | "perhaps"
                 | "probably" | "possibly" | "hopefully" | "hypothetically" | "likely"
                 | "unlikely" | "unverified" | "untested" | "unresolved" | "unfixed"
         ) || word.ends_with("'ll")
@@ -100,6 +100,14 @@ pub(super) fn excluded(sentence: &str) -> bool {
         &["potential", "fix"],
         &["suggested", "fix"],
         &["hypothesis"],
+        &["if"],
+        &["unless"],
+        &["assuming"],
+        &["example"],
+        &["quoted"],
+        &["the", "example"],
+        &["the", "docs"],
+        &["the", "documentation"],
         &["try"],
         &["please"],
     ]
@@ -121,6 +129,11 @@ pub(super) fn excluded(sentence: &str) -> bool {
         &["hope", "to"],
         &["expect", "to"],
         &["need", "to", "try"],
+        &["i", "think"],
+        &["i", "suspect"],
+        &["i", "guess"],
+        &["it", "seems"],
+        &["it", "appears"],
         &["not", "sure"],
         &["not", "yet"],
         &["no", "fix"],
@@ -140,7 +153,17 @@ pub(super) fn excluded(sentence: &str) -> bool {
     .any(|expected| phrase(&words, expected)) {
         return true;
     }
+    let mut completed_action = false;
+    let mut original_cause = false;
     for (index, word) in words.iter().enumerate() {
+        if word == "because" {
+            original_cause = completed_action;
+        } else if matches!(word.as_str(), "but" | "however" | "yet") {
+            // A subsequent contradiction is about the claimed repair, not
+            // the original defect inside the causal explanation.
+            original_cause = false;
+        }
+        completed_action |= action(word) && word.ends_with("ed");
         let negated = matches!(word.as_str(), "not" | "never" | "cannot" | "without")
             || word.ends_with("n't");
         if !negated {
@@ -149,14 +172,6 @@ pub(super) fn excluded(sentence: &str) -> bool {
         // A completed edit may explain the original defect: "I added the
         // derive because Widget did not implement Serialize". That is not
         // the same as "I added the derive but it did not work".
-        let original_cause = words[..index]
-            .iter()
-            .rposition(|word| word == "because")
-            .is_some_and(|cause| {
-                words[..cause].iter().any(|word| {
-                    action(word) && (word.ends_with("ed") || word == "fixed")
-                })
-            });
         if original_cause {
             continue;
         }
@@ -254,4 +269,31 @@ mod tests {
             assert_eq!(excluded(text), excluded(text));
         }
     }
+
+    #[test]
+    fn causal_explanations_cannot_hide_a_later_contradiction() {
+        for conjunction in ["but", "however", "yet"] {
+            let text = format!(
+                "I added Serialize because Widget lacked the trait, {conjunction} it did not fix E0277."
+            );
+            assert!(excluded(&text), "{text}");
+        }
+        assert!(!excluded("I added Serialize because Widget did not implement the trait."));
+    }
+
+    #[test]
+    fn hypotheticals_and_reported_examples_do_not_become_performed_edits() {
+        for text in [
+            "Adding Serialize may fix E0277.",
+            "I think I fixed E0277 by changing Widget.",
+            "If I added Serialize the E0277 error disappears.",
+            "The docs say `I fixed E0277 by changing Widget`.",
+        ] {
+            assert!(excluded(text), "{text}");
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "incident_card_repair_store_tests.rs"]
+mod store_tests;
