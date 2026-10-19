@@ -40,7 +40,9 @@ fn diagnostic(line: &str) -> Result<Option<Diagnostic<'_>>, ()> {
     };
     let origin = if let Some(rest) = message.strip_prefix("failed to get ") {
         let (_, rest) = quoted(rest)?;
-        let rest = rest.strip_prefix(" as a dependency of package ").ok_or(())?;
+        let rest = rest
+            .strip_prefix(" as a dependency of package ")
+            .ok_or(())?;
         if !quoted(rest)?.1.is_empty() {
             return Err(());
         }
@@ -85,9 +87,7 @@ fn diagnostic(line: &str) -> Result<Option<Diagnostic<'_>>, ()> {
             return Ok(None);
         };
         let (_, rest) = quoted(&message[prefix.len()..])?;
-        if !rest.is_empty()
-            && !(prefix.starts_with("failed to select a version") && rest == ".")
-        {
+        if !rest.is_empty() && !(prefix.starts_with("failed to select a version") && rest == ".") {
             return Err(());
         }
         Origin::Cargo
@@ -105,8 +105,17 @@ fn diagnostic(line: &str) -> Result<Option<Diagnostic<'_>>, ()> {
 fn progress(line: &str) -> bool {
     line.starts_with(char::is_whitespace)
         && [
-            "Updating ", "Downloading ", "Downloaded ", "Compiling ", "Checking ",
-            "Fresh ", "Running ", "Blocking ", "Locking ", "Adding ", "Removing ",
+            "Updating ",
+            "Downloading ",
+            "Downloaded ",
+            "Compiling ",
+            "Checking ",
+            "Fresh ",
+            "Running ",
+            "Blocking ",
+            "Locking ",
+            "Adding ",
+            "Removing ",
             "Finished ",
         ]
         .iter()
@@ -167,7 +176,10 @@ pub(super) fn decode(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()>
     let mut cause_pending = false;
     let mut keys = BTreeSet::new();
     let mut output = Vec::new();
-    for line in super::bounded(text).lines().filter(|line| !line.trim().is_empty()) {
+    for line in super::bounded(text)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+    {
         if line.starts_with("error[E") {
             return Ok(None);
         }
@@ -175,7 +187,10 @@ pub(super) fn decode(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()>
             return if current.is_some() { Err(()) } else { Ok(None) };
         }
         if cause_pending {
-            let cause = line.strip_prefix("  ").filter(|body| !body.trim().is_empty()).ok_or(())?;
+            let cause = line
+                .strip_prefix("  ")
+                .filter(|body| !body.trim().is_empty())
+                .ok_or(())?;
             let Some(current) = current.as_mut() else {
                 return Err(());
             };
@@ -207,7 +222,9 @@ pub(super) fn decode(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()>
             || line.starts_with('\t')
             || line.starts_with("note: ")
             || line.starts_with("help: ")
-            || current.as_ref().is_some_and(|current| resolver_detail(current.message, line))
+            || current
+                .as_ref()
+                .is_some_and(|current| resolver_detail(current.message, line))
             || compiler_summary(line))
         {
             return Err(());
@@ -234,7 +251,11 @@ mod tests {
     const BUILD: &str = "   Compiling widget v1.0.0 (/private/widget)\nerror: failed to run custom build command for `widget v1.0.0 (/private/widget)`\n\nCaused by:\n  process didn't exit successfully: `/private/widget/build-script-build` (exit status: 101)\n  --- stdout\n  error[E9999]: this is captured output, not a native diagnostic\n  --- stderr\n  missing native header\n";
 
     fn optimistic(text: &str) -> ToolOutput {
-        ToolOutput { text: text.to_owned(), is_error: Some(false), exit_code: Some(0) }
+        ToolOutput {
+            text: text.to_owned(),
+            is_error: Some(false),
+            exit_code: Some(0),
+        }
     }
 
     #[test]
@@ -279,7 +300,9 @@ mod tests {
 
     #[test]
     fn source_paths_versions_and_backticked_arguments_do_not_fragment_templates() {
-        let changed = BUILD.replace("widget", "other").replace("v1.0.0", "v2.3.4")
+        let changed = BUILD
+            .replace("widget", "other")
+            .replace("v1.0.0", "v2.3.4")
             .replace("/private", "/another");
         let first = structured_error_diagnostics(BUILD);
         assert_eq!(first.len(), 1);
@@ -294,8 +317,12 @@ mod tests {
     fn cause_specific_errors_remain_distinct() {
         let root = "error: failed to get `dep` as a dependency of package `app v1.0.0`";
         let network = format!("{root}\nCaused by:\n  download of registry configuration failed");
-        let manifest = format!("{root}\nCaused by:\n  failed to parse manifest at `/private/Cargo.toml`");
-        assert_ne!(structured_error_diagnostics(&network), structured_error_diagnostics(&manifest));
+        let manifest =
+            format!("{root}\nCaused by:\n  failed to parse manifest at `/private/Cargo.toml`");
+        assert_ne!(
+            structured_error_diagnostics(&network),
+            structured_error_diagnostics(&manifest)
+        );
         assert_eq!(structured_error_diagnostics(&network).len(), 1);
     }
 
@@ -305,15 +332,24 @@ mod tests {
         assert_eq!(structured_error_diagnostics(text).len(), 1);
         assert!(optimistic(text).failed());
         assert!(!optimistic(text).succeeded());
-        let wrong_family = text.replace("failed to select a version for the requirement", "failed to read");
+        let wrong_family = text.replace(
+            "failed to select a version for the requirement",
+            "failed to read",
+        );
         assert!(decode(&wrong_family).is_err());
         assert!(decode(&format!("{text}Process exited with code 0")).is_err());
     }
 
     #[test]
     fn malformed_trailers_missing_causes_and_truncated_headers_are_not_salvaged() {
-        for tail in ["Caused by:", "Caused by:\nnot indented", "Process exited with code 0",
-            "{\"success\":true}", "error: failed to download `unfinished", "unrelated command output"] {
+        for tail in [
+            "Caused by:",
+            "Caused by:\nnot indented",
+            "Process exited with code 0",
+            "{\"success\":true}",
+            "error: failed to download `unfinished",
+            "unrelated command output",
+        ] {
             let text = format!("{BUILD}\n{tail}");
             assert!(decode(&text).is_err(), "{tail}");
             assert!(failure_diagnostics(&optimistic(&text)).is_empty());
@@ -324,11 +360,14 @@ mod tests {
 
     #[test]
     fn examples_json_and_unrelated_stdout_cannot_claim_cargo_errors() {
-        for text in [format!("An example:\n{BUILD}"), format!("```text\n{BUILD}\n```"),
+        for text in [
+            format!("An example:\n{BUILD}"),
+            format!("```text\n{BUILD}\n```"),
             serde_json::json!({"example": BUILD}).to_string(),
             "error: an unrelated shell failure".to_owned(),
             "   error: failed to download `dep`".to_owned(),
-            "error: could not compile `app` due to 1 previous error".to_owned()] {
+            "error: could not compile `app` due to 1 previous error".to_owned(),
+        ] {
             assert!(decode(&text).expect("other producer").is_none(), "{text}");
         }
     }
@@ -337,9 +376,14 @@ mod tests {
     fn diagnostic_caps_do_not_skip_validation_of_remaining_errors() {
         let mut text = String::new();
         for name in ["alpha", "beta", "gamma", "delta", "epsilon"] {
-            text.push_str(&format!("error: failed to read `Cargo.toml`\nCaused by:\n  {name} failure\n"));
+            text.push_str(&format!(
+                "error: failed to read `Cargo.toml`\nCaused by:\n  {name} failure\n"
+            ));
         }
-        assert_eq!(structured_error_diagnostics(&text).len(), MAX_DIAGNOSTICS_PER_FAILURE);
+        assert_eq!(
+            structured_error_diagnostics(&text).len(),
+            MAX_DIAGNOSTICS_PER_FAILURE
+        );
         text.push_str("error: failed to read `unterminated\n");
         assert!(decode(&text).is_err());
         assert!(structured_error_diagnostics(&text).is_empty());
@@ -348,7 +392,10 @@ mod tests {
     #[test]
     fn limits_cover_original_utf8_bytes_and_every_root_diagnostic() {
         let short = "error: failed to read `Cargo.toml`\n";
-        assert_eq!(structured_error_diagnostics(&short.repeat(MAX_ERRORS)).len(), 1);
+        assert_eq!(
+            structured_error_diagnostics(&short.repeat(MAX_ERRORS)).len(),
+            1
+        );
         assert!(decode(&short.repeat(MAX_ERRORS + 1)).is_err());
         let oversized = format!("{BUILD}  {}", "界".repeat(MAX_SCANNED_OUTPUT_BYTES));
         assert!(decode(&oversized).is_err());
@@ -361,27 +408,46 @@ mod tests {
         let causes = "\nCaused by:\n  a stable cause".repeat(MAX_CAUSES);
         let text = format!("{root}{causes}");
         let longer = format!("{text}\nCaused by:\n  another valid cause");
-        assert_eq!(structured_error_diagnostics(&text), structured_error_diagnostics(&longer));
+        assert_eq!(
+            structured_error_diagnostics(&text),
+            structured_error_diagnostics(&longer)
+        );
         assert!(decode(&format!("{longer}\nCaused by:")).is_err());
     }
 
     #[test]
     fn status_progress_and_empty_stdout_still_need_independent_completion() {
-        assert!(decode("    Finished dev profile in 1.0s\n").expect("progress").is_none());
+        assert!(
+            decode("    Finished dev profile in 1.0s\n")
+                .expect("progress")
+                .is_none()
+        );
         assert!(!ToolOutput::default().succeeded());
         assert!(optimistic("").succeeded());
-        assert_eq!(failure_diagnostics(&optimistic("error[E0277]: missing trait"))[0]
-            .layered_key().key, "rustc:E0277");
-        assert_eq!(structured_error_diagnostics(&BUILD.replace('\n', "\r\n")),
-            structured_error_diagnostics(BUILD));
+        assert_eq!(
+            failure_diagnostics(&optimistic("error[E0277]: missing trait"))[0]
+                .layered_key()
+                .key,
+            "rustc:E0277"
+        );
+        assert_eq!(
+            structured_error_diagnostics(&BUILD.replace('\n', "\r\n")),
+            structured_error_diagnostics(BUILD)
+        );
     }
 
     #[test]
     fn secret_causes_are_screened_before_fingerprinting() {
         let secret = format!("ghp_{}", "Q".repeat(36));
-        let text = format!("error: failed to read `Cargo.toml`\nCaused by:\n  auth failed api_key={secret}");
+        let text = format!(
+            "error: failed to read `Cargo.toml`\nCaused by:\n  auth failed api_key={secret}"
+        );
         let diagnostics = structured_error_diagnostics(&text);
         assert_eq!(diagnostics.len(), 1);
-        assert!(!format!("{diagnostics:?}").to_ascii_lowercase().contains(&secret.to_ascii_lowercase()));
+        assert!(
+            !format!("{diagnostics:?}")
+                .to_ascii_lowercase()
+                .contains(&secret.to_ascii_lowercase())
+        );
     }
 }

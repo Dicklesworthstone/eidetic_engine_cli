@@ -85,9 +85,9 @@ fn strip_sgr(text: &str) -> Result<Cow<'_, str>, ()> {
             parameter.is_empty()
                 || (parameter.len() <= 3
                     && parameter.bytes().all(|byte| byte.is_ascii_digit())
-                    && parameter.parse::<u8>().is_ok_and(|value| {
-                        matches!(value, 0 | 1 | 7 | 22 | 27 | 30..=37 | 39 | 90..=97)
-                    }))
+                    && parameter.parse::<u8>().is_ok_and(
+                        |value| matches!(value, 0 | 1 | 7 | 22 | 27 | 30..=37 | 39 | 90..=97),
+                    ))
         }) {
             return Err(());
         }
@@ -129,7 +129,11 @@ fn summary(total: usize, files: &Files<'_>) -> String {
 
 fn check_footer<'a>(mut lines: impl Iterator<Item = &'a str>, files: &Files<'_>) -> Result<(), ()> {
     if files.len() <= 1 {
-        return if lines.next().is_none() { Ok(()) } else { Err(()) };
+        return if lines.next().is_none() {
+            Ok(())
+        } else {
+            Err(())
+        };
     }
     if lines.next().map(str::trim_start) != Some("Errors  Files") {
         return Err(());
@@ -144,9 +148,11 @@ fn check_footer<'a>(mut lines: impl Iterator<Item = &'a str>, files: &Files<'_>)
         if !positive_decimal(count, 3)
             || !positive_decimal(row, 10)
             || !seen.insert(file)
-            || !files.get(file).is_some_and(|(expected_count, expected_row)| {
-                count.parse::<usize>() == Ok(*expected_count) && row == *expected_row
-            })
+            || !files
+                .get(file)
+                .is_some_and(|(expected_count, expected_row)| {
+                    count.parse::<usize>() == Ok(*expected_count) && row == *expected_row
+                })
         {
             return Err(());
         }
@@ -250,7 +256,8 @@ mod tests {
 
     #[test]
     fn colored_context_and_plain_output_recall_the_same_native_error() {
-        let plain = "src/widget.ts(7,9): error TS2322: Type 'string' is not assignable to type 'number'.";
+        let plain =
+            "src/widget.ts(7,9): error TS2322: Type 'string' is not assignable to type 'number'.";
         let expected = structured_error_diagnostics(plain);
         assert_eq!(expected.len(), 1);
         for text in [colored(), native("src/widget.ts", 7, 2322)] {

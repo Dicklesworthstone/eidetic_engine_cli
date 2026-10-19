@@ -488,9 +488,7 @@ fn split_sentences(text: &str) -> Vec<String> {
         if fence.is_some() {
             continue;
         }
-        let trimmed = trimmed
-            .trim_start_matches(['-', '*', '#'])
-            .trim_start();
+        let trimmed = trimmed.trim_start_matches(['-', '*', '#']).trim_start();
         let trimmed = strip_numbered_marker(trimmed);
         if trimmed.starts_with('>') {
             continue;
@@ -917,11 +915,15 @@ mod tests {
 
     #[test]
     fn actual_repairs_keep_original_text_and_scoring_order_after_exclusions() {
-        let original = "I renamed `maybe` to `resolved` in src/widget.rs. I will fix another Widget later.";
+        let original =
+            "I renamed `maybe` to `resolved` in src/widget.rs. I will fix another Widget later.";
         let copy = original.to_owned();
         let expected = "I renamed `maybe` to `resolved` in src/widget.rs.";
         let anchors = anchor_terms("E0277 in src/widget.rs");
-        assert_eq!(fix_facet(&[copy.clone()], &anchors, 60), Some(expected.to_owned()));
+        assert_eq!(
+            fix_facet(&[copy.clone()], &anchors, 60),
+            Some(expected.to_owned())
+        );
         assert_eq!(copy, original);
         assert!(explains_a_fix(&copy, Some("E0277 in src/widget.rs")));
     }

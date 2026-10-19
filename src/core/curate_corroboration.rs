@@ -586,12 +586,7 @@ pub(super) fn score_candidates(
     // Tool-only failures can have an admitted fix but no prose failure recap.
     // Read the same bounded source context even when the initial queue is empty.
     let anchor = connection
-        .review_corroboration_sessions(
-            workspace_id,
-            &session.id,
-            &[session.id.as_str()],
-            LIMITS,
-        )
+        .review_corroboration_sessions(workspace_id, &session.id, &[session.id.as_str()], LIMITS)
         .map_err(domain)?;
     if let Some((anchor_session, anchor_spans, anchor_bytes)) = anchor.first()
         && eligible_session(workspace_id, anchor_session, anchor_spans)

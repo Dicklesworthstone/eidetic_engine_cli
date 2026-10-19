@@ -1556,7 +1556,11 @@ fn symptom_line(output: &ToolOutput) -> Option<String> {
     match cargo_text::decode(&output.text) {
         Ok(Some(diagnostics)) => {
             return diagnostics.first().map(|diagnostic| {
-                format!("{}: {}", diagnostic.tool.as_str(), diagnostic.message_template)
+                format!(
+                    "{}: {}",
+                    diagnostic.tool.as_str(),
+                    diagnostic.message_template
+                )
             });
         }
         Err(()) => return None,

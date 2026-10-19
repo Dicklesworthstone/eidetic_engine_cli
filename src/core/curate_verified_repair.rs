@@ -38,19 +38,26 @@ pub(super) fn candidates(
         let Some(diagnostic) = episode_diagnostics(&arc.diagnostics) else {
             continue;
         };
-        let source_ids = resolution.repair_ids.iter().cloned().collect::<BTreeSet<_>>();
-        if source_ids.is_empty() || source_ids.iter().any(|id| {
-            by_id.get(id.as_str()).is_none_or(|span| {
-                !span.is_search_admitted_for_session(workspace_id, session)
-                    || review_learning_text(span).is_none()
+        let source_ids = resolution
+            .repair_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if source_ids.is_empty()
+            || source_ids.iter().any(|id| {
+                by_id.get(id.as_str()).is_none_or(|span| {
+                    !span.is_search_admitted_for_session(workspace_id, session)
+                        || review_learning_text(span).is_none()
+                })
             })
-        }) {
+        {
             continue;
         }
         // Validate every complete source before considering a card. A card can
         // omit a whole qualification, list or code block without an ellipsis;
         // a grammatical last sentence does not make its summary lossless.
-        let Some(repairs) = source_ids.iter()
+        let Some(repairs) = source_ids
+            .iter()
             .map(|id| by_id.get(id.as_str()).copied())
             .collect::<Option<Vec<_>>>()
         else {
@@ -62,12 +69,16 @@ pub(super) fn candidates(
         // Keep existing compact identities only when the summary reproduces
         // the complete source explanation byte-for-byte. Otherwise the durable
         // lesson uses the full-text producer, including all qualifications.
-        let compact = sources.draft(workspace_id, &session.id, &arc).and_then(|card| {
-            card.input.excerpt.lines()
-                .find_map(|line| line.strip_prefix("Fix: "))
-                .filter(|fix| complete_fix(fix))
-                .map(str::to_owned)
-        });
+        let compact = sources
+            .draft(workspace_id, &session.id, &arc)
+            .and_then(|card| {
+                card.input
+                    .excerpt
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Fix: "))
+                    .filter(|fix| complete_fix(fix))
+                    .map(str::to_owned)
+            });
         let producer = if compact.as_deref() == Some(fix.as_str()) {
             PRODUCER
         } else {
@@ -81,7 +92,9 @@ pub(super) fn candidates(
             diagnostic.failure,
         );
         let screen = crate::policy::screen_external_text_for_ingestion(&content);
-        if screen.redacted || screen.instruction_like || screen.content != content
+        if screen.redacted
+            || screen.instruction_like
+            || screen.content != content
             || !matches!(screen.instruction_risk, "none" | "low")
             || content.contains("[REDACTED")
             || !crate::curate::specificity_score(&content).passes_threshold
@@ -94,8 +107,14 @@ pub(super) fn candidates(
         }
         let content_hash = content_hash_for_candidate(&content);
         let candidate_id = deterministic_curate_id(&[
-            workspace_id, &session.id, producer, &arc.attempt_id,
-            &arc.failure_id, &resolution.proof_id, &source_ids.join(","), &content_hash,
+            workspace_id,
+            &session.id,
+            producer,
+            &arc.attempt_id,
+            &arc.failure_id,
+            &resolution.proof_id,
+            &source_ids.join(","),
+            &content_hash,
         ]);
         if !seen.insert(candidate_id.clone()) {
             continue;
@@ -107,7 +126,10 @@ pub(super) fn candidates(
         signature_parts.extend(diagnostic.signature);
         let reason = format!(
             "Verified tool-repair proposal from session {}: failure {} followed by admitted repair turn(s) {} and completed same-context retry {}. Tool output is proof context, not a memory source. This observed repair requires review; it is not a general guarantee.",
-            session.id, arc.failure_id, source_ids.join(", "), resolution.proof_id,
+            session.id,
+            arc.failure_id,
+            source_ids.join(", "),
+            resolution.proof_id,
         );
         proposals.push(ReviewSessionCandidate {
             candidate_id,
@@ -146,7 +168,10 @@ fn episode_diagnostics(diagnostics: &[CanonicalDiagnostic]) -> Option<EpisodeDia
     let ordered: BTreeSet<_> = diagnostics
         .iter()
         .map(|diagnostic| {
-            (diagnostic.layered_key().key, diagnostic.message_template.clone())
+            (
+                diagnostic.layered_key().key,
+                diagnostic.message_template.clone(),
+            )
         })
         .collect();
     let (_, first_message) = ordered.first()?;
@@ -190,16 +215,19 @@ fn complete_explanation(
 ) -> Option<String> {
     let mut ordered = repairs.to_vec();
     ordered.sort_by(|left, right| session_arc_span_order(left, right));
-    let bodies = ordered.iter().map(|span| {
-        if span.span_kind != "message"
-            || span.role.as_deref() != Some("assistant")
-            || !complete_source(span)
-            || !span.is_derivation_admitted_for_session(workspace_id, session)
-        {
-            return None;
-        }
-        review_learning_text(span)
-    }).collect::<Option<Vec<_>>>()?;
+    let bodies = ordered
+        .iter()
+        .map(|span| {
+            if span.span_kind != "message"
+                || span.role.as_deref() != Some("assistant")
+                || !complete_source(span)
+                || !span.is_derivation_admitted_for_session(workspace_id, session)
+            {
+                return None;
+            }
+            review_learning_text(span)
+        })
+        .collect::<Option<Vec<_>>>()?;
     let texts: Vec<_> = bodies.iter().map(|body| body.as_ref()).collect();
     join_complete_explanations(&texts)
 }
@@ -226,8 +254,11 @@ fn join_complete_explanations(texts: &[&str]) -> Option<String> {
 
 fn complete_fix(fix: &str) -> bool {
     let fix = fix.trim();
-    !fix.is_empty() && !fix.ends_with("...") && !fix.ends_with('…')
-        && !fix.contains("[truncated]") && !fix.contains("[TRUNCATED]")
+    !fix.is_empty()
+        && !fix.ends_with("...")
+        && !fix.ends_with('…')
+        && !fix.contains("[truncated]")
+        && !fix.contains("[TRUNCATED]")
 }
 
 #[cfg(test)]
@@ -241,7 +272,10 @@ mod tests {
         let projected = episode_diagnostics(std::slice::from_ref(&diagnostic)).expect("diagnostic");
         assert_eq!(projected.classes, "rustc:E0277");
         assert_eq!(projected.failure, diagnostic.message_template);
-        assert_eq!(projected.signature, [diagnostic.layered_key().key, diagnostic.message_template]);
+        assert_eq!(
+            projected.signature,
+            [diagnostic.layered_key().key, diagnostic.message_template]
+        );
         assert!(episode_diagnostics(&[]).is_none());
     }
 
@@ -265,8 +299,14 @@ mod tests {
     fn distinct_templates_are_not_erased_by_a_shared_code_or_tool() {
         use crate::core::error_recall::{from_cargo, from_rustc};
         for diagnostics in [
-            vec![from_rustc(Some("E0277"), "missing trait"), from_rustc(Some("E0277"), "thread safety bound")],
-            vec![from_cargo(None, "failed native header lookup"), from_cargo(None, "failed dependency resolution")],
+            vec![
+                from_rustc(Some("E0277"), "missing trait"),
+                from_rustc(Some("E0277"), "thread safety bound"),
+            ],
+            vec![
+                from_cargo(None, "failed native header lookup"),
+                from_cargo(None, "failed dependency resolution"),
+            ],
         ] {
             let projected = episode_diagnostics(&diagnostics).expect("distinct diagnostics");
             assert_eq!(projected.failure.lines().count(), 2);
@@ -282,16 +322,39 @@ mod tests {
     fn verified_tool_episode_proposes_admitted_repairs_without_persisting_cards() -> TestResult {
         let fixture = Fixture::new_public(true)?;
         let session = fixture.db.get_session(&fixture.session)?.ok_or("session")?;
-        let spans = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let spans = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
         let proposed = candidates(WS, &session, &spans);
         assert_eq!(proposed.len(), 1);
         assert_eq!(proposed[0].source_ids, vec![fixture.repair.clone()]);
-        assert!(proposed[0].proposed_content.contains("Observed repair for rustc:E0308"));
-        assert!(proposed[0].proposed_content.contains("flushing pending writes"));
+        assert!(
+            proposed[0]
+                .proposed_content
+                .contains("Observed repair for rustc:E0308")
+        );
+        assert!(
+            proposed[0]
+                .proposed_content
+                .contains("flushing pending writes")
+        );
         assert_eq!(proposed[0].confidence, 0.0);
-        assert_eq!(candidates(WS, &session, &spans)[0].candidate_id, proposed[0].candidate_id);
-        assert_eq!(fixture.db.list_evidence_spans_for_session(&fixture.session)?, spans);
-        assert!(fixture.db.list_curation_candidates(WS, None, None, None)?.is_empty());
+        assert_eq!(
+            candidates(WS, &session, &spans)[0].candidate_id,
+            proposed[0].candidate_id
+        );
+        assert_eq!(
+            fixture
+                .db
+                .list_evidence_spans_for_session(&fixture.session)?,
+            spans
+        );
+        assert!(
+            fixture
+                .db
+                .list_curation_candidates(WS, None, None, None)?
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -299,7 +362,9 @@ mod tests {
     fn no_completed_retry_means_no_verified_repair_proposal() -> TestResult {
         let fixture = Fixture::new_public(false)?;
         let session = fixture.db.get_session(&fixture.session)?.ok_or("session")?;
-        let spans = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let spans = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
         assert!(candidates(WS, &session, &spans).is_empty());
         assert!(candidates("foreign-workspace", &session, &spans).is_empty());
         assert!(candidates(WS, &session, &[]).is_empty());
@@ -314,25 +379,45 @@ mod tests {
         score_candidates(&fixture.db, WS, &session, &mut proposed, 0.6, 10)?;
         assert_eq!(proposed.len(), 1);
         assert_eq!(proposed[0].confidence, 0.6);
-        assert!(proposed[0].corroboration.as_ref().is_some_and(ReviewCorroboration::recorded));
+        assert!(
+            proposed[0]
+                .corroboration
+                .as_ref()
+                .is_some_and(ReviewCorroboration::recorded)
+        );
         validate_draft(&fixture.db, WS, &proposed[0]).map_err(|error| error.message)?;
-        assert!(fixture.db.list_curation_candidates(WS, None, None, None)?.is_empty());
+        assert!(
+            fixture
+                .db
+                .list_curation_candidates(WS, None, None, None)?
+                .is_empty()
+        );
         Ok(())
     }
 
     #[test]
     fn incomplete_card_sentences_are_not_promoted_to_durable_lessons() {
-        for text in ["", " ", "Fixed Widget...", "Fixed Widget…", "Fixed [truncated]", "Fixed [TRUNCATED]"] {
+        for text in [
+            "",
+            " ",
+            "Fixed Widget...",
+            "Fixed Widget…",
+            "Fixed [truncated]",
+            "Fixed [TRUNCATED]",
+        ] {
             assert!(!complete_fix(text), "{text}");
         }
-        assert!(complete_fix("I fixed Widget only when its input is already validated."));
+        assert!(complete_fix(
+            "I fixed Widget only when its input is already validated."
+        ));
         assert!(complete_fix("Changed the literal `...` in src/widget.rs."));
     }
 
     #[test]
     fn complete_explanations_preserve_paragraphs_code_and_late_qualifications() {
         let first = "I fixed the cache by changing the key type.\n\n```rust\nlet key = 1;\n```";
-        let second = "This repair applies only to validated inputs; it does not enable unchecked decoding.";
+        let second =
+            "This repair applies only to validated inputs; it does not enable unchecked decoding.";
         assert_eq!(
             join_complete_explanations(&[first, second]),
             Some(format!("{first}\n\n{second}")),
@@ -348,7 +433,9 @@ mod tests {
         assert!(join_complete_explanations(&[&format!("{exact}x")]).is_none());
         let first = "x".repeat(MAX_COMPLETE_REPAIR_BYTES - 3);
         assert_eq!(
-            join_complete_explanations(&[&first, "y"]).as_ref().map(String::len),
+            join_complete_explanations(&[&first, "y"])
+                .as_ref()
+                .map(String::len),
             Some(MAX_COMPLETE_REPAIR_BYTES),
         );
         assert!(join_complete_explanations(&[&first, "yz"]).is_none());
@@ -358,14 +445,21 @@ mod tests {
     fn compact_proposals_keep_their_existing_identity_and_source_package() -> TestResult {
         let fixture = Fixture::new_public(true)?;
         let session = fixture.db.get_session(&fixture.session)?.ok_or("session")?;
-        let spans = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let spans = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
         let arcs = session_failure_arcs(WS, &session, &spans);
         let arc = arcs.first().ok_or("arc")?;
         let resolution = arc.resolution.as_ref().ok_or("resolution")?;
         let card = IncidentCardSources::new(&spans)
-            .draft(WS, &session.id, arc).ok_or("compact card")?;
-        let fix = card.input.excerpt.lines()
-            .find_map(|line| line.strip_prefix("Fix: ")).ok_or("fix")?;
+            .draft(WS, &session.id, arc)
+            .ok_or("compact card")?;
+        let fix = card
+            .input
+            .excerpt
+            .lines()
+            .find_map(|line| line.strip_prefix("Fix: "))
+            .ok_or("fix")?;
         let diagnostic = arc.diagnostics.first().ok_or("diagnostic")?;
         let class = error_class_label(&diagnostic.layered_key().key);
         let command = arc.family.to_string();
@@ -373,11 +467,22 @@ mod tests {
             "Observed repair for {class} during `{command}`:\nFailure: {}\nRepair: {fix}\nVerification: the same command and execution context succeeded afterwards.",
             diagnostic.message_template,
         );
-        let source_ids: Vec<_> = resolution.repair_ids.iter().cloned()
-            .collect::<BTreeSet<_>>().into_iter().collect();
+        let source_ids: Vec<_> = resolution
+            .repair_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let id = deterministic_curate_id(&[
-            WS, &session.id, PRODUCER, &arc.attempt_id, &arc.failure_id,
-            &resolution.proof_id, &source_ids.join(","), &content_hash_for_candidate(&expected),
+            WS,
+            &session.id,
+            PRODUCER,
+            &arc.attempt_id,
+            &arc.failure_id,
+            &resolution.proof_id,
+            &source_ids.join(","),
+            &content_hash_for_candidate(&expected),
         ]);
         let proposed = candidates(WS, &session, &spans);
         assert_eq!(proposed.len(), 1);
@@ -413,88 +518,174 @@ mod workflow_tests {
             let temp = tempfile::tempdir()?;
             let path = temp.path().canonicalize()?;
             let report = init_workspace(&InitOptions {
-                workspace_path: path.clone(), dry_run: false, repair_plan: false,
-                force: false, allow_symlink: false, skip_boilerplate: true,
+                workspace_path: path.clone(),
+                dry_run: false,
+                repair_plan: false,
+                force: false,
+                allow_symlink: false,
+                skip_boilerplate: true,
             });
             assert!(report.status.is_success(), "{report:?}");
             let db = DbConnection::open_file(&report.database_path)?;
-            let workspace = db.get_workspace_by_path(&path.to_string_lossy())?.ok_or("workspace")?;
-            Ok(Self { _temp: temp, path, database: report.database_path, id: workspace.id, db })
+            let workspace = db
+                .get_workspace_by_path(&path.to_string_lossy())?
+                .ok_or("workspace")?;
+            Ok(Self {
+                _temp: temp,
+                path,
+                database: report.database_path,
+                id: workspace.id,
+                db,
+            })
         }
 
-        fn episode(&self, number: u128, context: &str, retry_command: &str, passed: bool)
-        -> TestResult<(String, String, String)> {
+        fn episode(
+            &self,
+            number: u128,
+            context: &str,
+            retry_command: &str,
+            passed: bool,
+        ) -> TestResult<(String, String, String)> {
             self.episode_with_repair(number, context, retry_command, passed, FIX)
         }
 
         fn episode_with_repair(
-            &self, number: u128, context: &str, retry_command: &str, passed: bool, repair: &str,
+            &self,
+            number: u128,
+            context: &str,
+            retry_command: &str,
+            passed: bool,
+            repair: &str,
         ) -> TestResult<(String, String, String)> {
             self.episode_with_output(number, context, retry_command, passed, repair, FAILURE)
         }
 
         fn episode_with_output(
-            &self, number: u128, context: &str, retry_command: &str,
-            passed: bool, repair: &str, failure: &str,
+            &self,
+            number: u128,
+            context: &str,
+            retry_command: &str,
+            passed: bool,
+            repair: &str,
+            failure: &str,
         ) -> TestResult<(String, String, String)> {
-            let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
-            self.db.insert_session(&session, &CreateSessionInput {
-                workspace_id: self.id.clone(),
-                cass_session_id: format!("/sessions/verified-learning-{number}.jsonl"),
-                source_path: Some(format!("/sessions/verified-learning-{number}.jsonl")),
-                agent_name: Some("claude_code".to_owned()), model: None,
-                started_at: None, ended_at: None, message_count: 6, token_count: None,
-                content_hash: format!("blake3:{}", blake3::hash(context.as_bytes()).to_hex()),
-                metadata_json: None,
-            })?;
+            let session =
+                crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+            self.db.insert_session(
+                &session,
+                &CreateSessionInput {
+                    workspace_id: self.id.clone(),
+                    cass_session_id: format!("/sessions/verified-learning-{number}.jsonl"),
+                    source_path: Some(format!("/sessions/verified-learning-{number}.jsonl")),
+                    agent_name: Some("claude_code".to_owned()),
+                    model: None,
+                    started_at: None,
+                    ended_at: None,
+                    message_count: 6,
+                    token_count: None,
+                    content_hash: format!("blake3:{}", blake3::hash(context.as_bytes()).to_hex()),
+                    metadata_json: None,
+                },
+            )?;
             // Call IDs are identical across independent episodes. Changing only
             // local IDs or upstream paths must not manufacture independence.
             let rows = [
                 ("message", "user", json!({"type":"text","text":context})),
-                ("tool_call", "assistant", json!({"type":"tool_use","id":"fail","name":"Bash","input":{"command":COMMAND}})),
-                ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"fail","content":failure,"is_error":true})),
+                (
+                    "tool_call",
+                    "assistant",
+                    json!({"type":"tool_use","id":"fail","name":"Bash","input":{"command":COMMAND}}),
+                ),
+                (
+                    "tool_result",
+                    "user",
+                    json!({"type":"tool_result","tool_use_id":"fail","content":failure,"is_error":true}),
+                ),
                 ("message", "assistant", json!({"type":"text","text":repair})),
-                ("tool_call", "assistant", json!({"type":"tool_use","id":"retry","name":"Bash","input":{"command":retry_command}})),
-                ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"retry","content":if passed {""} else {failure},"is_error":!passed})),
+                (
+                    "tool_call",
+                    "assistant",
+                    json!({"type":"tool_use","id":"retry","name":"Bash","input":{"command":retry_command}}),
+                ),
+                (
+                    "tool_result",
+                    "user",
+                    json!({"type":"tool_result","tool_use_id":"retry","content":if passed {""} else {failure},"is_error":!passed}),
+                ),
             ];
             let mut ids = Vec::new();
             for (index, (kind, role, block)) in rows.into_iter().enumerate() {
                 let line = u32::try_from(index + 1)?;
-                let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(number * 100 + u128::from(line))).to_string();
-                let excerpt = json!({"type":role,"message":{"role":role,"content":[block]}}).to_string();
-                self.db.insert_evidence_span(&id, &CreateEvidenceSpanInput {
-                    workspace_id: self.id.clone(), session_id: session.clone(), memory_id: None,
-                    producer_kind: EvidenceProducerKind::CassImport,
-                    cass_span_id: format!("{session}:{line}"), span_kind: kind.to_owned(),
-                    start_line: line, end_line: line, start_byte: None, end_byte: None,
-                    role: Some(role.to_owned()),
-                    content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
-                    excerpt, metadata_json: None, inherited_redaction_classes: Vec::new(),
-                })?;
+                let id =
+                    EvidenceId::from_uuid(uuid::Uuid::from_u128(number * 100 + u128::from(line)))
+                        .to_string();
+                let excerpt =
+                    json!({"type":role,"message":{"role":role,"content":[block]}}).to_string();
+                self.db.insert_evidence_span(
+                    &id,
+                    &CreateEvidenceSpanInput {
+                        workspace_id: self.id.clone(),
+                        session_id: session.clone(),
+                        memory_id: None,
+                        producer_kind: EvidenceProducerKind::CassImport,
+                        cass_span_id: format!("{session}:{line}"),
+                        span_kind: kind.to_owned(),
+                        start_line: line,
+                        end_line: line,
+                        start_byte: None,
+                        end_byte: None,
+                        role: Some(role.to_owned()),
+                        content_hash: format!(
+                            "blake3:{}",
+                            blake3::hash(excerpt.as_bytes()).to_hex()
+                        ),
+                        excerpt,
+                        metadata_json: None,
+                        inherited_redaction_classes: Vec::new(),
+                    },
+                )?;
                 ids.push(id);
             }
             Ok((session, ids[3].clone(), ids[5].clone()))
         }
 
-        fn review(&self, session: &str, floor: f32, persist: bool) -> TestResult<ReviewSessionReport> {
+        fn review(
+            &self,
+            session: &str,
+            floor: f32,
+            persist: bool,
+        ) -> TestResult<ReviewSessionReport> {
             review_session_proposals(&ReviewSessionOptions {
-                workspace_path: &self.path, database_path: Some(&self.database),
-                session_id: Some(session), propose: persist, dry_run: !persist,
-                min_confidence: floor, limit: 100,
-            }).map_err(|error| error.message().into())
+                workspace_path: &self.path,
+                database_path: Some(&self.database),
+                session_id: Some(session),
+                propose: persist,
+                dry_run: !persist,
+                min_confidence: floor,
+                limit: 100,
+            })
+            .map_err(|error| error.message().into())
         }
     }
 
     fn native(report: &ReviewSessionReport) -> Vec<&ReviewSessionCandidate> {
-        report.candidates.iter().filter(|candidate| {
-            candidate.proposed_content.starts_with("Observed repair for ")
-        }).collect()
+        report
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .proposed_content
+                    .starts_with("Observed repair for ")
+            })
+            .collect()
     }
 
     #[test]
-    fn public_review_persists_reproducible_source_packages_without_creating_memories() -> TestResult {
+    fn public_review_persists_reproducible_source_packages_without_creating_memories() -> TestResult
+    {
         let workspace = Workspace::new()?;
-        let (session, repair, proof) = workspace.episode(90_001, "Work item alpha.", COMMAND, true)?;
+        let (session, repair, proof) =
+            workspace.episode(90_001, "Work item alpha.", COMMAND, true)?;
         let sources = workspace.db.list_evidence_spans_for_session(&session)?;
         let preview = workspace.review(&session, 0.6, false)?;
         assert!(!preview.durable_mutation);
@@ -505,18 +696,42 @@ mod workflow_tests {
         let proposed = native(&written);
         assert_eq!(proposed.len(), 1);
         assert_eq!(proposed[0].candidate_id, native(&preview)[0].candidate_id);
-        let stored = workspace.db.get_curation_candidate(&workspace.id, &proposed[0].candidate_id)?.ok_or("stored proposal")?;
+        let stored = workspace
+            .db
+            .get_curation_candidate(&workspace.id, &proposed[0].candidate_id)?
+            .ok_or("stored proposal")?;
         validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
-        let package: serde_json::Value = serde_json::from_str(stored.derivation_metadata_json.as_deref().ok_or("package")?)?;
-        let support = package.pointer("/producer/producerPayload/corroboration/sessions/0").ok_or("support")?;
+        let package: serde_json::Value = serde_json::from_str(
+            stored
+                .derivation_metadata_json
+                .as_deref()
+                .ok_or("package")?,
+        )?;
+        let support = package
+            .pointer("/producer/producerPayload/corroboration/sessions/0")
+            .ok_or("support")?;
         assert_eq!(support["sources"].as_array().ok_or("sources")?.len(), 1);
         assert_eq!(support["sources"][0]["evidenceSpanId"], repair);
-        assert!(support["contextSources"].as_array().ok_or("context")?.iter().any(|source| source["evidenceSpanId"] == proof));
+        assert!(
+            support["contextSources"]
+                .as_array()
+                .ok_or("context")?
+                .iter()
+                .any(|source| source["evidenceSpanId"] == proof)
+        );
         let again = workspace.review(&session, 0.6, true)?;
         assert!(!again.durable_mutation);
         assert_eq!(native(&again)[0].candidate_id, proposed[0].candidate_id);
-        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
-        assert_eq!(workspace.db.list_evidence_spans_for_session(&session)?, sources);
+        assert!(
+            workspace
+                .db
+                .list_memories(&workspace.id, None, true)?
+                .is_empty()
+        );
+        assert_eq!(
+            workspace.db.list_evidence_spans_for_session(&session)?,
+            sources
+        );
         Ok(())
     }
 
@@ -539,7 +754,8 @@ mod workflow_tests {
         let three = workspace.review(&anchor, 0.8, false)?;
         assert_eq!(native(&three).len(), 1);
         assert_eq!(native(&three)[0].confidence, 0.8);
-        validate_draft(&workspace.db, &workspace.id, native(&three)[0]).map_err(|error| error.message)?;
+        validate_draft(&workspace.db, &workspace.id, native(&three)[0])
+            .map_err(|error| error.message)?;
         Ok(())
     }
 
@@ -549,24 +765,42 @@ mod workflow_tests {
         let (session, _, proof) = workspace.episode(92_001, "Work item alpha.", COMMAND, true)?;
         let report = workspace.review(&session, 0.6, true)?;
         let id = &native(&report)[0].candidate_id;
-        let stored = workspace.db.get_curation_candidate(&workspace.id, id)?.ok_or("stored")?;
+        let stored = workspace
+            .db
+            .get_curation_candidate(&workspace.id, id)?
+            .ok_or("stored")?;
         validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
         let row = workspace.db.get_evidence_span(&proof)?.ok_or("proof")?;
         let mut body: serde_json::Value = serde_json::from_str(&row.excerpt)?;
         body["message"]["content"][0]["is_error"] = json!(true);
         body["message"]["content"][0]["content"] = json!(FAILURE);
         let revised = body.to_string().replace('\'', "''");
-        workspace.db.execute_raw(&format!("UPDATE evidence_spans SET excerpt = '{revised}' WHERE id = '{proof}'"))?;
+        workspace.db.execute_raw(&format!(
+            "UPDATE evidence_spans SET excerpt = '{revised}' WHERE id = '{proof}'"
+        ))?;
         assert!(validate_recorded(&workspace.db, &stored).is_err());
-        assert_eq!(workspace.db.get_curation_candidate(&workspace.id, id)?.ok_or("history")?.derivation_metadata_json, stored.derivation_metadata_json);
-        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
+        assert_eq!(
+            workspace
+                .db
+                .get_curation_candidate(&workspace.id, id)?
+                .ok_or("history")?
+                .derivation_metadata_json,
+            stored.derivation_metadata_json
+        );
+        assert!(
+            workspace
+                .db
+                .list_memories(&workspace.id, None, true)?
+                .is_empty()
+        );
         Ok(())
     }
 
     #[test]
     fn public_review_does_not_certify_a_different_retry_target() -> TestResult {
         let workspace = Workspace::new()?;
-        let (session, _, _) = workspace.episode(93_001, "Work item alpha.", "cargo check --lib", true)?;
+        let (session, _, _) =
+            workspace.episode(93_001, "Work item alpha.", "cargo check --lib", true)?;
         assert!(native(&workspace.review(&session, 0.0, false)?).is_empty());
         Ok(())
     }
@@ -577,24 +811,51 @@ mod workflow_tests {
         let output = format!("{FAILURE}error[E0308]: mismatched types\n --> src/widget.rs:8:2\n");
         let repair = "I fixed E0277 and E0308 by deriving Serialize for Widget and correcting its declared type in src/widget.rs.";
         let (session, repair_id, _) = workspace.episode_with_output(
-            96_001, "Multi-error work item.", COMMAND, true, repair, &output,
+            96_001,
+            "Multi-error work item.",
+            COMMAND,
+            true,
+            repair,
+            &output,
         )?;
         let sources = workspace.db.list_evidence_spans_for_session(&session)?;
         let preview = workspace.review(&session, 0.6, false)?;
         let candidates = native(&preview);
         assert_eq!(candidates.len(), 1);
         let proposal = candidates[0];
-        assert!(proposal.proposed_content.starts_with("Observed repair for rustc:E0277, rustc:E0308"));
-        assert!(proposal.proposed_content.contains("rustc:E0308: mismatched types"));
+        assert!(
+            proposal
+                .proposed_content
+                .starts_with("Observed repair for rustc:E0277, rustc:E0308")
+        );
+        assert!(
+            proposal
+                .proposed_content
+                .contains("rustc:E0308: mismatched types")
+        );
         assert_eq!(proposal.source_ids, vec![repair_id]);
         let written = workspace.review(&session, 0.6, true)?;
         assert_eq!(native(&written)[0].candidate_id, proposal.candidate_id);
-        let stored = workspace.db.get_curation_candidate(&workspace.id, &proposal.candidate_id)?.ok_or("stored")?;
+        let stored = workspace
+            .db
+            .get_curation_candidate(&workspace.id, &proposal.candidate_id)?
+            .ok_or("stored")?;
         validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
-        assert_eq!(stored.proposed_content.as_deref(), Some(proposal.proposed_content.as_str()));
+        assert_eq!(
+            stored.proposed_content.as_deref(),
+            Some(proposal.proposed_content.as_str())
+        );
         assert!(!workspace.review(&session, 0.6, true)?.durable_mutation);
-        assert_eq!(workspace.db.list_evidence_spans_for_session(&session)?, sources);
-        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
+        assert_eq!(
+            workspace.db.list_evidence_spans_for_session(&session)?,
+            sources
+        );
+        assert!(
+            workspace
+                .db
+                .list_memories(&workspace.id, None, true)?
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -604,16 +865,27 @@ mod workflow_tests {
         let second = "error[E0308]: mismatched types\n --> src/widget.rs:8:2\n";
         let repair = "I fixed E0277 and E0308 by deriving Serialize for Widget and correcting its declared type in src/widget.rs.";
         let (anchor, _, _) = workspace.episode_with_output(
-            97_001, "Work item alpha.", COMMAND, true, repair, &format!("{FAILURE}{second}"),
+            97_001,
+            "Work item alpha.",
+            COMMAND,
+            true,
+            repair,
+            &format!("{FAILURE}{second}"),
         )?;
         workspace.episode_with_output(
-            97_002, "Work item beta.", COMMAND, true, repair, &format!("{second}{FAILURE}"),
+            97_002,
+            "Work item beta.",
+            COMMAND,
+            true,
+            repair,
+            &format!("{second}{FAILURE}"),
         )?;
         let report = workspace.review(&anchor, 0.7, false)?;
         let candidates = native(&report);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].confidence, 0.7);
-        validate_draft(&workspace.db, &workspace.id, candidates[0]).map_err(|error| error.message)?;
+        validate_draft(&workspace.db, &workspace.id, candidates[0])
+            .map_err(|error| error.message)?;
         assert!(native(&workspace.review(&anchor, 0.8, false)?).is_empty());
         Ok(())
     }
@@ -629,21 +901,28 @@ mod workflow_tests {
     fn a_verified_repair_larger_than_a_card_is_a_complete_reviewable_lesson() -> TestResult {
         let workspace = Workspace::new()?;
         let text = long_repair();
-        let (session_id, repair, _) = workspace.episode_with_repair(
-            94_001, "Work item alpha.", COMMAND, true, &text,
-        )?;
+        let (session_id, repair, _) =
+            workspace.episode_with_repair(94_001, "Work item alpha.", COMMAND, true, &text)?;
         let spans = workspace.db.list_evidence_spans_for_session(&session_id)?;
         let session = workspace.db.get_session(&session_id)?.ok_or("session")?;
         let arcs = session_failure_arcs(&workspace.id, &session, &spans);
         let arc = arcs.first().ok_or("native failure arc")?;
-        assert!(arc.resolution.as_ref().is_some_and(|resolution| {
-            resolution.repair_ids.contains(&repair)
-        }));
+        assert!(
+            arc.resolution
+                .as_ref()
+                .is_some_and(|resolution| { resolution.repair_ids.contains(&repair) })
+        );
         let compact = IncidentCardSources::new(&spans).draft(&workspace.id, &session.id, arc);
-        assert!(compact.as_ref().is_none_or(|card| {
-            card.input.excerpt.lines().find_map(|line| line.strip_prefix("Fix: "))
-                .is_none_or(|fix| !complete_fix(fix))
-        }), "the fixture must miss the former compact-only path");
+        assert!(
+            compact.as_ref().is_none_or(|card| {
+                card.input
+                    .excerpt
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Fix: "))
+                    .is_none_or(|fix| !complete_fix(fix))
+            }),
+            "the fixture must miss the former compact-only path"
+        );
         let preview = workspace.review(&session.id, 0.6, false)?;
         let proposed = native(&preview);
         assert_eq!(proposed.len(), 1);
@@ -654,12 +933,28 @@ mod workflow_tests {
         let written = workspace.review(&session.id, 0.6, true)?;
         let id = &native(&written)[0].candidate_id;
         assert_eq!(*id, proposed[0].candidate_id);
-        let stored = workspace.db.get_curation_candidate(&workspace.id, id)?.ok_or("stored")?;
+        let stored = workspace
+            .db
+            .get_curation_candidate(&workspace.id, id)?
+            .ok_or("stored")?;
         validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
-        assert!(stored.proposed_content.as_ref().is_some_and(|content| content.contains(&text)));
+        assert!(
+            stored
+                .proposed_content
+                .as_ref()
+                .is_some_and(|content| content.contains(&text))
+        );
         assert!(!workspace.review(&session.id, 0.6, true)?.durable_mutation);
-        assert_eq!(workspace.db.list_evidence_spans_for_session(&session.id)?, spans);
-        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
+        assert_eq!(
+            workspace.db.list_evidence_spans_for_session(&session.id)?,
+            spans
+        );
+        assert!(
+            workspace
+                .db
+                .list_memories(&workspace.id, None, true)?
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -671,51 +966,96 @@ mod workflow_tests {
             (95_001, "cargo check --lib", true, long.clone()),
             (95_002, COMMAND, false, long.clone()),
             (95_003, COMMAND, true, format!("{long} [TRUNCATED]")),
-            (95_004, COMMAND, true, format!("{long}{}", " x".repeat(MAX_COMPLETE_REPAIR_BYTES))),
+            (
+                95_004,
+                COMMAND,
+                true,
+                format!("{long}{}", " x".repeat(MAX_COMPLETE_REPAIR_BYTES)),
+            ),
         ] {
             let (session, _, _) = workspace.episode_with_repair(
-                number, "Work item alpha.", command, passed, &text,
+                number,
+                "Work item alpha.",
+                command,
+                passed,
+                &text,
             )?;
-            assert!(native(&workspace.review(&session, 0.6, false)?).is_empty(), "{number}");
+            assert!(
+                native(&workspace.review(&session, 0.6, false)?).is_empty(),
+                "{number}"
+            );
         }
         Ok(())
     }
 
     #[test]
-    fn short_card_cannot_erase_a_separate_scope_qualification_from_a_durable_lesson()
-    -> TestResult {
+    fn short_card_cannot_erase_a_separate_scope_qualification_from_a_durable_lesson() -> TestResult
+    {
         let workspace = Workspace::new()?;
         let restriction = "This applies only to validated records.";
         let text = format!("{FIX}\n\n{restriction}");
         let (session_id, repair_id, _) = workspace.episode_with_repair(
-            98_001, "Qualified repair work item.", COMMAND, true, &text,
+            98_001,
+            "Qualified repair work item.",
+            COMMAND,
+            true,
+            &text,
         )?;
         let session = workspace.db.get_session(&session_id)?.ok_or("session")?;
         let before = workspace.db.list_evidence_spans_for_session(&session_id)?;
         let arcs = session_failure_arcs(&workspace.id, &session, &before);
         let arc = arcs.first().ok_or("resolved failure")?;
         let card = IncidentCardSources::new(&before)
-            .draft(&workspace.id, &session.id, arc).ok_or("compact control")?;
-        let compact_fix = card.input.excerpt.lines()
-            .find_map(|line| line.strip_prefix("Fix: ")).ok_or("compact fix")?;
-        assert!(complete_fix(compact_fix), "the old truncation check accepts this card");
-        assert!(!compact_fix.contains(restriction), "the fixture must lose its qualifier in a card");
+            .draft(&workspace.id, &session.id, arc)
+            .ok_or("compact control")?;
+        let compact_fix = card
+            .input
+            .excerpt
+            .lines()
+            .find_map(|line| line.strip_prefix("Fix: "))
+            .ok_or("compact fix")?;
+        assert!(
+            complete_fix(compact_fix),
+            "the old truncation check accepts this card"
+        );
+        assert!(
+            !compact_fix.contains(restriction),
+            "the fixture must lose its qualifier in a card"
+        );
 
         let preview = workspace.review(&session.id, 0.6, false)?;
         let proposed = native(&preview);
         assert_eq!(proposed.len(), 1);
-        assert!(proposed[0].proposed_content.contains(&format!("Repair: {text}\nVerification:")));
+        assert!(
+            proposed[0]
+                .proposed_content
+                .contains(&format!("Repair: {text}\nVerification:"))
+        );
         assert_eq!(proposed[0].source_ids, vec![repair_id]);
         validate_draft(&workspace.db, &workspace.id, proposed[0]).map_err(|error| error.message)?;
         let written = workspace.review(&session.id, 0.6, true)?;
         let id = &native(&written)[0].candidate_id;
         assert_eq!(*id, proposed[0].candidate_id);
-        let stored = workspace.db.get_curation_candidate(&workspace.id, id)?.ok_or("stored")?;
-        assert_eq!(stored.proposed_content.as_deref(), Some(proposed[0].proposed_content.as_str()));
+        let stored = workspace
+            .db
+            .get_curation_candidate(&workspace.id, id)?
+            .ok_or("stored")?;
+        assert_eq!(
+            stored.proposed_content.as_deref(),
+            Some(proposed[0].proposed_content.as_str())
+        );
         validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
         assert!(!workspace.review(&session.id, 0.6, true)?.durable_mutation);
-        assert_eq!(workspace.db.list_evidence_spans_for_session(&session.id)?, before);
-        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
+        assert_eq!(
+            workspace.db.list_evidence_spans_for_session(&session.id)?,
+            before
+        );
+        assert!(
+            workspace
+                .db
+                .list_memories(&workspace.id, None, true)?
+                .is_empty()
+        );
         Ok(())
     }
 
@@ -725,14 +1065,19 @@ mod workflow_tests {
         let context = "```rust\ntype ReadyRecord = ValidatedRecord;\n```\n\n- Only validated records belong to this type.\n- Legacy records retain their original representation.";
         let text = format!("{FIX}\n\n{context}");
         let (session_id, repair_id, _) = workspace.episode_with_repair(
-            98_002, "Structured repair work item.", COMMAND, true, &text,
+            98_002,
+            "Structured repair work item.",
+            COMMAND,
+            true,
+            &text,
         )?;
         let session = workspace.db.get_session(&session_id)?.ok_or("session")?;
         let spans = workspace.db.list_evidence_spans_for_session(&session_id)?;
         let arcs = session_failure_arcs(&workspace.id, &session, &spans);
         let arc = arcs.first().ok_or("failure arc")?;
         let card = IncidentCardSources::new(&spans)
-            .draft(&workspace.id, &session.id, arc).ok_or("compact control")?;
+            .draft(&workspace.id, &session.id, arc)
+            .ok_or("compact control")?;
         assert!(!card.input.excerpt.contains("type ReadyRecord"));
         let report = workspace.review(&session.id, 0.6, false)?;
         let proposed = native(&report);
@@ -740,7 +1085,10 @@ mod workflow_tests {
         assert!(proposed[0].proposed_content.contains(&text));
         assert_eq!(proposed[0].source_ids, vec![repair_id]);
         validate_draft(&workspace.db, &workspace.id, proposed[0]).map_err(|error| error.message)?;
-        assert_eq!(workspace.db.list_evidence_spans_for_session(&session.id)?, spans);
+        assert_eq!(
+            workspace.db.list_evidence_spans_for_session(&session.id)?,
+            spans
+        );
         Ok(())
     }
 
@@ -751,24 +1099,44 @@ mod workflow_tests {
         assert!(text.len() > MAX_COMPLETE_REPAIR_BYTES);
         assert!(text.len() < LEGACY_EXCERPT_CAP - 3);
         let (session_id, repair_id, _) = workspace.episode_with_repair(
-            98_003, "Large complete repair work item.", COMMAND, true, &text,
+            98_003,
+            "Large complete repair work item.",
+            COMMAND,
+            true,
+            &text,
         )?;
         let session = workspace.db.get_session(&session_id)?.ok_or("session")?;
         let spans = workspace.db.list_evidence_spans_for_session(&session_id)?;
-        let repair = spans.iter().find(|span| span.id == repair_id).ok_or("source repair")?;
+        let repair = spans
+            .iter()
+            .find(|span| span.id == repair_id)
+            .ok_or("source repair")?;
         assert!(complete_source(repair));
         assert!(repair.is_search_admitted_for_session(&workspace.id, &session));
         let arcs = session_failure_arcs(&workspace.id, &session, &spans);
         let arc = arcs.first().ok_or("failure arc")?;
         let card = IncidentCardSources::new(&spans)
-            .draft(&workspace.id, &session.id, arc).ok_or("small card control")?;
-        let compact_fix = card.input.excerpt.lines()
-            .find_map(|line| line.strip_prefix("Fix: ")).ok_or("compact fix")?;
+            .draft(&workspace.id, &session.id, arc)
+            .ok_or("small card control")?;
+        let compact_fix = card
+            .input
+            .excerpt
+            .lines()
+            .find_map(|line| line.strip_prefix("Fix: "))
+            .ok_or("compact fix")?;
         assert!(complete_fix(compact_fix));
         assert!(candidates(&workspace.id, &session, &spans).is_empty());
         assert!(native(&workspace.review(&session.id, 0.6, false)?).is_empty());
-        assert_eq!(workspace.db.list_evidence_spans_for_session(&session.id)?, spans);
-        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
+        assert_eq!(
+            workspace.db.list_evidence_spans_for_session(&session.id)?,
+            spans
+        );
+        assert!(
+            workspace
+                .db
+                .list_memories(&workspace.id, None, true)?
+                .is_empty()
+        );
         Ok(())
     }
 }

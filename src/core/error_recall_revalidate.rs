@@ -330,7 +330,12 @@ mod unclassified_card_tests {
         for actor in [None, Some("operator-review"), Some("older-importer")] {
             let fixture = Fixture::new_public(false)?;
             let card = fixture.old_card()?;
-            assert!(fixture.db.get_search_admitted_evidence_span(&card, WS)?.is_some());
+            assert!(
+                fixture
+                    .db
+                    .get_search_admitted_evidence_span(&card, WS)?
+                    .is_some()
+            );
             let diagnostic = from_rustc(Some("E0308"), "mismatched types");
             record_error_repair_links(
                 &fixture.db,
@@ -353,7 +358,10 @@ mod unclassified_card_tests {
             let query = pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?;
             assert!(!query.contains("prior fix:"));
             assert!(!query.contains(&card));
-            assert_eq!(fixture.db.list_error_repair_links(WS, "rustc:E0308")?, history);
+            assert_eq!(
+                fixture.db.list_error_repair_links(WS, "rustc:E0308")?,
+                history
+            );
             assert!(fixture.db.get_evidence_span(&card)?.is_some());
         }
         Ok(())
@@ -388,8 +396,15 @@ mod unclassified_card_tests {
         let evidence = recalled_repair_evidence(&fixture.db, WS, &report)?;
         assert_eq!(evidence[0].evidence_id, card.id);
         assert_eq!(evidence[0].role, "incident_card");
-        assert_eq!(evidence[0].text.as_deref(), Some(card.reader_text().as_ref()));
-        assert!(evidence.iter().any(|item| item.evidence_id == fixture.repair));
+        assert_eq!(
+            evidence[0].text.as_deref(),
+            Some(card.reader_text().as_ref())
+        );
+        assert!(
+            evidence
+                .iter()
+                .any(|item| item.evidence_id == fixture.repair)
+        );
         let query = pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?;
         assert!(query.contains(&format!("helpful_repair:{}", card.id)));
         record_error_repair_links(
@@ -403,13 +418,17 @@ mod unclassified_card_tests {
         )?;
         let evidence = recalled_repair_evidence(&fixture.db, WS, &report)?;
         assert!(evidence.iter().all(|item| item.evidence_id != card.id));
-        assert!(evidence.iter().any(|item| item.evidence_id == fixture.repair));
+        assert!(
+            evidence
+                .iter()
+                .any(|item| item.evidence_id == fixture.repair)
+        );
         Ok(())
     }
 
     #[test]
-    fn rejected_manual_cards_refill_the_pack_window_instead_of_hiding_later_repairs()
-    -> TestResult {
+    fn rejected_manual_cards_refill_the_pack_window_instead_of_hiding_later_repairs() -> TestResult
+    {
         let fixture = Fixture::new_public(false)?;
         let old = fixture.old_card()?;
         let template = fixture.db.get_evidence_span(&old)?.ok_or("old card")?;
@@ -458,13 +477,17 @@ mod unclassified_card_tests {
         for id in &targets[..40] {
             assert!(!query.contains(id));
         }
-        assert_eq!(error_recall_report(&fixture.db, WS, &diagnostic)?.helpful_repairs.len(), 41);
+        assert_eq!(
+            error_recall_report(&fixture.db, WS, &diagnostic)?
+                .helpful_repairs
+                .len(),
+            41
+        );
         Ok(())
     }
 
     #[test]
-    fn a_manual_card_with_changed_current_sources_is_withheld_from_a_cached_report()
-    -> TestResult {
+    fn a_manual_card_with_changed_current_sources_is_withheld_from_a_cached_report() -> TestResult {
         let fixture = Fixture::new_public(true)?;
         let card = fixture.current_card()?;
         let diagnostic = from_rustc(Some("E0308"), "mismatched types");
@@ -473,8 +496,11 @@ mod unclassified_card_tests {
             card.id,
         ))?;
         let report = error_recall_report(&fixture.db, WS, &diagnostic)?;
-        assert!(recalled_repair_evidence(&fixture.db, WS, &report)?
-            .iter().any(|item| item.evidence_id == card.id));
+        assert!(
+            recalled_repair_evidence(&fixture.db, WS, &report)?
+                .iter()
+                .any(|item| item.evidence_id == card.id)
+        );
         fixture.db.execute_raw(&format!(
             "UPDATE evidence_spans SET excerpt = 'changed source result' WHERE id = '{}'",
             fixture.proof,
@@ -482,9 +508,21 @@ mod unclassified_card_tests {
         let history = fixture.db.list_error_repair_links(WS, "rustc:E0308")?;
         let evidence = recalled_repair_evidence(&fixture.db, WS, &report)?;
         assert!(evidence.iter().all(|item| item.role == "proof"));
-        assert!(!pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?.contains("prior fix:"));
-        assert_eq!(fixture.db.list_error_repair_links(WS, "rustc:E0308")?, history);
-        assert_eq!(fixture.db.get_evidence_span(&card.id)?.ok_or("preserved card")?.excerpt, card.excerpt);
+        assert!(
+            !pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?.contains("prior fix:")
+        );
+        assert_eq!(
+            fixture.db.list_error_repair_links(WS, "rustc:E0308")?,
+            history
+        );
+        assert_eq!(
+            fixture
+                .db
+                .get_evidence_span(&card.id)?
+                .ok_or("preserved card")?
+                .excerpt,
+            card.excerpt
+        );
         Ok(())
     }
 }

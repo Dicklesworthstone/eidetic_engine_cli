@@ -20,7 +20,8 @@ use serde_json::{Value, json};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const WS: &str = "wsp_01234567890123456789012345";
 const COMMAND: &str = "cargo check";
-const ERROR: &str = "error[E0277]: the trait bound `Widget: Serialize` is not satisfied\n --> src/widget.rs:3:5\n";
+const ERROR: &str =
+    "error[E0277]: the trait bound `Widget: Serialize` is not satisfied\n --> src/widget.rs:3:5\n";
 const FIX: &str = "I fixed E0277 by deriving Serialize for Widget before writing it to the serialized store in src/widget.rs.";
 
 struct Fixture {
@@ -43,8 +44,8 @@ impl Fixture {
                 name: None,
             },
         )?;
-        let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x760100))
-            .to_string();
+        let session =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x760100)).to_string();
         db.insert_session(
             &session,
             &CreateSessionInput {
@@ -69,22 +70,38 @@ impl Fixture {
             proof: String::new(),
             line: 0,
         };
-        fixture.add("tool_call", "assistant", json!({
-            "type":"tool_use","id":"failed","name":"Bash","input":{"command":COMMAND}
-        }))?;
-        fixture.failure = fixture.add("tool_result", "user", json!({
-            "type":"tool_result","tool_use_id":"failed","content":ERROR,"is_error":true
-        }))?;
+        fixture.add(
+            "tool_call",
+            "assistant",
+            json!({
+                "type":"tool_use","id":"failed","name":"Bash","input":{"command":COMMAND}
+            }),
+        )?;
+        fixture.failure = fixture.add(
+            "tool_result",
+            "user",
+            json!({
+                "type":"tool_result","tool_use_id":"failed","content":ERROR,"is_error":true
+            }),
+        )?;
         for text in repairs {
             let id = fixture.add("message", "assistant", json!({"type":"text","text":text}))?;
             fixture.repairs.push(id);
         }
-        fixture.add("tool_call", "assistant", json!({
-            "type":"tool_use","id":"verified","name":"Bash","input":{"command":COMMAND}
-        }))?;
-        fixture.proof = fixture.add("tool_result", "user", json!({
-            "type":"tool_result","tool_use_id":"verified","content":"","is_error":false
-        }))?;
+        fixture.add(
+            "tool_call",
+            "assistant",
+            json!({
+                "type":"tool_use","id":"verified","name":"Bash","input":{"command":COMMAND}
+            }),
+        )?;
+        fixture.proof = fixture.add(
+            "tool_result",
+            "user",
+            json!({
+                "type":"tool_result","tool_use_id":"verified","content":"","is_error":false
+            }),
+        )?;
         Ok(fixture)
     }
 
@@ -130,13 +147,22 @@ fn a_successful_retry_does_not_turn_admitted_plans_into_helpful_repairs() -> Tes
         "~~~text\nI fixed E0277 by deriving Serialize for Widget.\n~~~",
     ] {
         let fixture = Fixture::new(&[text])?;
-        assert!(fixture.db.get_search_admitted_evidence_span(&fixture.repairs[0], WS)?.is_some());
+        assert!(
+            fixture
+                .db
+                .get_search_admitted_evidence_span(&fixture.repairs[0], WS)?
+                .is_some()
+        );
         let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
         assert_eq!(report.failures_seen, 1, "{text}");
         assert_eq!(report.resolved_failures, 1, "the command itself succeeded");
-        assert_eq!(report.repair_links_recorded, 1, "only the real proof is recorded");
+        assert_eq!(
+            report.repair_links_recorded, 1,
+            "only the real proof is recorded"
+        );
         assert_eq!(report.incident_cards_recorded, 0, "{text}");
-        let recall = error_recall_report(&fixture.db, WS, &from_rustc(Some("E0277"), "trait bound"))?;
+        let recall =
+            error_recall_report(&fixture.db, WS, &from_rustc(Some("E0277"), "trait bound"))?;
         assert!(recall.exact);
         assert!(recall.helpful_repairs.is_empty(), "{text}");
         assert_eq!(recall.proof_links, vec![fixture.proof]);
@@ -152,7 +178,9 @@ fn recent_plans_do_not_crowd_a_real_explanation_out_of_the_two_turn_budget() -> 
         "I will add another Serialize implementation next.",
         "Maybe I should update Widget in src/widget.rs.",
     ])?;
-    let before = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+    let before = fixture
+        .db
+        .list_evidence_spans_for_session(&fixture.session)?;
     let first = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
     assert_eq!(first.resolved_failures, 1);
     assert_eq!(first.repair_links_recorded, 2);
@@ -173,15 +201,27 @@ fn recent_plans_do_not_crowd_a_real_explanation_out_of_the_two_turn_budget() -> 
     assert!(checks.withheld(&fixture.db, WS)?.is_empty());
     assert!(pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?.contains("prior fix:"));
     for original in before {
-        let current = fixture.db.get_evidence_span(&original.id)?.ok_or("original")?;
+        let current = fixture
+            .db
+            .get_evidence_span(&original.id)?
+            .ok_or("original")?;
         assert_eq!(current.excerpt, original.excerpt);
         assert_eq!(current.content_hash, original.content_hash);
         assert_eq!(current.metadata_json, original.metadata_json);
-        assert_eq!(current.canonical_provenance_uri(), original.canonical_provenance_uri());
+        assert_eq!(
+            current.canonical_provenance_uri(),
+            original.canonical_provenance_uri()
+        );
     }
     let second = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
     assert_eq!(second.incident_cards_recorded, 0);
-    assert_eq!(fixture.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?.len(), 3);
+    assert_eq!(
+        fixture
+            .db
+            .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+            .len(),
+        3
+    );
     Ok(())
 }
 
@@ -203,7 +243,10 @@ fn historical_cass_helpful_links_are_withheld_live_without_erasing_history() -> 
     )?;
     assert_eq!(stored.len(), 2);
     let report = error_recall_report(&fixture.db, WS, &diagnostic)?;
-    assert!(report.helpful_repairs.contains(&fixture.repairs[0]), "history remains inspectable");
+    assert!(
+        report.helpful_repairs.contains(&fixture.repairs[0]),
+        "history remains inspectable"
+    );
     let exposed = recalled_repair_evidence(&fixture.db, WS, &report)?;
     assert!(exposed.iter().all(|item| item.role == "proof"));
     assert_eq!(exposed.len(), 1);
@@ -212,7 +255,13 @@ fn historical_cass_helpful_links_are_withheld_live_without_erasing_history() -> 
     let query = pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?;
     assert!(!query.contains("prior fix:"));
     assert!(!query.contains("I will fix"));
-    assert_eq!(fixture.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?.len(), 2);
+    assert_eq!(
+        fixture
+            .db
+            .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+            .len(),
+        2
+    );
     assert!(fixture.db.get_evidence_span(&fixture.repairs[0])?.is_some());
     Ok(())
 }
@@ -233,8 +282,10 @@ fn explicit_manual_feedback_is_not_reclassified_as_an_automatic_cass_claim() -> 
     )?;
     let report = error_recall_report(&fixture.db, WS, &diagnostic)?;
     let evidence = recalled_repair_evidence(&fixture.db, WS, &report)?;
-    assert!(evidence.iter().any(|item| {
-        item.role == "repair" && item.evidence_id == fixture.repairs[0]
-    }));
+    assert!(
+        evidence
+            .iter()
+            .any(|item| { item.role == "repair" && item.evidence_id == fixture.repairs[0] })
+    );
     Ok(())
 }

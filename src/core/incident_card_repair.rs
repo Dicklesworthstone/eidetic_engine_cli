@@ -28,7 +28,9 @@ fn language_words(sentence: &str) -> Vec<String> {
         let contraction = apostrophe
             && index > 0
             && chars[index - 1].is_alphanumeric()
-            && chars.get(index + 1).is_some_and(|next| next.is_alphanumeric());
+            && chars
+                .get(index + 1)
+                .is_some_and(|next| next.is_alphanumeric());
         if matches!(character, '`' | '"') || (character == '\'' && !contraction) {
             quote = Some(character);
             prose.push(' ');
@@ -47,22 +49,69 @@ fn language_words(sentence: &str) -> Vec<String> {
 
 fn phrase(words: &[String], expected: &[&str]) -> bool {
     words.windows(expected.len()).any(|window| {
-        window.iter().zip(expected).all(|(word, expected)| word.as_str() == *expected)
+        window
+            .iter()
+            .zip(expected)
+            .all(|(word, expected)| word.as_str() == *expected)
     })
 }
 
 fn action(word: &str) -> bool {
     matches!(
         word,
-        "fix" | "fixed" | "fixing" | "repair" | "repaired" | "resolve" | "resolved"
-            | "work" | "worked" | "working" | "help" | "helped" | "succeed" | "succeeded"
-            | "add" | "added" | "adding" | "change" | "changed" | "changing"
-            | "remove" | "removed" | "removing" | "replace" | "replaced" | "replacing"
-            | "update" | "updated" | "updating" | "implement" | "implemented"
-            | "apply" | "applied" | "applying" | "convert" | "converted" | "converting"
-            | "rename" | "renamed" | "renaming" | "restore" | "restored"
-            | "revert" | "reverted" | "enable" | "enabled" | "disable" | "disabled"
-            | "modify" | "modified" | "modifying" | "patch" | "patched"
+        "fix"
+            | "fixed"
+            | "fixing"
+            | "repair"
+            | "repaired"
+            | "resolve"
+            | "resolved"
+            | "work"
+            | "worked"
+            | "working"
+            | "help"
+            | "helped"
+            | "succeed"
+            | "succeeded"
+            | "add"
+            | "added"
+            | "adding"
+            | "change"
+            | "changed"
+            | "changing"
+            | "remove"
+            | "removed"
+            | "removing"
+            | "replace"
+            | "replaced"
+            | "replacing"
+            | "update"
+            | "updated"
+            | "updating"
+            | "implement"
+            | "implemented"
+            | "apply"
+            | "applied"
+            | "applying"
+            | "convert"
+            | "converted"
+            | "converting"
+            | "rename"
+            | "renamed"
+            | "renaming"
+            | "restore"
+            | "restored"
+            | "revert"
+            | "reverted"
+            | "enable"
+            | "enabled"
+            | "disable"
+            | "disabled"
+            | "modify"
+            | "modified"
+            | "modifying"
+            | "patch"
+            | "patched"
     )
 }
 
@@ -81,9 +130,24 @@ pub(super) fn excluded(sentence: &str) -> bool {
     if words.iter().any(|word| {
         matches!(
             word.as_str(),
-            "will" | "would" | "should" | "could" | "may" | "might" | "maybe" | "perhaps"
-                | "probably" | "possibly" | "hopefully" | "hypothetically" | "likely"
-                | "unlikely" | "unverified" | "untested" | "unresolved" | "unfixed"
+            "will"
+                | "would"
+                | "should"
+                | "could"
+                | "may"
+                | "might"
+                | "maybe"
+                | "perhaps"
+                | "probably"
+                | "possibly"
+                | "hopefully"
+                | "hypothetically"
+                | "likely"
+                | "unlikely"
+                | "unverified"
+                | "untested"
+                | "unresolved"
+                | "unfixed"
         ) || word.ends_with("'ll")
     }) {
         return true;
@@ -114,7 +178,10 @@ pub(super) fn excluded(sentence: &str) -> bool {
     .iter()
     .any(|prefix| {
         words.len() >= prefix.len()
-            && words.iter().zip(*prefix).all(|(word, expected)| word.as_str() == *expected)
+            && words
+                .iter()
+                .zip(*prefix)
+                .all(|(word, expected)| word.as_str() == *expected)
     }) {
         return true;
     }
@@ -150,7 +217,8 @@ pub(super) fn excluded(sentence: &str) -> bool {
         &["failed", "again"],
     ]
     .iter()
-    .any(|expected| phrase(&words, expected)) {
+    .any(|expected| phrase(&words, expected))
+    {
         return true;
     }
     let mut completed_action = false;
@@ -179,7 +247,10 @@ pub(super) fn excluded(sentence: &str) -> bool {
         // "hasn't actually been fixed" is no more a repair than "not fixed".
         let mut following = words[index + 1..].iter();
         let next = following.find(|word| {
-            !matches!(word.as_str(), "yet" | "actually" | "really" | "been" | "be" | "ever")
+            !matches!(
+                word.as_str(),
+                "yet" | "actually" | "really" | "been" | "be" | "ever"
+            )
         });
         if next.is_some_and(|word| action(word)) {
             return true;
@@ -264,7 +335,11 @@ mod tests {
     fn empty_unicode_and_identifier_boundaries_are_deterministic() {
         assert!(excluded(""));
         assert!(excluded("   "));
-        for text in ["I updated the willow buffer.", "I added the mayfly parser.", "I fixed café handling."] {
+        for text in [
+            "I updated the willow buffer.",
+            "I added the mayfly parser.",
+            "I fixed café handling.",
+        ] {
             assert!(!excluded(text));
             assert_eq!(excluded(text), excluded(text));
         }
@@ -278,7 +353,9 @@ mod tests {
             );
             assert!(excluded(&text), "{text}");
         }
-        assert!(!excluded("I added Serialize because Widget did not implement the trait."));
+        assert!(!excluded(
+            "I added Serialize because Widget did not implement the trait."
+        ));
     }
 
     #[test]

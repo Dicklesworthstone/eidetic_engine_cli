@@ -247,8 +247,8 @@ mod live_evidence_tests {
                         name: None,
                     },
                 )?;
-                let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(number))
-                    .to_string();
+                let session =
+                    crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
                 db.insert_session(
                     &session,
                     &CreateSessionInput {
@@ -276,7 +276,8 @@ mod live_evidence_tests {
 
         fn source(&self, number: u32, foreign: bool) -> TestResult<String> {
             let target = id(number);
-            let text = format!("Repair {number} uses the canonical cache key for reads and writes.");
+            let text =
+                format!("Repair {number} uses the canonical cache key for reads and writes.");
             let excerpt = serde_json::json!({"type":"assistant","message":{
                 "role":"assistant","content":[{"type":"text","text":text}]
             }})
@@ -350,9 +351,13 @@ mod live_evidence_tests {
         }
         fixture.record((1..=164).map(id).collect())?;
         let history = fixture.db.list_error_repair_links(WS, KEY)?;
-        let sources = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let sources = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
         assert_eq!(
-            fixture.db.list_helpful_error_repair_target_ids(WS, KEY, 32)?,
+            fixture
+                .db
+                .list_helpful_error_repair_target_ids(WS, KEY, 32)?,
             (1..=32).map(id).collect::<Vec<_>>(),
         );
         let expected = (129..=160).map(id).collect::<Vec<_>>();
@@ -368,9 +373,16 @@ mod live_evidence_tests {
         }
         assert_eq!(fixture.query()?, query);
         assert_eq!(fixture.db.list_error_repair_links(WS, KEY)?, history);
-        assert_eq!(fixture.db.list_evidence_spans_for_session(&fixture.session)?, sources);
+        assert_eq!(
+            fixture
+                .db
+                .list_evidence_spans_for_session(&fixture.session)?,
+            sources
+        );
         let report = error_recall_report(
-            &fixture.db, WS, &from_rustc(Some("E0277"), "trait bound failed"),
+            &fixture.db,
+            WS,
+            &from_rustc(Some("E0277"), "trait bound failed"),
         )?;
         assert_eq!(report.helpful_repairs.len(), 164);
         assert!(report.harmful_repairs.is_empty());
@@ -386,7 +398,10 @@ mod live_evidence_tests {
         fixture.record((1..=76).map(id).collect())?;
         let good = (42..=76).map(id).collect::<Vec<_>>();
         for limit in 0..=32 {
-            assert_eq!(pack_targets(&fixture.db, WS, KEY, limit)?, good[..limit as usize]);
+            assert_eq!(
+                pack_targets(&fixture.db, WS, KEY, limit)?,
+                good[..limit as usize]
+            );
         }
         assert!(pack_targets(&fixture.db, WS, KEY, 33).is_err());
         Ok(())
@@ -427,8 +442,12 @@ mod live_evidence_tests {
         let target = fixture.source(1, false)?;
         fixture.record(vec![target])?;
         assert!(fixture.query()?.contains("prior fix:"));
-        fixture.db.execute_raw("ALTER TABLE evidence_spans RENAME TO unavailable_recall_sources")?;
-        let error = fixture.query().expect_err("missing authority must not become an empty page");
+        fixture
+            .db
+            .execute_raw("ALTER TABLE evidence_spans RENAME TO unavailable_recall_sources")?;
+        let error = fixture
+            .query()
+            .expect_err("missing authority must not become an empty page");
         assert!(!error.to_string().contains("unavailable_recall_sources"));
         fixture.db.begin_read_snapshot()?;
         fixture.db.rollback_read_snapshot()?;
@@ -448,7 +467,9 @@ mod live_evidence_tests {
             ))?;
             assert_eq!(pack_targets(&fixture.db, WS, KEY, 1)?, vec![next.clone()]);
             assert!(!fixture.query()?.contains(&first));
-            fixture.db.execute_raw("INSERT INTO absent_admission_rollback_test VALUES (1)")?;
+            fixture
+                .db
+                .execute_raw("INSERT INTO absent_admission_rollback_test VALUES (1)")?;
             Ok(())
         });
         assert!(result.is_err());

@@ -14,7 +14,8 @@ type TestResult = Fallible<()>;
 const WS: &str = "wsp_01234567890123456789012345";
 const COMMAND: &str = "tsc --noEmit -p tsconfig.json";
 const CWD: &str = "/tmp/typescript-recall";
-const PLAIN: &str = "src/widget.ts(7,9): error TS2322: Type 'string' is not assignable to type 'number'.";
+const PLAIN: &str =
+    "src/widget.ts(7,9): error TS2322: Type 'string' is not assignable to type 'number'.";
 const REPAIR: &str = "I fixed TS2322 by converting the widget input to a number before assigning it to the numeric field in src/widget.ts.";
 
 fn colored() -> String {
@@ -150,7 +151,9 @@ fn imported_plain_and_pretty_errors_have_cited_idempotent_packable_repairs() -> 
         let repair_id = fixture.repair()?;
         fixture.call("verify", COMMAND, CWD)?;
         let proof_id = fixture.result("verify", "", Some(0))?;
-        let before = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let before = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
         let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
         assert_eq!(report.failures_seen, 1);
         assert_eq!(report.fingerprints_recorded, 1);
@@ -236,7 +239,10 @@ fn a_different_project_or_working_directory_cannot_verify_a_typescript_repair() 
 fn malformed_or_still_failing_optimistic_retries_never_write_helpful_repairs() -> TestResult {
     for retry in [
         colored(),
-        colored().replace("Found 1 error in src/widget.ts", "Found 0 errors in src/widget.ts"),
+        colored().replace(
+            "Found 1 error in src/widget.ts",
+            "Found 0 errors in src/widget.ts",
+        ),
     ] {
         let mut fixture = Fixture::new()?;
         fixture.call("fail", COMMAND, CWD)?;
@@ -305,7 +311,10 @@ fn a_stored_card_loses_current_source_proof_when_the_retry_changes_to_failure() 
         .db
         .get_evidence_span(&incident_card_id(WS, &failure))?
         .ok_or("card")?;
-    let source = fixture.db.get_evidence_span(&proof)?.ok_or("proof source")?;
+    let source = fixture
+        .db
+        .get_evidence_span(&proof)?
+        .ok_or("proof source")?;
     let mut record: Value = serde_json::from_str(&source.excerpt)?;
     record["payload"]["output"] = json!(format!(
         "Wall time: 0.01 seconds\nProcess exited with code 2\nOutput:\n{}",

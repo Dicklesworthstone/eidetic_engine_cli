@@ -924,8 +924,12 @@ mod tests {
         // the real-source tests in error_recall_revalidate.rs.
         assert!(!seed.contains("Card repair 6"));
         assert!(!seed.contains("Card repair 8"));
-        let first_position = seed.find("Unicode repair 1").ok_or("first repair missing")?;
-        let last_position = seed.find("Unicode repair 4").ok_or("fourth repair missing")?;
+        let first_position = seed
+            .find("Unicode repair 1")
+            .ok_or("first repair missing")?;
+        let last_position = seed
+            .find("Unicode repair 4")
+            .ok_or("fourth repair missing")?;
         assert!(first_position < last_position);
         assert!(seed.contains("Unicode repair 2"));
         assert!(seed.contains("Unicode repair 3"));

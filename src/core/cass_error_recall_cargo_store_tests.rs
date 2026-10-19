@@ -149,14 +149,19 @@ fn code_less_failures_persist_cited_repairs_and_packable_cards_idempotently() ->
     let failure = fixture.result("fail", &output, Some(101))?;
     let repair = fixture.repair()?;
     let proof = fixture.verify()?;
-    let before = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+    let before = fixture
+        .db
+        .list_evidence_spans_for_session(&fixture.session)?;
     let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
     assert_eq!(report.failures_seen, 1);
     assert_eq!(report.resolved_failures, 1);
     assert_eq!(report.fingerprints_recorded, 1);
     assert_eq!(report.repair_links_recorded, 2);
     assert_eq!(report.incident_cards_recorded, 1);
-    let diagnostic = structured_error_diagnostics(&output).into_iter().next().ok_or("diagnostic")?;
+    let diagnostic = structured_error_diagnostics(&output)
+        .into_iter()
+        .next()
+        .ok_or("diagnostic")?;
     let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
     assert!(recall.exact);
     assert!(recall.helpful_repairs.contains(&repair));
@@ -175,16 +180,26 @@ fn code_less_failures_persist_cited_repairs_and_packable_cards_idempotently() ->
         assert_eq!(source.excerpt, after.excerpt);
         assert_eq!(source.content_hash, after.content_hash);
         assert_eq!(source.metadata_json, after.metadata_json);
-        assert_eq!(source.canonical_provenance_uri(), after.canonical_provenance_uri());
+        assert_eq!(
+            source.canonical_provenance_uri(),
+            after.canonical_provenance_uri()
+        );
     }
     let second = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
     assert_eq!(second.incident_cards_recorded, 0);
-    assert_eq!(fixture.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?.len(), 3);
+    assert_eq!(
+        fixture
+            .db
+            .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+            .len(),
+        3
+    );
     Ok(())
 }
 
 #[test]
-fn final_streamed_causes_replace_provisional_template_keys_without_changing_the_anchor() -> TestResult {
+fn final_streamed_causes_replace_provisional_template_keys_without_changing_the_anchor()
+-> TestResult {
     let mut fixture = Fixture::new()?;
     fixture.call("fail", COMMAND, CWD)?;
     let failure = fixture.result("fail", ROOT, None)?;
@@ -198,10 +213,23 @@ fn final_streamed_causes_replace_provisional_template_keys_without_changing_the_
     assert_eq!(report.fingerprints_recorded, 1);
     assert_eq!(report.incident_cards_recorded, 1);
     let final_diagnostic = structured_error_diagnostics(&format!("{ROOT}{CAUSE}"))
-        .into_iter().next().ok_or("final diagnostic")?;
-    let provisional = structured_error_diagnostics(ROOT).into_iter().next().ok_or("prefix")?;
-    assert_ne!(final_diagnostic.layered_key().key, provisional.layered_key().key);
-    assert!(fixture.db.get_error_fingerprint(WS, &provisional.layered_key().key)?.is_none());
+        .into_iter()
+        .next()
+        .ok_or("final diagnostic")?;
+    let provisional = structured_error_diagnostics(ROOT)
+        .into_iter()
+        .next()
+        .ok_or("prefix")?;
+    assert_ne!(
+        final_diagnostic.layered_key().key,
+        provisional.layered_key().key
+    );
+    assert!(
+        fixture
+            .db
+            .get_error_fingerprint(WS, &provisional.layered_key().key)?
+            .is_none()
+    );
     let recall = error_recall_report(&fixture.db, WS, &final_diagnostic)?;
     assert!(recall.exact);
     assert_eq!(recall.proof_links, vec![proof]);
@@ -212,8 +240,13 @@ fn final_streamed_causes_replace_provisional_template_keys_without_changing_the_
     let mut checks = CardChecks::default();
     checks.observe(&card)?;
     assert!(checks.withheld(&fixture.db, WS)?.is_empty());
-    assert!(fixture.db.list_error_repair_links(WS, &final_diagnostic.layered_key().key)?
-        .iter().all(|link| link.evidence_ref.as_deref() == Some(failure.as_str())));
+    assert!(
+        fixture
+            .db
+            .list_error_repair_links(WS, &final_diagnostic.layered_key().key)?
+            .iter()
+            .all(|link| link.evidence_ref.as_deref() == Some(failure.as_str()))
+    );
     Ok(())
 }
 
@@ -235,7 +268,11 @@ fn later_polled_rustc_errors_are_retained_in_the_same_failed_invocation() -> Tes
         assert!(fixture.db.get_error_fingerprint(WS, key)?.is_some());
         let links = fixture.db.list_error_repair_links(WS, key)?;
         assert_eq!(links.len(), 3);
-        assert!(links.iter().any(|link| link.target_id == incident_card_id(WS, &failure)));
+        assert!(
+            links
+                .iter()
+                .any(|link| link.target_id == incident_card_id(WS, &failure))
+        );
     }
     Ok(())
 }
@@ -244,9 +281,13 @@ fn later_polled_rustc_errors_are_retained_in_the_same_failed_invocation() -> Tes
 fn an_invalid_final_native_report_cannot_authorize_a_later_successful_retry() -> TestResult {
     for (prefix, tail) in [
         (ROOT.to_owned(), "\nCaused by:".to_owned()),
-        (json!({"reason":"compiler-message","message":{
-            "code":{"code":"E0308"},"level":"error","message":"mismatched types"
-        }}).to_string(), "\n{unfinished".to_owned()),
+        (
+            json!({"reason":"compiler-message","message":{
+                "code":{"code":"E0308"},"level":"error","message":"mismatched types"
+            }})
+            .to_string(),
+            "\n{unfinished".to_owned(),
+        ),
     ] {
         let mut fixture = Fixture::new()?;
         fixture.call("fail", COMMAND, CWD)?;
@@ -283,7 +324,10 @@ fn a_still_running_failure_cannot_be_verified_by_an_overlapping_retry() -> TestR
 
 #[test]
 fn changed_commands_or_working_directories_do_not_verify_code_less_repairs() -> TestResult {
-    for (command, cwd) in [("cargo check --locked --lib", CWD), (COMMAND, "/tmp/other-cargo")] {
+    for (command, cwd) in [
+        ("cargo check --locked --lib", CWD),
+        (COMMAND, "/tmp/other-cargo"),
+    ] {
         let mut fixture = Fixture::new()?;
         fixture.call("fail", COMMAND, CWD)?;
         fixture.result("fail", &format!("{ROOT}{CAUSE}"), Some(101))?;
@@ -300,13 +344,18 @@ fn changed_commands_or_working_directories_do_not_verify_code_less_repairs() -> 
 }
 
 #[test]
-fn quiet_retry_completion_does_not_accept_a_zero_exit_wrapping_another_cargo_failure() -> TestResult {
+fn quiet_retry_completion_does_not_accept_a_zero_exit_wrapping_another_cargo_failure() -> TestResult
+{
     let mut fixture = Fixture::new()?;
     fixture.call("fail", COMMAND, CWD)?;
     fixture.result("fail", &format!("{ROOT}{CAUSE}"), Some(101))?;
     fixture.repair()?;
     fixture.call("verify", COMMAND, CWD)?;
-    fixture.result("verify", "error: failed to parse manifest at `Cargo.toml`", Some(0))?;
+    fixture.result(
+        "verify",
+        "error: failed to parse manifest at `Cargo.toml`",
+        Some(0),
+    )?;
     let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
     assert_eq!(report.failures_seen, 2);
     assert_eq!(report.resolved_failures, 0);
