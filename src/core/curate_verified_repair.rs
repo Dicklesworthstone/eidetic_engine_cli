@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::core::cass_error_recall::session_failure_arcs;
+use crate::core::error_recall::CanonicalDiagnostic;
 use crate::core::incident_card::{IncidentCardSources, error_class_label};
 
 const PRODUCER: &str = "verified_tool_repair.v1";
@@ -34,7 +35,7 @@ pub(super) fn candidates(
         let Some(resolution) = &arc.resolution else {
             continue;
         };
-        let Some(diagnostic) = arc.diagnostics.first() else {
+        let Some(diagnostic) = episode_diagnostics(&arc.diagnostics) else {
             continue;
         };
         let source_ids = resolution.repair_ids.iter().cloned().collect::<BTreeSet<_>>();
@@ -68,11 +69,11 @@ pub(super) fn candidates(
             }
         };
         let source_ids: Vec<_> = source_ids.into_iter().collect();
-        let class = error_class_label(&diagnostic.layered_key().key);
+        let class = &diagnostic.classes;
         let command = arc.family.to_string();
         let content = format!(
             "Observed repair for {class} during `{command}`:\nFailure: {}\nRepair: {fix}\nVerification: the same command and execution context succeeded afterwards.",
-            diagnostic.message_template,
+            diagnostic.failure,
         );
         let screen = crate::policy::screen_external_text_for_ingestion(&content);
         if screen.redacted || screen.instruction_like || screen.content != content
@@ -98,10 +99,7 @@ pub(super) fn candidates(
         // keyword or shortened card, define independent corroboration. Process
         // binding remains separately proved inside every supporting episode.
         let mut signature_parts = vec![producer.to_owned(), command];
-        for diagnostic in &arc.diagnostics {
-            signature_parts.push(diagnostic.layered_key().key);
-            signature_parts.push(diagnostic.message_template.clone());
-        }
+        signature_parts.extend(diagnostic.signature);
         let reason = format!(
             "Verified tool-repair proposal from session {}: failure {} followed by admitted repair turn(s) {} and completed same-context retry {}. Tool output is proof context, not a memory source. This observed repair requires review; it is not a general guarantee.",
             session.id, arc.failure_id, source_ids.join(", "), resolution.proof_id,
@@ -126,6 +124,54 @@ pub(super) fn candidates(
         });
     }
     proposals
+}
+
+struct EpisodeDiagnostics {
+    classes: String,
+    failure: String,
+    signature: Vec<String>,
+}
+
+/// One completed invocation can fail with several diagnostic classes. Describe
+/// every extracted diagnostic rather than attributing the entire repair to the
+/// first printed error. Preserve the extractor's bound and masked templates.
+/// Compiler emission order and identical repeats are not different lessons;
+/// distinct templates under one native code remain distinct observations.
+fn episode_diagnostics(diagnostics: &[CanonicalDiagnostic]) -> Option<EpisodeDiagnostics> {
+    let ordered: BTreeSet<_> = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            (diagnostic.layered_key().key, diagnostic.message_template.clone())
+        })
+        .collect();
+    let (_, first_message) = ordered.first()?;
+    let classes = ordered
+        .iter()
+        .map(|(key, _)| error_class_label(key))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let failure = if ordered.len() == 1 {
+        // Single-diagnostic proposals retain their exact previous content,
+        // content-bound identity and corroboration signature.
+        first_message.clone()
+    } else {
+        ordered
+            .iter()
+            .map(|(key, message)| format!("{}: {message}", error_class_label(key)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let signature = ordered
+        .into_iter()
+        .flat_map(|(key, message)| [key, message])
+        .collect();
+    Some(EpisodeDiagnostics {
+        classes,
+        failure,
+        signature,
+    })
 }
 
 /// A resolved arc has already selected performed repairs, not plans or tool
@@ -183,6 +229,49 @@ fn complete_fix(fix: &str) -> bool {
 mod tests {
     use super::*;
     use crate::core::incident_card::proof::tests::{Fixture, TestResult, WS};
+
+    #[test]
+    fn single_error_projection_preserves_the_existing_content_and_signature() {
+        let diagnostic = crate::core::error_recall::from_rustc(Some("E0277"), "missing trait");
+        let projected = episode_diagnostics(std::slice::from_ref(&diagnostic)).expect("diagnostic");
+        assert_eq!(projected.classes, "rustc:E0277");
+        assert_eq!(projected.failure, diagnostic.message_template);
+        assert_eq!(projected.signature, [diagnostic.layered_key().key, diagnostic.message_template]);
+        assert!(episode_diagnostics(&[]).is_none());
+    }
+
+    #[test]
+    fn multiple_errors_survive_projection_in_canonical_order_without_duplicate_noise() {
+        use crate::core::error_recall::from_rustc;
+        let first = from_rustc(Some("E0277"), "missing trait");
+        let second = from_rustc(Some("E0308"), "mismatched return type");
+        let forward = episode_diagnostics(&[first.clone(), second.clone()]).expect("forward");
+        let reverse = episode_diagnostics(&[second, first.clone(), first]).expect("reverse");
+        assert_eq!(forward.classes, "rustc:E0277, rustc:E0308");
+        assert_eq!(forward.failure.lines().count(), 2);
+        assert!(forward.failure.contains("missing trait"));
+        assert!(forward.failure.contains("mismatched return type"));
+        assert_eq!(reverse.classes, forward.classes);
+        assert_eq!(reverse.failure, forward.failure);
+        assert_eq!(reverse.signature, forward.signature);
+    }
+
+    #[test]
+    fn distinct_templates_are_not_erased_by_a_shared_code_or_tool() {
+        use crate::core::error_recall::{from_cargo, from_rustc};
+        for diagnostics in [
+            vec![from_rustc(Some("E0277"), "missing trait"), from_rustc(Some("E0277"), "thread safety bound")],
+            vec![from_cargo(None, "failed native header lookup"), from_cargo(None, "failed dependency resolution")],
+        ] {
+            let projected = episode_diagnostics(&diagnostics).expect("distinct diagnostics");
+            assert_eq!(projected.failure.lines().count(), 2);
+            assert_eq!(projected.signature.len(), 4);
+            for diagnostic in diagnostics {
+                assert!(projected.failure.contains(&diagnostic.message_template));
+                assert!(projected.signature.contains(&diagnostic.layered_key().key));
+            }
+        }
+    }
 
     #[test]
     fn verified_tool_episode_proposes_admitted_repairs_without_persisting_cards() -> TestResult {
@@ -336,6 +425,13 @@ mod workflow_tests {
         fn episode_with_repair(
             &self, number: u128, context: &str, retry_command: &str, passed: bool, repair: &str,
         ) -> TestResult<(String, String, String)> {
+            self.episode_with_output(number, context, retry_command, passed, repair, FAILURE)
+        }
+
+        fn episode_with_output(
+            &self, number: u128, context: &str, retry_command: &str,
+            passed: bool, repair: &str, failure: &str,
+        ) -> TestResult<(String, String, String)> {
             let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
             self.db.insert_session(&session, &CreateSessionInput {
                 workspace_id: self.id.clone(),
@@ -351,10 +447,10 @@ mod workflow_tests {
             let rows = [
                 ("message", "user", json!({"type":"text","text":context})),
                 ("tool_call", "assistant", json!({"type":"tool_use","id":"fail","name":"Bash","input":{"command":COMMAND}})),
-                ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"fail","content":FAILURE,"is_error":true})),
+                ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"fail","content":failure,"is_error":true})),
                 ("message", "assistant", json!({"type":"text","text":repair})),
                 ("tool_call", "assistant", json!({"type":"tool_use","id":"retry","name":"Bash","input":{"command":retry_command}})),
-                ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"retry","content":if passed {""} else {FAILURE},"is_error":!passed})),
+                ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"retry","content":if passed {""} else {failure},"is_error":!passed})),
             ];
             let mut ids = Vec::new();
             for (index, (kind, role, block)) in rows.into_iter().enumerate() {
@@ -467,6 +563,53 @@ mod workflow_tests {
         let workspace = Workspace::new()?;
         let (session, _, _) = workspace.episode(93_001, "Work item alpha.", "cargo check --lib", true)?;
         assert!(native(&workspace.review(&session, 0.0, false)?).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn multi_error_repairs_reach_public_preview_persistence_and_revalidation() -> TestResult {
+        let workspace = Workspace::new()?;
+        let output = format!("{FAILURE}error[E0308]: mismatched types\n --> src/widget.rs:8:2\n");
+        let repair = "I fixed E0277 and E0308 by deriving Serialize for Widget and correcting its declared type in src/widget.rs.";
+        let (session, repair_id, _) = workspace.episode_with_output(
+            96_001, "Multi-error work item.", COMMAND, true, repair, &output,
+        )?;
+        let sources = workspace.db.list_evidence_spans_for_session(&session)?;
+        let preview = workspace.review(&session, 0.6, false)?;
+        let candidates = native(&preview);
+        assert_eq!(candidates.len(), 1);
+        let proposal = candidates[0];
+        assert!(proposal.proposed_content.starts_with("Observed repair for rustc:E0277, rustc:E0308"));
+        assert!(proposal.proposed_content.contains("rustc:E0308: mismatched types"));
+        assert_eq!(proposal.source_ids, vec![repair_id]);
+        let written = workspace.review(&session, 0.6, true)?;
+        assert_eq!(native(&written)[0].candidate_id, proposal.candidate_id);
+        let stored = workspace.db.get_curation_candidate(&workspace.id, &proposal.candidate_id)?.ok_or("stored")?;
+        validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
+        assert_eq!(stored.proposed_content.as_deref(), Some(proposal.proposed_content.as_str()));
+        assert!(!workspace.review(&session, 0.6, true)?.durable_mutation);
+        assert_eq!(workspace.db.list_evidence_spans_for_session(&session)?, sources);
+        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn independent_compiler_emission_orders_corroborate_the_same_complete_repair() -> TestResult {
+        let workspace = Workspace::new()?;
+        let second = "error[E0308]: mismatched types\n --> src/widget.rs:8:2\n";
+        let repair = "I fixed E0277 and E0308 by deriving Serialize for Widget and correcting its declared type in src/widget.rs.";
+        let (anchor, _, _) = workspace.episode_with_output(
+            97_001, "Work item alpha.", COMMAND, true, repair, &format!("{FAILURE}{second}"),
+        )?;
+        workspace.episode_with_output(
+            97_002, "Work item beta.", COMMAND, true, repair, &format!("{second}{FAILURE}"),
+        )?;
+        let report = workspace.review(&anchor, 0.7, false)?;
+        let candidates = native(&report);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].confidence, 0.7);
+        validate_draft(&workspace.db, &workspace.id, candidates[0]).map_err(|error| error.message)?;
+        assert!(native(&workspace.review(&anchor, 0.8, false)?).is_empty());
         Ok(())
     }
 
