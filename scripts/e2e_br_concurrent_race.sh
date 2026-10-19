@@ -39,8 +39,18 @@ case "$mode" in
         printf '{"schema":"br.ready.v1","workspace_id":"%s","request_id":"%s","issues":[],"attempt":%s}\n' "${EE_FAKE_BR_WORKSPACE_ID:-br-race-fixture}" "${EE_FAKE_BR_REQUEST_ID:-bd-3usjw.73-e2e}" "$count"
         ;;
     actionable)
-        if [ "${1:-}" != "ready" ] || [ "${2:-}" != "--json" ]; then
-            printf 'expected br ready --json, got: %s\n' "$*" >&2
+        # Assert the CONTRACT -- a `ready` query asking for JSON -- not the exact
+        # argv. This checked "$2" = --json until 2026-10-19 and had been failing
+        # ever since br_retry.sh started passing `ready --limit 0 --json`, which
+        # makes $2 `--limit`. Nothing ran this script, so the fixture rotted
+        # against its own subject in silence; pinning argv positionally is what
+        # made a flag insertion look like a product defect.
+        saw_json=0
+        for argument in "$@"; do
+            if [ "$argument" = "--json" ]; then saw_json=1; fi
+        done
+        if [ "${1:-}" != "ready" ] || [ "$saw_json" -ne 1 ]; then
+            printf 'expected br ready ... --json, got: %s\n' "$*" >&2
             exit 67
         fi
         cat <<'JSON'
