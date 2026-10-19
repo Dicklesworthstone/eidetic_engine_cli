@@ -27,6 +27,9 @@
 #[path = "incident_card_proof.rs"]
 pub(crate) mod proof;
 
+#[path = "incident_card_repair.rs"]
+mod repair;
+
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -428,11 +431,13 @@ pub(crate) fn error_class_label(key: &str) -> String {
 
 fn sentence_score(sentence: &str, anchors: &BTreeSet<String>) -> i32 {
     let lower = sentence.to_ascii_lowercase();
-    // A sentence that lost a secret at ingest is not shown at all: a card
-    // carries no redaction markers.
+    // A successful retry does not make a plan, guess or explicit non-fix an
+    // observed repair. Exclusions apply before anchors can boost the score.
+    // A sentence that lost a secret at ingest is not shown either.
     if sentence.len() < MIN_SENTENCE_CHARS
         || sentence.split_whitespace().count() < 3
         || sentence.contains("[REDACTED")
+        || repair::excluded(sentence)
     {
         return i32::MIN;
     }
@@ -456,24 +461,40 @@ fn sentence_score(sentence: &str, anchors: &BTreeSet<String>) -> i32 {
     score
 }
 
-/// Split projected turn text into sentences, dropping code fences, list
-/// markers and blank lines.
+/// Split projected turn text without attributing quoted examples or fenced
+/// source to the speaker. Fence kind and length must match before prose resumes.
 fn split_sentences(text: &str) -> Vec<String> {
     let mut output = Vec::new();
-    let mut in_fence = false;
+    let mut fence: Option<(u8, usize)> = None;
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
+        if trimmed.is_empty() || trimmed.starts_with('>') {
             continue;
         }
-        if in_fence || trimmed.is_empty() {
+        let marker = trimmed.as_bytes()[0];
+        let width = trimmed.bytes().take_while(|byte| *byte == marker).count();
+        if matches!(marker, b'`' | b'~') && width >= 3 {
+            match fence {
+                None => fence = Some((marker, width)),
+                Some((kind, opened))
+                    if kind == marker && width >= opened && trimmed[width..].trim().is_empty() =>
+                {
+                    fence = None;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if fence.is_some() {
             continue;
         }
         let trimmed = trimmed
-            .trim_start_matches(['-', '*', '>', '#'])
+            .trim_start_matches(['-', '*', '#'])
             .trim_start();
         let trimmed = strip_numbered_marker(trimmed);
+        if trimmed.starts_with('>') {
+            continue;
+        }
         let mut start = 0;
         let bytes = trimmed.as_bytes();
         for (index, byte) in bytes.iter().enumerate() {
@@ -852,6 +873,57 @@ mod tests {
             error_class_label("cargo:tmpl:blake3:68e0e38e3119313b826b1cc84e2bcfeba7"),
             "cargo failure template 68e0e38e3119"
         );
+    }
+
+    #[test]
+    fn anchor_overlap_cannot_turn_plans_or_negated_edits_into_repairs() {
+        let symptom = "error[E0277]: Widget does not implement Serialize in src/widget.rs";
+        let anchors = anchor_terms(symptom);
+        for text in [
+            "I will fix E0277 by adding Serialize to Widget.",
+            "Let me add Serialize to src/widget.rs next.",
+            "I have not fixed E0277 in src/widget.rs.",
+            "Maybe changing Widget will fix E0277.",
+            "Can adding Serialize fix E0277?",
+        ] {
+            assert!(!explains_a_fix(text, Some(symptom)), "{text}");
+            assert_eq!(fix_facet(&[text.to_owned()], &anchors, 60), None, "{text}");
+        }
+        let actual = "I fixed E0277 by deriving Serialize for Widget.";
+        let mixed = format!("I will add a different Widget later. {actual}");
+        assert!(explains_a_fix(&mixed, Some(symptom)));
+        assert_eq!(fix_facet(&[mixed], &anchors, 60), Some(actual.to_owned()));
+    }
+
+    #[test]
+    fn fenced_and_blockquoted_examples_are_not_attributed_to_the_speaker() {
+        let actual = "I fixed E0277 by deriving Serialize for Widget.";
+        for example in [
+            format!("> {actual}"),
+            format!("- > {actual}"),
+            format!("1. > {actual}"),
+            format!("~~~text\n{actual}\n~~~"),
+            format!("````text\n```\n{actual}\n````"),
+            format!("~~~text\n```\n{actual}\n~~~"),
+            format!("```text\n{actual}"),
+        ] {
+            assert!(!explains_a_fix(&example, Some("E0277 Widget")), "{example}");
+            let with_actual = format!("{example}\n{actual}");
+            if !example.ends_with(actual) {
+                assert!(explains_a_fix(&with_actual, Some("E0277 Widget")));
+            }
+        }
+    }
+
+    #[test]
+    fn actual_repairs_keep_original_text_and_scoring_order_after_exclusions() {
+        let original = "I renamed `maybe` to `resolved` in src/widget.rs. I will fix another Widget later.";
+        let copy = original.to_owned();
+        let expected = "I renamed `maybe` to `resolved` in src/widget.rs.";
+        let anchors = anchor_terms("E0277 in src/widget.rs");
+        assert_eq!(fix_facet(&[copy.clone()], &anchors, 60), Some(expected.to_owned()));
+        assert_eq!(copy, original);
+        assert!(explains_a_fix(&copy, Some("E0277 in src/widget.rs")));
     }
 
     #[test]
