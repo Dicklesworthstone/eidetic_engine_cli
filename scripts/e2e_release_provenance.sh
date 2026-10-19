@@ -91,11 +91,48 @@ static_contract() {
   require_contains "$installer" "provenance is missing Cargo.lock blake3 dependency"
   require_contains "$installer" "cosign verify-blob"
 
+  # TWO NEEDLES WERE STALE, AND THE README WAS RIGHT (bd-1l32h).
+  #
+  # They demanded the sentence "Pass `--require-provenance` to require both a
+  # verified release signature and a verified SLSA provenance attestation",
+  # removed by 4ee0eb51a. That sentence promised a guarantee current releases
+  # do not have, and the README says so itself at the install table and at the
+  # security posture row:
+  #
+  #   "Releases are cut outside GitHub Actions and ship checksums and a
+  #    manifest without Sigstore bundles or SLSA provenance;
+  #    `--require-provenance` therefore fails by design."
+  #
+  # Confirmed independently: `gh workflow list --all` does not list Release as
+  # active at all. release.yml DOES implement `cosign sign-blob` and SLSA
+  # provenance generation, so the capability is real -- it is simply not the
+  # lane that cuts releases today. So the gate was asserting a promise the
+  # project had deliberately stopped making.
+  #
+  # THIS IS NOT A LOOSENING, which matters because a red needle is exactly the
+  # thing one is tempted to delete. The replacements pin MORE than the
+  # originals: the fail-closed semantics of the flag, the current sentence that
+  # replaced the stale one, and -- new -- the honest disclosure that releases
+  # ship WITHOUT provenance. That last needle reds if anyone quietly starts
+  # claiming releases are signed, which the old needle set could not detect.
   require_contains "$readme" "always verifies its"
-  require_contains "$readme" 'Pass `--require-provenance` to require both'
-  require_contains "$readme" "verified SLSA provenance attestation"
+  require_contains "$readme" '`--require-provenance` for fail-closed signature and SLSA provenance'
+  require_contains "$readme" 'Pass `--require-provenance` to require the SLSA provenance JSON and its Sigstore'
+  require_contains "$readme" '`--require-provenance` therefore fails by design'
   require_contains "$readme" "missing bundle is reported"
-  require_contains "$checklist" "Signed release provenance ready"
+  # A THIRD STALE NEEDLE, invisible to bd-1l32h because this gate stops at the
+  # first miss. It demanded "Signed release provenance ready" from
+  # PUBLISH_CHECKLIST.md, which now says the opposite on purpose:
+  #
+  #   "do not carry Sigstore bundles or SLSA attestations;
+  #    `--require-provenance` remains unsatisfied.
+  #    Do not describe unsigned metadata as signed provenance."
+  #
+  # Pinning that prohibition is strictly better than pinning the old optimistic
+  # phrase: the gate now reds if anyone DELETES the instruction against calling
+  # unsigned metadata signed, which is the failure actually worth catching here.
+  require_contains "$checklist" "do not carry Sigstore bundles or SLSA attestations"
+  require_contains "$checklist" "Do not describe unsigned metadata as signed provenance"
   require_contains "$audit" "release_verifies_provenance_before_publish"
   require_contains "$audit" "unix_installer_supports_required_provenance"
 }
