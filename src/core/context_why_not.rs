@@ -97,13 +97,13 @@ pub fn explain_why_not_entity_default(
     options: &ContextPackOptions,
     target: PackEntityRef,
 ) -> Result<TypedWhyNotSelectedReport, ContextPackError> {
-    explain_entity(options, target, &Deterministic::from_seed(0), None)
+    explain_entity(options, target, &mut Deterministic::from_seed(0), None)
 }
 
 pub(super) fn explain_memory(
     options: &ContextPackOptions,
     target: MemoryId,
-    determinism: &Deterministic<Seed>,
+    determinism: &mut Deterministic<Seed>,
 ) -> Result<WhyNotSelectedReport, ContextPackError> {
     let (response, observation) =
         run_observed_pack(options, PackEntityRef::Memory(target), determinism, None)?;
@@ -233,7 +233,7 @@ mod tests;
 fn explain_entity(
     options: &ContextPackOptions,
     target: PackEntityRef,
-    determinism: &Deterministic<Seed>,
+    determinism: &mut Deterministic<Seed>,
     embedder: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<TypedWhyNotSelectedReport, ContextPackError> {
     let (response, observation) = run_observed_pack(options, target, determinism, embedder)?;
@@ -243,7 +243,7 @@ fn explain_entity(
 fn run_observed_pack(
     options: &ContextPackOptions,
     target: PackEntityRef,
-    determinism: &Deterministic<Seed>,
+    determinism: &mut Deterministic<Seed>,
     embedder: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<(ContextResponse, WhyNotObservation), ContextPackError> {
     let mut options = options.clone();

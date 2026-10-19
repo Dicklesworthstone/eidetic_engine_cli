@@ -1619,7 +1619,7 @@ pub(crate) fn run_context_pack_with_embedder(
         run_context_pack_with_performance_inner(
             options,
             PACK_COMMAND,
-            &Deterministic::from_seed(0),
+            &mut Deterministic::from_seed(0),
             PackRecordPersistence::Seeded,
             ContextPackControl::new(&cx, None, None),
             Some(embedder),
@@ -2342,7 +2342,7 @@ pub(crate) fn run_context_pack_with_search_provider(
         run_context_pack_with_performance_inner(
             options,
             command,
-            &Deterministic::from_seed(0),
+            &mut Deterministic::from_seed(0),
             PackRecordPersistence::Ambient,
             ContextPackControl::new(&cx, None, None),
             None,
@@ -2358,11 +2358,11 @@ pub async fn run_context_pack_with_performance_with_cx(
     options: &ContextPackOptions,
     command: &'static str,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
-    let determinism = Deterministic::from_seed(0);
+    let mut determinism = Deterministic::from_seed(0);
     run_context_pack_with_performance_inner(
         options,
         command,
-        &determinism,
+        &mut determinism,
         PackRecordPersistence::Ambient,
         ContextPackControl::new(cx, None, None),
         None,
@@ -2445,11 +2445,11 @@ pub fn run_context_pack_with_performance_controlled(
         .unwrap_or(Duration::from_secs(60))
         .max(Duration::from_secs(60));
     crate::core::run_cli_with_cx(runtime_timeout, |cx| async move {
-        let determinism = Deterministic::from_seed(0);
+        let mut determinism = Deterministic::from_seed(0);
         run_context_pack_with_performance_inner(
             options,
             command,
-            &determinism,
+            &mut determinism,
             PackRecordPersistence::Ambient,
             ContextPackControl::new(&cx, deadline, cancellation_flag),
             None,
@@ -2463,13 +2463,13 @@ pub fn run_context_pack_with_performance_controlled(
 pub fn run_context_pack_with_performance_seeded(
     options: &ContextPackOptions,
     command: &'static str,
-    determinism: Deterministic<Seed>,
+    mut determinism: Deterministic<Seed>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
     crate::core::run_cli_with_cx(PACK_COMMAND_TIMEOUT, |cx| async move {
         run_context_pack_with_performance_inner(
             options,
             command,
-            &determinism,
+            &mut determinism,
             PackRecordPersistence::Seeded,
             ContextPackControl::new(&cx, None, None),
             None,
@@ -2566,7 +2566,7 @@ impl<'a> ContextPackControl<'a> {
 pub fn explain_why_not(
     options: &ContextPackOptions,
     target_memory_id: MemoryId,
-    determinism: &Deterministic<Seed>,
+    determinism: &mut Deterministic<Seed>,
 ) -> Result<WhyNotSelectedReport, ContextPackError> {
     why_not::explain_memory(options, target_memory_id, determinism)
 }
@@ -2582,8 +2582,8 @@ pub fn explain_why_not_default(
     options: &ContextPackOptions,
     target_memory_id: MemoryId,
 ) -> Result<WhyNotSelectedReport, ContextPackError> {
-    let determinism = Deterministic::from_seed(0);
-    explain_why_not(options, target_memory_id, &determinism)
+    let mut determinism = Deterministic::from_seed(0);
+    explain_why_not(options, target_memory_id, &mut determinism)
 }
 
 /// Build a `PackCandidate` for a memory that did not appear in the retrieved
@@ -2667,7 +2667,7 @@ fn reconstruct_not_retrieved_candidate(
 async fn run_context_pack_with_performance_inner(
     options: &ContextPackOptions,
     command: &'static str,
-    determinism: &Deterministic<Seed>,
+    determinism: &mut Deterministic<Seed>,
     pack_record_persistence: PackRecordPersistence,
     control: ContextPackControl<'_>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
