@@ -365,6 +365,31 @@ def census(root):
 #: or `git` failing still prints to stderr, so the operator sees something.
 STDOUT_DIAGNOSTIC = re.compile(r'\$\(\s*(?:run_ee|"?\$\{?EE[A-Z_]*\}?"?|ee)\s')
 
+#: For the SWALLOW shape, ANY `||`/`&&` means the abort is not silent.
+#:
+#: Deliberately broader than `GUARDED`, and I found out why the hard way: I
+#: wrote the prescribed repair as `... ) || ee_capture_failed TIE_A $?` -- a
+#: FUNCTION CALL -- and this detector went on flagging all six repaired sites,
+#: because `GUARDED` enumerates `|| true`, `|| :`, `|| echo`, `|| VAR=` and
+#: `|| {` and a bare handler call is none of them. That is exactly the defect
+#: `GUARDED`'s own comment warns about ("a detector that flags its own fix
+#: shape trains people to revert correct code"), one layer down.
+#:
+#: The right predicate for THIS shape is also simpler than `GUARDED`'s. The
+#: defect here is a SILENT ABORT, and `||` suspends -e for its left side, so
+#: the right side runs and the script gets to say something. What the handler
+#: happens to be is a separate question.
+#:
+#: `|| true` is therefore excluded on purpose: it loses the diagnostic but does
+#: not abort, so the script continues to the tolerant read the author wrote.
+#: That is a different defect from this one.
+#:
+#: Known exposure, shared with `GUARDED`: a literal `||` inside a quoted
+#: argument would read as a guard. jq filters use `//` and `or`, so this has no
+#: instance in this tree today, but it is a false-NEGATIVE direction and worth
+#: knowing about.
+SWALLOW_GUARD = re.compile(r"\|\||&&")
+
 
 def swallow_census(root):
     """Captures of a stdout-diagnostic command that `set -e` aborts silently.
@@ -430,7 +455,7 @@ def swallow_census(root):
             logical = _decomment(logical)
             if not STDOUT_DIAGNOSTIC.search(logical):
                 continue
-            if IF_COND.match(logical) or GUARDED.search(logical):
+            if IF_COND.match(logical) or SWALLOW_GUARD.search(logical):
                 continue
             rows.append({"file": os.path.relpath(path, root), "line": i + 1,
                          "var": m.group(1), "live": active[i],
@@ -590,6 +615,21 @@ def self_test():
         open(os.path.join(sw, "wrapped.sh"), "w").write(
             'set -euo pipefail\nreport="$(run_ee search q \\\n    --json)" \\\n'
             '    || rc=$?\necho "${rc:-0}"\n')
+        # NEGATIVE 5: THE PRESCRIBED REPAIR, as a bare handler-FUNCTION call.
+        # This arm exists because the shape's first version flagged all six
+        # sites I had just repaired this way: the guard vocabulary enumerated
+        # `|| true`, `|| :`, `|| echo`, `|| VAR=` and `|| {`, and a handler call
+        # is none of them. A detector that rejects its own fix is worse than no
+        # detector, because the next person reverts correct code to satisfy it.
+        open(os.path.join(sw, "handler_fn.sh"), "w").write(
+            'set -euo pipefail\nfail() { echo "$1" >&2; exit 1; }\n'
+            'report="$(run_ee search q --json \\\n    | jq -r .x)" \\\n'
+            '    || fail report $?\necho "$report"\n')
+        # NEGATIVE 6: `|| exit 1` and `|| return 1` are handlers too -- the
+        # abort is explicit and the script can print before it.
+        open(os.path.join(sw, "explicit_exit.sh"), "w").write(
+            'set -euo pipefail\nreport="$(run_ee search q --json)" '
+            '|| { echo "ee failed" >&2; exit 1; }\necho "$report"\n')
         sw_rows = swallow_census(os.path.join(tmp, "swallow"))
         sw_files = {r["file"] for r in sw_rows}
         arm("a bare capture of an ee call IS flagged",
@@ -602,6 +642,10 @@ def self_test():
             "scripts/iftest.sh" not in sw_files)
         arm("a guard on a CONTINUATION line is recognised",
             "scripts/wrapped.sh" not in sw_files)
+        arm("the PRESCRIBED REPAIR (a bare handler-fn call) is NOT flagged",
+            "scripts/handler_fn.sh" not in sw_files)
+        arm("`|| { ...; exit 1; }` is NOT flagged",
+            "scripts/explicit_exit.sh" not in sw_files)
         arm("exactly one swallow candidate across the swallow fixtures",
             len(sw_rows) == 1)
 
@@ -666,7 +710,7 @@ def self_test():
 #: false-positive classes (b9727a932, 8c24ce49c), three quarters of its
 #: headline DEAD rows at one point. A gate that reds on UNKNOWN would red on
 #: the instrument's own uncertainty. They are still PRINTED by the census.
-GATE_BLOCKING_VERDICTS = ("DEAD", "TOP-LEVEL")
+GATE_BLOCKING_VERDICTS = ("DEAD", "TOP-LEVEL", "SWALLOWED")
 
 
 def gate_blocking_rows(rows):
@@ -743,7 +787,13 @@ if __name__ == "__main__":
     # is indistinguishable from a broken one. `--gate` is the opt-in verdict.
     if not gate:
         sys.exit(0)
-    blocking = gate_blocking_rows(rows)
+    # THE SWALLOW SHAPE IS GATED NOW, and it was not when it shipped. At that
+    # point 23 live sites would have made this red on landing, and a gate that
+    # reds the moment it arrives gets disabled rather than obeyed. All 23 are
+    # repaired (determinism.sh 13, e2e_rule_validation_counter.sh 4,
+    # coordination_snapshot.sh 2, doctor_undo_replay.sh 2, prompt_budget.sh 1),
+    # so the gate can hold the line instead of announcing a backlog.
+    blocking = gate_blocking_rows(rows) + gate_blocking_rows(swallow_census(root))
     if not blocking:
         print(
             f"\n[set-e-census] GATE PASS -- 0 dead handlers among "
