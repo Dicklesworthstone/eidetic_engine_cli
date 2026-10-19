@@ -351,6 +351,108 @@ def census(root):
     return rows
 
 
+#: Commands whose DIAGNOSTIC goes to stdout rather than stderr.
+#:
+#: `ee` writes its error envelope to stdout. Measured 2026-10-19 against
+#: ee 0.14.2:
+#:
+#:     ee --workspace /nonexistent search q --json
+#:       exit 10, STDOUT 2116 bytes ({"schema":"ee.error.v2", ... "repair": ...}),
+#:       STDERR 0 bytes
+#:
+#: That is a defensible contract -- machine-readable errors belong on stdout --
+#: but it makes a bare capture lossy in a way a normal command is not. `date`
+#: or `git` failing still prints to stderr, so the operator sees something.
+STDOUT_DIAGNOSTIC = re.compile(r'\$\(\s*(?:run_ee|"?\$\{?EE[A-Z_]*\}?"?|ee)\s')
+
+
+def swallow_census(root):
+    """Captures of a stdout-diagnostic command that `set -e` aborts silently.
+
+    A DIFFERENT SHAPE from everything in census(), and deliberately a separate
+    function so the twenty validated arms there are not disturbed. The shapes
+    above all require a nearby `$?` read -- the defect is a handler that cannot
+    run. This one needs no handler at all: the defect is that the DIAGNOSTIC is
+    captured into a variable the shell then discards as it exits.
+
+        report="$(run_ee ... --json)"      # -e aborts HERE on failure
+
+    stdout holds a ~2 KB envelope including a `repair` string written for
+    exactly this moment; stderr holds nothing. Net result is a nonzero exit
+    with ZERO BYTES anywhere, which is bd-63mua's measured symptom and the
+    reason that bead sat from 2026-09-18 undiagnosable.
+
+    The call-site exemption applies here for the same reason it applies above:
+    if the enclosing function is only ever invoked in a context that suspends
+    -e, the assignment does not abort, so the script survives and CAN still
+    print what it captured.
+    """
+    rows = []
+    paths = sorted(set(glob.glob(os.path.join(root, "scripts", "**", "*.sh"), recursive=True)))
+    corpus = []
+    for p in paths:
+        try:
+            corpus.append(open(p, encoding="utf-8", errors="replace").read().splitlines())
+        except OSError:
+            pass
+    for path in paths:
+        try:
+            lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+        except OSError:
+            continue
+        shell = shell_lines(lines)
+        if not any(l is not None and SET_E.search(l) for l in shell):
+            continue
+        active, on = [], False
+        for l in shell:
+            if l is not None and SET_E.search(l):
+                on = True
+            elif l is not None and SET_PLUS_E.search(l):
+                on = False
+            active.append(on)
+        for i, line in enumerate(lines):
+            if shell[i] is None:
+                continue
+            # A continuation line is not a command; same trap that turned 17
+            # candidates into 316 for shape 4.
+            if i > 0 and shell[i - 1] is not None and lines[i - 1].rstrip().endswith("\\"):
+                continue
+            m = ASSIGN.match(line)
+            if m is None:
+                continue
+            # Join continuations BEFORE judging either the guard or the
+            # command, because a wrapped `ee` invocation carries both its
+            # `--json` and its `|| rc=$?` on later physical lines.
+            logical, last = line, i
+            while logical.rstrip().endswith("\\") and last + 1 < len(lines):
+                last += 1
+                logical = logical.rstrip()[:-1] + " " + lines[last]
+            logical = _decomment(logical)
+            if not STDOUT_DIAGNOSTIC.search(logical):
+                continue
+            if IF_COND.match(logical) or GUARDED.search(logical):
+                continue
+            rows.append({"file": os.path.relpath(path, root), "line": i + 1,
+                         "var": m.group(1), "live": active[i],
+                         "_lines": lines, "snippet": line.strip()[:78]})
+    for r in rows:
+        fns = function_ranges(r["_lines"])
+        enclosing = next((n for n, s, e in fns if s < r["line"] - 1 <= e), None)
+        r["fn"] = enclosing
+        if enclosing is None:
+            r["verdict"] = "TOP-LEVEL: -e aborts here, diagnostic SWALLOWED"
+        else:
+            kinds = call_contexts(enclosing, corpus)
+            if "tested" in kinds:
+                r["verdict"] = f"EXEMPT: {enclosing}() is called in a tested context"
+            elif kinds:
+                r["verdict"] = f"SWALLOWED: {enclosing}() only ever called bare"
+            else:
+                r["verdict"] = f"UNKNOWN: no call site found for {enclosing}()"
+        del r["_lines"]
+    return rows
+
+
 def self_test():
     import tempfile
     arms = []
@@ -457,6 +559,52 @@ def self_test():
             and all("EXEMPT" in r["verdict"] for r in setpluse_rows))
         arm("exactly three candidates across the fixtures", len(rows) == 3)
 
+        # --- SWALLOW SHAPE (bd-v918u) --------------------------------------
+        # A separate fixture root, so these arms cannot perturb the three
+        # counted above. The shape: a capture of a command whose diagnostic
+        # goes to STDOUT, under -e, with no handler -- the script dies and the
+        # envelope dies with it.
+        sw = os.path.join(tmp, "swallow", "scripts")
+        os.makedirs(sw)
+        # POSITIVE: the measured bd-63mua shape.
+        open(os.path.join(sw, "bare.sh"), "w").write(
+            'set -euo pipefail\nreport="$(run_ee search q --json)"\necho "$report"\n')
+        # NEGATIVE 1: the repair this census asks for.
+        open(os.path.join(sw, "guarded.sh"), "w").write(
+            'set -euo pipefail\nreport="$(run_ee search q --json)" || rc=$?\n'
+            'echo "${rc:-0}"\n')
+        # NEGATIVE 2: a command that reports on STDERR. Failing `date` still
+        # tells the operator something, so a bare capture of it is not this
+        # defect. Without this arm the shape would flag every capture in the
+        # tree and bury the ones that matter.
+        open(os.path.join(sw, "stderr_cmd.sh"), "w").write(
+            'set -euo pipefail\nstamp="$(date -u +%s)"\necho "$stamp"\n')
+        # NEGATIVE 3: assignment inside an `if` condition -- -e is suspended,
+        # so the script survives to print what it captured.
+        open(os.path.join(sw, "iftest.sh"), "w").write(
+            'set -euo pipefail\nif report="$(run_ee search q --json)"; then :; fi\n'
+            'echo "$report"\n')
+        # NEGATIVE 4: wrapped invocation whose guard is on a LATER physical
+        # line. This is the shape most `ee` calls actually have, and judging
+        # the first line alone would call it unguarded.
+        open(os.path.join(sw, "wrapped.sh"), "w").write(
+            'set -euo pipefail\nreport="$(run_ee search q \\\n    --json)" \\\n'
+            '    || rc=$?\necho "${rc:-0}"\n')
+        sw_rows = swallow_census(os.path.join(tmp, "swallow"))
+        sw_files = {r["file"] for r in sw_rows}
+        arm("a bare capture of an ee call IS flagged",
+            "scripts/bare.sh" in sw_files)
+        arm("`|| rc=$?` on the same line is NOT flagged",
+            "scripts/guarded.sh" not in sw_files)
+        arm("a stderr-reporting command is NOT flagged",
+            "scripts/stderr_cmd.sh" not in sw_files)
+        arm("an `if` condition capture is NOT flagged",
+            "scripts/iftest.sh" not in sw_files)
+        arm("a guard on a CONTINUATION line is recognised",
+            "scripts/wrapped.sh" not in sw_files)
+        arm("exactly one swallow candidate across the swallow fixtures",
+            len(sw_rows) == 1)
+
         # --- GATE ARMS (bd-w6849) ------------------------------------------
         # The census had no exit statement at all: it fell off the end of
         # __main__ and ALWAYS exited 0. So wiring it to a root as "assert exit
@@ -545,6 +693,35 @@ if __name__ == "__main__":
     root = "."
     if "--root" in sys.argv:
         root = sys.argv[sys.argv.index("--root") + 1]
+    # `--swallow` reports the bd-v918u shape instead: a capture of a
+    # stdout-diagnostic command that -e aborts, taking the envelope with it.
+    # Separate mode rather than extra rows in the default census, because the
+    # two defects have different repairs -- one needs the handler reached, the
+    # other needs the captured output PRINTED.
+    if "--swallow" in sys.argv:
+        sw = swallow_census(root)
+        live_sw = [r for r in sw if r["live"]]
+        print(f"swallow candidates: {len(sw)}  "
+              f"(set -e active at the line: {len(live_sw)})")
+        import collections as _c
+        for k, v in _c.Counter(
+                r["verdict"].split(":")[0] for r in live_sw).most_common():
+            print(f"    {k:<12} {v}")
+        print()
+        w = max((len(r["file"]) for r in sw), default=10)
+        for r in sorted(live_sw, key=lambda r: (r["verdict"], r["file"], r["line"])):
+            print(f"  {r['file']:<{w}} :{r['line']:<5} {r['var']:<16} {r['verdict']}")
+        dormant = [r for r in sw if not r["live"]]
+        if dormant:
+            print("\n  -- set +e in scope at the line, so the script survives "
+                  "and can still print what it captured --")
+            for r in sorted(dormant, key=lambda r: (r["file"], r["line"])):
+                print(f"  {r['file']:<{w}} :{r['line']:<5} {r['var']}")
+        print("\n  REPAIR: capture, then print what you captured before "
+              "failing --\n"
+              '    out="$(run_ee ...)" || rc=$?\n'
+              '    [ "$rc" -eq 0 ] || { printf \'%s\\n\' "$out" >&2; exit 1; }')
+        sys.exit(0)
     rows = census(root)
     live = [r for r in rows if r["live"]]
     print(f"candidate sites: {len(rows)}  (set -e active at the line: {len(live)})")
