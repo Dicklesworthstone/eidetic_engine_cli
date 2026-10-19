@@ -31,6 +31,8 @@ mod session_budget_plan_golden;
 mod session_budget_recorder_unit;
 #[path = "../session_budget_schema_unit.rs"]
 mod session_budget_schema_unit;
+#[path = "../set_e_dead_handler_gate.rs"]
+mod set_e_dead_handler_gate;
 #[path = "../shard_fanout_closeout_matrix.rs"]
 mod shard_fanout_closeout_matrix;
 #[path = "../shard_fanout_concurrency.rs"]
