@@ -38,6 +38,12 @@ pub(super) fn candidates(
         let Some(fix) = card.input.excerpt.lines().find_map(|line| line.strip_prefix("Fix: ")) else {
             continue;
         };
+        // A short-lived context card may shorten an oversized sentence. A
+        // proposed durable lesson must not omit its trailing qualifications.
+        // Abstain rather than turn a visibly incomplete repair into a rule.
+        if !complete_fix(fix) {
+            continue;
+        }
         let Some(diagnostic) = arc.diagnostics.first() else {
             continue;
         };
@@ -111,6 +117,12 @@ pub(super) fn candidates(
     proposals
 }
 
+fn complete_fix(fix: &str) -> bool {
+    let fix = fix.trim();
+    !fix.is_empty() && !fix.ends_with("...") && !fix.ends_with('…')
+        && !fix.contains("[truncated]") && !fix.contains("[TRUNCATED]")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +167,186 @@ mod tests {
         assert!(proposed[0].corroboration.as_ref().is_some_and(ReviewCorroboration::recorded));
         validate_draft(&fixture.db, WS, &proposed[0]).map_err(|error| error.message)?;
         assert!(fixture.db.list_curation_candidates(WS, None, None, None)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_card_sentences_are_not_promoted_to_durable_lessons() {
+        for text in ["", " ", "Fixed Widget...", "Fixed Widget…", "Fixed [truncated]", "Fixed [TRUNCATED]"] {
+            assert!(!complete_fix(text), "{text}");
+        }
+        assert!(complete_fix("I fixed Widget only when its input is already validated."));
+        assert!(complete_fix("Changed the literal `...` in src/widget.rs."));
+    }
+}
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+    use crate::core::init::{InitOptions, init_workspace};
+    use crate::db::{CreateEvidenceSpanInput, CreateSessionInput};
+    use serde_json::json;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    const FIX: &str = "I fixed E0277 by deriving Serialize for Widget before writing the value to the store in src/widget.rs.";
+    const FAILURE: &str = "error[E0277]: the trait bound `Widget: Serialize` is not satisfied\n --> src/widget.rs:3:5\n";
+    const COMMAND: &str = "cargo check";
+
+    struct Workspace {
+        _temp: tempfile::TempDir,
+        path: PathBuf,
+        database: PathBuf,
+        id: String,
+        db: DbConnection,
+    }
+
+    impl Workspace {
+        fn new() -> TestResult<Self> {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().canonicalize()?;
+            let report = init_workspace(&InitOptions {
+                workspace_path: path.clone(), dry_run: false, repair_plan: false,
+                force: false, allow_symlink: false, skip_boilerplate: true,
+            });
+            assert!(report.status.is_success(), "{report:?}");
+            let db = DbConnection::open_file(&report.database_path)?;
+            let workspace = db.get_workspace_by_path(&path.to_string_lossy())?.ok_or("workspace")?;
+            Ok(Self { _temp: temp, path, database: report.database_path, id: workspace.id, db })
+        }
+
+        fn episode(&self, number: u128, context: &str, retry_command: &str, passed: bool)
+        -> TestResult<(String, String, String)> {
+            let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+            self.db.insert_session(&session, &CreateSessionInput {
+                workspace_id: self.id.clone(),
+                cass_session_id: format!("/sessions/verified-learning-{number}.jsonl"),
+                source_path: Some(format!("/sessions/verified-learning-{number}.jsonl")),
+                agent_name: Some("claude_code".to_owned()), model: None,
+                started_at: None, ended_at: None, message_count: 6, token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(context.as_bytes()).to_hex()),
+                metadata_json: None,
+            })?;
+            // Call IDs are identical across independent episodes. Changing only
+            // local IDs or upstream paths must not manufacture independence.
+            let rows = [
+                ("message", "user", json!({"type":"text","text":context})),
+                ("tool_call", "assistant", json!({"type":"tool_use","id":"fail","name":"Bash","input":{"command":COMMAND}})),
+                ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"fail","content":FAILURE,"is_error":true})),
+                ("message", "assistant", json!({"type":"text","text":FIX})),
+                ("tool_call", "assistant", json!({"type":"tool_use","id":"retry","name":"Bash","input":{"command":retry_command}})),
+                ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"retry","content":if passed {""} else {FAILURE},"is_error":!passed})),
+            ];
+            let mut ids = Vec::new();
+            for (index, (kind, role, block)) in rows.into_iter().enumerate() {
+                let line = u32::try_from(index + 1)?;
+                let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(number * 100 + u128::from(line))).to_string();
+                let excerpt = json!({"type":role,"message":{"role":role,"content":[block]}}).to_string();
+                self.db.insert_evidence_span(&id, &CreateEvidenceSpanInput {
+                    workspace_id: self.id.clone(), session_id: session.clone(), memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("{session}:{line}"), span_kind: kind.to_owned(),
+                    start_line: line, end_line: line, start_byte: None, end_byte: None,
+                    role: Some(role.to_owned()),
+                    content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                    excerpt, metadata_json: None, inherited_redaction_classes: Vec::new(),
+                })?;
+                ids.push(id);
+            }
+            Ok((session, ids[3].clone(), ids[5].clone()))
+        }
+
+        fn review(&self, session: &str, floor: f32, persist: bool) -> TestResult<ReviewSessionReport> {
+            review_session_proposals(&ReviewSessionOptions {
+                workspace_path: &self.path, database_path: Some(&self.database),
+                session_id: Some(session), propose: persist, dry_run: !persist,
+                min_confidence: floor, limit: 100,
+            }).map_err(|error| error.message().into())
+        }
+    }
+
+    fn native(report: &ReviewSessionReport) -> Vec<&ReviewSessionCandidate> {
+        report.candidates.iter().filter(|candidate| {
+            candidate.proposed_content.starts_with("Observed repair for ")
+        }).collect()
+    }
+
+    #[test]
+    fn public_review_persists_reproducible_source_packages_without_creating_memories() -> TestResult {
+        let workspace = Workspace::new()?;
+        let (session, repair, proof) = workspace.episode(90_001, "Work item alpha.", COMMAND, true)?;
+        let sources = workspace.db.list_evidence_spans_for_session(&session)?;
+        let preview = workspace.review(&session, 0.6, false)?;
+        assert!(!preview.durable_mutation);
+        assert_eq!(native(&preview).len(), 1);
+        assert_eq!(native(&preview)[0].source_ids, vec![repair.clone()]);
+        let written = workspace.review(&session, 0.6, true)?;
+        assert!(written.durable_mutation);
+        let proposed = native(&written);
+        assert_eq!(proposed.len(), 1);
+        assert_eq!(proposed[0].candidate_id, native(&preview)[0].candidate_id);
+        let stored = workspace.db.get_curation_candidate(&workspace.id, &proposed[0].candidate_id)?.ok_or("stored proposal")?;
+        validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
+        let package: serde_json::Value = serde_json::from_str(stored.derivation_metadata_json.as_deref().ok_or("package")?)?;
+        let support = package.pointer("/producer/producerPayload/corroboration/sessions/0").ok_or("support")?;
+        assert_eq!(support["sources"].as_array().ok_or("sources")?.len(), 1);
+        assert_eq!(support["sources"][0]["evidenceSpanId"], repair);
+        assert!(support["contextSources"].as_array().ok_or("context")?.iter().any(|source| source["evidenceSpanId"] == proof));
+        let again = workspace.review(&session, 0.6, true)?;
+        assert!(!again.durable_mutation);
+        assert_eq!(native(&again)[0].candidate_id, proposed[0].candidate_id);
+        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
+        assert_eq!(workspace.db.list_evidence_spans_for_session(&session)?, sources);
+        Ok(())
+    }
+
+    #[test]
+    fn copied_sessions_and_failed_retries_cannot_supply_independent_support() -> TestResult {
+        let workspace = Workspace::new()?;
+        let (anchor, _, _) = workspace.episode(91_001, "Work item alpha.", COMMAND, true)?;
+        workspace.episode(91_002, "Work item alpha.", COMMAND, true)?;
+        workspace.episode(91_003, "Work item beta.", COMMAND, false)?;
+        assert!(native(&workspace.review(&anchor, 0.7, false)?).is_empty());
+        let single = workspace.review(&anchor, 0.6, false)?;
+        assert_eq!(native(&single).len(), 1);
+        assert_eq!(native(&single)[0].confidence, 0.6);
+        workspace.episode(91_004, "Work item gamma.", COMMAND, true)?;
+        let two = workspace.review(&anchor, 0.7, false)?;
+        assert_eq!(native(&two).len(), 1);
+        assert_eq!(native(&two)[0].confidence, 0.7);
+        assert!(native(&workspace.review(&anchor, 0.8, false)?).is_empty());
+        workspace.episode(91_005, "Work item delta.", COMMAND, true)?;
+        let three = workspace.review(&anchor, 0.8, false)?;
+        assert_eq!(native(&three).len(), 1);
+        assert_eq!(native(&three)[0].confidence, 0.8);
+        validate_draft(&workspace.db, &workspace.id, native(&three)[0]).map_err(|error| error.message)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_repairs_do_not_survive_changed_command_proof_at_validation() -> TestResult {
+        let workspace = Workspace::new()?;
+        let (session, _, proof) = workspace.episode(92_001, "Work item alpha.", COMMAND, true)?;
+        let report = workspace.review(&session, 0.6, true)?;
+        let id = &native(&report)[0].candidate_id;
+        let stored = workspace.db.get_curation_candidate(&workspace.id, id)?.ok_or("stored")?;
+        validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
+        let row = workspace.db.get_evidence_span(&proof)?.ok_or("proof")?;
+        let mut body: serde_json::Value = serde_json::from_str(&row.excerpt)?;
+        body["message"]["content"][0]["is_error"] = json!(true);
+        body["message"]["content"][0]["content"] = json!(FAILURE);
+        let revised = body.to_string().replace('\'', "''");
+        workspace.db.execute_raw(&format!("UPDATE evidence_spans SET excerpt = '{revised}' WHERE id = '{proof}'"))?;
+        assert!(validate_recorded(&workspace.db, &stored).is_err());
+        assert_eq!(workspace.db.get_curation_candidate(&workspace.id, id)?.ok_or("history")?.derivation_metadata_json, stored.derivation_metadata_json);
+        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn public_review_does_not_certify_a_different_retry_target() -> TestResult {
+        let workspace = Workspace::new()?;
+        let (session, _, _) = workspace.episode(93_001, "Work item alpha.", "cargo check --lib", true)?;
+        assert!(native(&workspace.review(&session, 0.0, false)?).is_empty());
         Ok(())
     }
 }
