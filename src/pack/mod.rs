@@ -3080,6 +3080,24 @@ const COVERAGE_GAP_KIND_SPECS: &[CoverageGapKindSpec] = &[
 pub fn explain_why_not_selected(
     input: WhyNotSelectedInput,
 ) -> Result<WhyNotSelectedReport, PackValidationError> {
+    explain_why_not_selected_inner(input, None)
+}
+
+/// Explain a memory against the completed production selection, including
+/// native rules, evidence, caller filters, and their shared token budget.
+/// The standalone counterfactual above remains available to library callers
+/// that deliberately provide a memory-only candidate universe.
+pub(crate) fn explain_why_not_selected_from_draft(
+    input: WhyNotSelectedInput,
+    draft: PackDraft,
+) -> Result<WhyNotSelectedReport, PackValidationError> {
+    explain_why_not_selected_inner(input, Some(draft))
+}
+
+fn explain_why_not_selected_inner(
+    input: WhyNotSelectedInput,
+    authoritative_draft: Option<PackDraft>,
+) -> Result<WhyNotSelectedReport, PackValidationError> {
     let task = trim_required(input.task, PackValidationError::EmptyQuery)?;
     input.options.validate_relevance_floor()?;
     let target = input.target;
@@ -3091,7 +3109,9 @@ pub fn explain_why_not_selected(
     let exclusions = input.exclusions;
     let degraded = input.degraded;
 
-    let draft = if target_present && exclusions.is_empty() {
+    let draft = if authoritative_draft.is_some() {
+        authoritative_draft
+    } else if target_present && exclusions.is_empty() {
         Some(assemble_draft_with_profile_and_options(
             input.profile,
             task.clone(),

@@ -74,7 +74,7 @@ use crate::core::search::{
     SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
     SearchWorkspaceProbeState, elapsed_timing_json, map_frankensearch_error,
     performance_redaction_json, query_observation_json, reconcile_search_index_before_read_with_cx,
-    resolve_search_rerank_runtime_posture, run_context_search_with_preloaded_memories,
+    resolve_search_rerank_runtime_posture,
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx,
     search_advisory_snapshot_data_json_with_delivery_reservation, search_degraded_data_json,
 };
@@ -112,8 +112,7 @@ use crate::pack::{
     PackTrustPosture, PackTrustSignal, TokenBudget, WhyNotSelectedInput, WhyNotSelectedReport,
     assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
-    estimate_tokens_default, explain_why_not_selected, pack_item_provenance_json,
-    redact_pack_provenance_text,
+    estimate_tokens_default, pack_item_provenance_json, redact_pack_provenance_text,
 };
 // The production PPR rerank is cfg(test)-only until the pinned FrankenNetworkX
 // release exposes deterministic personalized PageRank; the breakdown type is
@@ -123,6 +122,14 @@ use crate::pack::PackScoreBreakdown;
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::RuleIndexProjection;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
+
+#[path = "context_why_not.rs"]
+mod why_not;
+use why_not::OmissionCause;
+pub use why_not::{
+    TypedWhyNotSelectedReport, WHY_NOT_SELECTED_SCHEMA_V2, WhyNotEntity, WhyNotEntityScores,
+    WhyNotEntityTokenFrontier, explain_why_not_entity_default, parse_why_not_entity,
+};
 
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
 static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
@@ -1612,7 +1619,7 @@ pub(crate) fn run_context_pack_with_embedder(
         run_context_pack_with_performance_inner(
             options,
             PACK_COMMAND,
-            Deterministic::from_seed(0),
+            &Deterministic::from_seed(0),
             PackRecordPersistence::Seeded,
             ContextPackControl::new(&cx, None, None),
             Some(embedder),
@@ -2335,7 +2342,7 @@ pub(crate) fn run_context_pack_with_search_provider(
         run_context_pack_with_performance_inner(
             options,
             command,
-            Deterministic::from_seed(0),
+            &Deterministic::from_seed(0),
             PackRecordPersistence::Ambient,
             ContextPackControl::new(&cx, None, None),
             None,
@@ -2355,7 +2362,7 @@ pub async fn run_context_pack_with_performance_with_cx(
     run_context_pack_with_performance_inner(
         options,
         command,
-        determinism,
+        &determinism,
         PackRecordPersistence::Ambient,
         ContextPackControl::new(cx, None, None),
         None,
@@ -2442,7 +2449,7 @@ pub fn run_context_pack_with_performance_controlled(
         run_context_pack_with_performance_inner(
             options,
             command,
-            determinism,
+            &determinism,
             PackRecordPersistence::Ambient,
             ContextPackControl::new(&cx, deadline, cancellation_flag),
             None,
@@ -2462,7 +2469,7 @@ pub fn run_context_pack_with_performance_seeded(
         run_context_pack_with_performance_inner(
             options,
             command,
-            determinism,
+            &determinism,
             PackRecordPersistence::Seeded,
             ContextPackControl::new(&cx, None, None),
             None,
@@ -2484,6 +2491,7 @@ struct ContextPackControl<'a> {
     cx: &'a asupersync::Cx,
     deadline: Option<Instant>,
     cancellation_flag: Option<&'a AtomicBool>,
+    why_not: Option<&'a why_not::WhyNotSelectionProbe>,
 }
 
 impl<'a> ContextPackControl<'a> {
@@ -2497,6 +2505,7 @@ impl<'a> ContextPackControl<'a> {
             cx,
             deadline: deadline.and_then(|duration| now.checked_add(duration)),
             cancellation_flag,
+            why_not: None,
         }
     }
 
@@ -2538,12 +2547,12 @@ impl<'a> ContextPackControl<'a> {
 /// Explain why a target memory was (or was not) selected for a context pack.
 ///
 /// This is the read-only counterfactual of [`run_context_pack_with_performance`]
-/// (`ee why-not`, the reverse of `ee why`). It resolves the exact candidate
-/// universe the task+workspace would trigger, locates the target memory among
-/// those candidates (or reconstructs a not-retrieved candidate when the memory
-/// never reached the candidate pool), and delegates to
-/// [`crate::pack::explain_why_not_selected`]. The cost is one `ee pack`-shaped
-/// retrieval; nothing is persisted, mutated, or cached.
+/// (`ee why-not`, the reverse of `ee why`). A one-target observer follows the
+/// production pack through retrieval, filtering and mixed-source selection.
+/// The report therefore reflects native rule/evidence budget competition,
+/// graph/focus fan-in, pagination and the contradiction guard. Missing targets
+/// are reconstructed only for explanation, never inserted into selection.
+/// Nothing is persisted, mutated, or cached.
 ///
 /// When the target is in the candidate pool the report's `reason_source` is
 /// `authoritative`; for a reconstructed not-retrieved candidate it is
@@ -2559,272 +2568,7 @@ pub fn explain_why_not(
     target_memory_id: MemoryId,
     determinism: &Deterministic<Seed>,
 ) -> Result<WhyNotSelectedReport, ContextPackError> {
-    let database_path = options
-        .database_path
-        .clone()
-        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
-    if !database_path.exists() {
-        return Err(ContextPackError::WorkspaceStoreMissing(database_path));
-    }
-
-    let fast_embedder_override = if options.source_mode.uses_embeddings() {
-        let embedder_database_path = database_path.clone();
-        let preparation = crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
-            prepare_read_only_search_embedder_for_workspace(
-                &cx,
-                &options.workspace_path,
-                &embedder_database_path,
-            )
-            .map_err(|error| {
-                ContextPackError::Search(map_frankensearch_error(
-                    &cx,
-                    "why-not embedder preparation",
-                    error,
-                ))
-            })
-        })
-        .map_err(|error| {
-            ContextPackError::Pack(format!(
-                "Failed to start why-not embedder preparation: {error}"
-            ))
-        })??;
-        Some(preparation.fast_embedder)
-    } else {
-        None
-    };
-
-    let effective_filters = context_effective_filters(options);
-
-    let mut degraded = Vec::new();
-    let (read_pool_config, pin_snapshot) =
-        context_read_pool_config(&options.workspace_path, &mut degraded);
-    let read_pool = registered_process_read_pool(
-        DatabaseConfig::file(database_path.clone()),
-        read_pool_config,
-    );
-
-    let mut request = ContextRequest::new(ContextRequestInput {
-        query: options.query.clone(),
-        profile: options.profile,
-        max_tokens: options.max_tokens,
-        candidate_pool: resolved_candidate_pool(options)?,
-        max_results: options.max_results,
-        sections: Vec::new(),
-    })
-    .map_err(|error| ContextPackError::Pack(error.to_string()))?;
-
-    request.reference_time = context_validity_reference_time(options, &effective_filters);
-    let read_snapshot = if pin_snapshot {
-        read_pool.pin_snapshot_with_metadata(context_snapshot_pin_metadata(&request))
-    } else {
-        read_pool.acquire_snapshot(false)
-    }
-    .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
-
-    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let mut search_preloaded_memories = BTreeMap::new();
-    let search_options = SearchOptions {
-        workspace_path: options.workspace_path.clone(),
-        database_path: Some(database_path.clone()),
-        index_dir: options.index_dir.clone(),
-        query: request.query.clone(),
-        limit: request.candidate_pool,
-        speed: options.speed,
-        explain: false,
-        as_of: context_validity_reference_time(options, &effective_filters),
-        include_tombstoned: options.include_tombstoned,
-        include_expired: context_include_expired(options, &effective_filters),
-        include_future: context_include_future(options, &effective_filters),
-        include_stale: context_include_stale(options, &effective_filters),
-        relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
-        dedup_mode: crate::core::search::SearchDedupMode::DocId,
-        source_mode: options.source_mode,
-        strict_source_mode: options.strict_source_mode,
-        memory_scope: options.memory_scope,
-        strict_scope: options.strict_scope,
-    };
-    let mut search_report = match run_context_search_with_preloaded_memories(
-        &search_options,
-        read_connection,
-        None,
-        determinism,
-        fast_embedder_override,
-    ) {
-        Ok(context_search) => {
-            request.quality_scoring_policy = Some(context_search.quality_scoring_policy);
-            search_preloaded_memories = context_search.preloaded_memories;
-            context_search.report
-        }
-        Err(SearchError::NoIndex) => missing_index_search_report(
-            &request.query,
-            request.candidate_pool,
-            runtime_profile_for_workspace(&options.workspace_path),
-        ),
-        Err(error) => return Err(ContextPackError::Search(error)),
-    };
-
-    // Mirror the production pack path: when the derived index is missing or
-    // errored, resolve candidates from a deterministic lexical memory fallback so
-    // why-not reflects the same candidate universe `ee pack` would actually use
-    // (otherwise a memory the pack would include via fallback is misreported as
-    // not_retrieved/reconstructed).
-    push_search_degradations(&mut degraded, &search_report.degraded);
-    if matches!(
-        search_report.status,
-        SearchStatus::IndexError | SearchStatus::IndexNotFound
-    ) {
-        let global_memories = global_store_fallback_memories(
-            &search_options,
-            &mut degraded,
-            &mut search_preloaded_memories,
-        )?;
-        let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-        let (fallback_hits, quality_policy) = quality_scored_lexical_memory_fallback_hits(
-            read_connection,
-            &search_options,
-            global_memories,
-            &mut degraded,
-        )?;
-        request.quality_scoring_policy = Some(quality_policy);
-        search_report.results = fallback_hits;
-        search_report.status = if search_report.results.is_empty() {
-            SearchStatus::NoResults
-        } else {
-            SearchStatus::Success
-        };
-    }
-
-    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let (candidates, _candidate_metrics) = candidates_from_search_for_task_paths(
-        read_connection,
-        &options.workspace_path,
-        &search_report,
-        &effective_filters,
-        options.include_tombstoned,
-        &mut degraded,
-        Some(&search_preloaded_memories),
-        &task_paths::normalize(&options.workspace_path, &options.task_paths)?,
-        request.reference_time,
-        &mut Vec::new(),
-    );
-
-    let profile = options.profile.unwrap_or(ContextPackProfile::Balanced);
-    let budget = match options.max_tokens {
-        Some(max_tokens) => TokenBudget::new(max_tokens)
-            .map_err(|error| ContextPackError::Pack(error.to_string()))?,
-        None => TokenBudget::default_context(),
-    };
-
-    // Locate the target among the real candidate pool (authoritative path). When
-    // it never reached the pool, reconstruct a not-retrieved candidate so scores
-    // still render and the library reports reason_source=reconstructed.
-    // bd-1n0np.1.9: when the target was filtered out of the candidate pool,
-    // classify *why* by re-running the SAME candidate filters the pack applies
-    // (see candidates_from_search_with_metrics) against the target memory, so a
-    // memory dropped by tag/validity/trust/redaction reports the authoritative
-    // `excluded_by_*` reason instead of collapsing into a bare `not_retrieved`.
-    let mut why_not_exclusions: Vec<crate::pack::WhyNotSelectionExclusion> = Vec::new();
-    let target = match candidates
-        .iter()
-        .find(|candidate| candidate.memory_id == target_memory_id)
-        .cloned()
-    {
-        Some(candidate) => candidate,
-        None => {
-            let classify_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-            if let Ok(Some(target_memory)) =
-                classify_connection.get_memory(&target_memory_id.to_string())
-            {
-                let target_tags = classify_connection
-                    .get_memory_tags(&target_memory.id)
-                    .unwrap_or_default();
-                if !effective_filters.tags.is_empty()
-                    && !effective_filters.matches_tags(&target_tags)
-                {
-                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
-                        crate::pack::WhyNotSelectionExclusionKind::Filter,
-                        "excluded_by_tag_filter",
-                        "The memory did not match the requested tag filter.",
-                        None,
-                    ));
-                }
-                if !effective_filters.temporal.is_empty()
-                    && matches!(
-                        temporal_memory_outcome(&target_memory, &effective_filters.temporal),
-                        TemporalCandidateOutcome::Exclude
-                    )
-                {
-                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
-                        crate::pack::WhyNotSelectionExclusionKind::ValidityWindow,
-                        "excluded_by_validity_window",
-                        "The memory fell outside the requested temporal validity window.",
-                        None,
-                    ));
-                }
-                if !effective_filters.trust.is_empty()
-                    && !effective_filters.trust.matches(
-                        &target_memory.trust_class,
-                        posture_for_trust_class(&target_memory.trust_class),
-                    )
-                {
-                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
-                        crate::pack::WhyNotSelectionExclusionKind::Filter,
-                        "excluded_by_trust_filter",
-                        "The memory's trust class did not match the requested trust filter.",
-                        None,
-                    ));
-                }
-                if !effective_filters.redaction.allow_categories.is_empty()
-                    && !redaction_allow_categories(
-                        &target_memory.content,
-                        &effective_filters.redaction,
-                    )
-                {
-                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
-                        crate::pack::WhyNotSelectionExclusionKind::Redaction,
-                        "excluded_by_redaction",
-                        "The memory was withheld by the redaction allow-category filter.",
-                        None,
-                    ));
-                }
-            }
-            let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-            reconstruct_not_retrieved_candidate(
-                read_connection,
-                &options.workspace_path,
-                target_memory_id,
-                request.reference_time,
-                &mut degraded,
-            )?
-        }
-    };
-
-    // bd-1n0np.1.8: surface the retrieval-time degradations collected above (e.g.
-    // a degraded/missing search index that forced the lexical fallback) so a miss
-    // caused by a broken index reports `not_retrieved_due_to_degraded_index`
-    // (stage `degraded_index`) instead of a bare `not_retrieved` — the
-    // honest-vs-misleading distinction. Map the context degradations onto the
-    // why-not degradation contract.
-    let why_not_degraded: Vec<crate::pack::WhyNotSelectionDegradation> = degraded
-        .iter()
-        .map(|degradation| {
-            crate::pack::WhyNotSelectionDegradation::new(
-                degradation.code.clone(),
-                degradation.severity.as_str(),
-                degradation.message.clone(),
-                degradation.repair.clone(),
-            )
-        })
-        .collect();
-    let input =
-        WhyNotSelectedInput::new(options.query.clone(), target, budget, profile, candidates)
-            .with_options(crate::pack::PackAssemblyOptions {
-                relevance_floor: options.relevance_floor,
-                ..crate::pack::PackAssemblyOptions::default()
-            })
-            .with_degraded(why_not_degraded)
-            .with_exclusions(why_not_exclusions);
-    explain_why_not_selected(input).map_err(|error| ContextPackError::Pack(error.to_string()))
+    why_not::explain_memory(options, target_memory_id, determinism)
 }
 
 /// CLI-facing convenience wrapper for [`explain_why_not`] that uses the same
@@ -2881,6 +2625,16 @@ fn reconstruct_not_retrieved_candidate(
     ) {
         source_signals = Some(memory_provenance.attach_to(&mut provenance));
     }
+    if provenance.is_empty() {
+        provenance.push(
+            PackProvenance::new(
+                ProvenanceUri::from_str(&format!("ee://memory/{memory_id}"))
+                    .map_err(|error| ContextPackError::Pack(error.to_string()))?,
+                "Target memory identity; no external source provenance is available.",
+            )
+            .map_err(|error| ContextPackError::Pack(error.to_string()))?,
+        );
+    }
     let relevance = unit_score(0.0)
         .ok_or_else(|| ContextPackError::Pack("invalid relevance score".to_string()))?;
     let utility = unit_score(memory.utility)
@@ -2913,7 +2667,7 @@ fn reconstruct_not_retrieved_candidate(
 async fn run_context_pack_with_performance_inner(
     options: &ContextPackOptions,
     command: &'static str,
-    determinism: Deterministic<Seed>,
+    determinism: &Deterministic<Seed>,
     pack_record_persistence: PackRecordPersistence,
     control: ContextPackControl<'_>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
@@ -3320,6 +3074,17 @@ async fn run_context_pack_with_performance_inner(
         }
     }
 
+    if let Some(probe) = control.why_not {
+        probe.initialize(
+            checked_context_read_snapshot(&read_pool, &read_snapshot)?,
+            options,
+            &request,
+            &effective_filters,
+            &search_report,
+            &search_preloaded_memories,
+        )?;
+    }
+
     // Apply metadata query filters to search results. Tag filters are applied
     // after memory tags have been batch-loaded during candidate resolution.
     if !effective_filters.filters.is_empty() {
@@ -3342,6 +3107,9 @@ async fn run_context_pack_with_performance_inner(
                 None,
             );
         }
+    }
+    if let Some(probe) = control.why_not {
+        probe.observe_search(&search_report);
     }
     if search_report.status == SearchStatus::NoResults
         && !degraded
@@ -3434,6 +3202,10 @@ async fn run_context_pack_with_performance_inner(
         request.reference_time,
         &mut direct_rule_hits,
     );
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Filter);
+        probe.observe_rule_sources(&direct_rule_hits, OmissionCause::RuleAdmission);
+    }
     if candidate_metrics.tag_filtered_candidates > 0 {
         trace.filter_input_count = trace.filter_input_count.max(candidate_filter_input_count);
         trace.filtered_count = trace
@@ -3514,6 +3286,9 @@ async fn run_context_pack_with_performance_inner(
     candidate_metrics.graph_filtered_candidates = graph_metrics.filtered_candidates;
     candidate_metrics.graph_missing_seeds = graph_metrics.missing_seeds;
     candidate_metrics.graph_traversed_edges = graph_metrics.traversed_edges;
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Filter);
+    }
     trace.record_elapsed("candidateResolution", candidate_start);
     control.check()?;
 
@@ -3612,6 +3387,9 @@ async fn run_context_pack_with_performance_inner(
         Some(read_connection),
     );
     let global_store_memory_ids = global_store_search_memory_ids(&search_report);
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Filter);
+    }
     let mut scope_stats = filter_candidates_by_memory_scope(
         read_connection,
         &mut candidates,
@@ -3630,6 +3408,10 @@ async fn run_context_pack_with_performance_inner(
     if scope_context.strict_scope && scope_stats.strict_violations > 0 {
         candidates.clear();
         direct_rule_hits.clear();
+    }
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Scope);
+        probe.observe_rule_sources(&direct_rule_hits, OmissionCause::Scope);
     }
     if scope_stats.candidates_excluded_by_scope > 0 {
         candidate_metrics.scope_filtered_candidates = candidate_metrics
@@ -3651,6 +3433,9 @@ async fn run_context_pack_with_performance_inner(
         trace.filtered_count = trace.filtered_count.saturating_add(global_fan_in_filtered);
     }
     apply_team_lane_pack_policy(&mut candidates, &global_store_memory_ids, &mut degraded);
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Policy);
+    }
 
     let redaction_filter_input_count =
         candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
@@ -3658,6 +3443,9 @@ async fn run_context_pack_with_performance_inner(
         &mut candidates,
         &effective_filters.redaction,
     );
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Redaction);
+    }
     if redaction_filtered_candidates > 0 {
         candidate_metrics.redaction_filtered_candidates = candidate_metrics
             .redaction_filtered_candidates
@@ -3741,6 +3529,10 @@ async fn run_context_pack_with_performance_inner(
             &mut degraded,
         )?;
     }
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Policy);
+        probe.observe_rule_sources(&direct_rule_hits, OmissionCause::Policy);
+    }
     control.check()?;
 
     let ppr_rerank_start = Instant::now();
@@ -3804,7 +3596,7 @@ async fn run_context_pack_with_performance_inner(
     let scoring_ordering_start = Instant::now();
     sort_context_candidates(&mut candidates);
 
-    let mut evidence_candidates = collect_direct_evidence_pack_candidates(
+    let mut evidence_candidates = collect_direct_evidence_pack_candidates_with_probe(
         read_connection,
         &options.workspace_path,
         &search_report,
@@ -3812,6 +3604,7 @@ async fn run_context_pack_with_performance_inner(
         &effective_filters,
         options.relevance_floor,
         &mut degraded,
+        control.why_not,
     )?;
     let mut rule_candidates = direct_rule_pack_candidates(
         direct_rule_hits,
@@ -3820,6 +3613,14 @@ async fn run_context_pack_with_performance_inner(
         output_redaction_enabled,
         &mut degraded,
     );
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Filter);
+        probe.observe_native(
+            &rule_candidates,
+            &evidence_candidates,
+            OmissionCause::Filter,
+        );
+    }
     // Every fan-in has joined and final ranking scores are known. Reject
     // below-floor items before they can consume a result slot or page offset.
     policy_omissions.extend(filter_context_pack_candidates_by_relevance_floor(
@@ -3829,13 +3630,21 @@ async fn run_context_pack_with_performance_inner(
         options.relevance_floor,
         &mut degraded,
     )?);
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::ScoreFloor);
+        probe.observe_native(
+            &rule_candidates,
+            &evidence_candidates,
+            OmissionCause::ScoreFloor,
+        );
+    }
     let warning_reservation = native_warning_candidate_for_page(
         &candidates,
         &rule_candidates,
         &request,
         options.relevance_floor,
     );
-    let pagination_info = apply_pagination_with_rules(
+    let pagination_info = apply_pagination_with_rules_and_probe(
         &mut candidates,
         &mut rule_candidates,
         &mut evidence_candidates,
@@ -3843,7 +3652,16 @@ async fn run_context_pack_with_performance_inner(
         request.max_results,
         warning_reservation,
         &mut degraded,
+        control.why_not,
     );
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Pagination);
+        probe.observe_native(
+            &rule_candidates,
+            &evidence_candidates,
+            OmissionCause::Pagination,
+        );
+    }
     candidate_metrics.subspans.scoring_ordering = scoring_ordering_start.elapsed();
     trace.record_candidate_resolution_subspans(&candidate_metrics.subspans);
     trace.candidate_resolution = candidate_metrics;
@@ -3966,18 +3784,19 @@ async fn run_context_pack_with_performance_inner(
             // golden harness proves byte-identical output.
             arena_mode: crate::pack::ArenaMode::Disabled,
         },
-        &determinism,
+        determinism,
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     apply_context_pack_contradiction_guard(read_connection, &mut draft);
     if concurrent_limit_retry_after_ms.is_none() {
-        append_ranked_native_pack_items(
+        append_ranked_native_pack_items_with_probe(
             rule_candidates,
             evidence_candidates,
             &request,
             options.relevance_floor,
             &mut draft,
             &mut degraded,
+            control.why_not,
         );
     }
     if !policy_omissions.is_empty() {
@@ -4220,7 +4039,7 @@ async fn run_context_pack_with_performance_inner(
                         &draft,
                         &response_degraded,
                         &non_ledger_memory_ids,
-                        &determinism,
+                        determinism,
                         options.task_lens.as_ref(),
                         options.baseline_write.as_ref(),
                         &mut pack_persistence,
@@ -4256,7 +4075,7 @@ async fn run_context_pack_with_performance_inner(
                                 &draft,
                                 &response_degraded,
                                 &non_ledger_memory_ids,
-                                &determinism,
+                                determinism,
                                 options.task_lens.as_ref(),
                                 options.baseline_write.as_ref(),
                                 &mut pack_persistence,
@@ -5848,6 +5667,28 @@ fn apply_pagination_with_rules(
     warning_reservation: Option<ContextPackEntityKey>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> PaginationInfo {
+    apply_pagination_with_rules_and_probe(
+        candidates,
+        rule_candidates,
+        evidence_candidates,
+        pagination,
+        max_results,
+        warning_reservation,
+        degraded,
+        None,
+    )
+}
+
+fn apply_pagination_with_rules_and_probe(
+    candidates: &mut Vec<PackCandidate>,
+    rule_candidates: &mut Vec<crate::pack::PackRuleItem>,
+    evidence_candidates: &mut Vec<DirectEvidencePackCandidate>,
+    pagination: &Option<ContextPagination>,
+    max_results: Option<u32>,
+    warning_reservation: Option<ContextPackEntityKey>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+    why_not: Option<&why_not::WhyNotSelectionProbe>,
+) -> PaginationInfo {
     if pagination.is_none() && max_results.is_none() {
         return PaginationInfo::default();
     }
@@ -5921,7 +5762,8 @@ fn apply_pagination_with_rules(
         });
     }
     let mut represented_links = BTreeSet::new();
-    ranked.retain(|(_, slot)| {
+    let mut representative_entities = BTreeMap::new();
+    ranked.retain(|(priority, slot)| {
         let group = match slot {
             ContextPackCandidateSlot::Memory(index) => {
                 Some(candidates[*index].memory_id).filter(|id| linked_memory_ids.contains(id))
@@ -5933,13 +5775,28 @@ fn apply_pagination_with_rules(
                 .filter(|id| linked_memory_ids.contains(id)),
             ContextPackCandidateSlot::Rule(_) => None,
         };
-        group.is_none_or(|id| represented_links.insert(id))
+        let keep = group.is_none_or(|id| represented_links.insert(id));
+        if let Some(probe) = why_not
+            && let Some(id) = group
+        {
+            if keep {
+                representative_entities.insert(id, priority.entity.clone());
+            } else if probe.matches(&priority.entity)
+                && let Some(representative) = representative_entities.get(&id)
+            {
+                probe.represented_by_key(representative, OmissionCause::Duplicate);
+            }
+        }
+        keep
     });
     if let Some(max_results) = max_results {
         let mut memory_trimmed = 0_usize;
         let mut rule_trimmed = 0_usize;
         let mut evidence_trimmed = 0_usize;
-        for (_, slot) in ranked.iter().skip(max_results as usize) {
+        for (priority, slot) in ranked.iter().skip(max_results as usize) {
+            if let Some(probe) = why_not.filter(|probe| probe.matches(&priority.entity)) {
+                probe.reject(OmissionCause::ResultLimit);
+            }
             match slot {
                 ContextPackCandidateSlot::Memory(_) => memory_trimmed += 1,
                 ContextPackCandidateSlot::Rule(_) => rule_trimmed += 1,
@@ -5977,6 +5834,15 @@ fn apply_pagination_with_rules(
     let remaining = total.saturating_sub(offset);
     let page_size = remaining.min(limit);
     let has_more = remaining > limit;
+    if let Some(probe) = why_not {
+        for (index, (priority, _)) in ranked.iter().enumerate() {
+            if (index < offset || index >= offset.saturating_add(page_size))
+                && probe.matches(&priority.entity)
+            {
+                probe.reject(OmissionCause::Pagination);
+            }
+        }
+    }
     let page_slots = ranked
         .iter()
         .skip(offset)
@@ -14662,6 +14528,7 @@ fn native_pack_memory_displacements(
 /// anti-pattern reservation may also replace higher-ranked ordinary memories;
 /// it uses the existing failure quota and never displaces a reserved warning.
 /// No source receives a manufactured memory identity.
+#[cfg(test)]
 fn append_ranked_native_pack_items(
     rules: Vec<crate::pack::PackRuleItem>,
     evidence: Vec<DirectEvidencePackCandidate>,
@@ -14669,6 +14536,26 @@ fn append_ranked_native_pack_items(
     relevance_floor: Option<f32>,
     draft: &mut PackDraft,
     degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    append_ranked_native_pack_items_with_probe(
+        rules,
+        evidence,
+        request,
+        relevance_floor,
+        draft,
+        degraded,
+        None,
+    );
+}
+
+fn append_ranked_native_pack_items_with_probe(
+    rules: Vec<crate::pack::PackRuleItem>,
+    evidence: Vec<DirectEvidencePackCandidate>,
+    request: &ContextRequest,
+    relevance_floor: Option<f32>,
+    draft: &mut PackDraft,
+    degraded: &mut Vec<ContextResponseDegradation>,
+    why_not: Option<&why_not::WhyNotSelectionProbe>,
 ) {
     let mut candidates = rules
         .into_iter()
@@ -14751,6 +14638,12 @@ fn append_ranked_native_pack_items(
             // skipped source, a later weaker source cannot erase both of them.
             represented_memory_ids.insert(memory_id);
             linked_duplicates = linked_duplicates.saturating_add(1);
+            if let Some(probe) = why_not.filter(|probe| probe.matches(&priority.entity)) {
+                probe.represented_by(
+                    crate::pack::PackEntityRef::Memory(memory_id),
+                    OmissionCause::Duplicate,
+                );
+            }
             continue;
         }
         let estimated_tokens = candidate.estimated_tokens();
@@ -14765,6 +14658,13 @@ fn append_ranked_native_pack_items(
             let result_limited = request
                 .max_results
                 .is_some_and(|limit| draft.selected_item_count() >= limit as usize);
+            if let Some(probe) = why_not.filter(|probe| probe.matches(&priority.entity)) {
+                probe.reject(if result_limited {
+                    OmissionCause::ResultLimit
+                } else {
+                    OmissionCause::TokenBudget
+                });
+            }
             match (&candidate, result_limited) {
                 (NativePackCandidate::Rule(_), true) => rule_result_limit += 1,
                 (NativePackCandidate::Evidence(_), true) => evidence_result_limit += 1,
@@ -14952,6 +14852,7 @@ fn filter_context_pack_candidates_by_relevance_floor(
 /// Admit and deduplicate native evidence before pagination, without spending
 /// the page's token budget or assigning a selected rank. Pages can therefore
 /// reach every eligible hit, including hits that did not fit an earlier page.
+#[cfg(test)]
 fn collect_direct_evidence_pack_candidates(
     connection: &DbConnection,
     workspace_path: &Path,
@@ -14960,6 +14861,28 @@ fn collect_direct_evidence_pack_candidates(
     filters: &crate::models::QueryFilters,
     relevance_floor: Option<f32>,
     degraded: &mut Vec<ContextResponseDegradation>,
+) -> Result<Vec<DirectEvidencePackCandidate>, ContextPackError> {
+    collect_direct_evidence_pack_candidates_with_probe(
+        connection,
+        workspace_path,
+        search_report,
+        request,
+        filters,
+        relevance_floor,
+        degraded,
+        None,
+    )
+}
+
+fn collect_direct_evidence_pack_candidates_with_probe(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    search_report: &crate::core::search::SearchReport,
+    request: &ContextRequest,
+    filters: &crate::models::QueryFilters,
+    relevance_floor: Option<f32>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+    why_not: Option<&why_not::WhyNotSelectionProbe>,
 ) -> Result<Vec<DirectEvidencePackCandidate>, ContextPackError> {
     crate::pack::PackAssemblyOptions {
         relevance_floor,
@@ -15046,6 +14969,9 @@ fn collect_direct_evidence_pack_candidates(
         };
         candidates.push(candidate);
     }
+    if let Some(probe) = why_not {
+        probe.observe_evidence(&candidates, OmissionCause::Filter);
+    }
     if relevance_floor.is_none() {
         apply_direct_evidence_query_relative_floor(&mut candidates, degraded);
     }
@@ -15059,6 +14985,9 @@ fn collect_direct_evidence_pack_candidates(
         relevance_floor,
         degraded,
     )?;
+    if let Some(probe) = why_not {
+        probe.observe_evidence(&candidates, OmissionCause::ScoreFloor);
+    }
     let mut candidates = prefer_incident_cards(
         connection,
         &workspace_ids,
@@ -15067,7 +14996,13 @@ fn collect_direct_evidence_pack_candidates(
         candidates,
         degraded,
     );
+    if let Some(probe) = why_not {
+        probe.observe_incident_preference(connection, &candidates);
+    }
     collapse_duplicate_evidence(&mut candidates, degraded);
+    if let Some(probe) = why_not {
+        probe.observe_evidence(&candidates, OmissionCause::Duplicate);
+    }
     if rejected_live_admission > 0 {
         push_degradation(
             degraded,

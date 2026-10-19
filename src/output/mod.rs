@@ -11898,6 +11898,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: why_not_selected_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::context::WHY_NOT_SELECTED_SCHEMA_V2,
+            version: "2",
+            description: "Native-entity explanation observed in the mixed-source context pack by ee why-not.",
+            category: "context",
+            definition: why_not_selected_v2_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.why.causal.v1",
             version: "1",
             description: "Causal explanation block for ee why graph-accretion output.",
@@ -13410,6 +13417,10 @@ fn verification_evidence_schema_definition() -> String {
 
 fn why_not_selected_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.why_not_selected.v1.json").to_string()
+}
+
+fn why_not_selected_v2_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.why_not_selected.v2.json").to_string()
 }
 
 fn why_causal_schema_definition() -> String {

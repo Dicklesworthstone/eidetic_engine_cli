@@ -11348,13 +11348,17 @@ pub struct WhyArgs {
 /// Arguments for `ee why-not` — the counterfactual reverse of `ee why`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct WhyNotArgs {
-    /// Memory ID to explain the exclusion of.
-    #[arg(value_name = "MEMORY_ID", required_unless_present = "gaps")]
+    /// Memory, procedural rule, or evidence-span ID to explain (mem_, rule_, ev_).
+    #[arg(value_name = "ENTITY_ID", required_unless_present = "gaps")]
     pub memory_id: Option<String>,
 
     /// Task/query the context pack would be built for.
     #[arg(long, value_name = "TASK")]
     pub task: String,
+
+    /// Literal workspace-relative task target for a directory/file-scoped rule; repeatable.
+    #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
+    pub task_paths: Vec<String>,
 
     /// Report task-specific capture-demand gaps instead of a single memory exclusion.
     #[arg(long = "gaps", action = ArgAction::SetTrue)]
@@ -11375,6 +11379,10 @@ pub struct WhyNotArgs {
     /// Candidate pool size for retrieval.
     #[arg(long, value_name = "N")]
     pub candidate_pool: Option<u32>,
+
+    /// Maximum selected items across memories, rules and evidence.
+    #[arg(long, value_name = "N")]
+    pub max_results: Option<u32>,
 
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
@@ -55607,7 +55615,7 @@ where
                 let domain_error = DomainError::Usage {
                     message,
                     repair: Some(
-                        "ee why-not <memory-id> --task \"<task>\" --profile balanced".to_string(),
+                        "ee why-not <entity-id> --task \"<task>\" --profile balanced".to_string(),
                     ),
                 };
                 return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
@@ -55617,7 +55625,7 @@ where
     };
 
     let options = ContextPackOptions {
-        task_paths: Vec::new(),
+        task_paths: args.task_paths.clone(),
         workspace_path,
         database_path: Some(database_path),
         index_dir: None,
@@ -55629,7 +55637,7 @@ where
         profile,
         max_tokens: args.max_tokens,
         candidate_pool: args.candidate_pool,
-        max_results: None,
+        max_results: args.max_results,
         include_tombstoned: false,
         as_of: None,
         include_expired: false,
@@ -55675,20 +55683,41 @@ where
 
     let Some(memory_id_raw) = args.memory_id.as_deref() else {
         let domain_error = DomainError::Usage {
-            message: "Memory id is required unless --gaps is supplied.".to_string(),
-            repair: Some("Use `ee why-not <memory-id> --task \"<task>\" --json`, or `ee why-not --task \"<task>\" --gaps --json`.".to_string()),
+            message: "A memory, rule, or evidence-span id is required unless --gaps is supplied.".to_string(),
+            repair: Some("Use `ee why-not <entity-id> --task \"<task>\" --json`, or `ee why-not --task \"<task>\" --gaps --json`.".to_string()),
         };
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     };
-    let memory_id = match memory_id_raw.parse::<crate::models::MemoryId>() {
+    let entity = match crate::core::context::parse_why_not_entity(memory_id_raw) {
         Ok(id) => id,
-        Err(_) => {
+        Err(message) => {
             let domain_error = DomainError::Usage {
-                message: format!("Invalid memory id: {memory_id_raw}"),
-                repair: Some("ee memory list --workspace . --json".to_string()),
+                message,
+                repair: Some(
+                    "Use a mem_, rule_, or ev_ identifier from ee search --json.".to_string(),
+                ),
             };
             return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
+    };
+
+    let crate::pack::PackEntityRef::Memory(memory_id) = entity else {
+        let report = match crate::core::context::explain_why_not_entity_default(&options, entity) {
+            Ok(report) => report,
+            Err(error) => return write_context_pack_error(&error, cli.renderer(), stdout, stderr),
+        };
+        let rendered = match cli.renderer() {
+            output::Renderer::Human => format_typed_why_not(&report, false),
+            output::Renderer::Markdown => format_typed_why_not(&report, true),
+            output::Renderer::Toon => {
+                output::render_toon_from_json(&format_why_not_json(&report)) + "\n"
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => format_why_not_json(&report) + "\n",
+        };
+        return write_stdout(stdout, &rendered);
     };
 
     let report = match explain_why_not_default(&options, memory_id) {
@@ -55712,9 +55741,9 @@ where
     }
 }
 
-/// Render a `WhyNotSelectedReport` as an `ee.response.v2` envelope whose
-/// `data` is the `ee.why_not_selected.v1` report (camelCase fields).
-fn format_why_not_json(report: &crate::pack::WhyNotSelectedReport) -> String {
+/// Render a memory v1 or native-entity v2 why-not report inside the shared
+/// `ee.response.v2` envelope, retaining the report's own schema and identity.
+fn format_why_not_json(report: &impl serde::Serialize) -> String {
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
@@ -55722,6 +55751,55 @@ fn format_why_not_json(report: &crate::pack::WhyNotSelectedReport) -> String {
         "data": report,
     })
     .to_string()
+}
+
+fn format_typed_why_not(
+    report: &crate::core::context::TypedWhyNotSelectedReport,
+    markdown: bool,
+) -> String {
+    let mut out = if markdown {
+        format!("# Why not: {}\n\n", report.entity.id)
+    } else {
+        format!("why-not {}\n", report.entity.id)
+    };
+    let prefix = if markdown { "- " } else { "  " };
+    out.push_str(&format!("{prefix}kind: {}\n", report.entity.kind));
+    out.push_str(&format!(
+        "{prefix}selected: {} ({}, source={})\n",
+        report.selected, report.primary_reason, report.reason_source
+    ));
+    out.push_str(&format!(
+        "{prefix}stage reached: {}\n",
+        report.retrieval_stage_reached
+    ));
+    out.push_str(&format!("{prefix}{}\n", report.message));
+    if let Some(representative) = &report.represented_by {
+        out.push_str(&format!(
+            "{prefix}represented by: {} ({})\n",
+            representative.id, representative.kind
+        ));
+        if let Some(selected) = report.representative_selected {
+            out.push_str(&format!("{prefix}representative selected: {selected}\n"));
+        }
+    }
+    if let Some(scores) = &report.scores {
+        out.push_str(&format!(
+            "{prefix}scores: relevance {:.4}, utility {:.4}\n",
+            scores.target_relevance, scores.target_utility
+        ));
+    }
+    let frontier = &report.token_budget_frontier;
+    out.push_str(&format!(
+        "{prefix}tokens: {} used / {} max\n",
+        frontier.used_tokens, frontier.max_tokens
+    ));
+    if let Some(tokens) = frontier.target_estimated_tokens {
+        out.push_str(&format!("{prefix}target needs: {tokens} tokens\n"));
+    }
+    for hint in &report.counterfactual_hints {
+        out.push_str(&format!("{prefix}hint: {}\n", hint.action));
+    }
+    out
 }
 
 fn format_why_not_markdown(report: &crate::pack::WhyNotSelectedReport) -> String {
@@ -96057,6 +96135,39 @@ demos:
             &serde_json::json!("mem_release_policy"),
             "why-not data memory id",
         )
+    }
+
+    #[test]
+    fn why_not_cli_accepts_native_ids_and_mixed_selection_options() -> TestResult {
+        for kind in ["rule", "ev"] {
+            let id = format!("{kind}_00000000-0000-0000-0000-000000000701");
+            let parsed = Cli::try_parse_from([
+                "ee",
+                "why-not",
+                id.as_str(),
+                "--task",
+                "verify release",
+                "--task-path",
+                "src/lib.rs",
+                "--task-path",
+                "src/main.rs",
+                "--max-results",
+                "2",
+                "--json",
+            ])
+            .map_err(|error| error.to_string())?;
+            let Some(Command::WhyNot(args)) = parsed.command else {
+                return Err("expected why-not command".to_owned());
+            };
+            ensure_equal(&args.memory_id, &Some(id), "native positional identity")?;
+            ensure_equal(
+                &args.task_paths,
+                &vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()],
+                "literal task targets",
+            )?;
+            ensure_equal(&args.max_results, &Some(2), "mixed result cap")?;
+        }
+        Ok(())
     }
 
     #[test]
