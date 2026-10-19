@@ -91456,6 +91456,8 @@ mod tests {
 
     #[test]
     fn daemon_service_workspace_is_absolute_and_install_requires_a_store() -> TestResult {
+        use super::daemon_service_workspace;
+
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = temp.path().join("ws");
         std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
