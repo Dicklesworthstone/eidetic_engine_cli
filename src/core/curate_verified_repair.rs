@@ -10,6 +10,10 @@ use crate::core::cass_error_recall::session_failure_arcs;
 use crate::core::incident_card::{IncidentCardSources, error_class_label};
 
 const PRODUCER: &str = "verified_tool_repair.v1";
+const COMPLETE_PRODUCER: &str = "verified_tool_repair.complete.v1";
+// Durable lessons have a different budget from ephemeral 120-token cards.
+// Refuse over-budget source explanations, never keep an unmarked prefix.
+const MAX_COMPLETE_REPAIR_BYTES: usize = 8 * 1024;
 
 pub(super) fn candidates(
     workspace_id: &str,
@@ -30,20 +34,6 @@ pub(super) fn candidates(
         let Some(resolution) = &arc.resolution else {
             continue;
         };
-        // Reuse the existing extractive renderer's sentence selection, source
-        // screening and budget. A naked success or narration is not a lesson.
-        let Some(card) = sources.draft(workspace_id, &session.id, &arc) else {
-            continue;
-        };
-        let Some(fix) = card.input.excerpt.lines().find_map(|line| line.strip_prefix("Fix: ")) else {
-            continue;
-        };
-        // A short-lived context card may shorten an oversized sentence. A
-        // proposed durable lesson must not omit its trailing qualifications.
-        // Abstain rather than turn a visibly incomplete repair into a rule.
-        if !complete_fix(fix) {
-            continue;
-        }
         let Some(diagnostic) = arc.diagnostics.first() else {
             continue;
         };
@@ -56,6 +46,27 @@ pub(super) fn candidates(
         }) {
             continue;
         }
+        // Preserve the compact proposal's existing content and identity when
+        // the card has a complete fix. A card's presentation ceiling must not
+        // prevent a longer, fully proved repair from entering the review queue.
+        let compact = sources.draft(workspace_id, &session.id, &arc).and_then(|card| {
+            card.input.excerpt.lines()
+                .find_map(|line| line.strip_prefix("Fix: "))
+                .filter(|fix| complete_fix(fix))
+                .map(str::to_owned)
+        });
+        let (producer, fix) = match compact {
+            Some(fix) => (PRODUCER, fix),
+            None => {
+                let repairs: Vec<_> = source_ids.iter()
+                    .filter_map(|id| by_id.get(id.as_str()).copied())
+                    .collect();
+                let Some(fix) = complete_explanation(workspace_id, session, &repairs) else {
+                    continue;
+                };
+                (COMPLETE_PRODUCER, fix)
+            }
+        };
         let source_ids: Vec<_> = source_ids.into_iter().collect();
         let class = error_class_label(&diagnostic.layered_key().key);
         let command = arc.family.to_string();
@@ -77,7 +88,7 @@ pub(super) fn candidates(
         }
         let content_hash = content_hash_for_candidate(&content);
         let candidate_id = deterministic_curate_id(&[
-            workspace_id, &session.id, PRODUCER, &arc.attempt_id,
+            workspace_id, &session.id, producer, &arc.attempt_id,
             &arc.failure_id, &resolution.proof_id, &source_ids.join(","), &content_hash,
         ]);
         if !seen.insert(candidate_id.clone()) {
@@ -86,7 +97,7 @@ pub(super) fn candidates(
         // An exact diagnostic and complete repair records, not a repeated
         // keyword or shortened card, define independent corroboration. Process
         // binding remains separately proved inside every supporting episode.
-        let mut signature_parts = vec![PRODUCER.to_owned(), command];
+        let mut signature_parts = vec![producer.to_owned(), command];
         for diagnostic in &arc.diagnostics {
             signature_parts.push(diagnostic.layered_key().key);
             signature_parts.push(diagnostic.message_template.clone());
@@ -115,6 +126,51 @@ pub(super) fn candidates(
         });
     }
     proposals
+}
+
+/// A resolved arc has already selected performed repairs, not plans or tool
+/// output. For the larger lesson surface, retain each complete admitted turn:
+/// later qualifications and paragraph/code boundaries are part of the lesson.
+/// Sorting affects presentation only; exact source IDs remain in the package.
+fn complete_explanation(
+    workspace_id: &str,
+    session: &StoredSession,
+    repairs: &[&StoredEvidenceSpan],
+) -> Option<String> {
+    let mut ordered = repairs.to_vec();
+    ordered.sort_by(|left, right| session_arc_span_order(left, right));
+    let bodies = ordered.iter().map(|span| {
+        if span.span_kind != "message"
+            || span.role.as_deref() != Some("assistant")
+            || !complete_source(span)
+            || !span.is_derivation_admitted_for_session(workspace_id, session)
+        {
+            return None;
+        }
+        review_learning_text(span)
+    }).collect::<Option<Vec<_>>>()?;
+    let texts: Vec<_> = bodies.iter().map(|body| body.as_ref()).collect();
+    join_complete_explanations(&texts)
+}
+
+fn join_complete_explanations(texts: &[&str]) -> Option<String> {
+    if texts.is_empty() {
+        return None;
+    }
+    let mut bytes = 0_usize;
+    for (index, text) in texts.iter().enumerate() {
+        if !complete_fix(text) {
+            return None;
+        }
+        bytes = bytes.checked_add(text.len())?;
+        if index > 0 {
+            bytes = bytes.checked_add(2)?;
+        }
+        if bytes > MAX_COMPLETE_REPAIR_BYTES {
+            return None;
+        }
+    }
+    Some(texts.join("\n\n"))
 }
 
 fn complete_fix(fix: &str) -> bool {
@@ -178,6 +234,64 @@ mod tests {
         assert!(complete_fix("I fixed Widget only when its input is already validated."));
         assert!(complete_fix("Changed the literal `...` in src/widget.rs."));
     }
+
+    #[test]
+    fn complete_explanations_preserve_paragraphs_code_and_late_qualifications() {
+        let first = "I fixed the cache by changing the key type.\n\n```rust\nlet key = 1;\n```";
+        let second = "This repair applies only to validated inputs; it does not enable unchecked decoding.";
+        assert_eq!(
+            join_complete_explanations(&[first, second]),
+            Some(format!("{first}\n\n{second}")),
+        );
+        assert!(join_complete_explanations(&[]).is_none());
+        assert!(join_complete_explanations(&[first, "Still truncated..."]).is_none());
+    }
+
+    #[test]
+    fn complete_explanation_budget_counts_all_utf8_bytes_and_separators() {
+        let exact = "🦀".repeat(MAX_COMPLETE_REPAIR_BYTES / 4);
+        assert_eq!(join_complete_explanations(&[&exact]), Some(exact.clone()));
+        assert!(join_complete_explanations(&[&format!("{exact}x")]).is_none());
+        let first = "x".repeat(MAX_COMPLETE_REPAIR_BYTES - 3);
+        assert_eq!(
+            join_complete_explanations(&[&first, "y"]).as_ref().map(String::len),
+            Some(MAX_COMPLETE_REPAIR_BYTES),
+        );
+        assert!(join_complete_explanations(&[&first, "yz"]).is_none());
+    }
+
+    #[test]
+    fn compact_proposals_keep_their_existing_identity_and_source_package() -> TestResult {
+        let fixture = Fixture::new_public(true)?;
+        let session = fixture.db.get_session(&fixture.session)?.ok_or("session")?;
+        let spans = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let arcs = session_failure_arcs(WS, &session, &spans);
+        let arc = arcs.first().ok_or("arc")?;
+        let resolution = arc.resolution.as_ref().ok_or("resolution")?;
+        let card = IncidentCardSources::new(&spans)
+            .draft(WS, &session.id, arc).ok_or("compact card")?;
+        let fix = card.input.excerpt.lines()
+            .find_map(|line| line.strip_prefix("Fix: ")).ok_or("fix")?;
+        let diagnostic = arc.diagnostics.first().ok_or("diagnostic")?;
+        let class = error_class_label(&diagnostic.layered_key().key);
+        let command = arc.family.to_string();
+        let expected = format!(
+            "Observed repair for {class} during `{command}`:\nFailure: {}\nRepair: {fix}\nVerification: the same command and execution context succeeded afterwards.",
+            diagnostic.message_template,
+        );
+        let source_ids: Vec<_> = resolution.repair_ids.iter().cloned()
+            .collect::<BTreeSet<_>>().into_iter().collect();
+        let id = deterministic_curate_id(&[
+            WS, &session.id, PRODUCER, &arc.attempt_id, &arc.failure_id,
+            &resolution.proof_id, &source_ids.join(","), &content_hash_for_candidate(&expected),
+        ]);
+        let proposed = candidates(WS, &session, &spans);
+        assert_eq!(proposed.len(), 1);
+        assert_eq!(proposed[0].candidate_id, id);
+        assert_eq!(proposed[0].proposed_content, expected);
+        assert_eq!(proposed[0].source_ids, source_ids);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +330,12 @@ mod workflow_tests {
 
         fn episode(&self, number: u128, context: &str, retry_command: &str, passed: bool)
         -> TestResult<(String, String, String)> {
+            self.episode_with_repair(number, context, retry_command, passed, FIX)
+        }
+
+        fn episode_with_repair(
+            &self, number: u128, context: &str, retry_command: &str, passed: bool, repair: &str,
+        ) -> TestResult<(String, String, String)> {
             let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
             self.db.insert_session(&session, &CreateSessionInput {
                 workspace_id: self.id.clone(),
@@ -232,7 +352,7 @@ mod workflow_tests {
                 ("message", "user", json!({"type":"text","text":context})),
                 ("tool_call", "assistant", json!({"type":"tool_use","id":"fail","name":"Bash","input":{"command":COMMAND}})),
                 ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"fail","content":FAILURE,"is_error":true})),
-                ("message", "assistant", json!({"type":"text","text":FIX})),
+                ("message", "assistant", json!({"type":"text","text":repair})),
                 ("tool_call", "assistant", json!({"type":"tool_use","id":"retry","name":"Bash","input":{"command":retry_command}})),
                 ("tool_result", "user", json!({"type":"tool_result","tool_use_id":"retry","content":if passed {""} else {FAILURE},"is_error":!passed})),
             ];
@@ -347,6 +467,69 @@ mod workflow_tests {
         let workspace = Workspace::new()?;
         let (session, _, _) = workspace.episode(93_001, "Work item alpha.", "cargo check --lib", true)?;
         assert!(native(&workspace.review(&session, 0.0, false)?).is_empty());
+        Ok(())
+    }
+
+    fn long_repair() -> String {
+        format!(
+            "I fixed E0277 by deriving Serialize for Widget in src/widget.rs and preserving {}only for internally validated inputs, not arbitrary untrusted values.",
+            "the original field ordering and the explicit serialization boundary, ".repeat(18),
+        )
+    }
+
+    #[test]
+    fn a_verified_repair_larger_than_a_card_is_a_complete_reviewable_lesson() -> TestResult {
+        let workspace = Workspace::new()?;
+        let text = long_repair();
+        let (session_id, repair, _) = workspace.episode_with_repair(
+            94_001, "Work item alpha.", COMMAND, true, &text,
+        )?;
+        let spans = workspace.db.list_evidence_spans_for_session(&session_id)?;
+        let session = workspace.db.get_session(&session_id)?.ok_or("session")?;
+        let arcs = session_failure_arcs(&workspace.id, &session, &spans);
+        let arc = arcs.first().ok_or("native failure arc")?;
+        assert!(arc.resolution.as_ref().is_some_and(|resolution| {
+            resolution.repair_ids.contains(&repair)
+        }));
+        let compact = IncidentCardSources::new(&spans).draft(&workspace.id, &session.id, arc);
+        assert!(compact.as_ref().is_none_or(|card| {
+            card.input.excerpt.lines().find_map(|line| line.strip_prefix("Fix: "))
+                .is_none_or(|fix| !complete_fix(fix))
+        }), "the fixture must miss the former compact-only path");
+        let preview = workspace.review(&session.id, 0.6, false)?;
+        let proposed = native(&preview);
+        assert_eq!(proposed.len(), 1);
+        assert!(proposed[0].proposed_content.contains(&text));
+        assert_eq!(proposed[0].source_ids, vec![repair]);
+        assert_eq!(proposed[0].confidence, 0.6);
+        validate_draft(&workspace.db, &workspace.id, proposed[0]).map_err(|error| error.message)?;
+        let written = workspace.review(&session.id, 0.6, true)?;
+        let id = &native(&written)[0].candidate_id;
+        assert_eq!(*id, proposed[0].candidate_id);
+        let stored = workspace.db.get_curation_candidate(&workspace.id, id)?.ok_or("stored")?;
+        validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
+        assert!(stored.proposed_content.as_ref().is_some_and(|content| content.contains(&text)));
+        assert!(!workspace.review(&session.id, 0.6, true)?.durable_mutation);
+        assert_eq!(workspace.db.list_evidence_spans_for_session(&session.id)?, spans);
+        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn expanded_lesson_admission_still_needs_complete_sources_and_an_exact_retry() -> TestResult {
+        let workspace = Workspace::new()?;
+        let long = long_repair();
+        for (number, command, passed, text) in [
+            (95_001, "cargo check --lib", true, long.clone()),
+            (95_002, COMMAND, false, long.clone()),
+            (95_003, COMMAND, true, format!("{long} [TRUNCATED]")),
+            (95_004, COMMAND, true, format!("{long}{}", " x".repeat(MAX_COMPLETE_REPAIR_BYTES))),
+        ] {
+            let (session, _, _) = workspace.episode_with_repair(
+                number, "Work item alpha.", command, passed, &text,
+            )?;
+            assert!(native(&workspace.review(&session, 0.6, false)?).is_empty(), "{number}");
+        }
         Ok(())
     }
 }
