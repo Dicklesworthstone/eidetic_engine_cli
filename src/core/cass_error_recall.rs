@@ -57,7 +57,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// rejected by untagged buffering under arbitrary-precision JSON.
 /// V14 mines native TypeScript diagnostics using the same error class for
 /// imported failures and later interactive diagnosis.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v14";
+/// V15 reconsiders TypeScript color/context reports and complete summaries
+/// previously missed by the plain-only decoder, preserving source/card IDs.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v15";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -1603,6 +1605,10 @@ mod stream_tests;
 #[cfg(test)]
 #[path = "cass_error_recall_stream_store_tests.rs"]
 mod stream_store_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_typescript_store_tests.rs"]
+mod typescript_store_tests;
 
 #[cfg(test)]
 mod source_index_intake_tests {
