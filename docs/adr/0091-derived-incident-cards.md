@@ -74,9 +74,12 @@ list the failing span, error classes, repair turns and verifying run.
 
 In the direct evidence lane:
 
-- a matched transcript turn inside an admitted card's line range is replaced
-  by the narrowest such card, at the turn's rank; a turn whose card is already
-  a candidate is dropped;
+- a matched transcript turn is replaced by the narrowest currently verified
+  card whose line range contains it and whose exact source metadata names its
+  evidence id (`attemptSpanId`, `failureSpanId`, `proofSpanId`, or
+  `repairSpanIds`), at the turn's rank; that source turn is dropped when its
+  card is already a candidate. Interleaved facts and task instructions absent
+  from those sources remain eligible, even when the card matched directly;
 - each card's `why` states how many incident cards of its error class the
   workspace holds; sharing an error class does not establish that repairs are
   equivalent, so distinct cards remain eligible for ranking and budgeting;
@@ -88,6 +91,11 @@ The 2026-10-09 amendment replaces the original rule that kept only one card per
 error class. Different failures with the same code can require different fixes.
 The amendment changes candidate selection without rewriting cards, their source
 identities, recorded derivations, or historical pack ledgers.
+
+The 2026-10-19 amendment requires exact source membership for substitution.
+Temporal proximity alone does not mean a card represents an intervening user
+constraint or unrelated assistant observation. The existing live source-proof
+check verifies the metadata before it is used; no card regeneration is needed.
 
 ### Lifecycle
 
