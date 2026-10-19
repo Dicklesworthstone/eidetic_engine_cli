@@ -148,8 +148,8 @@ Measured 2026-10-14: a `-j 2` job pinned to a worker that had since shrunk from
 on a request that could never be admitted. The refusal named its own fix every
 time:
 
-    [RCH-I003] requested worker set [vmi1152480] refused (no_free_slots);
-    'vmi1152480' has 1 total slot(s) but the request is estimated at 2 core(s);
+    [RCH-I003] requested worker set [worker-01] refused (no_free_slots);
+    'worker-01' has 1 total slot(s) but the request is estimated at 2 core(s);
     pass -j 1 (or fewer), or request a larger worker
 
 Slots hot-reload, so a worker that hosted `-j 2` an hour ago may not now. A
