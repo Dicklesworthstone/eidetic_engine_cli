@@ -47,26 +47,31 @@ pub(super) fn candidates(
         }) {
             continue;
         }
-        // Preserve the compact proposal's existing content and identity when
-        // the card has a complete fix. A card's presentation ceiling must not
-        // prevent a longer, fully proved repair from entering the review queue.
+        // Validate every complete source before considering a card. A card can
+        // omit a whole qualification, list or code block without an ellipsis;
+        // a grammatical last sentence does not make its summary lossless.
+        let Some(repairs) = source_ids.iter()
+            .map(|id| by_id.get(id.as_str()).copied())
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let Some(fix) = complete_explanation(workspace_id, session, &repairs) else {
+            continue;
+        };
+        // Keep existing compact identities only when the summary reproduces
+        // the complete source explanation byte-for-byte. Otherwise the durable
+        // lesson uses the full-text producer, including all qualifications.
         let compact = sources.draft(workspace_id, &session.id, &arc).and_then(|card| {
             card.input.excerpt.lines()
                 .find_map(|line| line.strip_prefix("Fix: "))
                 .filter(|fix| complete_fix(fix))
                 .map(str::to_owned)
         });
-        let (producer, fix) = match compact {
-            Some(fix) => (PRODUCER, fix),
-            None => {
-                let repairs: Vec<_> = source_ids.iter()
-                    .filter_map(|id| by_id.get(id.as_str()).copied())
-                    .collect();
-                let Some(fix) = complete_explanation(workspace_id, session, &repairs) else {
-                    continue;
-                };
-                (COMPLETE_PRODUCER, fix)
-            }
+        let producer = if compact.as_deref() == Some(fix.as_str()) {
+            PRODUCER
+        } else {
+            COMPLETE_PRODUCER
         };
         let source_ids: Vec<_> = source_ids.into_iter().collect();
         let class = &diagnostic.classes;
@@ -673,6 +678,97 @@ mod workflow_tests {
             )?;
             assert!(native(&workspace.review(&session, 0.6, false)?).is_empty(), "{number}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn short_card_cannot_erase_a_separate_scope_qualification_from_a_durable_lesson()
+    -> TestResult {
+        let workspace = Workspace::new()?;
+        let restriction = "This applies only to validated records.";
+        let text = format!("{FIX}\n\n{restriction}");
+        let (session_id, repair_id, _) = workspace.episode_with_repair(
+            98_001, "Qualified repair work item.", COMMAND, true, &text,
+        )?;
+        let session = workspace.db.get_session(&session_id)?.ok_or("session")?;
+        let before = workspace.db.list_evidence_spans_for_session(&session_id)?;
+        let arcs = session_failure_arcs(&workspace.id, &session, &before);
+        let arc = arcs.first().ok_or("resolved failure")?;
+        let card = IncidentCardSources::new(&before)
+            .draft(&workspace.id, &session.id, arc).ok_or("compact control")?;
+        let compact_fix = card.input.excerpt.lines()
+            .find_map(|line| line.strip_prefix("Fix: ")).ok_or("compact fix")?;
+        assert!(complete_fix(compact_fix), "the old truncation check accepts this card");
+        assert!(!compact_fix.contains(restriction), "the fixture must lose its qualifier in a card");
+
+        let preview = workspace.review(&session.id, 0.6, false)?;
+        let proposed = native(&preview);
+        assert_eq!(proposed.len(), 1);
+        assert!(proposed[0].proposed_content.contains(&format!("Repair: {text}\nVerification:")));
+        assert_eq!(proposed[0].source_ids, vec![repair_id]);
+        validate_draft(&workspace.db, &workspace.id, proposed[0]).map_err(|error| error.message)?;
+        let written = workspace.review(&session.id, 0.6, true)?;
+        let id = &native(&written)[0].candidate_id;
+        assert_eq!(*id, proposed[0].candidate_id);
+        let stored = workspace.db.get_curation_candidate(&workspace.id, id)?.ok_or("stored")?;
+        assert_eq!(stored.proposed_content.as_deref(), Some(proposed[0].proposed_content.as_str()));
+        validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
+        assert!(!workspace.review(&session.id, 0.6, true)?.durable_mutation);
+        assert_eq!(workspace.db.list_evidence_spans_for_session(&session.id)?, before);
+        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn complete_repair_proposals_keep_code_lists_and_paragraphs_omitted_by_cards() -> TestResult {
+        let workspace = Workspace::new()?;
+        let context = "```rust\ntype ReadyRecord = ValidatedRecord;\n```\n\n- Only validated records belong to this type.\n- Legacy records retain their original representation.";
+        let text = format!("{FIX}\n\n{context}");
+        let (session_id, repair_id, _) = workspace.episode_with_repair(
+            98_002, "Structured repair work item.", COMMAND, true, &text,
+        )?;
+        let session = workspace.db.get_session(&session_id)?.ok_or("session")?;
+        let spans = workspace.db.list_evidence_spans_for_session(&session_id)?;
+        let arcs = session_failure_arcs(&workspace.id, &session, &spans);
+        let arc = arcs.first().ok_or("failure arc")?;
+        let card = IncidentCardSources::new(&spans)
+            .draft(&workspace.id, &session.id, arc).ok_or("compact control")?;
+        assert!(!card.input.excerpt.contains("type ReadyRecord"));
+        let report = workspace.review(&session.id, 0.6, false)?;
+        let proposed = native(&report);
+        assert_eq!(proposed.len(), 1);
+        assert!(proposed[0].proposed_content.contains(&text));
+        assert_eq!(proposed[0].source_ids, vec![repair_id]);
+        validate_draft(&workspace.db, &workspace.id, proposed[0]).map_err(|error| error.message)?;
+        assert_eq!(workspace.db.list_evidence_spans_for_session(&session.id)?, spans);
+        Ok(())
+    }
+
+    #[test]
+    fn compact_card_cannot_bypass_the_complete_source_byte_budget() -> TestResult {
+        let workspace = Workspace::new()?;
+        let text = format!("{FIX}\n{}", "Context for validated records. ".repeat(350));
+        assert!(text.len() > MAX_COMPLETE_REPAIR_BYTES);
+        assert!(text.len() < LEGACY_EXCERPT_CAP - 3);
+        let (session_id, repair_id, _) = workspace.episode_with_repair(
+            98_003, "Large complete repair work item.", COMMAND, true, &text,
+        )?;
+        let session = workspace.db.get_session(&session_id)?.ok_or("session")?;
+        let spans = workspace.db.list_evidence_spans_for_session(&session_id)?;
+        let repair = spans.iter().find(|span| span.id == repair_id).ok_or("source repair")?;
+        assert!(complete_source(repair));
+        assert!(repair.is_search_admitted_for_session(&workspace.id, &session));
+        let arcs = session_failure_arcs(&workspace.id, &session, &spans);
+        let arc = arcs.first().ok_or("failure arc")?;
+        let card = IncidentCardSources::new(&spans)
+            .draft(&workspace.id, &session.id, arc).ok_or("small card control")?;
+        let compact_fix = card.input.excerpt.lines()
+            .find_map(|line| line.strip_prefix("Fix: ")).ok_or("compact fix")?;
+        assert!(complete_fix(compact_fix));
+        assert!(candidates(&workspace.id, &session, &spans).is_empty());
+        assert!(native(&workspace.review(&session.id, 0.6, false)?).is_empty());
+        assert_eq!(workspace.db.list_evidence_spans_for_session(&session.id)?, spans);
+        assert!(workspace.db.list_memories(&workspace.id, None, true)?.is_empty());
         Ok(())
     }
 }
