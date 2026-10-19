@@ -118,9 +118,7 @@ impl<'a> IncidentCardSources<'a> {
             }
             by_id
         });
-        draft_incident_card_with_lookup(workspace_id, session_id, arc, |id| {
-            by_id.get(id).copied()
-        })
+        draft_incident_card_with_lookup(workspace_id, session_id, arc, |id| by_id.get(id).copied())
     }
 }
 
@@ -529,7 +527,9 @@ mod tests {
 
     fn source_index_fixture() -> TestResult<(Fixture, Vec<StoredEvidenceSpan>, FailureArc)> {
         let fixture = Fixture::new_public(true)?;
-        let spans = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let spans = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
         let session = fixture.db.get_session(&fixture.session)?.ok_or("session")?;
         let arc = session_failure_arcs(WS, &session, &spans)
             .into_iter()

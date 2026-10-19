@@ -32,9 +32,11 @@ fn source_path(path: &str) -> bool {
         && path.trim() == path
         && !path.chars().any(char::is_control)
         && !path.contains(['\'', '"', '`', '<', '>'])
-        && [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"]
-            .iter()
-            .any(|extension| path.ends_with(*extension))
+        && [
+            ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json",
+        ]
+        .iter()
+        .any(|extension| path.ends_with(*extension))
 }
 
 /// Probe only the current top-level record, never a diagnostic-looking string
@@ -65,9 +67,7 @@ fn header(line: &str) -> Result<Option<Header<'_>>, ()> {
         .strip_prefix("error TS")
         .and_then(|body| body.split_once(": "))
         .ok_or(())?;
-    if !positive_decimal(code, 6)
-        || message.trim().is_empty()
-        || line.chars().any(char::is_control)
+    if !positive_decimal(code, 6) || message.trim().is_empty() || line.chars().any(char::is_control)
     {
         return Err(());
     }
@@ -210,7 +210,11 @@ mod tests {
         let diagnostics = structured_error_diagnostics(&text);
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[1].layered_key().key, "shell:tsc:TS18003");
-        assert!(diagnostics.iter().all(|item| !item.message_template.contains("Nested")));
+        assert!(
+            diagnostics
+                .iter()
+                .all(|item| !item.message_template.contains("Nested"))
+        );
         assert_eq!(
             structured_error_diagnostics(&text.replace('\n', "\r\n")),
             diagnostics
@@ -221,8 +225,14 @@ mod tests {
     fn quoted_paths_identifiers_and_values_do_not_fragment_native_errors() {
         let before = "error TS2307: Cannot find module '/private/first/module' or its corresponding type declarations.";
         let after = "error TS2307: Cannot find module 'C:\\other\\module' or its corresponding type declarations.";
-        assert_eq!(structured_error_diagnostics(before), structured_error_diagnostics(after));
-        assert_eq!(mask_literals("'secret' and \"other\" and `name`"), "<id> and <id> and <id>");
+        assert_eq!(
+            structured_error_diagnostics(before),
+            structured_error_diagnostics(after)
+        );
+        assert_eq!(
+            mask_literals("'secret' and \"other\" and `name`"),
+            "<id> and <id> and <id>"
+        );
         assert_eq!(mask_literals("'unfinished private value"), "<id>");
     }
 
@@ -231,10 +241,13 @@ mod tests {
         assert!(decode("").expect("quiet").is_none());
         assert!(!ToolOutput::default().succeeded());
         assert!(optimistic("").succeeded());
-        assert!(!ToolOutput {
-            text: ERROR.to_owned(),
-            ..ToolOutput::default()
-        }.succeeded());
+        assert!(
+            !ToolOutput {
+                text: ERROR.to_owned(),
+                ..ToolOutput::default()
+            }
+            .succeeded()
+        );
     }
 
     #[test]
@@ -298,7 +311,10 @@ mod tests {
         let text = (1000..1010)
             .map(|code| format!("error TS{code}: Compiler diagnostic.\n"))
             .collect::<String>();
-        assert_eq!(structured_error_diagnostics(&text).len(), MAX_DIAGNOSTICS_PER_FAILURE);
+        assert_eq!(
+            structured_error_diagnostics(&text).len(),
+            MAX_DIAGNOSTICS_PER_FAILURE
+        );
         let invalid = format!("{text}error TSx: malformed final diagnostic\n");
         assert!(structured_error_diagnostics(&invalid).is_empty());
         assert!(!optimistic(&invalid).succeeded());
@@ -317,7 +333,8 @@ mod tests {
 
     #[test]
     fn function_signatures_in_messages_do_not_replace_the_source_location() {
-        let text = "src/handler.ts(4,2): error TS2322: Type '(x: string): number' is not assignable.";
+        let text =
+            "src/handler.ts(4,2): error TS2322: Type '(x: string): number' is not assignable.";
         let diagnostics = structured_error_diagnostics(text);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].layered_key().key, "shell:tsc:TS2322");
@@ -329,8 +346,11 @@ mod tests {
         let text = format!("error TS2345: Invalid argument api_key={secret}");
         let diagnostics = structured_error_diagnostics(&text);
         assert_eq!(diagnostics.len(), 1);
-        assert!(!format!("{diagnostics:?}").to_ascii_lowercase()
-            .contains(&secret.to_ascii_lowercase()));
+        assert!(
+            !format!("{diagnostics:?}")
+                .to_ascii_lowercase()
+                .contains(&secret.to_ascii_lowercase())
+        );
     }
 
     #[test]
@@ -344,7 +364,8 @@ mod tests {
         }
         assert_eq!(
             failure_diagnostics(&optimistic("error[E0277]: missing trait"))[0]
-                .layered_key().key,
+                .layered_key()
+                .key,
             "rustc:E0277"
         );
     }

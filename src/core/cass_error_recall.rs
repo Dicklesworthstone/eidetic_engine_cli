@@ -111,8 +111,8 @@ pub fn record_session_error_recall(
     }
     // One card can use the allocation-free linear path. Multiple incidents
     // share a lazy borrowed index instead of rescanning every source per facet.
-    let card_sources = (arcs.len() > 1)
-        .then(|| crate::core::incident_card::IncidentCardSources::new(&spans));
+    let card_sources =
+        (arcs.len() > 1).then(|| crate::core::incident_card::IncidentCardSources::new(&spans));
     connection.with_transaction(|| {
         for arc in &arcs {
             report.failures_seen = report.failures_seen.saturating_add(1);
@@ -1615,7 +1615,9 @@ mod source_index_intake_tests {
     #[test]
     fn multiple_incidents_share_source_lookup_and_keep_idempotent_proofs() -> TestResult {
         let fixture = Fixture::new_public(true)?;
-        let templates = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let templates = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
         assert_eq!(templates.len(), 5);
         let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(0x17600)).to_string();
         fixture.db.insert_session(
@@ -1645,10 +1647,8 @@ mod source_index_intake_tests {
                     }
                 }
                 let excerpt = record.to_string();
-                let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(
-                    0x18000 + u128::from(line),
-                ))
-                .to_string();
+                let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(0x18000 + u128::from(line)))
+                    .to_string();
                 fixture.db.insert_evidence_span(
                     &id,
                     &CreateEvidenceSpanInput {
@@ -1663,7 +1663,10 @@ mod source_index_intake_tests {
                         start_byte: None,
                         end_byte: None,
                         role: template.role.clone(),
-                        content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                        content_hash: format!(
+                            "blake3:{}",
+                            blake3::hash(excerpt.as_bytes()).to_hex()
+                        ),
                         excerpt,
                         metadata_json: None,
                         inherited_redaction_classes: Vec::new(),
@@ -1686,14 +1689,13 @@ mod source_index_intake_tests {
         assert_eq!(second.incident_cards_recorded, 0);
         let proofs = proof::session_proofs(&fixture.db, WS, None, &session_id)?;
         for arc in &arcs {
-            let expected = crate::core::incident_card::draft_incident_card(
-                WS,
-                &session_id,
-                &before,
-                arc,
-            )
-            .ok_or("linear card")?;
-            let stored = fixture.db.get_evidence_span(&expected.id)?.ok_or("stored card")?;
+            let expected =
+                crate::core::incident_card::draft_incident_card(WS, &session_id, &before, arc)
+                    .ok_or("linear card")?;
+            let stored = fixture
+                .db
+                .get_evidence_span(&expected.id)?
+                .ok_or("stored card")?;
             assert!(stored.matches_screened_input(&expected.input)?);
             assert!(proofs.claims.contains(&proof::Claim {
                 failure: arc.failure_id.clone(),
@@ -1704,7 +1706,10 @@ mod source_index_intake_tests {
         let after = fixture.db.list_evidence_spans_for_session(&session_id)?;
         assert_eq!(after.len(), before.len() + 4);
         for original in &before {
-            let current = after.iter().find(|span| span.id == original.id).ok_or("source")?;
+            let current = after
+                .iter()
+                .find(|span| span.id == original.id)
+                .ok_or("source")?;
             assert_eq!(current.excerpt, original.excerpt);
             assert_eq!(current.content_hash, original.content_hash);
             assert_eq!(current.metadata_json, original.metadata_json);

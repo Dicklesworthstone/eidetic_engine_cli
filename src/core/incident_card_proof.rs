@@ -329,7 +329,9 @@ mod reader_visit_tests {
     #[test]
     fn source_proofs_without_stored_cards_keep_repair_claims_without_writing_cards() -> TestResult {
         let fixture = Fixture::new_public(true)?;
-        let before = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let before = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
         assert!(before.iter().all(|span| !requires_proof(span)));
         let proofs = session_proofs(&fixture.db, WS, None, &fixture.session)?;
         assert!(proofs.cards.is_empty());
@@ -338,7 +340,9 @@ mod reader_visit_tests {
             target: fixture.repair.clone(),
             card: false,
         }));
-        let after = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let after = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
         assert_eq!(after.len(), before.len());
         assert!(after.iter().all(|span| !requires_proof(span)));
         Ok(())
