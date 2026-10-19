@@ -5379,7 +5379,39 @@ elif selected_worker and not degraded:
 else:
     status = "blocked"
 
+# bd-a62vq: A BLOCKED VERDICT MUST NAME A REASON.
+#
+# `blocked` is the else-branch above, so it is reached whenever no worker was
+# selected and no per-worker diagnostic row matched any of the four classified
+# shapes (active_project_exclusion, permission_denied, missing_root,
+# outer_workspace_shadowed). The most common blocking condition on this fleet
+# today -- every candidate worker denied admission -- matches none of them, so
+# the payload came back `status: "blocked"` with `degraded_codes: []`.
+#
+# That is indistinguishable from a HEALTHY canary, which also emits an empty
+# list. A consumer switching on `degraded_codes` to decide whether to act
+# cannot tell "nothing wrong" from "everything wrong, unnamed", and has to fall
+# back to parsing `workers[].final_reason`, which is free prose and not a
+# contract. Measured 2026-10-19: status blocked, degraded_codes [],
+# repair_actions [], while workers[0].final_reason carried the actual cause
+# ("requested cores N exceed total slots 0").
+#
+# The invariant holds BY CONSTRUCTION rather than by assertion: this block
+# always appends exactly one code when the list would otherwise be empty, so
+# `status == "blocked" and not degraded` is unreachable below. An assertion
+# here would risk suppressing the very JSON a reader needs.
+if status == "blocked" and not degraded:
+    if not selected_worker:
+        degraded.append("rch_worker_root_canary_no_admissible_worker")
+    else:
+        degraded.append("rch_worker_root_canary_blocked_unclassified")
+    degraded = sorted(dict.fromkeys(degraded))
+
 repair_actions = []
+if "rch_worker_root_canary_no_admissible_worker" in degraded:
+    repair_actions.append({"kind": "operator", "command": "rch diagnose -- cargo check --locked --lib", "summary": "No worker was admissible; rch diagnose prints the per-worker exclusion tally (critical_pressure / insufficient_total_slots / os_gate_excluded) that this canary does not."})
+if "rch_worker_root_canary_blocked_unclassified" in degraded:
+    repair_actions.append({"kind": "operator", "command": "scripts/rch_verify.sh --worker-root-canary --json", "summary": "A worker WAS selected yet the canary blocked with no classified cause; read workers[].final_reason in this payload and add the missing shape to the classifier."})
 if "rch_worker_root_canary_missing_root" in degraded:
     repair_actions.append({"kind": "operator", "command": "rch workers probe --all", "summary": "Confirm worker root inventory before retrying remote proof."})
 if "rch_worker_root_canary_outer_workspace_shadowed" in degraded:
