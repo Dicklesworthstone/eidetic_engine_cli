@@ -10,6 +10,9 @@ use crate::db::{CassSourceCommitment, ReviewCorroborationLimits};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 
+#[path = "curate_verified_repair.rs"]
+mod verified_repair;
+
 const SCHEMA: &str = "ee.review.corroboration.v1";
 const SCORE_KIND: &str = "bounded_exact_session_support_heuristic";
 const MAX_SUPPORT: usize = 3;
@@ -226,6 +229,7 @@ fn source_candidates(
         spans,
         0.0,
     ));
+    candidates.extend(verified_repair::candidates(workspace_id, session, spans));
     candidates
 }
 
@@ -309,6 +313,12 @@ impl<'a> SessionEvidence<'a> {
             // Filtering to just the endpoints could invent a causal link.
             for candidate in
                 build_session_arc_candidates(self.workspace_id, self.session, self.spans, 0.0)
+                    .into_iter()
+                    .chain(verified_repair::candidates(
+                        self.workspace_id,
+                        self.session,
+                        self.spans,
+                    ))
             {
                 arcs.entry(candidate.candidate_id.clone())
                     .or_insert(candidate);
@@ -563,9 +573,6 @@ pub(super) fn score_candidates(
     min_confidence: f32,
     limit: u32,
 ) -> Result<(), DomainError> {
-    if candidates.is_empty() {
-        return Ok(());
-    }
     connection.begin_read_snapshot().map_err(domain)?;
     struct Snapshot<'a>(&'a DbConnection, bool);
     impl Drop for Snapshot<'_> {
@@ -576,24 +583,28 @@ pub(super) fn score_candidates(
         }
     }
     let mut snapshot = Snapshot(connection, true);
-    let anchor = if candidates
-        .iter()
-        .any(|candidate| candidate.corroboration.is_some())
-    {
-        connection
-            .review_corroboration_sessions(
-                workspace_id,
-                &session.id,
-                &[session.id.as_str()],
-                LIMITS,
-            )
-            .map_err(domain)?
-    } else {
-        Vec::new()
-    };
+    // Tool-only failures can have an admitted fix but no prose failure recap.
+    // Read the same bounded source context even when the initial queue is empty.
+    let anchor = connection
+        .review_corroboration_sessions(
+            workspace_id,
+            &session.id,
+            &[session.id.as_str()],
+            LIMITS,
+        )
+        .map_err(domain)?;
     if let Some((anchor_session, anchor_spans, anchor_bytes)) = anchor.first()
         && eligible_session(workspace_id, anchor_session, anchor_spans)
     {
+        let existing: BTreeSet<_> = candidates
+            .iter()
+            .map(|candidate| candidate.candidate_id.clone())
+            .collect();
+        candidates.extend(
+            verified_repair::candidates(workspace_id, anchor_session, anchor_spans)
+                .into_iter()
+                .filter(|candidate| !existing.contains(&candidate.candidate_id)),
+        );
         let evidence = SessionEvidence::new(workspace_id, anchor_session, anchor_spans);
         for candidate in candidates.iter_mut() {
             if candidate.corroboration.is_none() {
@@ -621,9 +632,18 @@ pub(super) fn score_candidates(
             total_bytes: LIMITS.total_bytes.saturating_sub(*anchor_bytes),
             ..LIMITS
         };
-        let others = connection
-            .review_corroboration_sessions(workspace_id, &session.id, &[], other_limits)
-            .map_err(domain)?;
+        let others = if candidates.iter().any(|candidate| {
+            candidate
+                .corroboration
+                .as_ref()
+                .is_some_and(ReviewCorroboration::wants_support)
+        }) {
+            connection
+                .review_corroboration_sessions(workspace_id, &session.id, &[], other_limits)
+                .map_err(domain)?
+        } else {
+            Vec::new()
+        };
         for (other_session, spans, _) in &others {
             if !candidates.iter().any(|candidate| {
                 candidate
