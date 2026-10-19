@@ -104,6 +104,17 @@ const AGENT_MAIL_HEALTH_PORT: u16 = 8765;
 const AGENT_MAIL_HEALTH_PROBE_TIMEOUT_MS: u64 = 75;
 pub const AGENT_MAIL_SNAPSHOT_TEMPLATE_AGENT: &str = "<AGENT_NAME>";
 pub const AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH: &str = "/private/tmp/ee-agent-mail-snapshot.json";
+
+/// The workspace's default Agent Mail snapshot, when a producer has written one
+/// there (GH#80). `ee handoff` reads the same file. An absent file returns
+/// `None`, so the source stays `not_configured` with producer guidance instead
+/// of reporting a read failure for a file nobody wrote.
+#[must_use]
+pub fn default_agent_mail_snapshot_path(workspace: &Path) -> Option<PathBuf> {
+    let path = workspace.join(".ee").join("agent-mail-snapshot.json");
+    path.is_file().then_some(path)
+}
+
 pub const AGENT_MAIL_SNAPSHOT_PRODUCER_COMMAND: &str = "scripts/agent_mail_snapshot.sh --project . --agent <AGENT_NAME> --json --output /private/tmp/ee-agent-mail-snapshot.json";
 /// Interactive probes fail open promptly; callers can explicitly budget longer
 /// for large trackers using `--command-timeout-ms`.
@@ -13341,6 +13352,35 @@ mod tests {
         let error = agent_mail_snapshot_freshness_assessment(&encoded, now)
             .expect_err("future snapshot beyond skew budget must fail closed");
         assert!(error.contains("61 seconds in the future"));
+    }
+
+    #[test]
+    fn default_agent_mail_snapshot_is_used_only_once_a_producer_wrote_it() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        ensure_equal(
+            &default_agent_mail_snapshot_path(workspace.path()),
+            &None,
+            "no default without a snapshot file",
+        )?;
+        let path = workspace
+            .path()
+            .join(".ee")
+            .join("agent-mail-snapshot.json");
+        std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &default_agent_mail_snapshot_path(workspace.path()),
+            &None,
+            "a directory at the snapshot path is not a snapshot",
+        )?;
+        let other = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = other.path().join(".ee").join("agent-mail-snapshot.json");
+        std::fs::create_dir_all(other.path().join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(&path, b"{}").map_err(|error| error.to_string())?;
+        ensure_equal(
+            &default_agent_mail_snapshot_path(other.path()),
+            &Some(path),
+            "a written snapshot is the default",
+        )
     }
 
     #[test]

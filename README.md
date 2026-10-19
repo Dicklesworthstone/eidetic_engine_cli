@@ -987,7 +987,8 @@ need a deterministic brief:
 ee swarm brief --workspace . --agent-mail-snapshot <snapshot.json> --json
 ```
 
-The flag defaults to `<workspace>/.ee/agent-mail-snapshot.json` when omitted.
+When the flag is omitted, `<workspace>/.ee/agent-mail-snapshot.json` is read if
+it exists; `ee handoff` uses the same default.
 
 If either summary form (`ee swarm brief --fields summary ...` or
 `ee --fields summary swarm brief ...`) returns an `ee.error.v2` usage failure

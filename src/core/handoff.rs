@@ -6150,6 +6150,136 @@ memories_revised = 3
         )
     }
 
+    #[test]
+    fn handoff_reservation_evidence_reads_the_default_snapshot_and_its_binding() -> TestResult {
+        // GH#80: capsules reported Agent Mail `not_configured` and zero
+        // reservations while a matching snapshot sat at the documented default.
+        use super::super::swarm_brief::{
+            SwarmBriefCommandError, SwarmBriefCommandOutput, SwarmBriefCommandRunner,
+        };
+        struct NoTools;
+        impl SwarmBriefCommandRunner for NoTools {
+            fn run(
+                &self,
+                program: &str,
+                _args: &[&str],
+                _cwd: &Path,
+                _timeout_ms: u64,
+            ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
+                Err(SwarmBriefCommandError::Unavailable(format!(
+                    "{program} is not part of this fixture"
+                )))
+            }
+        }
+        fn write_snapshot(path: &Path, project_key: &str) -> Result<(), String> {
+            let schema: serde_json::Value = serde_json::from_str(include_str!(
+                "../../docs/schemas/swarm/ee.agent_mail.snapshot.v1.json"
+            ))
+            .map_err(|error| error.to_string())?;
+            let mut value = schema
+                .pointer("/examples/0")
+                .cloned()
+                .ok_or("the snapshot schema keeps its v1 example")?;
+            let now = chrono::Utc::now();
+            value["generated_at"] = serde_json::json!(now.to_rfc3339());
+            value["project_key"] = serde_json::json!(project_key);
+            value["file_reservations"][0]["expires_ts"] =
+                serde_json::json!((now + chrono::Duration::hours(1)).to_rfc3339());
+            std::fs::create_dir_all(path.parent().ok_or("snapshot parent")?)
+                .map_err(|error| error.to_string())?;
+            std::fs::write(
+                path,
+                serde_json::to_vec(&value).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())
+        }
+
+        fn evidence(section: &CapsuleSection) -> Result<serde_json::Value, String> {
+            serde_json::from_str(&section.content).map_err(|error| error.to_string())
+        }
+
+        let dir = repo_tempdir()?;
+        let workspace = dir.path().join("checkout");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let default_snapshot = workspace.join(".ee").join("agent-mail-snapshot.json");
+        let own_key = agent_mail_snapshot_project_key_for_workspace(&workspace)?;
+
+        write_snapshot(&default_snapshot, &own_key)?;
+        let (brief, _, section) = collect_handoff_coordination_summaries(
+            &workspace,
+            500,
+            &HandoffAgentMailOptions::default(),
+            &NoTools,
+        );
+        ensure_equal(
+            &section.confidence,
+            &EvidenceConfidence::Verified,
+            "a matching default snapshot is verified evidence",
+        )?;
+        let content = evidence(&section)?;
+        ensure_equal(
+            &content["currentReservationCount"],
+            &serde_json::json!(1),
+            "the active reservation is counted",
+        )?;
+        ensure_equal(
+            &content["snapshotInput"],
+            &serde_json::json!("workspace_default"),
+            "snapshot input",
+        )?;
+        ensure_equal(
+            &brief.pointer("/counts/activeReservationCount").cloned(),
+            &Some(serde_json::json!(1)),
+            "swarm summary count",
+        )?;
+
+        // A mail project registered at another path is not silently adopted...
+        let mail_project = dir.path().join("mail-project");
+        fs::create_dir_all(&mail_project).map_err(|error| error.to_string())?;
+        let shared_key = agent_mail_snapshot_project_key_for_workspace(&mail_project)?;
+        write_snapshot(&default_snapshot, &shared_key)?;
+        let (_, _, section) = collect_handoff_coordination_summaries(
+            &workspace,
+            500,
+            &HandoffAgentMailOptions::default(),
+            &NoTools,
+        );
+        ensure_equal(
+            &section.confidence,
+            &EvidenceConfidence::Unknown,
+            "another project's snapshot is unverified",
+        )?;
+        ensure_equal(
+            &evidence(&section)?["currentReservationCount"],
+            &serde_json::Value::Null,
+            "unverified evidence is unknown, not zero",
+        )?;
+
+        // ...but an explicit binding to that project accepts it.
+        let bound = HandoffAgentMailOptions {
+            snapshot: None,
+            project_key: Some(shared_key),
+        };
+        let (_, _, section) =
+            collect_handoff_coordination_summaries(&workspace, 500, &bound, &NoTools);
+        ensure_equal(
+            &section.confidence,
+            &EvidenceConfidence::Verified,
+            "an explicitly bound shared project is verified",
+        )?;
+        let content = evidence(&section)?;
+        ensure_equal(
+            &content["currentReservationCount"],
+            &serde_json::json!(1),
+            "bound reservation count",
+        )?;
+        ensure_equal(
+            &content["binding"],
+            &serde_json::json!("explicit_project_key"),
+            "binding method",
+        )
+    }
+
     #[cfg(unix)]
     #[test]
     fn handoff_coordination_collects_once_with_real_git_and_bounded_optional_process() -> TestResult

@@ -13211,7 +13211,9 @@ pub struct SwarmBriefArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_rch: bool,
 
-    /// Redacted Agent Mail snapshot JSON to include. No live Agent Mail mutation is performed.
+    /// Redacted Agent Mail snapshot JSON to include. Defaults to
+    /// <workspace>/.ee/agent-mail-snapshot.json when that file exists. No live
+    /// Agent Mail mutation is performed.
     #[arg(long, value_name = "PATH")]
     pub agent_mail_snapshot: Option<PathBuf>,
 
@@ -68342,7 +68344,10 @@ where
     options.max_recent_commits = args.max_recent_commits;
     options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
     options.enabled_sources = enabled_sources;
-    options.agent_mail_snapshot_path = args.agent_mail_snapshot.clone();
+    options.agent_mail_snapshot_path = args
+        .agent_mail_snapshot
+        .clone()
+        .or_else(|| crate::core::swarm_brief::default_agent_mail_snapshot_path(&options.workspace));
     options.agent_inventory_only_connectors = args
         .agent_inventory_only
         .as_deref()
@@ -91367,6 +91372,86 @@ mod tests {
             },
             _ => Err("expected daemon command".to_string()),
         }
+    }
+
+    #[test]
+    fn swarm_brief_reads_the_default_agent_mail_snapshot() -> TestResult {
+        // GH#80: `swarm brief` documented `.ee/agent-mail-snapshot.json` as its
+        // default snapshot, yet reported Agent Mail `not_configured` with one
+        // sitting there.
+        fn write_snapshot(path: &Path, project_key: &str) -> Result<(), String> {
+            let schema: serde_json::Value = serde_json::from_str(include_str!(
+                "../../docs/schemas/swarm/ee.agent_mail.snapshot.v1.json"
+            ))
+            .map_err(|error| error.to_string())?;
+            let mut value = schema
+                .pointer("/examples/0")
+                .cloned()
+                .ok_or("the snapshot schema keeps its v1 example")?;
+            let now = chrono::Utc::now();
+            value["generated_at"] = serde_json::json!(now.to_rfc3339());
+            value["project_key"] = serde_json::json!(project_key);
+            value["file_reservations"][0]["expires_ts"] =
+                serde_json::json!((now + chrono::Duration::hours(1)).to_rfc3339());
+            std::fs::create_dir_all(path.parent().ok_or("snapshot parent")?)
+                .map_err(|error| error.to_string())?;
+            std::fs::write(
+                path,
+                serde_json::to_vec(&value).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())
+        }
+
+        fn agent_mail_status(stdout: &str) -> Result<String, String> {
+            let value: serde_json::Value =
+                serde_json::from_str(stdout).map_err(|error| format!("{error}: {stdout}"))?;
+            value["data"]["sources"]
+                .as_array()
+                .and_then(|sources| {
+                    sources
+                        .iter()
+                        .find(|source| source["source"] == "agent_mail")
+                })
+                .and_then(|source| source["status"].as_str())
+                .map(str::to_owned)
+                .ok_or_else(|| format!("no agent_mail source in {stdout}"))
+        }
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("checkout");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace_text = workspace.display().to_string();
+        let args = [
+            "ee",
+            "--workspace",
+            workspace_text.as_str(),
+            "--json",
+            "swarm",
+            "brief",
+            "--sources",
+            "agent-mail",
+        ];
+
+        let (_, stdout, _) = invoke(&args);
+        ensure_equal(
+            &agent_mail_status(&stdout)?,
+            &"not_configured".to_owned(),
+            "no snapshot has been produced",
+        )?;
+
+        let project_key =
+            crate::core::swarm_brief::agent_mail_snapshot_project_key_for_workspace(&workspace)?;
+        write_snapshot(
+            &workspace.join(".ee").join("agent-mail-snapshot.json"),
+            &project_key,
+        )?;
+        let (exit, stdout, _) = invoke(&args);
+        ensure_equal(&exit, &ProcessExitCode::Success, "swarm brief exit")?;
+        ensure_equal(
+            &agent_mail_status(&stdout)?,
+            &"ready".to_owned(),
+            "the default snapshot is read",
+        )
     }
 
     #[test]
