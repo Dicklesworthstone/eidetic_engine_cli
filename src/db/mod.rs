@@ -25160,6 +25160,21 @@ pub struct StoredMemory {
     pub valid_to: Option<String>,
 }
 
+pub(crate) const MEMORY_INDEX_METADATA_BATCH_SIZE: usize = 128;
+
+/// Source sidecars for a memory already admitted to an index snapshot.
+#[derive(Debug, Default)]
+pub(crate) struct MemoryIndexMetadata {
+    pub anchors: Vec<StoredMemoryAnchor>,
+    pub typed_fields_json: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MemoryIndexMetadataBatch {
+    pub by_memory_id: BTreeMap<String, MemoryIndexMetadata>,
+    pub query_count: usize,
+}
+
 /// Attempt-family multiplicity sidecar on a memory row
 /// (bd-multiplicity-aware-trust-p0u7g): the stable family identity a finding
 /// was selected from and the declared number of sibling attempts.
@@ -26034,24 +26049,121 @@ impl DbConnection {
         memory_id: &str,
         content: &str,
     ) -> Result<u64> {
-        let surfaces = extract_memory_anchor_surfaces(
-            memory_id,
-            content,
-            MemoryAnchorSource::IndexRebuild,
-            Some("index_rebuild"),
-        );
+        self.refresh_memory_anchor_index_batch(&[(workspace_id, memory_id, content)])
+    }
+
+    /// Refresh derived reverse-index rows without one generation query and
+    /// delete statement per memory. The caller owns the source transaction;
+    /// globally scoped memories retain their originating workspace generation.
+    pub(crate) fn refresh_memory_anchor_index_for_memories(
+        &self,
+        memories: &[&StoredMemory],
+    ) -> Result<u64> {
+        let sources = memories
+            .iter()
+            .map(|memory| {
+                (
+                    memory.workspace_id.as_str(),
+                    memory.id.as_str(),
+                    memory.content.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.refresh_memory_anchor_index_batch(&sources)
+    }
+
+    fn refresh_memory_anchor_index_batch(&self, sources: &[(&str, &str, &str)]) -> Result<u64> {
+        // Ten parameters per row stay below the conservative SQLite bind limit.
+        const INSERT_BATCH_SIZE: usize = 64;
+        let mut generations = BTreeMap::new();
+        let mut written = 0_u64;
+        let now = Utc::now().to_rfc3339();
+        for chunk in sources.chunks(MEMORY_INDEX_METADATA_BATCH_SIZE) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.execute_for(
+                DbOperation::Execute,
+                &format!("DELETE FROM memory_anchor_index WHERE memory_id IN ({placeholders})"),
+                &chunk
+                    .iter()
+                    .map(|(_, memory_id, _)| Value::Text((*memory_id).to_owned()))
+                    .collect::<Vec<_>>(),
+            )?;
+            let mut rows = Vec::with_capacity(INSERT_BATCH_SIZE);
+            for &(workspace_id, memory_id, content) in chunk {
+                let generation = if let Some(generation) = generations.get(workspace_id) {
+                    *generation
+                } else {
+                    let generation =
+                        i64::try_from(self.get_workspace_generation(workspace_id)?.unwrap_or(0))
+                            .unwrap_or(i64::MAX);
+                    generations.insert(workspace_id, generation);
+                    generation
+                };
+                for surface in extract_memory_anchor_surfaces(
+                    memory_id,
+                    content,
+                    MemoryAnchorSource::IndexRebuild,
+                    Some("index_rebuild"),
+                ) {
+                    let (normalized_path, symbol) = match surface.anchor.anchor_kind {
+                        MemoryAnchorKind::Path => (Some(surface.normalized_value), None),
+                        MemoryAnchorKind::Symbol => (None, Some(surface.normalized_value)),
+                        _ => continue,
+                    };
+                    rows.push([
+                        Value::Text(workspace_id.to_owned()),
+                        Value::Text(memory_id.to_owned()),
+                        Value::Text(surface.anchor.anchor_kind.as_str().to_owned()),
+                        Value::Text(surface.anchor.anchor_value_hash),
+                        normalized_path.map_or(Value::Null, Value::Text),
+                        symbol.map_or(Value::Null, Value::Text),
+                        Value::Text(surface.anchor.freshness_state.as_str().to_owned()),
+                        Value::BigInt(generation),
+                        Value::Text(now.clone()),
+                        Value::Text(now.clone()),
+                    ]);
+                    if rows.len() == INSERT_BATCH_SIZE {
+                        self.insert_memory_anchor_index_batch(&rows)?;
+                        written = written.saturating_add(rows.len() as u64);
+                        rows.clear();
+                    }
+                }
+            }
+            if !rows.is_empty() {
+                self.insert_memory_anchor_index_batch(&rows)?;
+                written = written.saturating_add(rows.len() as u64);
+            }
+        }
+        Ok(written)
+    }
+
+    fn insert_memory_anchor_index_batch(&self, rows: &[[Value; 10]]) -> Result<()> {
+        let values = (0..rows.len())
+            .map(|row| {
+                let parameters = (1..=10)
+                    .map(|column| format!("?{}", row * 10 + column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({parameters})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         self.execute_for(
             DbOperation::Execute,
-            "DELETE FROM memory_anchor_index WHERE memory_id = ?1",
-            &[Value::Text(memory_id.to_string())],
+            &format!(
+                "INSERT INTO memory_anchor_index (workspace_id, memory_id, anchor_kind, anchor_value_hash, normalized_path, symbol, freshness_state, generation, created_at, updated_at) VALUES {values} ON CONFLICT(memory_id, anchor_kind, anchor_value_hash) DO UPDATE SET workspace_id = excluded.workspace_id, normalized_path = excluded.normalized_path, symbol = excluded.symbol, freshness_state = excluded.freshness_state, generation = excluded.generation, updated_at = excluded.updated_at WHERE excluded.generation >= memory_anchor_index.generation"
+            ),
+            &rows.iter().flatten().cloned().collect::<Vec<_>>(),
         )?;
-        self.upsert_memory_anchor_index_surfaces(workspace_id, &surfaces)
+        Ok(())
     }
 
     /// Upsert reverse-index rows for already-extracted anchor surfaces.
-    /// Shared by `insert_memory` (fresh rows) and the rebuild path (after a
-    /// wholesale delete). Non-path/non-symbol surfaces are skipped. Older
-    /// generations cannot overwrite newer rows.
+    /// Used by `insert_memory` for fresh rows. Non-path/non-symbol surfaces are
+    /// skipped, and older generations cannot overwrite newer rows.
     fn upsert_memory_anchor_index_surfaces(
         &self,
         workspace_id: &str,
@@ -26336,6 +26448,69 @@ impl DbConnection {
             &[Value::Text(memory_id.to_string())],
         )?;
         rows.iter().map(stored_memory_anchor_from_row).collect()
+    }
+
+    /// Load index-source sidecars in bounded ID batches inside the caller's
+    /// snapshot. Keep typed fields separate from the anchor join so a large
+    /// sidecar is never duplicated once per anchor. Existing anchor order and
+    /// provenance are identical to the scalar readers.
+    pub(crate) fn memory_index_metadata_in_current_snapshot(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<MemoryIndexMetadataBatch> {
+        let memory_ids = memory_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut batch = MemoryIndexMetadataBatch::default();
+        for chunk in memory_ids.chunks(MEMORY_INDEX_METADATA_BATCH_SIZE) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let parameters = chunk
+                .iter()
+                .map(|memory_id| Value::Text((*memory_id).to_owned()))
+                .collect::<Vec<_>>();
+            let rows = self.query_for(
+                DbOperation::Query,
+                &format!(
+                    "SELECT id, typed_fields_json FROM memories WHERE id IN ({placeholders}) ORDER BY id ASC"
+                ),
+                &parameters,
+            )?;
+            batch.query_count += 1;
+            for row in &rows {
+                let memory_id = required_text(row, 0, DbOperation::Query, "id")?.to_owned();
+                batch.by_memory_id.insert(
+                    memory_id,
+                    MemoryIndexMetadata {
+                        anchors: Vec::new(),
+                        typed_fields_json: optional_text(row, 1)?.map(str::to_owned),
+                    },
+                );
+            }
+            let rows = self.query_for(
+                DbOperation::Query,
+                &format!(
+                    "SELECT memory_id, anchor_kind, anchor_value_hash, redacted_anchor_value, confidence, source, provenance, captured_span_hash, freshness_state, generation, created_at, updated_at FROM memory_anchors WHERE memory_id IN ({placeholders}) ORDER BY memory_id ASC, anchor_kind ASC, anchor_value_hash ASC"
+                ),
+                &parameters,
+            )?;
+            batch.query_count += 1;
+            for row in &rows {
+                let anchor = stored_memory_anchor_from_row(row)?;
+                batch
+                    .by_memory_id
+                    .entry(anchor.memory_id.clone())
+                    .or_default()
+                    .anchors
+                    .push(anchor);
+            }
+        }
+        Ok(batch)
     }
 
     /// Query memories by a typed anchor hash.

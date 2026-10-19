@@ -4286,46 +4286,79 @@ fn memory_documents_with_anchors(
     db: &DbConnection,
     memories: &[crate::db::StoredMemory],
 ) -> Result<Vec<CanonicalSearchDocument>, IndexRebuildError> {
+    memory_documents_with_anchors_with_cx(asupersync::Cx::current().as_ref(), db, memories)
+}
+
+fn memory_documents_with_anchors_with_cx(
+    request: Option<&asupersync::Cx>,
+    db: &DbConnection,
+    memories: &[crate::db::StoredMemory],
+) -> Result<Vec<CanonicalSearchDocument>, IndexRebuildError> {
     let mut documents = Vec::with_capacity(memories.len());
-    for memory in memories {
-        if memory_has_seal_sidecar(db, memory)? {
-            continue;
+    let read_only = db.mode() == crate::db::DatabaseOpenMode::ReadOnly;
+    let mut metadata_queries = 0;
+    for chunk in memories.chunks(crate::db::MEMORY_INDEX_METADATA_BATCH_SIZE) {
+        if let Some(cx) = request {
+            index_checkpoint(cx)?;
         }
-        // Index rebuild is the fourth precision anchor-extraction point, after
-        // remember, CASS import, and curate apply (all wired through
-        // DbConnection::insert_memory). Backfill anchors for memories that have
-        // none yet — rows created before the anchor table existed, or through the
-        // revision write path, which does not extract at insert time. Memories
-        // that already carry anchors keep their original source provenance; this
-        // never downgrades a cass_import/curate_apply source to index_rebuild.
-        let mut anchors = db.list_memory_anchors(&memory.id)?;
-        if anchors.is_empty() {
-            if db.mode() == crate::db::DatabaseOpenMode::ReadOnly {
-                anchors = source_snapshot::projected_anchors(&memory.id, &memory.content);
-            } else {
-                db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)?;
-                anchors = db.list_memory_anchors(&memory.id)?;
+        let mut admitted = Vec::with_capacity(chunk.len());
+        for memory in chunk {
+            if let Some(cx) = request {
+                index_checkpoint(cx)?;
+            }
+            if !memory_has_seal_sidecar(db, memory)? {
+                admitted.push(memory);
             }
         }
-        // ADR 0064: the anchor reverse index is rebuilt alongside the
-        // search documents so `ee index rebuild` restores it from
-        // scratch and its MAX(generation) advances with the rebuild.
-        if db.mode() != crate::db::DatabaseOpenMode::ReadOnly {
-            db.refresh_memory_anchor_index_for_memory(
-                &memory.workspace_id,
-                &memory.id,
-                &memory.content,
-            )?;
+        let ids = admitted
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>();
+        let metadata = db.memory_index_metadata_in_current_snapshot(&ids);
+        if let Some(cx) = request {
+            index_checkpoint(cx)?;
         }
-        let typed_fields_json = db.get_memory_typed_fields_json(&memory.id)?;
-        documents.push(memory_to_document_with_context_anchors_and_typed_fields(
-            memory,
-            None,
-            &[],
-            &anchors,
-            typed_fields_json.as_deref(),
-        ));
+        let mut metadata = metadata?;
+        metadata_queries += metadata.query_count;
+        for memory in &admitted {
+            if let Some(cx) = request {
+                index_checkpoint(cx)?;
+            }
+            let crate::db::MemoryIndexMetadata {
+                mut anchors,
+                typed_fields_json,
+            } = metadata.by_memory_id.remove(&memory.id).unwrap_or_default();
+            // Preserve every existing anchor's source/provenance. Only legacy
+            // rows with no anchors use the shared rebuild extractor; read-only
+            // fallback projects those anchors without writing source tables.
+            if anchors.is_empty() {
+                if read_only {
+                    anchors = source_snapshot::projected_anchors(&memory.id, &memory.content);
+                } else if db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)? > 0 {
+                    anchors = db.list_memory_anchors(&memory.id)?;
+                }
+            }
+            documents.push(memory_to_document_with_context_anchors_and_typed_fields(
+                memory,
+                None,
+                &[],
+                &anchors,
+                typed_fields_json.as_deref(),
+            ));
+        }
+        // ADR 0064: rebuild the reverse index too, including stale removals and
+        // originating-workspace generations, using bounded set writes rather
+        // than a generation lookup/delete/insert round trip for every memory.
+        if !read_only {
+            db.refresh_memory_anchor_index_for_memories(&admitted)?;
+        }
     }
+    tracing::debug!(
+        target: "ee::index",
+        memories = documents.len(),
+        metadata_queries,
+        "captured memory index sidecars in batches"
+    );
     Ok(documents)
 }
 

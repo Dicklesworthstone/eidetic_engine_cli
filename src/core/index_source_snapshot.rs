@@ -41,13 +41,12 @@ pub(crate) fn read_only_documents_in_current_snapshot(
     let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false);
     super::index_checkpoint(cx)?;
     let memories = memories?;
-    let mut documents = Vec::new();
-    for memories in memories.chunks(16) {
-        super::index_checkpoint(cx)?;
-        let projected = super::memory_documents_with_anchors(db, memories);
-        super::index_checkpoint(cx)?;
-        documents.extend(projected?);
-    }
+    // The shared projector now owns bounded sidecar batches and observes the
+    // caller's request between memories. Do not split its batches into sixteen
+    // separate per-row query groups again on the live fallback path.
+    let projected = super::memory_documents_with_anchors_with_cx(Some(cx), db, &memories);
+    super::index_checkpoint(cx)?;
+    let mut documents = projected?;
     let visitor_checkpoint = || {
         cx.checkpoint()
             .map_err(|_| crate::db::DbError::MalformedRow {
@@ -1365,6 +1364,332 @@ mod tests {
             }
             assert_source_refusal_is_read_only(&db, &path, 128 * 1024);
         }
+    }
+
+    fn index_source_memory_input(workspace_id: &str, content: &str) -> CreateMemoryInput {
+        CreateMemoryInput {
+            workspace_id: workspace_id.to_owned(),
+            level: "episodic".to_owned(),
+            kind: "failure".to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: Some("test://index-source".to_owned()),
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    #[test]
+    fn memory_sidecar_batches_match_scalar_readers_across_chunk_boundaries() {
+        let (_root, db, path) = fixture();
+        db.with_transaction(|| {
+            for number in 0..=crate::db::MEMORY_INDEX_METADATA_BATCH_SIZE {
+                let id = format!("mem_{:026}", 80_000 + number);
+                let content = if number % 2 == 0 {
+                    format!("The build failed in `src/file{number}.rs`; run cargo check.")
+                } else {
+                    "A plain note about a previous failure.".to_owned()
+                };
+                db.insert_memory(&id, &index_source_memory_input(WORKSPACE, &content))?;
+                if number % 3 == 0 {
+                    db.set_memory_typed_fields_json(
+                        &id,
+                        Some(r#"{"family":"compiler-settings","cause":"stale configuration"}"#),
+                    )?;
+                }
+            }
+            let explicit = crate::models::CreateMemoryAnchorInput::from_raw(
+                MEMORY,
+                crate::models::MemoryAnchorKind::Command,
+                "cargo fmt --check",
+                0.9,
+                MemoryAnchorSource::Explicit,
+                "test://explicit-provenance",
+                3,
+            )
+            .expect("explicit anchor");
+            db.upsert_memory_anchors(&[explicit])?;
+            Ok(())
+        })
+        .expect("source rows");
+        let read = DbConnection::open_file_read_only(&path).expect("read-only store");
+        let before = std::fs::read(&path).expect("source bytes");
+        read.begin_read_snapshot().expect("borrowed snapshot");
+        let memories = read
+            .list_memories_for_retrieval_with_global(WORKSPACE, None, false)
+            .expect("memories");
+        let mut ids = memories
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>();
+        ids.push(MEMORY);
+        ids.push("mem_99999999999999999999999999");
+        let batch = read
+            .memory_index_metadata_in_current_snapshot(&ids)
+            .expect("batch");
+        assert_eq!(batch.query_count, 4, "two reads per 128 distinct IDs");
+        assert_eq!(batch.by_memory_id.len(), memories.len());
+        assert_eq!(
+            read.memory_index_metadata_in_current_snapshot(&[])
+                .expect("empty")
+                .query_count,
+            0,
+        );
+        let expected = memories
+            .iter()
+            .map(|memory| {
+                let mut anchors = read
+                    .list_memory_anchors(&memory.id)
+                    .expect("scalar anchors");
+                let typed = read
+                    .get_memory_typed_fields_json(&memory.id)
+                    .expect("scalar sidecar");
+                let actual = batch.by_memory_id.get(&memory.id).expect("batch member");
+                assert_eq!(actual.anchors, anchors);
+                assert_eq!(actual.typed_fields_json, typed);
+                if anchors.is_empty() {
+                    anchors = projected_anchors(&memory.id, &memory.content);
+                }
+                super::super::memory_to_document_with_context_anchors_and_typed_fields(
+                    memory,
+                    None,
+                    &[],
+                    &anchors,
+                    typed.as_deref(),
+                )
+                .into_indexable()
+            })
+            .collect::<Vec<_>>();
+        let actual = super::super::memory_documents_with_anchors(&read, &memories)
+            .expect("batched projection");
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.into_iter().zip(&expected) {
+            let actual = actual.into_indexable();
+            assert_eq!(actual.id, expected.id);
+            assert_eq!(actual.content, expected.content);
+            assert_eq!(actual.metadata, expected.metadata);
+        }
+        read.commit_read_snapshot()
+            .expect("caller retains snapshot");
+        assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
+
+        // Recreate derived rows from source, crossing both the metadata read
+        // boundary and the 64-row reverse-index insert boundary. Clearing the
+        // existing rows prevents insert_memory's scalar writes masking a gap.
+        db.execute_raw("DELETE FROM memory_anchor_index")
+            .expect("clear derived index");
+        let generation = db.get_workspace_generation(WORKSPACE).expect("generation");
+        let persisted = capture(&db, || {
+            super::super::memory_documents_with_anchors(&db, &memories)
+        })
+        .expect("writable source projection");
+        assert_eq!(persisted.len(), expected.len());
+        for (persisted, expected) in persisted.into_iter().zip(&expected) {
+            let persisted = persisted.into_indexable();
+            assert_eq!(persisted.id, expected.id);
+            assert_eq!(persisted.content, expected.content);
+            assert_eq!(persisted.metadata, expected.metadata);
+        }
+        assert_eq!(
+            db.count_table_rows("memory_anchor_index")
+                .expect("derived rows"),
+            66,
+            "65 numbered paths plus the original fixture path"
+        );
+        for number in (0..=crate::db::MEMORY_INDEX_METADATA_BATCH_SIZE).step_by(2) {
+            let candidates = db
+                .query_anchor_index_path_candidates(
+                    WORKSPACE,
+                    Some(&[format!("src/file{number}.rs")]),
+                    10,
+                )
+                .expect("reverse path lookup");
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(
+                candidates[0].memory_id,
+                format!("mem_{:026}", 80_000 + number)
+            );
+        }
+        assert_eq!(
+            db.get_workspace_generation(WORKSPACE).expect("generation"),
+            generation
+        );
+    }
+
+    #[test]
+    fn memory_batch_refresh_preserves_global_scope_and_removes_obsolete_paths() {
+        let (_root, db, path) = fixture();
+        let other_workspace = "wsp_00000000000000000000000072";
+        let global_id = "mem_00000000000000000000080001";
+        let unrelated_id = "mem_00000000000000000000080002";
+        db.insert_workspace(
+            other_workspace,
+            &CreateWorkspaceInput {
+                path: "/tmp/ee-source-global-workspace".to_owned(),
+                name: Some("global source".to_owned()),
+            },
+        )
+        .expect("other workspace");
+        let mut input =
+            index_source_memory_input(other_workspace, "Build failed in `src/current.rs`.");
+        input
+            .tags
+            .push(crate::models::GLOBAL_MEMORY_SCOPE_TAG.to_owned());
+        db.insert_memory(global_id, &input).expect("global memory");
+        db.insert_memory(
+            unrelated_id,
+            &index_source_memory_input(other_workspace, "Build failed in `src/unrelated.rs`."),
+        )
+        .expect("unrelated memory");
+        let original_anchors = db.list_memory_anchors(global_id).expect("original anchors");
+        assert!(!original_anchors.is_empty());
+        db.refresh_memory_anchor_index_for_memory(
+            other_workspace,
+            global_id,
+            "Build failed in `src/obsolete.rs`.",
+        )
+        .expect("stale derived rows");
+        let before_generations = [
+            db.get_workspace_generation(WORKSPACE)
+                .expect("local generation"),
+            db.get_workspace_generation(other_workspace)
+                .expect("global generation"),
+        ];
+        let read = DbConnection::open_file_read_only(&path).expect("read-only store");
+        let projected = capture(&read, || {
+            let memories = read.list_memories_for_retrieval_with_global(WORKSPACE, None, false)?;
+            super::super::memory_documents_with_anchors(&read, &memories)
+        })
+        .expect("read-only projection");
+        let persisted = capture(&db, || {
+            let memories = db.list_memories_for_retrieval_with_global(WORKSPACE, None, false)?;
+            super::super::memory_documents_with_anchors(&db, &memories)
+        })
+        .expect("writable projection");
+        assert_eq!(persisted.len(), 2, "local plus globally tagged source");
+        for (projected, persisted) in projected.into_iter().zip(persisted) {
+            let projected = projected.into_indexable();
+            let persisted = persisted.into_indexable();
+            assert_eq!(projected.id, persisted.id);
+            assert_eq!(projected.content, persisted.content);
+            assert_eq!(projected.metadata, persisted.metadata);
+        }
+        assert_eq!(
+            db.list_memory_anchors(global_id)
+                .expect("preserved anchors"),
+            original_anchors
+        );
+        assert!(
+            !db.list_memory_anchors(MEMORY)
+                .expect("legacy backfill")
+                .is_empty()
+        );
+        let paths = |path: &str| {
+            db.query_anchor_index_path_candidates(other_workspace, Some(&[path.to_owned()]), 10)
+                .expect("reverse path lookup")
+        };
+        assert!(paths("src/obsolete.rs").is_empty());
+        assert_eq!(paths("src/current.rs")[0].memory_id, global_id);
+        assert_eq!(paths("src/unrelated.rs")[0].memory_id, unrelated_id);
+        for (workspace, expected) in [WORKSPACE, other_workspace]
+            .into_iter()
+            .zip(before_generations)
+        {
+            assert_eq!(
+                db.get_workspace_generation(workspace)
+                    .expect("source generation"),
+                expected
+            );
+            assert_eq!(
+                db.memory_anchor_index_generation(workspace)
+                    .expect("derived generation"),
+                expected.map(|value| i64::try_from(value).expect("generation fits")),
+            );
+        }
+    }
+
+    #[test]
+    fn memory_batch_refresh_rolls_back_backfill_and_earlier_insert_groups() {
+        let (_root, db, _path) = fixture();
+        db.with_transaction(|| {
+            for number in 0..64 {
+                let id = format!("mem_{:026}", 90_000 + number);
+                db.insert_memory_revision(
+                    &id,
+                    &id,
+                    &index_source_memory_input(
+                        WORKSPACE,
+                        &format!("Build failed in `src/rollback{number}.rs`."),
+                    ),
+                )?;
+            }
+            Ok(())
+        })
+        .expect("legacy revisions");
+        db.refresh_memory_anchor_index_for_memory(
+            WORKSPACE,
+            MEMORY,
+            "Previous derived path was `src/obsolete.rs`.",
+        )
+        .expect("previous derived rows");
+        let memories = db
+            .list_memories_for_retrieval_with_global(WORKSPACE, None, false)
+            .expect("source memories");
+        assert_eq!(memories.len(), 65);
+        let tail = &memories.last().expect("tail memory").id;
+        db.execute_raw(&format!(
+            "CREATE TRIGGER refuse_anchor_tail BEFORE INSERT ON memory_anchor_index WHEN NEW.memory_id = '{tail}' BEGIN SELECT RAISE(ABORT, 'anchor_tail_refused'); END;"
+        ))
+        .expect("late insert failure");
+        let generation = db.get_workspace_generation(WORKSPACE).expect("generation");
+        let error = capture(&db, || {
+            super::super::memory_documents_with_anchors(&db, &memories)
+        })
+        .expect_err("tail insert must fail the entire source capture");
+        assert!(error.to_string().contains("anchor_tail_refused"));
+        assert_eq!(db.count_table_rows("memory_anchors").expect("anchors"), 0);
+        assert_eq!(
+            db.count_table_rows("memory_anchor_index")
+                .expect("previous derived rows"),
+            1
+        );
+        let previous = db
+            .query_anchor_index_path_candidates(
+                WORKSPACE,
+                Some(&["src/obsolete.rs".to_owned()]),
+                10,
+            )
+            .expect("restored obsolete path");
+        assert_eq!(previous.len(), 1);
+        assert_eq!(previous[0].memory_id, MEMORY);
+        assert_eq!(
+            db.get_workspace_generation(WORKSPACE).expect("generation"),
+            generation
+        );
+    }
+
+    #[test]
+    fn memory_sidecar_projection_observes_explicit_cancellation_before_writes() {
+        let (_root, db, path) = fixture();
+        let memories = db
+            .list_memories_for_retrieval_with_global(WORKSPACE, None, false)
+            .expect("source memories");
+        let before = std::fs::read(&path).expect("source bytes");
+        let cx = asupersync::Cx::for_testing();
+        cx.set_cancel_reason(asupersync::CancelReason::user("cancel memory projection"));
+        let result = super::super::memory_documents_with_anchors_with_cx(Some(&cx), &db, &memories);
+        assert!(matches!(
+            result,
+            Err(IndexRebuildError::Cancelled(reason))
+                if reason.message.as_deref() == Some("cancel memory projection")
+        ));
+        assert_eq!(std::fs::read(&path).expect("unchanged source"), before);
     }
 
     #[test]
