@@ -534,13 +534,23 @@ fn no_private_fleet_identifiers_are_published() {
     } = scan(&root);
     // FAIL CLOSED when the scan could not reach `.beads/issues.jsonl`.
     //
-    // bd-42puv measured 1149 of 4869 bead records carrying a fleet identifier
-    // and ZERO other tracked files carrying one. So a run that skips the
-    // tracker is not a smaller measurement of the published set, it is a
-    // measurement of everything except where the problem is, and it returns
-    // GREEN. Honestly reporting the smaller denominator -- which this guard
-    // already did -- documents the hole without closing it; the pass still
-    // reads as a clean bill of health to anyone scanning results.
+    // bd-42puv measured 1149 of 4869 bead records carrying a fleet identifier.
+    // Re-measured 2026-10-19: the tracker export carries 1150 of the 1164
+    // carrying lines. So a run that skips the tracker is not a smaller
+    // measurement of the published set, it is a measurement of everything
+    // except where the problem is, and it returns GREEN. Honestly reporting
+    // the smaller denominator -- which this guard already did -- documents the
+    // hole without closing it; the pass still reads as a clean bill of health
+    // to anyone scanning results.
+    //
+    // NOT "zero other tracked files", which this comment claimed until
+    // 2026-10-19 while the `per_file` comment above already named two more. The
+    // remainder is small but real and none of it is in the tracker: two files
+    // under `proofs/oracle/` carry 14 lines between them, and CLAUDE.md carried
+    // 2 until they became a placeholder. The share is what justifies failing
+    // closed -- a tracker-blind lane is 98.8% blind -- not exclusivity, and the
+    // difference matters because "zero others" invites a reader to scrub the
+    // tracker and declare the guard green.
     //
     // A green that nothing could have made red is worse than a red. This
     // assertion is what gives the one below a population to be true about.
