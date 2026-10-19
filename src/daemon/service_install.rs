@@ -14,6 +14,17 @@ pub const SYSTEMD_UNIT_NAME: &str = "ee-daemon.service";
 pub const WINDOWS_TASK_NAME: &str = "ai.eideticengine.ee-daemon";
 pub const WINDOWS_TASK_FILE_NAME: &str = "ee-daemon.task.xml";
 
+/// Seconds between supervised `--once` steward runs (GH#81).
+///
+/// Each run appends to the workspace's daemon job journal, so the supervisor
+/// must not respawn the one-shot steward every few seconds. This keeps every
+/// platform on the in-process background scheduler's one-minute cadence.
+pub const SUPERVISED_STEWARD_INTERVAL_SECS: u64 =
+    crate::steward::BACKGROUND_SCHEDULER_INTERVAL_MS / 1_000;
+
+// The Windows task repeats with a literal `PT1M`; keep it in lockstep.
+const _: () = assert!(SUPERVISED_STEWARD_INTERVAL_SECS == 60);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonServiceKind {
@@ -106,14 +117,14 @@ pub fn default_unit_path(kind: DaemonServiceKind, home: &Path) -> Option<PathBuf
     }
 }
 
-#[must_use]
-pub fn render_unit_body(kind: DaemonServiceKind, ee_binary: &Path) -> Option<String> {
-    render_unit_body_for_workspace(kind, ee_binary, Path::new("."))
-}
-
 /// Render a service with an explicitly pinned workspace. Paths are literal
 /// supervisor arguments, never shell fragments or environment substitutions.
 /// Refuse unrepresentable text rather than installing a different lossy path.
+///
+/// Supervisors start units in their own working directory (`$HOME` for
+/// systemd and launchd), so the workspace must be the absolute root the
+/// installing command resolved; never a relative path or a rediscovery from
+/// wherever the supervisor happens to start (GH#81).
 #[must_use]
 pub fn render_unit_body_for_workspace(
     kind: DaemonServiceKind,
@@ -160,14 +171,16 @@ pub fn render_unit_body_for_workspace(
   </array>
   <key>RunAtLoad</key>
   <true/>
-  <key>KeepAlive</key>
-  <true/>
+  <key>StartInterval</key>
+  <integer>{SUPERVISED_STEWARD_INTERVAL_SECS}</integer>
 </dict>
 </plist>
 "#
         )),
+        // `--once` exits after one tick by design; `Restart=always` brings it
+        // back after `RestartSec`, which is what makes the unit recurring.
         DaemonServiceKind::SystemdUser => Some(format!(
-            "[Unit]\nDescription=ee team/mesh steward daemon\nAfter=default.target\n\n[Service]\nType=simple\nExecStart=:{systemd_binary} daemon --foreground --once --workspace {systemd_workspace} --job team_steward --job decay_sweep --job health_check\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
+            "[Unit]\nDescription=ee team/mesh steward daemon\nAfter=default.target\n\n[Service]\nType=simple\nExecStart=:{systemd_binary} daemon --foreground --once --workspace {systemd_workspace} --job team_steward --job decay_sweep --job health_check\nRestart=always\nRestartSec={SUPERVISED_STEWARD_INTERVAL_SECS}\n\n[Install]\nWantedBy=default.target\n"
         )),
         DaemonServiceKind::WindowsUserTask => Some(render_windows_task_xml(ee_binary, workspace)),
         DaemonServiceKind::Unsupported => None,
@@ -325,17 +338,6 @@ fn render_windows_task_xml(ee_binary: &Path, workspace: &Path) -> String {
 </Task>
 "#
     )
-}
-
-#[must_use]
-pub fn plan_daemon_service(
-    command: &'static str,
-    kind: DaemonServiceKind,
-    home: &Path,
-    ee_binary: &Path,
-    confirm: bool,
-) -> DaemonServicePlan {
-    plan_daemon_service_for_workspace(command, kind, home, ee_binary, home, confirm)
 }
 
 /// Prepare a daemon unit for a pinned workspace rather than the service manager's cwd.
@@ -1134,7 +1136,7 @@ mod tests {
                 .count(),
             1
         );
-        assert!(body.contains("Restart=always\nRestartSec=5\n"));
+        assert!(body.contains("Restart=always\nRestartSec=60\n"));
     }
 
     #[test]
@@ -1152,7 +1154,7 @@ mod tests {
             )
         );
         assert_eq!(body.matches("<string>--workspace</string>").count(), 1);
-        assert!(body.contains("<key>KeepAlive</key>\n  <true/>"));
+        assert!(body.contains("<key>StartInterval</key>\n  <integer>60</integer>"));
     }
 
     #[test]
@@ -1330,19 +1332,66 @@ mod tests {
     }
 
     #[test]
+    fn supervised_steward_recurs_once_a_minute_on_every_platform() {
+        // GH#81: respawning the one-shot steward every few seconds appended a
+        // run to the daemon job journal each time. Every supervisor shares the
+        // in-process background scheduler's cadence.
+        let binary = Path::new("/usr/bin/ee");
+        let workspace = Path::new("/work");
+        let systemd =
+            render_unit_body_for_workspace(DaemonServiceKind::SystemdUser, binary, workspace)
+                .expect("systemd");
+        assert!(systemd.contains(" --once "));
+        assert!(systemd.contains("\nRestart=always\n"));
+        assert!(systemd.contains(&format!(
+            "\nRestartSec={SUPERVISED_STEWARD_INTERVAL_SECS}\n"
+        )));
+        let launchd = render_unit_body_for_workspace(DaemonServiceKind::Launchd, binary, workspace)
+            .expect("launchd");
+        assert!(launchd.contains("<string>--once</string>"));
+        assert!(launchd.contains("<key>RunAtLoad</key>\n  <true/>"));
+        assert!(launchd.contains(&format!(
+            "<key>StartInterval</key>\n  <integer>{SUPERVISED_STEWARD_INTERVAL_SECS}</integer>"
+        )));
+        // KeepAlive relaunches an exited one-shot after only launchd's
+        // default ten-second throttle.
+        assert!(!launchd.contains("KeepAlive"));
+        let windows = render_unit_body_for_workspace(
+            DaemonServiceKind::WindowsUserTask,
+            Path::new(r"C:\ee\ee.exe"),
+            Path::new(r"C:\work"),
+        )
+        .expect("windows");
+        assert_eq!(
+            windows
+                .matches("<Repetition>\n        <Interval>PT1M</Interval>")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn launchd_unit_mentions_team_steward_and_label() {
-        let body = render_unit_body(DaemonServiceKind::Launchd, Path::new("/usr/local/bin/ee"))
-            .expect("launchd body");
+        let body = render_unit_body_for_workspace(
+            DaemonServiceKind::Launchd,
+            Path::new("/usr/local/bin/ee"),
+            Path::new("/work"),
+        )
+        .expect("launchd body");
         assert!(body.contains(LAUNCHD_LABEL));
         assert!(body.contains("team_steward"));
         assert!(body.contains("/usr/local/bin/ee"));
-        assert!(body.contains("KeepAlive"));
+        assert!(body.contains("<key>RunAtLoad</key>\n  <true/>"));
     }
 
     #[test]
     fn systemd_unit_is_user_scoped_and_restarts() {
-        let body = render_unit_body(DaemonServiceKind::SystemdUser, Path::new("/usr/bin/ee"))
-            .expect("systemd body");
+        let body = render_unit_body_for_workspace(
+            DaemonServiceKind::SystemdUser,
+            Path::new("/usr/bin/ee"),
+            Path::new("/work"),
+        )
+        .expect("systemd body");
         assert!(body.contains("ExecStart=:\"/usr/bin/ee\" daemon --foreground --once"));
         assert!(body.contains("Restart=always"));
         assert!(body.contains("team_steward"));
@@ -1352,9 +1401,10 @@ mod tests {
 
     #[test]
     fn windows_task_xml_is_user_logon_and_escapes_paths() {
-        let body = render_unit_body(
+        let body = render_unit_body_for_workspace(
             DaemonServiceKind::WindowsUserTask,
             Path::new(r"C:\Program Files\ee & tools\ee.exe"),
+            Path::new(r"C:\work"),
         )
         .expect("windows body");
         assert!(body.contains(WINDOWS_TASK_NAME));
@@ -1368,11 +1418,12 @@ mod tests {
 
     #[test]
     fn windows_task_plan_lives_under_localappdata_not_workspace_ee() {
-        let plan = plan_daemon_service(
+        let plan = plan_daemon_service_for_workspace(
             "daemon install",
             DaemonServiceKind::WindowsUserTask,
             Path::new(r"C:\Users\dev"),
             Path::new(r"C:\Users\dev\ee.exe"),
+            Path::new(r"C:\Users\dev\project"),
             false,
         );
         let path = PathBuf::from(plan.unit_path.expect("path"));
@@ -1415,11 +1466,12 @@ mod tests {
 
     #[test]
     fn unsupported_kind_has_no_unit_path() {
-        let plan = plan_daemon_service(
+        let plan = plan_daemon_service_for_workspace(
             "daemon install",
             DaemonServiceKind::Unsupported,
             Path::new("/tmp/home"),
             Path::new("/usr/bin/ee"),
+            Path::new("/tmp/home/project"),
             false,
         );
         assert!(plan.unit_path.is_none());

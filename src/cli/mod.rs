@@ -2819,11 +2819,11 @@ pub struct DaemonArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub once: bool,
 
-    /// Maximum foreground scheduler ticks before exiting.
+    /// Maximum foreground scheduler ticks before exiting (1 to 1000).
     #[arg(long, default_value_t = crate::steward::DEFAULT_DAEMON_FOREGROUND_TICK_LIMIT, value_name = "N")]
     pub max_ticks: u32,
 
-    /// Delay between ticks in milliseconds.
+    /// Delay between ticks in milliseconds (at most 60000).
     #[arg(long, default_value_t = crate::steward::DEFAULT_DAEMON_FOREGROUND_INTERVAL_MS, value_name = "MS")]
     pub interval_ms: u64,
 
@@ -2914,6 +2914,9 @@ pub enum DaemonCommand {
     /// workers and socket to be released.
     Stop(DaemonHotModeStopArgs),
     /// Install a user-scoped launchd/systemd/Windows-task unit for the team steward.
+    /// The unit pins this command's workspace (`--workspace`, `EE_WORKSPACE`, or
+    /// the nearest `.ee/`), which must already hold a store, and runs one
+    /// `--once` steward tick about once a minute.
     /// This does not start the hot search RPC daemon; use `ee daemon start`
     /// for resident embeddings and `ee hook <harness> --install` for harness hooks.
     Install(DaemonServiceInstallArgs),
@@ -64876,8 +64879,6 @@ where
     };
     let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ee"));
     let kind = crate::daemon::service_install::current_service_kind();
-    let mut plan =
-        crate::daemon::service_install::plan_daemon_service(command, kind, &home, &binary, confirm);
     if kind == crate::daemon::service_install::DaemonServiceKind::Unsupported {
         return write_domain_error(
             &DomainError::Configuration {
@@ -64889,6 +64890,13 @@ where
             stderr,
         );
     }
+    let workspace = match daemon_service_workspace(&cli.resolve_workspace(), !uninstall) {
+        Ok(workspace) => workspace,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+    let mut plan = crate::daemon::service_install::plan_daemon_service_for_workspace(
+        command, kind, &home, &binary, &workspace, confirm,
+    );
     if confirm {
         if uninstall {
             if let Err(error) = crate::daemon::service_install::deactivate_daemon_service(kind) {
@@ -64973,6 +64981,22 @@ where
         ),
         stdout,
     )
+}
+
+/// Workspace root a supervised steward unit pins (GH#81).
+///
+/// A supervisor starts the unit in its own working directory (`$HOME` for
+/// systemd and launchd), where discovery would find whatever `.ee/` sits
+/// there. The unit therefore carries the workspace this command resolved, as
+/// an absolute canonical root. Installing also requires that root to hold a
+/// store: a steward pinned to a storeless directory reports successful ticks
+/// that do nothing. Uninstalling only renders the plan, so it skips that check.
+fn daemon_service_workspace(resolved: &Path, require_store: bool) -> Result<PathBuf, DomainError> {
+    let workspace = resolve_cli_workspace_path(resolved);
+    if require_store {
+        crate::core::ensure_addressed_database_exists(&workspace.join(".ee").join("ee.db"))?;
+    }
+    Ok(workspace)
 }
 
 fn write_team_like_json<W, T>(
@@ -91343,6 +91367,115 @@ mod tests {
             },
             _ => Err("expected daemon command".to_string()),
         }
+    }
+
+    #[test]
+    fn daemon_service_workspace_is_absolute_and_install_requires_a_store() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("ws");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let canonical = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+
+        // A `.ee/` directory without a database is not an initialized store.
+        match daemon_service_workspace(&workspace, true) {
+            Err(DomainError::WorkspaceStoreMissing { message, .. }) => ensure(
+                message.contains("ee.db"),
+                "store-missing refusal names the looked-for database",
+            )?,
+            other => return Err(format!("expected workspace_store_missing, got {other:?}")),
+        }
+        // Uninstall only renders a plan and must not require a store.
+        ensure_equal(
+            &daemon_service_workspace(&workspace, false).map_err(|error| error.to_string())?,
+            &canonical,
+            "uninstall workspace",
+        )?;
+
+        std::fs::write(workspace.join(".ee").join("ee.db"), b"")
+            .map_err(|error| error.to_string())?;
+        let pinned =
+            daemon_service_workspace(&workspace, true).map_err(|error| error.to_string())?;
+        ensure_equal(&pinned, &canonical, "install workspace")?;
+        ensure(pinned.is_absolute(), "pinned workspace is absolute")
+    }
+
+    #[test]
+    fn daemon_install_dry_run_pins_the_resolved_workspace_not_home() -> TestResult {
+        // GH#81: the rendered unit pinned $HOME (and before that, nothing, so
+        // the supervisor's working directory decided) instead of the
+        // workspace `daemon install` resolved.
+        let home = crate::daemon::service_install::resolve_user_home()
+            .ok_or("this test needs HOME or USERPROFILE, as `ee daemon install` does")?;
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("pinned ws");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let workspace_text = workspace.display().to_string();
+
+        let (exit, stdout, _) = invoke(&[
+            "ee",
+            "--workspace",
+            workspace_text.as_str(),
+            "--json",
+            "daemon",
+            "install",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::WorkspaceStoreMissing,
+            "install refuses a storeless workspace",
+        )?;
+        ensure(
+            stdout.contains("workspace_store_missing"),
+            "install refusal carries the store-missing code",
+        )?;
+
+        std::fs::write(workspace.join(".ee").join("ee.db"), b"")
+            .map_err(|error| error.to_string())?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            workspace_text.as_str(),
+            "--json",
+            "daemon",
+            "install",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "install dry run")?;
+        ensure(stderr.is_empty(), "install dry run writes no stderr")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["data"]["written"],
+            &serde_json::json!(false),
+            "dry run writes no unit",
+        )?;
+        let body = value["data"]["unitBody"]
+            .as_str()
+            .ok_or("dry run reports the unit body")?;
+        let canonical = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let canonical_text = canonical.display().to_string();
+        let home_text = home.display().to_string();
+        let pinned = match crate::daemon::service_install::current_service_kind() {
+            crate::daemon::service_install::DaemonServiceKind::SystemdUser => {
+                format!("--workspace \"{canonical_text}\"")
+            }
+            crate::daemon::service_install::DaemonServiceKind::Launchd => {
+                format!("<string>--workspace</string>\n    <string>{canonical_text}</string>")
+            }
+            _ => canonical_text.clone(),
+        };
+        ensure(
+            body.contains(&pinned),
+            &format!("unit pins the resolved workspace: {body}"),
+        )?;
+        ensure(
+            !body.contains(&format!("--workspace \"{home_text}\""))
+                && !body.contains(&format!("<string>{home_text}</string>")),
+            &format!("unit must not pin HOME: {body}"),
+        )
     }
 
     #[test]
