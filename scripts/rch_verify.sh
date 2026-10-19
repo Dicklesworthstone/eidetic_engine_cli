@@ -5391,8 +5391,28 @@ if "rch_worker_root_canary_timeout" in degraded:
 # success from the exit code rather than asserting it. The literal form is the
 # easier half to spot and the harder half to notice in review, because there is
 # no wrong question being asked -- there is no question at all.
+# SCHEMA ID IS DELIBERATELY NOT `ee.rch.worker_root_canary.v1` (bd-ldypi).
+#
+# scripts/rch_lane_doctor.sh --worker-canary emits THAT id, and the two shapes
+# share 2 keys out of 26: this one is snake_case with `success`/`generated_at`
+# (ISO)/`required_roots`, lane_doctor's is camelCase with no `success` at all
+# and `generatedAtMs` as an integer. Worse, the one shared payload field,
+# `status`, carried two vocabularies -- `missing_root`,
+# `outer_workspace_shadowed` and `permission_denied` are TOP-LEVEL statuses in
+# lane_doctor and DEGRADED CODES here, beneath a top-level `blocked`. A
+# consumer dispatching on the schema id, which is what a schema id is for, got
+# one of two incompatible objects with no field telling it which.
+#
+# lane_doctor owns the original id: the product names its command in a
+# constant (src/core/support_bundle.rs:182
+# RCH_WORKER_ROOT_CANARY_COMMAND) and emits it to agents as a recommended next
+# command, four docs reference it, and it asserts the id against its own output
+# twice. Nothing outside this file invokes `--worker-root-canary`, nothing reads
+# this payload's `.schema`, and no test or golden pins it -- measured 2026-10-19
+# by enumerating every occurrence of the id and its stem across sh/py/rs/yml/
+# md/toml/json. So renaming this side is the no-consumer side.
 payload = {
-    "schema": "ee.rch.worker_root_canary.v1",
+    "schema": "ee.rch_verify.worker_root_canary.v1",
     "success": status == "healthy",
     "generated_at": now,
     "status": status,
