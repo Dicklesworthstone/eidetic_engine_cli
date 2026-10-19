@@ -295,6 +295,32 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.reachability_self_test.outcome == 'success' }}
         run: python3 ./scripts/check-production-reachability.py
 
+      # bd-nnheo. docs/degraded_code_taxonomy.md assigns every degraded code a
+      # severity and an owner, and several gates derive their REQUIRED code set
+      # FROM that document -- auto_enroll_documentation_consistency.rs asks it
+      # for every `mesh_peer_` code and demands each be documented. So a code
+      # missing from the taxonomy is invisible to every gate downstream of it:
+      # the hole is in the registry, the derived gate reads a shorter list, and
+      # it PASSES. mesh_peer_randomness_unavailable shipped exactly that way.
+      #
+      # Self-test first, same reason as the guard above. Two of its arms are
+      # empty-world guards, and the taxonomy one matters most: an extraction
+      # that returned nothing would report every code in the product
+      # unclassified, which looks like a catastrophe and is a bug.
+      - name: Degraded-code classification guard --self-test
+        id: degraded_classified_self_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 ./scripts/check-degraded-code-classified.py --self-test
+
+      # A gate, not advisory: the 32 currently-unclassified codes are in a
+      # shrink-only baseline, so this is green at HEAD and fails only on a NEW
+      # unclassified constant, or on a baselined entry that has since been
+      # classified. Both directions were demonstrated end-to-end on a fixture
+      # before it was wired.
+      - name: Degraded-code classification guard
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.degraded_classified_self_test.outcome == 'success' }}
+        run: python3 ./scripts/check-degraded-code-classified.py
+
       # bd-pmgg0. src/graph/skyline.rs carried the README name "skyline" while
       # computing a grid of cell means with hand-rolled decile bucketing and no
       # dominance test, for months -- a README-advertised metric whose output did
