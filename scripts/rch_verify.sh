@@ -742,7 +742,16 @@ import re
 
 raw = os.environ.get("LOCAL_CARGO_PROCESSES_OUTPUT", "")
 exit_code = int(os.environ.get("LOCAL_CARGO_PROCESSES_EXIT_CODE") or "0")
-user_path = re.compile(r"/Users/[^\\s\"'`,;:]+")
+# `[^/\s...]`, NOT `[^\\s...]`. In a RAW string `\\s` inside a character class
+# is not the whitespace class -- it is the two literal characters `\` and `s`.
+# So the old class excluded the LETTER s and did not exclude `/`, which broke
+# redaction three ways (measured 2026-10-19):
+#   /Users/sam/x       -> /Users/sam/x            NOT REDACTED AT ALL
+#   /Users/jessica/w   -> /Users/<r>ssica/w       username partly leaked
+#   /Users/bob/notes   -> /Users/<r>s             path eaten past the user
+# A username that merely STARTS with `s` was published verbatim. The correct
+# form is already used three times in this same file (:945, :1215, :5615).
+user_path = re.compile(r"/Users/[^/\s\"'`,;:]+")
 
 def redact_local_paths(value):
     if isinstance(value, str):
@@ -5125,7 +5134,11 @@ def redact(text):
         return None
     text = str(text)
     text = re.sub(r"\x1b\[[0-9;]*m", "", text)
-    text = re.sub(r"/Users/[^\\s\"'`,;:]+", "/Users/<redacted>", text)
+    # See the note at the `user_path` compile earlier in this file: `\\s` in a
+    # raw character class excludes the LETTER s, not whitespace, and omitting
+    # `/` lets the match run past the username. `/Users/sam/x` was emitted
+    # unredacted by this exact line.
+    text = re.sub(r"/Users/[^/\s\"'`,;:]+", "/Users/<redacted>", text)
     return text
 
 def probe(name, argv, env_var, timeout_var):
