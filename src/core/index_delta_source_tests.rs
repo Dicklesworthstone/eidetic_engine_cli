@@ -720,3 +720,6 @@ fn streamed_evidence_matches_canonical_order_and_live_admission_scope() {
     }
     assert!(published.contains_key(&earlier) && published.contains_key(&later));
 }
+
+#[path = "index_delta_source_bulk_tests.rs"]
+mod bulk_tests;
