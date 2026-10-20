@@ -145,7 +145,7 @@
         "hubRank": { "type": ["integer", "null"], "minimum": 1 },
         "dominantRole": {
           "type": "string",
-          "enum": ["authority", "hub", "balanced", "unavailable"]
+          "enum": ["authority", "hub", "balanced", "weak", "unavailable"]
         },
         "profileInfluence": {
           "type": "object",

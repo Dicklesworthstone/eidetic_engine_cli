@@ -121,7 +121,12 @@ if printf '%s' "$WHY_JSON" | jq . >/dev/null 2>&1; then
     assert_jq "$WHY_JSON" '(.data.graph.hits.hubScore | type)' "number" "g10_hits_why_hub_score_number"
     assert_jq "$WHY_JSON" '.data.graph.hits.hubScore >= 0' "true" "g10_hits_why_hub_score_nonnegative"
     assert_jq "$WHY_JSON" '.data.graph.hits.authorityRank >= 1' "true" "g10_hits_why_authority_rank_valid"
-    assert_jq "$WHY_JSON" '.data.graph.hits.hubRank >= 1' "true" "g10_hits_why_hub_rank_valid"
+    # hubRank is declared ["integer","null"] by docs/schemas/ee.why.v1.json, and
+    # a PURE AUTHORITY legitimately has no hub rank -- the seeded authority in
+    # this fixture scores hub 0.0 with rank null. Asserting `>= 1` demanded a
+    # value the schema explicitly permits to be absent, so it would stay red
+    # against a correct implementation. Accept null OR a valid rank. bd-maisx.
+    assert_jq "$WHY_JSON" '(.data.graph.hits.hubRank == null) or (.data.graph.hits.hubRank >= 1)' "true" "g10_hits_why_hub_rank_valid_or_absent"
     assert_jq "$WHY_JSON" '.data.graph.hits.dominantRole // empty' "authority" "g10_hits_why_dominant_role"
     assert_jq "$WHY_JSON" '(.data.graph.hits.profileInfluence.groundingBoost | type)' "number" "g10_hits_why_grounding_boost_number"
     assert_jq "$WHY_JSON" '(.data.graph.hits.profileInfluence.orientationBoost | type)' "number" "g10_hits_why_orientation_boost_number"
