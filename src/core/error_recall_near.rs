@@ -2,21 +2,30 @@
 //!
 //! Exact lookup and interactive pack expansion do not use this scan. On a
 //! code-less exact miss, the complete report scans the workspace's persisted
-//! signatures (not logs) and retains at most five neighbors. This is O(N)
-//! metadata I/O, not an indexed neighborhood lookup. Similarity is not proof
+//! same-tool signatures in bounded pages and retains at most five neighbors.
+//! This is O(N) signature I/O, not an indexed neighborhood lookup. Unused
+//! location/version metadata and other tools' fingerprints are never hydrated.
+//! Similarity is not proof
 //! that a repair applies: exact status, repair/proof lists and pack seeds stay
-//! unchanged. A future indexed reader can feed the same selector.
+//! unchanged. All pages share one source snapshot; no partial answer escapes
+//! an unavailable page or cancelled request.
 
 use std::collections::BTreeSet;
+
+use sqlmodel_core::Value;
 
 use crate::core::error_recall::{
     CanonicalDiagnostic, ErrorFingerprint, SIMHASH_TAIL_MAX_DISTANCE, simhash_hamming_distance,
 };
-use crate::db::{DbConnection, Result, StoredErrorFingerprint};
+#[cfg(test)]
+use crate::db::StoredErrorFingerprint;
+use crate::db::{DbConnection, DbError, DbOperation, Result};
 
 use super::ErrorRecallReport;
 
 const NEAR_MATCH_LIMIT: usize = 5;
+const SIGNATURE_PAGE_SIZE: usize = 128;
+const MAX_FINGERPRINT_KEY_BYTES: usize = 128;
 
 pub(super) fn populate(
     connection: &DbConnection,
@@ -30,11 +39,100 @@ pub(super) fn populate(
     if report.exact || !eligible(canonical) || degenerate(fingerprint.stderr_simhash) {
         return Ok(());
     }
-    // This existing reader returns only fingerprint metadata. Keep the scan
-    // on the complete diagnostic surface, never the bounded pack hot path.
-    let candidates = connection.list_error_fingerprints_for_recovery(workspace_id)?;
-    report.near = select(fingerprint, workspace_id, candidates);
+    report.near = scan_observed(connection, workspace_id, fingerprint, |_| Ok(()))?;
     Ok(())
+}
+
+fn unavailable() -> DbError {
+    DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: "Could not complete near-error signature scan; no partial neighbors returned"
+            .to_owned(),
+    }
+}
+
+/// The existing (workspace, tool, canonical_code) index ends in rowid, so a
+/// cursor within one exact prefix avoids offsets or repeated whole-set sorts.
+/// Physical row numbers only advance this snapshot's scan; they never enter
+/// neighbor ranking, source identity, or persistent feedback. A separate first
+/// page includes even i64::MIN rather than assuming rowids start above zero.
+fn scan_observed(
+    connection: &DbConnection,
+    workspace: &str,
+    query: &ErrorFingerprint,
+    mut after_page: impl FnMut(usize) -> Result<()>,
+) -> Result<Vec<String>> {
+    let snapshot =
+        super::memory::Snapshot::begin_or_borrow(connection).map_err(|_| unavailable())?;
+    let request = asupersync::Cx::current();
+    let checkpoint = || -> Result<()> {
+        if let Some(cx) = &request {
+            cx.checkpoint().map_err(|_| unavailable())?;
+        }
+        Ok(())
+    };
+    let mut after: Option<i64> = None;
+    let mut nearest = Nearest::new(query);
+    loop {
+        checkpoint()?;
+        let cursor = if after.is_some() {
+            " AND rowid > ?3"
+        } else {
+            ""
+        };
+        // Bound each returned field independently. Oversized or invalid
+        // signatures cannot be near matches; returning an empty value lets
+        // the shared validator reject them without exposing their payloads.
+        // Do not fetch location_shape, version_hints or timestamps at all.
+        let sql = format!(
+            "SELECT CAST(rowid AS TEXT), CASE WHEN length(CAST(fingerprint_key AS BLOB)) <= {MAX_FINGERPRINT_KEY_BYTES} THEN fingerprint_key ELSE '' END, CASE WHEN length(CAST(message_template_signature AS BLOB)) = 71 THEN message_template_signature ELSE '' END, CASE WHEN length(CAST(stderr_simhash AS BLOB)) = 32 THEN stderr_simhash ELSE '' END FROM error_fingerprints WHERE workspace_id = ?1 AND tool = ?2 AND canonical_code IS NULL{cursor} ORDER BY rowid ASC LIMIT {SIGNATURE_PAGE_SIZE}"
+        );
+        let mut parameters = vec![
+            Value::Text(workspace.to_owned()),
+            Value::Text(query.tool.as_str().to_owned()),
+        ];
+        if let Some(cursor) = after {
+            parameters.push(Value::BigInt(cursor));
+        }
+        let rows = connection
+            .query(&sql, &parameters)
+            .map_err(|_| unavailable())?;
+        checkpoint()?;
+        if rows.len() > SIGNATURE_PAGE_SIZE {
+            return Err(unavailable());
+        }
+        let count = rows.len();
+        for row in &rows {
+            let text = |index| {
+                row.get(index)
+                    .and_then(Value::as_str)
+                    .ok_or_else(unavailable)
+            };
+            let cursor = text(0)?.parse::<i64>().map_err(|_| unavailable())?;
+            if after.is_some_and(|previous| cursor <= previous) {
+                return Err(unavailable());
+            }
+            let key = text(1)?;
+            let signature = text(2)?;
+            let simhash = text(3)?;
+            if key.len() > MAX_FINGERPRINT_KEY_BYTES || signature.len() > 71 || simhash.len() > 32 {
+                return Err(unavailable());
+            }
+            nearest.consider(query, key, signature, simhash);
+            after = Some(cursor);
+        }
+        // Release a page before observing completion or requesting the next.
+        drop(rows);
+        if count != 0 {
+            after_page(count)?;
+        }
+        checkpoint()?;
+        if count < SIGNATURE_PAGE_SIZE {
+            break;
+        }
+    }
+    snapshot.finish().map_err(|_| unavailable())?;
+    Ok(nearest.finish())
 }
 
 fn eligible(canonical: &CanonicalDiagnostic) -> bool {
@@ -83,31 +181,22 @@ fn hex_field(text: &str, digits: usize) -> bool {
 
 fn candidate_distance(
     query: &ErrorFingerprint,
-    workspace_id: &str,
     exact_key: &str,
-    candidate: &StoredErrorFingerprint,
+    key: &str,
+    template_signature: &str,
+    stderr_simhash: &str,
 ) -> Option<u32> {
-    if candidate.workspace_id != workspace_id
-        || candidate.tool != query.tool.as_str()
-        || candidate.canonical_code.is_some()
-        || candidate.fingerprint_key == exact_key
-    {
+    if key == exact_key {
         return None;
     }
-    let signature = candidate
-        .message_template_signature
-        .strip_prefix("blake3:")?;
+    let signature = template_signature.strip_prefix("blake3:")?;
     if !hex_field(signature, 64)
-        || candidate.fingerprint_key
-            != format!(
-                "{}:tmpl:{}",
-                candidate.tool, candidate.message_template_signature
-            )
-        || !hex_field(&candidate.stderr_simhash, 32)
+        || key != format!("{}:tmpl:{template_signature}", query.tool.as_str())
+        || !hex_field(stderr_simhash, 32)
     {
         return None;
     }
-    let hash = u128::from_str_radix(&candidate.stderr_simhash, 16).ok()?;
+    let hash = u128::from_str_radix(stderr_simhash, 16).ok()?;
     if degenerate(hash) {
         return None;
     }
@@ -115,6 +204,43 @@ fn candidate_distance(
     (distance <= SIMHASH_TAIL_MAX_DISTANCE).then_some(distance)
 }
 
+struct Nearest {
+    exact_key: String,
+    matches: Vec<(u32, String)>,
+}
+
+impl Nearest {
+    fn new(query: &ErrorFingerprint) -> Self {
+        Self {
+            exact_key: query.layered_key().key,
+            matches: Vec::with_capacity(NEAR_MATCH_LIMIT + 1),
+        }
+    }
+
+    fn consider(&mut self, query: &ErrorFingerprint, key: &str, signature: &str, simhash: &str) {
+        let Some(distance) = candidate_distance(query, &self.exact_key, key, signature, simhash)
+        else {
+            return;
+        };
+        // Keep the original order-independent duplicate policy. Only a better
+        // observation replaces the same key, and at most five keys survive.
+        if let Some(position) = self.matches.iter().position(|(_, prior)| prior == key) {
+            if self.matches[position].0 <= distance {
+                return;
+            }
+            self.matches.remove(position);
+        }
+        self.matches.push((distance, key.to_owned()));
+        self.matches.sort();
+        self.matches.truncate(NEAR_MATCH_LIMIT);
+    }
+
+    fn finish(self) -> Vec<String> {
+        self.matches.into_iter().map(|(_, key)| key).collect()
+    }
+}
+
+#[cfg(test)]
 fn select(
     query: &ErrorFingerprint,
     workspace_id: &str,
@@ -123,28 +249,22 @@ fn select(
     if query.canonical_code.is_some() || degenerate(query.stderr_simhash) {
         return Vec::new();
     }
-    let exact_key = query.layered_key().key;
-    let mut nearest: Vec<(u32, String)> = Vec::with_capacity(NEAR_MATCH_LIMIT + 1);
+    let mut nearest = Nearest::new(query);
     for candidate in candidates {
-        let Some(distance) = candidate_distance(query, workspace_id, &exact_key, &candidate) else {
-            continue;
-        };
-        // DB keys are unique, but keep selection safe for other future readers
-        // and independent of duplicate/input iteration order.
-        if let Some(position) = nearest
-            .iter()
-            .position(|(_, key)| key == &candidate.fingerprint_key)
+        if candidate.workspace_id != workspace_id
+            || candidate.tool != query.tool.as_str()
+            || candidate.canonical_code.is_some()
         {
-            if nearest[position].0 <= distance {
-                continue;
-            }
-            nearest.remove(position);
+            continue;
         }
-        nearest.push((distance, candidate.fingerprint_key));
-        nearest.sort();
-        nearest.truncate(NEAR_MATCH_LIMIT);
+        nearest.consider(
+            query,
+            &candidate.fingerprint_key,
+            &candidate.message_template_signature,
+            &candidate.stderr_simhash,
+        );
     }
-    nearest.into_iter().map(|(_, key)| key).collect()
+    nearest.finish()
 }
 
 #[cfg(test)]
@@ -340,6 +460,112 @@ mod tests {
         let exact = error_recall_report(&connection, WS, &current)?;
         assert!(exact.exact);
         assert!(exact.near.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn paged_scan_matches_complete_selection_and_keeps_late_better_matches() -> TestResult {
+        let connection = db()?;
+        let query = query();
+        let mut candidates = Vec::new();
+        // Equal-distance keys arrive in reverse canonical order. Better
+        // neighbors also arrive only after the first two complete pages.
+        for number in 1..=513_u32 {
+            let bits = if number <= 256 { 7 } else { number % 7 };
+            let candidate = row(10_000 - number, HASH ^ ((1_u128 << bits) - 1));
+            connection.insert_error_fingerprint_for_recovery(&candidate)?;
+            candidates.push(candidate);
+            if [1, 127, 128, 129, 256, 257, 513].contains(&number) {
+                let mut pages = Vec::new();
+                let actual = scan_observed(&connection, WS, &query, |count| {
+                    pages.push(count);
+                    Ok(())
+                })?;
+                assert_eq!(actual, select(&query, WS, candidates.clone()));
+                assert_eq!(pages.iter().sum::<usize>(), number as usize);
+                assert!(pages.iter().all(|count| *count <= SIGNATURE_PAGE_SIZE));
+                assert!(actual.len() <= NEAR_MATCH_LIMIT);
+            }
+        }
+        let before = connection.list_error_fingerprints_for_recovery(WS)?;
+        let expected = select(&query, WS, before.clone());
+        assert_eq!(expected.len(), NEAR_MATCH_LIMIT);
+        assert_eq!(
+            scan_observed(&connection, WS, &query, |_| Ok(()))?,
+            expected
+        );
+        assert_eq!(connection.list_error_fingerprints_for_recovery(WS)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn paged_scan_includes_negative_zero_and_extreme_physical_rows() -> TestResult {
+        let connection = db()?;
+        let positions = std::iter::once(i64::MIN)
+            .chain(-130_i64..=130)
+            .chain(std::iter::once(i64::MAX))
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for (index, position) in positions.into_iter().enumerate() {
+            let candidate = row(u32::try_from(index + 1)?, HASH ^ (index as u128 % 4));
+            connection.insert_error_fingerprint_for_recovery(&candidate)?;
+            let position = if position == i64::MIN {
+                "(-9223372036854775807 - 1)".to_owned()
+            } else {
+                position.to_string()
+            };
+            connection.execute_raw(&format!(
+                "UPDATE error_fingerprints SET rowid = {position} WHERE workspace_id = '{WS}' AND fingerprint_key = '{}'",
+                candidate.fingerprint_key,
+            ))?;
+            expected.push(candidate);
+        }
+        let mut pages = Vec::new();
+        let actual = scan_observed(&connection, WS, &query(), |count| {
+            pages.push(count);
+            Ok(())
+        })?;
+        assert_eq!(actual, select(&query(), WS, expected));
+        assert_eq!(pages, [128, 128, 7]);
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_and_oversized_metadata_cannot_hide_a_later_valid_signature() -> TestResult {
+        let connection = db()?;
+        for number in 1..=129_u32 {
+            let mut invalid = row(number, HASH);
+            match number % 3 {
+                0 => invalid.fingerprint_key = format!("INVALID_{}", "x".repeat(32_768)),
+                1 => invalid.message_template_signature = format!("blake3:{}", "界".repeat(64)),
+                _ => invalid.stderr_simhash = "界".repeat(32),
+            }
+            // Each oversized key must remain distinct in the source store.
+            if number % 3 == 0 {
+                invalid.fingerprint_key.push_str(&number.to_string());
+            }
+            connection.insert_error_fingerprint_for_recovery(&invalid)?;
+        }
+        let mut valid = row(1000, HASH);
+        valid.version_hints = Some("UNUSED_VERSION_SENTINEL".repeat(16_384));
+        valid.location_shape = Some("UNUSED_LOCATION_SENTINEL".repeat(16_384));
+        connection.insert_error_fingerprint_for_recovery(&valid)?;
+        let mut foreign = row(1001, HASH);
+        foreign.workspace_id = OTHER_WS.to_owned();
+        connection.insert_error_fingerprint_for_recovery(&foreign)?;
+        let mut coded = row(1002, HASH);
+        coded.canonical_code = Some("E0277".to_owned());
+        connection.insert_error_fingerprint_for_recovery(&coded)?;
+        let mut other_tool = row(1003, HASH);
+        other_tool.tool = "shell".to_owned();
+        connection.insert_error_fingerprint_for_recovery(&other_tool)?;
+        let mut pages = Vec::new();
+        let actual = scan_observed(&connection, WS, &query(), |count| {
+            pages.push(count);
+            Ok(())
+        })?;
+        assert_eq!(actual, [valid.fingerprint_key]);
+        assert_eq!(pages, [128, 2]);
         Ok(())
     }
 
