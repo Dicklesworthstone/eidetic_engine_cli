@@ -27,14 +27,31 @@
 # one second included -- reds the guard on arrival. Read that before planning a
 # stage, because it is not a question of whether your stage is small.
 #
-# Benchmarks are optional behind --include-bench and excluded from that total.
-# NOTE that the exclusion is implemented as a literal name comparison in
-# verification_drift_guard.rs (`if name != "Performance Benchmarks"`), not as a
-# general rule about optional stages. A second gated-off stage would therefore
-# be charged against the ceiling even though the default path never runs it --
-# the stage note beginning "Worth noting while it sits here" already records
-# that happening once, for a gated-off stage holding 30s. bd-2di61 owns whether
-# that exclusion becomes a property instead of a name.
+# EVERY STAGE verify.sh GATES BEHIND AN OPT-IN FLAG is excluded from that
+# total, not just benchmarks (bd-2di61, 2026-10-20). The exclusion used to be
+# the literal `name != "Performance Benchmarks"`, so a second opt-in stage was
+# charged against a ceiling the default path never spends -- the stage note
+# beginning "Worth noting while it sits here" records that happening to a
+# gated-off stage holding 30s.
+#
+# Four stages qualify today, and `opt_in_gated_stage_names` in
+# verification_drift_guard.rs derives them from verify.sh rather than listing
+# them here:
+#
+#     Plan Doc Smoke (bd-3usjw.23)                 --plan-doc-smoke        2s
+#     Fuzz Smoke: search query parser (bd-2j2h0)   --include-fuzz-smoke   30s
+#     Eval Regression (bd-bife.18)                 --include-eval         10s
+#     Performance Benchmarks                       --include-bench       120s
+#
+# so the non-benchmark readiness total is 566 of 608, with 42s of headroom
+# where there was none.
+#
+# THE PREDICATE IS NARROW ON PURPOSE. `record_gated_off` also fires for
+# "ci-smoke" (a FULL verify.sh runs those stages), for "ruby unavailable on
+# this host", and for "no Git metadata in this tree". Those run by default
+# elsewhere and MUST keep counting; excluding them would have freed 307s the
+# default path actually spends. `only_opt_in_flag_gating_excludes_a_stage` is
+# the planted negative against exactly that over-generalisation.
 #
 # Text further down says that decision "belongs" to bd-vihzq. It did when that
 # was written; bd-vihzq closed on 2026-09-22 having established something else

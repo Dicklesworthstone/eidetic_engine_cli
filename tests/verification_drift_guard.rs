@@ -1294,10 +1294,92 @@ fn verify_budget_manifest_declares_every_verify_stage() {
     );
 }
 
+/// Stage names verify.sh gates behind an OPT-IN FLAG whose default is off
+/// (bd-2di61).
+///
+/// The readiness total used to exclude exactly one literal,
+/// `name != "Performance Benchmarks"`. Benchmarks are not special because they
+/// are benchmarks; they are special because a default run does not execute
+/// them. Keying on the name meant every OTHER opt-in stage was charged against
+/// a ceiling the default path never spends, and the budget file already
+/// recorded that happening to a gated-off stage holding 30s.
+///
+/// THE PREDICATE IS DELIBERATELY NARROW, because the obvious generalisation is
+/// wrong. `record_gated_off` carries at least four meanings in verify.sh:
+///
+///   "--include-fuzz-smoke not set"   opt-in flag, default off   -> EXCLUDE
+///   "ci-smoke"                       a FULL verify.sh runs it   -> count
+///   "ruby unavailable on this host"  a ruby host runs it        -> count
+///   "no Git metadata in this tree"   a real checkout runs it    -> count
+///
+/// Only the first is optional. Excluding the others would understate the cost
+/// on any host where they DO run, which is the retune-a-p50 defect pointed
+/// outward. `only_opt_in_flag_gating_excludes_a_stage` is the planted negative
+/// for exactly that mistake.
+///
+/// A reason wrapped onto a continuation line stops matching and the stage goes
+/// back to being counted. That direction is deliberate: it reds this guard
+/// rather than quietly dropping a cost.
+fn opt_in_gated_stage_names(verify_script: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for line in verify_script.lines() {
+        let Some(rest) = line.trim().strip_prefix("record_gated_off \"") else {
+            continue;
+        };
+        let Some((name, reason)) = rest.split_once('"') else {
+            continue;
+        };
+        if reason.contains("not set") && reason.contains("--") {
+            names.insert(name.to_owned());
+        }
+    }
+    names
+}
+
+/// bd-2di61's planted negative. A predicate that excludes everything
+/// `record_gated_off` touches would free 307s the default path actually
+/// spends; this test fails if that generalisation is ever reintroduced.
+#[test]
+fn only_opt_in_flag_gating_excludes_a_stage() {
+    let script = concat!(
+        "    record_gated_off \"Flagged\" \"--include-flagged not set\"\n",
+        "    record_gated_off \"ModeSkipped\" \"ci-smoke\"\n",
+        "    record_gated_off \"HostSkipped\" \"ruby unavailable on this host\"\n",
+    );
+    let names = opt_in_gated_stage_names(script);
+    assert!(
+        names.contains("Flagged"),
+        "a stage gated behind an opt-in flag must be excluded from the readiness total"
+    );
+    assert!(
+        !names.contains("ModeSkipped"),
+        "a ci-smoke-gated stage RUNS on a full verify.sh, so it must still count"
+    );
+    assert!(
+        !names.contains("HostSkipped"),
+        "a host-capability skip RUNS on a capable host, so it must still count"
+    );
+
+    // And the real script: the set is small and knowing it is the point.
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let real = opt_in_gated_stage_names(&verify_script);
+    assert!(
+        real.contains("Performance Benchmarks"),
+        "the stage the old literal named must still be excluded, got {real:?}"
+    );
+    assert!(
+        real.len() >= 2,
+        "bd-2di61 measured four opt-in-gated stages; finding fewer than two means \
+         the reason strings changed shape and this predicate has stopped matching: {real:?}"
+    );
+}
+
 #[test]
 fn verify_budget_manifest_has_p50_and_regression_factor_for_every_stage() {
     let budget_manifest =
         fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let opt_in_gated = opt_in_gated_stage_names(&verify_script);
     let blocks = budget_stage_blocks(&budget_manifest);
 
     assert!(
@@ -1346,7 +1428,12 @@ fn verify_budget_manifest_has_p50_and_regression_factor_for_every_stage() {
             "stage {name} should keep an explicit regression factor"
         );
 
-        if name != "Performance Benchmarks" {
+        // bd-2di61: exclude on the PROPERTY, not on one literal name. A stage
+        // verify.sh gates behind an opt-in flag is not part of the default
+        // path's cost, so charging it against the readiness ceiling describes a
+        // run nobody performs. See `opt_in_gated_stage_names` for why this is
+        // narrower than "anything record_gated_off touches".
+        if !opt_in_gated.contains(name) {
             non_benchmark_p50_total += p50;
         }
     }
