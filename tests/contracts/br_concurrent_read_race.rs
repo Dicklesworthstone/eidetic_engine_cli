@@ -134,6 +134,24 @@ fn run_wrapper_with_args(root: &Path, mode: &str, args: &[&str]) -> Result<(Outp
         .env("EE_FAKE_BR_STATE", &state_file)
         .env("EE_FAKE_BR_WORKSPACE_ID", WORKSPACE_ID)
         .env("EE_FAKE_BR_REQUEST_ID", REQUEST_ID)
+        // PIN THE ATTEMPT BUDGET: these tests assert LOGIC, never latency.
+        //
+        // br_retry.sh defaults BR_RETRY_ATTEMPT_TIMEOUT_MS to 10000 and exits
+        // 124 when one attempt exceeds it (br_retry.sh:259). Inheriting that
+        // PRODUCTION default makes every test here race the host, because each
+        // attempt forks python plus a bash fake br. The identical omission in
+        // scripts/e2e_br_concurrent_race.sh was measured on 2026-10-19: 8
+        // passes and one exit 124 in 9 consecutive runs, the failing run taking
+        // 10.34s against a 10s budget. That script is an orphan, so its flake
+        // was invisible; this suite is WIRED into tests/contracts.rs, so the
+        // same omission here reds a real gate intermittently.
+        //
+        // Safe to pin generously because no test in this file asserts on
+        // timing: the three modes are transient, permanent and actionable, all
+        // of which check stdout and recovery behaviour. There is no hang arm
+        // here needing a tight bound -- that assertion lives in the shell
+        // script, which keeps its deliberate 150ms budget.
+        .env("BR_RETRY_ATTEMPT_TIMEOUT_MS", "60000")
         .output()
         .map_err(|error| format!("spawn scripts/br_retry.sh: {error}"))?;
     Ok((output, start.elapsed().as_millis()))
