@@ -138,11 +138,27 @@ while IFS= read -r rel; do
     elif [ -n "$summary" ]; then
         verdict=PASS; MEMBERS_PASS+=("$rel")
     else
-        # Exited 0 but printed no harness summary: the twelve standalone
-        # scripts do not source e2e_harness.sh, so their silence is normal and
-        # their green is simply weaker evidence. Kept separate from PASS rather
-        # than merged into it, because "asserted things and they held" and
-        # "exited 0" are different claims.
+        # Exited 0 but printed no harness summary, so the green is weaker
+        # evidence. Kept separate from PASS rather than merged into it, because
+        # "asserted things and they held" and "exited 0" are different claims.
+        #
+        # THIS COMMENT USED TO SAY "the twelve standalone scripts do not source
+        # e2e_harness.sh", and that is false. Corrected 2026-10-19 by executing
+        # them against a version-matched binary: five of the twelve printed a
+        # harness summary and landed in PASS, not here --
+        #
+        #     backup_roundtrip   25 pass, 0 fail, 9 steps, 7 drops
+        #     session_budget     15 pass, 0 fail, 3 steps, 0 drops
+        #     contradiction      10 pass, 0 fail, 8 steps, 3 drops
+        #     sandbox             8 pass, 0 fail, 5 steps, 0 drops
+        #     anchors_freshness   8 pass, 0 fail, 8 steps, 5 drops
+        #
+        # Do not re-derive that set with a grep for e2e_harness.sh. Six of the
+        # twelve name it directly, yet session_budget emits a summary WITHOUT
+        # naming it, so the reference is reached indirectly and a per-file grep
+        # under-counts. The run's own output is the only authority for which
+        # bucket a script belongs in -- which is the whole premise of this
+        # script, applied to its own documentation.
         verdict=PASS_UNHARNESSED; MEMBERS_PASS_UNHARNESSED+=("$rel")
     fi
 
