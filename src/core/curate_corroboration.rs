@@ -13,6 +13,9 @@ use std::cell::OnceCell;
 #[path = "curate_verified_repair.rs"]
 mod verified_repair;
 
+#[path = "curate_repair_context.rs"]
+mod repair_context;
+
 const SCHEMA: &str = "ee.review.corroboration.v1";
 const SCORE_KIND: &str = "bounded_exact_session_support_heuristic";
 const MAX_SUPPORT: usize = 3;
@@ -122,7 +125,7 @@ fn issue(error: impl std::fmt::Display) -> CurateValidationIssue {
 
 /// Keep every source record as a structural barrier, but never let an
 /// instruction-risk or invalid source session supply a confidence increment.
-fn eligible_session(
+fn admitted_session(
     workspace_id: &str,
     session: &StoredSession,
     spans: &[StoredEvidenceSpan],
@@ -134,29 +137,24 @@ fn eligible_session(
                 && complete_source(span)
                 && (span.is_derivation_admitted_for_session(workspace_id, session)
                     || span.is_class_a_derivation_readable(workspace_id, session))
-                && review_learning_text(span).is_none_or(|text| !explicitly_refuted(&text))
         })
 }
 
+/// Prose has no completed-invocation proof to separate a failed attempt from
+/// a recovered episode. Its existing whole-session refutation rule is unchanged.
+fn eligible_session(
+    workspace_id: &str,
+    session: &StoredSession,
+    spans: &[StoredEvidenceSpan],
+) -> bool {
+    admitted_session(workspace_id, session, spans)
+        && spans
+            .iter()
+            .all(|span| review_learning_text(span).is_none_or(|text| !explicitly_refuted(&text)))
+}
+
 fn explicitly_refuted(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase().replace('’', "'");
-    [
-        "this rule is wrong",
-        "this advice is wrong",
-        "incorrect advice",
-        "do not follow",
-        "don't follow",
-        "retract this",
-        "retracted",
-        "refuted",
-        "failed again",
-        "did not fix",
-        "didn't fix",
-        "does not fix",
-        "doesn't fix",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    repair_context::classify(text).is_some()
 }
 
 fn complete_source(span: &StoredEvidenceSpan) -> bool {
@@ -205,6 +203,11 @@ fn source_candidates(evidence: &SessionEvidence<'_>) -> Vec<ReviewSessionCandida
     let workspace_id = evidence.workspace_id;
     let session = evidence.session;
     let spans = evidence.spans;
+    if !eligible_session(workspace_id, session, spans) {
+        // Only the completed native episode can establish recovery after an
+        // earlier failed attempt. Do not rehabilitate ordinary prose lessons.
+        return evidence.native().candidates.clone();
+    }
     let mut grouped: BTreeMap<String, Vec<&StoredEvidenceSpan>> = BTreeMap::new();
     for span in spans {
         let Some(text) = review_learning_text(span) else {
@@ -272,7 +275,29 @@ struct NativeRepairCandidates {
 impl NativeRepairCandidates {
     fn new(workspace_id: &str, session: &StoredSession, spans: &[StoredEvidenceSpan]) -> Self {
         let mut native = Self::default();
+        let mut boundary = repair_context::RefutationBoundary::default();
+        let mut positions = BTreeMap::new();
+        for (position, span) in spans.iter().enumerate() {
+            positions
+                .entry(span.id.as_str())
+                .or_insert((position, span.start_line));
+            if let Some(text) = review_learning_text(span) {
+                boundary.observe(position, span.end_line, &text);
+            }
+        }
         verified_repair::visit_candidates(workspace_id, session, spans, |candidate, arc| {
+            // A later success cannot validate an explanation already denied.
+            // Every contributing turn must follow all failed-attempt notices;
+            // global retractions remain barriers regardless of chronology.
+            if candidate.source_ids.iter().any(|id| {
+                positions
+                    .get(id.as_str())
+                    .is_none_or(|&(position, start_line)| {
+                        !boundary.permits_source(position, start_line)
+                    })
+            }) {
+                return;
+            }
             let card_id =
                 crate::core::incident_card::incident_card_id(workspace_id, &arc.failure_id);
             for diagnostic in &arc.diagnostics {
@@ -410,6 +435,16 @@ impl<'a> SessionEvidence<'a> {
     }
 
     fn reconstruct(&self, expected: &SupportingSession) -> Option<ReviewSessionCandidate> {
+        if !eligible_session(self.workspace_id, self.session, self.spans) {
+            // Reconstruct only authentic native candidates whose complete
+            // source positions prove that the denied attempt came first.
+            return self
+                .native()
+                .candidates
+                .iter()
+                .find(|candidate| candidate.candidate_id == expected.candidate_id)
+                .cloned();
+        }
         // Reconstruct the recorded source group, not a current ownership
         // cluster. Later unrelated turns cannot replace a named supporter.
         let mut sources = expected
@@ -709,9 +744,19 @@ pub(super) fn score_candidates(
         .review_corroboration_sessions(workspace_id, &session.id, &[session.id.as_str()], LIMITS)
         .map_err(domain)?;
     if let Some((anchor_session, anchor_spans, anchor_bytes)) = anchor.first()
-        && eligible_session(workspace_id, anchor_session, anchor_spans)
+        && admitted_session(workspace_id, anchor_session, anchor_spans)
     {
         let evidence = SessionEvidence::new(workspace_id, anchor_session, anchor_spans);
+        if !eligible_session(workspace_id, anchor_session, anchor_spans) {
+            // A zero confidence floor or frozen historical score must not put
+            // a refuted prose proposal back into a recovered native episode.
+            candidates.retain(|candidate| {
+                evidence
+                    .native()
+                    .candidate_ids
+                    .contains(&candidate.candidate_id)
+            });
+        }
         let existing: BTreeSet<_> = candidates
             .iter()
             .map(|candidate| candidate.candidate_id.clone())
@@ -779,7 +824,7 @@ pub(super) fn score_candidates(
                 // after all anchors have reached the existing support cap.
                 break;
             }
-            if !eligible_session(workspace_id, other_session, spans) {
+            if !admitted_session(workspace_id, other_session, spans) {
                 continue;
             }
             let evidence = SessionEvidence::new(workspace_id, other_session, spans);
@@ -1094,8 +1139,8 @@ fn validate_proof(
                 "a supporting session is missing or exceeds the recorded proof bounds",
             ));
         };
-        if !eligible_session(workspace_id, session, spans) {
-            return Err(issue("support is no longer admitted or was refuted"));
+        if !admitted_session(workspace_id, session, spans) {
+            return Err(issue("support is no longer admitted"));
         }
         let Some(candidate) =
             reconstruct_support(connection, workspace_id, session, spans, expected)
@@ -1174,3 +1219,7 @@ pub(super) fn expected_for_recorded(
 #[cfg(test)]
 #[path = "curate_corroboration_index_tests.rs"]
 mod index_tests;
+
+#[cfg(test)]
+#[path = "curate_recovery_tests.rs"]
+mod recovery_tests;
