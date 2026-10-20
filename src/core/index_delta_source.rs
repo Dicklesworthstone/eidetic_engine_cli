@@ -3,9 +3,9 @@
 //! Job identities and generation equality cannot prove source membership: a
 //! global-memory withdrawal, admission change, or projection sidecar can affect
 //! documents outside the claimed jobs. Reconcile every source in one database
-//! snapshot, retaining only changed bodies and complete digest maps. Sessions
-//! and evidence use the existing bounded visitors; the other source classes
-//! still use their existing list APIs, released after each class is projected.
+//! snapshot, retaining only changed bodies and complete digest maps. Memory,
+//! session and evidence reads are page-bounded; artifacts and rules still use
+//! their existing list APIs, released after each class is projected.
 //!
 //! Prepare a complete private stage before accepting this path. A refusal then
 //! returns to the original collector before its snapshot hook, so fallback
@@ -156,15 +156,17 @@ fn capture(
         index_checkpoint(cx)?;
         let generation = db.get_workspace_generation(workspace_id)?;
         let mut counts = [0_usize; 5];
-        {
-            let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
-            for chunk in memories.chunks(crate::db::MEMORY_INDEX_METADATA_BATCH_SIZE) {
-                for document in memory_documents_with_anchors_with_cx(Some(cx), db, chunk)? {
+        db.visit_index_memory_batches_in_current_snapshot::<IndexRebuildError>(
+            workspace_id,
+            |page| {
+                index_checkpoint(cx)?;
+                for document in memory_documents_with_anchors_with_cx(Some(cx), db, page)? {
                     observe(cx, &mut reconciler, &mut refused, document)?;
                     counts[0] += 1;
                 }
-            }
-        }
+                Ok(())
+            },
+        )?;
         db.visit_sessions_for_workspace_in_current_snapshot(workspace_id, |session| {
             observe(
                 cx,
