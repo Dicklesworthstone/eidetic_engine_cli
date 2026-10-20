@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 
+use chrono::{DateTime, Utc};
 use sqlmodel_core::Value;
 
 use crate::db::{DbConnection, DbError, DbOperation, Result};
@@ -83,15 +84,39 @@ pub(super) fn harmful_targets(
 /// Diagnostic history and the legacy 128-byte target projection stay unchanged.
 /// Empty sentinels and exact aliases retain their old sampling semantics. Total
 /// index scans and source interpretation are not constant work or a latency SLO.
+#[cfg(test)]
 pub(super) fn pack_targets(
     connection: &DbConnection,
     workspace_id: &str,
     fingerprint_key: &str,
     limit: u32,
 ) -> Result<Vec<String>> {
+    pack_selection(connection, workspace_id, fingerprint_key, limit, Utc::now())
+        .map(|selection| selection.targets)
+}
+
+/// A request-local selection, not another source cache. Keep only the native
+/// excerpts that earned a target slot. Reusing them avoids a second hydration
+/// and screening pass after selection, within the same caller-owned snapshot.
+#[derive(Default)]
+pub(super) struct PackSelection {
+    pub(super) targets: Vec<String>,
+    pub(super) memories: Vec<(String, String)>,
+    pub(super) rules: Vec<(String, String)>,
+    pub(super) memory_hints: Vec<String>,
+}
+
+pub(super) fn pack_selection(
+    connection: &DbConnection,
+    workspace_id: &str,
+    fingerprint_key: &str,
+    limit: u32,
+    at: DateTime<Utc>,
+) -> Result<PackSelection> {
     let mut gate = Gate::new(connection, workspace_id, fingerprint_key);
     let mut diversity = PackEvidenceDiversity::default();
-    pack_targets_with(connection, workspace_id, fingerprint_key, limit, |ids| {
+    let mut selection = PackSelection::default();
+    let targets = pack_targets_with(connection, workspace_id, fingerprint_key, limit, |ids| {
         let mut withheld = gate.withheld(ids)?;
         withhold_unusable_pack_evidence(
             connection,
@@ -100,8 +125,92 @@ pub(super) fn pack_targets(
             &mut withheld,
             &mut diversity,
         )?;
+        selection.admit_native(connection, workspace_id, ids, &mut withheld, at)?;
         Ok(withheld)
-    })
+    })?;
+    selection.targets = targets;
+    Ok(selection)
+}
+
+impl PackSelection {
+    fn admit_native(
+        &mut self,
+        connection: &DbConnection,
+        workspace: &str,
+        targets: &[&str],
+        withheld: &mut BTreeSet<String>,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
+        let mut memories = Vec::new();
+        let mut rules = Vec::new();
+        for &id in targets {
+            // Feedback and current incident-source proof always run first.
+            if withheld.contains(id) {
+                continue;
+            }
+            if id
+                .parse::<crate::models::MemoryId>()
+                .is_ok_and(|parsed| parsed.to_string() == id)
+            {
+                memories.push(id);
+                // Preserve the existing locator-only contract without letting
+                // withheld bodies consume the 32 usable-target slots. Hints
+                // are independently capped and never grant body authority.
+                if self.memory_hints.len() < super::PACK_RECALL_EXCERPT_LIMIT
+                    && !self.memory_hints.iter().any(|hint| hint == id)
+                {
+                    self.memory_hints.push(id.to_owned());
+                }
+            } else if id
+                .parse::<crate::models::RuleId>()
+                .is_ok_and(|parsed| parsed.to_string() == id)
+            {
+                rules.push(id);
+            }
+        }
+        let rows = super::memory::read(connection, workspace, &memories, at)?;
+        retain_distinct_native(&memories, rows, &mut self.memories, withheld)?;
+        let rows = super::rules::read(connection, workspace, &rules, at)?;
+        retain_distinct_native(&rules, rows, &mut self.rules, withheld)
+    }
+}
+
+/// Equality is the exact final UTF-8 excerpt, not semantic equivalence or a
+/// claim about source identities. Keep kinds separate so final evidence,
+/// memory and rule precedence remains unchanged. All earlier admission and
+/// complete-body screening must succeed before an excerpt reserves a slot.
+fn retain_distinct_native(
+    selected: &[&str],
+    rows: Vec<(String, String)>,
+    retained: &mut Vec<(String, String)>,
+    withheld: &mut BTreeSet<String>,
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    let mut admitted = BTreeSet::new();
+    for (id, text) in rows {
+        if !selected.contains(&id.as_str())
+            || !seen.insert(id.clone())
+            || text.is_empty()
+            || text.len() > super::PACK_RECALL_EXCERPT_BYTES
+        {
+            return Err(unavailable());
+        }
+        if retained.iter().any(|(_, prior)| prior == &text) {
+            continue;
+        }
+        if retained.len() == super::PACK_RECALL_TARGET_LIMIT as usize {
+            return Err(unavailable());
+        }
+        admitted.insert(id.clone());
+        retained.push((id, text));
+    }
+    withheld.extend(
+        selected
+            .iter()
+            .filter(|id| !admitted.contains(**id))
+            .map(|id| (*id).to_owned()),
+    );
+    Ok(())
 }
 
 /// Selection-only diversity, not an equivalence claim about source episodes.
@@ -130,7 +239,7 @@ impl PackEvidenceDiversity {
 /// foreign, stale or pack-denied without an explicit harmful-feedback record.
 /// Only an admitted row can reserve an excerpt: an unusable earlier copy must
 /// never crowd out a later live source containing the same useful explanation.
-/// Non-evidence targets retain their native reader and locator-only contracts.
+/// Native memory/rule admission runs next, before targets consume the limit.
 fn withhold_unusable_pack_evidence(
     connection: &DbConnection,
     workspace_id: &str,

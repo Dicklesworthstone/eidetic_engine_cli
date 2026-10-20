@@ -270,3 +270,184 @@ fn pack_feedback_admission_does_not_commit_or_rollback_its_callers_write() -> Te
     assert_eq!(seed(&connection)?, before);
     Ok(())
 }
+
+#[test]
+fn unavailable_native_memory_windows_refill_with_later_current_repairs() -> TestResult {
+    let connection = db()?;
+    let mut targets = Vec::new();
+    for number in 1..=192_u128 {
+        let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        if number % 6 != 0 {
+            memory(
+                &connection,
+                number,
+                "UNUSABLE_NATIVE_SENTINEL is not current repair guidance.",
+            )?;
+            match number % 6 {
+                1 => connection.execute_raw(&format!(
+                    "UPDATE memories SET valid_to = '2001-01-01T00:00:00Z' WHERE id = '{id}'"
+                ))?,
+                2 => connection.execute_raw(&format!(
+                    "UPDATE memories SET workspace_id = '{OTHER_WS}' WHERE id = '{id}'"
+                ))?,
+                3 => connection.insert_memory_seal(
+                    &id,
+                    &format!("blake3:{}", "a".repeat(64)),
+                    "2000-01-01T00:00:00Z",
+                )?,
+                4 => connection.execute_raw(&format!(
+                    "UPDATE memories SET superseded_at = '2001-01-01T00:00:00Z' WHERE id = '{id}'"
+                ))?,
+                _ => connection.execute_raw(&format!(
+                    "UPDATE memories SET valid_from = '2999-01-01T00:00:00Z' WHERE id = '{id}'"
+                ))?,
+            }
+        }
+        targets.push(id);
+    }
+    let good = memory(&connection, 1000, GOOD_BODY)?;
+    let other_body = "SECOND_NATIVE_FIX flushes the cache before the serialization retry.";
+    let other = memory(&connection, 1001, other_body)?;
+    targets.extend([good.clone(), other.clone()]);
+    record(&connection, targets.clone(), Vec::new())?;
+    assert_eq!(
+        connection.list_helpful_error_repair_target_ids(WS, KEY, 32)?,
+        targets[..32]
+    );
+    let history = connection.list_error_repair_links(WS, KEY)?;
+    let before = connection.get_memory(&good)?;
+    let selection = feedback::pack_selection(&connection, WS, KEY, 32, chrono::Utc::now())?;
+    assert_eq!(selection.targets, [good.clone(), other.clone()]);
+    assert_eq!(selection.memories.len(), 2);
+    assert_eq!(selection.memory_hints.len(), 4);
+    let query = seed(&connection)?;
+    assert!(query.contains(GOOD_BODY));
+    assert!(query.contains(other_body));
+    assert!(!query.contains("UNUSABLE_NATIVE_SENTINEL"));
+    assert_eq!(query.matches("\nprior fix: ").count(), 2);
+    assert!(query.matches("helpful_repair:").count() <= 6);
+    assert_eq!(query, seed(&connection)?);
+    assert_eq!(connection.get_memory(&good)?, before);
+    assert_eq!(connection.list_error_repair_links(WS, KEY)?, history);
+    Ok(())
+}
+
+#[test]
+fn duplicate_native_memory_excerpts_do_not_hide_later_distinct_fixes() -> TestResult {
+    let connection = db()?;
+    let shared = format!(
+        "Shared serialization repair preserves the cache. {}",
+        "資料 🦀 ".repeat(300)
+    );
+    let mut targets = Vec::new();
+    for number in 1..=96_u128 {
+        // Full bodies differ, but their final bounded reader excerpts agree.
+        targets.push(memory(
+            &connection,
+            number,
+            &format!("{shared} Tail number {number}."),
+        )?);
+    }
+    let representative = targets[0].clone();
+    let mut distinct = Vec::new();
+    for number in 1000..1003_u128 {
+        let text =
+            format!("Distinct native repair {number} restores the serializer before retrying.");
+        let id = memory(&connection, number, &text)?;
+        targets.push(id.clone());
+        distinct.push((id, text));
+    }
+    record(&connection, targets, Vec::new())?;
+    let selected = feedback::pack_selection(&connection, WS, KEY, 32, chrono::Utc::now())?;
+    assert_eq!(
+        selected.targets,
+        std::iter::once(representative.clone())
+            .chain(distinct.iter().map(|(id, _)| id.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(selected.memories.len(), 4);
+    assert!(selected.memories[0].1.ends_with(" [truncated]"));
+    let query = seed(&connection)?;
+    assert_eq!(query.matches("\nprior fix: ").count(), 4);
+    assert!(query.contains(&representative));
+    for (id, text) in distinct {
+        assert!(query.contains(&id));
+        assert!(query.contains(&text));
+    }
+    assert!(query.len() <= super::super::PACK_RECALL_QUERY_BYTES);
+    assert_eq!(query, seed(&connection)?);
+    Ok(())
+}
+
+#[test]
+fn missing_retired_foreign_and_path_scoped_rule_windows_do_not_hide_live_advice() -> TestResult {
+    let connection = db()?;
+    let mut targets = Vec::new();
+    for number in 1..=128_u128 {
+        let id = RuleId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        if number % 4 != 0 {
+            rule(&connection, number)?;
+            match number % 4 {
+                1 => connection.execute_raw(&format!("UPDATE procedural_rules SET maturity = 'deprecated' WHERE id = '{id}'"))?,
+                2 => connection.execute_raw(&format!("UPDATE procedural_rules SET workspace_id = '{OTHER_WS}' WHERE id = '{id}'"))?,
+                _ => connection.execute_raw(&format!("UPDATE procedural_rules SET scope = 'directory', scope_pattern = 'src' WHERE id = '{id}'"))?,
+            }
+        }
+        targets.push(id);
+    }
+    let good = rule(&connection, 1000)?;
+    targets.push(good.clone());
+    record(&connection, targets, Vec::new())?;
+    let history = connection.list_error_repair_links(WS, KEY)?;
+    let selected = feedback::pack_selection(&connection, WS, KEY, 32, chrono::Utc::now())?;
+    assert_eq!(selected.targets, [good.clone()]);
+    assert_eq!(selected.rules, [(good.clone(), RULE_BODY.to_owned())]);
+    assert!(selected.memory_hints.is_empty());
+    let query = seed(&connection)?;
+    assert_eq!(query.matches("\nprior fix: ").count(), 1);
+    assert_eq!(query.matches("helpful_repair:").count(), 1);
+    assert!(query.contains(&good));
+    assert!(query.contains(RULE_BODY));
+    assert_eq!(connection.list_error_repair_links(WS, KEY)?, history);
+    Ok(())
+}
+
+#[test]
+fn duplicate_rule_windows_refill_without_displacing_native_memory_precedence() -> TestResult {
+    let connection = db()?;
+    let first = memory(&connection, 1, RULE_BODY)?;
+    let mut targets = vec![first.clone()];
+    let mut duplicates = Vec::new();
+    for number in 1..=96_u128 {
+        let id = rule(&connection, number)?;
+        targets.push(id.clone());
+        duplicates.push(id);
+    }
+    let mut distinct = Vec::new();
+    for number in 1000..1003_u128 {
+        let id = rule(&connection, number)?;
+        let text = format!("Distinct rule repair {number} preserves the serialization boundary.");
+        connection.execute_raw(&format!(
+            "UPDATE procedural_rules SET content = '{text}' WHERE id = '{id}'"
+        ))?;
+        targets.push(id.clone());
+        distinct.push((id, text));
+    }
+    record(&connection, targets, Vec::new())?;
+    let selected = feedback::pack_selection(&connection, WS, KEY, 32, chrono::Utc::now())?;
+    assert_eq!(selected.memories.len(), 1);
+    assert_eq!(selected.rules.len(), 4);
+    let query = seed(&connection)?;
+    assert!(query.contains(&first));
+    assert_eq!(query.matches(RULE_BODY).count(), 1);
+    assert_eq!(query.matches("\nprior fix: ").count(), 4);
+    for id in duplicates {
+        assert!(!query.contains(&id));
+    }
+    for (id, text) in distinct {
+        assert!(query.contains(&id));
+        assert!(query.contains(&text));
+    }
+    assert_eq!(query, seed(&connection)?);
+    Ok(())
+}

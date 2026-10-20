@@ -375,7 +375,7 @@ pub fn error_recall_report(
     Ok(report)
 }
 
-/// Maximum linked targets considered by one interactive error-recall query.
+/// Maximum retained targets, not the total linked history examined by a query.
 const PACK_RECALL_TARGET_LIMIT: u32 = 32;
 /// Maximum admitted repair excerpts included in the retrieval query.
 const PACK_RECALL_EXCERPT_LIMIT: usize = 4;
@@ -388,10 +388,11 @@ const PACK_RECALL_QUERY_BYTES: usize = 4096;
 ///
 /// A common fingerprint can have repairs from thousands of imported sessions.
 /// Interactive packing returns at most 32 uncontested helpful targets through
-/// the fingerprint index, then hydrates only that window. Harmful observations
-/// for the exact workspace/error/target exclude a repair before LIMIT; a long
-/// rejected prefix cannot crowd out later useful repairs. This bounds returned
-/// rows and hydration, not the index entries skipped during selection.
+/// the fingerprint index. Feedback, evidence proof and native source admission
+/// precede the target limit; an unusable or duplicate native-history prefix
+/// cannot hide later distinct repairs. Native excerpts are hydrated/screened
+/// once and retained only when they earn a slot. Pages and retained excerpts
+/// are bounded, but cumulative reads can grow with skipped history.
 /// Within the selected window, admitted
 /// incident cards precede raw repair turns, with canonical id order breaking
 /// ties. Current native memory repairs, then native procedural-rule repairs,
@@ -425,31 +426,20 @@ pub fn pack_error_recall_query_seed(
     let outcome = diagnose_error(connection, workspace_id, canonical)?;
     let metadata = ErrorRecallReport::from_outcome(&fingerprint, &outcome).query_seed();
     let mut seed = bounded_pack_recall_text(&metadata, PACK_RECALL_METADATA_BYTES);
-    let targets = feedback::pack_targets(
+    let selected = feedback::pack_selection(
         connection,
         workspace_id,
         &outcome.fingerprint_key,
         PACK_RECALL_TARGET_LIMIT,
+        reference_time,
     )?;
     let mut evidence_ids = Vec::new();
-    let mut memory_ids = Vec::new();
-    let mut rule_ids = Vec::new();
-    for target in &targets {
+    for target in &selected.targets {
         if target
             .parse::<crate::models::EvidenceId>()
             .is_ok_and(|id| id.to_string() == *target)
         {
             evidence_ids.push(target.as_str());
-        } else if target
-            .parse::<crate::models::MemoryId>()
-            .is_ok_and(|id| id.to_string() == *target)
-        {
-            memory_ids.push(target.as_str());
-        } else if target
-            .parse::<crate::models::RuleId>()
-            .is_ok_and(|id| id.to_string() == *target)
-        {
-            rule_ids.push(target.as_str());
         }
     }
     let mut evidence = connection.get_evidence_spans_with_sessions(&evidence_ids)?;
@@ -476,7 +466,7 @@ pub fn pack_error_recall_query_seed(
     }
     let mut expanded_memories = BTreeSet::new();
     if excerpts.len() < PACK_RECALL_EXCERPT_LIMIT {
-        for (id, text) in memory::read(connection, workspace_id, &memory_ids, reference_time)? {
+        for (id, text) in selected.memories {
             if excerpts.len() == PACK_RECALL_EXCERPT_LIMIT {
                 break;
             }
@@ -488,13 +478,13 @@ pub fn pack_error_recall_query_seed(
             expanded_memories.insert(id);
         }
     }
-    for memory_id in memory_ids.into_iter().take(PACK_RECALL_EXCERPT_LIMIT) {
-        if !expanded_memories.contains(memory_id) {
-            append_pack_recall_fragment(&mut seed, " helpful_repair:", memory_id);
+    for memory_id in selected.memory_hints {
+        if !expanded_memories.contains(&memory_id) {
+            append_pack_recall_fragment(&mut seed, " helpful_repair:", &memory_id);
         }
     }
     if excerpts.len() < PACK_RECALL_EXCERPT_LIMIT {
-        for (id, text) in rules::read(connection, workspace_id, &rule_ids, reference_time)? {
+        for (id, text) in selected.rules {
             if excerpts.len() == PACK_RECALL_EXCERPT_LIMIT {
                 break;
             }
