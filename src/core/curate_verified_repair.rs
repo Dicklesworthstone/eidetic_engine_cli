@@ -16,13 +16,30 @@ const COMPLETE_PRODUCER: &str = "verified_tool_repair.complete.v1";
 // Refuse over-budget source explanations, never keep an unmarked prefix.
 const MAX_COMPLETE_REPAIR_BYTES: usize = 8 * 1024;
 
+#[cfg(test)]
 pub(super) fn candidates(
     workspace_id: &str,
     session: &StoredSession,
     spans: &[StoredEvidenceSpan],
 ) -> Vec<ReviewSessionCandidate> {
+    let mut candidates = Vec::new();
+    visit_candidates(workspace_id, session, spans, |candidate, _| {
+        candidates.push(candidate);
+    });
+    candidates
+}
+
+/// Keep each emitted lesson attached to its actual failure episode while the
+/// caller builds request-local feedback bindings. No presentation parsing or
+/// additional transcript pass is needed to recover those identities later.
+pub(super) fn visit_candidates(
+    workspace_id: &str,
+    session: &StoredSession,
+    spans: &[StoredEvidenceSpan],
+    mut visit: impl FnMut(ReviewSessionCandidate, &crate::core::cass_error_recall::FailureArc),
+) {
     if session.workspace_id != workspace_id {
-        return Vec::new();
+        return;
     }
     let sources = IncidentCardSources::new(spans);
     let by_id = spans.iter().fold(BTreeMap::new(), |mut rows, span| {
@@ -30,7 +47,6 @@ pub(super) fn candidates(
         rows
     });
     let mut seen = BTreeSet::new();
-    let mut proposals = Vec::new();
     for arc in session_failure_arcs(workspace_id, session, spans) {
         let Some(resolution) = &arc.resolution else {
             continue;
@@ -131,7 +147,7 @@ pub(super) fn candidates(
             source_ids.join(", "),
             resolution.proof_id,
         );
-        proposals.push(ReviewSessionCandidate {
+        let candidate = ReviewSessionCandidate {
             candidate_id,
             candidate_type: CandidateType::CreateDerivedMemory.as_str().to_owned(),
             candidate_kind: REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY.to_owned(),
@@ -148,9 +164,9 @@ pub(super) fn candidates(
             session_arc: None,
             persisted: false,
             corroboration: Some(ReviewCorroboration::pending(digest(signature_parts))),
-        });
+        };
+        visit(candidate, &arc);
     }
-    proposals
 }
 
 struct EpisodeDiagnostics {
@@ -1088,6 +1104,265 @@ mod workflow_tests {
         assert_eq!(
             workspace.db.list_evidence_spans_for_session(&session.id)?,
             spans
+        );
+        Ok(())
+    }
+
+    fn record_repair_feedback(
+        workspace: &Workspace,
+        scope: &str,
+        code: &str,
+        target: &str,
+        harmful: bool,
+    ) -> TestResult {
+        crate::core::error_diagnosis::record_error_repair_links(
+            &workspace.db,
+            scope,
+            &crate::core::error_recall::from_rustc(Some(code), "native repair feedback"),
+            &crate::core::error_diagnosis::ErrorRepairLinkRecording {
+                helpful_repairs: if harmful {
+                    Vec::new()
+                } else {
+                    vec![target.to_owned()]
+                },
+                harmful_repairs: if harmful {
+                    vec![target.to_owned()]
+                } else {
+                    Vec::new()
+                },
+                ..Default::default()
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn harmful_native_repairs_are_not_reproposed_even_at_a_zero_floor() -> TestResult {
+        let workspace = Workspace::new()?;
+        let (session, repair, _) =
+            workspace.episode(99_001, "Feedback work item.", COMMAND, true)?;
+        let sources = workspace.db.list_evidence_spans_for_session(&session)?;
+        let initial = workspace.review(&session, 0.6, true)?;
+        let proposals = native(&initial);
+        assert_eq!(proposals.len(), 1);
+        let stored = workspace
+            .db
+            .get_curation_candidate(&workspace.id, &proposals[0].candidate_id)?
+            .ok_or("stored proposal")?;
+        validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
+        record_repair_feedback(&workspace, &workspace.id, "E0277", &repair, true)?;
+        record_repair_feedback(&workspace, &workspace.id, "E0277", &repair, false)?;
+        let history = workspace
+            .db
+            .list_error_repair_links(&workspace.id, "rustc:E0277")?;
+        assert!(native(&workspace.review(&session, 0.0, false)?).is_empty());
+        assert!(validate_recorded(&workspace.db, &stored).is_err());
+        assert!(validate_draft(&workspace.db, &workspace.id, proposals[0]).is_err());
+        assert_eq!(
+            workspace
+                .db
+                .list_error_repair_links(&workspace.id, "rustc:E0277")?,
+            history
+        );
+        assert_eq!(
+            workspace.db.list_evidence_spans_for_session(&session)?,
+            sources
+        );
+        assert_eq!(
+            workspace
+                .db
+                .get_curation_candidate(&workspace.id, &stored.id)?
+                .ok_or("historical proposal")?
+                .derivation_metadata_json,
+            stored.derivation_metadata_json,
+        );
+        assert!(
+            workspace
+                .db
+                .list_memories(&workspace.id, None, true)?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_harmful_supporter_does_not_increase_native_lesson_confidence() -> TestResult {
+        let workspace = Workspace::new()?;
+        let (anchor, _, _) = workspace.episode(99_101, "Work item alpha.", COMMAND, true)?;
+        let (_, supporter, _) = workspace.episode(99_102, "Work item beta.", COMMAND, true)?;
+        workspace.episode(99_103, "Work item gamma.", COMMAND, true)?;
+        let before = workspace.review(&anchor, 0.8, false)?;
+        let proposals = native(&before);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].confidence, 0.8);
+        validate_draft(&workspace.db, &workspace.id, proposals[0])
+            .map_err(|error| error.message)?;
+        record_repair_feedback(&workspace, &workspace.id, "E0277", &supporter, true)?;
+        assert!(native(&workspace.review(&anchor, 0.8, false)?).is_empty());
+        let after = workspace.review(&anchor, 0.7, false)?;
+        let remaining = native(&after);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].confidence, 0.7);
+        validate_draft(&workspace.db, &workspace.id, remaining[0])
+            .map_err(|error| error.message)?;
+        assert!(validate_draft(&workspace.db, &workspace.id, proposals[0]).is_err());
+        assert_eq!(remaining[0].source_ids, proposals[0].source_ids);
+        assert!(
+            workspace
+                .db
+                .list_memories(&workspace.id, None, true)?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn card_feedback_checks_every_error_without_widening_its_scope() -> TestResult {
+        let workspace = Workspace::new()?;
+        let output = format!("{FAILURE}error[E0308]: mismatched types\n");
+        let repair_text = "I fixed E0277 and E0308 by deriving Serialize for Widget and correcting its declared type in src/widget.rs.";
+        let (session_id, repair, _) = workspace.episode_with_output(
+            99_201,
+            "Card feedback work item.",
+            COMMAND,
+            true,
+            repair_text,
+            &output,
+        )?;
+        let session = workspace.db.get_session(&session_id)?.ok_or("session")?;
+        let sources = workspace.db.list_evidence_spans_for_session(&session_id)?;
+        let arcs = session_failure_arcs(&workspace.id, &session, &sources);
+        let arc = arcs.first().ok_or("resolved episode")?;
+        assert!(arc.resolution.is_some());
+        let card = crate::core::incident_card::incident_card_id(&workspace.id, &arc.failure_id);
+        record_repair_feedback(&workspace, &workspace.id, "E0599", &repair, true)?;
+        record_repair_feedback(
+            &workspace,
+            &workspace.id,
+            "E0308",
+            &format!("{repair}\0alias"),
+            true,
+        )?;
+        let foreign =
+            crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(99_202)).to_string();
+        workspace.db.insert_workspace(
+            &foreign,
+            &crate::db::CreateWorkspaceInput {
+                path: "/tmp/foreign-repair-feedback".to_owned(),
+                name: None,
+            },
+        )?;
+        record_repair_feedback(&workspace, &foreign, "E0308", &repair, true)?;
+        assert_eq!(native(&workspace.review(&session_id, 0.6, false)?).len(), 1);
+        record_repair_feedback(&workspace, &workspace.id, "E0308", &card, true)?;
+        assert!(native(&workspace.review(&session_id, 0.0, false)?).is_empty());
+        assert_eq!(
+            workspace.db.list_evidence_spans_for_session(&session_id)?,
+            sources
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_mining_and_feedback_are_reused_only_inside_one_source_snapshot() -> TestResult {
+        let workspace = Workspace::new()?;
+        let (id, _, _) = workspace.episode(99_301, "Cached feedback work item.", COMMAND, true)?;
+        let session = workspace.db.get_session(&id)?.ok_or("session")?;
+        let spans = workspace.db.list_evidence_spans_for_session(&id)?;
+        workspace.db.begin_read_snapshot()?;
+        let evidence = SessionEvidence::new(&workspace.id, &session, &spans);
+        assert_eq!(evidence.native().candidates.len(), 1);
+        let candidate = &evidence.native().candidates[0];
+        let support = evidence.support(candidate).ok_or("support")?;
+        assert!(evidence.reconstruct(&support).is_some());
+        let first = evidence.withheld_repairs(&workspace.db)?;
+        assert!(first.is_empty());
+        assert!(std::ptr::eq(
+            first,
+            evidence.withheld_repairs(&workspace.db)?
+        ));
+        assert!(std::ptr::eq(evidence.native(), evidence.native()));
+        drop(evidence);
+        workspace.db.rollback_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_feedback_cannot_become_a_successful_review_or_validation() -> TestResult {
+        let workspace = Workspace::new()?;
+        let (id, _, _) = workspace.episode(99_401, "Storage feedback work item.", COMMAND, true)?;
+        let preview = workspace.review(&id, 0.6, false)?;
+        assert_eq!(native(&preview).len(), 1);
+        let session = workspace.db.get_session(&id)?.ok_or("session")?;
+        workspace
+            .db
+            .execute_raw("ALTER TABLE error_repair_links RENAME TO unavailable_native_feedback")?;
+        let mut candidates = Vec::new();
+        let error = score_candidates(
+            &workspace.db,
+            &workspace.id,
+            &session,
+            &mut candidates,
+            0.6,
+            10,
+        )
+        .expect_err("missing feedback authority");
+        assert!(!error.message().contains("unavailable_native_feedback"));
+        assert!(validate_draft(&workspace.db, &workspace.id, native(&preview)[0]).is_err());
+        workspace.db.begin_read_snapshot()?;
+        workspace.db.rollback_read_snapshot()?;
+        assert!(
+            NativeRepairCandidates::default()
+                .withheld(&workspace.db, &workspace.id)?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_repair_validation_leaves_feedback_rollback_with_its_caller() -> TestResult {
+        let workspace = Workspace::new()?;
+        let (session, repair, _) =
+            workspace.episode(99_501, "Rollback feedback work item.", COMMAND, true)?;
+        let written = workspace.review(&session, 0.6, true)?;
+        assert_eq!(native(&written).len(), 1);
+        let stored = workspace
+            .db
+            .get_curation_candidate(&workspace.id, &native(&written)[0].candidate_id)?
+            .ok_or("stored proposal")?;
+        validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
+        let history = workspace
+            .db
+            .list_error_repair_links(&workspace.id, "rustc:E0277")?;
+        let result: crate::db::Result<()> = workspace.db.with_transaction(|| {
+            crate::core::error_diagnosis::record_error_repair_links(
+                &workspace.db,
+                &workspace.id,
+                &crate::core::error_recall::from_rustc(Some("E0277"), "rollback feedback"),
+                &crate::core::error_diagnosis::ErrorRepairLinkRecording {
+                    harmful_repairs: vec![repair.clone()],
+                    ..Default::default()
+                },
+            )?;
+            assert!(validate_recorded(&workspace.db, &stored).is_err());
+            workspace
+                .db
+                .execute_raw("INSERT INTO missing_native_feedback_rollback VALUES (1)")?;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            workspace
+                .db
+                .list_error_repair_links(&workspace.id, "rustc:E0277")?,
+            history
+        );
+        validate_recorded(&workspace.db, &stored).map_err(|error| error.message)?;
+        assert!(
+            workspace
+                .db
+                .list_memories(&workspace.id, None, true)?
+                .is_empty()
         );
         Ok(())
     }

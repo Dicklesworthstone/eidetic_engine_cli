@@ -201,11 +201,10 @@ fn full_signature(
 /// Source facts do not stop being observations when an accepted proposal
 /// attaches them to a memory. Ignore ownership only for this in-memory
 /// reconstruction; neither the row nor the resulting memory ownership changes.
-fn source_candidates(
-    workspace_id: &str,
-    session: &StoredSession,
-    spans: &[StoredEvidenceSpan],
-) -> Vec<ReviewSessionCandidate> {
+fn source_candidates(evidence: &SessionEvidence<'_>) -> Vec<ReviewSessionCandidate> {
+    let workspace_id = evidence.workspace_id;
+    let session = evidence.session;
+    let spans = evidence.spans;
     let mut grouped: BTreeMap<String, Vec<&StoredEvidenceSpan>> = BTreeMap::new();
     for span in spans {
         let Some(text) = review_learning_text(span) else {
@@ -229,17 +228,121 @@ fn source_candidates(
         spans,
         0.0,
     ));
-    candidates.extend(verified_repair::candidates(workspace_id, session, spans));
+    candidates.extend(evidence.native().candidates.iter().cloned());
     candidates
 }
 
 fn reconstruct_support(
+    connection: &DbConnection,
     workspace_id: &str,
     session: &StoredSession,
     spans: &[StoredEvidenceSpan],
     expected: &SupportingSession,
-) -> Option<ReviewSessionCandidate> {
-    SessionEvidence::new(workspace_id, session, spans).reconstruct(expected)
+) -> Result<Option<ReviewSessionCandidate>, DomainError> {
+    let evidence = SessionEvidence::new(workspace_id, session, spans);
+    let candidate = evidence.reconstruct(expected);
+    // A directly reconstructed prose lesson has not mined native episodes.
+    // It must not acquire a feedback dependency through a shared validator.
+    let native_candidate = candidate.as_ref().is_some_and(|candidate| {
+        evidence
+            .native
+            .get()
+            .is_some_and(|native| native.candidate_ids.contains(&candidate.candidate_id))
+    });
+    if native_candidate
+        && evidence
+            .withheld_repairs(connection)?
+            .contains(&expected.candidate_id)
+    {
+        return Err(domain("a recorded tool repair has harmful feedback"));
+    }
+    Ok(candidate)
+}
+
+/// Native episode bindings, never inferred from rendered proposal text.
+/// Feedback is scoped to the exact workspace, extracted error class and repair
+/// target. These locators identify observations, not admission authority.
+#[derive(Default)]
+struct NativeRepairCandidates {
+    candidates: Vec<ReviewSessionCandidate>,
+    candidate_ids: BTreeSet<String>,
+    claims: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+}
+
+impl NativeRepairCandidates {
+    fn new(workspace_id: &str, session: &StoredSession, spans: &[StoredEvidenceSpan]) -> Self {
+        let mut native = Self::default();
+        verified_repair::visit_candidates(workspace_id, session, spans, |candidate, arc| {
+            let card_id =
+                crate::core::incident_card::incident_card_id(workspace_id, &arc.failure_id);
+            for diagnostic in &arc.diagnostics {
+                let targets = native
+                    .claims
+                    .entry(diagnostic.layered_key().key)
+                    .or_default();
+                for target in candidate.source_ids.iter().chain(std::iter::once(&card_id)) {
+                    targets
+                        .entry(target.clone())
+                        .or_default()
+                        .insert(candidate.candidate_id.clone());
+                }
+            }
+            native.candidate_ids.insert(candidate.candidate_id.clone());
+            native.candidates.push(candidate);
+        });
+        native
+    }
+
+    /// Helpful upserts cannot erase independent harmful history. Read only
+    /// exact selected identities, with bounded parameters and returned rows.
+    /// The enclosing scorer or validator owns the snapshot/transaction.
+    fn withheld(
+        &self,
+        connection: &DbConnection,
+        workspace_id: &str,
+    ) -> Result<BTreeSet<String>, DomainError> {
+        use sqlmodel_core::Value as SqlValue;
+
+        const BATCH: usize = 128;
+        let unavailable = || domain("native repair feedback could not be read or validated");
+        let mut withheld = BTreeSet::new();
+        for (fingerprint, targets) in &self.claims {
+            let ids = targets.keys().map(String::as_str).collect::<Vec<_>>();
+            for batch in ids.chunks(BATCH) {
+                let placeholders = (3..3 + batch.len())
+                    .map(|index| format!("?{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT DISTINCT target_id FROM error_repair_links WHERE workspace_id = ?1 AND fingerprint_key = ?2 AND link_kind = 'repair' AND outcome = 'harmful' AND target_id IN ({placeholders}) ORDER BY target_id ASC"
+                );
+                let mut parameters = vec![
+                    SqlValue::Text(workspace_id.to_owned()),
+                    SqlValue::Text(fingerprint.clone()),
+                ];
+                parameters.extend(batch.iter().map(|id| SqlValue::Text((*id).to_owned())));
+                let rows = connection
+                    .query(&sql, &parameters)
+                    .map_err(|_| unavailable())?;
+                if rows.len() > batch.len() {
+                    return Err(unavailable());
+                }
+                let mut seen = BTreeSet::new();
+                for row in rows {
+                    let id = row
+                        .get(0)
+                        .and_then(SqlValue::as_str)
+                        .ok_or_else(&unavailable)?;
+                    if !batch.contains(&id) || !seen.insert(id.to_owned()) {
+                        return Err(unavailable());
+                    }
+                    let affected = targets.get(id).ok_or_else(&unavailable)?;
+                    withheld.extend(affected.iter().cloned());
+                }
+            }
+        }
+        Ok(withheld)
+    }
 }
 
 /// Request-local facts bound to one immutable session/snapshot. No cache can
@@ -252,6 +355,8 @@ struct SessionEvidence<'a> {
     spans: &'a [StoredEvidenceSpan],
     by_id: BTreeMap<&'a str, &'a StoredEvidenceSpan>,
     arcs: OnceCell<BTreeMap<String, ReviewSessionCandidate>>,
+    native: OnceCell<NativeRepairCandidates>,
+    repair_feedback: OnceCell<BTreeSet<String>>,
     context: OnceCell<SupportingContext>,
     #[cfg(test)]
     arc_builds: std::cell::Cell<usize>,
@@ -277,12 +382,31 @@ impl<'a> SessionEvidence<'a> {
             spans,
             by_id,
             arcs: OnceCell::new(),
+            native: OnceCell::new(),
+            repair_feedback: OnceCell::new(),
             context: OnceCell::new(),
             #[cfg(test)]
             arc_builds: std::cell::Cell::new(0),
             #[cfg(test)]
             context_builds: std::cell::Cell::new(0),
         }
+    }
+
+    fn native(&self) -> &NativeRepairCandidates {
+        self.native.get_or_init(|| {
+            NativeRepairCandidates::new(self.workspace_id, self.session, self.spans)
+        })
+    }
+
+    fn withheld_repairs(
+        &self,
+        connection: &DbConnection,
+    ) -> Result<&BTreeSet<String>, DomainError> {
+        if let Some(withheld) = self.repair_feedback.get() {
+            return Ok(withheld);
+        }
+        let withheld = self.native().withheld(connection, self.workspace_id)?;
+        Ok(self.repair_feedback.get_or_init(|| withheld))
     }
 
     fn reconstruct(&self, expected: &SupportingSession) -> Option<ReviewSessionCandidate> {
@@ -314,11 +438,7 @@ impl<'a> SessionEvidence<'a> {
             for candidate in
                 build_session_arc_candidates(self.workspace_id, self.session, self.spans, 0.0)
                     .into_iter()
-                    .chain(verified_repair::candidates(
-                        self.workspace_id,
-                        self.session,
-                        self.spans,
-                    ))
+                    .chain(self.native().candidates.iter().cloned())
             {
                 arcs.entry(candidate.candidate_id.clone())
                     .or_insert(candidate);
@@ -591,16 +711,24 @@ pub(super) fn score_candidates(
     if let Some((anchor_session, anchor_spans, anchor_bytes)) = anchor.first()
         && eligible_session(workspace_id, anchor_session, anchor_spans)
     {
+        let evidence = SessionEvidence::new(workspace_id, anchor_session, anchor_spans);
         let existing: BTreeSet<_> = candidates
             .iter()
             .map(|candidate| candidate.candidate_id.clone())
             .collect();
         candidates.extend(
-            verified_repair::candidates(workspace_id, anchor_session, anchor_spans)
-                .into_iter()
-                .filter(|candidate| !existing.contains(&candidate.candidate_id)),
+            evidence
+                .native()
+                .candidates
+                .iter()
+                .filter(|candidate| !existing.contains(&candidate.candidate_id))
+                .cloned(),
         );
-        let evidence = SessionEvidence::new(workspace_id, anchor_session, anchor_spans);
+        // A successful retry does not override contrary feedback about the
+        // same repair and error. Filter before both the requested confidence
+        // floor and historical freezing, including a floor of zero.
+        let withheld = evidence.withheld_repairs(connection)?;
+        candidates.retain(|candidate| !withheld.contains(&candidate.candidate_id));
         for candidate in candidates.iter_mut() {
             if candidate.corroboration.is_none() {
                 continue;
@@ -654,14 +782,22 @@ pub(super) fn score_candidates(
             if !eligible_session(workspace_id, other_session, spans) {
                 continue;
             }
-            let other_candidates = source_candidates(workspace_id, other_session, spans);
             let evidence = SessionEvidence::new(workspace_id, other_session, spans);
+            let other_candidates = source_candidates(&evidence);
             corroborate_candidates(
                 candidates,
                 &other_candidates,
                 |other| full_signature(other, spans),
                 |other| {
-                    if rejected(connection, workspace_id, other)? {
+                    if rejected(connection, workspace_id, other)?
+                        || (evidence
+                            .native()
+                            .candidate_ids
+                            .contains(&other.candidate_id)
+                            && evidence
+                                .withheld_repairs(connection)?
+                                .contains(&other.candidate_id))
+                    {
                         Ok(None)
                     } else {
                         Ok(evidence.support(other))
@@ -961,7 +1097,10 @@ fn validate_proof(
         if !eligible_session(workspace_id, session, spans) {
             return Err(issue("support is no longer admitted or was refuted"));
         }
-        let Some(candidate) = reconstruct_support(workspace_id, session, spans, expected) else {
+        let Some(candidate) =
+            reconstruct_support(connection, workspace_id, session, spans, expected)
+                .map_err(|error| issue(error.message()))?
+        else {
             return Err(issue(
                 "the recorded complete source lesson cannot be reconstructed",
             ));
