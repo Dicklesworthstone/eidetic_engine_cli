@@ -69,8 +69,28 @@ if printf '%s' "$HUBS_JSON" | jq . >/dev/null 2>&1 && printf '%s' "$AUTHORITIES_
     e2e_log_assert_num "$AUTHORITY_SCORE_PRESENT" -ge 1 "g10_hits_authority_score_present"
     assert_jq "$HUBS_JSON" '.data.sections[0].items[0].rank >= 1' "true" "g10_hits_hub_item_rank_valid"
     assert_jq "$AUTHORITIES_JSON" '.data.sections[0].items[0].rank >= 1' "true" "g10_hits_authority_item_rank_valid"
-    assert_jq "$HUBS_JSON" '.data.sections[0].items[0].memoryId // empty' "$HITS_HUB_ID" "g10_hits_seed_hub_ranked"
-    assert_jq "$AUTHORITIES_JSON" '.data.sections[0].items[0].memoryId // empty' "$HITS_AUTHORITY_ID" "g10_hits_seed_authority_ranked"
+    # These two used to assert that the seeded hub/authority occupy items[0] of
+    # the GLOBAL top-N. `seed_corpus` above contributes a densely co-tag-linked
+    # component, and the seeded pair is a disconnected two-node component, so
+    # HITS normalises it to near zero: measured 2026-10-20, the seeded hub and
+    # authority rank 11 of 11 and do not appear on the default 10-item page at
+    # all. "The seeded hub ranks first" is therefore false of a CORRECT
+    # implementation on this corpus, and asserting it reported a working
+    # product as broken. The contract that does hold here is that every memory
+    # in the graph receives a HITS profile; the ranking claim moves to the
+    # isolated workspace at the end of this suite, where it is both meaningful
+    # and strong. bd-ol177.
+    HUBS_FULL_JSON=$(ee_workspace insights --section hubs --limit 200 --json 2>/dev/null || true)
+    AUTHORITIES_FULL_JSON=$(ee_workspace insights --section authorities --limit 200 --json 2>/dev/null || true)
+    SEEDED_HUB_ITEM=$(printf '%s' "$HUBS_FULL_JSON" | jq -c --arg id "$HITS_HUB_ID" '[.data.sections[0].items[]? | select(.memoryId == $id)][0] // {}' 2>/dev/null || echo '{}')
+    SEEDED_AUTHORITY_ITEM=$(printf '%s' "$AUTHORITIES_FULL_JSON" | jq -c --arg id "$HITS_AUTHORITY_ID" '[.data.sections[0].items[]? | select(.memoryId == $id)][0] // {}' 2>/dev/null || echo '{}')
+    e2e_log_note "g10_hits_seeded_profiles hub_rank=$(printf '%s' "$SEEDED_HUB_ITEM" | jq -r '.rank // "absent"') authority_rank=$(printf '%s' "$SEEDED_AUTHORITY_ITEM" | jq -r '.rank // "absent"')"
+    assert_jq "$SEEDED_HUB_ITEM" 'has("memoryId")' "true" "g10_hits_seed_hub_profiled"
+    assert_jq "$SEEDED_AUTHORITY_ITEM" 'has("memoryId")' "true" "g10_hits_seed_authority_profiled"
+    assert_jq "$SEEDED_HUB_ITEM" '(.hubScore | type)' "number" "g10_hits_seed_hub_score_number"
+    assert_jq "$SEEDED_AUTHORITY_ITEM" '(.authorityScore | type)' "number" "g10_hits_seed_authority_score_number"
+    assert_jq "$SEEDED_HUB_ITEM" '(.rank >= 1)' "true" "g10_hits_seed_hub_rank_valid"
+    assert_jq "$SEEDED_AUTHORITY_ITEM" '(.rank >= 1)' "true" "g10_hits_seed_authority_rank_valid"
     assert_jq "$HUBS_JSON" '(.data.sections[0].items[0].hubScore | type)' "number" "g10_hits_hub_score_number"
     assert_jq "$AUTHORITIES_JSON" '(.data.sections[0].items[0].authorityScore | type)' "number" "g10_hits_authority_score_number"
     assert_jq "$HUBS_JSON" '.data.sections[0].items[0].hubScore >= 0' "true" "g10_hits_hub_score_nonnegative"
@@ -149,6 +169,56 @@ if printf '%s' "$CONTEXT_GROUNDING_JSON" | jq . >/dev/null 2>&1 \
     fi
 else
     todo_assert "g10_hits_context_profiles_available" "bd-jy4w.4" "ee context --profile grounding/orientation/balanced is not fully available for the HITS fixture yet."
+fi
+
+# ---------------------------------------------------------------------------
+# The ranking claim, in the only workspace where it is meaningful.
+#
+# A hub is only "the" hub relative to a graph. In the seeded epic workspace the
+# corpus supplies a denser component than the fixture does, so the strong claim
+# belongs here, over a graph that contains nothing but the seeded hub ->
+# authority edge. Measured 2026-10-20: hubs and authorities each return exactly
+# one item, the seeded memory, with a score of 1.0.
+#
+# The list length is asserted BESIDE the ranking so this cannot pass vacuously
+# by some future corpus leaking in and making "ranked first" trivial again.
+#
+# The workspace is retained, not removed, and its path is logged.
+# ---------------------------------------------------------------------------
+WS_G10_ISOLATED=$(mktemp -d "${TMPDIR:-/tmp}/ee-e2e-g10-hits-isolated.XXXXXX")
+e2e_log_note "g10_hits_isolated_workspace=$WS_G10_ISOLATED"
+
+ee_hits_isolated() {
+    e2e_log_command "$EE_BINARY" "$@" --workspace "$WS_G10_ISOLATED"
+}
+
+ee_hits_isolated init --json >/dev/null
+ee_hits_isolated config set graph.feature.hits_profiles.enabled true --json >/dev/null
+ISO_HUB_ID=$(ee_hits_isolated remember "G10 HITS fixture hub memory that points to authoritative facts." --level semantic --kind note --no-auto-link --json 2>/dev/null | jq -r '.data.memory_id // .data.memory.id // .data.id // empty' 2>/dev/null)
+ISO_AUTHORITY_ID=$(ee_hits_isolated remember "G10 HITS fixture authority memory grounded by hubs." --level semantic --kind note --no-auto-link --json 2>/dev/null | jq -r '.data.memory_id // .data.memory.id // .data.id // empty' 2>/dev/null)
+
+if [ -z "${ISO_HUB_ID:-}" ] || [ -z "${ISO_AUTHORITY_ID:-}" ]; then
+    e2e_log_assert_eq "memory-ids" "missing" "g10_hits_isolated_fixture_memory_ids"
+else
+    ee_hits_isolated link "$ISO_HUB_ID" "$ISO_AUTHORITY_ID" --relation supports --json >/dev/null 2>&1 || true
+    ee_hits_isolated graph centrality-refresh --json >/dev/null 2>&1 || true
+
+    ISO_HUBS_JSON=$(ee_hits_isolated insights --section hubs --json 2>/dev/null || true)
+    ISO_AUTHORITIES_JSON=$(ee_hits_isolated insights --section authorities --json 2>/dev/null || true)
+    ISO_HUB_COUNT=$(printf '%s' "$ISO_HUBS_JSON" | jq '.data.sections[0].items | length' 2>/dev/null || echo 0)
+    ISO_AUTHORITY_COUNT=$(printf '%s' "$ISO_AUTHORITIES_JSON" | jq '.data.sections[0].items | length' 2>/dev/null || echo 0)
+    e2e_log_note "g10_hits_isolated hubs=${ISO_HUB_COUNT} authorities=${ISO_AUTHORITY_COUNT}"
+
+    # Precondition: the isolated graph really is just the seeded pair.
+    e2e_log_assert_num "$ISO_HUB_COUNT" -ge 1 "g10_hits_isolated_hubs_present"
+    e2e_log_assert_num "$ISO_HUB_COUNT" -le 2 "g10_hits_isolated_hubs_uncontaminated"
+    e2e_log_assert_num "$ISO_AUTHORITY_COUNT" -ge 1 "g10_hits_isolated_authorities_present"
+    e2e_log_assert_num "$ISO_AUTHORITY_COUNT" -le 2 "g10_hits_isolated_authorities_uncontaminated"
+    # The claim the suite is really making.
+    assert_jq "$ISO_HUBS_JSON" '.data.sections[0].items[0].memoryId // empty' "$ISO_HUB_ID" "g10_hits_isolated_seed_hub_ranked_first"
+    assert_jq "$ISO_AUTHORITIES_JSON" '.data.sections[0].items[0].memoryId // empty' "$ISO_AUTHORITY_ID" "g10_hits_isolated_seed_authority_ranked_first"
+    assert_jq "$ISO_HUBS_JSON" '(.data.sections[0].items[0].hubScore > 0)' "true" "g10_hits_isolated_seed_hub_score_positive"
+    assert_jq "$ISO_AUTHORITIES_JSON" '(.data.sections[0].items[0].authorityScore > 0)' "true" "g10_hits_isolated_seed_authority_score_positive"
 fi
 
 if [ "${EE_GRAPH_E2E_INJECT_FAILURE:-0}" = "1" ]; then
