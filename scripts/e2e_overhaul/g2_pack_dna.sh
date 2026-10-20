@@ -10,6 +10,14 @@ require_jq
 START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g2_pack_dna"
 seed_corpus
+# EVERY graph.feature.*.enabled DEFAULTS TO FALSE (src/config/merge.rs:1304, in
+# built_in_config; src/core/memory.rs:5635 calls them "dormant by default").
+# Without this line the suite asserts enabled-feature behaviour against a
+# workspace where the feature is off, and the nulls that come back read as a
+# product regression. Measured 2026-10-19: 4 failed assertions here, all of
+# that shape. g1/g8/g9 already carry the equivalent line; g9 is the control --
+# same default-false flag, enabled explicitly, 30 of 30 assertions green.
+ee_workspace config set graph.feature.pack_dna.enabled true --json >/dev/null
 
 e2e_log_note "g2_pack_dna_surface=context --explain packDna"
 PACK_JSON=$(ee_workspace context "pack dna structural diversity" --max-tokens 1200 --explain --json 2>/dev/null || true)

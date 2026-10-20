@@ -10,6 +10,12 @@ require_jq
 START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g7_revision_impact"
 seed_corpus
+# graph.feature.revision_dominance.enabled DEFAULTS TO FALSE
+# (src/config/merge.rs:1304, built_in_config). Before this line
+# g7_revision_impact_validation_status_valid expected "valid" and got the
+# literal "disabled" -- the product reporting its own dormancy correctly, which
+# the suite then scored as a failure. Three assertions failed here 2026-10-19.
+ee_workspace config set graph.feature.revision_dominance.enabled true --json >/dev/null
 
 e2e_log_note "g7_revision_impact_surface=memory revise --dry-run impactAnalysis"
 ROOT_JSON=$(ee_workspace remember "G7 revision impact root." --level semantic --kind note --json 2>/dev/null || true)

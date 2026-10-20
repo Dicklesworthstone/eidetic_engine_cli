@@ -10,6 +10,12 @@ require_jq
 START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g6_proximity"
 seed_corpus
+# graph.feature.proximity.enabled DEFAULTS TO FALSE (src/config/merge.rs:1304,
+# built_in_config). THIS SUITE IS THE ONE THAT SAYS SO OUT LOUD: before this
+# line, g6_proximity_interpretation expected "weak" and got the literal string
+# "graph_feature_disabled". Fourteen assertions failed here on 2026-10-19,
+# mostly nulls downstream of that same dormant feature.
+ee_workspace config set graph.feature.proximity.enabled true --json >/dev/null
 
 e2e_log_note "g6_proximity_surface=proximity <id1> <id2>"
 MEM_A_JSON=$(ee_workspace remember "G6 proximity source." --level semantic --kind note --no-auto-link --json 2>/dev/null || true)

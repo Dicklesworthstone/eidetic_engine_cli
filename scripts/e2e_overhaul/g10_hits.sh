@@ -10,6 +10,13 @@ require_jq
 START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g10_hits"
 seed_corpus
+# graph.feature.hits_profiles.enabled DEFAULTS TO FALSE (src/config/merge.rs:1304,
+# built_in_config). This suite carried 39 of the 75 graph failures on 2026-10-19
+# -- the largest single block -- and they are the signature of a dormant
+# feature: hubScore/authorityScore null, evidence.schema and
+# evidence.algorithm empty, every rank invalid. Enabling the flag is the
+# precondition for reading any of those as real defects.
+ee_workspace config set graph.feature.hits_profiles.enabled true --json >/dev/null
 
 e2e_log_note "g10_hits_surface=insights --section hubs/authorities"
 remember_hits_fixture() {
