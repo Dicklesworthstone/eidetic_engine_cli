@@ -570,6 +570,159 @@ mod tests {
     }
 
     #[test]
+    fn public_report_finds_late_neighbors_without_promoting_their_repairs() -> TestResult {
+        let connection = db()?;
+        let (previous, current) = messages();
+        let fingerprint = ErrorFingerprint::from_canonical(&current);
+        for number in 1..=257_u32 {
+            let mut distant = row(number, fingerprint.stderr_simhash ^ 0x7f);
+            distant.version_hints = Some("NOT_QUERY_TEXT".repeat(1024));
+            connection.insert_error_fingerprint_for_recovery(&distant)?;
+        }
+        record_error_repair_links(
+            &connection,
+            WS,
+            &previous,
+            &ErrorRepairLinkRecording {
+                helpful_repairs: vec!["PRIVATE_NEIGHBOR_FIX".to_owned()],
+                proof_links: vec!["PRIVATE_NEIGHBOR_PROOF".to_owned()],
+                ..Default::default()
+            },
+        )?;
+        let before = connection.list_error_fingerprints_for_recovery(WS)?;
+        let report = error_recall_report(&connection, WS, &current)?;
+        assert_eq!(report.near, [previous.layered_key().key]);
+        assert!(!report.exact);
+        assert!(report.helpful_repairs.is_empty() && report.proof_links.is_empty());
+        let encoded = serde_json::to_string(&report)?;
+        assert!(!encoded.contains("PRIVATE_NEIGHBOR") && !encoded.contains("NOT_QUERY_TEXT"));
+        assert!(
+            !pack_error_recall_query_seed(&connection, WS, &current)?.contains("helpful_repair:")
+        );
+        assert_eq!(connection.list_error_fingerprints_for_recovery(WS)?, before);
+        record_error_fingerprint(&connection, WS, &current)?;
+        let exact = error_recall_report(&connection, WS, &current)?;
+        assert!(exact.exact && exact.near.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_page_observation_drops_provisional_neighbors_and_releases_only_owned_snapshots()
+    -> TestResult {
+        let connection = db()?;
+        for number in 1..=257_u32 {
+            connection.insert_error_fingerprint_for_recovery(&row(number, HASH))?;
+        }
+        let expected = select(
+            &query(),
+            WS,
+            connection.list_error_fingerprints_for_recovery(WS)?,
+        );
+        for borrowed in [false, true] {
+            if borrowed {
+                connection.begin_read_snapshot()?;
+            }
+            let mut pages = 0;
+            let error = scan_observed(&connection, WS, &query(), |_| {
+                pages += 1;
+                if pages == 2 {
+                    Err(unavailable())
+                } else {
+                    Ok(())
+                }
+            })
+            .expect_err("a completed prefix is not a complete nearest-neighbor answer");
+            assert_eq!(pages, 2);
+            assert!(!error.to_string().contains(WS));
+            if borrowed {
+                assert!(connection.begin_read_snapshot().is_err());
+                connection.commit_read_snapshot()?;
+            } else {
+                connection.begin_read_snapshot()?;
+                connection.rollback_read_snapshot()?;
+            }
+            assert_eq!(
+                scan_observed(&connection, WS, &query(), |_| Ok(()))?,
+                expected
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_later_page_does_not_commit_or_release_the_callers_write() -> TestResult {
+        let connection = db()?;
+        for number in 1..=257_u32 {
+            connection.insert_error_fingerprint_for_recovery(&row(number, HASH))?;
+        }
+        let before = connection.list_error_fingerprints_for_recovery(WS)?;
+        let transaction: Result<()> = connection.with_transaction(|| {
+            let mut pages = 0;
+            let error = scan_observed(&connection, WS, &query(), |_| {
+                pages += 1;
+                connection.execute_raw(
+                    "ALTER TABLE error_fingerprints RENAME TO private_near_signature_authority",
+                )?;
+                Ok(())
+            })
+            .expect_err("the next page must require the original source authority");
+            assert_eq!(pages, 1);
+            assert!(
+                !error
+                    .to_string()
+                    .contains("private_near_signature_authority")
+            );
+            assert!(
+                connection
+                    .query(
+                        "SELECT fingerprint_key FROM private_near_signature_authority LIMIT 1",
+                        &[]
+                    )
+                    .is_ok()
+            );
+            Err(unavailable())
+        });
+        assert!(transaction.is_err());
+        assert_eq!(connection.list_error_fingerprints_for_recovery(WS)?, before);
+        assert_eq!(
+            scan_observed(&connection, WS, &query(), |_| Ok(()))?,
+            select(&query(), WS, before)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_after_a_page_never_returns_its_provisional_neighbors() -> TestResult {
+        let connection = db()?;
+        for number in 1..=257_u32 {
+            connection.insert_error_fingerprint_for_recovery(&row(number, HASH))?;
+        }
+        let source = &connection;
+        let (result, pages) =
+            crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+                let mut pages = 0;
+                let result = scan_observed(source, WS, &query(), |_| {
+                    pages += 1;
+                    cx.cancel_with(
+                        asupersync::types::CancelKind::User,
+                        Some("stop near-error scan"),
+                    );
+                    Ok(())
+                });
+                (result, pages)
+            })?;
+        assert!(result.is_err());
+        assert_eq!(pages, 1);
+        connection.begin_read_snapshot()?;
+        connection.rollback_read_snapshot()?;
+        assert_eq!(
+            scan_observed(&connection, WS, &query(), |_| Ok(()))?.len(),
+            NEAR_MATCH_LIMIT
+        );
+        Ok(())
+    }
+
+    #[test]
     fn complete_reports_never_mix_workspaces_or_structured_error_codes() -> TestResult {
         let connection = db()?;
         let (previous, current) = messages();
