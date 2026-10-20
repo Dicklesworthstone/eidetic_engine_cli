@@ -46,6 +46,20 @@ if printf '%s' "$PPR_JSON" | jq . >/dev/null 2>&1; then
     assert_jq "$PPR_JSON" '.success // empty' "true" "g1_ppr_context_success"
     PPR_DEGRADED_BLOCKERS=$(printf '%s' "$PPR_JSON" | jq '[.. | objects | (.code? // empty) | select(test("^graph_ppr_|context_graph_snapshot_|context_config_unavailable|graph_feature_disabled$"))] | length' 2>/dev/null || echo 0)
     PPR_DEGRADED_BLOCKERS="${PPR_DEGRADED_BLOCKERS:-0}"
+    # Log the CODES and their messages, not just how many there are. This
+    # assertion asserts a count, so until now a failure recorded `exp=0 act=2`
+    # and nothing else, and the codes never reached the event log -- which is
+    # what made this a multi-session investigation instead of one capture.
+    # The code alone is still not enough here: the emitted code is
+    # `context_graph_snapshot_unavailable` even when a valid snapshot exists
+    # and `ee why` is reading it, so the MESSAGE is the only field that names
+    # the real cause. bd-cxnf8.
+    PPR_BLOCKER_CODES=$(printf '%s' "$PPR_JSON" | jq -c '[.. | objects | (.code? // empty) | select(test("^graph_ppr_|context_graph_snapshot_|context_config_unavailable|graph_feature_disabled$"))] | unique' 2>/dev/null || echo '[]')
+    e2e_log_note "g1_ppr_blocker_codes=${PPR_BLOCKER_CODES}"
+    if [ "$PPR_DEGRADED_BLOCKERS" -ne 0 ]; then
+        PPR_BLOCKER_MESSAGES=$(printf '%s' "$PPR_JSON" | jq -c '[.. | objects | select((.code? // "") | test("^graph_ppr_|context_graph_snapshot_|context_config_unavailable|graph_feature_disabled$")) | {code, severity, repair, message}] | unique' 2>/dev/null || echo '[]')
+        e2e_log_note "g1_ppr_blocker_detail=${PPR_BLOCKER_MESSAGES}"
+    fi
     e2e_log_assert_num "$PPR_DEGRADED_BLOCKERS" -eq 0 "g1_ppr_no_ppr_degradation" || true
     PPR_BREAKDOWN_COUNT=$(printf '%s' "$PPR_JSON" | jq '[.. | objects | select(has("pprScore") or has("ppr_score"))] | length' 2>/dev/null || echo 0)
     PPR_BREAKDOWN_COUNT="${PPR_BREAKDOWN_COUNT:-0}"
