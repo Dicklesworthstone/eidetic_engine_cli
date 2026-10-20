@@ -371,6 +371,149 @@ impl DbConnection {
         }
         Ok(())
     }
+
+    /// Visit artifact rows without sorting or retaining all source bodies.
+    /// Physical row IDs are private traversal cursors, never source identities.
+    /// The caller holds the snapshot and restores canonical order for changed
+    /// documents only. Callback failures stop before the next page is read.
+    pub(crate) fn visit_index_artifacts_in_current_snapshot<E>(
+        &self,
+        workspace: &str,
+        mut visitor: impl FnMut(super::StoredArtifact) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E>
+    where
+        E: From<DbError>,
+    {
+        let request = asupersync::Cx::current();
+        let mut cursor: Option<i64> = None;
+        loop {
+            super::checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
+            let mut sql = "SELECT id, workspace_id, source_kind, artifact_type, original_path, canonical_path, external_ref, content_hash, media_type, size_bytes, redaction_status, snippet, snippet_hash, provenance_uri, metadata_json, created_at, updated_at, rowid FROM artifacts WHERE workspace_id = ?1".to_owned();
+            let mut parameters = vec![
+                Value::Text(workspace.to_owned()),
+                Value::BigInt(PAGE_SIZE as i64),
+            ];
+            if let Some(after) = cursor {
+                sql.push_str(" AND rowid > ?3");
+                parameters.push(Value::BigInt(after));
+            }
+            sql.push_str(" ORDER BY rowid ASC LIMIT ?2");
+            let rows = self.query_for(DbOperation::Query, &sql, &parameters)?;
+            let count = rows.len();
+            if count > PAGE_SIZE {
+                return Err(malformed("Artifact source page exceeded its bound").into());
+            }
+            for row in rows {
+                super::checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
+                let rowid = super::required_i64(&row, 17, DbOperation::Query, "source_cursor")?;
+                let artifact = super::stored_artifact_from_row(&row)?;
+                if artifact.workspace_id != workspace
+                    || artifact.id.is_empty()
+                    || cursor.is_some_and(|previous| rowid <= previous)
+                {
+                    return Err(
+                        malformed("Artifact source cursor or workspace is inconsistent").into(),
+                    );
+                }
+                cursor = Some(rowid);
+                visitor(artifact)?;
+                super::checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
+            }
+            if count < PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Visit rule rows and only their page's tags/source identities. Physical
+    /// pagination avoids repeated full-body sorts; the caller restores changed
+    /// document order and uses the shared eligibility projection. No row or
+    /// sidecar is cached across snapshots; transaction ownership stays outside.
+    pub(crate) fn visit_index_rules_in_current_snapshot<E>(
+        &self,
+        workspace: &str,
+        mut visitor: impl FnMut(
+            super::StoredProceduralRule,
+            Vec<String>,
+            Vec<String>,
+        ) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E>
+    where
+        E: From<DbError>,
+    {
+        let request = asupersync::Cx::current();
+        let mut cursor: Option<i64> = None;
+        loop {
+            super::checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
+            let mut sql = "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, positive_feedback_count, negative_feedback_count, validation_passes, validation_contradictions, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at, rowid FROM procedural_rules WHERE workspace_id = ?1 AND tombstoned_at IS NULL".to_owned();
+            let mut parameters = vec![
+                Value::Text(workspace.to_owned()),
+                Value::BigInt(PAGE_SIZE as i64),
+            ];
+            if let Some(after) = cursor {
+                sql.push_str(" AND rowid > ?3");
+                parameters.push(Value::BigInt(after));
+            }
+            sql.push_str(" ORDER BY rowid ASC LIMIT ?2");
+            let rows = self.query_for(DbOperation::Query, &sql, &parameters)?;
+            let count = rows.len();
+            if count > PAGE_SIZE {
+                return Err(malformed("Rule source page exceeded its bound").into());
+            }
+            if count == 0 {
+                break;
+            }
+            let mut rules = Vec::with_capacity(count);
+            for row in rows {
+                super::checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
+                let rowid = super::required_i64(&row, 21, DbOperation::Query, "source_cursor")?;
+                let rule = super::stored_procedural_rule_from_row(&row)?;
+                if rule.workspace_id != workspace
+                    || rule.tombstoned_at.is_some()
+                    || rule.id.is_empty()
+                    || cursor.is_some_and(|previous| rowid <= previous)
+                {
+                    return Err(malformed("Rule source cursor or workspace is inconsistent").into());
+                }
+                cursor = Some(rowid);
+                rules.push(rule);
+            }
+            // The junction primary keys bound each lookup to this page's IDs.
+            // Never load the entire workspace's retired-rule sidecars first.
+            let binds = (1..=count)
+                .map(|n| format!("?{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let ids = rules
+                .iter()
+                .map(|rule| Value::Text(rule.id.clone()))
+                .collect::<Vec<_>>();
+            super::checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
+            let mut tags = super::grouped_rule_strings(
+                &self.query_for(DbOperation::Query,
+                    &format!("SELECT rule_id, tag FROM rule_tags WHERE rule_id IN ({binds}) ORDER BY rule_id ASC, tag ASC"), &ids)?,
+                "rule_tags.rule_id", "rule_tags.tag",
+            )?;
+            super::checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
+            let mut sources = super::grouped_rule_strings(
+                &self.query_for(DbOperation::Query,
+                    &format!("SELECT rule_id, memory_id FROM rule_source_memories WHERE rule_id IN ({binds}) ORDER BY rule_id ASC, memory_id ASC"), &ids)?,
+                "rule_source_memories.rule_id", "rule_source_memories.memory_id",
+            )?;
+            for rule in rules {
+                super::checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
+                let rule_tags = tags.remove(&rule.id).unwrap_or_default();
+                let rule_sources = sources.remove(&rule.id).unwrap_or_default();
+                visitor(rule, rule_tags, rule_sources)?;
+                super::checkpoint_retry_cx(DbOperation::Query, request.as_ref())?;
+            }
+            if count < PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]

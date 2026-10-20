@@ -3,9 +3,9 @@
 //! Job identities and generation equality cannot prove source membership: a
 //! global-memory withdrawal, admission change, or projection sidecar can affect
 //! documents outside the claimed jobs. Reconcile every source in one database
-//! snapshot, retaining only changed bodies and complete digest maps. Memory,
-//! session and evidence reads are page-bounded; artifacts and rules still use
-//! their existing list APIs, released after each class is projected.
+//! snapshot, retaining only changed bodies and complete digest maps. Every
+//! source class is page-read; rule tags and source links are loaded only for
+//! the current rule page, not for the entire workspace.
 //!
 //! Prepare a complete private stage before accepting this path. A refusal then
 //! returns to the original collector before its snapshot hook, so fallback
@@ -14,13 +14,13 @@
 use super::{
     BTreeSet, CanonicalSearchDocument, DbConnection, DbError, DbOperation, DeltaStageError,
     EvidenceAdmissionReport, IncrementalFallback, IndexDocumentCounts, IndexEmbedderFingerprint,
-    IndexProcessingJobReport, IndexPublishLockOwner, IndexRebuildError, Path,
+    IndexProcessingJobReport, IndexPublishLockOwner, IndexRebuildError, Path, RuleIndexProjection,
     RunningIndexJobFinalizer, SearchIndexJobStatus, SearchIndexJobType, StoredSearchIndexJob,
     UnpublishedIndexStage, append_failed_index_job_transition, artifact_to_document,
     checked_document_counts, delta, embedder_fingerprint_for_index_metadata,
     evidence_span_to_document, finalize_coalesced_claimed_jobs, index_checkpoint,
     memory_documents_with_anchors_with_cx, path_exists_no_follow, publish_staged_generation,
-    recover_interrupted_publish_for_snapshot, require_index_job_transition, rule_documents,
+    recover_interrupted_publish_for_snapshot, require_index_job_transition, rule_to_document,
     session_to_document, source_snapshot, stage_planned_index_delta,
     update_running_index_job_total, validate_incremental_index_metadata, workspace_embedder_stack,
 };
@@ -177,19 +177,41 @@ fn capture(
             counts[1] += 1;
             Ok(())
         })?;
-        for artifact in db.list_artifacts(workspace_id, None)? {
-            observe(
-                cx,
-                &mut reconciler,
-                &mut refused,
-                artifact_to_document(&artifact),
-            )?;
-            counts[2] += 1;
-        }
-        for document in rule_documents(db, workspace_id)? {
-            observe(cx, &mut reconciler, &mut refused, document)?;
-            counts[3] += 1;
-        }
+        db.visit_index_artifacts_in_current_snapshot::<IndexRebuildError>(
+            workspace_id,
+            |artifact| {
+                observe(
+                    cx,
+                    &mut reconciler,
+                    &mut refused,
+                    artifact_to_document(&artifact),
+                )?;
+                counts[2] += 1;
+                Ok(())
+            },
+        )?;
+        let workspace = db.get_workspace(workspace_id)?.ok_or_else(|| {
+            IndexRebuildError::Index(format!(
+                "Workspace {workspace_id} disappeared while projecting procedural rules."
+            ))
+        })?;
+        db.visit_index_rules_in_current_snapshot::<IndexRebuildError>(
+            workspace_id,
+            |rule, tags, sources| {
+                let projection =
+                    RuleIndexProjection::new(rule, workspace.path.as_str(), tags, sources);
+                if projection.is_search_indexable() {
+                    observe(
+                        cx,
+                        &mut reconciler,
+                        &mut refused,
+                        rule_to_document(&projection),
+                    )?;
+                    counts[3] += 1;
+                }
+                Ok(())
+            },
+        )?;
         let scan = db.visit_index_evidence_in_current_snapshot(workspace_id, |span| {
             observe(
                 cx,
@@ -226,18 +248,51 @@ fn capture(
                 "streamed source membership disagrees with its document counts".to_owned(),
             ));
         }
-        // The evidence visitor uses physical pagination. Match the full
-        // collector's canonical evidence order without retaining unchanged
-        // evidence bodies: all evidence is the final source class here.
-        if let Some(first_evidence) = reconciliation.delta.upserts.iter().position(|document| {
-            document
-                .metadata
-                .get("source")
-                .is_some_and(|source| source == "import")
-        }) {
-            reconciliation.delta.upserts[first_evidence..]
-                .sort_by(|left, right| left.id.cmp(&right.id));
+        // Physical paging avoids sorting complete source bodies repeatedly.
+        // Restore exactly the full collector's order only for retained changes.
+        // The projection writes these fields from source rows; they are not
+        // user-supplied index metadata. Memory/session order stays unchanged.
+        for (source, stamp) in [
+            ("artifact", Some("created_at")),
+            ("rule", Some("updated_at")),
+            ("import", None),
+        ] {
+            index_checkpoint(cx)?;
+            let belongs = |document: &crate::search::IndexableDocument| {
+                document
+                    .metadata
+                    .get("source")
+                    .is_some_and(|value| value == source)
+            };
+            let Some(start) = reconciliation.delta.upserts.iter().position(belongs) else {
+                continue;
+            };
+            let count = reconciliation.delta.upserts[start..]
+                .iter()
+                .take_while(|document| belongs(document))
+                .count();
+            let changes = &mut reconciliation.delta.upserts[start..start + count];
+            if let Some(field) = stamp {
+                if changes
+                    .iter()
+                    .any(|document| !document.metadata.contains_key(field))
+                {
+                    return Err(IndexRebuildError::Index(
+                        "Streamed source lacks its canonical ordering field".to_owned(),
+                    ));
+                }
+                changes.sort_by(|left, right| {
+                    right
+                        .metadata
+                        .get(field)
+                        .cmp(&left.metadata.get(field))
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+            } else {
+                changes.sort_by(|left, right| left.id.cmp(&right.id));
+            }
         }
+        index_checkpoint(cx)?;
         Ok(SourceDeltaSnapshot {
             generation: generation.unwrap_or_else(|| u64::from(document_counts.total())),
             document_counts,
