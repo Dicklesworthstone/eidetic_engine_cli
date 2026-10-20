@@ -1,9 +1,10 @@
 //! Reconcile a complete canonical source stream without retaining unchanged bodies.
 //!
-//! This is a conservative small-delta optimization. A refusal returns to the
-//! existing full-snapshot planner, including its bulk growth and maintenance
-//! paths. Every source document is still read and hashed; only body residency
-//! and repeated whole-corpus hashing are reduced. No job list proves membership.
+//! Ordinary changes, bulk growth and rolling maintenance share the full V3
+//! planner's existing mutation/inference bounds. Only refused snapshots return
+//! to the full collector; accepted bulk imports never retain unchanged bodies.
+//! Every source document is still read and hashed; only body residency and
+//! repeated whole-corpus hashing are reduced. No job list proves membership.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -12,10 +13,12 @@ use crate::search::IndexableDocument;
 
 use super::{
     DOC_DIGESTS_SCHEMA_V3, Delta, DocDigests, EmbedderStack, EmbeddingReuse, IncrementalFallback,
-    IncrementalFallbackReason, MAX_DELTA_DOCUMENTS, MAX_DELTA_PERCENT, batch, document_digest,
-    embedder_identity, embedding_input_digest, incremental_fallback,
-    metadata::document_payload_bytes, read_digests,
+    IncrementalFallbackReason, MAX_DELTA_PERCENT, batch, document_digest, embedder_identity,
+    embedding_input_digest, incremental_fallback, metadata::document_payload_bytes, read_digests,
 };
+
+#[path = "index_delta_stream_budget.rs"]
+mod budget;
 
 const MAX_STREAM_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 
@@ -33,6 +36,7 @@ pub(in super::super) struct SourceReconciler {
     upserts: Vec<IndexableDocument>,
     reusable_inputs: BTreeMap<String, String>,
     inference_inputs: usize,
+    new_identities: usize,
     payload_bytes: usize,
     refused: Option<IncrementalFallback>,
 }
@@ -88,6 +92,7 @@ impl SourceReconciler {
             upserts: Vec::new(),
             reusable_inputs: BTreeMap::new(),
             inference_inputs: 0,
+            new_identities: 0,
             payload_bytes: 0,
             refused: None,
         })
@@ -133,7 +138,7 @@ impl SourceReconciler {
             ));
         }
         if changed {
-            if self.upserts.len() == MAX_DELTA_DOCUMENTS {
+            if self.upserts.len() == budget::MAX_MUTATIONS {
                 return Err(over_limit(
                     "streaming source delta exceeds the mutation budget",
                 ));
@@ -146,6 +151,7 @@ impl SourceReconciler {
             }
             self.payload_bytes += bytes;
             self.inference_inputs += usize::from(!reusable);
+            self.new_identities += usize::from(previous.is_none());
         }
         self.live_documents.remove(&document.id);
         self.live_inputs.remove(&document.id);
@@ -166,25 +172,17 @@ impl SourceReconciler {
             return Err(error);
         }
         checkpoint(self.request.as_ref())?;
-        if self.upserts.len().saturating_add(self.live_documents.len()) > MAX_DELTA_DOCUMENTS {
-            return Err(over_limit(
-                "streaming source delta exceeds the mutation budget",
-            ));
-        }
-        // The source count is known only after the stream ends. Metadata
-        // changes and withdrawals never consume this inference allowance.
+        // Apply the full planner's ordinary/growth/maintenance policy only
+        // after the complete source reveals net size and all withdrawals.
         let documents_total = self.current_documents.len();
-        let inference_limit = (self
-            .live_count
-            .max(documents_total)
-            .saturating_mul(MAX_DELTA_PERCENT)
-            / 100)
-            .clamp(1, MAX_DELTA_DOCUMENTS);
-        if self.inference_inputs > inference_limit {
-            return Err(over_limit(
-                "streaming source delta exceeds the inference budget",
-            ));
-        }
+        budget::validate(
+            self.live_count,
+            documents_total,
+            self.upserts.len(),
+            self.live_documents.len(),
+            self.inference_inputs,
+            self.new_identities,
+        )?;
         let mut removals = Vec::with_capacity(self.live_documents.len());
         for id in self.live_documents.into_keys() {
             checkpoint(self.request.as_ref())?;
@@ -249,13 +247,13 @@ mod tests {
     use crate::search::HashEmbedder;
     use std::sync::Arc;
 
-    type TestResult = Result<(), String>;
+    pub(super) type TestResult = Result<(), String>;
 
-    fn test_stack(seed: u64) -> EmbedderStack {
+    pub(super) fn test_stack(seed: u64) -> EmbedderStack {
         EmbedderStack::from_parts(Arc::new(HashEmbedder::jl_384(seed)), None)
     }
 
-    fn documents(count: usize) -> Vec<IndexableDocument> {
+    pub(super) fn documents(count: usize) -> Vec<IndexableDocument> {
         (0..count)
             .map(|number| {
                 IndexableDocument::new(format!("mem_{number:05}"), format!("lesson {number}"))
@@ -263,7 +261,7 @@ mod tests {
             .collect()
     }
 
-    fn generation(
+    pub(super) fn generation(
         stack: &EmbedderStack,
         documents: &[IndexableDocument],
     ) -> Result<tempfile::TempDir, String> {
@@ -274,7 +272,7 @@ mod tests {
         Ok(root)
     }
 
-    fn reconcile(
+    pub(super) fn reconcile(
         root: &Path,
         stack: &EmbedderStack,
         documents: &[IndexableDocument],
@@ -286,7 +284,7 @@ mod tests {
         stream.finish()
     }
 
-    fn same_as_full_plan(
+    pub(super) fn same_as_full_plan(
         root: &Path,
         stack: &EmbedderStack,
         current: &[IndexableDocument],
@@ -409,31 +407,17 @@ mod tests {
     }
 
     #[test]
-    fn small_delta_caps_preserve_metadata_removal_and_bulk_fallback_semantics() -> TestResult {
+    fn metadata_and_removals_no_longer_fall_back_at_the_old_stream_cap() -> TestResult {
         let stack = test_stack(11);
         let original = documents(1024);
         let root = generation(&stack, &original)?;
-        for mutations in [MAX_DELTA_DOCUMENTS, MAX_DELTA_DOCUMENTS + 1] {
+        for mutations in [256, 257, 1024] {
             let mut current = original.clone();
             for document in &mut current[..mutations] {
                 document.title = Some("new title without new embedding input".to_owned());
             }
-            assert!(super::super::plan(root.path(), &stack, &current).is_ok());
-            if mutations == MAX_DELTA_DOCUMENTS {
-                same_as_full_plan(root.path(), &stack, &current)?;
-            } else {
-                let error = reconcile(root.path(), &stack, &current)
-                    .err()
-                    .ok_or("small optimization must refuse the extra metadata operation")?;
-                assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
-            }
-            let survivors = &original[..original.len() - mutations];
-            assert!(super::super::plan(root.path(), &stack, survivors).is_ok());
-            if mutations == MAX_DELTA_DOCUMENTS {
-                same_as_full_plan(root.path(), &stack, survivors)?;
-            } else {
-                assert!(reconcile(root.path(), &stack, survivors).is_err());
-            }
+            same_as_full_plan(root.path(), &stack, &current)?;
+            same_as_full_plan(root.path(), &stack, &original[..original.len() - mutations])?;
         }
         Ok(())
     }
@@ -456,9 +440,14 @@ mod tests {
         current.rotate_right(2);
         same_as_full_plan(root.path(), &stack, &current)?;
         current[2].content.push_str(" rewritten");
+        // The bulk-growth policy can admit the first old rewrite plus both
+        // new IDs; a SECOND old rewrite exceeds its old-corpus allowance.
+        same_as_full_plan(root.path(), &stack, &current)?;
+        current[3].content.push_str(" another rewrite");
+        assert!(super::super::plan(root.path(), &stack, &current).is_err());
         let error = reconcile(root.path(), &stack, &current)
             .err()
-            .ok_or("third input must exceed the ordinary 25 percent allowance")?;
+            .ok_or("old rewrites must retain their bulk-growth percentage bound")?;
         assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
         Ok(())
     }
@@ -589,3 +578,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "index_delta_stream_bulk_tests.rs"]
+mod bulk_tests;

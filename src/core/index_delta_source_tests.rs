@@ -450,7 +450,7 @@ fn coalesced_streamed_stage_covers_unclaimed_jobs_and_fences_late_writes() {
 }
 
 #[test]
-fn streamed_mutation_cap_returns_to_existing_metadata_delta_publication() {
+fn streamed_bulk_metadata_does_not_require_complete_source_fallback() {
     let fixture = Fixture::new(257);
     fixture.seed_index();
     let baseline = vector_rows(&fixture.index_dir);
@@ -460,16 +460,20 @@ fn streamed_mutation_cap_returns_to_existing_metadata_delta_publication() {
         .expect("bulk metadata update");
     let job = fixture.queue(1, &memory_id(0));
     let expected = fixture.snapshot();
-    assert!(
-        fixture.streamed().is_none(),
-        "257 changes exceed only the small-stream optimization"
+    let streamed = fixture
+        .streamed()
+        .expect("257 metadata changes remain streamed");
+    assert_eq!(streamed.reconciliation.delta.upserts.len(), 257);
+    assert_eq!(
+        serde_json::to_value(streamed.reconciliation.digests).expect("complete streamed digests"),
+        canonical_digests(&expected),
     );
     assert_delta(&fixture.process(&job));
     fixture.assert_published(&expected);
     assert_eq!(
         vector_rows(&fixture.index_dir),
         baseline,
-        "metadata fallback preserves all existing vectors"
+        "streamed metadata preserves all existing vectors"
     );
 }
 
