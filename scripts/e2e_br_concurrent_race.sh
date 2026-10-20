@@ -80,11 +80,29 @@ esac
 BR
 chmod +x "$fake_bin/br"
 
+# PIN THE ATTEMPT BUDGET ON THE ARMS THAT ASSERT LOGIC, not latency.
+#
+# br_retry.sh defaults BR_RETRY_ATTEMPT_TIMEOUT_MS to 10000 and exits 124 when a
+# single attempt exceeds it (br_retry.sh:259). This arm and the `actionable` arm
+# below inherited that PRODUCTION default and therefore raced the host: each
+# attempt forks python plus a bash fake br, and under contention on a shared
+# six-agent checkout one of them crosses 10s. Measured 2026-10-19 before this
+# pin: 8 passes and one exit 124 in 9 consecutive runs, the failing run taking
+# 10.34s against 2.57-6.45s for the others -- i.e. the script reported a product
+# failure for a scheduling delay, which is the most expensive kind of flake
+# because it looks like logic.
+#
+# The hang arm below DELIBERATELY keeps a 150ms budget: its whole job is to prove
+# the hang guard fires and returns 124 quickly, so a tight bound is the assertion
+# there. Nothing about that is relaxed here, and no assertion in this file is
+# weakened -- the two arms that only need the retry and filter LOGIC to complete
+# now get room to complete.
 start_ms="$(python3 -c 'import time; print(int(time.monotonic() * 1000))')"
 PATH="$fake_bin:$PATH" \
 EE_FAKE_BR_STATE="$state_file" \
 EE_FAKE_BR_WORKSPACE_ID="$workspace_id" \
 EE_FAKE_BR_REQUEST_ID="$request_id" \
+BR_RETRY_ATTEMPT_TIMEOUT_MS="${EE_BR_RACE_ATTEMPT_TIMEOUT_MS:-60000}" \
 BR_RETRY_TMPDIR="$artifact_root" \
     "$REPO_ROOT/scripts/br_retry.sh" ready --json >"$stdout_path" 2>"$stderr_path"
 end_ms="$(python3 -c 'import time; print(int(time.monotonic() * 1000))')"
@@ -165,6 +183,7 @@ actionable_stderr_path="$artifact_root/actionable_stderr.jsonl"
 PATH="$fake_bin:$PATH" \
 EE_FAKE_BR_STATE="$state_file.actionable" \
 EE_FAKE_BR_MODE="actionable" \
+BR_RETRY_ATTEMPT_TIMEOUT_MS="${EE_BR_RACE_ATTEMPT_TIMEOUT_MS:-60000}" \
 BR_RETRY_TMPDIR="$artifact_root" \
     "$REPO_ROOT/scripts/br_retry.sh" actionable --json >"$actionable_stdout_path" 2>"$actionable_stderr_path"
 
