@@ -213,11 +213,9 @@ fn late_rewritten_survivor_duplicates_and_inconsistent_input_maps_never_return_p
         .expect("old survivor")
         .content
         .push(' ');
-    assert!(
-        try_plan(&live, &input, &rewritten, IDENTITY.to_owned())
-            .expect("old input rewrite retains the ordinary fallback")
-            .is_none()
-    );
+    let error = try_plan(&live, &input, &rewritten, IDENTITY.to_owned())
+        .expect_err("new and rewritten inputs share one inference budget");
+    assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
     let mut inconsistent = input.clone();
     inconsistent.insert(original[31].id.clone(), "0".repeat(64));
     assert!(

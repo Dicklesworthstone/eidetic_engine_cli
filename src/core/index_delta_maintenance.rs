@@ -3,9 +3,9 @@
 //! A shrinking or constant-size archive may ingest new evidence while older
 //! evidence is withdrawn. Net growth is not a prerequisite for incremental
 //! publication. Share bulk intake's row/payload budgets for those operations,
-//! but keep the ordinary inference allowance for NEW identities and require
-//! every surviving old identity's embedding input to remain exactly unchanged.
-//! An old input rewrite still retains the ordinary mixed-mutation refusal.
+//! while keeping the ordinary inference allowance for new AND rewritten inputs.
+//! Metadata-only survivors reuse their exact old vectors; an edited body never
+//! gains reuse authority merely because its document ID survived.
 //! Metadata refreshes and withdrawals alone remain inference-free. Source
 //! admission, producer identity, staging and publication are unchanged here.
 
@@ -62,10 +62,12 @@ fn plan_with_checkpoint(
 
     let mut budget = append::AppendBudget::default();
     // Do not turn the larger maintenance mutation allowance into a larger
-    // inference allowance. Since this source cannot grow, new inputs keep the
-    // ordinary percentage/absolute limit measured against the live corpus.
-    let new_input_limit = super::vector_delta_limit(live.len(), documents.len());
-    let mut new_inputs = 0;
+    // inference allowance. New IDs and rewritten old inputs share the ordinary
+    // percentage/absolute limit measured against the live corpus. Withdrawals
+    // and metadata refreshes cannot buy more embedding work.
+    let input_limit = super::vector_delta_limit(live.len(), documents.len());
+    let mut inferred_inputs = 0;
+    let mut new_identities = 0;
     let mut present = BTreeSet::new();
     let mut changed = Vec::new();
     for document in documents {
@@ -80,29 +82,34 @@ fn plan_with_checkpoint(
             let expected_input = inputs.get(&document.id).ok_or_else(invalid_identity_map)?;
             let input = embedding_input_digest(document);
             checkpoint()?;
-            if *expected_input != input {
-                return Ok(None);
-            }
             // Check every surviving input, including a supposedly unchanged
             // document: inconsistent maps must not confer reuse authority.
             let digest = document_digest(document);
             checkpoint()?;
             if *expected_document == digest {
+                if *expected_input != input {
+                    return Ok(None);
+                }
                 continue;
             }
-            Some(expected_input)
+            // Only metadata changes may reuse an existing vector. A changed
+            // embedding input is submitted to both configured tiers below.
+            (*expected_input == input).then_some(expected_input)
         } else {
             // A new ID always needs a vector, even if its text equals a
             // survivor's or a withdrawn document's. No equality hash can
             // establish a live vector record for this previously absent ID.
-            if new_inputs == new_input_limit {
-                return Err(over_limit(
-                    "rolling intake exceeds the new-input inference budget",
-                ));
-            }
-            new_inputs += 1;
+            new_identities += 1;
             None
         };
+        if reusable.is_none() {
+            if inferred_inputs == input_limit {
+                return Err(over_limit(
+                    "rolling intake exceeds the new-input inference budget (including rewritten inputs)",
+                ));
+            }
+            inferred_inputs += 1;
+        }
         let bytes = document_payload_bytes(document);
         checkpoint()?;
         budget.admit(bytes)?;
@@ -139,10 +146,11 @@ fn plan_with_checkpoint(
     tracing::debug!(
         target: "ee::index",
         source_documents = documents.len(),
-        metadata_upserts = upserts.len().saturating_sub(new_inputs),
-        new_inputs,
+        metadata_upserts = upserts.len().saturating_sub(inferred_inputs),
+        new_inputs = new_identities,
+        rewritten_inputs = inferred_inputs.saturating_sub(new_identities),
         withdrawals = removals.len(),
-        "planned bounded rolling intake with unchanged surviving embedding inputs"
+        "planned bounded rolling intake with exact per-input vector reuse"
     );
     Ok(Some(Delta {
         upserts,
@@ -161,3 +169,7 @@ mod tests;
 #[cfg(test)]
 #[path = "index_delta_rolling_tests.rs"]
 mod rolling_tests;
+
+#[cfg(test)]
+#[path = "index_delta_mixed_maintenance_tests.rs"]
+mod mixed_tests;
