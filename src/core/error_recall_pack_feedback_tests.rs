@@ -451,3 +451,199 @@ fn duplicate_rule_windows_refill_without_displacing_native_memory_precedence() -
     assert_eq!(query, seed(&connection)?);
     Ok(())
 }
+
+#[test]
+fn every_native_target_limit_refills_and_retains_only_selected_bounded_excerpts() -> TestResult {
+    let connection = db()?;
+    let mut targets = (1..=40_u128)
+        .map(|number| MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string())
+        .collect::<Vec<_>>();
+    let mut expected = Vec::new();
+    for number in 0..36_u128 {
+        let text = format!("Native repair group {number} restores the cache before retrying.");
+        let first = memory(&connection, 1000 + 2 * number, &text)?;
+        let copy = memory(&connection, 1001 + 2 * number, &text)?;
+        expected.push(first.clone());
+        targets.extend([first, copy]);
+    }
+    record(&connection, targets, Vec::new())?;
+    let at = chrono::Utc::now();
+    connection.begin_read_snapshot()?;
+    for limit in 0..=32_u32 {
+        let selected = feedback::pack_selection(&connection, WS, KEY, limit, at)?;
+        assert_eq!(selected.targets, expected[..limit as usize]);
+        assert_eq!(
+            selected
+                .memories
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            expected[..limit as usize]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            selected
+                .memories
+                .iter()
+                .all(|(_, text)| text.len() <= super::super::PACK_RECALL_EXCERPT_BYTES)
+        );
+        assert!(selected.rules.is_empty());
+        assert!(selected.memory_hints.len() <= 4);
+    }
+    connection.commit_read_snapshot()?;
+    let unavailable = DbConnection::open_memory()?;
+    let empty = feedback::pack_selection(&unavailable, WS, KEY, 0, at)?;
+    assert!(empty.targets.is_empty() && empty.memories.is_empty() && empty.memory_hints.is_empty());
+    assert!(feedback::pack_selection(&unavailable, WS, KEY, 33, at).is_err());
+    Ok(())
+}
+
+#[test]
+fn complete_source_refusals_precede_native_diversity_and_do_not_reserve_a_safe_excerpt()
+-> TestResult {
+    let connection = db()?;
+    let prefix = format!(
+        "The serializer repair preserves checked cache keys. {}",
+        "資料 🦀 ".repeat(250)
+    );
+    let sealed = memory(&connection, 1, &prefix)?;
+    connection.insert_memory_seal(
+        &sealed,
+        &format!("blake3:{}", "a".repeat(64)),
+        "2000-01-01T00:00:00Z",
+    )?;
+    let harmful = memory(&connection, 2, &prefix)?;
+    let poisoned = memory(&connection, 3, &prefix)?;
+    let poison = format!("{prefix} api_key=ghp_{}", "Q".repeat(36));
+    connection.execute_raw(&format!(
+        "UPDATE memories SET content = '{}' WHERE id = '{poisoned}'",
+        poison.replace('\'', "''")
+    ))?;
+    let good = memory(&connection, 1000, &prefix)?;
+    let good_rule = rule(&connection, 1000)?;
+    record(
+        &connection,
+        vec![
+            sealed.clone(),
+            harmful.clone(),
+            poisoned.clone(),
+            good.clone(),
+            good_rule.clone(),
+        ],
+        vec![harmful.clone()],
+    )?;
+    let history = connection.list_error_repair_links(WS, KEY)?;
+    let selected = feedback::pack_selection(&connection, WS, KEY, 32, chrono::Utc::now())?;
+    assert_eq!(selected.targets, [good.clone(), good_rule.clone()]);
+    assert_eq!(selected.memories.len(), 1);
+    assert_eq!(selected.rules.len(), 1);
+    assert!(!selected.memory_hints.contains(&harmful));
+    let query = seed(&connection)?;
+    assert!(query.contains(&good));
+    assert!(query.contains(&good_rule));
+    assert!(query.contains(" [truncated]"));
+    assert!(!query.contains("ghp_") && !query.contains("api_key="));
+    assert!(!query.contains(&harmful));
+    assert_eq!(query.matches("\nprior fix: ").count(), 2);
+    assert_eq!(connection.list_error_repair_links(WS, KEY)?, history);
+    Ok(())
+}
+
+#[test]
+fn native_refill_rechecks_changed_eligibility_and_preserves_caller_rollback() -> TestResult {
+    let connection = db()?;
+    let first = memory(&connection, 1, MEMORY_BODY)?;
+    let later = memory(&connection, 1000, GOOD_BODY)?;
+    let retained_rule = rule(&connection, 1000)?;
+    let mut targets = (2..=96_u128)
+        .map(|number| MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string())
+        .collect::<Vec<_>>();
+    targets.extend([first.clone(), later.clone(), retained_rule.clone()]);
+    record(&connection, targets, Vec::new())?;
+    let before = seed(&connection)?;
+    assert!(
+        before.contains(MEMORY_BODY) && before.contains(GOOD_BODY) && before.contains(RULE_BODY)
+    );
+    let history = connection.list_error_repair_links(WS, KEY)?;
+    let transaction: crate::db::Result<()> = connection.with_transaction(|| {
+        connection.execute_raw(&format!(
+            "UPDATE memories SET valid_to = '2001-01-01T00:00:00Z' WHERE id = '{first}'"
+        ))?;
+        connection.execute_raw(&format!(
+            "UPDATE procedural_rules SET maturity = 'deprecated' WHERE id = '{retained_rule}'"
+        ))?;
+        let selected = feedback::pack_selection(&connection, WS, KEY, 1, chrono::Utc::now())?;
+        assert_eq!(selected.targets, [later.clone()]);
+        let inside = seed(&connection)?;
+        assert!(inside.contains(GOOD_BODY));
+        assert!(!inside.contains(MEMORY_BODY) && !inside.contains(RULE_BODY));
+        connection.execute_raw("INSERT INTO missing_native_refill_rollback VALUES (1)")?;
+        Ok(())
+    });
+    assert!(transaction.is_err());
+    assert_eq!(seed(&connection)?, before);
+    assert_eq!(connection.list_error_repair_links(WS, KEY)?, history);
+    connection.insert_memory_seal(
+        &first,
+        &format!("blake3:{}", "a".repeat(64)),
+        "2000-01-01T00:00:00Z",
+    )?;
+    assert!(!seed(&connection)?.contains(MEMORY_BODY));
+    connection.mark_memory_seal_revealed(&first, "2000-01-01T00:00:00Z")?;
+    assert_eq!(seed(&connection)?, before);
+    connection.begin_read_snapshot()?;
+    assert_eq!(seed(&connection)?, before);
+    connection.commit_read_snapshot()?;
+    Ok(())
+}
+
+#[test]
+fn late_native_authority_failure_returns_no_partial_query_and_keeps_transaction_ownership()
+-> TestResult {
+    let connection = db()?;
+    let good = memory(&connection, 1000, GOOD_BODY)?;
+    let linked_rule = rule(&connection, 1000)?;
+    let mut targets = (1..=96_u128)
+        .map(|number| MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string())
+        .collect::<Vec<_>>();
+    targets.extend([good.clone(), linked_rule.clone()]);
+    record(&connection, targets, Vec::new())?;
+    let before = seed(&connection)?;
+    assert!(before.contains(GOOD_BODY) && before.contains(RULE_BODY));
+    let transaction: crate::db::Result<()> = connection.with_transaction(|| {
+        connection.execute_raw(
+            "ALTER TABLE rule_source_memories RENAME TO unavailable_late_native_authority",
+        )?;
+        let error = seed(&connection)
+            .expect_err("selected memory cannot make unchecked rule authority optional");
+        let message = error.to_string();
+        for private in [
+            GOOD_BODY,
+            RULE_BODY,
+            good.as_str(),
+            linked_rule.as_str(),
+            "unavailable_late_native_authority",
+        ] {
+            assert!(!message.contains(private));
+        }
+        // The reader neither commits nor rolls back the caller's schema edit.
+        assert!(
+            connection
+                .query(
+                    "SELECT memory_id FROM unavailable_late_native_authority",
+                    &[]
+                )
+                .is_ok()
+        );
+        connection.execute_raw("INSERT INTO missing_late_native_rollback VALUES (1)")?;
+        Ok(())
+    });
+    assert!(transaction.is_err());
+    assert_eq!(seed(&connection)?, before);
+    connection.begin_read_snapshot()?;
+    assert_eq!(seed(&connection)?, before);
+    connection.commit_read_snapshot()?;
+    Ok(())
+}
