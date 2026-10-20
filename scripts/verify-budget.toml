@@ -527,6 +527,14 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Step Assertion Isolation Contract"
+# The cargo-provenance guard flags this stage because
+# scripts/check-step-assertion-isolation.py CONTAINS the text `cargo test` --
+# in its docstrings and in the planted YAML fixtures it analyses. It does not
+# RUN cargo: its only subprocess call re-invokes itself
+# (sys.executable + __file__) for a self-test. The guard is matching
+# conservatively on the string, which is the right direction to be wrong in,
+# so this record satisfies it with a real measurement rather than arguing.
+# P50_PROVENANCE measured=2026-10-20 host=mac-mini-old load=3.27 samples_s=0.15,0.11,0.11 median_s=0.11 declared_p50_s=1
 expected_seconds_p50 = 1
 regression_factor = 1.5
 
