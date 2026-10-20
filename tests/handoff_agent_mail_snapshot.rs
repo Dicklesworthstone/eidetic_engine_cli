@@ -13,9 +13,35 @@ mod fixture;
 type TestResult = Result<(), String>;
 
 fn call(workspace: &str, args: &[&str]) -> Result<Value, String> {
+    // bd-9vkmt: isolate HOME and XDG_DATA_HOME. `ee` resolves its data dir
+    // from XDG_DATA_HOME, else HOME/.local/share, and keeps the global store,
+    // catalog and embedding-model cache there. This spawn removed the two
+    // workspace selectors and inherited everything else, so it read whatever
+    // state the host happened to hold -- including a developer's real
+    // ~/.local/share/ee. bd-rvrj2 measured the consequence: the same worker
+    // and binary emit different degradation codes with and without host
+    // state, so an un-isolated spawn is a test whose verdict depends on the
+    // machine.
+    //
+    // The root is a SIBLING of the workspace inside the same temp dir (see
+    // `workspace`), so it is cleaned up with it and nothing lands inside the
+    // tree under test -- an isolated HOME materialises `.local/share/ee`, and
+    // putting that under the workspace would plant the nested-marker
+    // condition another fixture exists to detect.
+    let isolation = Path::new(workspace)
+        .parent()
+        .ok_or_else(|| format!("workspace has no parent to isolate beside: {workspace}"))?
+        .join("isolation");
+    let home = isolation.join("home");
+    let data = isolation.join("xdg-data");
+    for dir in [&home, &data] {
+        fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(["--workspace", workspace, "--json"])
         .args(args)
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", &data)
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
@@ -39,7 +65,20 @@ fn call(workspace: &str, args: &[&str]) -> Result<Value, String> {
 
 fn workspace() -> Result<(tempfile::TempDir, String), String> {
     let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let path = fs::canonicalize(dir.path()).map_err(|error| error.to_string())?;
+    // bd-9vkmt: the workspace is a SUBDIR of the temp root rather than the
+    // root itself, so `call` has a sibling slot for its isolated HOME. When
+    // the root WAS the workspace there was nowhere to put one: `parent()` is
+    // the shared system temp dir, and inside the workspace would plant a
+    // nested `.ee` marker in the tree under test.
+    //
+    // Every path derived from this shifts by one component. That is safe for
+    // the only derivation here: project_key_for_workspace hashes the canonical
+    // path, and this test only ever compares two such keys for equality or
+    // difference, never against a literal.
+    let workspace_dir = dir.path().join("ws");
+    fs::create_dir_all(&workspace_dir)
+        .map_err(|error| format!("create {}: {error}", workspace_dir.display()))?;
+    let path = fs::canonicalize(&workspace_dir).map_err(|error| error.to_string())?;
     let name = path.to_str().ok_or("non-UTF-8 workspace")?.to_owned();
     call(&name, &["init"])?;
     Ok((dir, name))

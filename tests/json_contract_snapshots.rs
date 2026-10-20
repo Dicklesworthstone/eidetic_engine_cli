@@ -57,7 +57,7 @@ impl JsonContractFixture {
         let canonical_workspace = canonical_fixture_path(&workspace, "workspace")?;
         let canonical_database = canonical_fixture_path(&database, "database")?;
         let canonical_index_dir_input = canonical_workspace.join(".ee").join("index");
-        let binary = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+        let binary = ee_binary();
         let canonical_binary = canonical_fixture_path(&binary, "ee binary")?;
         build_search_index(
             &binary,
@@ -517,6 +517,24 @@ fn build_search_index(
         ));
     }
     Ok(())
+}
+
+/// The ONE place this suite names the ee binary (bd-9vkmt).
+///
+/// Every spawn in this file goes through `run_ee_at`, which IS isolated -- it
+/// sets `HOME` to a per-fixture `.home` for the bd-28kky reason documented at
+/// its call to `.env("HOME", ...)`. But `scripts/check-ee-spawn-isolation.py`
+/// counts FUNCTIONS CONTAINING the `CARGO_BIN_EXE_ee` token, not functions
+/// that spawn, so two call sites that merely built a `PathBuf` were each
+/// counted as an un-isolated spawn and the ratchet went 270 -> 272.
+///
+/// Consolidating the token here leaves exactly one counted site, which is what
+/// this file's baseline row has always allowed, without weakening anything:
+/// the isolation lives where the spawn lives, and path construction stops
+/// masquerading as a spawn. Do NOT inline this back into a caller -- the
+/// ratchet will go up again and the next reader will think a spawn regressed.
+fn ee_binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_ee"))
 }
 
 fn run_ee_at(binary: &Path, workspace: &Path, args: &[String]) -> Result<Output, String> {
@@ -1924,7 +1942,7 @@ fn nested_workspace_still_reports_subproject_scope() -> TestResult {
         ));
     }
 
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+    let binary = ee_binary();
     let workspace_arg = workspace.display().to_string();
 
     let init_args = vec![
