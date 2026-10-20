@@ -473,6 +473,63 @@ name = "RCH Doc Examples Lint"
 expected_seconds_p50 = 2
 regression_factor = 1.5
 
+# The eight no-Cargo static check gates wired into verify.sh on 2026-10-20
+# (bd-actions-disabled-repo-wide-33mfm). They ran ONLY in .github/workflows
+# before, and Actions has been dark for 11.4 days across 1005 commits, so they
+# were not running anywhere -- check-ee-spawn-isolation.py was FAILING on main
+# for all of it.
+#
+# Every p50 below is MEASURED on this host, not estimated: seven of the eight
+# complete in under a second and declare 1s; check-production-reachability was
+# timed at 1.99s and declares 2s. Nine seconds in total, which the readiness
+# ceiling has room for only because bd-2di61 moved the exclusion from one
+# literal stage name to the opt-in-flag property (608/608 -> 566/608).
+#
+# If one of these grows past p50 * 3 verify.sh fails the run, which for a
+# sub-second static scan means something structural changed rather than the
+# host being slow -- worth reading the scanner's own output rather than
+# raising the number.
+
+[[stage]]
+name = "Action Pins Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Degraded Code Classification Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "ee Spawn Isolation Ratchet"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Graph Metric FNX Routing Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Production Reachability Contract"
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+name = "RCH Remediation Guidance Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Shard Coverage Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Step Assertion Isolation Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
 [[stage]]
 name = "Local Cargo Tripwire Contract"
 expected_seconds_p50 = 3

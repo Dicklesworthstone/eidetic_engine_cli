@@ -1996,6 +1996,41 @@ run_stage "RCH Doc Examples Contract" "python3 scripts/check-rch-doc-examples.py
 # copy-pasteable local Cargo compile examples that bypass the verifier wrapper.
 run_stage "RCH Doc Examples Lint" "python3 scripts/check-rch-doc-examples.py --json"
 
+# Gate 3.906-3.913: the eight no-Cargo static check gates that previously ran
+# ONLY in .github/workflows (bd-actions-disabled-repo-wide-33mfm, bd-9vkmt).
+#
+# Every one is pure Python, deterministic, needs no network and no Cargo, and
+# they total about 3.5 seconds measured on this host. They were wired into
+# hosted workflows and nowhere else, so while Actions has been dark -- 11.4
+# days and 1005 commits at the time of writing -- they were not running at all,
+# and verify.sh stayed green without them.
+#
+# THAT IS NOT HYPOTHETICAL. check-ee-spawn-isolation.py was FAILING on main for
+# eleven days (census 272 un-isolated ee spawns against a 270 baseline) with its
+# job in ci-static.yml. One of the two new sites spawned the real `ee` binary
+# while inheriting the developer's HOME, so the test read the host's own
+# ~/.local/share/ee; bd-rvrj2 measured that host state changes degradation
+# codes. Nothing reported it because a wired gate in a dark workflow is
+# indistinguishable from an unwired one. Fixed in a99ff01ff; these stages are
+# how the next one gets caught locally instead.
+#
+# check-rch-doc-examples.py is deliberately absent here: Gates 3.90 and 3.905
+# above already run it.
+#
+# Room for these exists because bd-2di61 moved the readiness-total exclusion
+# from a literal stage name to the property "verify.sh gates it behind an
+# opt-in flag", which took the non-benchmark total from 608/608 to 566/608.
+# Their p50s are measured, not estimated: each sub-second check declares 1s and
+# check-production-reachability, timed at 1.99s, declares 2s.
+run_stage "Action Pins Contract" "python3 scripts/check-action-pins.py"
+run_stage "Degraded Code Classification Contract" "python3 scripts/check-degraded-code-classified.py"
+run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation.py"
+run_stage "Graph Metric FNX Routing Contract" "python3 scripts/check-graph-metric-fnx-routing.py"
+run_stage "Production Reachability Contract" "python3 scripts/check-production-reachability.py"
+run_stage "RCH Remediation Guidance Contract" "python3 scripts/check-rch-remediation-guidance.py"
+run_stage "Shard Coverage Contract" "python3 scripts/check-shard-coverage.py"
+run_stage "Step Assertion Isolation Contract" "python3 scripts/check-step-assertion-isolation.py"
+
 # Gate 3.91: Local Cargo tripwire contract (bd-1n3x1.10). This deterministic
 # self-test validates command-shape denials, JSON repair actions, and fixture
 # process classification without scanning live peer processes or running Cargo.
