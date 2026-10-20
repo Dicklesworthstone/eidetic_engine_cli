@@ -277,6 +277,8 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     let mut ambiguous = false;
     let mut nodes = BTreeMap::<&str, Status>::new();
     let mut details = BTreeMap::<&str, Status>::new();
+    let mut fixture_progress = BTreeMap::<&str, u64>::new();
+    let mut fixture_details = BTreeMap::<&str, u64>::new();
     let mut observed = [0_u64; 6];
     let mut description = None;
     for (index, line) in lines.iter().enumerate() {
@@ -291,7 +293,9 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             if let Some(status) = displayed_status
                 && started_at + 1 == index
             {
-                if nodes.len() == MAX_TESTS || nodes.insert(node, status).is_some() {
+                if observed.iter().sum::<u64>() >= MAX_TESTS as u64
+                    || nodes.insert(node, status).is_some()
+                {
                     return Err(());
                 }
                 observed[status.index()] += 1;
@@ -323,8 +327,17 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         }
         if inventory_open && verbose {
             if let Some((node, status)) = progress(line) {
-                if nodes.len() == MAX_TESTS || nodes.insert(node, status).is_some() {
+                if observed.iter().sum::<u64>() >= MAX_TESTS as u64 {
                     return Err(());
+                }
+                let repeated_fixture = fixture_phase(node).is_some() && status == Status::Error;
+                if let Some(previous) = nodes.insert(node, status)
+                    && !(repeated_fixture && previous == Status::Error)
+                {
+                    return Err(());
+                }
+                if repeated_fixture {
+                    *fixture_progress.entry(node).or_default() += 1;
                 }
                 observed[status.index()] += 1;
             } else if let Some(node) = test_identity(line) {
@@ -342,18 +355,28 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             if details.len() == MAX_TESTS && !details.contains_key(node) {
                 return Err(());
             }
-            if details.insert(node, status).is_some() && complete_subject {
+            let repeated_fixture = fixture_phase(node).is_some() && status == Status::Error;
+            if let Some(previous) = details.insert(node, status)
+                && complete_subject
+                && !(repeated_fixture && previous == Status::Error)
+            {
                 return Err(());
+            }
+            if repeated_fixture {
+                if fixture_details.values().sum::<u64>() >= MAX_TESTS as u64 {
+                    return Err(());
+                }
+                *fixture_details.entry(node).or_default() += 1;
             }
         }
     }
-    // A fixture reports ERROR (or a setup SkipTest), never an ordinary pass,
-    // assertion failure or expected outcome. Neither a detail-only fixture in
-    // a verbose report nor an invalid fixture status can certify a whole run.
+    // Each failed class cleanup can report the same _ErrorHolder again. Keep
+    // multiplicity for summary/proof checks but one diagnostic per identity.
+    // Test identities still cannot repeat. SkipTest is also a native fixture
+    // outcome (including teardown), but never supplies completion authority.
     for (node, status) in nodes.iter().chain(details.iter()) {
-        if let Some(phase) = fixture_phase(node)
-            && *status != Status::Error
-            && !(phase == FixturePhase::Setup && *status == Status::Skipped)
+        if fixture_phase(node).is_some()
+            && !matches!(status, Status::Error | Status::Skipped)
         {
             return Err(());
         }
@@ -376,8 +399,16 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             return Err(());
         }
         let mut known = [0_u64; 6];
-        for status in failures.values() {
-            known[status.index()] += 1;
+        for (node, status) in &failures {
+            // Progress and detail sections describe the same callbacks, not
+            // two independent failures. Neither may contradict the footer.
+            let occurrences = fixture_progress
+                .get(node)
+                .copied()
+                .unwrap_or(0)
+                .max(fixture_details.get(node).copied().unwrap_or(0))
+                .max(1);
+            known[status.index()] += occurrences;
         }
         if [1, 2, 5]
             .iter()
@@ -388,9 +419,10 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     }
     let mut execution = Execution::default();
     let has_fixture = nodes.keys().any(|node| fixture_phase(node).is_some());
-    let setup_withheld = nodes
-        .keys()
-        .any(|node| fixture_phase(node) == Some(FixturePhase::Setup));
+    let fixture_withheld = nodes.iter().any(|(node, status)| {
+        fixture_phase(node)
+            .is_some_and(|phase| phase == FixturePhase::Setup || *status == Status::Skipped)
+    });
     let teardown_failed = nodes.iter().any(|(node, status)| {
         fixture_phase(node) == Some(FixturePhase::Teardown) && *status == Status::Error
     });
@@ -414,14 +446,14 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     }
     execution.complete = verbose
         && !ambiguous
-        && !setup_withheld
+        && !fixture_withheld
         && description.is_none()
         && ran_count == Some(tests_run)
         && (!has_fixture
             || nodes.iter().all(|(node, status)| {
                 fixture_phase(node).is_none()
                     || *status == Status::Skipped
-                    || details.get(node) == Some(status)
+                    || fixture_progress.get(node) == fixture_details.get(node)
             }))
         && summary
             .as_ref()
@@ -879,5 +911,96 @@ mod tests {
                     && !diagnostic.message_template.contains("private fixture body")
             })
         );
+    }
+
+    fn cleanup_detail(number: usize) -> String {
+        format!(
+            "{ERROR_SEPARATOR}\nERROR: tearDownClass (tests.test_cache.CacheTests)\n{RUN_SEPARATOR}\nTraceback (most recent call last):\nRuntimeError: private cleanup {number}\n\n"
+        )
+    }
+
+    fn repeated_cleanup_report() -> String {
+        let progress = "tearDownClass (tests.test_cache.CacheTests) ... ERROR\n";
+        format!(
+            "{CACHE} ... ok\n{CONTROL} ... ok\n{progress}{progress}\n{}{}{RUN_SEPARATOR}\nRan 2 tests in 0.001s\n\nFAILED (errors=2)\n",
+            cleanup_detail(0),
+            cleanup_detail(1),
+        )
+    }
+
+    #[test]
+    fn multiple_class_cleanup_errors_keep_one_class_and_require_all_executed_tests() {
+        let text = repeated_cleanup_report();
+        let failure = decoded(&text);
+        assert!(failure.failed);
+        assert!(failure.execution.has_known_failures());
+        assert_eq!(failure.execution.inventory.len(), 2);
+        assert_eq!(failure.execution.failed.len(), 2);
+        assert_eq!(failure.diagnostics.len(), 1);
+        let single = fixture_report(
+            "tearDownClass",
+            "tests.test_cache.CacheTests",
+            &format!("{CACHE} ... ok\n{CONTROL} ... ok\n"),
+            2,
+        );
+        assert_eq!(failure.diagnostics, decoded(&single).diagnostics);
+        assert!(
+            failure
+                .execution
+                .verified_by(&decoded(&report("ok")).execution)
+        );
+        assert!(!failure.symptom.unwrap().contains("private cleanup"));
+    }
+
+    #[test]
+    fn repeated_fixture_counts_do_not_relax_test_duplicates_or_detail_reconciliation() {
+        let text = repeated_cleanup_report();
+        assert!(super::super::decode(&text.replace("errors=2", "errors=1")).is_err());
+        let missing_detail = text.replace(&cleanup_detail(0), "");
+        let incomplete = decoded(&missing_detail);
+        assert!(incomplete.failed);
+        assert!(!incomplete.execution.has_known_failures());
+        let duplicate_test = text.replacen(
+            &format!("{CACHE} ... ok\n"),
+            &format!("{CACHE} ... ok\n{CACHE} ... ok\n"),
+            1,
+        );
+        assert!(super::super::decode(&duplicate_test).is_err());
+        let mixed = text.replacen(
+            "tearDownClass (tests.test_cache.CacheTests) ... ERROR",
+            "tearDownClass (tests.test_cache.CacheTests) ... skipped 'ambiguous callback'",
+            1,
+        );
+        assert!(super::super::decode(&mixed).is_err());
+    }
+
+    #[test]
+    fn a_skipped_teardown_retains_test_failures_but_never_certifies_completion() {
+        let skipped = "tearDownClass (tests.test_cache.CacheTests) ... skipped 'not completed'\n";
+        let text = report("FAIL")
+            .replacen(ERROR_SEPARATOR, &format!("{skipped}\n{ERROR_SEPARATOR}"), 1)
+            .replace("FAILED (failures=1)", "FAILED (failures=1, skipped=1)");
+        let failure = decoded(&text);
+        assert!(failure.failed);
+        assert_eq!(failure.diagnostics, decoded(&report("FAIL")).diagnostics);
+        assert!(!failure.execution.has_known_failures());
+        let passed = report("ok")
+            .replacen(RUN_SEPARATOR, &format!("{skipped}\n{RUN_SEPARATOR}"), 1)
+            .replace("\nOK\n", "\nOK (skipped=1)\n");
+        let proof = decoded(&passed);
+        assert!(!proof.failed);
+        assert!(!proof.allows_completion);
+    }
+
+    #[test]
+    fn repeated_cleanup_callbacks_are_bounded_even_under_one_unique_identity() {
+        let progress = "tearDownClass (m.C) ... ERROR\n".repeat(MAX_TESTS + 1);
+        let text = format!(
+            "{progress}\n{RUN_SEPARATOR}\nRan 0 tests in 0.001s\n\nFAILED (errors={})\n",
+            MAX_TESTS + 1,
+        );
+        assert!(text.len() < MAX_SCANNED_OUTPUT_BYTES);
+        assert!(text.lines().count() < MAX_LINES);
+        assert!(super::super::decode(&text).is_err());
     }
 }
