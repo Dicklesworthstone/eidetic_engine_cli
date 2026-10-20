@@ -172,14 +172,45 @@ doctor_fixture_assert_write_lock_monotonic() {
 # contract change and the fixture is the right place to notice it.
 DOCTOR_LOCK_EXPECTED_MARKER='ee.doctor.persistent_lock.v1'
 
+# Record whether the lock existed BEFORE the fix, mirroring
+# doctor_fixture_record_write_lock. The baseline is what makes the assertion
+# below able to distinguish "doctor never created a lock" from "undo removed
+# one", and those must not be conflated:
+#
+#   absent -> absent   doctor created none. PASS. This is the shape the
+#                      assertion_contract.py scenarios produce, because their
+#                      fake `ee` never takes a real lock.
+#   absent -> present  the normal real-fixture path. PASS, marker required.
+#   present -> absent  undo unlinked a persistent lock. FAIL.
+#   present -> present PASS, marker required.
+doctor_fixture_record_doctor_lock() {
+    local target="${1:?target required}"
+    local lock="$target/.ee/.doctor.lock"
+    if [ -e "$lock" ] || [ -L "$lock" ]; then
+        printf 'present\n' > "$target/.fixture_baseline/doctor-lock.before"
+    else
+        printf 'absent\n' > "$target/.fixture_baseline/doctor-lock.before"
+    fi
+}
+
 doctor_fixture_assert_doctor_lock_persistent() {
     local fm_id="${1:?fm id required}"
     local target="${2:?target required}"
     local lock="$target/.ee/.doctor.lock"
+    local before="absent"
+    # A missing baseline means doctor_fixture_corrupt predates this check;
+    # treat it as `absent` rather than failing, so an old fixture tree does not
+    # red on the bookkeeping instead of on doctor's behaviour.
+    if [ -f "$target/.fixture_baseline/doctor-lock.before" ]; then
+        before="$(cat "$target/.fixture_baseline/doctor-lock.before")"
+    fi
     if [ ! -f "$lock" ]; then
-        printf 'fixture assert: .doctor.lock is absent after undo for %s; doctor_runtime forbids teardown unlinking it\n' \
-            "$fm_id" >&2
-        return 1
+        if [ "$before" = "present" ]; then
+            printf 'fixture assert: .doctor.lock existed at the baseline but is absent after undo for %s; doctor_runtime:3643 forbids teardown unlinking it\n' \
+                "$fm_id" >&2
+            return 1
+        fi
+        return 0
     fi
     if ! grep -qF "$DOCTOR_LOCK_EXPECTED_MARKER" "$lock"; then
         printf 'fixture assert: .doctor.lock does not carry %s after undo for %s; undo overwrote a persistent lock\n' \
@@ -204,6 +235,7 @@ doctor_fixture_corrupt() {
     # can name the file instead of only reporting that one exists.
     doctor_fixture_content_manifest "$target" > "$target/.fixture_baseline/before.manifest"
     doctor_fixture_record_write_lock "$target"
+    doctor_fixture_record_doctor_lock "$target"
     printf '{"schema":"ee.doctor_fixture_marker.v1","fmId":"%s","severity":"%s","subsystem":"%s","state":"corrupt"}\n' \
         "$fm_id" "$severity" "$subsystem" > "$marker_dir/$fm_id.json"
     printf 'corrupt fixture prepared: %s\n' "$fm_id" >&2
