@@ -439,3 +439,262 @@ fn unavailable_sources_return_no_partial_verdict_and_caller_transaction_remains_
     fixture.db.rollback_read_snapshot()?;
     Ok(())
 }
+
+pub(crate) fn record_card_feedback(
+    connection: &DbConnection,
+    workspace: &str,
+    diagnostic: &CanonicalDiagnostic,
+    target: &str,
+    harmful: bool,
+) -> Result<()> {
+    let mut recording = crate::core::error_diagnosis::ErrorRepairLinkRecording::default();
+    if harmful {
+        recording.harmful_repairs.push(target.to_owned());
+    } else {
+        recording.helpful_repairs.push(target.to_owned());
+    }
+    crate::core::error_diagnosis::persist_error_repair_links(
+        connection, workspace, diagnostic, &recording,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn harmful_card_or_repair_feedback_withholds_summary_without_rewriting_episode() -> TestResult {
+    for target_is_card in [false, true] {
+        let fixture = Fixture::new(true)?;
+        let card = fixture.current_card()?;
+        assert!(check(&fixture, std::slice::from_ref(&card))?.is_empty());
+        let target = if target_is_card {
+            &card.id
+        } else {
+            &fixture.repair
+        };
+        record_card_feedback(&fixture.db, WS, &fixture.diagnostic, target, true)?;
+        // Helpful and harmful observations coexist; last writer does not win.
+        record_card_feedback(&fixture.db, WS, &fixture.diagnostic, target, false)?;
+        let key = fixture.diagnostic.layered_key().key;
+        let history = fixture.db.list_error_repair_links(WS, &key)?;
+        assert!(
+            history
+                .iter()
+                .any(|row| row.target_id == *target && row.outcome == "harmful")
+        );
+        assert!(
+            history
+                .iter()
+                .any(|row| row.target_id == *target && row.outcome == "helpful")
+        );
+        let before = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
+        assert_eq!(
+            check(&fixture, std::slice::from_ref(&card))?,
+            BTreeSet::from([card.id.clone()])
+        );
+        let proofs = session_proofs(&fixture.db, WS, Some(&key), &fixture.session)?;
+        assert!(proofs.claims.contains(&Claim {
+            failure: fixture.failure.clone(),
+            target: fixture.repair.clone(),
+            card: false
+        }));
+        assert!(!proofs.claims.contains(&Claim {
+            failure: fixture.failure.clone(),
+            target: card.id.clone(),
+            card: true
+        }));
+        let mut checks = CardChecks::default();
+        checks.observe(&card)?;
+        checks.visit_verified(&fixture.db, WS, |_| {
+            panic!("harmful guidance cannot reach a reader")
+        })?;
+        assert_eq!(fixture.db.list_error_repair_links(WS, &key)?, history);
+        assert!(
+            history
+                .iter()
+                .any(|row| row.link_kind == "proof" && row.target_id == fixture.proof)
+        );
+        for original in before {
+            let current = fixture
+                .db
+                .get_evidence_span(&original.id)?
+                .ok_or("source")?;
+            assert_eq!(current.excerpt, original.excerpt);
+            assert_eq!(current.content_hash, original.content_hash);
+            assert_eq!(current.metadata_json, original.metadata_json);
+            assert_eq!(
+                current.canonical_provenance_uri(),
+                original.canonical_provenance_uri()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn feedback_scope_is_exact_and_proof_targets_are_not_repair_targets() -> TestResult {
+    let fixture = Fixture::new(true)?;
+    let card = fixture.current_card()?;
+    let unrelated = crate::core::error_recall::from_ee_error("other_error", "different failure");
+    record_card_feedback(&fixture.db, OTHER, &fixture.diagnostic, &card.id, true)?;
+    record_card_feedback(&fixture.db, WS, &unrelated, &fixture.repair, true)?;
+    for alias in [
+        format!("{}-copy", card.id),
+        format!("{}\0alias", fixture.repair),
+        fixture.proof.clone(),
+    ] {
+        record_card_feedback(&fixture.db, WS, &fixture.diagnostic, &alias, true)?;
+    }
+    assert!(check(&fixture, std::slice::from_ref(&card))?.is_empty());
+    let mut checks = CardChecks::default();
+    checks.observe(&card)?;
+    let mut delivered = Vec::new();
+    checks.visit_verified(&fixture.db, WS, |span| {
+        delivered.push(span.id);
+        Ok(())
+    })?;
+    assert_eq!(delivered, [card.id]);
+    Ok(())
+}
+
+#[test]
+fn every_native_error_in_a_card_binds_its_actual_repair_sources() -> TestResult {
+    let fixture = Fixture::new(true)?;
+    let session = fixture.db.get_session(&fixture.session)?.ok_or("session")?;
+    let spans = fixture
+        .db
+        .list_evidence_spans_for_session(&fixture.session)?;
+    let mut arc = session_failure_arcs(WS, &session, &spans)
+        .into_iter()
+        .next()
+        .ok_or("arc")?;
+    let other = crate::core::error_recall::from_rustc(Some("E0277"), "missing bound");
+    arc.diagnostics.push(other.clone());
+    let card = super::super::incident_card_id(WS, &arc.failure_id);
+    let mut feedback = CardFeedback::default();
+    feedback.observe(&arc, &card);
+    assert_eq!(feedback.by_fingerprint.len(), 2);
+    assert!(feedback.withheld(&fixture.db, WS)?.is_empty());
+    record_card_feedback(&fixture.db, WS, &other, &fixture.repair, true)?;
+    assert_eq!(feedback.withheld(&fixture.db, WS)?, BTreeSet::from([card]));
+    Ok(())
+}
+
+#[test]
+fn feedback_batches_preserve_many_to_many_bindings_without_cross_error_contamination() -> TestResult
+{
+    let fixture = Fixture::new(true)?;
+    let session = fixture.db.get_session(&fixture.session)?.ok_or("session")?;
+    let spans = fixture
+        .db
+        .list_evidence_spans_for_session(&fixture.session)?;
+    let prototype = session_failure_arcs(WS, &session, &spans)
+        .into_iter()
+        .next()
+        .ok_or("arc")?;
+    let mut feedback = CardFeedback::default();
+    let mut expected = BTreeSet::new();
+    fixture.db.with_transaction(|| {
+        for number in 0..257_u128 {
+            let target = EvidenceId::from_uuid(uuid::Uuid::from_u128(0x90000 + number)).to_string();
+            let mut arc = prototype.clone();
+            arc.resolution.as_mut().expect("resolved").repair_ids = vec![target.clone()];
+            for copy in 0..2_u128 {
+                let card =
+                    EvidenceId::from_uuid(uuid::Uuid::from_u128(0xa0000 + number * 2 + copy))
+                        .to_string();
+                feedback.observe(&arc, &card);
+                if number % 7 == 0 {
+                    expected.insert(card);
+                }
+            }
+            record_card_feedback(
+                &fixture.db,
+                WS,
+                &fixture.diagnostic,
+                &target,
+                number % 7 == 0,
+            )?;
+            record_card_feedback(&fixture.db, OTHER, &fixture.diagnostic, &target, true)?;
+        }
+        Ok(())
+    })?;
+    let targets = feedback.by_fingerprint.values().next().expect("bindings");
+    assert_eq!(targets.len(), 257 * 3);
+    assert_eq!(feedback.withheld(&fixture.db, WS)?, expected);
+    assert_eq!(feedback.withheld(&fixture.db, WS)?, expected);
+    Ok(())
+}
+
+#[test]
+fn harmful_card_feedback_follows_caller_transactions_without_a_persistent_cache() -> TestResult {
+    let fixture = Fixture::new(true)?;
+    let card = fixture.current_card()?;
+    let history = fixture
+        .db
+        .list_error_repair_links(WS, &fixture.diagnostic.layered_key().key)?;
+    let transaction: Result<()> = fixture.db.with_transaction(|| {
+        record_card_feedback(&fixture.db, WS, &fixture.diagnostic, &fixture.repair, true)?;
+        assert!(check(&fixture, std::slice::from_ref(&card))?.contains(&card.id));
+        Err(unavailable())
+    });
+    assert!(transaction.is_err());
+    assert_eq!(
+        fixture
+            .db
+            .list_error_repair_links(WS, &fixture.diagnostic.layered_key().key)?,
+        history
+    );
+    assert!(check(&fixture, std::slice::from_ref(&card))?.is_empty());
+    record_card_feedback(&fixture.db, WS, &fixture.diagnostic, &fixture.repair, true)?;
+    assert!(check(&fixture, std::slice::from_ref(&card))?.contains(&card.id));
+    Ok(())
+}
+
+#[test]
+fn feedback_read_failure_withholds_cards_but_does_not_require_feedback_for_plain_sources()
+-> TestResult {
+    for stored_card in [false, true] {
+        let fixture = Fixture::new(true)?;
+        let card = if stored_card {
+            Some(fixture.current_card()?)
+        } else {
+            None
+        };
+        fixture
+            .db
+            .execute_raw("ALTER TABLE error_repair_links RENAME TO unavailable_card_feedback")?;
+        fixture.db.begin_read_snapshot()?;
+        if let Some(card) = card {
+            assert!(check(&fixture, std::slice::from_ref(&card)).is_err());
+            let mut checks = CardChecks::default();
+            checks.observe(&card)?;
+            let result =
+                checks.visit_verified(&fixture.db, WS, |_| panic!("no partial feedback approval"));
+            assert!(result.is_err());
+            assert!(
+                !result
+                    .expect_err("unavailable")
+                    .to_string()
+                    .contains("unavailable_card_feedback")
+            );
+        } else {
+            let proofs = session_proofs(&fixture.db, WS, None, &fixture.session)?;
+            assert!(proofs.claims.contains(&Claim {
+                failure: fixture.failure.clone(),
+                target: fixture.repair.clone(),
+                card: false
+            }));
+            assert!(proofs.cards.is_empty());
+        }
+        let ordinary = fixture
+            .db
+            .get_evidence_span(&fixture.repair)?
+            .ok_or("repair")?;
+        assert!(check(&fixture, &[ordinary])?.is_empty());
+        fixture.db.commit_read_snapshot()?;
+    }
+    let empty = DbConnection::open_memory()?;
+    assert!(CardFeedback::default().withheld(&empty, WS)?.is_empty());
+    Ok(())
+}

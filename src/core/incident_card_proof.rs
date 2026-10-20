@@ -3,6 +3,9 @@
 //! A stored card is derived text, not a permanent certificate. Interpret the
 //! original transcript once per referenced session, excluding every reserved
 //! card row. Neither a helpful link nor absence of one grants proof authority.
+//! Successful execution is not proof that advice remains helpful: exact harmful
+//! feedback against a card or one of its repair sources withholds that summary.
+//! Original transcript claims and the recorded successful retry remain history.
 //! Callers keep these reads inside their existing source snapshot; this module
 //! never starts a transaction, changes history, or invokes a model or index.
 
@@ -13,7 +16,7 @@ use sqlmodel_core::Value;
 #[cfg(test)]
 use super::draft_incident_card;
 use super::{IncidentCardDraft, IncidentCardSources};
-use crate::core::cass_error_recall::session_failure_arcs;
+use crate::core::cass_error_recall::{FailureArc, session_failure_arcs};
 use crate::db::{DbConnection, DbError, DbOperation, Result, StoredEvidenceSpan};
 use crate::models::{EvidenceId, SessionId};
 
@@ -21,6 +24,7 @@ use crate::models::{EvidenceId, SessionId};
 pub(crate) const MAX_SOURCE_ROWS: usize = 4096;
 pub(crate) const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CLAIMS: usize = MAX_SOURCE_ROWS * 4;
+const FEEDBACK_BATCH: usize = 128;
 
 type CardSignature = [u8; 32];
 
@@ -278,6 +282,7 @@ fn load_session_proofs(
         .collect();
     let card_sources = IncidentCardSources::new(&sources);
     let mut proofs = SessionProofs::default();
+    let mut feedback = CardFeedback::default();
     for arc in session_failure_arcs(workspace, &session, &sources) {
         if fingerprint.is_some_and(|key| {
             !arc.diagnostics
@@ -303,6 +308,7 @@ fn load_session_proofs(
             && let Some(draft) = card_sources.draft(workspace, session_id, &arc)
             && matches_draft(card, &draft)
         {
+            feedback.observe(&arc, &draft.id);
             proofs.cards.insert(draft.id.clone(), card_signature(card)?);
             proofs.claims.insert(Claim {
                 failure: arc.failure_id,
@@ -314,7 +320,84 @@ fn load_session_proofs(
             return Ok(LoadedSessionProofs::default());
         }
     }
+    // Finish every feedback read before returning any approved card. A storage
+    // failure is not an empty harmless verdict, and an unrelated harmful link
+    // cannot revoke a transcript observation or successful execution proof.
+    let withheld = feedback.withheld(connection, workspace)?;
+    proofs.cards.retain(|id, _| !withheld.contains(id));
+    proofs
+        .claims
+        .retain(|claim| !claim.card || !withheld.contains(&claim.target));
     Ok(LoadedSessionProofs { proofs, cards })
+}
+
+/// Exact many-to-many bindings from the current interpreter, never from card
+/// presentation text or user-supplied feedback metadata. Only authentic stored
+/// cards add work. Source-input and claim bounds above also bound this map.
+#[derive(Default)]
+struct CardFeedback {
+    by_fingerprint: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+}
+
+impl CardFeedback {
+    fn observe(&mut self, arc: &FailureArc, card: &str) {
+        let Some(resolution) = &arc.resolution else {
+            return;
+        };
+        for diagnostic in &arc.diagnostics {
+            let targets = self
+                .by_fingerprint
+                .entry(diagnostic.layered_key().key)
+                .or_default();
+            for target in
+                std::iter::once(card).chain(resolution.repair_ids.iter().map(String::as_str))
+            {
+                targets
+                    .entry(target.to_owned())
+                    .or_default()
+                    .insert(card.to_owned());
+            }
+        }
+    }
+
+    fn withheld(&self, connection: &DbConnection, workspace: &str) -> Result<BTreeSet<String>> {
+        let mut withheld = BTreeSet::new();
+        for (fingerprint, targets) in &self.by_fingerprint {
+            let ids: Vec<_> = targets.keys().map(String::as_str).collect();
+            for batch in ids.chunks(FEEDBACK_BATCH) {
+                let placeholders = (3..3 + batch.len())
+                    .map(|n| format!("?{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                // Same exact workspace/error/repair contract as error recall
+                // and learning. DISTINCT bounds returned rows by this batch,
+                // regardless of duplicate or contradictory observations.
+                let sql = format!(
+                    "SELECT DISTINCT target_id FROM error_repair_links WHERE workspace_id = ?1 AND fingerprint_key = ?2 AND link_kind = 'repair' AND outcome = 'harmful' AND target_id IN ({placeholders}) ORDER BY target_id ASC"
+                );
+                let mut parameters = vec![
+                    Value::Text(workspace.to_owned()),
+                    Value::Text(fingerprint.clone()),
+                ];
+                parameters.extend(batch.iter().map(|id| Value::Text((*id).to_owned())));
+                let rows = connection
+                    .query(&sql, &parameters)
+                    .map_err(|_| unavailable())?;
+                if rows.len() > batch.len() {
+                    return Err(unavailable());
+                }
+                let mut seen = BTreeSet::new();
+                for row in rows {
+                    let id = row.get(0).and_then(Value::as_str).ok_or_else(unavailable)?;
+                    if !batch.contains(&id) || !seen.insert(id.to_owned()) {
+                        return Err(unavailable());
+                    }
+                    withheld.extend(targets.get(id).ok_or_else(unavailable)?.iter().cloned());
+                }
+            }
+        }
+        Ok(withheld)
+    }
 }
 
 #[cfg(test)]
