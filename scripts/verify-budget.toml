@@ -33,8 +33,13 @@
 # general rule about optional stages. A second gated-off stage would therefore
 # be charged against the ceiling even though the default path never runs it --
 # the stage note beginning "Worth noting while it sits here" already records
-# that happening once, for a gated-off stage holding 30s. bd-vihzq owns whether
+# that happening once, for a gated-off stage holding 30s. bd-2di61 owns whether
 # that exclusion becomes a property instead of a name.
+#
+# Text further down says that decision "belongs" to bd-vihzq. It did when that
+# was written; bd-vihzq closed on 2026-09-22 having established something else
+# entirely (p50 provenance, 13773e207), so the pointer outlived its bead. Left
+# in place as the dated record it is -- bd-2di61 is the live owner.
 #
 # A stage with no measurement yet declares `expected_seconds_p50_unmeasured =
 # true` and NO `expected_seconds_p50`. That is deliberate: verify.sh's
