@@ -29,8 +29,40 @@ doctor_fixture_content_digest() {
     # - `ee.write.lock` is excluded from the BYTES but checked by its semantics
     #   (doctor_fixture_assert_write_lock_monotonic): a monotonic epoch counter
     #   that no honest undo can restore.
-    # Everything else, including ee.db, ee.db-wal and .doctor.lock, stays
-    # byte-compared.
+    # - `.doctor.lock` joins that class as of 2026-10-20 (bd-ooj2h). It is
+    #   excluded from the BYTES and checked by its semantics
+    #   (doctor_fixture_assert_doctor_lock_persistent).
+    # Everything else, including ee.db and ee.db-wal, stays byte-compared.
+    #
+    # WHY `.doctor.lock` MOVED, because this line used to say the opposite.
+    # The c9818 decision byte-compared it on the observation that "a real doctor
+    # fix + undo changed exactly these two outside .doctor/". That observation no
+    # longer holds, and the product documents why it cannot:
+    #
+    #   src/core/doctor_runtime.rs:9     "an OS advisory lock on the persistent
+    #                                     <workspace>/.ee/.doctor.lock file"
+    #   src/core/doctor_runtime.rs:82    DOCTOR_LOCK_FILE_MARKER =
+    #                                     "ee.doctor.persistent_lock.v1\n"
+    #   src/core/doctor_runtime.rs:3643  "The `.doctor.lock` pathname is
+    #                                     persistent and may now name a peer
+    #                                     replacement, so teardown must never
+    #                                     inspect, unlink, overwrite, or rename
+    #                                     it."
+    #
+    # So a baseline captured before any doctor run cannot contain the lock, the
+    # first `--fix` creates it, and `--undo` is FORBIDDEN from removing it --
+    # unlinking it could destroy a concurrent peer's replacement lock. A
+    # byte-identical assertion over it therefore demands behaviour the product
+    # is explicitly designed never to perform. Measured 2026-10-20 on an RCH
+    # worker against ee 0.18.0: both of this bead's COVERAGE failures were this
+    # one file, same digest 812ab0a5, and nothing else differed:
+    #
+    #   verify-undo[fm-state_files-merge-conflict-markers]:   14a15 > .ee/.doctor.lock
+    #   verify-undo[fm-workspace_config-config-toml-malformed]: 22a23 > .ee/.doctor.lock
+    #
+    # This is a correction, NOT a relaxation: the file is still asserted, by the
+    # contract it actually has. Do not "restore" the byte comparison without
+    # first changing doctor_runtime's persistence contract.
     doctor_fixture_content_manifest "$target" | shasum -a 256
 }
 
@@ -55,6 +87,7 @@ doctor_fixture_content_manifest() {
         -not -path '*/.ee/doctor-fixtures/*' \
         -not -path '*/.ee/ee.db-shm' \
         -not -path '*/.ee/ee.write.lock' \
+        -not -path '*/.ee/.doctor.lock' \
         -not -name '.assert.stdout' \
         -not -name '.assert.stderr' \
         -not -name '._*' \
@@ -114,6 +147,43 @@ doctor_fixture_assert_write_lock_monotonic() {
     if [[ "$after" < "$before" ]]; then
         printf 'fixture assert: ee.write.lock epoch went backwards (%s -> %s) for %s\n' \
             "$before" "$after" "$fm_id" >&2
+        return 1
+    fi
+}
+
+# `.doctor.lock` replaces its byte comparison with this (bd-ooj2h). It is
+# excluded from the digest because the product documents it as PERSISTENT and
+# forbids teardown from touching it (src/core/doctor_runtime.rs:3643), so a
+# byte-identical assertion over it demanded behaviour `ee doctor --undo` is
+# designed never to perform. See the exclusion comment in
+# doctor_fixture_content_digest for the measurement.
+#
+# This is the stronger assertion, not the weaker one. The byte comparison only
+# said "same as the pre-fix baseline", and the baseline has NO lock at all, so
+# it could only ever fail. This checks the contract the file actually has:
+# after a fix + undo round trip the lock MUST still exist, and its contents MUST
+# be exactly DOCTOR_LOCK_FILE_MARKER (src/core/doctor_runtime.rs:82).
+#
+# Verified 2026-10-20: the single file both COVERAGE failures reported had
+# digest 812ab0a5..., and sha256 of the marker text is that same digest, so the
+# residue is the marker byte for byte and nothing else differed.
+#
+# A marker version bump (v1 -> v2) SHOULD red this. That is a doctor runtime
+# contract change and the fixture is the right place to notice it.
+DOCTOR_LOCK_EXPECTED_MARKER='ee.doctor.persistent_lock.v1'
+
+doctor_fixture_assert_doctor_lock_persistent() {
+    local fm_id="${1:?fm id required}"
+    local target="${2:?target required}"
+    local lock="$target/.ee/.doctor.lock"
+    if [ ! -f "$lock" ]; then
+        printf 'fixture assert: .doctor.lock is absent after undo for %s; doctor_runtime forbids teardown unlinking it\n' \
+            "$fm_id" >&2
+        return 1
+    fi
+    if ! grep -qF "$DOCTOR_LOCK_EXPECTED_MARKER" "$lock"; then
+        printf 'fixture assert: .doctor.lock does not carry %s after undo for %s; undo overwrote a persistent lock\n' \
+            "$DOCTOR_LOCK_EXPECTED_MARKER" "$fm_id" >&2
         return 1
     fi
 }
@@ -268,7 +338,8 @@ doctor_fixture_assert() {
                  "$target/.fixture_baseline/after-undo.manifest" >&2 || true
             return 1
         fi
-        doctor_fixture_assert_write_lock_monotonic "$fm_id" "$target"
+        doctor_fixture_assert_write_lock_monotonic "$fm_id" "$target" || return 1
+        doctor_fixture_assert_doctor_lock_persistent "$fm_id" "$target" || return 1
     fi
 
     printf 'assert fixture ready: %s %s %s\n' "$fm_id" "$severity" "$subsystem" >&2
