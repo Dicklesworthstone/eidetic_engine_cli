@@ -4,15 +4,37 @@
 # regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
 # scripts/verify.sh fails the run when elapsed time exceeds p50 * 3.
 #
-# Non-benchmark p50 values must not EXCEED 601s, the 10-minute readiness
-# target plus the one stage added since. This is a ceiling, not an equality. It
+# Non-benchmark p50 values must not EXCEED 608s, the 10-minute readiness
+# target plus the stages added since. This is a ceiling, not an equality. It
 # used to be an exact sum, which
 # meant adding any verify.sh stage forced someone to reduce another stage's p50
 # to keep the total -- i.e. to write down a number that was not the
 # measurement. A budget file that can only stay green by falsifying a latency
 # is worse than a loose one, so the equality was removed on 2026-09-16.
 #
+# THIS LINE SAID 601 UNTIL 2026-10-19 and the enforced value was already 608.
+# `total_expected_seconds = 608` below is authoritative, and
+# verification_drift_guard.rs asserts both that figure and the <= 608 total,
+# so the drift was in the prose only -- but the prose is what a reader checks
+# their stage against before adding one. Other mentions of 601 further down are
+# CONTEMPORANEOUS RECORDS of decisions taken while the ceiling was 601 and are
+# deliberately left alone; this file is partly a log, and rewriting the numbers
+# inside a dated observation would destroy the thing that makes it evidence.
+#
+# THERE IS CURRENTLY ZERO HEADROOM. The non-benchmark p50s total EXACTLY 608
+# against the 608 ceiling (measured 2026-10-19, 120 stages, 27 unmeasured,
+# benchmarks excluded). Any new stage carrying a measured p50 -- of any size,
+# one second included -- reds the guard on arrival. Read that before planning a
+# stage, because it is not a question of whether your stage is small.
+#
 # Benchmarks are optional behind --include-bench and excluded from that total.
+# NOTE that the exclusion is implemented as a literal name comparison in
+# verification_drift_guard.rs (`if name != "Performance Benchmarks"`), not as a
+# general rule about optional stages. A second gated-off stage would therefore
+# be charged against the ceiling even though the default path never runs it --
+# the stage note beginning "Worth noting while it sits here" already records
+# that happening once, for a gated-off stage holding 30s. bd-vihzq owns whether
+# that exclusion becomes a property instead of a name.
 #
 # A stage with no measurement yet declares `expected_seconds_p50_unmeasured =
 # true` and NO `expected_seconds_p50`. That is deliberate: verify.sh's
