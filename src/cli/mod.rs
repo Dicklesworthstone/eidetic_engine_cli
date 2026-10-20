@@ -57036,17 +57036,61 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             }),
         );
     }
-    if let Some(load_bearing) = load_bearing
+    // Emits the `graph.hits` contract from docs/schemas/ee.why.v1.json. This is
+    // the CLI's own why renderer; `crate::output::render_why_json` is a SECOND,
+    // independent implementation of the same payload used by the serve adapter,
+    // and both must carry this block or `ee why --json` and the HTTP surface
+    // disagree. See bd-maisx -- the duplication is why the documented contract
+    // could go unimplemented without any single file looking wrong.
+    //
+    // $defs.hitsEvidence requires a non-nullable graphType and snapshotVersion,
+    // and profileInfluence's boosts are non-nullable numbers with minimum 0,
+    // while graph_score_json_value yields null for a non-finite score. So the
+    // block is emitted only when a snapshot witness, a graph type, and finite
+    // non-negative normalized scores are all present; emitting it otherwise
+    // would publish a payload that fails the schema it exists to satisfy.
+    let graph_hits_contract = report.graph_retrieval.as_ref().and_then(|graph| {
+        let hits = graph.hits.as_ref()?;
+        let snapshot = graph.source.snapshot.as_ref()?;
+        let graph_type = graph.source.graph_type.as_ref()?;
+        let authority = hits.authority.normalized;
+        let hub = hits.hub.normalized;
+        if !authority.is_finite() || !hub.is_finite() || authority < 0.0 || hub < 0.0 {
+            return None;
+        }
+        Some(serde_json::json!({
+            "authorityScore": graph_score_json_value(authority),
+            "authorityRank": hits.authority.rank,
+            "hubScore": graph_score_json_value(hub),
+            "hubRank": hits.hub.rank,
+            "dominantRole": hits.role_label,
+            "profileInfluence": {
+                "groundingBoost": graph_score_json_value(authority),
+                "orientationBoost": graph_score_json_value(hub),
+                "balancedBoost": graph_score_json_value((authority + hub) / 2.0),
+            },
+            "evidence": {
+                "schema": hits.schema,
+                "algorithm": "hits_centrality_directed",
+                "graphType": graph_type,
+                "snapshotVersion": snapshot.snapshot_version,
+            },
+            "rationale": hits.role_rationale,
+        }))
+    });
+    let mut graph_block = serde_json::Map::new();
+    if let Some(load_bearing) = load_bearing {
+        graph_block.insert("loadBearing".to_owned(), load_bearing);
+    }
+    if let Some(graph_hits_contract) = graph_hits_contract {
+        graph_block.insert("hits".to_owned(), graph_hits_contract);
+    }
+    if !graph_block.is_empty()
         && let Some(data) = json
             .get_mut("data")
             .and_then(serde_json::Value::as_object_mut)
     {
-        data.insert(
-            "graph".to_owned(),
-            serde_json::json!({
-                "loadBearing": load_bearing,
-            }),
-        );
+        data.insert("graph".to_owned(), serde_json::Value::Object(graph_block));
     }
     if let Some(causal_explanation) = &report.causal_explanation {
         if let Some(data) = json
