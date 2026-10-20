@@ -72,9 +72,10 @@ pub(super) fn harmful_targets(
 }
 
 /// Select up to the existing target budget after feedback, live proof, and
-/// direct-pack evidence admission. Missing or no-longer-admitted evidence
-/// cannot consume the window before final hydration and hide later repairs.
-/// Page metadata in canonical order, refilling slots refused by either gate.
+/// direct-pack evidence admission. Missing, no-longer-admitted, or repeated
+/// evidence excerpts cannot consume the window and hide later distinct repairs.
+/// Page metadata in canonical order, refilling slots refused by either gate or
+/// already represented by the same bounded reader excerpt in this request.
 /// The server retains the raw target ordering key; only a bounded link ID crosses
 /// the cursor boundary, so an oversized target never has to be hydrated to page.
 /// One gate reuses bounded per-session verdicts throughout this source snapshot.
@@ -89,23 +90,55 @@ pub(super) fn pack_targets(
     limit: u32,
 ) -> Result<Vec<String>> {
     let mut gate = Gate::new(connection, workspace_id, fingerprint_key);
+    let mut diversity = PackEvidenceDiversity::default();
     pack_targets_with(connection, workspace_id, fingerprint_key, limit, |ids| {
         let mut withheld = gate.withheld(ids)?;
-        withhold_unavailable_pack_evidence(connection, workspace_id, ids, &mut withheld)?;
+        withhold_unusable_pack_evidence(
+            connection,
+            workspace_id,
+            ids,
+            &mut withheld,
+            &mut diversity,
+        )?;
         Ok(withheld)
     })
+}
+
+/// Selection-only diversity, not an equivalence claim about source episodes.
+/// The final pack reader already emits each bounded excerpt only once. Apply
+/// that same equality before the target limit so repeated imports cannot fill
+/// all 32 slots with text that contributes only one of the four excerpts.
+/// Keep cards separate from ordinary turns to preserve final card preference.
+/// At most 32 admitted keys of at most 768 UTF-8 bytes are retained. No full
+/// transcript body, cross-request cache, or durable feedback state is kept.
+#[derive(Default)]
+struct PackEvidenceDiversity {
+    excerpts: BTreeSet<(bool, String)>,
+}
+
+impl PackEvidenceDiversity {
+    fn admit(&mut self, is_card: bool, reader_text: &str) -> bool {
+        let excerpt = super::bounded_pack_recall_text(
+            reader_text.trim(),
+            super::PACK_RECALL_EXCERPT_BYTES,
+        );
+        !excerpt.is_empty() && self.excerpts.insert((is_card, excerpt))
+    }
 }
 
 /// Check the same live admission used by the final error-guided pack reader,
 /// inside its existing source snapshot. This does not grant proof authority:
 /// the feedback/card gate must run first. Ordinary evidence can become missing,
 /// foreign, stale or pack-denied without an explicit harmful-feedback record.
+/// Only an admitted row can reserve an excerpt: an unusable earlier copy must
+/// never crowd out a later live source containing the same useful explanation.
 /// Non-evidence targets retain their native reader and locator-only contracts.
-fn withhold_unavailable_pack_evidence(
+fn withhold_unusable_pack_evidence(
     connection: &DbConnection,
     workspace_id: &str,
     targets: &[&str],
     withheld: &mut BTreeSet<String>,
+    diversity: &mut PackEvidenceDiversity,
 ) -> Result<()> {
     let selected: BTreeSet<_> = targets
         .iter()
@@ -121,19 +154,26 @@ fn withhold_unavailable_pack_evidence(
         return Ok(());
     }
     let ids: Vec<_> = selected.iter().copied().collect();
-    let rows = connection
+    let mut rows = connection
         .get_evidence_spans_with_sessions(&ids)
         .map_err(|_| unavailable())?;
     if rows.len() > selected.len() {
         return Err(unavailable());
     }
     let mut seen = BTreeSet::new();
-    let mut admitted = BTreeSet::new();
-    for row in rows {
+    for row in &rows {
         if !selected.contains(row.span.id.as_str()) || !seen.insert(row.span.id.clone()) {
             return Err(unavailable());
         }
-        if row.is_direct_pack_admitted(workspace_id) && !row.span.reader_text().trim().is_empty() {
+    }
+    // Hydration order is not a sampling policy. Preserve the SQL cursor's
+    // canonical target order, including ties that cross page boundaries.
+    rows.sort_by(|left, right| left.span.id.cmp(&right.span.id));
+    let mut admitted = BTreeSet::new();
+    for row in rows {
+        if row.is_direct_pack_admitted(workspace_id)
+            && diversity.admit(row.span.is_derived_incident_card(), &row.span.reader_text())
+        {
             admitted.insert(row.span.id);
         }
     }
@@ -275,9 +315,12 @@ mod live_evidence_tests {
         }
 
         fn source(&self, number: u32, foreign: bool) -> TestResult<String> {
+            let text = format!("Repair {number} uses the canonical cache key for reads and writes.");
+            self.source_text(number, foreign, &text)
+        }
+
+        fn source_text(&self, number: u32, foreign: bool, text: &str) -> TestResult<String> {
             let target = id(number);
-            let text =
-                format!("Repair {number} uses the canonical cache key for reads and writes.");
             let excerpt = serde_json::json!({"type":"assistant","message":{
                 "role":"assistant","content":[{"type":"text","text":text}]
             }})
@@ -475,6 +518,182 @@ mod live_evidence_tests {
         assert!(result.is_err());
         assert_eq!(pack_targets(&fixture.db, WS, KEY, 1)?, vec![first]);
         assert_eq!(fixture.query()?, original);
+        Ok(())
+    }
+
+    const REPEATED_REPAIR: &str =
+        "The verified repair flushes pending cache writes before reading the canonical key.";
+
+    #[test]
+    fn duplicate_evidence_windows_refill_with_distinct_repairs_without_changing_history()
+    -> TestResult {
+        let fixture = Fixture::new()?;
+        for number in 1..=96 {
+            fixture.source_text(number, false, REPEATED_REPAIR)?;
+        }
+        for number in 97..=132 {
+            fixture.source(number, false)?;
+        }
+        fixture.record((1..=132).rev().map(id).collect())?;
+        let history = fixture.db.list_error_repair_links(WS, KEY)?;
+        let sources = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        assert_eq!(
+            fixture.db.list_helpful_error_repair_target_ids(WS, KEY, 32)?,
+            (1..=32).map(id).collect::<Vec<_>>(),
+        );
+        let expected = std::iter::once(id(1))
+            .chain((97..=127).map(id))
+            .collect::<Vec<_>>();
+        assert_eq!(pack_targets(&fixture.db, WS, KEY, 32)?, expected);
+        let query = fixture.query()?;
+        assert_eq!(query.matches(REPEATED_REPAIR).count(), 1);
+        assert_eq!(query.matches("\nprior fix: ").count(), 4);
+        assert!(query.contains(&format!("helpful_repair:{}", id(1))));
+        for number in 97..=99 {
+            assert!(query.contains(&format!("Repair {number} uses")));
+            assert!(query.contains(&format!("helpful_repair:{}", id(number))));
+        }
+        for number in 2..=96 {
+            assert!(!query.contains(&id(number)));
+        }
+        assert!(query.len() <= super::super::PACK_RECALL_QUERY_BYTES);
+        assert_eq!(fixture.query()?, query);
+        assert_eq!(fixture.db.list_error_repair_links(WS, KEY)?, history);
+        assert_eq!(fixture.db.list_evidence_spans_for_session(&fixture.session)?, sources);
+        let report = error_recall_report(
+            &fixture.db,
+            WS,
+            &from_rustc(Some("E0277"), "trait bound failed"),
+        )?;
+        assert_eq!(report.helpful_repairs.len(), 132);
+        assert!(report.harmful_repairs.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn every_limit_and_duplicate_only_exhaustion_keep_one_canonical_representative()
+    -> TestResult {
+        let fixture = Fixture::new()?;
+        for number in 1..=41 {
+            fixture.source_text(number, false, REPEATED_REPAIR)?;
+        }
+        fixture.record((1..=41).map(id).collect())?;
+        assert_eq!(pack_targets(&fixture.db, WS, KEY, 32)?, vec![id(1)]);
+        assert_eq!(fixture.query()?.matches("\nprior fix: ").count(), 1);
+        for number in 42..=76 {
+            fixture.source(number, false)?;
+        }
+        fixture.record((42..=76).map(id).collect())?;
+        let expected = std::iter::once(id(1))
+            .chain((42..=76).map(id))
+            .collect::<Vec<_>>();
+        for limit in 0..=32 {
+            assert_eq!(pack_targets(&fixture.db, WS, KEY, limit)?, expected[..limit as usize]);
+        }
+        assert!(pack_targets(&fixture.db, WS, KEY, 33).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn equal_rendered_utf8_prefixes_do_not_hide_later_distinct_guidance() -> TestResult {
+        let fixture = Fixture::new()?;
+        let prefix = format!("{REPEATED_REPAIR} {}", "🦀".repeat(220));
+        for number in 1..=40 {
+            let body = format!("{prefix} Source-specific suffix {number} remains in history.");
+            fixture.source_text(number, false, &body)?;
+        }
+        for number in 41..=43 {
+            fixture.source(number, false)?;
+        }
+        fixture.record((1..=43).map(id).collect())?;
+        assert_eq!(pack_targets(&fixture.db, WS, KEY, 32)?, vec![id(1), id(41), id(42), id(43)]);
+        let query = fixture.query()?;
+        assert_eq!(query.matches("\nprior fix: ").count(), 4);
+        assert_eq!(query.matches(" [truncated]").count(), 1);
+        assert!(query.contains('🦀'));
+        assert!(!query.contains("Source-specific suffix"));
+        for number in 41..=43 {
+            assert!(query.contains(&format!("Repair {number} uses")));
+        }
+        assert!(query.len() <= super::super::PACK_RECALL_QUERY_BYTES);
+        Ok(())
+    }
+
+    #[test]
+    fn unusable_copies_cannot_reserve_the_excerpt_of_a_later_admitted_repair() -> TestResult {
+        let fixture = Fixture::new()?;
+        let denied = fixture.source_text(1, false, REPEATED_REPAIR)?;
+        let harmful = fixture.source_text(2, false, REPEATED_REPAIR)?;
+        fixture.source_text(3, true, REPEATED_REPAIR)?;
+        let admitted = fixture.source_text(4, false, REPEATED_REPAIR)?;
+        let other = fixture.source(5, false)?;
+        fixture.record((1..=5).map(id).collect())?;
+        fixture.db.execute_raw(&format!(
+            "UPDATE evidence_spans SET pack_eligibility = 'denied' WHERE id = '{denied}'"
+        ))?;
+        record_error_repair_links(
+            &fixture.db,
+            WS,
+            &from_rustc(Some("E0277"), "trait bound failed"),
+            &ErrorRepairLinkRecording {
+                harmful_repairs: vec![harmful],
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(pack_targets(&fixture.db, WS, KEY, 32)?, vec![admitted.clone(), other]);
+        let query = fixture.query()?;
+        assert!(query.contains(&format!("helpful_repair:{admitted}")));
+        assert_eq!(query.matches("\nprior fix: ").count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_excerpt_comparison_preserves_card_priority_case_and_visible_qualifiers() {
+        let mut sample = PackEvidenceDiversity::default();
+        assert!(!sample.admit(false, " \n"));
+        assert!(sample.admit(false, REPEATED_REPAIR));
+        assert!(!sample.admit(false, &format!("  {REPEATED_REPAIR}\n")));
+        assert!(sample.admit(true, REPEATED_REPAIR));
+        assert!(!sample.admit(true, REPEATED_REPAIR));
+        assert!(sample.admit(false, &REPEATED_REPAIR.to_ascii_lowercase()));
+        assert!(sample.admit(false, &format!("{REPEATED_REPAIR} Only for validated inputs.")));
+        assert!(sample.admit(false, &format!("{REPEATED_REPAIR} Only for legacy inputs.")));
+        assert_eq!(sample.excerpts.len(), 5);
+        assert!(sample.excerpts.iter().all(|(_, text)| {
+            text.len() <= super::super::PACK_RECALL_EXCERPT_BYTES
+        }));
+    }
+
+    #[test]
+    fn diversity_is_request_local_and_caller_owned_feedback_can_roll_back() -> TestResult {
+        let fixture = Fixture::new()?;
+        let first = fixture.source_text(1, false, REPEATED_REPAIR)?;
+        let second = fixture.source_text(2, false, REPEATED_REPAIR)?;
+        fixture.source(3, false)?;
+        fixture.record((1..=3).map(id).collect())?;
+        let before = fixture.query()?;
+        let history = fixture.db.list_error_repair_links(WS, KEY)?;
+        let outcome: crate::db::Result<()> = fixture.db.with_transaction(|| {
+            record_error_repair_links(
+                &fixture.db,
+                WS,
+                &from_rustc(Some("E0277"), "trait bound failed"),
+                &ErrorRepairLinkRecording {
+                    harmful_repairs: vec![first.clone()],
+                    ..Default::default()
+                },
+            )?;
+            let inside = fixture.query()?;
+            assert!(!inside.contains(&first));
+            assert!(inside.contains(&format!("helpful_repair:{second}")));
+            assert_eq!(inside.matches("\nprior fix: ").count(), 2);
+            fixture.db.execute_raw("INSERT INTO absent_diversity_rollback_test VALUES (1)")?;
+            Ok(())
+        });
+        assert!(outcome.is_err());
+        assert_eq!(fixture.db.list_error_repair_links(WS, KEY)?, history);
+        assert_eq!(fixture.query()?, before);
+        assert_eq!(pack_targets(&fixture.db, WS, KEY, 32)?, vec![first, id(3)]);
         Ok(())
     }
 }
