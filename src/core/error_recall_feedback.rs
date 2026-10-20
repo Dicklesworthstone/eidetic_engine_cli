@@ -118,10 +118,8 @@ struct PackEvidenceDiversity {
 
 impl PackEvidenceDiversity {
     fn admit(&mut self, is_card: bool, reader_text: &str) -> bool {
-        let excerpt = super::bounded_pack_recall_text(
-            reader_text.trim(),
-            super::PACK_RECALL_EXCERPT_BYTES,
-        );
+        let excerpt =
+            super::bounded_pack_recall_text(reader_text.trim(), super::PACK_RECALL_EXCERPT_BYTES);
         !excerpt.is_empty() && self.excerpts.insert((is_card, excerpt))
     }
 }
@@ -315,7 +313,8 @@ mod live_evidence_tests {
         }
 
         fn source(&self, number: u32, foreign: bool) -> TestResult<String> {
-            let text = format!("Repair {number} uses the canonical cache key for reads and writes.");
+            let text =
+                format!("Repair {number} uses the canonical cache key for reads and writes.");
             self.source_text(number, foreign, &text)
         }
 
@@ -536,9 +535,13 @@ mod live_evidence_tests {
         }
         fixture.record((1..=132).rev().map(id).collect())?;
         let history = fixture.db.list_error_repair_links(WS, KEY)?;
-        let sources = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let sources = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
         assert_eq!(
-            fixture.db.list_helpful_error_repair_target_ids(WS, KEY, 32)?,
+            fixture
+                .db
+                .list_helpful_error_repair_target_ids(WS, KEY, 32)?,
             (1..=32).map(id).collect::<Vec<_>>(),
         );
         let expected = std::iter::once(id(1))
@@ -559,7 +562,12 @@ mod live_evidence_tests {
         assert!(query.len() <= super::super::PACK_RECALL_QUERY_BYTES);
         assert_eq!(fixture.query()?, query);
         assert_eq!(fixture.db.list_error_repair_links(WS, KEY)?, history);
-        assert_eq!(fixture.db.list_evidence_spans_for_session(&fixture.session)?, sources);
+        assert_eq!(
+            fixture
+                .db
+                .list_evidence_spans_for_session(&fixture.session)?,
+            sources
+        );
         let report = error_recall_report(
             &fixture.db,
             WS,
@@ -571,8 +579,7 @@ mod live_evidence_tests {
     }
 
     #[test]
-    fn every_limit_and_duplicate_only_exhaustion_keep_one_canonical_representative()
-    -> TestResult {
+    fn every_limit_and_duplicate_only_exhaustion_keep_one_canonical_representative() -> TestResult {
         let fixture = Fixture::new()?;
         for number in 1..=41 {
             fixture.source_text(number, false, REPEATED_REPAIR)?;
@@ -588,7 +595,10 @@ mod live_evidence_tests {
             .chain((42..=76).map(id))
             .collect::<Vec<_>>();
         for limit in 0..=32 {
-            assert_eq!(pack_targets(&fixture.db, WS, KEY, limit)?, expected[..limit as usize]);
+            assert_eq!(
+                pack_targets(&fixture.db, WS, KEY, limit)?,
+                expected[..limit as usize]
+            );
         }
         assert!(pack_targets(&fixture.db, WS, KEY, 33).is_err());
         Ok(())
@@ -606,7 +616,10 @@ mod live_evidence_tests {
             fixture.source(number, false)?;
         }
         fixture.record((1..=43).map(id).collect())?;
-        assert_eq!(pack_targets(&fixture.db, WS, KEY, 32)?, vec![id(1), id(41), id(42), id(43)]);
+        assert_eq!(
+            pack_targets(&fixture.db, WS, KEY, 32)?,
+            vec![id(1), id(41), id(42), id(43)]
+        );
         let query = fixture.query()?;
         assert_eq!(query.matches("\nprior fix: ").count(), 4);
         assert_eq!(query.matches(" [truncated]").count(), 1);
@@ -640,7 +653,10 @@ mod live_evidence_tests {
                 ..Default::default()
             },
         )?;
-        assert_eq!(pack_targets(&fixture.db, WS, KEY, 32)?, vec![admitted.clone(), other]);
+        assert_eq!(
+            pack_targets(&fixture.db, WS, KEY, 32)?,
+            vec![admitted.clone(), other]
+        );
         let query = fixture.query()?;
         assert!(query.contains(&format!("helpful_repair:{admitted}")));
         assert_eq!(query.matches("\nprior fix: ").count(), 2);
@@ -656,12 +672,18 @@ mod live_evidence_tests {
         assert!(sample.admit(true, REPEATED_REPAIR));
         assert!(!sample.admit(true, REPEATED_REPAIR));
         assert!(sample.admit(false, &REPEATED_REPAIR.to_ascii_lowercase()));
-        assert!(sample.admit(false, &format!("{REPEATED_REPAIR} Only for validated inputs.")));
+        assert!(sample.admit(
+            false,
+            &format!("{REPEATED_REPAIR} Only for validated inputs.")
+        ));
         assert!(sample.admit(false, &format!("{REPEATED_REPAIR} Only for legacy inputs.")));
         assert_eq!(sample.excerpts.len(), 5);
-        assert!(sample.excerpts.iter().all(|(_, text)| {
-            text.len() <= super::super::PACK_RECALL_EXCERPT_BYTES
-        }));
+        assert!(
+            sample
+                .excerpts
+                .iter()
+                .all(|(_, text)| { text.len() <= super::super::PACK_RECALL_EXCERPT_BYTES })
+        );
     }
 
     #[test]
@@ -687,7 +709,9 @@ mod live_evidence_tests {
             assert!(!inside.contains(&first));
             assert!(inside.contains(&format!("helpful_repair:{second}")));
             assert_eq!(inside.matches("\nprior fix: ").count(), 2);
-            fixture.db.execute_raw("INSERT INTO absent_diversity_rollback_test VALUES (1)")?;
+            fixture
+                .db
+                .execute_raw("INSERT INTO absent_diversity_rollback_test VALUES (1)")?;
             Ok(())
         });
         assert!(outcome.is_err());
