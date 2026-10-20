@@ -446,12 +446,17 @@ fn an_unreadable_later_memory_page_never_publishes_an_accepted_prefix() {
     let fixture = Fixture::new(257);
     fixture.seed_index();
     let before = regular_files(&fixture.index_dir);
+    let original = fixture
+        .db
+        .get_memory(&memory_id(200))
+        .expect("original source")
+        .expect("row");
     fixture.db.execute_raw(&format!("UPDATE memories SET content = 'First page contains a valid changed memory.' WHERE id = '{}'", memory_id(0)))
         .expect("early valid update");
     fixture
         .db
         .execute_raw(&format!(
-            "UPDATE memories SET provenance_verified_at = X'ff' WHERE id = '{}'",
+            "UPDATE memories SET content = X'ff' WHERE id = '{}'",
             memory_id(200)
         ))
         .expect("inject malformed second page");
@@ -472,7 +477,8 @@ fn an_unreadable_later_memory_page_never_publishes_an_accepted_prefix() {
     fixture
         .db
         .execute_raw(&format!(
-            "UPDATE memories SET provenance_verified_at = NULL WHERE id = '{}'",
+            "UPDATE memories SET content = '{}' WHERE id = '{}'",
+            original.content.replace('\'', "''"),
             memory_id(200)
         ))
         .expect("repair fixture storage");
@@ -480,4 +486,577 @@ fn an_unreadable_later_memory_page_never_publishes_an_accepted_prefix() {
     let job = fixture.queue(1, &memory_id(0));
     assert_delta(&fixture.process(&job));
     fixture.assert_published(&expected);
+}
+
+fn paged_rule_id(number: u32) -> String {
+    format!("rule_{number:026}")
+}
+fn paged_artifact_id(number: u32) -> String {
+    format!("art_{number:026x}")
+}
+
+fn insert_paged_artifact(fixture: &Fixture, workspace: &str, number: u32) {
+    let body =
+        format!("Artifact {number} records a reproducible repair with UTF-8 context: café 資料.");
+    let hash = format!("blake3:{}", blake3::hash(body.as_bytes()));
+    fixture
+        .db
+        .upsert_artifact(
+            &paged_artifact_id(number),
+            &crate::db::CreateArtifactInput {
+                workspace_id: workspace.to_owned(),
+                source_kind: "external".to_owned(),
+                artifact_type: "repair_report".to_owned(),
+                original_path: None,
+                canonical_path: None,
+                external_ref: Some(format!("https://example.invalid/artifact/{number}")),
+                content_hash: hash.clone(),
+                media_type: "text/plain".to_owned(),
+                size_bytes: body.len() as u64,
+                redaction_status: "checked".to_owned(),
+                snippet: Some(body),
+                snippet_hash: Some(hash),
+                provenance_uri: Some(format!("test://artifact/{number}")),
+                metadata_json: None,
+            },
+        )
+        .expect("artifact source");
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE artifacts SET created_at = '2026-01-01T00:00:{:02}Z' WHERE id = '{}'",
+            number % 3,
+            paged_artifact_id(number)
+        ))
+        .expect("tied artifact chronology");
+}
+
+fn insert_paged_rule(fixture: &Fixture, workspace: &str, number: u32) {
+    fixture
+        .db
+        .insert_procedural_rule(
+            &paged_rule_id(number),
+            &crate::db::CreateProceduralRuleInput {
+                workspace_id: workspace.to_owned(),
+                content: format!(
+                    "For repair {number}, validate the captured generation before publishing it."
+                ),
+                confidence: 0.9,
+                utility: 0.5,
+                importance: 0.5,
+                trust_class: "human_explicit".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "validated".to_owned(),
+                protected: false,
+                source_memory_ids: vec![memory_id(1), memory_id(0)],
+                tags: vec![
+                    "z-last".to_owned(),
+                    "a-first".to_owned(),
+                    format!("repair-{}", number % 9),
+                ],
+            },
+        )
+        .expect("rule source");
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE procedural_rules SET updated_at = '2026-01-01T00:00:{:02}Z' WHERE id = '{}'",
+            number % 3,
+            paged_rule_id(number)
+        ))
+        .expect("tied rule chronology");
+}
+
+fn source_visitor_refusal() -> DbError {
+    DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: "injected source consumer refusal".to_owned(),
+    }
+}
+
+#[test]
+fn paged_artifact_and_rule_sources_match_complete_rows_and_all_sidecars() {
+    for count in [0, 1, 127, 128, 129, 257] {
+        let fixture = Fixture::new(2);
+        let foreign = fixture.other_workspace();
+        fixture
+            .db
+            .with_transaction(|| {
+                for number in (0..count).rev() {
+                    insert_paged_artifact(&fixture, &fixture.workspace_id, number);
+                    insert_paged_rule(&fixture, &fixture.workspace_id, number);
+                }
+                insert_paged_artifact(&fixture, &foreign, 9000);
+                insert_paged_rule(&fixture, &foreign, 9000);
+                if count > 1 {
+                    for (table, first, second) in [
+                        ("artifacts", paged_artifact_id(0), paged_artifact_id(1)),
+                        ("procedural_rules", paged_rule_id(0), paged_rule_id(1)),
+                    ] {
+                        fixture.db.execute_raw(&format!(
+                            "UPDATE {table} SET rowid = -9 WHERE id = '{first}'"
+                        ))?;
+                        fixture.db.execute_raw(&format!(
+                            "UPDATE {table} SET rowid = 0 WHERE id = '{second}'"
+                        ))?;
+                    }
+                }
+                Ok(())
+            })
+            .expect("source seed");
+        fixture.db.begin_read_snapshot().expect("owned snapshot");
+        let expected_artifacts = fixture
+            .db
+            .list_artifacts(&fixture.workspace_id, None)
+            .expect("full artifacts");
+        let expected_rules = fixture
+            .db
+            .list_procedural_rules(&fixture.workspace_id, None, None, false)
+            .expect("full rules");
+        let mut artifacts = Vec::new();
+        fixture
+            .db
+            .visit_index_artifacts_in_current_snapshot::<DbError>(&fixture.workspace_id, |row| {
+                artifacts.push(row);
+                Ok(())
+            })
+            .expect("artifact visitor");
+        let mut rules = Vec::new();
+        fixture
+            .db
+            .visit_index_rules_in_current_snapshot::<DbError>(
+                &fixture.workspace_id,
+                |row, tags, sources| {
+                    assert_eq!(tags, fixture.db.get_rule_tags(&row.id)?);
+                    assert_eq!(sources, fixture.db.get_rule_source_memory_ids(&row.id)?);
+                    rules.push(row);
+                    Ok(())
+                },
+            )
+            .expect("rule visitor");
+        assert_eq!(artifacts.len(), count as usize);
+        assert_eq!(rules.len(), count as usize);
+        if count > 1 {
+            assert_eq!(artifacts[0].id, paged_artifact_id(0));
+            assert_eq!(rules[0].id, paged_rule_id(0));
+        }
+        artifacts.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        rules.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        assert_eq!(artifacts, expected_artifacts);
+        assert_eq!(rules, expected_rules);
+        fixture
+            .db
+            .commit_read_snapshot()
+            .expect("caller still owns snapshot");
+    }
+}
+
+#[test]
+fn artifact_and_rule_consumer_refusals_preserve_outer_transaction_ownership() {
+    let fixture = Fixture::new(2);
+    for number in 0..129 {
+        insert_paged_artifact(&fixture, &fixture.workspace_id, number);
+        insert_paged_rule(&fixture, &fixture.workspace_id, number);
+    }
+    let before = fixture
+        .db
+        .get_procedural_rule(&paged_rule_id(0))
+        .expect("rule")
+        .expect("source");
+    let outer: Result<(), DbError> = fixture.db.with_transaction(|| {
+        fixture.db.execute_raw(&format!(
+            "UPDATE procedural_rules SET content = 'transaction-local repair' WHERE id = '{}'",
+            before.id
+        ))?;
+        let mut artifacts = 0;
+        let refused = fixture
+            .db
+            .visit_index_artifacts_in_current_snapshot::<DbError>(&fixture.workspace_id, |_| {
+                artifacts += 1;
+                Err(source_visitor_refusal())
+            });
+        assert!(refused.is_err());
+        assert_eq!(artifacts, 1);
+        let mut rules = 0;
+        let refused = fixture.db.visit_index_rules_in_current_snapshot::<DbError>(
+            &fixture.workspace_id,
+            |_, _, _| {
+                rules += 1;
+                Err(source_visitor_refusal())
+            },
+        );
+        assert!(refused.is_err());
+        assert_eq!(rules, 1);
+        assert_eq!(
+            fixture
+                .db
+                .get_procedural_rule(&before.id)?
+                .expect("still inside outer transaction")
+                .content,
+            "transaction-local repair"
+        );
+        Err(source_visitor_refusal())
+    });
+    assert!(outer.is_err());
+    assert_eq!(
+        fixture
+            .db
+            .get_procedural_rule(&before.id)
+            .expect("rolled back rule")
+            .expect("source"),
+        before
+    );
+}
+
+#[test]
+fn paged_artifacts_rules_and_sidecars_share_the_callers_read_snapshot() {
+    let fixture = Fixture::new(2);
+    for number in (0..257).rev() {
+        insert_paged_artifact(&fixture, &fixture.workspace_id, number);
+        insert_paged_rule(&fixture, &fixture.workspace_id, number);
+    }
+    let reader = DbConnection::open_file_read_only(&fixture.root.path().join("source.db"))
+        .expect("read-only source");
+    reader.begin_read_snapshot().expect("pinned snapshot");
+    let expected_artifacts = reader
+        .list_artifacts(&fixture.workspace_id, None)
+        .expect("artifact baseline");
+    let expected_rules = reader
+        .list_procedural_rules(&fixture.workspace_id, None, None, false)
+        .expect("rule baseline");
+    let mut artifacts = Vec::new();
+    reader.visit_index_artifacts_in_current_snapshot::<DbError>(&fixture.workspace_id, |row| {
+        artifacts.push(row);
+        if artifacts.len() == 1 {
+            fixture.db.with_transaction(|| {
+                fixture.db.execute_raw(&format!("UPDATE artifacts SET snippet = 'next-snapshot artifact' WHERE id = '{}'", paged_artifact_id(0)))?;
+                fixture.db.execute_raw(&format!("UPDATE procedural_rules SET content = 'next-snapshot rule' WHERE id = '{}'", paged_rule_id(0)))?;
+                fixture.db.execute_raw(&format!("INSERT INTO rule_tags (rule_id, tag) VALUES ('{}', 'late-tag')", paged_rule_id(0)))?;
+                insert_paged_artifact(&fixture, &fixture.workspace_id, 9000);
+                insert_paged_rule(&fixture, &fixture.workspace_id, 9000);
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }).expect("artifact snapshot visitor");
+    let mut rules = Vec::new();
+    reader
+        .visit_index_rules_in_current_snapshot::<DbError>(
+            &fixture.workspace_id,
+            |row, tags, sources| {
+                assert!(!tags.iter().any(|tag| tag == "late-tag"));
+                assert_eq!(sources, vec![memory_id(0), memory_id(1)]);
+                rules.push(row);
+                Ok(())
+            },
+        )
+        .expect("rule and sidecar snapshot visitor");
+    artifacts.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    rules.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    assert_eq!(artifacts, expected_artifacts);
+    assert_eq!(rules, expected_rules);
+    reader.commit_read_snapshot().expect("caller ends snapshot");
+    assert_eq!(
+        reader
+            .list_artifacts(&fixture.workspace_id, None)
+            .expect("next artifacts")
+            .len(),
+        258
+    );
+    assert_eq!(
+        reader
+            .get_procedural_rule(&paged_rule_id(0))
+            .expect("next rule")
+            .expect("row")
+            .content,
+        "next-snapshot rule"
+    );
+    assert!(
+        reader
+            .get_rule_tags(&paged_rule_id(0))
+            .expect("next tags")
+            .contains(&"late-tag".to_owned())
+    );
+}
+
+#[test]
+fn unavailable_source_tables_do_not_become_empty_successes() {
+    let db = DbConnection::open_memory().expect("unmigrated source");
+    db.begin_read_snapshot().expect("caller snapshot");
+    let mut visited = false;
+    assert!(
+        db.visit_index_artifacts_in_current_snapshot::<DbError>("workspace", |_| {
+            visited = true;
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(
+        db.visit_index_rules_in_current_snapshot::<DbError>("workspace", |_, _, _| {
+            visited = true;
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(!visited);
+    db.commit_read_snapshot()
+        .expect("snapshot remains caller-owned");
+}
+
+#[test]
+fn artifact_and_rule_pages_publish_canonical_deltas_without_late_source_leaks() {
+    let fixture = Fixture::new(16);
+    fixture
+        .db
+        .with_transaction(|| {
+            for number in (0..257).rev() {
+                insert_paged_artifact(&fixture, &fixture.workspace_id, number);
+                insert_paged_rule(&fixture, &fixture.workspace_id, number);
+            }
+            Ok(())
+        })
+        .expect("multi-page source corpus");
+    fixture.seed_index();
+    let baseline = vector_rows(&fixture.index_dir);
+    let edges = [0, 127, 128, 256];
+    fixture.db.with_transaction(|| {
+        for number in edges {
+            let body = format!("Corrected artifact {number} explains atomic repair publication.");
+            let hash = format!("blake3:{}", blake3::hash(body.as_bytes()));
+            fixture.db.execute_raw(&format!("UPDATE artifacts SET snippet = '{body}', snippet_hash = '{hash}', content_hash = '{hash}' WHERE id = '{}'", paged_artifact_id(number)))?;
+            fixture.db.execute_raw(&format!("UPDATE procedural_rules SET content = 'Corrected rule {number} requires durable source validation.', updated_at = '2026-10-20T20:00:00Z' WHERE id = '{}'", paged_rule_id(number)))?;
+            fixture.db.execute_raw(&format!("INSERT INTO rule_tags (rule_id, tag) VALUES ('{}', 'new-rule-tag')", paged_rule_id(number)))?;
+            fixture.db.execute_raw(&format!("INSERT INTO rule_source_memories (rule_id, memory_id) VALUES ('{}', '{}')", paged_rule_id(number), memory_id(2)))?;
+        }
+        fixture.db.execute_raw(&format!("UPDATE procedural_rules SET tombstoned_at = '2026-10-20T20:00:00Z' WHERE id = '{}'", paged_rule_id(254)))?;
+        fixture.db.execute_raw(&format!("UPDATE procedural_rules SET maturity = 'superseded' WHERE id = '{}'", paged_rule_id(253)))?;
+        fixture.db.execute_raw(&format!("UPDATE procedural_rules SET superseded_by = '{}' WHERE id = '{}'", paged_rule_id(251), paged_rule_id(252)))?;
+        Ok(())
+    }).expect("multi-source edits and retirements");
+    let job = fixture.queue(1, &memory_id(0));
+    let expected = fixture.snapshot();
+    let streamed = fixture.streamed().expect("changed sources remain streamed");
+    let changed: BTreeSet<_> = edges
+        .iter()
+        .flat_map(|n| [paged_artifact_id(*n), paged_rule_id(*n)])
+        .collect();
+    let expected_order: Vec<_> = expected
+        .documents
+        .iter()
+        .filter(|document| changed.contains(&document.id))
+        .map(|document| document.id.clone())
+        .collect();
+    assert_eq!(expected_order.len(), 8);
+    assert_eq!(
+        streamed
+            .reconciliation
+            .delta
+            .upserts
+            .iter()
+            .map(|document| document.id.clone())
+            .collect::<Vec<_>>(),
+        expected_order
+    );
+    assert_eq!(
+        streamed
+            .reconciliation
+            .delta
+            .removals
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        [252, 253, 254].map(paged_rule_id).into_iter().collect()
+    );
+    assert_eq!(
+        serde_json::to_value(streamed.reconciliation.digests).expect("streamed digests"),
+        canonical_digests(&expected)
+    );
+    let reference = fixture.root.path().join("artifact-rule-reference");
+    let stats = build_index_generation_sync(
+        &reference,
+        hash_fallback_embedder_stack(),
+        expected.documents.clone(),
+    )
+    .expect("independent full rebuild");
+    validate_built_generation(&reference, stats, expected.document_counts)
+        .expect("complete reference");
+    let report =
+        process_one_index_job_after_snapshot(&fixture.db, &job, &fixture.index_dir, || {
+            fixture.db.execute_raw(&format!(
+                "INSERT INTO rule_tags (rule_id, tag) VALUES ('{}', 'after-capture')",
+                paged_rule_id(0)
+            ))?;
+            insert_paged_artifact(&fixture, &fixture.workspace_id, 10_000);
+            fixture.queue(2, &memory_id(0));
+            Ok(())
+        })
+        .expect("publish captured artifact/rule generation");
+    assert_delta(&report);
+    fixture.assert_published(&expected);
+    let published = vector_rows(&fixture.index_dir);
+    assert_eq!(published, vector_rows(&reference));
+    for (id, vector) in baseline {
+        if !changed.contains(&id) && ![252, 253, 254].map(paged_rule_id).contains(&id) {
+            assert_eq!(published.get(&id), Some(&vector));
+        }
+    }
+    assert!(!published.contains_key(&paged_artifact_id(10_000)));
+    let current = fixture.snapshot();
+    assert_ne!(canonical_digests(&current), canonical_digests(&expected));
+    let late_job = fixture
+        .db
+        .get_search_index_job(&format!("sidx_{:026}", 2))
+        .expect("late job")
+        .expect("row");
+    assert_eq!(late_job.status_enum(), Some(SearchIndexJobStatus::Pending));
+    assert_delta(&fixture.process(&late_job));
+    fixture.assert_published(&current);
+    assert!(vector_rows(&fixture.index_dir).contains_key(&paged_artifact_id(10_000)));
+}
+
+#[test]
+fn artifact_and_rule_cancellation_stops_after_the_first_callback() {
+    for rules in [false, true] {
+        let fixture = Fixture::new(2);
+        for number in 0..129 {
+            insert_paged_artifact(&fixture, &fixture.workspace_id, number);
+            insert_paged_rule(&fixture, &fixture.workspace_id, number);
+        }
+        fixture.db.begin_read_snapshot().expect("caller snapshot");
+        let borrowed = &fixture;
+        let (result, visited) =
+            crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+                let mut visited = 0;
+                let mut cancel = || {
+                    visited += 1;
+                    cx.set_cancel_reason(asupersync::CancelReason::user(
+                        "stop current source traversal",
+                    ));
+                    Ok(())
+                };
+                let result = if rules {
+                    borrowed
+                        .db
+                        .visit_index_rules_in_current_snapshot::<DbError>(
+                            &borrowed.workspace_id,
+                            |_, _, _| cancel(),
+                        )
+                } else {
+                    borrowed
+                        .db
+                        .visit_index_artifacts_in_current_snapshot::<DbError>(
+                            &borrowed.workspace_id,
+                            |_| cancel(),
+                        )
+                };
+                assert!(cx.checkpoint().is_err());
+                (result, visited)
+            })
+            .expect("source cancellation runtime");
+        assert!(result.is_err());
+        assert_eq!(visited, 1);
+        fixture
+            .db
+            .commit_read_snapshot()
+            .expect("caller still owns snapshot");
+        assert_eq!(
+            fixture
+                .db
+                .list_artifacts(&fixture.workspace_id, None)
+                .expect("source remains")
+                .len(),
+            129
+        );
+        assert_eq!(
+            fixture
+                .db
+                .list_procedural_rules(&fixture.workspace_id, None, None, false)
+                .expect("rules remain")
+                .len(),
+            129
+        );
+    }
+}
+
+#[test]
+fn a_corrupt_later_artifact_or_rule_page_never_publishes_a_valid_prefix() {
+    for rules in [false, true] {
+        let fixture = Fixture::new(2);
+        for number in 0..257 {
+            insert_paged_artifact(&fixture, &fixture.workspace_id, number);
+            insert_paged_rule(&fixture, &fixture.workspace_id, number);
+        }
+        fixture.seed_index();
+        let before = regular_files(&fixture.index_dir);
+        fixture
+            .db
+            .execute_raw(&format!(
+                "UPDATE artifacts SET snippet = 'Valid first-page repair change.' WHERE id = '{}'",
+                paged_artifact_id(0)
+            ))
+            .expect("valid early change");
+        let (table, field, id, original) = if rules {
+            let id = paged_rule_id(200);
+            let row = fixture
+                .db
+                .get_procedural_rule(&id)
+                .expect("original rule")
+                .expect("row");
+            ("procedural_rules", "content", id, row.content)
+        } else {
+            let id = paged_artifact_id(200);
+            let row = fixture
+                .db
+                .get_artifact(&id)
+                .expect("original artifact")
+                .expect("row");
+            ("artifacts", "artifact_type", id, row.artifact_type)
+        };
+        fixture
+            .db
+            .execute_raw(&format!(
+                "UPDATE {table} SET {field} = X'ff' WHERE id = '{id}'"
+            ))
+            .expect("malformed required source field");
+        let reconciler =
+            delta::SourceReconciler::read(&fixture.index_dir, &hash_fallback_embedder_stack())
+                .expect("published baseline");
+        assert!(
+            super::super::capture(
+                &asupersync::Cx::for_testing(),
+                &fixture.db,
+                &fixture.workspace_id,
+                reconciler
+            )
+            .is_err()
+        );
+        assert_eq!(regular_files(&fixture.index_dir), before);
+        fixture
+            .db
+            .execute_raw(&format!(
+                "UPDATE {table} SET {field} = '{}' WHERE id = '{id}'",
+                original.replace('\'', "''")
+            ))
+            .expect("restore source fixture");
+        let expected = fixture.snapshot();
+        assert_delta(&fixture.process(&fixture.queue(1, &memory_id(0))));
+        fixture.assert_published(&expected);
+    }
 }
