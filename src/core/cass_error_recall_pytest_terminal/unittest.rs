@@ -375,9 +375,7 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     // Test identities still cannot repeat. SkipTest is also a native fixture
     // outcome (including teardown), but never supplies completion authority.
     for (node, status) in nodes.iter().chain(details.iter()) {
-        if fixture_phase(node).is_some()
-            && !matches!(status, Status::Error | Status::Skipped)
-        {
+        if fixture_phase(node).is_some() && !matches!(status, Status::Error | Status::Skipped) {
             return Err(());
         }
     }
@@ -880,7 +878,8 @@ mod tests {
             ),
             format!("{text}another command is still running\n"),
             text.replace(" ... ERROR", " ... ok"),
-            text.replace("ERROR", "FAIL").replace("errors=1", "failures=1"),
+            text.replace("ERROR", "FAIL")
+                .replace("errors=1", "failures=1"),
         ] {
             assert!(
                 !matches!(super::super::decode(&malformed), Ok(Some(report)) if report.execution.has_known_failures() || report.allows_completion),
@@ -905,12 +904,10 @@ mod tests {
         let credential = format!("ghp_{}", "Q".repeat(36));
         let sensitive = decoded(&fixture_report("setUpModule", &credential, "", 0));
         assert!(!sensitive.symptom.unwrap().contains(&credential));
-        assert!(
-            sensitive.diagnostics.iter().all(|diagnostic| {
-                !diagnostic.message_template.contains(&credential)
-                    && !diagnostic.message_template.contains("private fixture body")
-            })
-        );
+        assert!(sensitive.diagnostics.iter().all(|diagnostic| {
+            !diagnostic.message_template.contains(&credential)
+                && !diagnostic.message_template.contains("private fixture body")
+        }));
     }
 
     fn cleanup_detail(number: usize) -> String {

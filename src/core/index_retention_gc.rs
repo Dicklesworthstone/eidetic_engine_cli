@@ -1612,7 +1612,10 @@ mod automatic_tests {
             reclaim_automatic_entries(
                 &parent,
                 "index",
-                vec![reclaim_entry(missing.clone()), reclaim_entry(healthy.clone())],
+                vec![
+                    reclaim_entry(missing.clone()),
+                    reclaim_entry(healthy.clone()),
+                ],
                 &mut budget,
                 &mut outcome,
             );
