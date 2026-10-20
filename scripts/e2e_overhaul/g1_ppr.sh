@@ -60,16 +60,55 @@ if printf '%s' "$PPR_JSON" | jq . >/dev/null 2>&1; then
         PPR_BLOCKER_MESSAGES=$(printf '%s' "$PPR_JSON" | jq -c '[.. | objects | select((.code? // "") | test("^graph_ppr_|context_graph_snapshot_|context_config_unavailable|graph_feature_disabled$")) | {code, severity, repair, message}] | unique' 2>/dev/null || echo '[]')
         e2e_log_note "g1_ppr_blocker_detail=${PPR_BLOCKER_MESSAGES}"
     fi
-    e2e_log_assert_num "$PPR_DEGRADED_BLOCKERS" -eq 0 "g1_ppr_no_ppr_degradation" || true
     PPR_BREAKDOWN_COUNT=$(printf '%s' "$PPR_JSON" | jq '[.. | objects | select(has("pprScore") or has("ppr_score"))] | length' 2>/dev/null || echo 0)
     PPR_BREAKDOWN_COUNT="${PPR_BREAKDOWN_COUNT:-0}"
-    e2e_log_assert_num "$PPR_BREAKDOWN_COUNT" -ge 1 "g1_ppr_score_breakdown_present" || true
     PPR_POSITIVE_SCORE_COUNT=$(printf '%s' "$PPR_JSON" | jq '[.. | objects | (.pprScore? // .ppr_score? // empty) | numbers | select(. > 0)] | length' 2>/dev/null || echo 0)
     PPR_POSITIVE_SCORE_COUNT="${PPR_POSITIVE_SCORE_COUNT:-0}"
-    e2e_log_assert_num "$PPR_POSITIVE_SCORE_COUNT" -ge 1 "g1_ppr_positive_score_breakdown_present" || true
     PPR_WHY_COUNT=$(printf '%s' "$PPR_JSON" | jq '[.. | objects | .why? // empty | select(test("Personalized PageRank"))] | length' 2>/dev/null || echo 0)
     PPR_WHY_COUNT="${PPR_WHY_COUNT:-0}"
-    e2e_log_assert_num "$PPR_WHY_COUNT" -ge 1 "g1_ppr_why_mentions_rerank" || true
+
+    # PPR rerank is an ACKNOWLEDGED UNIMPLEMENTED CAPABILITY at this revision:
+    # graph_ppr_upstream_unavailable (src/models/degradation.rs:407, emitted at
+    # src/core/context.rs:2296) says the pinned FrankenNetworkX exposes no
+    # deterministic personalized PageRank. Measured on ee 0.18.0 2026-10-20.
+    #
+    # So asserting "no degradation, and a PPR score breakdown is present" was
+    # asserting a feature that does not exist, and the four assertions were
+    # permanently red for a product that is behaving correctly and saying so.
+    #
+    # Instead: assert the contract in BOTH states. While upstream is missing,
+    # verify the product announces it honestly -- right code, severity, a
+    # message naming the real blocker, and a repair that actually works. The
+    # day a deterministic PPR lands upstream, the degradation disappears and
+    # this suite AUTOMATICALLY starts enforcing the real reranking claims
+    # instead, with no edit required. bd-cxnf8.
+    PPR_UPSTREAM_UNAVAILABLE=$(printf '%s' "$PPR_JSON" | jq '[.. | objects | select((.code? // "") == "graph_ppr_upstream_unavailable")] | length' 2>/dev/null || echo 0)
+    PPR_UPSTREAM_UNAVAILABLE="${PPR_UPSTREAM_UNAVAILABLE:-0}"
+    e2e_log_note "g1_ppr_upstream_unavailable_entries=${PPR_UPSTREAM_UNAVAILABLE} breakdown=${PPR_BREAKDOWN_COUNT} positive=${PPR_POSITIVE_SCORE_COUNT} why=${PPR_WHY_COUNT}"
+
+    if [ "$PPR_UPSTREAM_UNAVAILABLE" -gt 0 ]; then
+        # Honest-degradation arm. The entry appears both in the response
+        # `degraded` array and in the pack-DNA degradation block, so the count
+        # is a location count, not a duplicate; assert on ONE entry's fields.
+        PPR_UPSTREAM_ENTRY=$(printf '%s' "$PPR_JSON" | jq -c '[.. | objects | select((.code? // "") == "graph_ppr_upstream_unavailable")][0] // {}' 2>/dev/null || echo '{}')
+        assert_jq "$PPR_UPSTREAM_ENTRY" '.severity // empty' "medium" "g1_ppr_upstream_unavailable_severity"
+        assert_jq "$PPR_UPSTREAM_ENTRY" '((.message // "") | test("FrankenNetworkX"))' "true" "g1_ppr_upstream_unavailable_names_blocker"
+        assert_jq "$PPR_UPSTREAM_ENTRY" '((.message // "") | test("deterministic personalized PageRank"))' "true" "g1_ppr_upstream_unavailable_names_capability"
+        assert_jq "$PPR_UPSTREAM_ENTRY" '((.repair // "") | test("--ppr-weight 0"))' "true" "g1_ppr_upstream_unavailable_repair_actionable"
+        # The honest consequence: no PPR scores while PPR cannot run. If a
+        # breakdown DID appear beside this degradation the surface would be
+        # contradicting itself, and that is worth a red.
+        e2e_log_assert_num "$PPR_BREAKDOWN_COUNT" -eq 0 "g1_ppr_no_score_breakdown_while_upstream_unavailable"
+        # Only the PPR blocker may be present; any OTHER blocker code here is
+        # a real regression this arm must not hide.
+        e2e_log_assert_num "$PPR_DEGRADED_BLOCKERS" -eq "$PPR_UPSTREAM_UNAVAILABLE" "g1_ppr_only_upstream_blocker_present"
+    else
+        # Capability arm: upstream PPR exists, so the original claims apply.
+        e2e_log_assert_num "$PPR_DEGRADED_BLOCKERS" -eq 0 "g1_ppr_no_ppr_degradation"
+        e2e_log_assert_num "$PPR_BREAKDOWN_COUNT" -ge 1 "g1_ppr_score_breakdown_present"
+        e2e_log_assert_num "$PPR_POSITIVE_SCORE_COUNT" -ge 1 "g1_ppr_positive_score_breakdown_present"
+        e2e_log_assert_num "$PPR_WHY_COUNT" -ge 1 "g1_ppr_why_mentions_rerank"
+    fi
     SNAPSHOT_VERSION=$(printf '%s' "$PPR_JSON" | jq -r '.. | objects | .snapshotVersion? // .snapshot_version? // empty' 2>/dev/null | head -n 1)
 else
     e2e_log_assert_eq "invalid-json" "valid-json" "g1_ppr_context_json_parse" || true
