@@ -14,7 +14,7 @@
       "id": "fm-state_files-sqlite-integrity-page-malformed",
       "severity": "P0",
       "subsystem": "state_files",
-      "label": "NOT-DETECTED",
+      "label": "GUIDANCE-ONLY",
       "spec": "docs/doctor/repair-specs/state_files.md"
     },
     {
