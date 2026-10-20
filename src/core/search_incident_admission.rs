@@ -564,6 +564,101 @@ mod tests {
     }
 
     #[test]
+    fn harmful_source_feedback_removes_cards_before_ranking_without_reindexing() -> TestResult {
+        use crate::core::incident_card::proof::tests::record_card_feedback;
+        for target_is_card in [false, true] {
+            let (_root, source, mut options) = fixture(true)?;
+            let card = source.current_card()?;
+            let mut candidate = hit(&card.id);
+            candidate.score = 99.0;
+            candidate.metadata = Some(canonical_evidence_search_metadata(&card));
+            let inputs = vec![candidate, hit(&source.repair)];
+            let baseline = super::super::admit_hits(
+                &options,
+                inputs.clone(),
+                &mut Vec::new(),
+                Some(&source.db),
+            );
+            assert!(baseline.iter().any(|row| row.doc_id == card.id));
+            let target = if target_is_card {
+                &card.id
+            } else {
+                &source.repair
+            };
+            record_card_feedback(&source.db, WS, &source.diagnostic, target, true)?;
+            record_card_feedback(&source.db, WS, &source.diagnostic, target, false)?;
+            let history = source
+                .db
+                .list_error_repair_links(WS, &source.diagnostic.layered_key().key)?;
+            let mut degraded = Vec::new();
+            let filtered =
+                super::super::admit_hits(&options, inputs.clone(), &mut degraded, Some(&source.db));
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].doc_id, source.repair);
+            assert_eq!(filtered[0].score.to_bits(), 0.73_f32.to_bits());
+            assert!(degraded.iter().any(|entry| entry.code == FILTERED));
+            // The additional proof/feedback gate cannot be bypassed with an
+            // old index revision, optimistic score or historical query flags.
+            options.as_of = Some(
+                chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")?
+                    .with_timezone(&chrono::Utc),
+            );
+            options.include_tombstoned = true;
+            options.include_expired = true;
+            options.include_future = true;
+            options.include_stale = true;
+            let filtered = admit_hits(&options, inputs, &mut Vec::new(), Some(&source.db));
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].doc_id, source.repair);
+            let stored = source
+                .db
+                .get_evidence_span(&card.id)?
+                .ok_or("historical card")?;
+            assert_eq!(stored.excerpt, card.excerpt);
+            assert_eq!(stored.pack_entity_revision(), card.pack_entity_revision());
+            assert_eq!(
+                source
+                    .db
+                    .list_error_repair_links(WS, &source.diagnostic.layered_key().key)?,
+                history
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_card_feedback_preserves_ordinary_search_evidence_and_reports_refusal()
+    -> TestResult {
+        let (_root, source, options) = fixture(true)?;
+        let card = source.current_card()?;
+        source.db.execute_raw(
+            "ALTER TABLE error_repair_links RENAME TO unavailable_search_card_feedback",
+        )?;
+        source.db.begin_read_snapshot()?;
+        let mut degraded = Vec::new();
+        let result = admit_hits(
+            &options,
+            vec![hit(&card.id), hit(&source.repair), hit("other-document")],
+            &mut degraded,
+            Some(&source.db),
+        );
+        assert_eq!(
+            result
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            [source.repair.as_str(), "other-document"]
+        );
+        assert!(degraded.iter().any(|entry| entry.code == UNAVAILABLE));
+        let diagnostic = serde_json::to_string(&degraded)?;
+        assert!(!diagnostic.contains("unavailable_search_card_feedback"));
+        assert!(!diagnostic.contains(&card.id));
+        source.db.commit_read_snapshot()?;
+        assert!(source.db.get_evidence_span(&card.id)?.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn absent_store_never_gets_created_and_non_evidence_hits_do_not_require_it() -> TestResult {
         let (_root, source, options) = fixture(true)?;
         let database = options.resolve_database_path();
