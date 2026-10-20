@@ -59,10 +59,43 @@ step "blind-spot map: uncovered high-importance nodes + coverageRatio (6.1/6.2)"
 if ee_supports insights && ee_help_lists insights blindSpots; then
     bs="$(ee_json insights --section blindSpots --workspace "$WS" --json)"
     assert_jq "$bs" '.success == true' "insights --section blindSpots succeeds"
-    assert_jq "$bs" \
-        '(.data.blindSpots // .data.blind_spots // .data.section) != null' \
-        "blindSpots section is present"
+    # THE SECTION PAYLOAD LIVES IN `.data.sections[]`, KEYED BY `.data.selectedSection`.
+    #
+    # This assertion used to read `.data.blindSpots // .data.blind_spots //
+    # .data.section` and failed on all three (bd-psna1). That looked like a
+    # regression because the envelope is well-formed and `.success` is true --
+    # the command works, only the reader was wrong. It is a STALE EXPECTATION
+    # that nothing caught, because no gate has ever invoked this script.
+    #
+    # The replacement is not another guess. It is the shape three sibling
+    # suites assert and PASS against on this same 0.18.0 binary:
+    #
+    #   g9_load_bearing  .data.selectedSection == "loadBearingMemories"
+    #   g6_proximity     (.data.sections | type) == "array"
+    #   g10_hits         .data.sections[0].name == <section>
+    #
+    # Do not widen this back into a `//` chain. The original chain is what hid
+    # the defect: a chain that tries several spellings cannot distinguish
+    # "absent" from "I never knew the name", and it reports the same null for
+    # both.
+    # NOTE THE 3-ARG FORM. This harness is assert_jq(json, PREDICATE, label) and
+    # grades on `jq -e`'s exit code, whereas scripts/e2e_overhaul/lib/shared.sh
+    # takes assert_jq(json, filter, EXPECTED, label). Copying the 4-arg shape
+    # here does not fail loudly -- the 4th argument is silently dropped and the
+    # 3rd becomes the label, so `'(.data.sections | type)' "array"` would assert
+    # the string "array", which is truthy, and PASS for any value at all.
+    assert_jq "$bs" '(.data.sections | type) == "array"' "blindSpots sections is an array"
+    assert_jq "$bs" '.data.selectedSection == "blindSpots"' "blindSpots is the selected section"
+    assert_jq "$bs" '(.data.sections | map(.name) | index("blindSpots")) != null' "blindSpots section is present"
     # coverageRatio is an honesty number in [0,1]; log it (no silent omission).
+    #
+    # UNVERIFIED PATH, AND DELIBERATELY LEFT THAT WAY. `coverageRatio` appears
+    # in none of the three green suites above, so this read has no evidence
+    # behind it the way the assertions above now do. If it is reached at the
+    # wrong path the `else` branch below fires and attributes the miss to an
+    # unbuilt feature -- a drop that reads as honest while actually being a
+    # wrong-path read. Settle it by capturing `.data | keys` and
+    # `.data.sections[0] | keys` rather than by widening the chain.
     cov="$(printf '%s' "$bs" | jq -r '(.data.coverageRatio // .data.coverage_ratio // empty)')"
     if [ -n "$cov" ]; then
         assert_jq "$bs" \
@@ -70,7 +103,7 @@ if ee_supports insights && ee_help_lists insights blindSpots; then
             "coverageRatio is a ratio in [0,1]"
         e2e_log_note "coverageRatio=$cov"
     else
-        log_drop 1 "coverageRatio absent (bd-1n0np.6.2 importance/coverage ranking not built)"
+        log_drop 1 "coverageRatio not found at .data.coverageRatio/.data.coverage_ratio -- either unbuilt (bd-1n0np.6.2) or read at the wrong path (bd-psna1); path unverified"
     fi
 else
     log_drop 1 "insights --section blindSpots pending (bd-1n0np.6.1): blind-spot assertions skipped"
