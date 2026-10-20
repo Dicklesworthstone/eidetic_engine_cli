@@ -24,6 +24,17 @@ fn archive() -> Vec<IndexableDocument> {
 }
 
 fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
+    publish_mixed_maintenance(retained, 0, 0, fail_commit)
+}
+
+fn publish_mixed_maintenance(
+    retained: u32,
+    rewrites: u32,
+    additions: u32,
+    fail_commit: bool,
+) -> TestResult {
+    assert!(rewrites <= retained);
+    assert!(retained + additions <= ORIGINAL_COUNT);
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
     let parent = root
         .path()
@@ -78,17 +89,52 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
                 .metadata
                 .insert("revision".to_owned(), "2".to_owned());
         }
+        let rewrite_count = usize::try_from(rewrites).map_err(|error| error.to_string())?;
+        let addition_count = usize::try_from(additions).map_err(|error| error.to_string())?;
+        let inferred_count = rewrite_count + addition_count;
+        for document in &mut current[..rewrite_count] {
+            document.content.push_str(" repairedmarker");
+        }
+        current.extend((0..additions).map(|number| {
+            let mut document = IndexableDocument::new(
+                format!("new-{number:05}"),
+                format!("lesson new {number} appendedmarker"),
+            );
+            document
+                .metadata
+                .insert("origin".to_owned(), format!("new-{number}"));
+            document
+        }));
         current.reverse();
+        let fresh_ids: std::collections::BTreeSet<_> = current
+            .iter()
+            .filter(|document| {
+                document.id.starts_with("new-") || document.content.contains("repairedmarker")
+            })
+            .map(|document| document.id.clone())
+            .collect();
+        assert_eq!(fresh_ids.len(), inferred_count);
         let identity = embedder_identity(&stack).ok_or("complete stack identity")?;
         let delta = plan(&live, &stack, &current).map_err(|error| error.detail)?;
         assert_eq!(delta.upserts.len(), current.len());
-        assert_eq!(delta.removals.len(), original.len() - current.len());
-        assert_eq!(delta.upserts.len() + delta.removals.len(), 9000);
-        assert!(
-            delta
-                .vector_upserts(&identity)
-                .map_err(|error| error.detail)?
-                .is_empty()
+        assert_eq!(
+            delta.removals.len(),
+            original.len() - current.len() + addition_count
+        );
+        assert_eq!(
+            delta.upserts.len() + delta.removals.len(),
+            9000 + addition_count
+        );
+        let vector_upserts = delta
+            .vector_upserts(&identity)
+            .map_err(|error| error.detail)?;
+        assert_eq!(vector_upserts.len(), inferred_count);
+        assert_eq!(
+            vector_upserts
+                .iter()
+                .map(|document| document.id.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+            fresh_ids,
         );
         assert!(delta.vector_upserts("changed producer").is_err());
         let reset = || {
@@ -99,7 +145,11 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
             assert_eq!(fast.inputs.load(Ordering::SeqCst), 0);
             assert_eq!(quality.inputs.load(Ordering::SeqCst), 0);
         };
-        let counts = index::IndexDocumentCounts::memory_only(retained);
+        let assert_changed_input_inference = || {
+            assert_eq!(fast.inputs.load(Ordering::SeqCst), inferred_count);
+            assert_eq!(quality.inputs.load(Ordering::SeqCst), inferred_count);
+        };
+        let counts = index::IndexDocumentCounts::memory_only(retained + additions);
         if fail_commit {
             reset();
             let mut commits = 0;
@@ -123,7 +173,7 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
                 commits, 1,
                 "complete maintenance must reach the commit tail"
             );
-            assert_no_inference();
+            assert_changed_input_inference();
             assert_eq!(index::validated_index_generation(&live)?, 1);
             assert_eq!(generation_files(&live)?, before);
             assert_eq!(tier_rows(&live, false)?, old_fast);
@@ -144,37 +194,51 @@ fn publish_maintenance(retained: u32, fail_commit: bool) -> TestResult {
         .await
         .map_err(|error| error.to_string())?;
         assert!(matches!(kind, index::PublishedGenerationKind::Delta));
-        assert_no_inference();
+        assert_changed_input_inference();
         assert_eq!(index::validated_index_generation(&live)?, 2);
-        index::verify_published_tier_counts(&live, retained, true)?;
+        index::verify_published_tier_counts(&live, retained + additions, true)?;
         let fast_rows = tier_rows(&live, false)?;
         let quality_rows = tier_rows(&live, true)?;
-        // Compare every survivor to its actual previous vector, including IDs;
-        // neither recomputed vectors nor a count-only empty pass can satisfy it.
-        let expected_fast: BTreeMap<_, _> = current
-            .iter()
-            .map(|doc| {
-                Ok((
-                    doc.id.clone(),
-                    old_fast.get(&doc.id).ok_or("missing fast source")?.clone(),
-                ))
-            })
-            .collect::<Result<_, &str>>()?;
-        let expected_quality: BTreeMap<_, _> = current
-            .iter()
-            .map(|doc| {
-                Ok((
-                    doc.id.clone(),
+        // Unchanged embedding inputs retain exact previous vectors in both
+        // spaces. Changed/new vectors must be present now, and are compared
+        // to an independent full rebuild below rather than a synthetic oracle.
+        assert_eq!(fast_rows.len(), current.len());
+        assert_eq!(quality_rows.len(), current.len());
+        for document in &current {
+            let current_fast = fast_rows.get(&document.id).ok_or("missing fast result")?;
+            let current_quality = quality_rows
+                .get(&document.id)
+                .ok_or("missing quality result")?;
+            if !fresh_ids.contains(&document.id) {
+                assert_eq!(
+                    current_fast,
+                    old_fast.get(&document.id).ok_or("missing fast source")?
+                );
+                assert_eq!(
+                    current_quality,
                     old_quality
-                        .get(&doc.id)
+                        .get(&document.id)
                         .ok_or("missing quality source")?
-                        .clone(),
-                ))
-            })
-            .collect::<Result<_, &str>>()?;
-        assert_eq!(fast_rows, expected_fast);
-        assert_eq!(quality_rows, expected_quality);
-        if retained == ORIGINAL_COUNT {
+                );
+            } else if let Some(previous) = old_fast.get(&document.id) {
+                assert_ne!(
+                    current_fast, previous,
+                    "edited input kept an obsolete fast vector"
+                );
+                assert_ne!(
+                    current_quality,
+                    old_quality
+                        .get(&document.id)
+                        .ok_or("missing edited quality source")?,
+                    "edited input kept an obsolete quality vector"
+                );
+            }
+        }
+        for removed in &delta.removals {
+            assert!(!fast_rows.contains_key(removed));
+            assert!(!quality_rows.contains_key(removed));
+        }
+        if retained == ORIGINAL_COUNT && inferred_count == 0 {
             for file in ["vector.fast.idx", "vector.quality.idx"] {
                 let old = before
                     .get(Path::new(file))
@@ -243,6 +307,22 @@ fn native_bulk_withdrawal_finalizes_empty_tiers_without_inference() -> TestResul
 #[test]
 fn native_bulk_maintenance_commit_refusal_restores_files_before_retry() -> TestResult {
     publish_maintenance(8000, true)
+}
+
+#[test]
+fn native_mixed_metadata_refresh_reembeds_only_edited_inputs_in_both_tiers() -> TestResult {
+    publish_mixed_maintenance(ORIGINAL_COUNT, 16, 0, false)
+}
+
+#[test]
+fn native_shrinking_mixed_archive_publishes_new_edits_metadata_and_withdrawals_together()
+-> TestResult {
+    publish_mixed_maintenance(8000, 16, 32, false)
+}
+
+#[test]
+fn native_mixed_commit_failure_restores_both_tiers_and_retry_stays_incremental() -> TestResult {
+    publish_mixed_maintenance(8000, 16, 32, true)
 }
 
 #[test]
