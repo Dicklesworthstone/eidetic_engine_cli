@@ -271,6 +271,17 @@ fn normalized_points(
     }
     let mut sorted = points.to_vec();
     sorted.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+    // A support threshold counts memories, not occurrences in a joined or
+    // retried input. Refuse conflicting copies as well as identical copies;
+    // choosing one would make evidence and centroid identity input-dependent.
+    if sorted
+        .windows(2)
+        .any(|pair| pair[0].memory_id == pair[1].memory_id)
+    {
+        return Err(ClusterCoherenceError::new(
+            "cluster memory IDs must be unique",
+        ));
+    }
     for point in &sorted {
         if point.memory_id.trim().is_empty() {
             return Err(ClusterCoherenceError::new(
@@ -285,6 +296,13 @@ fn normalized_points(
         if point.embedding.iter().any(|value| !value.is_finite()) {
             return Err(ClusterCoherenceError::new(
                 "cluster embeddings must contain only finite values",
+            ));
+        }
+        // Validate even a singleton: its matrix diagonal is assigned directly
+        // and therefore never passes through the pairwise cosine validator.
+        if point.embedding.iter().all(|value| *value == 0.0) {
+            return Err(ClusterCoherenceError::new(
+                "cluster embeddings must not be zero vectors",
             ));
         }
     }
@@ -561,6 +579,70 @@ fn round_metric(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_memory_cannot_manufacture_minimum_cluster_support() {
+        let point = EmbeddingPoint::new("mem_one_observation", vec![1.0, 0.0]);
+        let points = vec![point; DEFAULT_MIN_CLUSTER_SIZE];
+        let error = agglomerate(&points, ClusterCoherenceConfig::default()).unwrap_err();
+        assert_eq!(error.message(), "cluster memory IDs must be unique");
+        assert!(!error.message().contains("mem_one_observation"));
+    }
+
+    #[test]
+    fn conflicting_duplicate_identity_is_refused_in_every_input_order() {
+        let original = vec![
+            EmbeddingPoint::new("mem_a", vec![1.0, 0.0]),
+            EmbeddingPoint::new("mem_b", vec![0.0, 1.0]),
+            EmbeddingPoint::new("mem_a", vec![-1.0, 0.0]),
+        ];
+        for reverse in [false, true] {
+            for offset in 0..original.len() {
+                let mut points = original.clone();
+                if reverse {
+                    points.reverse();
+                }
+                points.rotate_left(offset);
+                let error = agglomerate(&points, ClusterCoherenceConfig::default()).unwrap_err();
+                assert_eq!(error.message(), "cluster memory IDs must be unique");
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_memories_with_identical_vectors_keep_their_support_and_identity() {
+        let points = (0..DEFAULT_MIN_CLUSTER_SIZE)
+            .map(|index| EmbeddingPoint::new(format!("mem_{index}"), vec![1.0, 0.0]))
+            .collect::<Vec<_>>();
+        let report = agglomerate(&points, ClusterCoherenceConfig::default()).unwrap();
+        assert_eq!(report.input_count, points.len());
+        assert_eq!(report.clusters.len(), 1);
+        let cluster = &report.clusters[0];
+        assert!(cluster.accepted);
+        assert_eq!(cluster.member_count, points.len());
+        assert_eq!(
+            cluster.member_memory_ids,
+            points.iter().map(|point| point.memory_id.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn zero_vectors_are_invalid_even_when_no_pairwise_comparison_runs() {
+        for embedding in [vec![0.0], vec![-0.0, 0.0]] {
+            let point = EmbeddingPoint::new("mem_zero", embedding);
+            let error = agglomerate(&[point.clone()], ClusterCoherenceConfig::default())
+                .unwrap_err();
+            assert_eq!(error.message(), "cluster embeddings must not be zero vectors");
+            let mut points = vec![
+                EmbeddingPoint::new("mem_valid", vec![1.0; point.embedding.len()]),
+                point,
+            ];
+            for _ in 0..2 {
+                points.reverse();
+                assert!(agglomerate(&points, ClusterCoherenceConfig::default()).is_err());
+            }
+        }
+    }
 
     fn angular_points(angles: &[f64]) -> Vec<EmbeddingPoint> {
         angles
