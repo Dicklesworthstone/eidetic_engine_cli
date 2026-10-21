@@ -1017,9 +1017,30 @@ fn insights_database_path(
     workspace: Option<&Path>,
     database_path: Option<&Path>,
 ) -> Option<PathBuf> {
-    database_path
-        .map(Path::to_path_buf)
-        .or_else(|| workspace.map(|workspace| workspace.join(".ee").join("ee.db")))
+    database_path.map(Path::to_path_buf).or_else(|| {
+        workspace.map(|workspace| {
+            // bd-6as5e / bd-l7t9x: resolve the workspace before deriving the
+            // store path, for the same reason audit.rs does
+            // (src/core/audit.rs resolved_database_path). The symlink guard in
+            // src/db/mod.rs refuses a database path with a symlink component,
+            // so joining an unresolved workspace made `ee insights` exit 3 with
+            // error.code "storage" on a path seven other commands accept.
+            //
+            // This is the DATABASE-OPEN half of bd-l7t9x and is separate from
+            // the config-read half already fixed in runtime_graph_feature_enabled
+            // below: one surface could be half-resolved, and this one was.
+            // Neither half is the abort-versus-degrade policy question -- a
+            // resolved path simply opens, with nothing to degrade.
+            //
+            // An explicit --database path stays untouched: it is the caller's
+            // chosen file and resolving it could open a different one.
+            workspace
+                .canonicalize()
+                .unwrap_or_else(|_| workspace.to_path_buf())
+                .join(".ee")
+                .join("ee.db")
+        })
+    })
 }
 
 fn open_insights_database(
