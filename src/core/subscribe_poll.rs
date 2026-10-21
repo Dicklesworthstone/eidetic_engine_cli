@@ -28,6 +28,9 @@ pub use invalidation::{MEMORY_INVALIDATION_SCHEMA_V1, MemoryInvalidation};
 #[path = "subscribe_revision.rs"]
 mod revision;
 
+#[path = "subscribe_links.rs"]
+mod links;
+
 /// Read/access accounting and refused writes do not change memory state.
 /// Keep their audit rows and watermark progress, but never turn a subscriber's
 /// response to a notification into another notification. This is an exact
@@ -218,7 +221,7 @@ impl<'a> SubscriptionSnapshot<'a> {
         // Exclude observations before LIMIT/lookahead, not after hydration.
         // Otherwise a busy reader can consume every page and manufacture
         // has_more even when there are no memory changes to deliver.
-        let observation_slots = (8..8 + OBSERVATION_ONLY_ACTIONS.len())
+        let observation_slots = (9..9 + OBSERVATION_ONLY_ACTIONS.len())
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
             .join(",");
@@ -226,10 +229,12 @@ impl<'a> SubscriptionSnapshot<'a> {
             "SELECT a.rowid, a.id, COALESCE(a.workspace_id, m.workspace_id), \
                     a.timestamp, a.actor, a.action, a.target_id, m.level, m.kind, m.trust_class, \
                     CASE WHEN a.action = ?6 AND length(CAST(a.details AS BLOB)) <= ?7 \
-                         THEN a.details ELSE NULL END \
+                         THEN a.details ELSE NULL END, a.target_type \
              FROM audit_log a LEFT JOIN memories m ON m.id = a.target_id \
              WHERE a.rowid > ?1 AND a.rowid <= ?4 \
-               AND (a.target_type = 'memory' OR (a.target_type IS NULL \
+               AND (a.target_type = 'memory' \
+                    OR (a.target_type = 'memory_link' AND a.action = ?8) \
+                    OR (a.target_type IS NULL \
                     AND (a.action LIKE 'memory.%' OR a.action = ?3))) \
                AND a.target_id IS NOT NULL \
                AND COALESCE(a.workspace_id, m.workspace_id) = ?5 \
@@ -245,6 +250,7 @@ impl<'a> SubscriptionSnapshot<'a> {
             SqlValue::Text(workspace_id.to_owned()),
             SqlValue::Text(audit_actions::MEMORY_REVISE.to_owned()),
             SqlValue::BigInt(revision::MAX_DETAILS_BYTES as i64),
+            SqlValue::Text(audit_actions::MEMORY_LINK_CREATE.to_owned()),
         ];
         parameters.extend(
             OBSERVATION_ONLY_ACTIONS
@@ -262,6 +268,7 @@ impl<'a> SubscriptionSnapshot<'a> {
         let mut deltas = Vec::new();
         let mut invalidations = Vec::new();
         let mut revisions = Vec::new();
+        let mut link_events = Vec::new();
         // Metadata-excluded events can still invalidate prior membership.
         // Only candidates eligible for a full delta need current tag reads.
         let mut metadata_filter = filter.clone();
@@ -269,6 +276,15 @@ impl<'a> SubscriptionSnapshot<'a> {
         for row in rows.into_iter().take(limit) {
             let raw = raw_delta_from_row(&row)?;
             next_cursor = raw.cursor;
+            if raw.action == audit_actions::MEMORY_LINK_CREATE
+                && (matches!(row.get(11), Some(SqlValue::Null))
+                    || row.get(11).and_then(SqlValue::as_str) == Some("memory_link"))
+            {
+                // One edge changes both endpoint caches. Do not split the
+                // audit cursor into two independently acknowledged rows.
+                links::collect(raw, &mut link_events)?;
+                continue;
+            }
             // A batch/scope audit or a foreign native entity is not a memory
             // event merely because its action shares the memory prefix.
             if MemoryId::from_str(&raw.memory_id).is_err() {
@@ -291,6 +307,13 @@ impl<'a> SubscriptionSnapshot<'a> {
                 invalidations.push(notice);
             }
         }
+        invalidations.extend(links::notices(
+            self.connection,
+            workspace_id,
+            &link_events,
+            filter,
+            since_cutoff,
+        )?);
         invalidations.extend(revision::retirement_notices(
             self.connection,
             workspace_id,
