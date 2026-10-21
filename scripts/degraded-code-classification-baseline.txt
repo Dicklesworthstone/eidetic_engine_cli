@@ -2,7 +2,8 @@
 #
 # Read by scripts/check-degraded-code-classified.py (bd-nnheo). Measured
 # 2026-10-18 at 2a1a21282: 324 `pub const *CODE*: &str` declarations in src/,
-# 321 distinct values, 289 classified, 32 not.
+# 321 distinct values, 289 classified, 32 not. Re-measured 2026-10-21 after
+# classifying mesh_peer_randomness_unavailable: 290 classified, 31 not.
 #
 # THIS IS A SHRINK-ONLY BASELINE, NOT AN IGNORE-LIST. The gate fails on a NEW
 # unclassified constant AND on any line here that has since been classified --
@@ -21,8 +22,10 @@
 # "discovery_policy_", "mesh_peer_"]) and demands each result be documented. A
 # code absent from the taxonomy is therefore invisible to every gate downstream
 # of it: the derived gate reads a shorter list and passes.
-# mesh_peer_randomness_unavailable below is exactly that case, and it is how
-# bd-nnheo was found.
+# mesh_peer_randomness_unavailable was exactly that case and is how bd-nnheo
+# was found. It is now CLASSIFIED (medium) and documented, so it has left this
+# list -- and classifying it is what made the onboarding-doc gate start
+# demanding it, which is the chain working in the intended direction.
 #
 # Grouped by owning surface to make the classification work assignable.
 
@@ -64,9 +67,6 @@ typed_field_unknown
 team_idp_device_flow_expired
 team_idp_provider_unsupported
 team_idp_token_invalid
-
-# src/mesh/peer.rs -- the code that surfaced this whole class
-mesh_peer_randomness_unavailable
 
 # src/graph/mod.rs
 graph_remote_projection_stale

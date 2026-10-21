@@ -359,6 +359,7 @@ every step):
 | `mesh_peer_key_rotation_revoked` | medium | Rotation was attempted on a peer in the `Revoked` state | Revoked peers cannot rotate; re-enroll if the peer is trusted again |
 | `mesh_peer_key_rotation_invalid_key` | medium | Rotation supplied an empty public-key fingerprint | Supply the peer's new non-empty fingerprint |
 | `mesh_peer_key_rotation_unchanged` | info | The supplied fingerprint equals the one already on record, so rotation would be a no-op | Supply a genuinely new fingerprint, or skip the rotation |
+| `mesh_peer_randomness_unavailable` | medium | `ee mesh peer add` could not obtain operating-system cryptographic randomness to mint the peer id, so enrollment was denied rather than completed with a weak identifier | Retry on a host with a working CSPRNG; never fabricate or reuse a peer id to get past it |
 | `mesh_approval_token_invalid` | high | Bearer is malformed, tampered with, from another workspace/store/surface, or signed by a non-current key | Discard it and explicitly issue a fresh token after reviewing a new preview |
 | `mesh_approval_token_stale` | warning | Authenticated bearer expired or its canonical preview no longer matches current target/policy/memory-or-ledger revisions/scanner generation/sample/grant generation | Re-run the ordinary preview, review the drift, then explicitly issue a new token |
 | `mesh_store_authentication_unavailable` | high | The workspace store-auth root is missing or unreadable | Run `ee doctor --json`; do not grant until local authentication is repaired |

@@ -515,6 +515,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `mesh_peer_key_rotation_invalid_key` | medium | bd-1x87h (SRR6.24) |
 | `mesh_peer_key_rotation_revoked` | medium | bd-1x87h (SRR6.24) |
 | `mesh_peer_key_rotation_unchanged` | info | bd-1x87h (SRR6.24) |
+| `mesh_peer_randomness_unavailable` | medium | bd-nnheo — `ee mesh peer add` denied at `src/mesh/peer.rs:524` because `generate_peer_id()` could not obtain OS cryptographic randomness; severity matches the SRR6.24 denial family above, every member of which denies the same command |
 | `lane_grant_preview_peer_not_in_group` | info | bd-36bbk.1.17 |
 | `lane_grant_preview_lane_already_granted` | info | bd-36bbk.1.17 |
 | `share_preview_peer_unknown` | warning | bd-tc-epic-qzk7o.2.7 |
