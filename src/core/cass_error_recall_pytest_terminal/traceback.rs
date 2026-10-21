@@ -5,6 +5,9 @@
 //! prove process success, even when truncated or wrapped in exit-code zero.
 //! Native test reports keep their earlier, stricter test-inventory dispatch.
 
+#[path = "exception_group.rs"]
+mod exception_group;
+
 use std::collections::BTreeSet;
 
 use super::{
@@ -176,15 +179,20 @@ pub(super) fn inspect(text: &str) -> Option<Decoded> {
     };
     // A quoted or indented example is not a native traceback. An unindented
     // header may follow ordinary stdout from the same invocation.
-    if !visible.lines().any(|line| line == HEADER) {
-        // Exception groups use a different, indented tree grammar. Do not
-        // extract subexceptions from that tree or accept it as a green retry.
-        return visible
-            .lines()
-            .any(|line| line.trim_start() == "+ Exception Group Traceback (most recent call last):")
-            .then_some(output);
+    let ordinary = visible.lines().any(|line| line == HEADER);
+    if !ordinary
+        && !visible.lines().any(|line| {
+            line.trim_start() == "+ Exception Group Traceback (most recent call last):"
+        })
+    {
+        return None;
     }
-    let Some(summaries) = summaries(&visible) else {
+    let summaries = if ordinary {
+        summaries(&visible)
+    } else {
+        exception_group::summaries(&visible)
+    };
+    let Some(summaries) = summaries else {
         return Some(output);
     };
     output.symptom = summaries
