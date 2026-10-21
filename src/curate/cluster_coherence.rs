@@ -312,13 +312,31 @@ fn normalized_points(
 fn pairwise_cosine_matrix(
     points: &[EmbeddingPoint],
 ) -> Result<Vec<Vec<f64>>, ClusterCoherenceError> {
+    pairwise_cosine_matrix_with_norms(points, CosineNorm::new)
+}
+
+fn pairwise_cosine_matrix_with_norms(
+    points: &[EmbeddingPoint],
+    mut prepare: impl FnMut(&[f64]) -> Result<CosineNorm, ClusterCoherenceError>,
+) -> Result<Vec<Vec<f64>>, ClusterCoherenceError> {
+    // Norms depend on a point, not on a pair. Prepare them exactly once and
+    // validate every input before allocating the quadratic similarity matrix.
+    let norms = points
+        .iter()
+        .map(|point| prepare(&point.embedding))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut matrix = vec![vec![0.0; points.len()]; points.len()];
     for left in 0..points.len() {
         for right in left..points.len() {
             let similarity = if left == right {
                 1.0
             } else {
-                cosine_similarity(&points[left].embedding, &points[right].embedding)?
+                cosine_similarity(
+                    &points[left].embedding,
+                    &points[right].embedding,
+                    norms[left],
+                    norms[right],
+                )?
             };
             matrix[left][right] = similarity;
             matrix[right][left] = similarity;
@@ -327,25 +345,81 @@ fn pairwise_cosine_matrix(
     Ok(matrix)
 }
 
-fn cosine_similarity(left: &[f64], right: &[f64]) -> Result<f64, ClusterCoherenceError> {
+#[derive(Clone, Copy)]
+struct CosineNorm {
+    ordinary: Option<f64>,
+    scale: f64,
+    scaled_length: f64,
+}
+
+impl CosineNorm {
+    fn new(values: &[f64]) -> Result<Self, ClusterCoherenceError> {
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(ClusterCoherenceError::new(
+                "cluster embeddings must contain only finite values",
+            ));
+        }
+        let scale = values
+            .iter()
+            .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+        if scale == 0.0 {
+            return Err(ClusterCoherenceError::new(
+                "cluster embeddings must not be zero vectors",
+            ));
+        }
+        let squared = values.iter().map(|value| value * value).sum::<f64>();
+        let scaled_length = values
+            .iter()
+            .map(|value| {
+                let scaled = value / scale;
+                scaled * scaled
+            })
+            .sum::<f64>()
+            .sqrt();
+        Ok(Self {
+            // A subnormal/overflowed sum is not a reliable norm. Nonzero
+            // direction, unlike magnitude, is necessary for cosine scoring.
+            ordinary: squared.is_normal().then(|| squared.sqrt()),
+            scale,
+            scaled_length,
+        })
+    }
+}
+
+fn cosine_similarity(
+    left: &[f64],
+    right: &[f64],
+    left_norm: CosineNorm,
+    right_norm: CosineNorm,
+) -> Result<f64, ClusterCoherenceError> {
+    if let Some((left_length, right_length)) = left_norm.ordinary.zip(right_norm.ordinary) {
+        let denominator = left_length * right_length;
+        if denominator.is_normal() {
+            // Retain the exact ordinary arithmetic and rounding order. The
+            // scaled lane is only for numerically unsafe intermediate values.
+            let dot = left
+                .iter()
+                .zip(right.iter())
+                .map(|(left, right)| left * right)
+                .sum::<f64>();
+            let score = dot / denominator;
+            if score.is_finite() {
+                return Ok(score.clamp(-1.0, 1.0));
+            }
+        }
+    }
     let dot = left
         .iter()
         .zip(right.iter())
-        .map(|(left, right)| left * right)
+        .map(|(left, right)| (left / left_norm.scale) * (right / right_norm.scale))
         .sum::<f64>();
-    let left_norm = left.iter().map(|value| value * value).sum::<f64>().sqrt();
-    let right_norm = right.iter().map(|value| value * value).sum::<f64>().sqrt();
-    if left_norm <= FLOAT_EPSILON || right_norm <= FLOAT_EPSILON {
+    let score = dot / (left_norm.scaled_length * right_norm.scaled_length);
+    if !score.is_finite() {
         return Err(ClusterCoherenceError::new(
-            "cluster embeddings must not be zero vectors",
+            "cluster cosine computation must produce a finite value",
         ));
     }
-    let score = dot / (left_norm * right_norm);
-    if score.is_nan() {
-        Ok(0.0)
-    } else {
-        Ok(score.clamp(-1.0, 1.0))
-    }
+    Ok(score.clamp(-1.0, 1.0))
 }
 
 fn best_merge(
@@ -533,8 +607,15 @@ fn centroid_hash(members: &[usize], points: &[EmbeddingPoint]) -> String {
         }
     }
     if !members.is_empty() {
-        for value in &mut centroid {
-            *value /= members.len() as f64;
+        for (coordinate, value) in centroid.iter_mut().enumerate() {
+            if value.is_finite() {
+                *value /= members.len() as f64;
+            } else {
+                // A mean of finite inputs is finite even when its sum is not.
+                // Preserve historical bytes for ordinary means, but never
+                // collapse unrelated large centroids into the same inf/NaN tag.
+                *value = scaled_centroid_coordinate(members, points, coordinate);
+            }
         }
     }
     let mut hasher = blake3::Hasher::new();
@@ -543,6 +624,25 @@ fn centroid_hash(members: &[usize], points: &[EmbeddingPoint]) -> String {
         hash_text(&mut hasher, "value", &format!("{value:.9}"));
     }
     format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn scaled_centroid_coordinate(
+    members: &[usize],
+    points: &[EmbeddingPoint],
+    coordinate: usize,
+) -> f64 {
+    let scale = members.iter().fold(0.0_f64, |scale, member| {
+        scale.max(points[*member].embedding[coordinate].abs())
+    });
+    if scale == 0.0 {
+        return 0.0;
+    }
+    let total = members
+        .iter()
+        .map(|member| points[*member].embedding[coordinate] / scale)
+        .sum::<f64>();
+    // Rounding may not move a mean outside its inputs' magnitude bound.
+    (total / members.len() as f64).clamp(-1.0, 1.0) * scale
 }
 
 fn hash_text(hasher: &mut blake3::Hasher, field: &str, value: &str) {
@@ -579,6 +679,173 @@ fn round_metric(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finite_nonzero_directions_survive_extreme_and_subnormal_magnitudes() {
+        let scales = [
+            f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            1.0e-200,
+            1.0e-14,
+            1.0,
+            1.0e200,
+            f64::MAX,
+        ];
+        for left in scales {
+            for right in scales {
+                let points = vec![
+                    EmbeddingPoint::new("a", vec![left, 0.0]),
+                    EmbeddingPoint::new("b", vec![right, 0.0]),
+                    EmbeddingPoint::new("c", vec![-right, 0.0]),
+                    EmbeddingPoint::new("d", vec![0.0, right]),
+                ];
+                let matrix = pairwise_cosine_matrix(&points).unwrap();
+                assert!((matrix[0][1] - 1.0).abs() < 1.0e-12);
+                assert!((matrix[0][2] + 1.0).abs() < 1.0e-12);
+                assert!(matrix[0][3].abs() < 1.0e-12);
+                for row in 0..matrix.len() {
+                    for column in 0..matrix.len() {
+                        assert!(matrix[row][column].is_finite());
+                        assert_eq!(matrix[row][column], matrix[column][row]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overflowing_products_do_not_turn_parallel_vectors_into_unrelated_topics() {
+        let points = vec![
+            EmbeddingPoint::new("a", vec![f64::MAX, f64::MAX]),
+            EmbeddingPoint::new("b", vec![f64::MAX, f64::MAX]),
+            EmbeddingPoint::new("c", vec![f64::MAX, -f64::MAX]),
+        ];
+        let matrix = pairwise_cosine_matrix(&points).unwrap();
+        assert!((matrix[0][1] - 1.0).abs() < 1.0e-12);
+        assert!(matrix[0][2].abs() < 1.0e-12);
+        assert!(matrix[1][2].abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn positive_rescaling_preserves_topic_membership_scores_and_admission() {
+        let original = angular_points(&[0.0, 5.0, 10.0, 45.0, 50.0, 55.0]);
+        let config = ClusterCoherenceConfig {
+            merge_threshold: 0.95,
+            ..ClusterCoherenceConfig::default()
+        };
+        let baseline = agglomerate(&original, config).unwrap();
+        let mut scaled = original.clone();
+        for (point, scale) in scaled
+            .iter_mut()
+            .zip([1.0e300, 1.0e-300, 1.0e200, 1.0e-200, 1.0e-14, 1.0])
+        {
+            for value in &mut point.embedding {
+                *value *= scale;
+            }
+        }
+        let unchanged = scaled.clone();
+        let report = agglomerate(&scaled, config).unwrap();
+        assert_eq!(scaled, unchanged, "scoring may not rewrite caller embeddings");
+        assert_eq!(report.clusters.len(), baseline.clusters.len());
+        for (actual, expected) in report.clusters.iter().zip(&baseline.clusters) {
+            assert_eq!(actual.cluster_id, expected.cluster_id);
+            assert_eq!(actual.member_memory_ids, expected.member_memory_ids);
+            assert_eq!(
+                actual.average_internal_similarity,
+                expected.average_internal_similarity
+            );
+            assert_eq!(
+                actual.nearest_external_similarity,
+                expected.nearest_external_similarity
+            );
+            assert_eq!(actual.silhouette_score, expected.silhouette_score);
+            assert_eq!(actual.accepted, expected.accepted);
+        }
+        scaled.reverse();
+        assert_eq!(agglomerate(&scaled, config).unwrap(), report);
+    }
+
+    #[test]
+    fn ordinary_pair_scores_and_centroid_commitments_retain_their_original_bytes() {
+        let points = angular_points(&[-170.0, -90.0, -5.0, 0.0, 5.0, 55.0, 120.0, 170.0]);
+        let matrix = pairwise_cosine_matrix(&points).unwrap();
+        for left in 0..points.len() {
+            for right in left + 1..points.len() {
+                // Literal pre-change arithmetic is the compatibility oracle.
+                let a = &points[left].embedding;
+                let b = &points[right].embedding;
+                let dot = a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
+                let a_norm = a.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let expected = (dot / (a_norm * b_norm)).clamp(-1.0, 1.0);
+                assert_eq!(matrix[left][right].to_bits(), expected.to_bits());
+            }
+        }
+        let members = vec![0, 1, 2];
+        let mut expected = blake3::Hasher::new();
+        expected.update(b"ee.cluster_centroid.v1\n");
+        for coordinate in 0..2 {
+            let mean = members
+                .iter()
+                .map(|member| points[*member].embedding[coordinate])
+                .sum::<f64>()
+                / members.len() as f64;
+            hash_text(&mut expected, "value", &format!("{mean:.9}"));
+        }
+        assert_eq!(
+            centroid_hash(&members, &points),
+            format!("blake3:{}", expected.finalize().to_hex())
+        );
+    }
+
+    #[test]
+    fn large_centroids_commit_finite_means_instead_of_a_shared_infinity_tag() {
+        let mut hashes = Vec::new();
+        for value in [f64::MAX, f64::MAX / 2.0, -f64::MAX] {
+            let points = (0..3)
+                .map(|index| EmbeddingPoint::new(format!("mem_{index}"), vec![value]))
+                .collect::<Vec<_>>();
+            let report = agglomerate(&points, ClusterCoherenceConfig::default()).unwrap();
+            assert_eq!(report.clusters.len(), 1);
+            assert!(report.clusters[0].accepted);
+            let mut expected = blake3::Hasher::new();
+            expected.update(b"ee.cluster_centroid.v1\n");
+            hash_text(&mut expected, "value", &format!("{value:.9}"));
+            assert_eq!(
+                report.clusters[0].centroid_hash,
+                format!("blake3:{}", expected.finalize().to_hex())
+            );
+            hashes.push(report.clusters[0].centroid_hash.clone());
+        }
+        hashes.sort();
+        hashes.dedup();
+        assert_eq!(hashes.len(), 3);
+        let points = vec![
+            EmbeddingPoint::new("a", vec![f64::MAX]),
+            EmbeddingPoint::new("b", vec![f64::MAX]),
+            EmbeddingPoint::new("c", vec![-f64::MAX]),
+        ];
+        let mean = scaled_centroid_coordinate(&[0, 1, 2], &points, 0);
+        assert!(mean.is_finite());
+        assert!((mean / f64::MAX - 1.0 / 3.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn norm_preparation_is_linear_in_points_not_quadratic_in_pairs() {
+        let points = angular_points(&[0.0, 5.0, 10.0, 45.0, 50.0, 55.0]);
+        let mut calls = 0;
+        let observed = pairwise_cosine_matrix_with_norms(&points, |values| {
+            calls += 1;
+            CosineNorm::new(values)
+        })
+        .unwrap();
+        assert_eq!(calls, points.len());
+        assert_eq!(observed, pairwise_cosine_matrix(&points).unwrap());
+        for value in [0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let invalid = vec![EmbeddingPoint::new("invalid_singleton", vec![value])];
+            assert!(pairwise_cosine_matrix(&invalid).is_err());
+        }
+    }
 
     #[test]
     fn repeated_memory_cannot_manufacture_minimum_cluster_support() {
