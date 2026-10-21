@@ -88,6 +88,88 @@ fn set_e_census_self_test_passes() -> TestResult {
     Ok(())
 }
 
+fn check_format_script() -> PathBuf {
+    repo_root().join("scripts").join("check-format.sh")
+}
+
+fn run_check_format(args: &[&str]) -> Result<(bool, String), String> {
+    let output = Command::new(check_format_script())
+        .args(args)
+        .current_dir(repo_root())
+        .output()
+        .map_err(|error| format!("run check-format.sh with {args:?}: {error}"))?;
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok((output.status.success(), combined))
+}
+
+/// `scripts/check-format.sh`'s own arms. bd-w6849's second half.
+///
+/// WHY IT LIVES IN THIS FILE. This file already is "the gate scripts that were
+/// invoked by nothing, given a root", and `autotests = false` means a new
+/// `tests/*.rs` needs either a `[[test]]` entry or another `#[path]` include.
+/// Riding this one costs no target, no verify.sh stage and no budget key.
+///
+/// WHY IT IS NOT REDUNDANT WITH THE RUSTFMT GATE. `cargo fmt` walks only the
+/// module tree reachable under the DEFAULT cfg, so files pulled in by
+/// `include!` and files behind `#[cfg(test)]`, `#[cfg(unix)]` or a feature gate
+/// are never visited. Measured on this tree the script reports SIX
+/// include!-only files plus eight cfg-gated ones that `cargo fmt --check` does
+/// not see, which is exactly the population no other gate covers.
+///
+/// EXECUTED BEFORE BEING WIRED, as bd-w6849 requires: `--self-test` passed 7
+/// of 7 arms and the live run exited 0 on this tree before this file named it.
+#[test]
+fn check_format_self_test_passes() -> TestResult {
+    let (ok, out) = run_check_format(&["--self-test"])?;
+    if !ok {
+        return Err(format!("check-format.sh self-test failed:\n{out}"));
+    }
+    // A self-test that runs zero arms also "passes". Read the denominator.
+    if !out.contains("arms passed") {
+        return Err(format!(
+            "check-format.sh self-test printed no arm tally, so nothing proves \
+             it ran any arms:\n{out}"
+        ));
+    }
+    Ok(())
+}
+
+/// Files that `cargo fmt` cannot reach must still be formatted.
+///
+/// WHY EXIT 0 IS NOT ENOUGH HERE. The script documents its own contract as
+/// "0 clean, OR inconclusive (fail-open)": an unresolvable pinned toolchain, a
+/// missing rustfmt, or a timeout each warn and return 0. Asserting only the
+/// status would credit a check that never ran — the failure mode this file's
+/// header objects to — so an inconclusive run is treated as a RED here, with
+/// the warning quoted. In a test context the pinned toolchain is a declared
+/// requirement of this repo, so "I could not check" is a finding, not noise.
+#[test]
+fn include_only_and_cfg_gated_files_stay_formatted() -> TestResult {
+    let (ok, out) = run_check_format(&[])?;
+    if !ok {
+        return Err(format!(
+            "check-format.sh reported formatting drift in files `cargo fmt` \
+             does not reach (include!-only or cfg-gated). Run \
+             `scripts/check-format.sh` and format the files it names.\n{out}"
+        ));
+    }
+    if out.contains("inconclusive") {
+        return Err(format!(
+            "check-format.sh exited 0 INCONCLUSIVE, so nothing was actually \
+             checked. Its fail-open paths are an unresolvable pinned \
+             toolchain, a missing rustfmt under it, or a timeout.\n{out}"
+        ));
+    }
+    if !out.contains("include!-only file(s)") {
+        return Err(format!(
+            "check-format.sh printed no include!-only tally, so nothing proves \
+             it walked the population this arm exists for:\n{out}"
+        ));
+    }
+    Ok(())
+}
+
 /// No shell script in the tree may carry a handler that `set -e` prevents from
 /// running.
 #[test]
