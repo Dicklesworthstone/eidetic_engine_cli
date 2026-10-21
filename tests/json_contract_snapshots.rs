@@ -766,8 +766,21 @@ fn scrub_value_for_key(key: &str, value: &mut Value) {
         *value = serde_json::json!(0);
         return;
     }
+    // bd-yxpm9: freshness multipliers are clock-dependent, so they have to be
+    // redacted -- but the redaction has to be VISIBLE. This arm used to write
+    // the integer 0, which is indistinguishable from a real measurement and,
+    // for a MULTIPLICATIVE component, arithmetically impossible: the snapshot
+    // showed components.freshnessDrift = 0 beside finalScore = 0.9936, which
+    // cannot both hold. That reads as a product defect and was filed as one.
+    // It is not: the live path emits the float 1.0, measured on an RCH worker
+    // and unchanged under --as-of, under the portable operating profile, and
+    // across both writers, because SearchScoringSignals::new leaves the signal
+    // None and freshness_drift is therefore its map_or default. Nothing in the
+    // product emits a bare 0 here. So use the same self-identifying placeholder
+    // shape as every string arm above and let the next reader see a redaction
+    // instead of a value.
     if normalized.contains("freshness") && value.is_number() {
-        *value = serde_json::json!(0);
+        *value = Value::String("[FRESHNESS]".to_string());
     }
 }
 
