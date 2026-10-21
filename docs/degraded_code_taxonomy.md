@@ -820,6 +820,7 @@ that helper is the thing to change.
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
 | `graph_skyline_disabled` | info | bd-reality-core-convergence-1azkt.31 — config-time: `[graph.feature.skyline] enabled = false` on a graph-enabled build; do not confuse with the build-time codes above |
+| `graph_skyline_flag_unreadable` | medium | bd-l7t9x — the workspace config could not be READ, so the flag's value is unknown; distinct from `graph_skyline_disabled`, which asserts the operator turned the section off. Previously folded into the same `None` as "no workspace" and emitted nothing, so an empty skyline came back with `success: true` and no signal |
 | `insights_section_unavailable` | info | bd-113r0, retired by bd-2pos6.4 — historical registered `ee insights` metadata-only builder code |
 | `singleflight_follower_timeout` | medium | bd-gni47.3 (SF3) |
 | `singleflight_leader_failed` | medium | bd-gni47.3 (SF3) |

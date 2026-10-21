@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_skyline_flag_unreadable",
+  "introduced_by": {
+    "bead": "bd-l7t9x",
+    "epic_letter": "symlinked-workspace-config"
+  },
+  "surfaces": ["status", "status --skyline"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The workspace config exists but cannot be read or parsed, so status_skyline_feature_enabled never learns whether graph.feature.skyline.enabled is on. Before this code existed, that state was folded into the same None as 'no workspace addressed' by an .ok(), the skyline was simply never computed, and ee status --skyline answered with an empty skyline, success:true and nothing in degraded[] -- a confident wrong answer rather than a missing one. Measured on 0.14.2 with one workspace addressed two ways: via /tmp (a symlink on macOS) the skyline reported 0 communities, via /private/tmp it reported 1. That particular trigger no longer reproduces because the reader now resolves the workspace first, so the portable trigger is a config the parser rejects.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee config set graph.feature.skyline.enabled true --workspace .",
+      "printf 'graph = { feature = ' > .ee/config.toml"
+    ],
+    "invocation": "ee status --skyline --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_skyline_flag_unreadable",
+    "severity": "medium",
+    "message_contains": [
+      "could not read graph.feature.skyline.enabled",
+      "without confirming"
+    ],
+    "repair_contains": "ee config show graph.feature."
+  }
+}
