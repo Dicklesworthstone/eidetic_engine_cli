@@ -59,9 +59,17 @@ fn storage_error(_: impl std::fmt::Display) -> DomainError {
     }
 }
 
+fn checkpoint() -> Result<(), DomainError> {
+    if let Some(cx) = asupersync::Cx::current() {
+        cx.checkpoint().map_err(storage_error)?;
+    }
+    Ok(())
+}
+
 pub(super) fn poll_memory_deltas(
     options: &SubscribePollOptions<'_>,
 ) -> Result<SubscribePollReport, DomainError> {
+    checkpoint()?;
     let started = Instant::now();
     let since_cutoff = subscription_cutoff(&options.filter, Utc::now())?;
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
@@ -187,6 +195,7 @@ struct SubscriptionSnapshot<'a> {
 
 impl<'a> SubscriptionSnapshot<'a> {
     fn begin(connection: &'a DbConnection) -> Result<Self, DomainError> {
+        checkpoint()?;
         connection.begin_read_snapshot().map_err(storage_error)?;
         Ok(Self {
             connection,
@@ -251,6 +260,7 @@ impl<'a> SubscriptionSnapshot<'a> {
             .connection
             .query(&sql, &parameters)
             .map_err(storage_error)?;
+        checkpoint()?;
         // One lookahead row proves whether the raw page is exhausted. Never
         // acknowledge that row: the next request still has to inspect it.
         let has_more = rows.len() > limit;
@@ -264,6 +274,7 @@ impl<'a> SubscriptionSnapshot<'a> {
         let mut metadata_filter = filter.clone();
         metadata_filter.tags.clear();
         for row in rows.into_iter().take(limit) {
+            checkpoint()?;
             let raw = raw_delta_from_row(&row)?;
             next_cursor = raw.cursor;
             if raw.action == audit_actions::MEMORY_LINK_CREATE
@@ -312,6 +323,7 @@ impl<'a> SubscriptionSnapshot<'a> {
             since_cutoff,
         )?);
         self.hydrate_tags(&mut deltas)?;
+        checkpoint()?;
         deltas.retain(|delta| {
             if filter.matches_delta(delta, since_cutoff) {
                 true
@@ -336,6 +348,7 @@ impl<'a> SubscriptionSnapshot<'a> {
             // commits are above this watermark and remain visible next time.
             next_cursor = high_watermark;
         }
+        checkpoint()?;
         Ok(DeltaPage {
             high_watermark,
             next_cursor,
@@ -349,6 +362,15 @@ impl<'a> SubscriptionSnapshot<'a> {
     /// Repeated events retain their own cursors and complete canonical tags;
     /// lookahead and metadata-only invalidations never enter a batch.
     fn hydrate_tags(&self, deltas: &mut [MemoryDelta]) -> Result<(), DomainError> {
+        self.hydrate_tags_observed(deltas, || Ok(()))
+    }
+
+    fn hydrate_tags_observed(
+        &self,
+        deltas: &mut [MemoryDelta],
+        mut after_batch: impl FnMut() -> Result<(), DomainError>,
+    ) -> Result<(), DomainError> {
+        checkpoint()?;
         let ids: BTreeSet<&str> = deltas
             .iter()
             .map(|delta| delta.memory_id.as_str())
@@ -358,26 +380,31 @@ impl<'a> SubscriptionSnapshot<'a> {
         // At most 40 bulk-reader calls for the 10,000-event page limit.
         // Bound SQL parameters independently of repeated audit identities.
         for batch in ids.chunks(256) {
+            checkpoint()?;
             tags.extend(
                 self.connection
                     .get_memory_tags_batch(batch)
                     .map_err(storage_error)?,
             );
+            after_batch()?;
+            checkpoint()?;
         }
         for delta in deltas {
             delta.tags = tags.get(&delta.memory_id).cloned().unwrap_or_default();
             delta.tags.sort();
             delta.tags.dedup();
         }
+        checkpoint()?;
         Ok(())
     }
 
     fn finish(mut self) -> Result<(), DomainError> {
+        checkpoint()?;
         self.connection
             .commit_read_snapshot()
             .map_err(storage_error)?;
         self.active = false;
-        Ok(())
+        checkpoint()
     }
 }
 

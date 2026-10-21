@@ -9,7 +9,7 @@ use sqlmodel_core::Value;
 use crate::db::DbConnection;
 use crate::models::DomainError;
 
-use super::{malformed_row, storage_error};
+use super::{checkpoint, malformed_row, storage_error};
 
 pub(super) fn read(db: &DbConnection, workspace: &str) -> Result<u64, DomainError> {
     read_observed(db, workspace, || Ok(()))
@@ -20,6 +20,7 @@ fn read_observed(
     workspace: &str,
     after_bound_head: impl FnOnce() -> Result<(), DomainError>,
 ) -> Result<u64, DomainError> {
+    checkpoint()?;
     // idx_audit_log_workspace ends in rowid. MAX on one exact workspace is
     // an indexed endpoint lookup, rather than the old OR/join over its history.
     let bound = db
@@ -38,6 +39,7 @@ fn read_observed(
         None => return Err(malformed_row("workspace audit high watermark")),
     };
     after_bound_head()?;
+    checkpoint()?;
     // Do not join bound rows to memory state: their original workspace owns
     // them even when a target was removed or is not a memory. Conversely a
     // foreign bound audit cannot be adopted merely because its target is local.
@@ -55,6 +57,7 @@ fn read_observed(
             ],
         )
         .map_err(storage_error)?;
+    checkpoint()?;
     let legacy = legacy
         .first()
         .map(|row| {
@@ -249,6 +252,33 @@ mod tests {
         .unwrap();
         assert_parity(&db);
         assert_eq!(read(&db, OWN).unwrap(), i64::MAX as u64);
+    }
+
+    #[test]
+    fn cancellation_between_head_reads_cannot_publish_a_bound_only_watermark() {
+        let db = fixture();
+        let own = memory(&db, 1, OWN);
+        audit(&db, Some(OWN), Some(&own));
+        audit(&db, None, Some(&own));
+        let expected = read(&db, OWN).unwrap();
+        db.begin_read_snapshot().expect("caller snapshot");
+        let borrowed = &db;
+        let result =
+            crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+                read_observed(borrowed, OWN, || {
+                    cx.cancel_with(
+                        asupersync::CancelKind::User,
+                        Some("stop before legacy head"),
+                    );
+                    Ok(())
+                })
+            })
+            .expect("runtime");
+        assert!(result.is_err());
+        assert!(db.begin_read_snapshot().is_err());
+        db.commit_read_snapshot()
+            .expect("caller still owns the snapshot");
+        assert_eq!(read(&db, OWN).unwrap(), expected);
     }
 
     #[test]
