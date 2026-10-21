@@ -514,3 +514,186 @@ fn invalid_time_filters_fail_instead_of_disabling_the_cutoff() {
         None
     );
 }
+
+#[test]
+fn fetching_a_notified_memory_does_not_start_a_subscription_feedback_loop() {
+    use crate::core::memory::{GetMemoryOptions, get_memory_details};
+
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    let created = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    let first = f.poll(0, 1, SubscribeFilter::default());
+    assert_eq!(first.delta_count, 1);
+    assert_eq!(first.next_cursor, created);
+    let original = f.db.get_memory(&id).expect("source").expect("present");
+    let mut cursor = first.next_cursor;
+    for expected_reads in 1..=3 {
+        // Exercise the actual public read producer, not a fabricated show row.
+        let shown = get_memory_details(&GetMemoryOptions {
+            database_path: &f.database,
+            memory_id: &id,
+            include_tombstoned: false,
+        });
+        assert!(shown.found && shown.error.is_none(), "{shown:?}");
+        let reads =
+            f.db.query(
+                "SELECT COUNT(*), MAX(rowid) FROM audit_log WHERE action = ?1 AND target_id = ?2",
+                &[
+                    SqlValue::Text(audit_actions::MEMORY_SHOW.to_owned()),
+                    SqlValue::Text(id.clone()),
+                ],
+            )
+            .expect("actual read audits");
+        assert_eq!(
+            reads[0].get(0).and_then(SqlValue::as_i64),
+            Some(expected_reads)
+        );
+        let read_cursor = u64::try_from(
+            reads[0]
+                .get(1)
+                .and_then(SqlValue::as_i64)
+                .expect("read cursor"),
+        )
+        .expect("positive cursor");
+        assert!(
+            read_cursor > cursor,
+            "the producer must really have emitted its audit"
+        );
+        let next = f.poll(cursor, 1, SubscribeFilter::default());
+        assert!(next.deltas.is_empty() && next.invalidations.is_empty());
+        assert!(!next.has_more);
+        assert_eq!(next.next_cursor, read_cursor);
+        assert_eq!(next.high_watermark, read_cursor);
+        cursor = next.next_cursor;
+    }
+    assert_eq!(
+        f.db.get_memory(&id)
+            .expect("source after reads")
+            .expect("present")
+            .content,
+        original.content
+    );
+    let changed = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_TAG_SET,
+    );
+    let next = f.poll(cursor, 1, SubscribeFilter::default());
+    assert_eq!(next.delta_count, 1, "real changes still notify");
+    assert_eq!(next.deltas[0].cursor, changed);
+    assert_eq!(next.deltas[0].changed_fields, ["tags"]);
+}
+
+#[test]
+fn observation_prefixes_and_tails_do_not_consume_change_page_slots() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    for _ in 0..5 {
+        for action in OBSERVATION_ONLY_ACTIONS {
+            f.audit(Some(&f.own), Some(&id), Some("memory"), action);
+        }
+    }
+    let first = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_TAG_ADD,
+    );
+    f.audit(None, Some(&id), None, audit_actions::MEMORY_SHOW);
+    let second = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    let tail = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        "memory.reveal_failed",
+    );
+    let page = f.poll(0, 1, SubscribeFilter::default());
+    assert_eq!(page.delta_count, 1);
+    assert_eq!(page.deltas[0].cursor, first);
+    assert_eq!(
+        page.next_cursor, first,
+        "never acknowledge the second change as lookahead"
+    );
+    assert!(page.has_more);
+    assert_eq!(page.high_watermark, tail);
+    let next = f.poll(first, 1, SubscribeFilter::default());
+    assert_eq!(next.delta_count, 1);
+    assert_eq!(next.deltas[0].cursor, second);
+    assert_eq!(next.next_cursor, tail);
+    assert!(!next.has_more, "read-only tail is not more change work");
+    let replay = f.poll(tail, 1, SubscribeFilter::default());
+    assert!(replay.deltas.is_empty() && replay.invalidations.is_empty());
+    assert_eq!(replay.next_cursor, tail);
+}
+
+#[test]
+fn observations_neither_invalidate_filtered_membership_nor_require_tag_storage() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "private-tag");
+    let mut tail = 0;
+    for action in OBSERVATION_ONLY_ACTIONS {
+        tail = f.audit(Some(&f.own), Some(&id), Some("memory"), action);
+    }
+    f.db.execute_raw("ALTER TABLE memory_tags RENAME TO subscription_observation_tags")
+        .expect("make an unintended hydration observable");
+    for expression in [
+        None,
+        Some("TAG=release"),
+        Some("LEVEL=episodic,TAG=release"),
+    ] {
+        let filter = super::super::parse_subscribe_filter(expression).expect("filter");
+        let page = f.poll(0, 1, filter);
+        assert!(page.deltas.is_empty() && page.invalidations.is_empty());
+        assert_eq!(page.next_cursor, tail);
+        assert!(!page.has_more);
+    }
+    let rows =
+        f.db.query("SELECT COUNT(*) FROM audit_log", &[])
+            .expect("history remains");
+    assert_eq!(
+        rows[0].get(0).and_then(SqlValue::as_i64),
+        Some(OBSERVATION_ONLY_ACTIONS.len() as i64)
+    );
+}
+
+#[test]
+fn observation_exclusion_is_exact_and_unknown_mutations_remain_visible() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_SHOW,
+    );
+    let mut expected = Vec::new();
+    for action in [
+        "memory.show.changed",
+        "memory.reveal_failed_recovered",
+        "future.reclassify",
+        audit_actions::MEMORY_UPDATE,
+    ] {
+        expected.push(f.audit(Some(&f.own), Some(&id), Some("memory"), action));
+    }
+    let page = f.poll(0, 100, SubscribeFilter::default());
+    assert_eq!(
+        page.deltas
+            .iter()
+            .map(|delta| delta.cursor)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(!page.has_more);
+    assert_eq!(page.next_cursor, page.high_watermark);
+}

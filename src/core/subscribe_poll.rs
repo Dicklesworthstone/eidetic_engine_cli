@@ -28,6 +28,20 @@ pub use invalidation::{MEMORY_INVALIDATION_SCHEMA_V1, MemoryInvalidation};
 #[path = "subscribe_revision.rs"]
 mod revision;
 
+/// Read/access accounting and refused writes do not change memory state.
+/// Keep their audit rows and watermark progress, but never turn a subscriber's
+/// response to a notification into another notification. This is an exact
+/// exclusion, not a mutation whitelist: unknown actions still invalidate.
+const OBSERVATION_ONLY_ACTIONS: &[&str] = &[
+    audit_actions::MEMORY_SHOW,
+    audit_actions::SEARCH_RETURNED_MEM,
+    audit_actions::PACK_INCLUDED_MEM,
+    audit_actions::WHY_INSPECTED,
+    audit_actions::REDACT_AT_OUTPUT,
+    audit_actions::TRUST_CLASS_PROMOTION_BLOCKED,
+    "memory.reveal_failed",
+];
+
 fn storage_error(_: impl std::fmt::Display) -> DomainError {
     DomainError::Storage {
         message: "Could not read a consistent subscription page; no cursor was acknowledged"
@@ -201,10 +215,15 @@ impl<'a> SubscriptionSnapshot<'a> {
     ) -> Result<DeltaPage, DomainError> {
         let high_watermark = self.high_watermark(workspace_id)?;
         let limit = limit.clamp(1, MAX_LIMIT) as usize;
-        let rows = self
-            .connection
-            .query(
-                "SELECT a.rowid, a.id, COALESCE(a.workspace_id, m.workspace_id), \
+        // Exclude observations before LIMIT/lookahead, not after hydration.
+        // Otherwise a busy reader can consume every page and manufacture
+        // has_more even when there are no memory changes to deliver.
+        let observation_slots = (8..8 + OBSERVATION_ONLY_ACTIONS.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT a.rowid, a.id, COALESCE(a.workspace_id, m.workspace_id), \
                     a.timestamp, a.actor, a.action, a.target_id, m.level, m.kind, m.trust_class, \
                     CASE WHEN a.action = ?6 AND length(CAST(a.details AS BLOB)) <= ?7 \
                          THEN a.details ELSE NULL END \
@@ -215,17 +234,26 @@ impl<'a> SubscriptionSnapshot<'a> {
                AND a.target_id IS NOT NULL \
                AND COALESCE(a.workspace_id, m.workspace_id) = ?5 \
                AND (m.id IS NULL OR m.workspace_id = ?5) \
-             ORDER BY a.rowid ASC LIMIT ?2",
-                &[
-                    cursor_sql_value(cursor),
-                    SqlValue::BigInt((limit + 1) as i64),
-                    SqlValue::Text(audit_actions::TRUST_CLASS_TRANSITION.to_owned()),
-                    cursor_sql_value(high_watermark),
-                    SqlValue::Text(workspace_id.to_owned()),
-                    SqlValue::Text(audit_actions::MEMORY_REVISE.to_owned()),
-                    SqlValue::BigInt(revision::MAX_DETAILS_BYTES as i64),
-                ],
-            )
+               AND a.action NOT IN ({observation_slots}) \
+             ORDER BY a.rowid ASC LIMIT ?2"
+        );
+        let mut parameters = vec![
+            cursor_sql_value(cursor),
+            SqlValue::BigInt((limit + 1) as i64),
+            SqlValue::Text(audit_actions::TRUST_CLASS_TRANSITION.to_owned()),
+            cursor_sql_value(high_watermark),
+            SqlValue::Text(workspace_id.to_owned()),
+            SqlValue::Text(audit_actions::MEMORY_REVISE.to_owned()),
+            SqlValue::BigInt(revision::MAX_DETAILS_BYTES as i64),
+        ];
+        parameters.extend(
+            OBSERVATION_ONLY_ACTIONS
+                .iter()
+                .map(|action| SqlValue::Text((*action).to_owned())),
+        );
+        let rows = self
+            .connection
+            .query(&sql, &parameters)
             .map_err(storage_error)?;
         // One lookahead row proves whether the raw page is exhausted. Never
         // acknowledge that row: the next request still has to inspect it.
