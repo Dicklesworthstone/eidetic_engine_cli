@@ -6686,6 +6686,21 @@ pub fn render_why_json(report: &WhyReport) -> String {
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
+            // bd-6ox3b. The PAYLOAD schema id, which `ee why` was the only
+            // surface not emitting. Two authorities agree on the value and that
+            // it belongs here:
+            //   docs/schemas/ee.why.v1.json declares its root `schema` as
+            //     {"type": "string", "const": "ee.why.v1"} and lists it in
+            //     `required` -- and that schema's root describes THIS object,
+            //     not the envelope (its properties are schema/memoryId/graph).
+            //   src/core/mod.rs registers SupportedSchema::new("why_augmented",
+            //     "ee.why.v1").
+            // Siblings already carry theirs the same way: .data.schema is
+            // "ee.insights.v1" for insights and "ee.status.skyline.v1" for
+            // status --skyline. First key because serde_json runs with
+            // preserve_order here, so this matches the schema's own ordering
+            // rather than landing wherever it was appended.
+            "schema": "ee.why.v1",
             "command": "why",
             "version": report.version,
             "memoryId": report.entity.is_none().then_some(&report.memory_id),

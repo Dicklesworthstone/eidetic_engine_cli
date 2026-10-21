@@ -281,6 +281,7 @@ expression: canonical_json_text(value)
       "sourceSchema": "ee.memory.impact_analysis.v1",
       "validationStatus": "disabled"
     },
+    "schema": "ee.why.v1",
     "selection": {
       "aboveConfidenceThreshold": true,
       "isActive": true,
