@@ -7,6 +7,9 @@
 # Re-measured 2026-10-21 after classifying unix_xdg_data_unavailable, the
 # platform twin of the already-classified windows_appdata_unavailable:
 # 291 classified, 30 not.
+# Re-measured 2026-10-21 after classifying graph_remote_projection_stale, which
+# src/graph/mod.rs:9949 already proves reaches remoteGraph.degradedCodes:
+# 292 classified, 29 not.
 #
 # THIS IS A SHRINK-ONLY BASELINE, NOT AN IGNORE-LIST. The gate fails on a NEW
 # unclassified constant AND on any line here that has since been classified --
@@ -72,7 +75,6 @@ team_idp_provider_unsupported
 team_idp_token_invalid
 
 # src/graph/mod.rs
-graph_remote_projection_stale
 
 # src/db/migrate.rs
 shard_fanout_target_hash_mismatch

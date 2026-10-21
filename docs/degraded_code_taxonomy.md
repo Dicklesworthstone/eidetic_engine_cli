@@ -468,6 +468,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `ask_semantic_degraded` | info | bd-169v0.5 (QA) |
 | `cass_limited` | info | bd-1et0v.14 (doctor-health) |
 | `graph_ppr_upstream_unavailable` | medium | bd-reality-core-convergence-1azkt.15 (G) |
+| `graph_remote_projection_stale` | medium | bd-nnheo — emitted at src/graph/mod.rs:4493 when `stale_edge_count > 0`, and src/graph/mod.rs:9949 already asserts it reaches `remoteGraph.degradedCodes[0]`, so this is a live user-visible code rather than a declaration. Severity DERIVED, not invented, from two independent readings that agree: the closest functional analogue is `search_index_stale` (medium) — a query surface served from a stale index — and medium is also the mode of the classified `graph_*` family. |
 | `graph_witness_unparseable_recorded_at` | medium | bd-bife.25 (G) |
 | `import_index_publish_failed` | warning | bd-index-auto-freshness-m5kwf (I) |
 | `mesh_frame_auth_failed` | high | bd-tc-epic-qzk7o.3.2 (TC) |
