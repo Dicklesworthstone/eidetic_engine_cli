@@ -882,8 +882,22 @@ fn runtime_graph_feature_enabled(
     let Some(workspace) = workspace else {
         return Ok(true);
     };
+    // Resolve the workspace before reading its config. The config surface
+    // refuses a config reached through a symlinked path COMPONENT, and this
+    // was the only graph surface handing it an unresolved CLI path, so
+    // `ee insights --workspace /tmp/ws` hard-errored with exit 2 on macOS --
+    // where /tmp and /var are symlinks and $TMPDIR lives under /var/folders --
+    // while `ee init`, `ee why` and `ee context` all succeeded on the SAME
+    // workspace. Measured on both 0.14.2 and 0.18.0: `ee init --workspace
+    // /tmp/ws` reports "workspace":"/private/tmp/ws" in its own payload, so
+    // the product was writing the config through a path it then declined to
+    // read. Falls back to the given path when resolution fails, which keeps a
+    // missing workspace reporting as a missing workspace. bd-l7t9x.
+    let workspace_root = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
     let options = ConfigSurfaceOptions {
-        workspace_root: workspace.to_path_buf(),
+        workspace_root,
         config_path: None,
     };
     get_config(&options, key)
