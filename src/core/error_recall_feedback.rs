@@ -326,6 +326,24 @@ fn withhold_unusable_pack_evidence(
     Ok(())
 }
 
+/// Keep the continuation lower bound outside an OR with the first-page case.
+/// Otherwise an index can restart at the beginning of the fingerprint on every
+/// refill, making a long rejected prefix quadratic. The server resolves the
+/// bounded link cursor to its original target, so oversized targets and NUL
+/// aliases keep their exact ordering without crossing the hydration boundary.
+/// Retain the link tie-break even though the current schema forbids duplicate
+/// helpful targets. The lower bound is inclusive; the final predicate is not.
+fn pack_target_page_sql(continuation: bool) -> String {
+    let cursor = if continuation {
+        " AND h.target_id >= (SELECT c.target_id FROM error_repair_links AS c WHERE c.workspace_id = ?1 AND c.fingerprint_key = ?2 AND c.link_id = ?4) AND (h.target_id > (SELECT c.target_id FROM error_repair_links AS c WHERE c.workspace_id = ?1 AND c.fingerprint_key = ?2 AND c.link_id = ?4) OR h.link_id > ?4)"
+    } else {
+        ""
+    };
+    format!(
+        "SELECT CASE WHEN length(CAST(h.target_id AS BLOB)) <= 128 THEN h.target_id ELSE '' END, CASE WHEN length(CAST(h.link_id AS BLOB)) <= 128 THEN h.link_id ELSE '' END FROM error_repair_links AS h WHERE h.workspace_id = ?1 AND h.fingerprint_key = ?2 AND h.link_kind = 'repair' AND h.outcome = 'helpful'{cursor} AND NOT EXISTS (SELECT 1 FROM error_repair_links AS n WHERE n.workspace_id = ?1 AND n.fingerprint_key = ?2 AND n.link_kind = 'repair' AND n.outcome = 'harmful' AND n.target_id = h.target_id) ORDER BY h.target_id ASC, h.link_id ASC LIMIT ?3"
+    )
+}
+
 fn pack_targets_with(
     connection: &DbConnection,
     workspace_id: &str,
@@ -352,15 +370,17 @@ fn pack_targets_with(
     while output.len() < limit as usize {
         checkpoint()?;
         let remaining = limit as usize - output.len();
-        let rows = connection.query(
-            "SELECT CASE WHEN length(CAST(h.target_id AS BLOB)) <= 128 THEN h.target_id ELSE '' END, CASE WHEN length(CAST(h.link_id AS BLOB)) <= 128 THEN h.link_id ELSE '' END FROM error_repair_links AS h WHERE h.workspace_id = ?1 AND h.fingerprint_key = ?2 AND h.link_kind = 'repair' AND h.outcome = 'helpful' AND (?4 = '' OR h.target_id > (SELECT c.target_id FROM error_repair_links AS c WHERE c.workspace_id = ?1 AND c.fingerprint_key = ?2 AND c.link_id = ?4) OR (h.target_id = (SELECT c.target_id FROM error_repair_links AS c WHERE c.workspace_id = ?1 AND c.fingerprint_key = ?2 AND c.link_id = ?4) AND h.link_id > ?4)) AND NOT EXISTS (SELECT 1 FROM error_repair_links AS n WHERE n.workspace_id = ?1 AND n.fingerprint_key = ?2 AND n.link_kind = 'repair' AND n.outcome = 'harmful' AND n.target_id = h.target_id) ORDER BY h.target_id ASC, h.link_id ASC LIMIT ?3",
-            &[
-                Value::Text(workspace_id.to_owned()),
-                Value::Text(fingerprint_key.to_owned()),
-                Value::BigInt(i64::try_from(remaining).map_err(|_| unavailable())?),
-                Value::Text(after.clone()),
-            ],
-        ).map_err(|_| unavailable())?;
+        let mut parameters = vec![
+            Value::Text(workspace_id.to_owned()),
+            Value::Text(fingerprint_key.to_owned()),
+            Value::BigInt(i64::try_from(remaining).map_err(|_| unavailable())?),
+        ];
+        if !after.is_empty() {
+            parameters.push(Value::Text(after.clone()));
+        }
+        let rows = connection
+            .query(&pack_target_page_sql(!after.is_empty()), &parameters)
+            .map_err(|_| unavailable())?;
         checkpoint()?;
         if rows.is_empty() {
             break;

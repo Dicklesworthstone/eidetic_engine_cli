@@ -214,3 +214,153 @@ fn source_storage_failure_is_not_downgraded_to_an_empty_valid_claim_set() -> Tes
     fixture.db.rollback_read_snapshot()?;
     Ok(())
 }
+
+fn raw_cursor_page(
+    fixture: &Fixture,
+    after: Option<&str>,
+    limit: i64,
+) -> TestResult<Vec<(String, String)>> {
+    let key = fixture.diagnostic.layered_key().key;
+    let mut parameters = vec![
+        Value::Text(WS.to_owned()),
+        Value::Text(key),
+        Value::BigInt(limit),
+    ];
+    if let Some(after) = after {
+        parameters.push(Value::Text(after.to_owned()));
+    }
+    let sql = super::super::super::pack_target_page_sql(after.is_some());
+    let mut page = Vec::new();
+    for row in fixture.db.query(&sql, &parameters)? {
+        page.push((
+            row.get(0)
+                .and_then(Value::as_str)
+                .ok_or("target")?
+                .to_owned(),
+            row.get(1)
+                .and_then(Value::as_str)
+                .ok_or("cursor")?
+                .to_owned(),
+        ));
+    }
+    Ok(page)
+}
+
+#[test]
+fn seek_pages_preserve_raw_target_order_projection_and_negative_feedback() -> TestResult {
+    let fixture = Fixture::new(true)?;
+    let good = manual_sources(&fixture, 36)?;
+    let mut unusual = Vec::new();
+    for number in 0..129 {
+        unusual.push(match number % 3 {
+            0 => format!("!{number:04}-{}", "🦀".repeat(100)),
+            1 => format!("{}\0alias-{number:04}", good[0]),
+            _ => format!("界-{number:04}"),
+        });
+    }
+    record(&fixture, unusual.clone(), None)?;
+    let harmful: BTreeSet<_> = unusual.iter().step_by(5).cloned().collect();
+    record_error_repair_links(
+        &fixture.db,
+        WS,
+        &fixture.diagnostic,
+        &ErrorRepairLinkRecording {
+            harmful_repairs: harmful.iter().cloned().collect(),
+            ..Default::default()
+        },
+    )?;
+    let key = fixture.diagnostic.layered_key().key;
+    let history = fixture.db.list_error_repair_links(WS, &key)?;
+    let mut expected: Vec<_> = history
+        .iter()
+        .filter(|link| {
+            link.link_kind == "repair"
+                && link.outcome == "helpful"
+                && !harmful.contains(&link.target_id)
+        })
+        .collect();
+    expected.sort_by(|left, right| {
+        left.target_id
+            .cmp(&right.target_id)
+            .then_with(|| left.link_id.cmp(&right.link_id))
+    });
+    let expected: Vec<_> = expected
+        .into_iter()
+        .map(|link| {
+            (
+                if link.target_id.len() <= 128 {
+                    link.target_id.clone()
+                } else {
+                    String::new()
+                },
+                link.link_id.clone(),
+            )
+        })
+        .collect();
+    assert!(expected.iter().any(|(target, _)| target.is_empty()));
+    assert!(expected.iter().any(|(target, _)| target.contains('\0')));
+    for limit in [1_i64, 2, 7, 31, 32] {
+        let mut after: Option<String> = None;
+        let mut actual = Vec::new();
+        loop {
+            let page = raw_cursor_page(&fixture, after.as_deref(), limit)?;
+            if page.is_empty() {
+                break;
+            }
+            assert!(page.len() <= limit as usize);
+            assert!(
+                page.iter()
+                    .all(|(target, cursor)| target.len() <= 128 && cursor.len() <= 128)
+            );
+            after = page.last().map(|(_, cursor)| cursor.clone());
+            actual.extend(page);
+            assert!(
+                actual.len() <= expected.len(),
+                "a cursor revisited an earlier target"
+            );
+        }
+        assert_eq!(actual, expected);
+    }
+    assert_eq!(fixture.db.list_error_repair_links(WS, &key)?, history);
+    assert_eq!(pack_targets(&fixture.db, WS, &key, 32)?, good[..32]);
+    Ok(())
+}
+
+#[test]
+fn seek_cursor_is_bound_to_the_workspace_and_error_class_without_aliasing() -> TestResult {
+    let fixture = Fixture::new(true)?;
+    manual_sources(&fixture, 8)?;
+    let first = raw_cursor_page(&fixture, None, 1)?;
+    let cursor = first.first().ok_or("first page")?.1.clone();
+    let next = raw_cursor_page(&fixture, Some(&cursor), 1)?;
+    assert_eq!(next.len(), 1);
+    assert!(first[0].0 < next[0].0);
+    for invalid in [
+        "unknown".to_owned(),
+        format!("{cursor}\0alias"),
+        format!(" {cursor}"),
+    ] {
+        assert!(raw_cursor_page(&fixture, Some(&invalid), 32)?.is_empty());
+    }
+    for (workspace, diagnostic) in [
+        (OTHER, fixture.diagnostic.clone()),
+        (
+            WS,
+            crate::core::error_recall::from_rustc(Some("E0308"), "mismatched types"),
+        ),
+    ] {
+        let links = record_error_repair_links(
+            &fixture.db,
+            workspace,
+            &diagnostic,
+            &ErrorRepairLinkRecording {
+                helpful_repairs: vec![id(1)],
+                ..Default::default()
+            },
+        )?;
+        let foreign = links.first().ok_or("foreign cursor")?;
+        assert!(raw_cursor_page(&fixture, Some(&foreign.link_id), 32)?.is_empty());
+    }
+    assert_eq!(raw_cursor_page(&fixture, Some(&cursor), 1)?, next);
+    Ok(())
+}
