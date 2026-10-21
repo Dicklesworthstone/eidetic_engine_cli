@@ -4,6 +4,9 @@
 //! Keep unknown, malformed, truncated and still-running outputs out of the
 //! helpful-repair store; any explicit failure overrides optimistic summaries.
 
+#[path = "cass_error_recall_execution.rs"]
+mod execution;
+
 use serde_json::Value;
 
 use super::{MAX_SCANNED_OUTPUT_BYTES, ToolOutput, bounded, content_text};
@@ -232,12 +235,9 @@ pub(super) fn codex_output(raw: &Value) -> Option<ToolOutput> {
 
 fn structured_output(raw: &Value) -> Option<ToolOutput> {
     let text = content_text(raw.get("output")?)?;
-    let mut invalid = false;
+    let mut invalid = execution::refuses_completion(raw);
     let mut exit_code = None;
     let metadata = raw.get("metadata");
-    if metadata.is_some_and(|value| !value.is_object()) {
-        invalid = true;
-    }
     for value in [
         raw.get("exit_code"),
         metadata.and_then(|metadata| metadata.get("exit_code")),
@@ -255,11 +255,8 @@ fn structured_output(raw: &Value) -> Option<ToolOutput> {
             None => invalid = true,
         }
     }
-    // Do not derive Codex completion from a generic success/error boolean:
-    // execution wrappers must supply their process exit, not merely no error.
-    if let Some(value) = raw.get("is_error") {
-        invalid |= value.as_bool() != Some(false);
-    }
+    // Clean metadata only removes a veto. It cannot supply process completion
+    // or override a native failure in the captured output.
     Some(ToolOutput {
         text,
         is_error: invalid.then_some(true),
