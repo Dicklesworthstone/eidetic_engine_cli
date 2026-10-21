@@ -171,6 +171,54 @@ or envelope carries that marker. Workspace and policy isolation still belong
 to the caller because `ContextDeltaPackSnapshot` does not store those values.
 The methods neither authenticate network input nor widen source eligibility.
 
+### Scope-Bound Application (prefer this)
+
+A pack hash alone does not bind a delta to a workspace or a feature-flag set,
+so the methods above will cheerfully apply a delta whose baseline hash matches
+but whose origin does not. If your client retains the workspace and flag
+identity alongside its baseline — and it should — pass them in and let the
+envelope enforce the binding instead of hand-rolling it:
+
+```rust
+// Typed envelope (ContextDeltaEnvelope), identities from the RETAINED baseline.
+// Like apply_to_snapshot, this borrows and returns a new snapshot.
+let next = delta.apply_to_snapshot_scoped(&prior, workspace_id, flag_hash)?;
+
+// Wire bytes (ContextDeltaPackSnapshot). NOTE: &mut self -- these UPDATE the
+// snapshot in place and hand back the envelope they parsed. Default cap is
+// ContextDeltaEnvelope::DEFAULT_MAX_JSON_BYTES (4 MiB).
+let envelope = snapshot.apply_json_delta_scoped(bytes, workspace_id, flag_hash)?;
+
+// ...or an explicit inclusive cap:
+let envelope = snapshot
+    .apply_json_delta_scoped_with_limit(bytes, max_json_bytes, workspace_id, flag_hash)?;
+```
+
+There is no unscoped `apply_json_delta`. For the wire path these are the only
+entry points, so scope binding is the default rather than the upgrade; it is
+the typed path that can still be used unbound.
+
+`flag_hash: Option<&str>` is an assertion in both directions, not an optional
+filter. `None` asserts the envelope carries **no** flag identity on either
+side, so passing `None` for a delta that does carry one is rejected — it is
+not "no opinion". `Some("")` is likewise rejected rather than read as blank.
+A client that has lost track of its own flag hash therefore fails loudly
+instead of quietly applying an unverified delta.
+
+**The expected identities must come from the client's retained baseline
+context, never from the arriving delta.** A delta that supplies its own notion
+of which workspace it belongs to is asserting the very thing being checked.
+
+Beyond everything `apply_to_snapshot` rejects, the scoped forms reject a
+missing, blank or mismatched workspace, a changed feature-flag identity, and a
+generation rollback. Diagnostics deliberately exclude the supplied identities
+and the evidence contents, so a rejection is safe to log verbatim.
+
+What scope binding does NOT add: the new hash is still copied from the
+envelope rather than recomputed, the result still carries no server-ledger
+verification, and transport authentication remains external (see
+[Transport](#transport)).
+
 ## Response Shapes
 
 There are two valid outcomes:
