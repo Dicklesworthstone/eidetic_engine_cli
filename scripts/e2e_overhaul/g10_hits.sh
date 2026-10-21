@@ -151,9 +151,28 @@ if printf '%s' "$CONTEXT_GROUNDING_JSON" | jq . >/dev/null 2>&1 \
     && printf '%s' "$CONTEXT_ORIENTATION_JSON" | jq . >/dev/null 2>&1 \
     && printf '%s' "$CONTEXT_BALANCED_JSON" | jq . >/dev/null 2>&1; then
     e2e_log_note "g10_hits_surface=context profile rerank"
-    assert_jq "$CONTEXT_GROUNDING_JSON" '.data.pack.profile // .data.profile // empty' "grounding" "g10_hits_context_grounding_profile"
-    assert_jq "$CONTEXT_ORIENTATION_JSON" '.data.pack.profile // .data.profile // empty' "orientation" "g10_hits_context_orientation_profile"
-    assert_jq "$CONTEXT_BALANCED_JSON" '.data.pack.profile // .data.profile // empty' "balanced" "g10_hits_context_balanced_profile"
+    # `ee context` DOES echo its profile, in three places -- but not at either
+    # of the two paths these assertions used to read. `.data.pack.profile` and
+    # `.data.profile` do not exist, so all three failed against a surface that
+    # reports the profile correctly. Measured 2026-10-20; the real paths are
+    # .data.request.profile, .data.pack.selectionAudit.profile and
+    # .data.pack.meta.algorithm.profile. Asserting all three together also
+    # catches the two agreeing while the third drifts. bd-ol177.
+    # Labels stay as literals rather than being built in a loop:
+    # tests/e2e_graph_logging_scripts.rs pins these exact strings by substring
+    # match against the script TEXT, so a constructed label silently breaks
+    # that guard even though the suite still emits the right thing.
+    assert_jq "$CONTEXT_GROUNDING_JSON" '.data.request.profile // empty' "grounding" "g10_hits_context_grounding_profile"
+    assert_jq "$CONTEXT_ORIENTATION_JSON" '.data.request.profile // empty' "orientation" "g10_hits_context_orientation_profile"
+    assert_jq "$CONTEXT_BALANCED_JSON" '.data.request.profile // empty' "balanced" "g10_hits_context_balanced_profile"
+    # The same value is echoed in three independent places; asserting all three
+    # catches two agreeing while the third drifts.
+    assert_jq "$CONTEXT_GROUNDING_JSON" '.data.pack.selectionAudit.profile // empty' "grounding" "g10_hits_context_grounding_audit_profile"
+    assert_jq "$CONTEXT_ORIENTATION_JSON" '.data.pack.selectionAudit.profile // empty' "orientation" "g10_hits_context_orientation_audit_profile"
+    assert_jq "$CONTEXT_BALANCED_JSON" '.data.pack.selectionAudit.profile // empty' "balanced" "g10_hits_context_balanced_audit_profile"
+    assert_jq "$CONTEXT_GROUNDING_JSON" '.data.pack.meta.algorithm.profile // empty' "grounding" "g10_hits_context_grounding_algorithm_profile"
+    assert_jq "$CONTEXT_ORIENTATION_JSON" '.data.pack.meta.algorithm.profile // empty' "orientation" "g10_hits_context_orientation_algorithm_profile"
+    assert_jq "$CONTEXT_BALANCED_JSON" '.data.pack.meta.algorithm.profile // empty' "balanced" "g10_hits_context_balanced_algorithm_profile"
     GROUNDING_FIRST=$(printf '%s' "$CONTEXT_GROUNDING_JSON" | jq -r '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
     ORIENTATION_FIRST=$(printf '%s' "$CONTEXT_ORIENTATION_JSON" | jq -r '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
     BALANCED_FIRST=$(printf '%s' "$CONTEXT_BALANCED_JSON" | jq -r '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
