@@ -524,3 +524,113 @@ fn split_terminal_sequences_wait_for_completion_without_poisoning_later_proof() 
     }
     Ok(())
 }
+
+#[test]
+fn styled_cargo_failures_reach_live_recall_without_rewriting_source_evidence() -> TestResult {
+    let plain = format!("{ROOT}{CAUSE}");
+    let diagnostic = structured_error_diagnostics(&plain)
+        .into_iter()
+        .next()
+        .ok_or("diagnostic")?;
+    for styled in [
+        format!("\u{1b}[31m{plain}\u{1b}[0m"),
+        plain
+            .replace("error:", "\u{1b}[31merror:\u{1b}[0m")
+            .replace("Caused by:", "\u{1b}[1mCaused by:\u{1b}[0m"),
+        format!("\u{1b}]8;;https://example.test/build\u{7}{plain}\u{1b}]8;;\u{7}"),
+    ] {
+        assert_eq!(
+            structured_error_diagnostics(&styled),
+            vec![diagnostic.clone()]
+        );
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        let failure = fixture.result("fail", &styled, Some(101))?;
+        let repair = fixture.repair()?;
+        fixture.call("verify", COMMAND, CWD)?;
+        let proof = fixture.result("verify", "\u{1b}[32mFinished dev profile\u{1b}[0m", Some(0))?;
+        let before = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.fingerprints_recorded, 1);
+        assert_eq!(report.resolved_failures, 1);
+        assert_eq!(report.incident_cards_recorded, 1);
+        let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        assert!(recall.exact);
+        assert!(recall.helpful_repairs.contains(&repair));
+        assert_eq!(recall.proof_links, vec![proof]);
+        let card_id = incident_card_id(WS, &failure);
+        let card = fixture.db.get_evidence_span(&card_id)?.ok_or("card")?;
+        let mut checks = CardChecks::default();
+        checks.observe(&card)?;
+        assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+        assert!(recall.helpful_repairs.contains(&card_id));
+        assert!(pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?.contains("prior fix:"));
+        for source in before {
+            let after = fixture.db.get_evidence_span(&source.id)?.ok_or("source")?;
+            assert_eq!(after.excerpt, source.excerpt);
+            assert_eq!(after.content_hash, source.content_hash);
+            assert_eq!(after.metadata_json, source.metadata_json);
+            assert_eq!(
+                after.canonical_provenance_uri(),
+                source.canonical_provenance_uri()
+            );
+        }
+        let repeated = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(repeated.incident_cards_recorded, 0);
+        assert_eq!(
+            fixture
+                .db
+                .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+                .len(),
+            3
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn split_cargo_presentation_waits_for_complete_native_diagnostics_before_learning() -> TestResult {
+    for complete in [false, true] {
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        fixture.result("fail", "\u{1b}[3", None)?;
+        let prefix = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(prefix.fingerprints_recorded, 0);
+        assert_eq!(prefix.repair_links_recorded, 0);
+        assert_eq!(prefix.incident_cards_recorded, 0);
+        fixture.poll("finish")?;
+        let tail = if complete {
+            format!("1m{ROOT}{CAUSE}\u{1b}[0m")
+        } else {
+            format!("1m{ROOT}\nCaused by:\u{1b}[0m")
+        };
+        let failure = fixture.result("finish", &tail, Some(101))?;
+        fixture.repair()?;
+        let proof = fixture.verify()?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.resolved_failures, if complete { 1 } else { 0 });
+        assert_eq!(report.incident_cards_recorded, if complete { 1 } else { 0 });
+        if complete {
+            let diagnostic = structured_error_diagnostics(&format!("{ROOT}{CAUSE}"))
+                .into_iter()
+                .next()
+                .ok_or("diagnostic")?;
+            let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+            assert_eq!(recall.proof_links, vec![proof]);
+            let card = fixture
+                .db
+                .get_evidence_span(&incident_card_id(WS, &failure))?
+                .ok_or("card")?;
+            let mut checks = CardChecks::default();
+            checks.observe(&card)?;
+            assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+        } else {
+            assert_eq!(report.repair_links_recorded, 0);
+            assert_eq!(report.fingerprints_recorded, 0);
+        }
+    }
+    Ok(())
+}
