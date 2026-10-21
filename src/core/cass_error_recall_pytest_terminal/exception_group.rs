@@ -2,19 +2,34 @@
 //!
 //! Structural margins, child ordinals/counts and the final closing border must
 //! all agree before any leaf summary escapes. Group labels, frames, source and
-//! locals are not fingerprints. Notes, causal chains and formatter elisions
-//! remain unsupported: they keep the parent's failure veto, not a partial key.
+//! locals are not fingerprints. The parent composes complete top-level causal
+//! chains; notes, branch-local chains and formatter elisions remain unsupported
+//! and keep the failure veto rather than exposing a partial key.
 
 use super::{
     HEADER, MAX_FRAMES, MAX_LINES, MAX_SCANNED_OUTPUT_BYTES, exception_line, frame, repeated_frames,
 };
 
-const ROOT_HEADER: &str = "  + Exception Group Traceback (most recent call last):";
+pub(super) const ROOT_HEADER: &str = "  + Exception Group Traceback (most recent call last):";
 const GROUP_HEADER: &str = "Exception Group Traceback (most recent call last):";
 const MAX_GROUP_DEPTH: usize = 10;
 const MAX_GROUP_NODES: usize = 256;
 
-pub(super) fn summaries(text: &str) -> Option<Vec<&str>> {
+#[cfg(test)]
+fn summaries(text: &str) -> Option<Vec<&str>> {
+    let mut frames = 0;
+    let mut summaries = Vec::new();
+    append_summaries(text, &mut frames, &mut summaries)?;
+    Some(summaries)
+}
+
+/// Charge frames against the enclosing chain, not a fresh per-tree allowance.
+/// Commit leaves only after the entire tree and its trailing bytes validate.
+pub(super) fn append_summaries<'a>(
+    text: &'a str,
+    frames: &mut usize,
+    summaries: &mut Vec<&'a str>,
+) -> Option<()> {
     if text.len() > MAX_SCANNED_OUTPUT_BYTES || text.lines().count() > MAX_LINES {
         return None;
     }
@@ -30,7 +45,7 @@ pub(super) fn summaries(text: &str) -> Option<Vec<&str>> {
     let mut parser = Parser {
         lines,
         index,
-        frames: 0,
+        frames: *frames,
         nodes: 0,
         leaves: Vec::new(),
     };
@@ -42,7 +57,9 @@ pub(super) fn summaries(text: &str) -> Option<Vec<&str>> {
     {
         return None;
     }
-    Some(parser.leaves)
+    *frames = parser.frames;
+    summaries.extend(parser.leaves);
+    Some(())
 }
 
 struct Parser<'a> {
