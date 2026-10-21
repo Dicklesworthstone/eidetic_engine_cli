@@ -89,21 +89,38 @@ if ee_supports insights && ee_help_lists insights blindSpots; then
     assert_jq "$bs" '(.data.sections | map(.name) | index("blindSpots")) != null' "blindSpots section is present"
     # coverageRatio is an honesty number in [0,1]; log it (no silent omission).
     #
-    # UNVERIFIED PATH, AND DELIBERATELY LEFT THAT WAY. `coverageRatio` appears
-    # in none of the three green suites above, so this read has no evidence
-    # behind it the way the assertions above now do. If it is reached at the
-    # wrong path the `else` branch below fires and attributes the miss to an
-    # unbuilt feature -- a drop that reads as honest while actually being a
-    # wrong-path read. Settle it by capturing `.data | keys` and
-    # `.data.sections[0] | keys` rather than by widening the chain.
-    cov="$(printf '%s' "$bs" | jq -r '(.data.coverageRatio // .data.coverage_ratio // empty)')"
-    if [ -n "$cov" ]; then
+    # PATH SETTLED 2026-10-21, the way the previous comment here asked for it
+    # to be settled: by capturing keys, NOT by widening the chain.
+    #
+    # `coverageRatio` is a PER-ITEM field of the blindSpots items. The product
+    # emits that spelling at exactly one place, `blind_spots_section_from_inputs`
+    # (src/cli/insights/mod.rs:2801), in the same json! object as
+    # rank/blindSpotId/coverageStatus. Confirmed against a live envelope:
+    #
+    #   .data | keys             -> 13 keys, none coverage-ish
+    #   .data.sections[0] | keys -> items,name,nextCommands,summary,title,
+    #                               whyItMatters
+    #
+    # So the old two-spelling read could never hit, and the old `else` branch
+    # then attributed a wrong-path read to an unbuilt feature -- exactly the
+    # failure the previous comment predicted of itself. Same defect class as
+    # bd-psna1 (fixed in 9429f5be5), in this same script, which that fix did
+    # not reach.
+    #
+    # Zero items and items-without-the-field are now DIFFERENT outcomes: the
+    # first is an honest empty section, the second is a product gap that fails.
+    cov_items="$(printf '%s' "$bs" | jq -r '[.data.sections[]? | select(.name == "blindSpots") | .items[]?] | length')"
+    if [ "${cov_items:-0}" -gt 0 ]; then
+        # (length > 0) is the empty-world guard: jq's all() returns true for an
+        # empty array, so without it an absent field would pass vacuously.
+        # Verified all four ways -- in-range true, out-of-range false, field
+        # absent false, zero items false.
         assert_jq "$bs" \
-            '((.data.coverageRatio // .data.coverage_ratio) >= 0) and ((.data.coverageRatio // .data.coverage_ratio) <= 1)' \
-            "coverageRatio is a ratio in [0,1]"
-        e2e_log_note "coverageRatio=$cov"
+            '[.data.sections[]? | select(.name == "blindSpots") | .items[]? | .coverageRatio] | map(select(. != null)) | (length > 0) and all(. >= 0 and . <= 1)' \
+            "every blindSpots item carries a coverageRatio in [0,1]"
+        e2e_log_note "coverageRatio values=$(printf '%s' "$bs" | jq -c '[.data.sections[]? | select(.name == "blindSpots") | .items[]? | .coverageRatio]')"
     else
-        log_drop 1 "coverageRatio not found at .data.coverageRatio/.data.coverage_ratio -- either unbuilt (bd-1n0np.6.2) or read at the wrong path (bd-psna1); path unverified"
+        log_drop 1 "blindSpots carried 0 items in this fixture, so no coverageRatio existed to assert; the PATH is settled (.data.sections[].items[].coverageRatio, src/cli/insights/mod.rs:2801) -- this drop reports an empty section, not an unverified read"
     fi
 else
     log_drop 1 "insights --section blindSpots pending (bd-1n0np.6.1): blind-spot assertions skipped"
