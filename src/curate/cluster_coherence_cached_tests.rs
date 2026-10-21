@@ -39,7 +39,11 @@ fn reference(matrix: &[Vec<f64>], threshold: f64) -> (Vec<Vec<usize>>, Trace, us
         let Some((left, right, score, merged)) = best else {
             return (clusters, trace, calls);
         };
-        trace.push((clusters[left].clone(), clusters[right].clone(), score.to_bits()));
+        trace.push((
+            clusters[left].clone(),
+            clusters[right].clone(),
+            score.to_bits(),
+        ));
         clusters[left] = merged;
         clusters.remove(right);
     }
@@ -79,7 +83,10 @@ fn every_cached_and_streamed_merge_matches_the_original_bits() {
         let threshold = [0.0, 0.5, 0.75, 1.0][case % 4];
         let (clusters, trace, _) = reference(&matrix, threshold);
         for limit in [0, MAX_CACHED_LINKAGES] {
-            assert_eq!(observed(&matrix, threshold, limit), (clusters.clone(), trace.clone()));
+            assert_eq!(
+                observed(&matrix, threshold, limit),
+                (clusters.clone(), trace.clone())
+            );
         }
     }
 }
@@ -107,7 +114,10 @@ fn empty_singleton_signed_zero_and_threshold_edges_keep_the_same_trace() {
     for matrix in [vec![], vec![vec![1.0]]] {
         let (expected, trace, _) = reference(&matrix, 0.5);
         assert_eq!(observed(&matrix, 0.5, 0), (expected.clone(), trace.clone()));
-        assert_eq!(observed(&matrix, 0.5, MAX_CACHED_LINKAGES), (expected, trace));
+        assert_eq!(
+            observed(&matrix, 0.5, MAX_CACHED_LINKAGES),
+            (expected, trace)
+        );
     }
     for value in [-1.0, -0.0, 0.0, 0.5 - FLOAT_EPSILON, 0.5, 1.0] {
         let matrix = vec![
@@ -117,7 +127,10 @@ fn empty_singleton_signed_zero_and_threshold_edges_keep_the_same_trace() {
         ];
         for threshold in [0.0, 0.5, 0.5 + FLOAT_EPSILON, 1.0] {
             let (expected, trace, _) = reference(&matrix, threshold);
-            assert_eq!(observed(&matrix, threshold, MAX_CACHED_LINKAGES), (expected, trace));
+            assert_eq!(
+                observed(&matrix, threshold, MAX_CACHED_LINKAGES),
+                (expected, trace)
+            );
         }
     }
 }
@@ -149,7 +162,10 @@ fn triangular_cache_admission_is_bounded_and_refusal_keeps_complete_results() {
         if pairs > 0 {
             assert!(Scores::new(width, pairs - 1).is_none());
             let matrix = vec![vec![1.0; width]; width];
-            assert_eq!(observed(&matrix, 0.5, pairs - 1), observed(&matrix, 0.5, pairs));
+            assert_eq!(
+                observed(&matrix, 0.5, pairs - 1),
+                observed(&matrix, 0.5, pairs)
+            );
         }
     }
 }
@@ -220,15 +236,22 @@ fn representative_ties_preserve_interleaved_members_not_only_singletons() {
         })
         .collect::<Vec<_>>();
     let (expected, trace, _) = reference(&matrix, 0.5);
-    assert!(trace.iter().any(|(left, right, _)| left.len() > 1 && right.len() > 1));
-    assert_eq!(observed(&matrix, 0.5, MAX_CACHED_LINKAGES), (expected, trace));
+    assert!(
+        trace
+            .iter()
+            .any(|(left, right, _)| left.len() > 1 && right.len() > 1)
+    );
+    assert_eq!(
+        observed(&matrix, 0.5, MAX_CACHED_LINKAGES),
+        (expected, trace)
+    );
 }
 
 #[test]
 fn public_reports_keep_membership_scores_admission_and_centroid_identity() {
     use super::super::{
-        ClusterCoherenceConfig, EmbeddingPoint, agglomerate, coherent_cluster,
-        normalized_points, pairwise_cosine_matrix,
+        ClusterCoherenceConfig, EmbeddingPoint, agglomerate, coherent_cluster, normalized_points,
+        pairwise_cosine_matrix,
     };
 
     let points = [0.0_f64, 5.0, 10.0, 45.0, 50.0, 55.0, 170.0]
@@ -242,11 +265,15 @@ fn public_reports_keep_membership_scores_admission_and_centroid_identity() {
     let points = normalized_points(&points).unwrap();
     let matrix = pairwise_cosine_matrix(&points).unwrap();
     for threshold in [0.0, 0.55, 0.95, 1.0] {
-        let config = ClusterCoherenceConfig { merge_threshold: threshold, ..Default::default() };
+        let config = ClusterCoherenceConfig {
+            merge_threshold: threshold,
+            ..Default::default()
+        };
         let expected_members = reference(&matrix, threshold).0;
-        let expected = expected_members.iter().map(|members| {
-            coherent_cluster(members, &expected_members, &points, &matrix, config)
-        }).collect::<Vec<_>>();
+        let expected = expected_members
+            .iter()
+            .map(|members| coherent_cluster(members, &expected_members, &points, &matrix, config))
+            .collect::<Vec<_>>();
         let actual = agglomerate(&points, config).unwrap();
         assert_eq!(actual.clusters, expected);
         let mut reversed = points.clone();

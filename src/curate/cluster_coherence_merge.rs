@@ -30,7 +30,10 @@ pub(super) fn best_merge(
                         .total_cmp(best_similarity)
                         .then_with(|| {
                             merged_members(&clusters[left], &clusters[right])
-                                .cmp(merged_members(&clusters[*best_left], &clusters[*best_right]))
+                                .cmp(merged_members(
+                                    &clusters[*best_left],
+                                    &clusters[*best_right],
+                                ))
                                 .reverse()
                         })
                         .then_with(|| (left, right).cmp(&(*best_left, *best_right)).reverse())
@@ -112,10 +115,7 @@ mod tests {
         best.map(|(left, right, similarity, _members)| (left, right, similarity))
     }
 
-    fn same_winner(
-        actual: Option<(usize, usize, f64)>,
-        expected: Option<(usize, usize, f64)>,
-    ) {
+    fn same_winner(actual: Option<(usize, usize, f64)>, expected: Option<(usize, usize, f64)>) {
         let bits = |winner: Option<(usize, usize, f64)>| {
             winner.map(|(left, right, similarity)| (left, right, similarity.to_bits()))
         };
@@ -228,7 +228,10 @@ mod tests {
     fn dense_equal_similarity_runs_keep_exact_membership_and_merge_order() {
         let count = 128;
         let matrix = vec![vec![1.0; count]; count];
-        let mut clusters = (0..count).rev().map(|point| vec![point]).collect::<Vec<_>>();
+        let mut clusters = (0..count)
+            .rev()
+            .map(|point| vec![point])
+            .collect::<Vec<_>>();
         let mut merges = 0;
         while let Some(actual) = best_merge(&clusters, &matrix, 0.55) {
             same_winner(Some(actual), original_best_merge(&clusters, &matrix, 0.55));
