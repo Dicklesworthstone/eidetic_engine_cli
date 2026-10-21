@@ -107,6 +107,25 @@ impl HonestyReport {
 
 /// Validate that a repair command looks actionable.
 ///
+/// SCOPE (bd-ixdqd): this governs [`DegradationCode::repair`] -- the static
+/// matrix in `models::degradation`, authored once per code -- and nothing
+/// else. Its only enforced population is `ALL_DEGRADATION_CODES`, iterated by
+/// `degradation_matrix_repair_commands_are_valid` (tests/golden.rs) and by
+/// `run_honesty_checks` below. Every matrix entry satisfies the prefix rule.
+///
+/// It deliberately does NOT govern the `repair` field on runtime error
+/// surfaces -- `DomainError::WorkspaceStoreMissing { repair, .. }` and the
+/// `"repair"` key in cache/hotset's json payload -- which carry PROSE such as
+/// "Re-check --workspace addressing", ratified by committed goldens
+/// (tests/fixtures/golden/agent/search_unavailable.json.golden and two
+/// others). That is the honest content there: an addressing mistake has no
+/// single fix command, because only the operator knows which workspace they
+/// meant. Those values never reach this function, so the two conventions do
+/// not conflict -- one field NAME, two contracts.
+///
+/// Consumers that need to know whether a given repair string is runnable
+/// should ask [`classify_repair_command`] rather than require a prefix here.
+///
 /// Repair commands should:
 /// - Start with a known command prefix (ee, cargo, cass, etc.)
 /// - Not be empty
