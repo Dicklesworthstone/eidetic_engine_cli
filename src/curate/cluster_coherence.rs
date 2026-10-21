@@ -6,7 +6,10 @@
 //! average-linkage agglomeration is deterministic, and every emitted cluster
 //! carries the threshold and member set that determined it.
 
-use std::cmp::Ordering;
+#[path = "cluster_coherence_merge.rs"]
+mod merge;
+
+use merge::best_merge;
 
 use serde::{Serialize, Serializer};
 
@@ -420,40 +423,6 @@ fn cosine_similarity(
         ));
     }
     Ok(score.clamp(-1.0, 1.0))
-}
-
-fn best_merge(
-    clusters: &[Vec<usize>],
-    similarities: &[Vec<f64>],
-    threshold: f64,
-) -> Option<(usize, usize, f64)> {
-    let mut best: Option<(usize, usize, f64, Vec<usize>)> = None;
-    for left in 0..clusters.len() {
-        for right in (left + 1)..clusters.len() {
-            let similarity =
-                average_linkage_similarity(&clusters[left], &clusters[right], similarities);
-            if similarity + FLOAT_EPSILON < threshold {
-                continue;
-            }
-            let mut merged = clusters[left].clone();
-            merged.extend(clusters[right].iter().copied());
-            merged.sort_unstable();
-            let replace = match &best {
-                None => true,
-                Some((best_left, best_right, best_similarity, best_members)) => {
-                    similarity
-                        .total_cmp(best_similarity)
-                        .then_with(|| merged.cmp(best_members).reverse())
-                        .then_with(|| (left, right).cmp(&(*best_left, *best_right)).reverse())
-                        == Ordering::Greater
-                }
-            };
-            if replace {
-                best = Some((left, right, similarity, merged));
-            }
-        }
-    }
-    best.map(|(left, right, similarity, _members)| (left, right, similarity))
 }
 
 fn coherent_cluster(
