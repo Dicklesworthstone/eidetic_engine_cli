@@ -8250,6 +8250,37 @@ pub fn unrelated_context() -> u64 {{
             no_lod: false,
         };
 
+        // bd-verzk: THE PACK CACHE MUST BE OFF OR THIS TEST MEASURES THE WRONG
+        // THING. The three iterations below issue a BYTE-IDENTICAL request and
+        // differ only in `.ee/config.toml` on disk, which is not part of request
+        // identity. With `persist_pack: true` the first iteration assembled
+        // cold and persisted, and the later two were served from that pack --
+        // so the comparison was cold-assembly against a cache hit, not
+        // pool_size=1 against pool_size=8.
+        //
+        // The symptom was a hash mismatch that looked like a determinism defect
+        // and carried three unresolved hypotheses for a month. What it actually
+        // reported: `index_dir` is deliberately an EMPTY directory, so a real
+        // search MUST degrade -- and only the first iteration carried
+        // `index_missing` and `context_lexical_fallback`. The later iterations
+        // lacked them because they never searched. `renderedText` differed for
+        // the same single reason, since degraded codes are interpolated into
+        // hash-bearing prose and cannot differ independently of `degraded`.
+        //
+        // Measured 2026-10-21 on an RCH worker, one variable changed:
+        //     persist_pack: true   -> FAILED, 0 passed / 1 failed
+        //     persist_pack: false  -> ok,     1 passed / 0 failed  (93.89s)
+        // So read-pool size does NOT change the pack hash. The defect was this
+        // test's control.
+        //
+        // Do not "restore" persistence here. A cache-served response carries
+        // its own snapshot identity by design -- the panic arm below says so --
+        // which makes a persisted pack unusable as a determinism baseline.
+        let base_options = super::ContextPackOptions {
+            persist_pack: false,
+            ..base_options
+        };
+
         let mut hashes_by_pool_size = BTreeMap::new();
         for pool_size in [1_u32, 4, 8] {
             std::fs::write(
