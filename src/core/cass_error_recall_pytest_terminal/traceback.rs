@@ -8,6 +8,9 @@
 #[path = "exception_group.rs"]
 mod exception_group;
 
+#[path = "syntax.rs"]
+mod syntax;
+
 use std::collections::BTreeSet;
 
 use super::{
@@ -150,6 +153,9 @@ fn summaries(text: &str) -> Option<Vec<&str>> {
 }
 
 pub(super) fn inspect(text: &str) -> Option<Decoded> {
+    if let Some(output) = syntax::inspect(text) {
+        return Some(output);
+    }
     // Cheap family probe before allocation. Standard CPython styling wraps
     // this header; it does not put terminal commands inside the header words.
     let mut end = text.len().min(MAX_SCANNED_OUTPUT_BYTES);
