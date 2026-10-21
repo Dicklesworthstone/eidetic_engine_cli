@@ -3,6 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# bd-3ghvw. MUST equal STAGE_ENV_UNRUNNABLE_CODE in scripts/verify.sh, which is
+# what classifies this exit as ENV_UNRUNNABLE rather than FAIL. The two are
+# separate literals because this script runs standalone and must not source the
+# verifier; tests/verification_drift_guard.rs asserts they agree, so changing
+# one alone fails that guard rather than silently reverting this fix.
+STAGE_ENV_UNRUNNABLE_EXIT=76
 EVENT_ROOT="${EE_REPO_HYGIENE_EVENT_DIR:-${TMPDIR:-/tmp}/ee-repo-hygiene}"
 case "$EVENT_ROOT" in
     /Volumes/*) EVENT_ROOT="/tmp/ee-repo-hygiene" ;;
@@ -157,8 +163,14 @@ for index in "${!paths[@]}"; do
                 "$REPO_ROOT" "$output" >&2
             printf 'repo_hygiene: this is an ENVIRONMENT error, not a hygiene failure.\n' >&2
             printf 'repo_hygiene: the check needs a git repository; this tree has none.\n' >&2
-            emit_event "pattern_check" "unrunnable" 3 "git check-ignore unavailable: $output" "${#patterns[@]}"
-            exit 3
+            # bd-3ghvw: exit the code verify.sh classifies as ENV_UNRUNNABLE,
+            # not a bare 3. This script already said "CANNOT RUN ... not a
+            # hygiene failure" in words above, but every unclassified code falls
+            # to FAIL in stage_status_for_exit_code, so the verifier reported a
+            # no-git tree as a hygiene failure while the stage itself knew
+            # better. The event carries the same code so the two agree.
+            emit_event "pattern_check" "unrunnable" "$STAGE_ENV_UNRUNNABLE_EXIT" "git check-ignore unavailable: $output" "${#patterns[@]}"
+            exit "$STAGE_ENV_UNRUNNABLE_EXIT"
             ;;
     esac
     if ! grep -Fq -- "$expected_pattern" <<<"$output"; then

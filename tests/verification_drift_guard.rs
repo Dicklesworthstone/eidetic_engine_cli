@@ -416,6 +416,10 @@ CLOSURE_LINT_STALE_BASELINE_CODE=3
 # closure_gate_status: a constant missing here kills the extracted function
 # under `set -u` before it prints anything.
 CLOSURE_LINT_EMPTY_POPULATION_CODE=4
+# bd-3ghvw: run_stage gained an ENV_UNRUNNABLE branch that reads these.
+STAGE_ENV_UNRUNNABLE_CODE=76
+STAGE_ENV_UNRUNNABLE=0
+STAGE_ENV_UNRUNNABLE_NAMES=""
 STAGE_RESULTS=""
 STAGE_PASSED=0
 STAGE_SKIPPED_CONTENTION=0
@@ -457,6 +461,10 @@ fn stage_status_for(exit_code: i32) -> String {
             r#"
 set -uo pipefail
 BEADS_LOCK_SKIP_CODE=75
+# bd-3ghvw: the classifier reads this too. Omitting it does not fall back to a
+# default -- under `set -u` it kills the extracted function and every case in
+# stage_status_names_the_kind_of_outcome_not_just_pass_or_fail fails with 127.
+STAGE_ENV_UNRUNNABLE_CODE=76
 eval "$(awk '/^stage_status_for_exit_code\(\) /,/^}/' "$VERIFY_SCRIPT")"
 stage_status_for_exit_code "$CODE"
 "#,
@@ -530,6 +538,11 @@ fn verify_declares_the_whole_stage_status_vocabulary() {
         "INFRA_ERROR",
         "TIMEOUT",
         "CANCELLED",
+        // bd-3ghvw. Pinned here for the reason in this test's own docstring: a
+        // status the script can emit but does not declare is invisible, and one
+        // declared but unemittable is an undelivered promise. This one is
+        // emitted by run_stage's environment-unrunnable branch.
+        "ENV_UNRUNNABLE",
     ] {
         assert!(
             declared.contains(status),
@@ -952,6 +965,13 @@ STAGE_TRACKED_RED_NAMES=""
 # omitting it kills the extracted function under `set -u` instead of returning a
 # wrong number. 70 = EX_SOFTWARE, the code a run that attempted NOTHING returns.
 VERIFY_EXIT_NOTHING_ATTEMPTED=70
+# bd-3ghvw, and the same rule again: BOTH the exit status and the banner read
+# the environment-unrunnable counter, and the banner reads its name list. This
+# preamble's own comment predicted this -- the census change surfaced here as
+# exit 127 -- and adding the counter without these did exactly that a second
+# time, in five tests at once.
+STAGE_ENV_UNRUNNABLE=0
+STAGE_ENV_UNRUNNABLE_NAMES=""
 eval "$(awk '/^verification_exit_status\(\) /,/^}/' "$VERIFY_SCRIPT")"
 eval "$(awk '/^verification_summary_banner\(\) /,/^}/' "$VERIFY_SCRIPT")"
 verification_summary_banner
@@ -3509,6 +3529,10 @@ STAGE_TRACKED_RED="$TRACKED_RED"
 STAGE_GATED_OFF="$GATED_OFF"
 STAGE_SKIPPED_CONTENTION=0
 STAGE_SKIPPED_CONTENTION_NAMES=""
+# bd-3ghvw: the banner now reads these too, and the extracted function dies
+# under `set -u` without them -- which is this guard working as designed.
+STAGE_ENV_UNRUNNABLE=0
+STAGE_ENV_UNRUNNABLE_NAMES=""
 STAGE_GATED_OFF_NAMES=""
 STAGE_ADVISORY_NAMES=""
 STAGE_TRACKED_RED_NAMES=""
@@ -4576,5 +4600,54 @@ fn every_cargo_scan_exemption_is_still_earned() {
          look like a cargo invocation is gone. Delete the exemption -- an exemption \
          nobody can see fail is the thing that lets a real cargo stage in later \
          under a name somebody already excused."
+    );
+}
+
+/// bd-3ghvw. The "this environment cannot run this stage" exit code is written
+/// twice on purpose -- once in `scripts/verify.sh`, which classifies it, and
+/// once in `scripts/e2e_repo_hygiene.sh`, which returns it and must not source
+/// the verifier to run standalone. Two literals can drift, and the drift is
+/// SILENT in the worst direction: the hygiene script would exit a code the
+/// verifier no longer recognises, every unclassified code falls to FAIL, and a
+/// no-git tree would once again be reported as a hygiene failure. That is
+/// exactly the symptom this classification was added to remove, so the two are
+/// pinned to each other here.
+#[test]
+fn the_environment_unrunnable_exit_code_agrees_across_both_scripts() {
+    let verify = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let hygiene = fs::read_to_string(project_root().join("scripts/e2e_repo_hygiene.sh"))
+        .expect("read e2e_repo_hygiene.sh");
+
+    let read_literal = |source: &str, name: &str| -> String {
+        let needle = format!("\n{name}=");
+        let start = source.find(&needle).unwrap_or_else(|| {
+            panic!("{name} is not declared; this guard cannot verify agreement")
+        }) + needle.len();
+        source[start..]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+
+    let classifier = read_literal(&verify, "STAGE_ENV_UNRUNNABLE_CODE");
+    let emitter = read_literal(&hygiene, "STAGE_ENV_UNRUNNABLE_EXIT");
+
+    assert_eq!(
+        classifier, emitter,
+        "verify.sh classifies STAGE_ENV_UNRUNNABLE_CODE={classifier} while \
+         e2e_repo_hygiene.sh exits STAGE_ENV_UNRUNNABLE_EXIT={emitter}. A code the \
+         verifier does not recognise falls through to FAIL, so a tree with no .git \
+         would be reported as a hygiene failure again instead of as a stage this \
+         environment cannot run. Change both or neither."
+    );
+
+    // The classifier must also still have an arm for it. Agreeing constants with
+    // no matching arm would pass the comparison above and still report FAIL.
+    assert!(
+        verify.contains("\"$STAGE_ENV_UNRUNNABLE_CODE\") printf '%s\\n' \"ENV_UNRUNNABLE\" ;;"),
+        "stage_status_for_exit_code has no arm for STAGE_ENV_UNRUNNABLE_CODE, so the \
+         code would classify as FAIL however well the two literals agree."
     );
 }
