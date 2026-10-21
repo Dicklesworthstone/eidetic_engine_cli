@@ -163,7 +163,14 @@ mod tests {
             "running",
         ] {
             for nested in [false, true] {
-                for value in [json!(true), Value::Null, json!("false"), json!(0), json!({}), json!([])] {
+                for value in [
+                    json!(true),
+                    Value::Null,
+                    json!("false"),
+                    json!(0),
+                    json!({}),
+                    json!([]),
+                ] {
                     assert_decoded(&in_scope(field, value, nested), false);
                 }
                 assert_decoded(&in_scope(field, json!(false), nested), true);
@@ -183,13 +190,29 @@ mod tests {
                 raw.as_object_mut().unwrap().remove("exit_code");
                 assert_decoded(&raw, false);
             }
-            for status in ["completed", "finished", "exited", "success", "succeeded", "ok"] {
+            for status in [
+                "completed",
+                "finished",
+                "exited",
+                "success",
+                "succeeded",
+                "ok",
+            ] {
                 let mut raw = in_scope("status", json!(status), nested);
                 assert_decoded(&raw, true);
                 raw.as_object_mut().unwrap().remove("exit_code");
                 assert_decoded(&raw, false);
             }
-            for status in ["running", "pending", "cancelled", "timed_out", "failed", "abstained", "unknown", ""] {
+            for status in [
+                "running",
+                "pending",
+                "cancelled",
+                "timed_out",
+                "failed",
+                "abstained",
+                "unknown",
+                "",
+            ] {
                 assert_decoded(&in_scope("status", json!(status), nested), false);
             }
             for status in [Value::Null, json!(true), json!(0), json!([]), json!({})] {
@@ -220,7 +243,10 @@ mod tests {
 
     #[test]
     fn stdout_examples_and_unrelated_metadata_are_not_execution_controls() {
-        for output in ["", r#"{"timed_out":true,"status":"running","success":false}"#] {
+        for output in [
+            "",
+            r#"{"timed_out":true,"status":"running","success":false}"#,
+        ] {
             let raw = json!({
                 "output": output,
                 "exit_code": 0,
@@ -263,7 +289,10 @@ mod tests {
                 raw["output"] = json!(passed_text);
                 for representation in [raw.clone(), Value::String(raw.to_string())] {
                     let partial = codex_output(&representation).unwrap();
-                    assert!(!required.is_verified_by(&Proof::capture(&partial)), "{field}");
+                    assert!(
+                        !required.is_verified_by(&Proof::capture(&partial)),
+                        "{field}"
+                    );
                 }
             }
         }
@@ -311,9 +340,15 @@ mod encoded_tests {
                 for nested in [false, true] {
                     let controls = format!("\"{field}\":{first},\"{field}\":{last}");
                     let text = if nested {
-                        format!(r#"{{"output":"Finished dev profile","exit_code":0,"metadata":{{{controls}}}}}"#)
+                        format!(
+                            r#"{{"output":"Finished dev profile","exit_code":0,"metadata":{{{controls}}}}}"#
+                        )
                     } else {
-                        let exit = if field == "exit_code" { "" } else { ",\"exit_code\":0" };
+                        let exit = if field == "exit_code" {
+                            ""
+                        } else {
+                            ",\"exit_code\":0"
+                        };
                         format!(r#"{{"output":"Finished dev profile",{controls}{exit}}}"#)
                     };
                     assert!(!unique_control_fields(&text));
@@ -354,12 +389,21 @@ mod encoded_tests {
         }
         // The same field in different scopes is not a duplicate; the existing
         // semantic check, not wire order, rejects a conflicting value.
-        let conflict = r#"{"metadata":{"exit_code":1},"output":"Finished dev profile","exit_code":0}"#;
+        let conflict =
+            r#"{"metadata":{"exit_code":1},"output":"Finished dev profile","exit_code":0}"#;
         assert!(unique_control_fields(conflict));
-        assert!(!codex_output(&Value::String(conflict.to_owned())).unwrap().succeeded());
+        assert!(
+            !codex_output(&Value::String(conflict.to_owned()))
+                .unwrap()
+                .succeeded()
+        );
         let unknown = r#"{"output":"","exit_code":0,"metadata":{"example":{"is_error":true,"is_error":false}},"note":1,"note":2}"#;
         assert!(unique_control_fields(unknown));
-        assert!(codex_output(&Value::String(unknown.to_owned())).unwrap().succeeded());
+        assert!(
+            codex_output(&Value::String(unknown.to_owned()))
+                .unwrap()
+                .succeeded()
+        );
     }
 
     #[test]
