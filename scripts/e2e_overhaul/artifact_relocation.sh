@@ -91,11 +91,30 @@ capture_ee() {
 # is unsatisfiable, and whether it is depends on how random TMPDIR looks, which
 # is why this reads as environment flakiness rather than a stale assertion.
 #
-# Fixing the ASSERTION needs a product flag I cannot exercise: `--redaction
-# <level>` is documented in docs/redaction_levels.md but is not present in the
-# only binary runnable here (0.14.2 rejects it as an unexpected argument), and
-# the current tree cannot be built on this host. So that half is reported on the
-# bead rather than guessed at.
+# THAT EARLIER NOTE'S PROPOSED FIX WAS WRONG, and the correction is 2026-10-21.
+# It said the assertion needed `--redaction <level>`, unavailable on the runnable
+# binary. No level can help: `originalPath` is produced by
+# `redacted_artifact_public_field` (src/core/artifact.rs:170), which takes NO
+# level argument. It unconditionally applies `redact_secret_like_content` and
+# then `redact_path_like_segments`, and `ArtifactRelocateArgs` declares no
+# redaction flag. So the literal path is unreachable on this surface BY DESIGN,
+# and no product change was pending -- the assertion was simply asserting the
+# wrong thing.
+#
+# The clause now asserts the redaction CONTRACT instead of path equality, which
+# is both satisfiable and a stronger property: a public surface must not leak
+# the raw path. `!= $original` keeps the original value in the assertion so a
+# regression that let the raw path through would fail here rather than pass
+# quietly. The internal manifest keeps the real path for the relocation logic
+# (artifact_relocation.rs:288), so nothing is lost.
+#
+# `destinationPath` got the same treatment, but only AFTER a run proved it.
+# Measured on ee 0.18.0: both fields come back as "[REDACTED_PATH]". I fixed
+# `originalPath` alone first -- the only field this bead's trace had actually
+# observed -- precisely because assuming the neighbour behaved the same way is
+# the inference that produced the wrong `--redaction` lead above. The suite then
+# advanced past plan mode and failed on "apply mode report shape", naming
+# `destinationPath` for me instead of my guessing it.
 #
 # This half is unambiguous and is what the bead asks for: the suite must be able
 # to say what failed.
@@ -201,7 +220,8 @@ assert_json "audit artifact plan mode report shape" "$audit_plan_report" \
       and .data.mode == "plan"
       and .data.sourceAllowed == true
       and (.data.manifest.entries | length) == 1
-      and .data.manifest.entries[0].originalPath == $original
+      and (.data.manifest.entries[0].originalPath | startswith("[REDACTED"))
+      and .data.manifest.entries[0].originalPath != $original
     '
 
 apply_report="$(capture_ee "apply mode" artifact relocate \
@@ -245,8 +265,10 @@ assert_json "apply mode report shape" "$apply_report" \
       and .data.restored == false
       and .data.manifestHash != null
       and (.data.manifest.entries | length) == 1
-      and .data.manifest.entries[0].originalPath == $original
-      and .data.manifest.entries[0].destinationPath == $destination
+      and (.data.manifest.entries[0].originalPath | startswith("[REDACTED"))
+      and .data.manifest.entries[0].originalPath != $original
+      and (.data.manifest.entries[0].destinationPath | startswith("[REDACTED"))
+      and .data.manifest.entries[0].destinationPath != $destination
       and (.data.manifest.entries[0].blake3 | startswith("blake3:"))
     '
 
