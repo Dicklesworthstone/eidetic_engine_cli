@@ -3196,6 +3196,28 @@ mod tests {
             .join(name)
     }
 
+    /// Replace `result.serverInfo.version` with the shared golden sentinel.
+    ///
+    /// bd-5gaxt. The emitted value is `env!("CARGO_PKG_VERSION")`, so pinning
+    /// it raw guarantees a red golden at every release. `<scrubbed:eeVersion>`
+    /// is the same sentinel tests/golden.rs uses for the same field, so the
+    /// two surfaces now agree on how a release-volatile value is recorded.
+    ///
+    /// Deliberately NARROW: it rewrites one field at one path and leaves the
+    /// value untouched when the path is absent, so a response that stops
+    /// carrying serverInfo fails the comparison instead of being quietly
+    /// normalised into agreement.
+    fn scrub_golden_server_version(mut response: Value) -> Value {
+        if let Some(version) = response
+            .get_mut("result")
+            .and_then(|result| result.get_mut("serverInfo"))
+            .and_then(|server_info| server_info.get_mut("version"))
+        {
+            *version = Value::String("<scrubbed:eeVersion>".to_owned());
+        }
+        response
+    }
+
     fn load_json_fixture(name: &str) -> Result<Value, String> {
         let path = golden_fixture_path(name);
         let contents = fs::read_to_string(&path)
@@ -3641,6 +3663,21 @@ mod tests {
                         "MCP JSON-RPC golden fixture {name} suppressed a required response"
                     ));
                 };
+                // bd-5gaxt: SCRUB THE VERSION, DO NOT RE-PIN IT. src/mcp.rs
+                // emits `version: env!("CARGO_PKG_VERSION")`, so this field
+                // changes at every version bump BY CONSTRUCTION. The fixture
+                // pinned it raw and the golden went red three times over:
+                // emitted 0.12.0 when pinned, 0.15.2 when the defect was
+                // filed, 0.18.0 today, against one unchanged pin. Bumping the
+                // number re-arms the identical trap at the next release, which
+                // is why that bead rejected a corrected value.
+                //
+                // Same convention and same sentinel as the goldens in
+                // tests/golden.rs, which scrub this field for exactly this
+                // reason. Scrubbing the ACTUAL keeps every other byte of the
+                // response under byte-exact comparison -- only the one field
+                // whose volatility is structural is relaxed.
+                let actual = scrub_golden_server_version(actual);
                 assert_eq!(&actual, expected, "MCP JSON-RPC golden fixture {name}");
             }
         }
