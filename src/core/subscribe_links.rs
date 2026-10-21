@@ -155,6 +155,11 @@ pub(super) fn notices(
     filter: &SubscribeFilter,
     since_cutoff: Option<DateTime<Utc>>,
 ) -> Result<Vec<MemoryInvalidation>, DomainError> {
+    // A memory-only poll must not consult link storage or acquire a new
+    // cancellation boundary merely because this optional replay exists.
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
     let endpoints = endpoints(db, workspace, pending)?;
     let routing = SubscribeFilter {
         workspace_ids: filter.workspace_ids.clone(),
@@ -423,6 +428,254 @@ mod tests {
         assert!(page.invalidations.is_empty());
         assert_eq!(page.next_cursor, tail);
         assert!(!page.has_more);
+    }
+
+    #[test]
+    fn batch_failure_withholds_both_endpoints_and_allows_complete_retry() {
+        let f = Fixture::new();
+        let anchor = f.memory(1, false);
+        let foreign = f.memory(50_000, true);
+        let mut expected = Vec::new();
+        let mut edges = Vec::new();
+        for number in 1..=129_u128 {
+            let target = f.memory(1000 + number, false);
+            let edge = MemoryLinkId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+            f.db.insert_memory_link(
+                &edge,
+                &crate::db::CreateMemoryLinkInput {
+                    src_memory_id: anchor.clone(),
+                    dst_memory_id: target.clone(),
+                    relation: MemoryLinkRelation::Supports,
+                    weight: 1.0,
+                    confidence: 0.9,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Human,
+                    created_by: None,
+                    metadata_json: None,
+                },
+            )
+            .expect("durable edge");
+            let cursor = f.audit(&edge, "memory_link", audit_actions::MEMORY_LINK_CREATE);
+            expected.extend([(cursor, anchor.clone()), (cursor, target.clone())]);
+            edges.push((edge, target));
+        }
+        let repeat = f.audit(
+            &edges[0].0,
+            "memory_link",
+            audit_actions::MEMORY_LINK_CREATE,
+        );
+        expected.extend([(repeat, anchor.clone()), (repeat, edges[0].1.clone())]);
+        let original = f.poll(0, 200, None).expect("all batches");
+        assert_eq!(
+            original
+                .invalidations
+                .iter()
+                .map(|n| (n.cursor, n.memory_id.clone()))
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let (last, target) = edges.last().expect("late batch");
+        f.db.execute_raw(&format!(
+            "UPDATE memory_links SET dst_memory_id = '{foreign}' WHERE id = '{last}'"
+        ))
+        .expect("foreign endpoint in final batch");
+        let error = f
+            .poll(0, 200, None)
+            .expect_err("no prefix may be acknowledged");
+        let error = error.to_string();
+        for private in [&anchor, &foreign, last, &f.other] {
+            assert!(!error.contains(private));
+        }
+        f.db.begin_read_snapshot()
+            .expect("failed poll released its own view");
+        f.db.rollback_read_snapshot().unwrap();
+        f.db.execute_raw(&format!(
+            "UPDATE memory_links SET dst_memory_id = '{target}' WHERE id = '{last}'"
+        ))
+        .expect("repair authority");
+        let retry = f
+            .poll(0, 200, None)
+            .expect("same cursor retries the complete page");
+        assert_eq!(retry.invalidations, original.invalidations);
+        assert_eq!(retry.next_cursor, original.next_cursor);
+        assert_eq!(
+            f.head(),
+            repeat,
+            "reads never append or rewrite audit history"
+        );
+    }
+
+    #[test]
+    fn absent_link_authority_refuses_partial_output_and_preserves_borrowed_transactions() {
+        let f = Fixture::new();
+        let first = f.memory(1, false);
+        let second = f.memory(2, false);
+        f.link(&first, &second);
+        let before = f.poll(0, 100, None).unwrap();
+        let transaction: crate::db::Result<()> = f.db.with_transaction(|| {
+            f.db.execute_raw("ALTER TABLE memory_links RENAME TO private_missing_link_authority")?;
+            // Do not create another snapshot inside the write transaction.
+            // Source verification neither commits nor rolls back its caller.
+            let row = f.db.query(
+                "SELECT target_id FROM audit_log WHERE action = 'memory.link.create'",
+                &[],
+            )?;
+            let edge = row[0].get(0).and_then(Value::as_str).expect("edge");
+            let pending = vec![PendingLink {
+                link_id: edge.to_owned(),
+                event: routing_event(&f, 1),
+            }];
+            let error = notices(&f.db, &f.own, &pending, &SubscribeFilter::default(), None)
+                .expect_err("missing link authority cannot produce empty success");
+            assert!(!error.to_string().contains("private_missing_link_authority"));
+            assert!(
+                f.db.query("SELECT id FROM private_missing_link_authority", &[])
+                    .is_ok()
+            );
+            f.db.execute_raw("INSERT INTO missing_link_transaction_rollback VALUES (1)")?;
+            Ok(())
+        });
+        assert!(transaction.is_err());
+        assert_eq!(
+            f.poll(0, 100, None).unwrap().invalidations,
+            before.invalidations
+        );
+        assert_eq!(f.head(), before.next_cursor);
+    }
+
+    fn routing_event(f: &Fixture, cursor: u64) -> MemoryDelta {
+        MemoryDelta {
+            schema: crate::core::subscribe::MEMORY_DELTA_SCHEMA_V1,
+            cursor,
+            kind: "updated".to_owned(),
+            memory_id: String::new(),
+            levels: Vec::new(),
+            kinds: Vec::new(),
+            tags: Vec::new(),
+            workspace_id: Some(f.own.clone()),
+            trust_class: None,
+            agent_name: None,
+            changed_fields: vec!["links".to_owned()],
+            audit_id: "audit-test".to_owned(),
+            occurred_at: "2026-10-20T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn memory_only_poll_does_not_depend_on_unused_link_authority() {
+        let f = Fixture::new();
+        let first = f.memory(1, false);
+        let cursor = f.audit(&first, "memory", audit_actions::MEMORY_CREATE);
+        f.db.execute_raw("ALTER TABLE memory_links RENAME TO unrelated_subscription_edges")
+            .expect("missing optional source");
+        let page = f
+            .poll(0, 1, None)
+            .expect("ordinary memory feed remains independent");
+        assert_eq!(page.deltas.len(), 1);
+        assert_eq!(page.deltas[0].memory_id, first);
+        assert!(page.invalidations.is_empty());
+        assert_eq!(page.next_cursor, cursor);
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn hidden_relationships_do_not_leak_and_link_only_pages_never_hydrate_tags() {
+        let f = Fixture::new();
+        let first = f.memory(1, false);
+        let second = f.memory(2, false);
+        let report = f.link(&first, &second);
+        let edge = report.link.as_ref().unwrap().link_id.as_deref().unwrap();
+        let original = f.db.get_memory_link(edge).unwrap().unwrap();
+        f.db.execute_raw(&format!("UPDATE memory_links SET metadata_json = '{{\"workspaceScopeDecision\":\"deny\",\"originWorkspaceId\":\"PRIVATE_ORIGIN\"}}' WHERE id = '{edge}'"))
+            .expect("hidden mesh relationship");
+        f.db.execute_raw("ALTER TABLE memory_tags RENAME TO private_unused_link_tags")
+            .unwrap();
+        let hidden = f.poll(0, 1, None).expect("no tag hydration for links");
+        assert!(hidden.deltas.is_empty() && hidden.invalidations.is_empty());
+        assert_eq!(hidden.next_cursor, f.head());
+        let oversized = serde_json::json!({"note": "界".repeat(MAX_METADATA_BYTES)}).to_string();
+        f.db.execute_raw(&format!(
+            "UPDATE memory_links SET metadata_json = '{}' WHERE id = '{edge}'",
+            oversized.replace('\'', "''")
+        ))
+        .unwrap();
+        let error = f
+            .poll(0, 1, None)
+            .expect_err("oversized policy is not absent policy");
+        assert!(!error.to_string().contains('界'));
+        f.db.execute_raw(&format!(
+            "UPDATE memory_links SET metadata_json = '{}' WHERE id = '{edge}'",
+            original.metadata_json.unwrap().replace('\'', "''")
+        ))
+        .unwrap();
+        let visible = f
+            .poll(0, 1, Some("TAG=unknown,CHANGED_FIELDS=links"))
+            .unwrap();
+        assert!(visible.deltas.is_empty());
+        assert_eq!(visible.invalidations.len(), 2);
+        assert_eq!(visible.next_cursor, hidden.next_cursor);
+    }
+
+    #[test]
+    fn a_pinned_page_cannot_acknowledge_a_link_committed_after_its_watermark() {
+        let f = Fixture::new();
+        let first = f.memory(1, false);
+        let second = f.memory(2, false);
+        let third = f.memory(3, false);
+        f.link(&first, &second);
+        let before = f.head();
+        let reader = DbConnection::open(crate::db::DatabaseConfig::read_only_file(
+            f.database.clone(),
+        ))
+        .unwrap();
+        let snapshot = super::super::SubscriptionSnapshot::begin(&reader).unwrap();
+        assert_eq!(snapshot.high_watermark(&f.own).unwrap(), before);
+        f.link(&first, &third);
+        let after = f.head();
+        let pinned = snapshot
+            .page(&f.own, 0, 100, &SubscribeFilter::default(), None)
+            .unwrap();
+        assert_eq!(pinned.next_cursor, before);
+        assert_eq!(pinned.invalidations.len(), 2);
+        assert!(!pinned.invalidations.iter().any(|n| n.memory_id == third));
+        snapshot.finish().unwrap();
+        let fresh = f.poll(before, 1, None).unwrap();
+        assert_eq!(fresh.next_cursor, after);
+        assert_eq!(fresh.invalidations.len(), 2);
+        assert!(fresh.invalidations.iter().all(|n| n.cursor == after));
+        assert!(fresh.invalidations.iter().any(|n| n.memory_id == third));
+        assert!(f.poll(after, 1, None).unwrap().invalidations.is_empty());
+    }
+
+    #[test]
+    fn cancellation_withholds_link_notices_without_releasing_a_callers_snapshot() {
+        let f = Fixture::new();
+        let first = f.memory(1, false);
+        let second = f.memory(2, false);
+        let report = f.link(&first, &second);
+        let pending = vec![PendingLink {
+            link_id: report.link.unwrap().link_id.unwrap(),
+            event: routing_event(&f, f.head()),
+        }];
+        f.db.begin_read_snapshot().unwrap();
+        let db = &f.db;
+        let workspace = f.own.as_str();
+        let result =
+            crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+                cx.cancel_with(
+                    asupersync::CancelKind::User,
+                    Some("stop subscription replay"),
+                );
+                notices(db, workspace, &pending, &SubscribeFilter::default(), None)
+            })
+            .expect("runtime");
+        assert!(result.is_err());
+        assert!(f.db.begin_read_snapshot().is_err());
+        f.db.commit_read_snapshot()
+            .expect("caller still owns its snapshot");
+        assert_eq!(f.poll(0, 100, None).unwrap().invalidations.len(), 2);
     }
 
     #[test]
