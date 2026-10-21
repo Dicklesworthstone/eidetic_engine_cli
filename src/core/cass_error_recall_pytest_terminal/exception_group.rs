@@ -179,3 +179,7 @@ fn child_count(summary: &str) -> Option<usize> {
 #[cfg(test)]
 #[path = "exception_group_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "exception_group_store_tests.rs"]
+mod store_tests;
