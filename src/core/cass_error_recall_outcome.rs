@@ -458,7 +458,8 @@ mod tests {
             "alpha\n\nbeta\n界"
         );
         assert!(succeeded(&ToolOutput {
-            exit_code: Some(0), ..output("progress 20%\rprogress 100%\rFinished dev profile"),
+            exit_code: Some(0),
+            ..output("progress 20%\rprogress 100%\rFinished dev profile")
         }));
     }
 
