@@ -363,3 +363,164 @@ fn quiet_retry_completion_does_not_accept_a_zero_exit_wrapping_another_cargo_fai
     assert_eq!(report.incident_cards_recorded, 0);
     Ok(())
 }
+#[test]
+fn terminal_failures_never_persist_repairs_even_when_the_wrapper_exits_zero() -> TestResult {
+    let failure_output = format!("{ROOT}{CAUSE}");
+    let diagnostic = structured_error_diagnostics(&failure_output)
+        .into_iter()
+        .next()
+        .ok_or("diagnostic")?;
+    for body in [
+        "Tests: \u{1b}[31m1 failed\u{1b}[0m, 21 passed",
+        "\u{1b}[31m1 failing\u{1b}[0m",
+        "progress 20%\rTests: 1 failed\rTests: 22 passed",
+        "Command timed\u{1b}[0m out\rFinished dev profile",
+        "Finished dev profile\u{1b}[2K",
+        "Finished dev profile\u{1b}[31",
+    ] {
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        fixture.result("fail", &failure_output, Some(101))?;
+        fixture.repair()?;
+        fixture.call("verify", COMMAND, CWD)?;
+        fixture.result("verify", body, Some(0))?;
+        let before = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert!(report.failures_seen >= 1, "{body:?}: {report:?}");
+        assert_eq!(report.resolved_failures, 0, "{body:?}");
+        assert_eq!(report.repair_links_recorded, 0, "{body:?}");
+        assert_eq!(report.incident_cards_recorded, 0, "{body:?}");
+        let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        assert!(recall.exact);
+        assert!(recall.helpful_repairs.is_empty());
+        assert!(recall.proof_links.is_empty());
+        assert!(
+            !pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?.contains("prior fix:")
+        );
+        let replay = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(replay.repair_links_recorded, 0);
+        assert_eq!(replay.incident_cards_recorded, 0);
+        for source in before {
+            let after = fixture.db.get_evidence_span(&source.id)?.ok_or("source")?;
+            assert_eq!(after.excerpt, source.excerpt);
+            assert_eq!(after.content_hash, source.content_hash);
+            assert_eq!(after.metadata_json, source.metadata_json);
+            assert_eq!(
+                after.canonical_provenance_uri(),
+                source.canonical_provenance_uri()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn completed_styled_retries_keep_live_card_proof_and_original_source_bytes() -> TestResult {
+    let failure_output = format!("{ROOT}{CAUSE}");
+    let diagnostic = structured_error_diagnostics(&failure_output)
+        .into_iter()
+        .next()
+        .ok_or("diagnostic")?;
+    for body in [
+        "\u{1b}[32mFinished dev profile\u{1b}[0m",
+        "progress 20%\rprogress 100%\rFinished dev profile",
+        "\u{1b}]8;;https://example.test/build\u{7}Finished dev profile\u{1b}]8;;\u{7}",
+        "\u{1b}]8;;https://example.test/build\u{1b}\\Finished dev profile\u{1b}]8;;\u{1b}\\",
+    ] {
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        let failure = fixture.result("fail", &failure_output, Some(101))?;
+        let repair = fixture.repair()?;
+        fixture.call("verify", COMMAND, CWD)?;
+        let proof = fixture.result("verify", body, Some(0))?;
+        let before = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.resolved_failures, 1, "{body:?}: {report:?}");
+        assert_eq!(report.incident_cards_recorded, 1);
+        let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        assert!(recall.helpful_repairs.contains(&repair));
+        assert_eq!(recall.proof_links, vec![proof]);
+        let card_id = incident_card_id(WS, &failure);
+        assert!(recall.helpful_repairs.contains(&card_id));
+        let card = fixture.db.get_evidence_span(&card_id)?.ok_or("card")?;
+        let mut checks = CardChecks::default();
+        checks.observe(&card)?;
+        assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+        assert!(pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?.contains("prior fix:"));
+        for source in before {
+            let after = fixture.db.get_evidence_span(&source.id)?.ok_or("source")?;
+            assert_eq!(source.excerpt, after.excerpt);
+            assert_eq!(source.content_hash, after.content_hash);
+            assert_eq!(source.metadata_json, after.metadata_json);
+            assert_eq!(
+                source.canonical_provenance_uri(),
+                after.canonical_provenance_uri()
+            );
+        }
+        let replay = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(replay.incident_cards_recorded, 0);
+        assert_eq!(
+            fixture
+                .db
+                .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+                .len(),
+            3
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn split_terminal_sequences_wait_for_completion_without_poisoning_later_proof() -> TestResult {
+    for (prefix, tail, completed) in [
+        ("Finished \u{1b}[3", "2mdev profile\u{1b}[0m", true),
+        ("Tests: \u{1b}[3", "1m1 failed\u{1b}[0m, 21 passed", false),
+        (
+            "Finished \u{1b}]8;;https://example.test/build",
+            "\u{7}dev profile\u{1b}]8;;\u{7}",
+            true,
+        ),
+        ("Finished \u{1b}[", "2Kdev profile", false),
+    ] {
+        let mut fixture = Fixture::new()?;
+        let failure_output = format!("{ROOT}{CAUSE}");
+        fixture.call("fail", COMMAND, CWD)?;
+        let failure = fixture.result("fail", &failure_output, Some(101))?;
+        fixture.repair()?;
+        fixture.call("verify", COMMAND, CWD)?;
+        fixture.result("verify", prefix, None)?;
+        let interim = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(interim.resolved_failures, 0);
+        assert_eq!(interim.incident_cards_recorded, 0);
+        fixture.poll("finish")?;
+        let proof = fixture.result("finish", tail, Some(0))?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(
+            report.resolved_failures,
+            if completed { 1 } else { 0 },
+            "{prefix:?} {tail:?}"
+        );
+        let diagnostic = structured_error_diagnostics(&failure_output)
+            .into_iter()
+            .next()
+            .ok_or("diagnostic")?;
+        let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        if completed {
+            assert_eq!(recall.proof_links, vec![proof]);
+            let card_id = incident_card_id(WS, &failure);
+            let card = fixture.db.get_evidence_span(&card_id)?.ok_or("card")?;
+            let mut checks = CardChecks::default();
+            checks.observe(&card)?;
+            assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+        } else {
+            assert!(recall.helpful_repairs.is_empty());
+            assert!(recall.proof_links.is_empty());
+            assert_eq!(report.incident_cards_recorded, 0);
+        }
+    }
+    Ok(())
+}
