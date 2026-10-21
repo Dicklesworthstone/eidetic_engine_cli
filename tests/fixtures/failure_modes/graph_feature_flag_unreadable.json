@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_feature_flag_unreadable",
+  "introduced_by": {
+    "bead": "bd-l7t9x",
+    "epic_letter": "J"
+  },
+  "surfaces": ["insights", "graph feature-enrichment"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The graph feature flag cannot be read, so its value is unknown. Distinct from graph_feature_disabled, which asserts the operator turned the feature off: here the flag's value was never obtained. Reproduced locally by making .ee/config.toml unreadable; the same emission covers a malformed config and a config refused by the symlinked-path policy.",
+    "setup_commands": [
+      "ee config set graph.feature.hits_profiles.enabled true --workspace .",
+      "chmod 000 .ee/config.toml"
+    ],
+    "invocation": "ee insights --section hubs --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_feature_flag_unreadable",
+    "severity": "medium",
+    "message_contains": ["graph feature flag could not be read", "suppressed"],
+    "repair_contains": "ee config show graph.feature."
+  }
+}

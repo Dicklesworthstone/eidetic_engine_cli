@@ -741,19 +741,56 @@ fn build_registry_section_with_runtime_gate(
     database_path: Option<&Path>,
 ) -> Result<BuiltSection, DomainError> {
     if let Some(gate) = graph_feature_gate_for_section(display_name) {
-        if !runtime_graph_feature_enabled(workspace, gate.key)? {
-            return Ok(BuiltSection {
-                section: builder(),
-                degraded_signal: Some((
-                    display_name,
-                    DegradationReport {
-                        code: "graph_feature_disabled",
-                        severity: "medium",
-                        message: gate.message,
-                        repair: gate.repair,
-                    },
-                )),
-            });
+        match runtime_graph_feature_state(workspace, gate.key) {
+            GraphFeatureFlagState::Enabled => {}
+            GraphFeatureFlagState::Disabled => {
+                return Ok(BuiltSection {
+                    section: builder(),
+                    degraded_signal: Some((
+                        display_name,
+                        DegradationReport {
+                            code: "graph_feature_disabled",
+                            severity: "medium",
+                            message: gate.message,
+                            repair: gate.repair,
+                        },
+                    )),
+                });
+            }
+            // bd-l7t9x: an UNREADABLE flag is a third state and must not
+            // borrow either of the other two's codes. Reporting it as
+            // `graph_feature_disabled` would assert that the operator turned
+            // the feature off, which is not known to be true; aborting the
+            // whole command (the previous behaviour, exit 2 with a generic
+            // `configuration` error) threw away every other section over one
+            // optional gate whose own default is false.
+            //
+            // AGENTS.md puts a state-dependent gate in degraded[], and
+            // src/core/context.rs's reader for this same flag already does
+            // exactly this -- it pushes `context_config_unavailable` and
+            // continues. This arm follows that precedent.
+            //
+            // What is lost: DegradationReport carries only &'static str, so
+            // the underlying cause ("Permission denied (os error 13)", a TOML
+            // parse error, or the symlinked-path refusal) does not reach the
+            // signal. The repair is therefore a diagnostic that reveals it,
+            // rather than a fix for one assumed cause. Suppressing the
+            // section is deliberate: computing it under an assumed default
+            // would publish a number the flag may not authorise.
+            GraphFeatureFlagState::Unreadable => {
+                return Ok(BuiltSection {
+                    section: builder(),
+                    degraded_signal: Some((
+                        display_name,
+                        DegradationReport {
+                            code: "graph_feature_flag_unreadable",
+                            severity: "medium",
+                            message: "This section's graph feature flag could not be read, so its value is unknown and the section was suppressed rather than computed under an assumed default.",
+                            repair: "ee config show graph.feature.* --json",
+                        },
+                    )),
+                });
+            }
         }
     }
 
@@ -875,12 +912,26 @@ fn graph_feature_gate_for_section(display_name: &str) -> Option<GraphFeatureGate
     }
 }
 
-fn runtime_graph_feature_enabled(
+/// Three-state outcome of reading a graph feature flag (bd-l7t9x).
+///
+/// A read FAILURE is not a flag value. Collapsing it into `Disabled` would
+/// claim the operator turned the feature off, and collapsing it into `Enabled`
+/// would compute a graph surface the flag may not authorise -- so the
+/// unreadable case gets its own variant and its own degraded code
+/// (`graph_feature_flag_unreadable`) rather than borrowing either answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GraphFeatureFlagState {
+    Enabled,
+    Disabled,
+    Unreadable,
+}
+
+fn runtime_graph_feature_state(
     workspace: Option<&Path>,
     key: &'static str,
-) -> Result<bool, DomainError> {
+) -> GraphFeatureFlagState {
     let Some(workspace) = workspace else {
-        return Ok(true);
+        return GraphFeatureFlagState::Enabled;
     };
     // Resolve the workspace before reading its config. The config surface
     // refuses a config reached through a symlinked path COMPONENT, and this
@@ -900,12 +951,11 @@ fn runtime_graph_feature_enabled(
         workspace_root,
         config_path: None,
     };
-    get_config(&options, key)
-        .map(|report| report.value == "true")
-        .map_err(|error| DomainError::Configuration {
-            message: format!("Could not read graph feature flag `{key}`: {error}"),
-            repair: Some("ee config show graph.feature.* --json".to_owned()),
-        })
+    match get_config(&options, key) {
+        Ok(report) if report.value == "true" => GraphFeatureFlagState::Enabled,
+        Ok(_) => GraphFeatureFlagState::Disabled,
+        Err(_) => GraphFeatureFlagState::Unreadable,
+    }
 }
 
 fn degraded_signals_for_sections(
@@ -1027,7 +1077,7 @@ fn insights_database_path(
             // error.code "storage" on a path seven other commands accept.
             //
             // This is the DATABASE-OPEN half of bd-l7t9x and is separate from
-            // the config-read half already fixed in runtime_graph_feature_enabled
+            // the config-read half already fixed in runtime_graph_feature_state
             // below: one surface could be half-resolved, and this one was.
             // Neither half is the abort-versus-degrade policy question -- a
             // resolved path simply opens, with nothing to degrade.
