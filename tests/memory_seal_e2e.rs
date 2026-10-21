@@ -403,9 +403,28 @@ fn exact_placeholder_seal_reveal_stays_atomic_fresh_and_searchable() -> TestResu
         .get_memory(&revealed_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "exact-placeholder live revision missing".to_owned())?;
+    // Supersession is recorded in `superseded_at`, NOT in `valid_to`. This
+    // assertion used to read `original.valid_to.is_some()`, which was correct
+    // when `valid_to` doubled as both the user's expiry and the supersede
+    // marker -- the ambiguity recorded in bd-tmv70. The schema since gained a
+    // discriminator (src/db/mod.rs:10900 enumerates live/history against
+    // `superseded_at IS NULL`), and the revision algorithm marks the original
+    // through it (src/core/memory.rs:12055 mark_memory_superseded). So the old
+    // assertion was testing a marker the product deliberately stopped writing,
+    // and it failed at HEAD while the product was right. bd-65z6l.
+    let original_superseded_at = connection
+        .get_memory_superseded_at(&original_id)
+        .map_err(|error| error.to_string())?;
     ensure(
-        original.valid_to.is_some(),
-        "exact-placeholder original was not expired",
+        original_superseded_at.is_some(),
+        "exact-placeholder original was not superseded",
+    )?;
+    // The point of the discriminator: superseding a revision must not invent a
+    // user-facing expiry. Asserting both halves is what keeps the two columns
+    // from silently collapsing back into one.
+    ensure(
+        original.valid_to.is_none(),
+        "superseding the exact-placeholder original must not fabricate a valid_to",
     )?;
     ensure(
         revealed.valid_to.is_none(),
