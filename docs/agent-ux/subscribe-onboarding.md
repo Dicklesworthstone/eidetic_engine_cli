@@ -49,6 +49,42 @@ it does **not** forward the poll response's invalidations. Use the poll API abov
 for complete cache reconciliation, including revisions, filter exits, and graph
 changes. Harness tests can use `--max-events N` to bound ordinary stream output.
 
+## Complete library delivery
+
+`ee::subscription::run` is the implemented JSONL delivery API. Its
+`StreamOptions` contains the existing `SubscribePollOptions`, an idle interval,
+and an optional maximum number of complete audit-change frames. Pass the owning
+request's `Cx` to propagate cancellation into both polling and idle waits. The
+reader releases its database snapshot before writing or waiting.
+
+This API emits native `ee.memory.delta.v1` and `ee.memory.invalidation.v1` objects
+for single-notice audit units. Multiple notices sharing one cursor travel in
+one `ee.subscribe.change.v1` object with `cursor`, `workspaceId`, and an `events`
+array. Invalidation notices precede ordinary deltas within that unit; identities
+are deterministic. Both endpoints of a link and both sides of a revision must
+be processed before acknowledging the outer cursor. Never acknowledge a nested
+event from an incomplete JSON line.
+
+A `ee.subscribe.checkpoint.v1` object contains `cursor` and `workspaceId` when
+filtered or observation-only history advances the cursor without another
+matching change. Checkpoints do not count toward the change-frame maximum, and
+idle polls with no progress emit nothing. Known backlog is drained without the
+idle delay. A maximum of zero performs no source read or output operation.
+
+The API advances its progress only after the complete frame is written and
+flushed. A partial-write or flush failure returns an error; reconnect from the
+last complete frame and apply replayed notices idempotently. This is at-least-once
+delivery, not exactly-once processing or a queue reservation. A stale or degraded
+source page returns `subscribe_stream_resync_required` instead of silently
+rewinding the cursor. A changed workspace/database binding also stops delivery.
+
+**CLI integration is still pending.** The exact bridge is retained at
+`scripts/delivery/subscribe-stream-20261021.patch`. It connects the existing
+validated CLI entrypoint to this API and keeps delivery errors on stderr, away
+from possibly partial JSONL stdout. The bounded GitHub delivery attempt did not
+start and has been retired; neither a patch file nor this library API establishes
+that `ee subscribe stream` has switched implementations.
+
 ## Filter Keys
 
 - `LEVEL=working|episodic|semantic|procedural`

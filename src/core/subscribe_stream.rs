@@ -271,6 +271,10 @@ fn run_with(
     mut poll: impl FnMut(&SubscribePollOptions<'_>) -> Result<SubscribePollReport, DomainError>,
     mut idle: impl FnMut(Option<&Cx>, Duration) -> Result<(), DomainError>,
 ) -> Result<StreamProgress, DomainError> {
+    // Existing source readers check the ambient request context. Propagate
+    // the supplied capability into those reads, then restore the caller's
+    // context even on an early error. None leaves an existing context alone.
+    let _ambient = cx.map(|cx| Cx::set_current(Some(cx.clone())));
     let mut progress = StreamProgress {
         next_cursor: options.poll.cursor,
         events_emitted: 0,
@@ -301,3 +305,40 @@ fn run_with(
 #[cfg(test)]
 #[path = "subscribe_stream_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn an_explicit_context_reaches_source_reads_and_restores_the_callers_context() {
+        crate::core::run_cli_with_cx(Duration::from_secs(10), |cx| async move {
+            let _outside = Cx::set_current(None);
+            assert!(Cx::current().is_none());
+            let options = StreamOptions {
+                poll: SubscribePollOptions::new(Path::new("/tmp/stream-context")),
+                interval: Duration::from_secs(3600),
+                max_events: Some(1),
+            };
+            let mut bytes = Vec::new();
+            let result = run_with(
+                Some(&cx),
+                &options,
+                &mut bytes,
+                |_| {
+                    Cx::current()
+                        .expect("explicit context reaches source adapter")
+                        .cancel_with(asupersync::CancelKind::User, Some("stop source read"));
+                    Err(delivery_error())
+                },
+                |_, _| panic!("failed read must not wait"),
+            );
+            assert!(result.is_err());
+            assert!(cx.checkpoint().is_err());
+            assert!(Cx::current().is_none(), "request context escaped its scope");
+            assert!(bytes.is_empty());
+        })
+        .expect("runtime");
+    }
+}

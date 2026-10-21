@@ -354,3 +354,277 @@ fn explicit_cancellation_stops_before_poll_and_during_idle_wait() {
     });
     result.expect("runtime");
 }
+
+struct Store {
+    _root: tempfile::TempDir,
+    workspace: PathBuf,
+    database: PathBuf,
+    db: crate::db::DbConnection,
+    id: String,
+}
+
+impl Store {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        std::fs::create_dir(workspace.join(".ee")).unwrap();
+        let database = workspace.join(".ee/ee.db");
+        let db = crate::db::DbConnection::open_file(&database).unwrap();
+        db.migrate().unwrap();
+        let id = crate::core::workspace::stable_workspace_id(&workspace);
+        db.insert_workspace(
+            &id,
+            &crate::db::CreateWorkspaceInput {
+                path: workspace.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        Self {
+            _root: root,
+            workspace,
+            database,
+            db,
+            id,
+        }
+    }
+
+    fn memory(&self, number: u128) -> String {
+        let id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        self.db
+            .insert_memory(
+                &id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: self.id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: format!("PRIVATE_STREAM_BODY_{number}"),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("manual://stream-test".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["release".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .unwrap();
+        id
+    }
+
+    fn head(&self) -> u64 {
+        let rows = self
+            .db
+            .query("SELECT COALESCE(MAX(rowid), 0) FROM audit_log", &[])
+            .unwrap();
+        u64::try_from(
+            rows[0]
+                .get(0)
+                .and_then(sqlmodel_core::Value::as_i64)
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn audit(&self, target: &str, kind: &str, action: &str) -> u64 {
+        self.db
+            .insert_audit(
+                &crate::db::generate_audit_id(),
+                &crate::db::CreateAuditInput {
+                    workspace_id: Some(self.id.clone()),
+                    actor: Some("PRIVATE_STREAM_ACTOR".to_owned()),
+                    action: action.to_owned(),
+                    target_type: Some(kind.to_owned()),
+                    target_id: Some(target.to_owned()),
+                    details: None,
+                },
+            )
+            .unwrap();
+        self.head()
+    }
+
+    fn stream(
+        &self,
+        cursor: u64,
+        filter: Option<&str>,
+        maximum: u64,
+        output: &mut impl Write,
+    ) -> Result<StreamProgress, DomainError> {
+        let options = self.options(cursor, filter, maximum);
+        crate::core::run_cli_with_cx(Duration::from_secs(10), |cx| async move {
+            run(Some(&cx), &options, output)
+        })
+        .expect("bounded stream runtime")
+    }
+
+    fn options(&self, cursor: u64, filter: Option<&str>, maximum: u64) -> StreamOptions<'_> {
+        StreamOptions {
+            poll: SubscribePollOptions {
+                workspace_path: &self.workspace,
+                database_path: Some(&self.database),
+                cursor,
+                filter: crate::core::subscribe::parse_subscribe_filter(filter).unwrap(),
+                limit: 100,
+            },
+            interval: Duration::from_millis(1),
+            max_events: Some(maximum),
+        }
+    }
+}
+
+#[test]
+fn real_link_producer_replays_both_endpoints_as_one_resumable_frame() {
+    use crate::core::memory::{MemoryLinkMode, MemoryLinkOptions, update_memory_link};
+    use crate::db::{MemoryLinkRelation, MemoryLinkSource};
+    let store = Store::new();
+    let left = store.memory(1);
+    let right = store.memory(2);
+    let start = store.head();
+    let source = store.db.get_memory(&left).unwrap();
+    let linked = update_memory_link(&MemoryLinkOptions {
+        workspace_path: &store.workspace,
+        database_path: &store.database,
+        memory_id: &right,
+        mode: MemoryLinkMode::Create {
+            target_memory_id: left.clone(),
+            relation: MemoryLinkRelation::Supports,
+            weight: 1.0,
+            confidence: 0.9,
+            directed: true,
+            evidence_count: 1,
+            source: MemoryLinkSource::Human,
+            metadata_json: Some("{\"annotation\":\"PRIVATE_STREAM_LINK\"}".to_owned()),
+        },
+        actor: Some("PRIVATE_STREAM_ACTOR"),
+        dry_run: false,
+        include_tombstoned: false,
+    })
+    .unwrap();
+    assert!(linked.persisted);
+    let mut output = Vec::new();
+    let progress = store
+        .stream(start, Some("CHANGED_FIELDS=links"), 1, &mut output)
+        .unwrap();
+    let values = frames(&output);
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0]["schema"], CHANGE_SCHEMA_V1);
+    assert_eq!(values[0]["events"].as_array().unwrap().len(), 2);
+    assert_eq!(values[0]["events"][0]["memoryId"], left);
+    assert_eq!(values[0]["events"][1]["memoryId"], right);
+    assert_eq!(progress.next_cursor, store.head());
+    assert_eq!(progress.events_emitted, 1);
+    assert!(
+        !String::from_utf8(output)
+            .unwrap()
+            .contains("PRIVATE_STREAM")
+    );
+    assert_eq!(store.db.get_memory(&left).unwrap(), source);
+    let again = crate::core::subscribe::poll_memory_deltas(
+        &store.options(progress.next_cursor, None, 1).poll,
+    )
+    .unwrap();
+    assert!(again.deltas.is_empty() && again.invalidations.is_empty());
+}
+
+#[test]
+fn real_filter_exits_are_delivered_and_unavailable_source_pages_emit_no_prefix() {
+    let store = Store::new();
+    let id = store.memory(1);
+    let start = store.head();
+    store
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET level = 'semantic' WHERE id = '{id}'"
+        ))
+        .unwrap();
+    let cursor = store.audit(
+        &id,
+        "memory",
+        crate::db::audit_actions::MEMORY_LEVEL_TRANSITION,
+    );
+    let mut bytes = Vec::new();
+    let progress = store
+        .stream(start, Some("LEVEL=procedural"), 1, &mut bytes)
+        .unwrap();
+    let notices = frames(&bytes);
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0]["schema"], MEMORY_INVALIDATION_SCHEMA_V1);
+    assert_eq!(notices[0]["memoryId"], id);
+    assert_eq!(progress.next_cursor, cursor);
+    let missing = crate::models::MemoryLinkId::from_uuid(uuid::Uuid::from_u128(900)).to_string();
+    store.audit(
+        &missing,
+        "memory_link",
+        crate::db::audit_actions::MEMORY_LINK_CREATE,
+    );
+    let mut rejected = Vec::new();
+    assert!(store.stream(start, None, 2, &mut rejected).is_err());
+    assert!(
+        rejected.is_empty(),
+        "an incomplete source page must not yield a successful prefix"
+    );
+    let mut stale = Vec::new();
+    let error = store
+        .stream(store.head() + 1, None, 1, &mut stale)
+        .unwrap_err();
+    assert!(stale.is_empty());
+    assert!(matches!(
+        error,
+        DomainError::UsageCodeWithDetails {
+            code: "subscribe_stream_resync_required",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_write_during_delivery_is_observed_by_the_next_fresh_poll() {
+    struct ConcurrentWriter<'a> {
+        store: &'a Store,
+        memory: &'a str,
+        bytes: Vec<u8>,
+        new_cursor: Option<u64>,
+    }
+    impl Write for ConcurrentWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.new_cursor.is_none() {
+                self.new_cursor = Some(self.store.audit(
+                    self.memory,
+                    "memory",
+                    crate::db::audit_actions::MEMORY_TAG_SET,
+                ));
+            }
+            Ok(())
+        }
+    }
+    let store = Store::new();
+    let id = store.memory(1);
+    let before = store.head();
+    let first = store.audit(&id, "memory", crate::db::audit_actions::MEMORY_CREATE);
+    let mut writer = ConcurrentWriter {
+        store: &store,
+        memory: &id,
+        bytes: Vec::new(),
+        new_cursor: None,
+    };
+    let progress = store.stream(before, None, 2, &mut writer).unwrap();
+    let second = writer.new_cursor.unwrap();
+    assert!(second > first);
+    let events = frames(&writer.bytes);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event["cursor"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [first, second]
+    );
+    assert_eq!(progress.next_cursor, second);
+    assert_eq!(progress.events_emitted, 2);
+}

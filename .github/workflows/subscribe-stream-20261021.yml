@@ -1,48 +1,15 @@
-name: Checked subscription stream integration
+# Retained delivery-attempt record. The push-triggered attempt did not start;
+# this file grants no write permission and cannot perform the pending patch.
+# The original attempt also requires the old stream-engine blob, so it refuses
+# the newer engine even if an old event were later scheduled.
+name: Retired subscription stream integration attempt
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/subscribe-stream-20261021.yml]
+  workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: subscription-stream-integration-20261021
-  cancel-in-progress: false
 jobs:
-  integrate:
-    if: github.repository == 'Dicklesworthstone/eidetic_engine_cli' && github.ref == 'refs/heads/main'
+  retired:
+    if: false
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: main
-          fetch-depth: 1
-      - name: Apply only the reviewed CLI bridge
-        shell: bash
-        run: |
-          set -euo pipefail
-          # One bounded delivery attempt, not a standing repository mutator.
-          test "$(date -u +%s)" -le "$(date -u -d '2026-10-21T22:50:00Z' +%s)"
-          test "$(git branch --show-current)" = main
-          test "$(git hash-object scripts/delivery/subscribe-stream-20261021.patch)" = 4328068c85c8b09230d49e91691a07ebc4810721
-          test "$(git hash-object src/core/subscribe_stream.rs)" = 91dcaab204ac9e6177712595679a4a0ea0ff4d60
-          test "$(git hash-object src/lib.rs)" = c82287aa9bc71710c144bc148e9a0dbf8f357b34
-          current="$(git hash-object src/cli/mod.rs)"
-          if test "$current" = 939198e13ccb35e68db949cc7957b1ad10f853d6; then
-            echo 'Reviewed CLI bridge already present.'
-            exit 0
-          fi
-          test "$current" = 429a5ef99bd07f750341bb5cc2ee7988f0822458
-          git apply --check scripts/delivery/subscribe-stream-20261021.patch
-          git apply scripts/delivery/subscribe-stream-20261021.patch
-          test "$(git hash-object src/cli/mod.rs)" = 939198e13ccb35e68db949cc7957b1ad10f853d6
-          test "$(git diff --name-only)" = src/cli/mod.rs
-          git diff --check
-          git config user.name 'Jeff Emanuel'
-          git config user.email '35050222+Dicklesworthstone@users.noreply.github.com'
-          git add -- src/cli/mod.rs
-          git commit -m 'fix(subscribe): wire CLI streams to complete resumable change delivery' -m 'Switch the existing validated CLI entrypoint to ee::subscription::run. Preserve shared-cursor invalidations, checkpoint filtered gaps, stop only between audit groups, and send failures to stderr without corrupting a partial JSONL frame. This exact source passed pinned rustfmt before delivery; compilation and native tests remain unverified. Direct main, no PR or force push.'
-          git push origin HEAD:main
+      - run: echo 'Retired. The exact CLI bridge remains in scripts/delivery/subscribe-stream-20261021.patch.'
