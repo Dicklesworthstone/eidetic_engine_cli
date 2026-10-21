@@ -17,11 +17,14 @@ Per `bd-2oh15`, the fixture lifecycle is:
    `.fixture_baseline/before.sha256`.
 2. `assert.sh` requires `EE_DOCTOR_FIXTURE_RUN_EE=1` and a binary in
    `EE_DOCTOR_FIXTURE_BINARY` (it exits 2 without them). It checks the
-   independent witness named in the spec's Oracle, then runs
-   `doctor_fixture_assert_pinned_gap` in `lib.sh`: `ee doctor` must report the
-   workspace healthy, an unscoped `ee doctor --fix` must take 0 actions, and
-   `.ee/ee.db` must be byte-identical afterwards. No undo step runs because
-   nothing is written.
+   independent witness named in the spec's Oracle, confirms the pre-fix report
+   carries `posture` `blocked` with both `database`/EE-E207 and
+   `search_index`/EE-E300 in `actionable`, then runs
+   `doctor_fixture_assert_guidance_only` in `lib.sh`: `ee doctor --fix` exits 6
+   with one `database_unavailable` fixer whose `operation` is `manual` and
+   `outcome` is `guidance_recorded`, the content digest is byte-identical
+   across the fix, and `.ee/index-rebuild-request.json` stays ABSENT. No undo
+   step runs because nothing is written.
 
 The shell scripts intentionally NEVER invoke Cargo and NEVER
 delete files. Recovery, including the post-undo step, runs
@@ -31,10 +34,13 @@ state on disk.
 
 ## Wiring status
 
-Label: **NOT-DETECTED** (pinned gap; NOT coverage; repair spec and
-`manifest.json`). Doctor reports this damage as healthy, so `ee doctor --fix`
-dispatches nothing for it. A passing run means the gap is still there; when a
-detector lands the fixture goes red on purpose and is relabelled.
+Label: **GUIDANCE-ONLY** (repair spec and `manifest.json`). This fixture was a
+pinned gap: doctor reported the malformed page as healthy, and a passing run
+meant the gap was still there. A detector has since landed, so `ee doctor` now
+reports EE-E207 with posture `blocked`, and `ee doctor --fix` records manual
+guidance instead of rewriting anything. The relabelling reached
+`manifest.json` and `assert.sh` but not this README or the repair spec, which
+is what the fixture contract caught.
 There is no per-FM fix: `ee doctor --fix --only <id>` is a usage error,
 because `--fix` declares a conflict with `--only`.
 `scripts/verify-undo.sh` runs this fixture with `EE_DOCTOR_FIXTURE_RUN_EE=1`

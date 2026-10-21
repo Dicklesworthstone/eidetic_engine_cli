@@ -32,10 +32,14 @@ state on disk.
 
 ## Wiring status
 
-Label: **NOT-DETECTED** (pinned gap; NOT coverage; repair spec and
-`manifest.json`). Doctor reports this damage as healthy, so `ee doctor --fix`
-dispatches nothing for it. A passing run means the gap is still there; when a
-detector lands the fixture goes red on purpose and is relabelled.
+Label: **REPAIR** (repair spec and `manifest.json`). This fixture was a pinned
+gap: doctor swallowed `.ee/config.toml` parse errors, reported the workspace
+healthy, and a passing run meant the gap was still there. A detector landed
+(EE-E101, posture `blocked`) and was joined to
+`fix_workspace_config_malformed_toml`, so `ee doctor --fix` now quarantines the
+malformed config by rename and `ee doctor undo` puts the damage back. The
+relabelling reached `manifest.json` and `assert.sh` but not this README, which
+is what the fixture contract caught.
 There is no per-FM fix: `ee doctor --fix --only <id>` is a usage error,
 because `--fix` declares a conflict with `--only`.
 `scripts/verify-undo.sh` runs this fixture with `EE_DOCTOR_FIXTURE_RUN_EE=1`

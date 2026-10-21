@@ -18,15 +18,15 @@ Labels, fields and the coverage rule are defined in
 
 ## fm-state_files-sqlite-integrity-page-malformed
 
-- **Label:** NOT-DETECTED (pinned gap; NOT coverage)
+- **Label:** GUIDANCE-ONLY (was a pinned gap until a detector landed; relabelled in `manifest.json` and `assert.sh`, and this section had not caught up)
 - **Severity:** P0. Scored P0 as `pop-ee_db-corrupt_page`.
-- **Detector:** None. `database` opens the store and reads the migration ledger; it never runs an integrity check, so an interior page can be malformed while doctor reports healthy.
+- **Detector:** `database` reports EE-E207 (error) and posture `blocked`, so the malformed interior page is now seen rather than passing as healthy. `search_index` reports EE-E300 (warning) in the same run and deliberately receives NO fixer: `fix_finding_for_check` returns `None` for `search_index` while the store is unreadable, because rebuilding an index over a malformed database would be the wrong repair.
 - **Real trigger:** The real `.ee/ee.db` is moved into `.fixture_baseline/` and replaced by a new copy in which the middle 4096-byte page is random bytes. `corrupt.sh` fails unless `sqlite3 PRAGMA integrity_check` stops returning `ok`.
-- **Repair:** None. Doctor finds nothing, so `--fix` dispatches nothing.
-- **Undo:** Not applicable. The harness asserts the damaged file is unchanged by `--fix`.
-- **Oracle:** `doctor_fixture_assert_pinned_gap`: doctor is healthy with an empty `actionable`, `--fix` reports `actionCount` 0 and no `fixerResults`, and the damaged database digest is unchanged. The witness is `PRAGMA integrity_check` != `ok`. This pins the gap; a detector landing turns this fixture red on purpose.
+- **Repair:** Guidance only, never an applied change. `--fix` exits 6 with `status` `completed_partial`, `fixerDispatchPending` true, `unresolvedCoreCheckCount` 2 and `guidanceOnlyFixerCount` 1, dispatching a single `database_unavailable` fixer whose `operation` is `manual` and whose `outcome` is `guidance_recorded`. A malformed page is not something doctor may rewrite.
+- **Undo:** Not applicable, and asserted so rather than assumed: `--fix` writes nothing, the content digest is byte-identical across it, and `.ee/index-rebuild-request.json` stays ABSENT. A real repair would request that rebuild; guidance must not.
+- **Oracle:** `doctor_fixture_assert_guidance_only "$FM" "database_unavailable" "database" "EE-E207" ".ee/index-rebuild-request.json"`, preceded by a jq check that the pre-fix report carries `posture` `blocked`, `healthy` false, and both `database`/EE-E207 and `search_index`/EE-E300 in `actionable`. The independent witness is `PRAGMA integrity_check` != `ok`.
 - **Negative control:** `doctor_fixture_healthy_store` asserts the undamaged store is healthy before the damage.
-- **Pinned sha:** 9188a0661, measured on the ab83e3f23 release binary.
+- **Pinned sha:** STALE -- 9188a0661 was measured on the ab83e3f23 release binary against the pre-detector behaviour described above, so it attests a report this fixture no longer produces. Needs re-measurement against a current binary; not restated here because it has not been measured.
 
 ## fm-state_files-empty-or-truncated-database
 
@@ -42,11 +42,11 @@ Labels, fields and the coverage rule are defined in
 
 ## fm-state_files-merge-conflict-markers
 
-- **Label:** COVERAGE (repair round trip). Upgraded from NOT-DETECTED under spec rule V6 on 2026-10-14 (bd-ooj2h), after the pinned-gap assertion began failing with "GAP no longer reproduces; the label is wrong, relabel it".
+- **Label:** REPAIR (full round trip). Upgraded from NOT-DETECTED under spec rule V6 on 2026-10-14 (bd-ooj2h), after the pinned-gap assertion began failing with "GAP no longer reproduces; the label is wrong, relabel it". The bucket was spelled COVERAGE here while `manifest.json` already said REPAIR; the fixture contract requires this field to START with the manifest label, so the two had drifted apart in vocabulary rather than in meaning.
 - **Severity:** P1. Scored P1 as `pop-config-malformed`: an unparseable config blocks search and pack until edited, but loses no data. Settled by execution (bd-2oh15 c9891/c9892) on a stamped 11f6e832e build: `status`, `remember` and `doctor` succeed on the conflicted workspace and only `search` fails (exit 2, `configuration`), so the failure does not block every command and P0 clause 2 does not apply. The manifest said P0 until then. NOTE: the `doctor` half of that 2026-09 finding is now stale — doctor reports this workspace as blocked, see Detector.
 - **Detector:** `workspace`, error code `EE-E101`, posture `blocked`, repair hint "Fix the TOML syntax in the config file the error names, then re-run the command". Conflict markers ARE invalid TOML, so this lands in the same detector as `fm-workspace_config-config-toml-malformed` and doctor reports the two IDENTICALLY — same check, code, posture and repair string. The two fixtures therefore now assert one observable and differ only in how `corrupt.sh` produces the damage; whether both should survive is an open question on bd-ooj2h.
 - **Real trigger:** A valid comment-only `.ee/config.toml` baseline is replaced by the same file wrapped in `<<<<<<<` / `=======` / `>>>>>>>` markers.
-- **Repair:** `quarantine_by_rename`, outcome `applied`, `status: completed_ok`, `actionCount: 1`, `guidanceOnlyFixerCount: 0`; doctor then reports `healthy: true`, posture `ok`, empty `actionable`. The conflicted config is renamed aside, never deleted.
+- **Repair:** `fix_workspace_config_malformed_toml` (src/core/doctor_fixers.rs:309), dispatched for EE-E101 by `fix_finding_for_check` under the join bd-bigu7 records, which is GUARDED on the check name so a second EE-E101 emitter cannot inherit this repair by accident. Operation `quarantine_by_rename`, outcome `applied`, `status: completed_ok`, `actionCount: 1`, `guidanceOnlyFixerCount: 0`; doctor then reports `healthy: true`, posture `ok`, empty `actionable`. The conflicted config is renamed aside, never deleted.
 - **Undo:** Applicable now. `--undo <run-id>` restores the damaged baseline and the fixture asserts `EE-E101` returns, which the digest comparison alone cannot establish.
 - **Oracle:** `doctor_fixture_assert` plus detection-before-repair, the fixer operation by name, `actionsUndone > 0`, and `EE-E101` after undo. The witness remains `ee search`, failing with an `ee.error.v2` envelope whose code is `configuration`.
 - **Negative control:** The comment-only baseline config passes `doctor_fixture_healthy_store` before the markers are written.
