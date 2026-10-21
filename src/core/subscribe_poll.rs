@@ -31,6 +31,9 @@ mod revision;
 #[path = "subscribe_links.rs"]
 mod links;
 
+#[path = "subscribe_watermark.rs"]
+mod watermark;
+
 /// Read/access accounting and refused writes do not change memory state.
 /// Keep their audit rows and watermark progress, but never turn a subscriber's
 /// response to a notification into another notification. This is an exact
@@ -192,20 +195,7 @@ impl<'a> SubscriptionSnapshot<'a> {
     }
 
     fn high_watermark(&self, workspace_id: &str) -> Result<u64, DomainError> {
-        let rows = self
-            .connection
-            .query(
-                "SELECT COALESCE(MAX(a.rowid), 0) FROM audit_log a \
-             LEFT JOIN memories m ON m.id = a.target_id \
-             WHERE a.workspace_id = ?1 \
-                OR (a.workspace_id IS NULL AND m.workspace_id = ?1)",
-                &[SqlValue::Text(workspace_id.to_owned())],
-            )
-            .map_err(storage_error)?;
-        rows.first()
-            .and_then(|row| row.get(0).and_then(|value| value.as_i64()))
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(|| malformed_row("workspace audit high watermark"))
+        watermark::read(self.connection, workspace_id)
     }
 
     fn page(
