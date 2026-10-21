@@ -4,6 +4,7 @@ use ee::cass::process::fuzz_decode_cass_stdout_stream;
 use libfuzzer_sys::fuzz_target;
 
 const CASS_STDOUT_LINE_MAX_BYTES: usize = 1024 * 1024;
+const CASS_VIEW_STDOUT_LINE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INPUT_BYTES: usize = CASS_STDOUT_LINE_MAX_BYTES + 4096;
 const MAX_ENVELOPE_TEXT_BYTES: usize = 64 * 1024;
 const MAX_EXCERPT_BYTES: usize = 65_536;
@@ -43,7 +44,7 @@ fn exercise_stream_decoder(data: &[u8]) {
 
     match first {
         Ok(summary) => {
-            assert!(summary.peak_buffer_bytes <= CASS_STDOUT_LINE_MAX_BYTES + 1);
+            assert!(summary.peak_buffer_bytes <= CASS_STDOUT_LINE_MAX_BYTES + 2);
             assert!(summary.peak_line_bytes <= CASS_STDOUT_LINE_MAX_BYTES);
             assert!(summary.bytes_seen <= data.len());
             assert!(summary.line_count <= data.len().saturating_add(1));
@@ -252,7 +253,7 @@ fn exercise_cap_sized_line() {
     let summary = fuzz_decode_cass_stdout_stream(&input)
         .expect("cap-sized newline-terminated line must decode");
     assert_eq!(summary.line_count, 1);
-    assert_eq!(summary.bytes_seen, CASS_STDOUT_LINE_MAX_BYTES);
+    assert_eq!(summary.bytes_seen, input.len());
     assert_eq!(summary.peak_line_bytes, CASS_STDOUT_LINE_MAX_BYTES);
     assert!(summary.peak_buffer_bytes <= CASS_STDOUT_LINE_MAX_BYTES + 1);
 }
@@ -261,7 +262,7 @@ fn exercise_oversized_line() {
     let input = vec![b'x'; CASS_STDOUT_LINE_MAX_BYTES + 1];
     let error = fuzz_decode_cass_stdout_stream(&input)
         .expect_err("oversized unterminated line must be rejected");
-    assert_eq!(error.kind_str(), "io");
+    assert_eq!(error.kind_str(), "stdout_line_too_long");
     assert!(
         error
             .to_string()
@@ -270,27 +271,49 @@ fn exercise_oversized_line() {
 }
 
 fn exercise_crlf_line_boundaries() {
-    let mut capped_crlf = vec![b'x'; CASS_STDOUT_LINE_MAX_BYTES - 1];
+    let mut capped_crlf = vec![b'x'; CASS_STDOUT_LINE_MAX_BYTES];
     capped_crlf.extend_from_slice(b"\r\n");
 
     let summary = fuzz_decode_cass_stdout_stream(&capped_crlf)
-        .expect("CRLF line within the raw read cap must decode");
+        .expect("cap-sized content plus a CRLF delimiter must decode");
     assert_eq!(summary.line_count, 1);
-    assert_eq!(summary.bytes_seen, CASS_STDOUT_LINE_MAX_BYTES - 1);
-    assert_eq!(summary.peak_line_bytes, CASS_STDOUT_LINE_MAX_BYTES - 1);
-    assert!(summary.peak_buffer_bytes <= CASS_STDOUT_LINE_MAX_BYTES + 1);
+    assert_eq!(summary.bytes_seen, capped_crlf.len());
+    assert_eq!(summary.peak_line_bytes, CASS_STDOUT_LINE_MAX_BYTES);
+    assert!(summary.peak_buffer_bytes <= CASS_STDOUT_LINE_MAX_BYTES + 2);
 
-    let mut oversized_crlf = vec![b'x'; CASS_STDOUT_LINE_MAX_BYTES];
+    let mut oversized_crlf = vec![b'x'; CASS_STDOUT_LINE_MAX_BYTES + 1];
     oversized_crlf.extend_from_slice(b"\r\n");
     assert_err_contains(
         fuzz_decode_cass_stdout_stream(&oversized_crlf),
-        "CRLF input whose raw line bytes exceed the cap must be rejected",
+        "CRLF content beyond the logical line cap must be rejected",
         "cass subprocess stdout line exceeded",
     );
 }
 
 fn exercise_oversized_view_envelope_line() {
-    let oversized_content = "x".repeat(CASS_STDOUT_LINE_MAX_BYTES);
+    let recoverable_json = serde_json::json!({
+        "lines": [
+            {"line": 1, "content": "x".repeat(CASS_STDOUT_LINE_MAX_BYTES + 1)},
+            {"line": 2, "content": "later valid record"},
+        ],
+    })
+    .to_string();
+    let recovered = ee::cass::parse_view_json_summary(
+        recoverable_json.as_bytes(),
+        "/tmp/cass-envelope-fuzz.jsonl",
+    )
+    .expect("complete records within the view budget must preserve later evidence");
+    assert_eq!(recovered.accepted_items, 2);
+    assert_eq!(recovered.max_line, 2);
+    assert!(recovered.max_excerpt_bytes < 1_024);
+    assert_eq!(
+        fuzz_decode_cass_stdout_stream(recoverable_json.as_bytes())
+            .expect_err("ordinary decoding must retain its strict 1 MiB cap")
+            .kind_str(),
+        "stdout_line_too_long",
+    );
+
+    let oversized_content = "x".repeat(CASS_VIEW_STDOUT_LINE_MAX_BYTES);
     let content_json =
         serde_json::to_string(&oversized_content).expect("string JSON encoding should succeed");
     let view_json = format!(r#"{{"lines":[{{"line":1,"content":{content_json}}}]}}"#);

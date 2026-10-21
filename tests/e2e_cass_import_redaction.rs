@@ -13,6 +13,7 @@ use ee::models::id::WorkspaceId;
 use uuid::Uuid;
 
 type TestResult = Result<(), String>;
+const CASS_VIEW_STDOUT_LINE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 #[test]
 fn cass_import_redaction_round_trip_is_search_safe_and_idempotent() -> TestResult {
@@ -302,16 +303,43 @@ fn cass_import_fake_subprocess_supervision_logs_success_cap_and_timeout() -> Tes
             ..ImportRunOptions::default()
         },
     )?;
-    ensure_error_output_contains(
-        &cap_run.output,
-        "supervision stdout cap import",
-        "stdout line exceeded",
+    let cap_json = parse_json_output(&cap_run.output, "supervision stdout cap import")?;
+    ensure_success(&cap_json, "supervision stdout cap import")?;
+    ensure_equal(
+        json_field(&cap_json, &["data", "status"], "stdout cap import status")?,
+        &serde_json::json!("completed_with_refusals"),
+        "stdout cap import status",
     )?;
-    let cap_json = parse_stdout_json(&cap_run.output, "supervision stdout cap import")?;
+    for (field, expected) in [
+        ("sessionsDiscovered", 1),
+        ("sessionsImported", 0),
+        ("sessionsSkipped", 1),
+        ("spansImported", 0),
+    ] {
+        ensure_equal(&report_count(&cap_json, field)?, &expected, field)?;
+    }
+    ensure_equal(
+        &cap_json["data"]["sessions"][0]["status"],
+        &serde_json::json!("refused"),
+        "stdout cap session status",
+    )?;
+    ensure_equal(
+        &cap_json["data"]["sessions"][0]["refusalCode"],
+        &serde_json::json!("cass_view_oversized"),
+        "stdout cap session refusal",
+    )?;
+    ensure(
+        cap_json["degraded"].as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry["code"] == "cass_import_history_refused")
+        }),
+        "stdout cap import must report its session refusal as degraded",
+    )?;
     append_supervision_event(
         &log_path,
         SupervisionEventInput {
-            step: "stdout_line_cap_error",
+            step: "stdout_line_cap_refusal",
             fake_cass_behavior: "view_stdout_line_cap_then_sleep",
             workspace_arg: &workspace_arg,
             view_json_arg: &cap_view_arg,
@@ -651,9 +679,9 @@ fn write_fake_view_jsonl(path: &Path, content: &str) -> TestResult {
 }
 
 fn write_oversized_stdout_line(path: &Path) -> TestResult {
-    let mut line = "x".repeat(1_048_577);
-    line.push('\n');
-    fs::write(path, line).map_err(|error| error.to_string())
+    // Valid view JSON exceeds the physical-line cap once its envelope is
+    // included. Recovery must refuse the session before parsing any prefix.
+    write_fake_view_jsonl(path, &"x".repeat(CASS_VIEW_STDOUT_LINE_MAX_BYTES))
 }
 
 struct SupervisionEventInput<'a> {
@@ -709,7 +737,7 @@ fn assert_supervision_log(path: &Path) -> TestResult {
 
     let expected = [
         ("streamed_jsonl_success", true, "ee.response.v2"),
-        ("stdout_line_cap_error", false, "ee.error.v2"),
+        ("stdout_line_cap_refusal", true, "ee.response.v2"),
         ("view_timeout_cleanup", false, "ee.error.v2"),
     ];
     for (event, (step, success, schema)) in events.iter().zip(expected) {

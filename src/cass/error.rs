@@ -59,6 +59,12 @@ pub enum CassError {
     /// the OS level (e.g. permission denied, broken pipe).
     Io { message: String },
 
+    /// A physical stdout line exceeded its bounded read budget before
+    /// UTF-8 or JSON decoding. No truncated line is exposed to callers.
+    /// Import may isolate this failure to the requested session; other
+    /// I/O and malformed-response errors must not be mistaken for it.
+    StdoutLineTooLong { limit_bytes: usize },
+
     /// `cass` produced no machine-data on stdout where it was required.
     ///
     /// This is distinct from [`CassError::InvalidStdoutJson`]: empty
@@ -103,6 +109,7 @@ impl CassError {
             Self::BinaryNotFound { .. } => "binary_not_found",
             Self::FoundButUntrusted { .. } => "found_but_untrusted",
             Self::Io { .. } => "io",
+            Self::StdoutLineTooLong { .. } => "stdout_line_too_long",
             Self::EmptyStdout => "empty_stdout",
             Self::InvalidStdoutJson { .. } => "invalid_stdout_json",
             Self::ContractMismatch { .. } => "external_adapter_schema_mismatch",
@@ -141,6 +148,9 @@ impl CassError {
             ),
             Self::ContractMismatch { .. } => Some("upgrade cass to a compatible contract version"),
             Self::Degraded { repair_hint, .. } => Some(repair_hint.as_str()),
+            Self::StdoutLineTooLong { .. } => Some(
+                "inspect the affected CASS session and retry with a bounded transcript; its incomplete response was not imported",
+            ),
             Self::EmptyStdout
             | Self::InvalidStdoutJson { .. }
             | Self::Io { .. }
@@ -169,6 +179,10 @@ impl fmt::Display for CassError {
                 found_at.display()
             ),
             Self::Io { message } => write!(f, "cass subprocess io error: {message}"),
+            Self::StdoutLineTooLong { limit_bytes } => write!(
+                f,
+                "cass subprocess stdout line exceeded {limit_bytes} byte limit",
+            ),
             Self::EmptyStdout => f.write_str("cass produced no stdout payload"),
             Self::InvalidStdoutJson { hint } => write!(f, "cass stdout was not valid JSON: {hint}"),
             Self::ContractMismatch { required, observed } => write!(
@@ -226,6 +240,12 @@ mod tests {
                     message: "broken pipe".into(),
                 },
                 "io",
+            ),
+            (
+                CassError::StdoutLineTooLong {
+                    limit_bytes: 1024 * 1024,
+                },
+                "stdout_line_too_long",
             ),
             (CassError::EmptyStdout, "empty_stdout"),
             (
@@ -378,5 +398,25 @@ mod tests {
         let cass: CassError = raw.into();
         assert_eq!(cass.kind_str(), "io");
         assert!(cass.to_string().contains("denied"));
+    }
+
+    #[test]
+    fn stdout_line_limit_is_distinct_from_io_and_not_degraded() {
+        let error = CassError::StdoutLineTooLong {
+            limit_bytes: 8 * 1024 * 1024,
+        };
+        assert_eq!(error.kind_str(), "stdout_line_too_long");
+        assert_eq!(
+            error.to_string(),
+            "cass subprocess stdout line exceeded 8388608 byte limit",
+        );
+        assert!(!error.is_degraded());
+        assert!(error.repair_hint().is_some());
+        assert_ne!(
+            CassError::Io {
+                message: error.to_string(),
+            },
+            error,
+        );
     }
 }

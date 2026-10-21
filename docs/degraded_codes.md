@@ -2064,13 +2064,13 @@ ee review workspace --workspace . --include-cass --json
 
 **Introduced by:** gh-66 (epic I)
 
-**Trigger.** A retained CASS source line changed or disappeared, or a legacy lossy excerpt cannot prove its complete source across screening versions. That session is preserved and later sessions continue importing.
+**Trigger.** A CASS view line exceeds the fixed 8 MiB capture limit, a source changes during capture, a retained source line changed or disappeared, or a legacy lossy excerpt cannot prove its complete source across screening versions. That session is preserved and later sessions continue importing.
 
 **Setup.**
 
 ```bash
 ee import cass --workspace . --json
-# Revisit an unverifiable v0.17.0 excerpt, or change a previously imported source line.
+# Revisit an unverifiable v0.17.0 excerpt, change a previously imported source line, or capture a transcript with a stdout line over 8 MiB.
 ```
 
 **Invocation.**

@@ -16,7 +16,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
-use super::process::{CASS_STDOUT_LINE_MAX_BYTES, CassStreamError};
+#[cfg(test)]
+use super::process::CASS_STDOUT_LINE_MAX_BYTES;
+use super::process::{CASS_VIEW_STDOUT_LINE_MAX_BYTES, CassStreamError};
 use super::{
     CassAgent, CassClient, CassError, CassExitClass, CassRole, CassSessionInfo, CassSpanKind,
     ImportCursor,
@@ -42,7 +44,7 @@ const CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1: &str = "ee.cass.subprocess_diagnost
 /// Upper bound on the total `cass view --json` stdout we will buffer before
 /// parsing. Real `cass` emits a single pretty-printed `{...,"lines":[...]}`
 /// envelope (see [`parse_view_json_envelope`]), so the per-line read limit
-/// (`CASS_STDOUT_LINE_MAX_BYTES`, enforced in `process.rs`) is not by itself a
+/// (`CASS_VIEW_STDOUT_LINE_MAX_BYTES`, enforced in `process.rs`) is not by itself a
 /// total bound — the whole object can span many lines. Mirror the buffered
 /// `run` path's 100 MiB pipe cap so a pathological session can't make us hold
 /// unbounded memory.
@@ -134,14 +136,16 @@ pub enum ImportSessionStatus {
     Refused(CassHistoryRefusal),
 }
 
-/// A history-integrity refusal is local to one session, not a storage outage.
-/// Keep this vocabulary closed so unrelated DB failures still abort the run.
+/// A capture or history-integrity refusal is local to one session, not a
+/// storage outage. Keep this vocabulary closed so unrelated failures still
+/// abort the run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CassHistoryRefusal {
     Changed,
     Missing,
     Unverifiable,
     Unstable,
+    Oversized,
 }
 
 impl CassHistoryRefusal {
@@ -152,6 +156,7 @@ impl CassHistoryRefusal {
             Self::Missing => "cass_refresh_history_missing",
             Self::Unverifiable => "cass_refresh_history_unverifiable",
             Self::Unstable => "cass_source_changed_during_import",
+            Self::Oversized => "cass_view_oversized",
         }
     }
 
@@ -166,6 +171,9 @@ impl CassHistoryRefusal {
             }
             Self::Unstable => {
                 "Retry after the live session stops changing. No evidence from this incomplete snapshot was written."
+            }
+            Self::Oversized => {
+                "Inspect the oversized CASS transcript before retrying this session. A stdout line exceeded the fixed 8 MiB capture limit; no evidence from this incomplete snapshot was written. Other sessions were still processed."
             }
         }
     }
@@ -235,7 +243,7 @@ impl CassImportReport {
             code: "cass_import_history_refused",
             severity: "high",
             message: format!(
-                "{refused} CASS sessions were refused because their source changed during capture, retained history changed, is missing, or cannot be verified across screening versions. Their evidence was preserved and other sessions were processed."
+                "{refused} CASS sessions were refused because their source exceeded the bounded capture limit, changed during capture, retained history changed, is missing, or cannot be verified across screening versions. Their evidence was preserved and other sessions were processed."
             ),
             repair: "Inspect sessions[].refusalCode and sessions[].repair; restore original source evidence before retrying refused sessions.".to_owned(),
         })
@@ -516,6 +524,9 @@ impl CassImportError {
     #[must_use]
     pub fn subprocess_diagnostics_json(&self) -> Option<JsonValue> {
         match self {
+            Self::Cass(CassError::StdoutLineTooLong { limit_bytes }) => {
+                Some(cass_stdout_line_cap_diagnostics_json(Some(*limit_bytes)))
+            }
             Self::Cass(CassError::Io { message }) => cass_io_subprocess_diagnostics_json(message),
             Self::CassCommand {
                 command,
@@ -595,6 +606,31 @@ impl From<DbError> for CassImportError {
     }
 }
 
+fn cass_stdout_line_cap_diagnostics_json(limit_bytes: Option<usize>) -> JsonValue {
+    json!({
+        "schema": CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1,
+        "outcome": "cap_error",
+        "command": null,
+        "cap": {
+            "stream": "stdout",
+            "kind": "line",
+            "limitBytes": limit_bytes,
+        },
+        "timeout": false,
+        "killAttempted": true,
+        "reapSucceeded": true,
+        "stderrCapture": {
+            "truncated": false,
+            "captureCapExceeded": false,
+        },
+        "peakStreamedStdoutLineBufferBytes": null,
+        "unavailable": {
+            "command": "cap error surfaced before the higher-level command wrapper was built",
+            "peakStreamedStdoutLineBufferBytes": "reader returned the cap error before a stream outcome was emitted",
+        },
+    })
+}
+
 fn cass_io_subprocess_diagnostics_json(message: &str) -> Option<JsonValue> {
     let lower = message.to_lowercase();
     if !lower.contains("cass subprocess") {
@@ -602,28 +638,9 @@ fn cass_io_subprocess_diagnostics_json(message: &str) -> Option<JsonValue> {
     }
 
     if lower.contains("stdout line exceeded") {
-        return Some(json!({
-            "schema": CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1,
-            "outcome": "cap_error",
-            "command": null,
-            "cap": {
-                "stream": "stdout",
-                "kind": "line",
-                "limitBytes": first_usize_in_text(message),
-            },
-            "timeout": false,
-            "killAttempted": true,
-            "reapSucceeded": true,
-            "stderrCapture": {
-                "truncated": false,
-                "captureCapExceeded": false,
-            },
-            "peakStreamedStdoutLineBufferBytes": null,
-            "unavailable": {
-                "command": "cap error surfaced before the higher-level command wrapper was built",
-                "peakStreamedStdoutLineBufferBytes": "reader returned the cap error before a stream outcome was emitted",
-            },
-        }));
+        return Some(cass_stdout_line_cap_diagnostics_json(first_usize_in_text(
+            message,
+        )));
     }
 
     if lower.contains("stdout line was not valid utf-8") {
@@ -829,7 +846,10 @@ pub fn import_cass_sessions(
             let spans = if options.include_spans {
                 match view_session_spans(client, &session.source_path) {
                     Ok(spans) => spans,
-                    Err(error) if is_unstable_view(&error) => {
+                    Err(error) => {
+                        let Some(reason) = view_session_refusal(&error) else {
+                            return Err(error);
+                        };
                         first_history_refusal.get_or_insert(error);
                         cursor.record_skipped();
                         skipped = skipped.saturating_add(1);
@@ -837,14 +857,13 @@ pub fn import_cass_sessions(
                             source_path: session.source_path,
                             session_id: None,
                             index_job_id: None,
-                            status: ImportSessionStatus::Refused(CassHistoryRefusal::Unstable),
+                            status: ImportSessionStatus::Refused(reason),
                             spans_imported: 0,
                             message_count: session.message_count,
                             missing_metadata: session.missing_metadata,
                         });
                         continue;
                     }
-                    Err(error) => return Err(error),
                 }
             } else {
                 Vec::new()
@@ -1314,11 +1333,24 @@ fn invalid_view_page(message: &str) -> CassImportError {
 
 const UNSTABLE_VIEW_MESSAGE: &str = "view total_lines changed during import";
 
-// Only a changed endpoint is retryable. Malformed envelopes, missing lines,
-// subprocess failures and storage errors retain their batch-failure semantics.
-fn is_unstable_view(error: &CassImportError) -> bool {
-    matches!(error, CassImportError::InvalidJson { source: "view", message }
-        if message == UNSTABLE_VIEW_MESSAGE)
+// Refuse an incomplete snapshot before any session transaction. A physical
+// stdout line can be only part of a pretty-printed JSON record, so dropping or
+// truncating it cannot safely quarantine a span or prove its complete source.
+// Only the typed view-line limit and a changing endpoint are session-local;
+// malformed JSON/UTF-8, subprocess failures and storage errors still fail.
+fn view_session_refusal(error: &CassImportError) -> Option<CassHistoryRefusal> {
+    match error {
+        CassImportError::Cass(CassError::StdoutLineTooLong { limit_bytes })
+            if *limit_bytes == CASS_VIEW_STDOUT_LINE_MAX_BYTES =>
+        {
+            Some(CassHistoryRefusal::Oversized)
+        }
+        CassImportError::InvalidJson {
+            source: "view",
+            message,
+        } if message == UNSTABLE_VIEW_MESSAGE => Some(CassHistoryRefusal::Unstable),
+        _ => None,
+    }
 }
 
 fn cass_view_total_lines(input: &[u8]) -> Result<Option<u32>, CassImportError> {
@@ -1382,12 +1414,14 @@ fn read_cass_view_page(
     // (the first stdout line is just `{`), not a per-line `{"line",..}` JSONL
     // stream. So we cannot `serde_json::from_str` each line in isolation (the
     // bare `{` yields "EOF while parsing an object" and imports zero spans —
-    // issue #11). Instead, stream the stdout to keep the per-line 1 MiB read
-    // limit and bound total memory, accumulate the raw bytes, then hand the
+    // issue #11). Instead, stream stdout with a fixed 8 MiB view-line limit,
+    // accumulate the raw bytes within the total cap, then hand the
     // whole buffer to `parse_view_json`, which understands the real envelope
     // shape via `parse_view_json_envelope` (and still tolerates true JSONL).
+    // Complete content over the policy's 1 MiB scan budget is quarantined by
+    // parse_view_line_value without changing JSON or losing its source hash.
     let mut buffer = CassViewStdoutBuffer::default();
-    let outcome = match invocation.run_stdout_lines(|line| buffer.accept_line(&line)) {
+    let outcome = match invocation.run_view_stdout_lines(|line| buffer.accept_line(&line)) {
         Ok(outcome) => outcome,
         Err(CassStreamError::Cass(error)) => return Err(CassImportError::Cass(error)),
         Err(CassStreamError::Handler(error)) => return Err(error),
@@ -1407,7 +1441,7 @@ fn read_cass_view_page(
 /// Accumulates `cass view --json` stdout while streaming so the full envelope
 /// can be parsed in one pass (see [`view_session_spans`]). Preserves the
 /// streaming safety posture: each line is already bounded by the read-side
-/// `CASS_STDOUT_LINE_MAX_BYTES` limit, and the running total is capped here at
+/// `CASS_VIEW_STDOUT_LINE_MAX_BYTES` limit, and the running total is capped here at
 /// [`CASS_VIEW_STDOUT_TOTAL_MAX_BYTES`] so pathological output cannot pin
 /// unbounded memory.
 #[derive(Default)]
@@ -1812,6 +1846,16 @@ fn parse_view_json(
         source: "view",
         message: error.to_string(),
     })?;
+    // The envelope fallback must enforce the same physical-line cap as JSONL,
+    // including direct parser/fuzz callers that bypass the subprocess reader.
+    if text
+        .lines()
+        .any(|line| line.len() > CASS_VIEW_STDOUT_LINE_MAX_BYTES)
+    {
+        return Err(invalid_view_page(&format!(
+            "view JSON line exceeds {CASS_VIEW_STDOUT_LINE_MAX_BYTES} byte limit"
+        )));
+    }
 
     match parse_view_json_lines(text, source_path) {
         Ok(spans) => Ok(spans),
@@ -1910,10 +1954,12 @@ impl CassViewLineCollector {
         if line.trim().is_empty() {
             return Ok(());
         }
-        if line.len() > CASS_STDOUT_LINE_MAX_BYTES {
+        if line.len() > CASS_VIEW_STDOUT_LINE_MAX_BYTES {
             return Err(CassImportError::InvalidJson {
                 source: "view",
-                message: format!("view JSON line exceeds {CASS_STDOUT_LINE_MAX_BYTES} byte limit"),
+                message: format!(
+                    "view JSON line exceeds {CASS_VIEW_STDOUT_LINE_MAX_BYTES} byte limit"
+                ),
             });
         }
         self.memory_sample.record_line(line.len());
@@ -3323,11 +3369,36 @@ mod tests {
     }
 
     #[test]
+    fn only_typed_view_line_cap_is_a_recoverable_size_refusal() {
+        assert_eq!(
+            view_session_refusal(&CassImportError::Cass(CassError::StdoutLineTooLong {
+                limit_bytes: CASS_VIEW_STDOUT_LINE_MAX_BYTES,
+            })),
+            Some(CassHistoryRefusal::Oversized),
+        );
+        for error in [
+            CassImportError::Cass(CassError::StdoutLineTooLong {
+                limit_bytes: CASS_STDOUT_LINE_MAX_BYTES,
+            }),
+            CassImportError::Cass(CassError::Io {
+                message: format!(
+                    "cass subprocess stdout line exceeded {CASS_VIEW_STDOUT_LINE_MAX_BYTES} byte limit"
+                ),
+            }),
+            CassImportError::Cass(CassError::Io {
+                message: "cass subprocess stdout line was not valid UTF-8".to_owned(),
+            }),
+            invalid_view_page("view JSON output exceeds total session byte limit"),
+            invalid_view_page("view source locator does not match the requested session"),
+        ] {
+            assert_eq!(view_session_refusal(&error), None, "{error}");
+        }
+    }
+
+    #[test]
     fn subprocess_diagnostics_classifies_stdout_line_cap() -> TestResult {
-        let error = CassImportError::Cass(CassError::Io {
-            message: format!(
-                "cass subprocess stdout line exceeded {CASS_STDOUT_LINE_MAX_BYTES} byte limit"
-            ),
+        let error = CassImportError::Cass(CassError::StdoutLineTooLong {
+            limit_bytes: CASS_VIEW_STDOUT_LINE_MAX_BYTES,
         });
         let diagnostics = error
             .subprocess_diagnostics_json()
@@ -3349,6 +3420,11 @@ mod tests {
             "cap stream",
         )?;
         ensure_equal(&diagnostics["cap"]["kind"], &json!("line"), "cap kind")?;
+        ensure_equal(
+            &diagnostics["cap"]["limitBytes"],
+            &json!(CASS_VIEW_STDOUT_LINE_MAX_BYTES),
+            "typed view cap",
+        )?;
         ensure_equal(&diagnostics["timeout"], &json!(false), "timeout flag")?;
         ensure_equal(
             &diagnostics["killAttempted"],
@@ -4570,7 +4646,7 @@ mod tests {
 
     #[test]
     fn parse_view_jsonl_rejects_oversized_lines() -> TestResult {
-        let oversized_content = "x".repeat(CASS_STDOUT_LINE_MAX_BYTES);
+        let oversized_content = "x".repeat(CASS_VIEW_STDOUT_LINE_MAX_BYTES);
         let input = json!({
             "line": 1,
             "content": oversized_content,
@@ -4588,8 +4664,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_view_json_rejects_pretty_envelope_over_line_cap() -> TestResult {
+        let input = serde_json::to_string_pretty(&json!({
+            "lines": [{"line": 1, "content": "x".repeat(CASS_VIEW_STDOUT_LINE_MAX_BYTES)}],
+            "total_lines": 1,
+        }))
+        .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(
+                parse_view_json(input.as_bytes(), "/tmp/session.jsonl"),
+                Err(error) if cass_view_line_error_is_size_limit(&error)
+            ),
+            "pretty-printed envelopes must not bypass the physical-line limit",
+        )
+    }
+
+    #[test]
     fn parse_view_json_rejects_single_line_envelope_over_line_cap() -> TestResult {
-        let oversized_content = "x".repeat(CASS_STDOUT_LINE_MAX_BYTES);
+        let oversized_content = "x".repeat(CASS_VIEW_STDOUT_LINE_MAX_BYTES);
         let input = json!({
             "lines": [{
                 "line": 1,

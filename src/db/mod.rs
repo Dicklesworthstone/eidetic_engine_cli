@@ -14963,7 +14963,11 @@ pub const EVIDENCE_SCREENING_VERSION: u32 = 1;
 pub const EVIDENCE_SECURITY_POLICY_EPOCH: u32 = 1;
 pub const EVIDENCE_CANONICAL_PROVENANCE_REVISION: u32 = 1;
 pub(crate) const CASS_SOURCE_COMMITMENT_SCHEMA_V1: &str = "ee.cass.source.v1";
-const CASS_SOURCE_COMMITMENT_MAX_BYTES: u64 = 1024 * 1024;
+// Complete transcripts above the 1 MiB screening budget are quarantined, but
+// their hashes and lengths must survive import and refresh. This finite bound
+// matches the 8 MiB CASS view capture budget; it never authorizes retaining the
+// original oversized content in an evidence excerpt.
+const CASS_SOURCE_COMMITMENT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A commitment captured from a complete CASS source line before screening.
 ///
@@ -53956,6 +53960,26 @@ UPDATE memories
     }
 
     #[test]
+    fn cass_source_commitment_bounds_quarantined_transcript_lengths() {
+        let mut source = super::CassSourceCommitment {
+            schema: super::CASS_SOURCE_COMMITMENT_SCHEMA_V1.to_owned(),
+            content_hash: super::canonical_evidence_hash("quarantined source"),
+            byte_length: 1,
+            excerpt_producer_version: 1,
+        };
+        for (byte_length, valid) in [
+            (0, false),
+            (1_136_663, true),
+            (8 * 1024 * 1024, true),
+            (8 * 1024 * 1024 + 1, false),
+            (u64::MAX, false),
+        ] {
+            source.byte_length = byte_length;
+            assert_eq!(source.is_valid(), valid, "source byte length {byte_length}");
+        }
+    }
+
+    #[test]
     fn cass_source_commitment_rejects_malformed_and_foreign_claims_before_writes() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -53987,7 +54011,10 @@ UPDATE memories
             ),
             ("byteLength", serde_json::json!(0)),
             ("byteLength", serde_json::json!(-1)),
-            ("byteLength", serde_json::json!(1_048_577)),
+            (
+                "byteLength",
+                serde_json::json!(super::CASS_SOURCE_COMMITMENT_MAX_BYTES + 1),
+            ),
             ("byteLength", serde_json::json!(1.5)),
             ("excerptProducerVersion", serde_json::json!(0)),
             (

@@ -1067,3 +1067,443 @@ fn malformed_checkpoints_do_not_authorize_a_completed_publication() {
     assert!(!error.to_string().contains("PRIVATE_SENTINEL"));
     assert_eq!(db.list_evidence_spans_for_session(&id).unwrap().len(), 1);
 }
+
+/// Drive the real bounded subprocess reader, complete-snapshot importer and
+/// durable admission boundary together. These fixtures are generated at test
+/// time so a large transcript does not become a large committed test asset.
+#[cfg(unix)]
+mod oversized_transcripts {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+
+    use super::super::super::{
+        CassHistoryRefusal, CassImportError, CassImportOptions, CassImportReport,
+        ImportSessionStatus, import_cass_sessions, stable_session_id,
+    };
+    use crate::cass::process::CASS_VIEW_STDOUT_LINE_MAX_BYTES;
+    use crate::cass::{CassClient, CassError};
+    use crate::db::{DbConnection, StoredEvidenceSpan};
+
+    const REPORTED_LINE_BYTES: usize = 1_136_663;
+    const VALID_RECORD: &str = r#"{"type":"assistant","message":{"role":"assistant","content":"quartzoversizerecovery compilation succeeded and release verification passed."}}"#;
+    const LATER_RECORD: &str = r#"{"type":"assistant","message":{"role":"assistant","content":"quartzlaterrecovery the unrelated session completed its database migration successfully."}}"#;
+
+    struct ImportFixture {
+        bin: PathBuf,
+        workspace: PathBuf,
+        database: PathBuf,
+    }
+
+    impl ImportFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("ee-cass-oversized-{}", uuid::Uuid::now_v7()));
+            let bin = root.join("bin");
+            let workspace = root.join("workspace");
+            fs::create_dir_all(&bin).unwrap();
+            fs::create_dir_all(&workspace).unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+            let binary = bin.join("cass");
+            fs::write(
+                &binary,
+                r#"#!/bin/sh
+dir=${0%/*}
+case "$1" in
+  sessions) cat "$dir/sessions.json" ;;
+  view)
+    for source in "$@"; do :; done
+    name=${source##*/}
+    case "$name" in
+      affected.jsonl|later.jsonl) cat "$dir/$name.view" ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+"#,
+            )
+            .unwrap();
+            fs::set_permissions(binary, fs::Permissions::from_mode(0o755)).unwrap();
+            Self {
+                bin,
+                workspace,
+                database: root.join("ee.db"),
+            }
+        }
+
+        fn source(&self, name: &str) -> String {
+            self.workspace
+                .join(format!("{name}.jsonl"))
+                .to_string_lossy()
+                .into_owned()
+        }
+
+        fn sessions(&self, sessions: &[(&str, u32)]) {
+            let entries = sessions
+                .iter()
+                .map(|(name, count)| {
+                    json!({
+                        "path": self.source(name),
+                        "workspace": self.workspace,
+                        "agent": "codex",
+                        "modified": "2026-10-21T12:00:00Z",
+                        "message_count": count,
+                    })
+                })
+                .collect::<Vec<_>>();
+            fs::write(
+                self.bin.join("sessions.json"),
+                json!({"sessions": entries}).to_string(),
+            )
+            .unwrap();
+        }
+
+        fn view(&self, name: &str, bytes: impl AsRef<[u8]>) {
+            fs::write(self.bin.join(format!("{name}.jsonl.view")), bytes).unwrap();
+        }
+
+        fn encoded_view(&self, name: &str, contents: &[&str], pretty: bool) -> String {
+            let lines = contents
+                .iter()
+                .enumerate()
+                .map(|(index, content)| {
+                    json!({"line": index + 1, "content": content, "highlighted": index == 0})
+                })
+                .collect::<Vec<_>>();
+            if pretty {
+                serde_json::to_string_pretty(&json!({
+                    "path": self.source(name),
+                    "target_line": 1,
+                    "context": 4,
+                    "total_lines": lines.len(),
+                    "lines": lines,
+                }))
+                .unwrap()
+            } else {
+                // Deliberately omit the final newline: EOF must not drop the
+                // valid record following an oversized JSONL record.
+                lines
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+
+        fn import(&self) -> Result<CassImportReport, CassImportError> {
+            let client = CassClient::with_binary(self.bin.join("cass"))
+                .with_timeout(Duration::from_secs(10));
+            let mut options = CassImportOptions::new(&self.workspace);
+            options.database_path = Some(self.database.clone());
+            options.limit = 2;
+            import_cass_sessions(&client, &options)
+        }
+
+        fn workspace_id(&self) -> String {
+            crate::core::workspace::stable_workspace_id(&self.workspace)
+        }
+
+        fn session_id(&self, name: &str) -> String {
+            stable_session_id(&self.workspace_id(), &self.source(name))
+        }
+    }
+
+    fn assert_source_commitment(row: &StoredEvidenceSpan, source: &str) {
+        let metadata: Value = serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["cassSource"]["schema"], "ee.cass.source.v1");
+        assert_eq!(metadata["cassSource"]["byteLength"], json!(source.len()));
+        assert_eq!(
+            metadata["cassSource"]["contentHash"],
+            format!("blake3:{}", blake3::hash(source.as_bytes()).to_hex())
+        );
+    }
+
+    fn recoverable_import(pretty: bool, assistant_message: bool) {
+        let fixture = ImportFixture::new();
+        fixture.sessions(&[("affected", 2), ("later", 1)]);
+        let transcript_record = |output: &str| {
+            let payload = if assistant_message {
+                json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": output}],
+                })
+            } else {
+                json!({
+                    "type": "function_call_output",
+                    "call_id": "call_oversized_build_log",
+                    "output": output,
+                })
+            };
+            json!({
+                "timestamp": "2026-10-21T12:00:00Z",
+                "type": "response_item",
+                "payload": payload,
+            })
+            .to_string()
+        };
+        let empty_record = transcript_record("");
+        let empty_view = fixture.encoded_view("affected", &[&empty_record, VALID_RECORD], pretty);
+        let overhead = if pretty {
+            empty_view
+                .lines()
+                .find(|line| line.trim_start().starts_with("\"content\":"))
+                .unwrap()
+                .len()
+        } else {
+            empty_view.lines().next().unwrap().len()
+        };
+        let oversized = transcript_record(&"x".repeat(REPORTED_LINE_BYTES - overhead));
+        let view = fixture.encoded_view("affected", &[&oversized, VALID_RECORD], pretty);
+        assert_eq!(view.lines().map(str::len).max(), Some(REPORTED_LINE_BYTES));
+        fixture.view("affected", &view);
+        fixture.view(
+            "later",
+            fixture.encoded_view("later", &[LATER_RECORD], pretty),
+        );
+
+        let first = fixture.import().unwrap();
+        assert_eq!(first.status, "completed");
+        assert_eq!(first.sessions_discovered, 2);
+        assert_eq!(first.sessions_imported, 2);
+        assert_eq!(first.spans_imported, 3);
+        assert_eq!(first.evidence_admission.quarantined, 1);
+        assert_eq!(first.evidence_admission.admitted, 2);
+        let db = DbConnection::open_file(&fixture.database).unwrap();
+        let affected_id = fixture.session_id("affected");
+        let session = db.get_session(&affected_id).unwrap().unwrap();
+        let rows = db.list_evidence_spans_for_session(&affected_id).unwrap();
+        assert_eq!(rows.len(), 2);
+        let withheld = rows.iter().find(|row| row.start_line == 1).unwrap();
+        assert_eq!(withheld.end_line, 1);
+        assert_eq!(withheld.search_eligibility, "quarantined");
+        assert!(withheld.excerpt.len() < 1_024);
+        assert!(withheld.excerpt.contains("external_ingestion_oversized"));
+        assert!(
+            withheld
+                .redaction_classes_json
+                .contains("external_ingestion_oversized")
+        );
+        assert_source_commitment(withheld, &oversized);
+        assert!(!withheld.is_search_admitted_for_session(&fixture.workspace_id(), &session));
+        assert!(!withheld.is_direct_pack_admitted_for_session(&fixture.workspace_id(), &session));
+        let valid = rows.iter().find(|row| row.start_line == 2).unwrap();
+        assert!(valid.excerpt.contains("quartzoversizerecovery"));
+        assert!(valid.is_search_admitted_for_session(&fixture.workspace_id(), &session));
+        assert!(valid.is_direct_pack_admitted_for_session(&fixture.workspace_id(), &session));
+        assert_source_commitment(valid, VALID_RECORD);
+        let later_id = fixture.session_id("later");
+        let later = db.get_session(&later_id).unwrap().unwrap();
+        let later_rows = db.list_evidence_spans_for_session(&later_id).unwrap();
+        assert_eq!(later_rows.len(), 1);
+        assert!(later_rows[0].excerpt.contains("quartzlaterrecovery"));
+        assert!(later_rows[0].is_search_admitted_for_session(&fixture.workspace_id(), &later));
+        let audits = db
+            .list_audit_by_action("cass.evidence.redacted", None)
+            .unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].target_id.as_deref(), Some(withheld.id.as_str()));
+        db.close().unwrap();
+
+        let retry = fixture.import().unwrap();
+        assert_eq!(retry.status, "completed");
+        assert_eq!(retry.sessions_skipped, 2);
+        assert_eq!(retry.sessions_imported, 0);
+        assert_eq!(retry.spans_imported, 0);
+        let db = DbConnection::open_file(&fixture.database).unwrap();
+        assert_eq!(
+            db.list_evidence_spans_for_session(&affected_id).unwrap(),
+            rows
+        );
+        assert_eq!(
+            db.list_evidence_spans_for_session(&later_id).unwrap(),
+            later_rows
+        );
+        assert_eq!(
+            db.list_audit_by_action("cass.evidence.redacted", None)
+                .unwrap(),
+            audits
+        );
+        assert_eq!(db.count_table_rows("sessions").unwrap(), 2);
+        assert_eq!(db.count_table_rows("evidence_spans").unwrap(), 3);
+        db.close().unwrap();
+    }
+
+    #[test]
+    fn import_quarantines_reported_pretty_printed_record_and_keeps_later_evidence() {
+        recoverable_import(true, false);
+    }
+
+    #[test]
+    fn import_quarantines_oversized_jsonl_record_and_keeps_valid_record_at_eof() {
+        recoverable_import(false, false);
+    }
+
+    #[test]
+    fn import_quarantines_oversized_assistant_message_and_keeps_later_evidence() {
+        recoverable_import(true, true);
+    }
+
+    #[test]
+    fn over_budget_view_refuses_only_its_session_without_partial_evidence() {
+        let fixture = ImportFixture::new();
+        fixture.sessions(&[("affected", 3), ("later", 1)]);
+        let oversized = "x".repeat(CASS_VIEW_STDOUT_LINE_MAX_BYTES + 1);
+        fixture.view(
+            "affected",
+            fixture.encoded_view("affected", &[VALID_RECORD, &oversized, VALID_RECORD], true),
+        );
+        fixture.view(
+            "later",
+            fixture.encoded_view("later", &[LATER_RECORD], true),
+        );
+        let first = fixture.import().unwrap();
+        assert_eq!(first.status, "completed_with_refusals");
+        assert_eq!(first.sessions_discovered, 2);
+        assert_eq!(first.sessions_imported, 1);
+        assert_eq!(first.sessions_skipped, 1);
+        assert_eq!(first.spans_imported, 1);
+        assert_eq!(
+            first.sessions[0].status,
+            ImportSessionStatus::Refused(CassHistoryRefusal::Oversized)
+        );
+        assert_eq!(
+            first.data_json()["sessions"][0]["refusalCode"],
+            "cass_view_oversized"
+        );
+        assert!(first.history_degradation().is_some());
+        let db = DbConnection::open_file(&fixture.database).unwrap();
+        assert!(
+            db.get_session(&fixture.session_id("affected"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.list_evidence_spans_for_session(&fixture.session_id("affected"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(db.count_table_rows("sessions").unwrap(), 1);
+        assert_eq!(db.count_table_rows("evidence_spans").unwrap(), 1);
+        let later_id = fixture.session_id("later");
+        let later_rows = db.list_evidence_spans_for_session(&later_id).unwrap();
+        assert!(later_rows[0].excerpt.contains("quartzlaterrecovery"));
+        let ledger = db
+            .get_import_ledger(first.ledger_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.status, "failed");
+        assert_eq!(ledger.imported_session_count, 1);
+        assert_eq!(ledger.imported_span_count, 1);
+        let cursor: Value = serde_json::from_str(ledger.cursor_json.as_deref().unwrap()).unwrap();
+        assert_eq!(cursor["sessionsSkipped"], 1);
+        assert_eq!(
+            cursor["subprocessDiagnostics"]["cap"]["limitBytes"],
+            json!(CASS_VIEW_STDOUT_LINE_MAX_BYTES)
+        );
+        db.close().unwrap();
+
+        let retry = fixture.import().unwrap();
+        assert_eq!(retry.sessions_imported, 0);
+        assert_eq!(retry.spans_imported, 0);
+        assert_eq!(retry.sessions_skipped, 2);
+        let db = DbConnection::open_file(&fixture.database).unwrap();
+        assert_eq!(
+            db.list_evidence_spans_for_session(&later_id).unwrap(),
+            later_rows
+        );
+        assert_eq!(db.count_table_rows("sessions").unwrap(), 1);
+        assert_eq!(db.count_table_rows("evidence_spans").unwrap(), 1);
+        db.close().unwrap();
+    }
+
+    #[test]
+    fn over_budget_refresh_preserves_history_and_imports_an_unaffected_session() {
+        let fixture = ImportFixture::new();
+        fixture.sessions(&[("affected", 1)]);
+        fixture.view(
+            "affected",
+            fixture.encoded_view("affected", &[VALID_RECORD], true),
+        );
+        fixture.import().unwrap();
+        let db = DbConnection::open_file(&fixture.database).unwrap();
+        let id = fixture.session_id("affected");
+        let original_session = db.get_session(&id).unwrap().unwrap();
+        let original_rows = db.list_evidence_spans_for_session(&id).unwrap();
+        let original_audits = db
+            .list_audit_by_target("evidence_span", &original_rows[0].id, None)
+            .unwrap();
+        db.close().unwrap();
+
+        fixture.sessions(&[("affected", 3), ("later", 1)]);
+        let oversized = "x".repeat(CASS_VIEW_STDOUT_LINE_MAX_BYTES + 1);
+        fixture.view(
+            "affected",
+            fixture.encoded_view("affected", &[VALID_RECORD, &oversized, VALID_RECORD], true),
+        );
+        fixture.view(
+            "later",
+            fixture.encoded_view("later", &[LATER_RECORD], true),
+        );
+        let report = fixture.import().unwrap();
+        assert_eq!(report.status, "completed_with_refusals");
+        assert_eq!(report.sessions_imported, 1);
+        assert_eq!(report.sessions_skipped, 1);
+        assert_eq!(report.spans_imported, 1);
+        let db = DbConnection::open_file(&fixture.database).unwrap();
+        assert_eq!(db.get_session(&id).unwrap().unwrap(), original_session);
+        assert_eq!(
+            db.list_evidence_spans_for_session(&id).unwrap(),
+            original_rows
+        );
+        assert_eq!(
+            db.list_audit_by_target("evidence_span", &original_rows[0].id, None)
+                .unwrap(),
+            original_audits
+        );
+        assert_eq!(db.count_table_rows("sessions").unwrap(), 2);
+        assert_eq!(db.count_table_rows("evidence_spans").unwrap(), 2);
+        db.close().unwrap();
+    }
+
+    #[test]
+    fn malformed_or_non_utf8_view_is_not_mistaken_for_oversized_recovery() {
+        for invalid_utf8 in [false, true] {
+            let fixture = ImportFixture::new();
+            fixture.sessions(&[("affected", 2), ("later", 1)]);
+            let oversized = "x".repeat(REPORTED_LINE_BYTES);
+            let mut view = fixture
+                .encoded_view("affected", &[&oversized, VALID_RECORD], true)
+                .into_bytes();
+            if invalid_utf8 {
+                view.extend_from_slice(&[b'\n', 0xff]);
+            } else {
+                assert_eq!(view.pop(), Some(b'}'));
+            }
+            fixture.view("affected", view);
+            fixture.view(
+                "later",
+                fixture.encoded_view("later", &[LATER_RECORD], true),
+            );
+            let error = fixture.import().unwrap_err();
+            if invalid_utf8 {
+                assert!(matches!(error, CassImportError::Cass(CassError::Io { .. })));
+            } else {
+                assert!(matches!(
+                    error,
+                    CassImportError::InvalidJson { source: "view", .. }
+                ));
+            }
+            let db = DbConnection::open_file(&fixture.database).unwrap();
+            assert_eq!(db.count_table_rows("sessions").unwrap(), 0);
+            assert_eq!(db.count_table_rows("evidence_spans").unwrap(), 0);
+            db.close().unwrap();
+        }
+    }
+}

@@ -112,7 +112,7 @@ pub(super) fn refresh_session(
             // checkpoint, even when a future caller bypasses the view parser.
             if span.start_line == 0
                 || span.source_bytes == 0
-                || span.source_bytes > super::CASS_STDOUT_LINE_MAX_BYTES
+                || span.source_bytes > super::CASS_VIEW_STDOUT_LINE_MAX_BYTES
                 || span.end_line != span.start_line
                 || span.cass_span_id != format!("{}:{}", discovered.source_path, span.start_line)
                 || span.content_hash

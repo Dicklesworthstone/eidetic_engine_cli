@@ -92,6 +92,54 @@ refresh library tests, and `db::tests::cass_source_commitment_*`: real database
 and subprocess imports cover old/new representations, subsequent sessions,
 hidden source edits, duplicate-free retries, privacy and transaction rollback.
 
+## Oversized Transcript Recovery (issue #82)
+
+`cass view --json` may pretty-print a transcript's entire `content` string on
+one physical stdout line. The ordinary 1 MiB line limit rejected real tool
+output before the ingestion screener could quarantine it. Transcript capture
+therefore uses a separate, fixed **8 MiB physical-line limit**, including JSON
+syntax and escaping. The ordinary streaming decoder remains capped at 1 MiB.
+
+The larger capture window does not enlarge the ingestion scan budget. Complete
+decoded content over **1 MiB** still becomes an
+`external_ingestion_oversized` quarantine marker, with its line identity,
+complete-source BLAKE3 hash and byte length preserved. Subsequent valid records
+in the same session remain eligible for search and packs. Stored source
+commitments and refresh validation accept up to 8 MiB so a retry can prove the
+same source without restoring rejected content.
+
+The reader allocates at most the selected line limit plus two delimiter bytes
+and hands off through a two-item bounded queue. Each supervisor iteration
+drains only a finite batch before checking the child and timeout. The existing
+100 MiB page/session stdout limits, 100 MiB retained-evidence limit, stderr
+capture limit, timeout, process-group termination and child reaping remain in
+force. These are separate bounded allocations, not a 100 MiB process-RSS quota.
+
+A line beyond 8 MiB cannot be safely shortened or dropped: it may be only part
+of a JSON envelope, and an incomplete record cannot provide a source
+commitment. A typed view-line-cap failure instead refuses the **whole affected
+session** before its transaction, with `refusalCode: cass_view_oversized`.
+Existing history stays untouched and later sessions continue. The report uses
+`completed_with_refusals`, counts the refusal in `sessionsSkipped`, and emits
+the existing `cass_import_history_refused` degradation. The ledger keeps the
+first refusal, structured cap diagnostics and the committed partial counts.
+Malformed JSON, invalid UTF-8, mismatched source paths, other resource-cap
+errors, timeouts and storage failures retain their error behavior.
+
+There is intentionally no configurable or unlimited cap in this fix. A fixed
+8 MiB recovery window accommodates the reported 1,136,663-byte line and common
+JSON escape expansion without multiplying caller-controlled allocation limits.
+Any future configuration must remain view-specific, validate a nonzero value
+against a fixed ceiling, and keep parser, source-commitment and refresh bounds
+consistent; a global override would weaken unrelated CASS surfaces.
+
+Regression coverage lives in `cass::process::tests`, `cass::import::tests`,
+`cass::import::refresh::tests::oversized_transcripts`, and
+`db::tests::cass_source_commitment_*`. Fixtures are generated at test time and
+cover the reported-size pretty-printed record, JSONL without a final newline,
+later valid records, unaffected sessions, over-budget refusal, unchanged
+history on retry, invalid responses and bounded subprocess supervision.
+
 ## Rejected Alternatives
 
 - Directly reading CASS internals without a stable robot contract.
