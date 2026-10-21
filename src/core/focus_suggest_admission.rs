@@ -377,6 +377,317 @@ mod tests {
     }
 
     #[test]
+    fn review_holds_are_exact_batched_and_rechecked_after_release() {
+        let store = Store::new();
+        let mut ids = Vec::new();
+        for number in 1..=257 {
+            ids.push(store.memory(number, "Check release invariants."));
+        }
+        let other = crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(800)).to_string();
+        store
+            .db
+            .insert_workspace(
+                &other,
+                &CreateWorkspaceInput {
+                    path: store.workspace.join("other").to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
+        store.hold(1, &other, "memory", &ids[0]);
+        store.hold(2, &store.id, "rule", &ids[1]);
+        let first = store.hold(3, &store.id, "memory", &ids[0]);
+        let last = store.hold(4, &store.id, "memory", &ids[256]);
+        let read_ids = || {
+            with_snapshot(&store.db, || memories(&store.db, &store.id, Utc::now()))
+                .unwrap()
+                .into_iter()
+                .map(|memory| memory.id)
+                .collect::<BTreeSet<_>>()
+        };
+        let before = read_ids();
+        assert_eq!(before.len(), 255);
+        assert!(!before.contains(&ids[0]) && !before.contains(&ids[256]));
+        assert!(
+            before.contains(&ids[1]),
+            "rule authority is not memory authority"
+        );
+        for hold in [first, last] {
+            assert!(
+                store
+                    .db
+                    .update_feedback_quarantine_status(&hold, "discarded", Some("reviewer"), None,)
+                    .unwrap()
+            );
+        }
+        assert_eq!(read_ids(), ids.into_iter().collect());
+    }
+
+    #[test]
+    fn concurrent_hold_changes_do_not_mix_source_views_and_fresh_reads_recheck() {
+        let store = Store::new();
+        let id = store.memory(1, "Review cache releases carefully.");
+        let reader = DbConnection::open_file_read_only(&store.database).unwrap();
+        let at = Utc::now();
+        let hold = with_snapshot(&reader, || {
+            assert_eq!(memories(&reader, &store.id, at)?.len(), 1);
+            let hold = store.hold(1, &store.id, "memory", &id);
+            assert_eq!(
+                memories(&reader, &store.id, at)?.len(),
+                1,
+                "new writer state cannot replace a pinned admission decision"
+            );
+            Ok(hold)
+        })
+        .unwrap();
+        assert!(
+            with_snapshot(&reader, || memories(&reader, &store.id, Utc::now()))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .db
+                .update_feedback_quarantine_status(&hold, "discarded", Some("reviewer"), None,)
+                .unwrap()
+        );
+        assert_eq!(
+            with_snapshot(&reader, || memories(&reader, &store.id, Utc::now()))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.db.get_memory(&id).unwrap().unwrap().content,
+            "Review cache releases carefully."
+        );
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn private_and_out_of_scope_graphs_cannot_change_admitted_centrality() {
+        use crate::db::{CreateMemoryLinkInput, MemoryLinkRelation, MemoryLinkSource};
+        use crate::graph::{ProjectionOptions, build_memory_graph, compute_pagerank};
+        let store = Store::new();
+        let a = store.memory(1, "Alpha release checklist.");
+        let b = store.memory(2, "Beta release checklist.");
+        let isolated = store.memory(3, "Independent release checklist.");
+        let link = |number, from: &str, to: &str| {
+            let id =
+                crate::models::MemoryLinkId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+            store
+                .db
+                .insert_memory_link(
+                    &id,
+                    &CreateMemoryLinkInput {
+                        src_memory_id: from.to_owned(),
+                        dst_memory_id: to.to_owned(),
+                        relation: MemoryLinkRelation::Supports,
+                        weight: 1.0,
+                        confidence: 0.9,
+                        directed: true,
+                        evidence_count: 1,
+                        last_reinforced_at: None,
+                        source: MemoryLinkSource::Human,
+                        created_by: None,
+                        metadata_json: None,
+                    },
+                )
+                .unwrap();
+        };
+        link(1, &a, &b);
+        let at = Utc::now();
+        let admitted = with_snapshot(&store.db, || memories(&store.db, &store.id, at)).unwrap();
+        assert_eq!(admitted.len(), 3);
+        let ranks = || {
+            let mut graph = build_memory_graph(&store.db, &ProjectionOptions::default()).unwrap();
+            restrict_graph(&mut graph, &admitted);
+            assert_eq!(graph.node_count, 3);
+            assert_eq!(graph.edge_count, 1);
+            assert!(graph.graph.has_node(&isolated));
+            assert_eq!(graph.node_count, graph.graph.node_count());
+            compute_pagerank(&graph)
+                .unwrap()
+                .scores
+                .into_iter()
+                .map(|score| (score.node, score.score))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let baseline = ranks();
+        let other = crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(900)).to_string();
+        store
+            .db
+            .insert_workspace(
+                &other,
+                &CreateWorkspaceInput {
+                    path: store.workspace.join("other").to_string_lossy().into_owned(),
+                    name: None,
+                },
+            )
+            .unwrap();
+        for number in 10..42 {
+            let hidden = store.memory(number, "Unselected graph source.");
+            if number % 2 == 0 {
+                store
+                    .db
+                    .execute_raw(&format!(
+                        "UPDATE memories SET workspace_id = '{other}' WHERE id = '{hidden}'"
+                    ))
+                    .unwrap();
+            } else {
+                store
+                    .db
+                    .insert_memory_seal(
+                        &hidden,
+                        &crate::models::memory_seal_commitment(b"Unselected graph source."),
+                        "2026-01-01T00:00:00Z",
+                    )
+                    .unwrap();
+            }
+            link(number, &hidden, &a);
+        }
+        let out_of_scope = store.memory(50, "Another task frame.");
+        link(50, &out_of_scope, &isolated);
+        let after = ranks();
+        assert_eq!(
+            baseline.keys().collect::<Vec<_>>(),
+            after.keys().collect::<Vec<_>>()
+        );
+        for (id, score) in baseline {
+            assert!(
+                (score - after[&id]).abs() < 1e-12,
+                "withheld neighbors changed {id}"
+            );
+        }
+        assert_eq!(
+            store.db.count_table_rows("memory_links").unwrap(),
+            34,
+            "projection pruning must not delete source relationships"
+        );
+    }
+
+    fn evidence(store: &Store, number: u128, parent: Option<String>) -> String {
+        use crate::db::{CreateEvidenceSpanInput, CreateSessionInput, EvidenceProducerKind};
+        let session =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        store
+            .db
+            .insert_session(
+                &session,
+                &CreateSessionInput {
+                    workspace_id: store.id.clone(),
+                    cass_session_id: format!("private-focus-session-{number}"),
+                    source_path: None,
+                    agent_name: Some("codex".to_owned()),
+                    model: None,
+                    started_at: None,
+                    ended_at: None,
+                    message_count: 1,
+                    token_count: None,
+                    content_hash: format!("blake3:{}", blake3::hash(session.as_bytes()).to_hex()),
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        let body = "Independent release review needs a checklist.";
+        store
+            .db
+            .insert_evidence_span(
+                &id,
+                &CreateEvidenceSpanInput {
+                    workspace_id: store.id.clone(),
+                    session_id: session,
+                    memory_id: parent,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("private-focus-span-{number}"),
+                    span_kind: "message".to_owned(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: body.to_owned(),
+                    content_hash: format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex()),
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn independent_cass_remains_useful_without_rehabilitating_a_held_parent() {
+        let store = Store::new();
+        let held = store.memory(1, "Heldcanary deployment rule.");
+        store.hold(1, &store.id, "memory", &held);
+        let independent = evidence(&store, 100, None);
+        let linked = evidence(&store, 101, Some(held.clone()));
+        let original = store.db.get_evidence_span(&independent).unwrap().unwrap();
+        let mut options = store.options();
+        options.from_cass = true;
+        let report = suggest_focus(&options).unwrap();
+        assert_eq!(report.recommendations.len(), 1);
+        assert_eq!(report.recommendations[0].span_ids, [independent.clone()]);
+        assert_eq!(report.recommendations[0].centrality_score, 0.0);
+        assert!(
+            report.recommendations[0]
+                .topic
+                .starts_with("Independent release")
+        );
+        assert!(
+            !serde_json::to_string(&report.recommendations)
+                .unwrap()
+                .contains("Heldcanary")
+        );
+        assert!(store.db.get_evidence_span(&linked).unwrap().is_some());
+        assert_eq!(
+            store
+                .db
+                .get_evidence_span(&independent)
+                .unwrap()
+                .unwrap()
+                .excerpt,
+            original.excerpt
+        );
+        assert_eq!(store.db.count_table_rows("memories").unwrap(), 1);
+        assert!(!report.degraded.iter().any(|d| d.code == "cass_unavailable"));
+    }
+
+    #[test]
+    fn cancellation_discards_staged_topics_and_releases_only_the_owned_snapshot() {
+        let store = Store::new();
+        store.memory(1, "Run release checks.");
+        let connection = &store.db;
+        let workspace = store.id.as_str();
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(10), |cx| async move {
+            let result = with_snapshot(connection, || {
+                let staged = memories(connection, workspace, Utc::now())?;
+                cx.cancel_with(asupersync::CancelKind::User, Some("stop focus"));
+                Ok(staged)
+            });
+            assert!(
+                result.is_err(),
+                "cancelled staging cannot become a successful result"
+            );
+        })
+        .unwrap();
+        store
+            .db
+            .begin_read_snapshot()
+            .expect("owned snapshot was released");
+        store.db.rollback_read_snapshot().unwrap();
+        assert_eq!(
+            suggest_focus(&store.options())
+                .unwrap()
+                .recommendations
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn missing_authority_returns_no_recommendations_and_does_not_release_a_callers_transaction() {
         let store = Store::new();
         store.memory(1, "Run checks before publishing.");
