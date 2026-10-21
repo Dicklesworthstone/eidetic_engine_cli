@@ -11047,6 +11047,27 @@ fn lexical_ram_tier_config_for_search(workspace_path: &Path) -> LexicalRamTierCo
     config
 }
 
+/// Resolve the effective `[search.lexical_ram_tier]` settings for
+/// `workspace_path`, falling back to the environment when the workspace config
+/// cannot be read (bd-p9m4j).
+///
+/// THE `Err` ARM IS A CONTRACT, NOT A SWALLOW. An unreadable config here is
+/// deliberately not propagated, and the rule that separates this from the
+/// neighbouring enrichment sites that DO propagate (bd-8a19j) is what the
+/// fallback changes:
+///
+/// - PROPAGATE when an unreadable config would silently change RESULTS.
+///   Fusion weights change ranking, so swallowing an error there turns a
+///   config fault into a quietly different answer.
+/// - DEGRADE when it only changes PERFORMANCE. This config governs mmap
+///   pinning and hugepages, so an unreadable one means search runs UNPINNED,
+///   never wrong. Refusing a search because a RAM-tuning knob could not be
+///   read would be the worse outcome.
+///
+/// Documented rather than changed, because an unstated fallback is
+/// indistinguishable from an oversight -- which is why this bead had to ask.
+/// Compare [`resolve_search_rerank_config`] directly below, which states its
+/// own fallback the same way.
 fn resolve_lexical_ram_tier_config_for_search(workspace_path: &Path) -> LexicalRamTierConfig {
     if let Ok(merged) = crate::core::config_surface::merged_workspace_config(workspace_path) {
         return LexicalRamTierConfig::from_config_overrides(&merged.values.search.lexical_ram_tier);
