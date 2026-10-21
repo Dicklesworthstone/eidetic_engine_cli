@@ -1,0 +1,78 @@
+diff --git a/src/cli/mod.rs b/src/cli/mod.rs
+index 429a5ef..939198e 100644
+--- a/src/cli/mod.rs
++++ b/src/cli/mod.rs
+@@ -1659,7 +1659,7 @@ pub struct SubscribeStreamArgs {
+     #[arg(long = "interval-ms", default_value_t = 100)]
+     pub interval_ms: u64,
+ 
+-    /// Stop after emitting this many deltas. Primarily for harness tests.
++    /// Stop after N complete audit-change frames. Checkpoints do not count.
+     #[arg(long, value_name = "N")]
+     pub max_events: Option<u64>,
+ 
+@@ -21956,49 +21956,25 @@ where
+     W: Write,
+     E: Write,
+ {
+-    let mut cursor = args.cursor;
+-    let mut emitted = 0_u64;
+-    loop {
+-        let options = SubscribePollOptions {
++    let options = crate::subscription::StreamOptions {
++        poll: SubscribePollOptions {
+             workspace_path,
+             database_path: args.database.as_deref(),
+-            cursor,
+-            filter: filter.clone(),
++            cursor: args.cursor,
++            filter,
+             limit: args.limit,
+-        };
+-        let report = match poll_memory_deltas(&options) {
+-            Ok(report) => report,
+-            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+-        };
+-        cursor = report.next_cursor;
+-        for delta in &report.deltas {
+-            let line = match serde_json::to_string(delta) {
+-                Ok(line) => line,
+-                Err(error) => {
+-                    let domain_error = DomainError::Storage {
+-                        message: format!("Failed to serialize subscribe delta: {error}"),
+-                        repair: Some(
+-                            "Retry the stream or use `ee subscribe poll --json`.".to_owned(),
+-                        ),
+-                    };
+-                    return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
+-                }
+-            };
+-            if stdout.write_all(line.as_bytes()).is_err() || stdout.write_all(b"\n").is_err() {
+-                return ProcessExitCode::Usage;
+-            }
+-            emitted += 1;
+-            if let Some(max_events) = args.max_events {
+-                if emitted >= max_events {
+-                    let _ = stdout.flush();
+-                    return ProcessExitCode::Success;
+-                }
+-            }
+-        }
+-        if stdout.flush().is_err() {
+-            return ProcessExitCode::Usage;
++        },
++        interval: Duration::from_millis(args.interval_ms.max(1)),
++        max_events: args.max_events,
++    };
++    let cx = asupersync::Cx::current();
++    match crate::subscription::run(cx.as_ref(), &options, stdout) {
++        Ok(_) => ProcessExitCode::Success,
++        Err(error) => {
++            // stdout may end in a partial frame after an interrupted write.
++            // Never append an error envelope to that resumable data stream.
++            write_domain_error(&error, cli.renderer(), stderr, &mut io::sink())
+         }
+-        std::thread::sleep(Duration::from_millis(args.interval_ms.max(1)));
+     }
+ }
+ 
