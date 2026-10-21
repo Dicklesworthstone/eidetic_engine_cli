@@ -704,7 +704,10 @@ mod tests {
         }
         let unchanged = scaled.clone();
         let report = agglomerate(&scaled, config).unwrap();
-        assert_eq!(scaled, unchanged, "scoring may not rewrite caller embeddings");
+        assert_eq!(
+            scaled, unchanged,
+            "scoring may not rewrite caller embeddings"
+        );
         assert_eq!(report.clusters.len(), baseline.clusters.len());
         for (actual, expected) in report.clusters.iter().zip(&baseline.clusters) {
             assert_eq!(actual.cluster_id, expected.cluster_id);
@@ -848,7 +851,10 @@ mod tests {
         assert_eq!(cluster.member_count, points.len());
         assert_eq!(
             cluster.member_memory_ids,
-            points.iter().map(|point| point.memory_id.clone()).collect::<Vec<_>>()
+            points
+                .iter()
+                .map(|point| point.memory_id.clone())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -856,9 +862,12 @@ mod tests {
     fn zero_vectors_are_invalid_even_when_no_pairwise_comparison_runs() {
         for embedding in [vec![0.0], vec![-0.0, 0.0]] {
             let point = EmbeddingPoint::new("mem_zero", embedding);
-            let error = agglomerate(&[point.clone()], ClusterCoherenceConfig::default())
-                .unwrap_err();
-            assert_eq!(error.message(), "cluster embeddings must not be zero vectors");
+            let error =
+                agglomerate(&[point.clone()], ClusterCoherenceConfig::default()).unwrap_err();
+            assert_eq!(
+                error.message(),
+                "cluster embeddings must not be zero vectors"
+            );
             let mut points = vec![
                 EmbeddingPoint::new("mem_valid", vec![1.0; point.embedding.len()]),
                 point,
