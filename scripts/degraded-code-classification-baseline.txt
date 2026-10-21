@@ -4,6 +4,9 @@
 # 2026-10-18 at 2a1a21282: 324 `pub const *CODE*: &str` declarations in src/,
 # 321 distinct values, 289 classified, 32 not. Re-measured 2026-10-21 after
 # classifying mesh_peer_randomness_unavailable: 290 classified, 31 not.
+# Re-measured 2026-10-21 after classifying unix_xdg_data_unavailable, the
+# platform twin of the already-classified windows_appdata_unavailable:
+# 291 classified, 30 not.
 #
 # THIS IS A SHRINK-ONLY BASELINE, NOT AN IGNORE-LIST. The gate fails on a NEW
 # unclassified constant AND on any line here that has since been classified --
@@ -78,4 +81,3 @@ shard_fanout_target_hash_mismatch
 unauthenticated_native_import_trust
 
 # src/config/mod.rs and src/config/path_resolver.rs -- declared in both
-unix_xdg_data_unavailable

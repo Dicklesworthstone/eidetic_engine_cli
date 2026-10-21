@@ -1208,6 +1208,7 @@ the closed daemon hot-mode surface.
 | `unsupported_condition` | warning | bd-17c65.10.6 (J6) |
 | `unsupported_schema` | high | bd-17c65.10.6 (J6) |
 | `windows_appdata_unavailable` | medium | bd-3usjw.68 |
+| `unix_xdg_data_unavailable` | medium | bd-nnheo — platform twin of `windows_appdata_unavailable`: both are the `code` field of the same `PlatformDataDirError` (src/config/path_resolver.rs), so the severity is inherited rather than invented. Kept adjacent deliberately, because classifying one platform and not the other is how this gap arose. |
 | `workspace_nested_markers` | warning | bd-17c65.12.2 (L1) |
 | `workspace_symlink_refused` | medium | bd-2bbtw |
 | `ambiguous_containing_symbols` | warning | (TBD) |
