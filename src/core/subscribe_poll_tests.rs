@@ -697,3 +697,151 @@ fn observation_exclusion_is_exact_and_unknown_mutations_remain_visible() {
     assert!(!page.has_more);
     assert_eq!(page.next_cursor, page.high_watermark);
 }
+
+#[test]
+fn noncontent_changes_reach_the_right_subscribers_without_claiming_body_edits() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    let original =
+        f.db.get_memory(&id)
+            .expect("source")
+            .expect("present")
+            .content;
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET confidence = 0.9 WHERE id = '{id}'"
+    ))
+    .expect("confidence update");
+    let confidence = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_REINFORCE,
+    );
+    f.db.insert_memory_seal(
+        &id,
+        &format!("blake3:{}", "a".repeat(64)),
+        "2026-01-01T00:00:00Z",
+    )
+    .expect("seal");
+    assert!(
+        f.db.mark_memory_seal_revealed(&id, "2026-01-02T00:00:00Z")
+            .expect("reveal")
+    );
+    let seal = f.audit(Some(&f.own), Some(&id), Some("memory"), "memory.reveal");
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET trust_class = 'agent_validated' WHERE id = '{id}'"
+    ))
+    .expect("prior trust");
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET trust_class = 'human_explicit' WHERE id = '{id}'"
+    ))
+    .expect("explicit promotion");
+    let trust = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::TRUST_CLASS_PROMOTION_OVERRIDE,
+    );
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET level = 'semantic' WHERE id = '{id}'"
+    ))
+    .expect("level demotion");
+    let level = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_DECAY_DEMOTE,
+    );
+    let tail = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_SHOW,
+    );
+    for (field, cursor, kind) in [
+        ("confidence", confidence, "updated"),
+        ("seal_state", seal, "updated"),
+        ("trust_class", trust, "updated"),
+        ("level", level, "level_transitioned"),
+    ] {
+        let filter = super::super::parse_subscribe_filter(Some(&format!("CHANGED_FIELDS={field}")))
+            .expect("filter");
+        let report = f.poll(0, 100, filter);
+        assert_eq!(report.delta_count, 1, "{field}");
+        assert_eq!(report.deltas[0].cursor, cursor, "{field}");
+        assert_eq!(report.deltas[0].kind, kind, "{field}");
+        assert_eq!(report.deltas[0].changed_fields, [field], "{field}");
+        assert!(report.invalidations.is_empty());
+        assert_eq!(report.next_cursor, tail);
+    }
+    let content = super::super::parse_subscribe_filter(Some("CHANGED_FIELDS=content_hash"))
+        .expect("content filter");
+    let report = f.poll(0, 100, content);
+    assert!(report.deltas.is_empty() && report.invalidations.is_empty());
+    let prior_level =
+        super::super::parse_subscribe_filter(Some("LEVEL=procedural,CHANGED_FIELDS=level"))
+            .expect("level-membership filter");
+    let report = f.poll(0, 100, prior_level);
+    assert!(report.deltas.is_empty());
+    assert_eq!(report.invalidations.len(), 1);
+    assert_eq!(report.invalidations[0].cursor, level);
+    assert_eq!(report.invalidations[0].memory_id, id);
+    assert_eq!(
+        f.db.get_memory(&id)
+            .expect("source remains")
+            .expect("present")
+            .content,
+        original
+    );
+}
+
+#[test]
+fn concurrent_observations_do_not_advance_a_pinned_page_over_a_later_change() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    let initial = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    let reader = DbConnection::open(DatabaseConfig::read_only_file(f.database.clone()))
+        .expect("independent reader");
+    let snapshot = SubscriptionSnapshot::begin(&reader).expect("snapshot");
+    assert_eq!(snapshot.high_watermark(&f.own).expect("pin"), initial);
+    for action in OBSERVATION_ONLY_ACTIONS {
+        f.audit(Some(&f.own), Some(&id), Some("memory"), action);
+    }
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET confidence = 0.95 WHERE id = '{id}'"
+    ))
+    .expect("new change");
+    let mutation = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_REINFORCE,
+    );
+    let tail = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_SHOW,
+    );
+    let page = snapshot
+        .page(&f.own, initial, 1, &SubscribeFilter::default(), None)
+        .expect("old page");
+    assert!(page.deltas.is_empty() && page.invalidations.is_empty());
+    assert_eq!(page.next_cursor, initial);
+    assert_eq!(page.high_watermark, initial);
+    snapshot.finish().expect("release old view");
+    let filter = super::super::parse_subscribe_filter(Some("CHANGED_FIELDS=confidence"))
+        .expect("confidence filter");
+    let fresh = f.poll(initial, 1, filter.clone());
+    assert_eq!(fresh.delta_count, 1);
+    assert_eq!(fresh.deltas[0].cursor, mutation);
+    assert_eq!(fresh.next_cursor, tail);
+    assert!(!fresh.has_more);
+    let acknowledged = f.poll(fresh.next_cursor, 1, filter);
+    assert!(acknowledged.deltas.is_empty() && acknowledged.invalidations.is_empty());
+}
