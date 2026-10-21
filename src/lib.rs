@@ -34,6 +34,8 @@ pub mod search;
 pub mod shadow;
 #[path = "steward_api.rs"]
 pub mod steward;
+#[path = "core/subscribe_stream.rs"]
+pub mod subscription;
 pub mod util;
 pub mod workspace_rebind;
 
