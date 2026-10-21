@@ -219,7 +219,11 @@ pub(super) fn codex_output(raw: &Value) -> Option<ToolOutput> {
                 && structured.is_object()
                 && (structured.get("output").is_some() || structured.get("metadata").is_some())
             {
-                return structured_output(&structured);
+                let mut output = structured_output(&structured)?;
+                if !execution::unique_control_fields(text) {
+                    output.is_error = Some(true);
+                }
+                return Some(output);
             }
             Some(ToolOutput {
                 text: text.clone(),

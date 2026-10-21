@@ -45,6 +45,86 @@ pub(super) fn refuses_completion(raw: &Value) -> bool {
         })
 }
 
+/// Value deserialization keeps only the last occurrence of a key. Before using
+/// an encoded wrapper as proof, inspect its control scopes without constructing
+/// a second Value tree. Unknown diagnostic objects and stdout are not controls.
+/// Object-valued inputs have already lost wire multiplicity at their caller;
+/// this check deliberately applies only where the encoded bytes still exist.
+pub(super) fn unique_control_fields(text: &str) -> bool {
+    use serde::de::DeserializeSeed;
+
+    let mut decoder = serde_json::Deserializer::from_str(text);
+    ControlScope { outer: true }
+        .deserialize(&mut decoder)
+        .and_then(|()| decoder.end())
+        .is_ok()
+}
+
+struct ControlScope {
+    outer: bool,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for ControlScope {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for ControlScope {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an execution control object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        use serde::de::{Error, IgnoredAny};
+
+        // Fixed-size bookkeeping, independent of stdout or unknown key count.
+        let mut seen = 0_u16;
+        while let Some(key) = map.next_key::<String>()? {
+            let bit = match key.as_str() {
+                "output" if self.outer => Some(0),
+                "metadata" if self.outer => Some(1),
+                "exit_code" => Some(2),
+                "is_error" => Some(3),
+                "timed_out" => Some(4),
+                "cancelled" => Some(5),
+                "canceled" => Some(6),
+                "interrupted" => Some(7),
+                "truncated" => Some(8),
+                "output_truncated" => Some(9),
+                "running" => Some(10),
+                "completed" => Some(11),
+                "success" => Some(12),
+                "status" => Some(13),
+                _ => None,
+            };
+            if let Some(bit) = bit {
+                let mask = 1_u16 << bit;
+                if seen & mask != 0 {
+                    return Err(A::Error::custom("duplicate execution control field"));
+                }
+                seen |= mask;
+            }
+            if self.outer && key == "metadata" {
+                map.next_value_seed(ControlScope { outer: false })?;
+            } else {
+                let _ = map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +282,97 @@ mod tests {
         assert!(decoded.failed());
         assert!(!decoded.succeeded());
         assert!(!crate::core::cass_error_recall::failure_diagnostics(&decoded).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod encoded_tests {
+    use super::*;
+    use crate::core::cass_error_recall::outcome::codex_output;
+    use serde_json::json;
+
+    #[test]
+    fn duplicated_controls_cannot_hide_an_earlier_failure_in_encoded_wrappers() {
+        for (field, bad, good) in [
+            ("exit_code", "1", "0"),
+            ("is_error", "true", "false"),
+            ("timed_out", "true", "false"),
+            ("cancelled", "true", "false"),
+            ("canceled", "true", "false"),
+            ("interrupted", "true", "false"),
+            ("truncated", "true", "false"),
+            ("output_truncated", "true", "false"),
+            ("running", "true", "false"),
+            ("completed", "false", "true"),
+            ("success", "false", "true"),
+            ("status", "\"running\"", "\"completed\""),
+        ] {
+            for (first, last) in [(bad, good), (good, bad), (good, good)] {
+                for nested in [false, true] {
+                    let controls = format!("\"{field}\":{first},\"{field}\":{last}");
+                    let text = if nested {
+                        format!(r#"{{"output":"Finished dev profile","exit_code":0,"metadata":{{{controls}}}}}"#)
+                    } else {
+                        let exit = if field == "exit_code" { "" } else { ",\"exit_code\":0" };
+                        format!(r#"{{"output":"Finished dev profile",{controls}{exit}}}"#)
+                    };
+                    assert!(!unique_control_fields(&text));
+                    let decoded = codex_output(&Value::String(text)).expect("diagnostic text");
+                    assert_eq!(decoded.text, "Finished dev profile");
+                    assert!(!decoded.succeeded(), "{field}, nested={nested}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_output_metadata_and_escaped_aliases_also_withhold_proof() {
+        for text in [
+            r#"{"output":"failure","output":"Finished dev profile","exit_code":0}"#,
+            r#"{"output":"Finished dev profile","metadata":{"exit_code":1},"metadata":{"exit_code":0}}"#,
+            r#"{"output":"Finished dev profile","metadata":{},"metadata":{},"exit_code":0}"#,
+            r#"{"output":"Finished dev profile","exit_code":1,"exit\u005fcode":0}"#,
+            r#"{"output":"Finished dev profile","exit_code":0,"metadata":{"is_error":true,"is\u005ferror":false}}"#,
+        ] {
+            assert!(!unique_control_fields(text));
+            let decoded = codex_output(&Value::String(text.to_owned())).unwrap();
+            assert!(!decoded.succeeded());
+        }
+    }
+
+    #[test]
+    fn unique_encoded_controls_preserve_wire_order_and_unknown_metadata_compatibility() {
+        for raw in [
+            json!({"output":"", "exit_code":0}),
+            json!({"output":"Finished dev profile", "metadata":{"exit_code":0, "duration_seconds":0.125}}),
+            json!({"output":"Finished dev profile", "exit_code":0, "metadata":{"exit_code":0, "completed":true}}),
+        ] {
+            for encoded in [raw.to_string(), serde_json::to_string_pretty(&raw).unwrap()] {
+                assert!(unique_control_fields(&encoded));
+                assert!(codex_output(&Value::String(encoded)).unwrap().succeeded());
+            }
+        }
+        // The same field in different scopes is not a duplicate; the existing
+        // semantic check, not wire order, rejects a conflicting value.
+        let conflict = r#"{"metadata":{"exit_code":1},"output":"Finished dev profile","exit_code":0}"#;
+        assert!(unique_control_fields(conflict));
+        assert!(!codex_output(&Value::String(conflict.to_owned())).unwrap().succeeded());
+        let unknown = r#"{"output":"","exit_code":0,"metadata":{"example":{"is_error":true,"is_error":false}},"note":1,"note":2}"#;
+        assert!(unique_control_fields(unknown));
+        assert!(codex_output(&Value::String(unknown.to_owned())).unwrap().succeeded());
+    }
+
+    #[test]
+    fn captured_json_is_not_reparsed_as_wrapper_control_authority() {
+        let stdout = r#"{"exit_code":1,"exit_code":0,"timed_out":true}"#;
+        let raw = json!({"output":stdout, "metadata":{"exit_code":0}});
+        let text = raw.to_string();
+        assert!(unique_control_fields(&text));
+        let decoded = codex_output(&Value::String(text)).unwrap();
+        assert_eq!(decoded.text, stdout);
+        assert!(decoded.succeeded());
+        for bad in ["[]", "null", "{", "{} {}", r#"{"metadata":false}"#] {
+            assert!(!unique_control_fields(bad));
+        }
     }
 }
