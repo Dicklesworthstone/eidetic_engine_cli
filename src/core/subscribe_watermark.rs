@@ -184,17 +184,25 @@ mod tests {
             audit(&db, workspace, target);
             assert_parity(&db);
         }
-        let before = db
-            .query("SELECT id FROM audit_log ORDER BY rowid", &[])
-            .unwrap();
+        // Compare the ID COLUMN, not the Rows. sqlmodel's `Row` implements no
+        // PartialEq, so `assert_eq!` on two query results does not compile
+        // (E0369) -- and because every build in this repo targets `--bin ee`,
+        // which never compiles cfg(test) code, that error took the entire lib
+        // TEST target down with nothing reporting it. Projecting the ids keeps
+        // the claim this test makes -- repeated parity checks do not mutate the
+        // audit log -- and makes it checkable.
+        let audit_ids = || -> Vec<String> {
+            db.query("SELECT id FROM audit_log ORDER BY rowid", &[])
+                .unwrap()
+                .iter()
+                .filter_map(|row| row.get(0).and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        };
+        let before = audit_ids();
         for _ in 0..3 {
             assert_parity(&db);
         }
-        assert_eq!(
-            db.query("SELECT id FROM audit_log ORDER BY rowid", &[])
-                .unwrap(),
-            before
-        );
+        assert_eq!(audit_ids(), before);
     }
 
     #[test]
