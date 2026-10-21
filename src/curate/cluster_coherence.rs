@@ -9,7 +9,8 @@
 #[path = "cluster_coherence_merge.rs"]
 mod merge;
 
-use merge::best_merge;
+#[path = "cluster_coherence_cached.rs"]
+mod cached;
 
 use serde::{Serialize, Serializer};
 
@@ -183,18 +184,7 @@ pub fn analyze_embedding_clusters(
 
     let points = normalized_points(points)?;
     let similarities = pairwise_cosine_matrix(&points)?;
-    let mut cluster_members = (0..points.len())
-        .map(|index| vec![index])
-        .collect::<Vec<_>>();
-    while let Some((left, right, _similarity)) =
-        best_merge(&cluster_members, &similarities, config.merge_threshold)
-    {
-        let mut merged = cluster_members[left].clone();
-        merged.extend(cluster_members[right].iter().copied());
-        merged.sort_unstable();
-        cluster_members[left] = merged;
-        cluster_members.remove(right);
-    }
+    let cluster_members = cached::cluster(&similarities, config.merge_threshold);
 
     let mut degraded = Vec::new();
     if points.len() == 1 {
