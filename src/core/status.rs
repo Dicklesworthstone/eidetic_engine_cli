@@ -4809,8 +4809,18 @@ fn gather_status_skyline(
 
 fn status_skyline_feature_enabled(workspace_path: Option<&Path>) -> Option<bool> {
     let workspace_root = workspace_path?;
+    // Resolve before reading: the config surface refuses a config reached
+    // through a symlinked path COMPONENT, and `.ok()` below discards that
+    // refusal, so an unresolved path yields None -- an empty skyline with no
+    // signal of any kind. On macOS /tmp and /var are symlinks and $TMPDIR
+    // lives under /var/folders, so that is the common case, not the exotic
+    // one. Same unresolved-path defect as ee insights (bd-l7t9x), except
+    // this one fails silently instead of loudly.
+    let workspace_root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
     let options = crate::core::config_surface::ConfigSurfaceOptions {
-        workspace_root: workspace_root.to_path_buf(),
+        workspace_root,
         config_path: None,
     };
     crate::core::config_surface::get_config(&options, GRAPH_FEATURE_SKYLINE_ENABLED_KEY)
