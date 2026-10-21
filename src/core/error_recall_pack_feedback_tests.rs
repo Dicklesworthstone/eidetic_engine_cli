@@ -184,9 +184,11 @@ fn selector_preserves_legacy_bounds_and_aliases_when_feedback_is_uncontested() -
     )?;
     let legacy = connection.list_helpful_error_repair_target_ids(WS, KEY, 32)?;
     let admitted = feedback::pack_targets(&connection, WS, KEY, 32)?;
-    assert_eq!(admitted, legacy);
-    assert!(admitted.iter().any(String::is_empty));
-    assert!(admitted.contains(&alias));
+    // History preserves exact metadata. The useful pack window no longer
+    // spends slots on values none of its source readers can resolve.
+    assert_eq!(admitted, [good.clone()]);
+    assert!(legacy.iter().any(String::is_empty));
+    assert!(legacy.contains(&alias));
     // Negative alias, foreign scope and another error class are not this target.
     record(&connection, Vec::new(), vec![alias])?;
     for (workspace, code) in [(OTHER_WS, CODE), (WS, "E0308")] {

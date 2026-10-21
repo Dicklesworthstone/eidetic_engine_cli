@@ -82,7 +82,8 @@ pub(super) fn harmful_targets(
 /// One gate reuses bounded per-session verdicts throughout this source snapshot.
 ///
 /// Diagnostic history and the legacy 128-byte target projection stay unchanged.
-/// Empty sentinels and exact aliases retain their old sampling semantics. Total
+/// Only canonical identities supported by a live pack reader earn a slot;
+/// opaque metadata and projected empty sentinels remain history, not advice. Total
 /// index scans and source interpretation are not constant work or a latency SLO.
 #[cfg(test)]
 pub(super) fn pack_targets(
@@ -117,19 +118,51 @@ pub(super) fn pack_selection(
     let mut diversity = PackEvidenceDiversity::default();
     let mut selection = PackSelection::default();
     let targets = pack_targets_with(connection, workspace_id, fingerprint_key, limit, |ids| {
-        let mut withheld = gate.withheld(ids)?;
+        // The cursor advances over every raw row, but only canonical typed
+        // identities can reach source readers or occupy the usable window.
+        // Never trim an alias or let a projected oversized target's empty
+        // sentinel consume a slot. The complete report still retains it.
+        let typed: Vec<_> = ids
+            .iter()
+            .copied()
+            .filter(|id| canonical_pack_target(id))
+            .collect();
+        let mut withheld: BTreeSet<_> = ids
+            .iter()
+            .copied()
+            .filter(|id| !canonical_pack_target(id))
+            .map(str::to_owned)
+            .collect();
+        if typed.is_empty() {
+            return Ok(withheld);
+        }
+        withheld.extend(gate.withheld(&typed)?);
         withhold_unusable_pack_evidence(
             connection,
             workspace_id,
-            ids,
+            &typed,
             &mut withheld,
             &mut diversity,
         )?;
-        selection.admit_native(connection, workspace_id, ids, &mut withheld, at)?;
+        selection.admit_native(connection, workspace_id, &typed, &mut withheld, at)?;
         Ok(withheld)
     })?;
     selection.targets = targets;
     Ok(selection)
+}
+
+/// Parsing alone may accept another spelling. Only the reader's exact
+/// round-tripped identity is useful here; metadata is never an implicit ID.
+fn canonical_pack_target(target: &str) -> bool {
+    target
+        .parse::<EvidenceId>()
+        .is_ok_and(|id| id.to_string() == target)
+        || target
+            .parse::<crate::models::MemoryId>()
+            .is_ok_and(|id| id.to_string() == target)
+        || target
+            .parse::<crate::models::RuleId>()
+            .is_ok_and(|id| id.to_string() == target)
 }
 
 impl PackSelection {
@@ -303,9 +336,21 @@ fn pack_targets_with(
     if limit > super::PACK_RECALL_TARGET_LIMIT {
         return Err(unavailable());
     }
+    // A long rejected history must remain interruptible. Observe the caller's
+    // cancellation only; do not mint another request or extend its deadline.
+    // The outer pack reader owns (or borrows) the source snapshot and unwinds
+    // it on Err. A successful prefix is not an authorized partial answer.
+    let request = asupersync::Cx::current();
+    let checkpoint = || -> Result<()> {
+        if let Some(cx) = &request {
+            cx.checkpoint().map_err(|_| unavailable())?;
+        }
+        Ok(())
+    };
     let mut output = Vec::new();
     let mut after = String::new();
     while output.len() < limit as usize {
+        checkpoint()?;
         let remaining = limit as usize - output.len();
         let rows = connection.query(
             "SELECT CASE WHEN length(CAST(h.target_id AS BLOB)) <= 128 THEN h.target_id ELSE '' END, CASE WHEN length(CAST(h.link_id AS BLOB)) <= 128 THEN h.link_id ELSE '' END FROM error_repair_links AS h WHERE h.workspace_id = ?1 AND h.fingerprint_key = ?2 AND h.link_kind = 'repair' AND h.outcome = 'helpful' AND (?4 = '' OR h.target_id > (SELECT c.target_id FROM error_repair_links AS c WHERE c.workspace_id = ?1 AND c.fingerprint_key = ?2 AND c.link_id = ?4) OR (h.target_id = (SELECT c.target_id FROM error_repair_links AS c WHERE c.workspace_id = ?1 AND c.fingerprint_key = ?2 AND c.link_id = ?4) AND h.link_id > ?4)) AND NOT EXISTS (SELECT 1 FROM error_repair_links AS n WHERE n.workspace_id = ?1 AND n.fingerprint_key = ?2 AND n.link_kind = 'repair' AND n.outcome = 'harmful' AND n.target_id = h.target_id) ORDER BY h.target_id ASC, h.link_id ASC LIMIT ?3",
@@ -316,6 +361,7 @@ fn pack_targets_with(
                 Value::Text(after.clone()),
             ],
         ).map_err(|_| unavailable())?;
+        checkpoint()?;
         if rows.is_empty() {
             break;
         }
@@ -341,8 +387,11 @@ fn pack_targets_with(
             targets.push(target.to_owned());
             after = cursor.to_owned();
         }
+        drop(rows);
+        checkpoint()?;
         let refs: Vec<_> = targets.iter().map(String::as_str).collect();
         let rejected = withheld(&refs)?;
+        checkpoint()?;
         if rejected.iter().any(|id| !refs.contains(&id.as_str())) {
             return Err(unavailable());
         }
@@ -626,6 +675,145 @@ mod live_evidence_tests {
         assert!(result.is_err());
         assert_eq!(pack_targets(&fixture.db, WS, KEY, 1)?, vec![first]);
         assert_eq!(fixture.query()?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_targets_require_the_exact_reader_identity() {
+        let targets = [
+            id(1),
+            crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(2)).to_string(),
+            crate::models::RuleId::from_uuid(uuid::Uuid::from_u128(3)).to_string(),
+        ];
+        for target in targets {
+            assert!(canonical_pack_target(&target));
+            for alias in [
+                format!(" {target}"),
+                format!("{target} "),
+                format!("{target}\0suffix"),
+                format!("{target}/child"),
+                target.to_ascii_uppercase(),
+            ] {
+                assert!(!canonical_pack_target(&alias), "{alias:?}");
+            }
+        }
+        for metadata in [
+            "",
+            "mem_bad",
+            "rule_bad",
+            "ev_bad",
+            "proof_123",
+            "artifact_123",
+            "0",
+        ] {
+            assert!(!canonical_pack_target(metadata));
+        }
+    }
+
+    #[test]
+    fn unsupported_history_prefixes_cannot_hide_later_typed_repairs() -> TestResult {
+        let fixture = Fixture::new()?;
+        let mut targets = Vec::new();
+        for number in 0..160 {
+            targets.push(if number % 2 == 0 {
+                format!("!opaque-{number:04}")
+            } else {
+                format!("!oversized-{number:04}-{}", "界".repeat(100))
+            });
+        }
+        let mut good = Vec::new();
+        for number in 1000..1036 {
+            let target = fixture.source(number, false)?;
+            targets.push(format!("{target}\0alias"));
+            targets.push(target.clone());
+            good.push(target);
+        }
+        fixture.record(targets)?;
+        let history = fixture.db.list_error_repair_links(WS, KEY)?;
+        let legacy = fixture
+            .db
+            .list_helpful_error_repair_target_ids(WS, KEY, 32)?;
+        assert!(legacy.iter().all(|target| !canonical_pack_target(target)));
+        for limit in 0..=32 {
+            assert_eq!(
+                pack_targets(&fixture.db, WS, KEY, limit)?,
+                good[..limit as usize]
+            );
+        }
+        let query = fixture.query()?;
+        for number in 1000..1004 {
+            assert!(query.contains(&format!("Repair {number} uses")));
+        }
+        assert_eq!(query.matches("\nprior fix: ").count(), 4);
+        assert!(
+            !query.contains("opaque-") && !query.contains("oversized-") && !query.contains("alias")
+        );
+        assert_eq!(fixture.db.list_error_repair_links(WS, KEY)?, history);
+        assert_eq!(
+            error_recall_report(
+                &fixture.db,
+                WS,
+                &from_rustc(Some("E0277"), "trait bound failed")
+            )?
+            .helpful_repairs
+            .len(),
+            history.len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unresolvable_metadata_does_not_require_unrelated_source_authority() -> TestResult {
+        let fixture = Fixture::new()?;
+        fixture.record(
+            (0..97)
+                .map(|number| format!("!opaque-{number:03}"))
+                .collect(),
+        )?;
+        fixture
+            .db
+            .execute_raw("ALTER TABLE evidence_spans RENAME TO unavailable_unlinked_evidence")?;
+        let selected = pack_selection(&fixture.db, WS, KEY, 32, Utc::now())?;
+        assert!(
+            selected.targets.is_empty()
+                && selected.memories.is_empty()
+                && selected.rules.is_empty()
+        );
+        assert!(selected.memory_hints.is_empty());
+        assert_eq!(fixture.db.list_error_repair_links(WS, KEY)?.len(), 97);
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_refill_discards_provisional_targets_without_releasing_a_borrowed_snapshot()
+    -> TestResult {
+        let fixture = Fixture::new()?;
+        for number in 1..=8 {
+            fixture.source(number, false)?;
+        }
+        fixture.record((1..=8).map(id).collect())?;
+        fixture.db.begin_read_snapshot()?;
+        let source = &fixture.db;
+        let (result, calls) =
+            crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+                let mut calls = 0;
+                let result = pack_targets_with(source, WS, KEY, 3, |ids| {
+                    calls += 1;
+                    cx.cancel_with(asupersync::CancelKind::User, Some("stop repair refill"));
+                    Ok(ids.iter().skip(1).map(|id| (*id).to_owned()).collect())
+                });
+                (result, calls)
+            })?;
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+        assert!(fixture.db.begin_read_snapshot().is_err());
+        fixture.db.commit_read_snapshot()?;
+        assert_eq!(
+            pack_targets(&fixture.db, WS, KEY, 3)?,
+            [id(1), id(2), id(3)]
+        );
+        fixture.db.begin_read_snapshot()?;
+        fixture.db.rollback_read_snapshot()?;
         Ok(())
     }
 

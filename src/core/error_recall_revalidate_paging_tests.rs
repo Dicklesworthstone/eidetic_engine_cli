@@ -129,13 +129,21 @@ fn uncontested_projection_keeps_oversized_sentinels_and_exact_nul_aliases() -> T
         None,
     )?;
     let key = fixture.diagnostic.layered_key().key;
+    let complete = fixture.history()?;
     for limit in 0..=32 {
         let legacy = fixture
             .db
             .list_helpful_error_repair_target_ids(WS, &key, limit)?;
         let selected = pack_targets(&fixture.db, WS, &key, limit)?;
-        assert_eq!(selected, legacy);
+        assert_eq!(selected, good[..limit as usize]);
+        if limit > 0 {
+            assert!(legacy.first().is_some_and(String::is_empty));
+        }
+        if limit > 2 {
+            assert!(legacy.contains(&format!("{}\0alias", good[0])));
+        }
     }
+    assert_eq!(fixture.history()?, complete);
     Ok(())
 }
 
