@@ -1,6 +1,6 @@
 //! Exact average-linkage scheduling with bounded, invocation-local reuse.
 //!
-//! Only pairs touching the newly merged cluster need new source arithmetic.
+//! With a dense cache, only pairs touching the merged cluster need new arithmetic.
 //! Each row keeps its best eligible pair; an ordered frontier contains at most
 //! one entry per row, with no stale heap entries. Recompute changed linkages
 //! using the original member traversal, NOT a weighted update of old means.
@@ -11,9 +11,13 @@ use std::collections::BTreeSet;
 
 use super::{FLOAT_EPSILON, average_linkage_similarity, merge::best_merge};
 
+#[path = "cluster_coherence_sparse.rs"]
+mod sparse;
+
 // At most 8 MiB of f64 linkage payload, plus O(n) row/frontier state. This is
 // extra workspace, not a bound on the original cosine matrix or total RSS.
-// Larger inputs (or a refused allocation) keep the original streaming path.
+// Larger inputs use linear row-winner storage, not a complete rescan per merge.
+// Refused linear reservations still retain the complete original streaming path.
 const MAX_CACHED_LINKAGES: usize = 1_048_576;
 
 pub(super) fn cluster(similarities: &[Vec<f64>], threshold: f64) -> Vec<Vec<usize>> {
@@ -30,6 +34,15 @@ fn cluster_observed(
         .map(|point| vec![point])
         .collect::<Vec<_>>();
     let Some(scores) = Scores::new(members.len(), limit) else {
+        if let Some(workspace) = sparse::Workspace::new(members.len()) {
+            return sparse::cluster(
+                members,
+                workspace,
+                threshold,
+                |left, right| average_linkage_similarity(left, right, similarities),
+                on_merge,
+            );
+        }
         // No truncation, changed threshold or partial clustering on refusal.
         while let Some((left, right, score)) = best_merge(&members, similarities, threshold) {
             on_merge(&members[left], &members[right], score);
