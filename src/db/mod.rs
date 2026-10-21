@@ -11019,11 +11019,22 @@ CREATE INDEX idx_memories_workspace_content_simhash
 /// what this did instead of taking it on faith. Expect all zeros on a store that
 /// has never expired, revised, or imported a memory.
 ///
-/// VERSION NOTE: the dueling-wizards manifest reserves version 124 for
+/// VERSION NOTE, updated 2026-10-21: this slot's collision is RESOLVED and the
+/// note below is kept because the reasoning still explains why.
+///
+/// The dueling-wizards manifest used to reserve version 124 for
 /// `V124_SOURCE_WRITE_STATS` (bd-1n0np.8.5). Compiled migrations must stay
-/// contiguous, so this repair could not take 125 and leave 124 free. That makes
-/// three reserved slots consumed by unrelated work (122, 123, 124); see
-/// bd-zs76e, which owns renumbering the planned allocations.
+/// contiguous, so this repair could not take 125 and leave 124 free, which made
+/// three reserved slots consumed by unrelated work (122, 123, 124). bd-zs76e
+/// owned the renumbering and is now closed: the manifest allocates that work
+/// version 135 as `V135_SOURCE_WRITE_STATS`, so nothing is double-booked.
+///
+/// Still PLANNED, not shipped: allocation 135 has `"status": "planned"` and
+/// `"tables": ["source_write_stats"]`, and shipped migrations currently reach
+/// 132. The `source_write_stats` table therefore does not exist, which is why
+/// the write-immune evaluator in core/write_owner.rs has no production
+/// observation feed -- see bd-1n0np.8.13. Do not read this note as evidence
+/// that the table ships.
 pub const V124_TIMESTAMP_SPELLING_REPAIR: Migration = Migration::new(
     124,
     "timestamp_spelling_repair",
