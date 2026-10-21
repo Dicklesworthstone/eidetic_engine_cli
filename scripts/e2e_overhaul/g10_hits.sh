@@ -44,6 +44,14 @@ fi
 
 HUBS_JSON=$(ee_workspace insights --section hubs --json 2>/dev/null || true)
 AUTHORITIES_JSON=$(ee_workspace insights --section authorities --json 2>/dev/null || true)
+# The guard below cannot distinguish a payload from a refusal: `ee` writes its
+# error envelope to STDOUT, so an error parses cleanly AND carries a top-level
+# `schema`, and `jq .` additionally exits 0 on EMPTY input. Measured 2026-10-21
+# on ee 0.18.0: a single error envelope here turned into 22 assertions logging
+# `act=` with the cause recorded nowhere. Log the code beside them.
+HUBS_ERR=$(printf '%s' "$HUBS_JSON" | jq -r '.error.code // empty' 2>/dev/null)
+AUTHORITIES_ERR=$(printf '%s' "$AUTHORITIES_JSON" | jq -r '.error.code // empty' 2>/dev/null)
+e2e_log_note "g10_hits_insights_error_codes=hubs:${HUBS_ERR:-none} authorities:${AUTHORITIES_ERR:-none}"
 if printf '%s' "$HUBS_JSON" | jq . >/dev/null 2>&1 && printf '%s' "$AUTHORITIES_JSON" | jq . >/dev/null 2>&1; then
     assert_jq_nonempty "$HUBS_JSON" '.schema // empty' "g10_hits_hubs_schema_present"
     assert_jq_nonempty "$AUTHORITIES_JSON" '.schema // empty' "g10_hits_authorities_schema_present"
@@ -120,14 +128,28 @@ if printf '%s' "$WHY_JSON" | jq . >/dev/null 2>&1; then
     assert_jq "$WHY_JSON" '.data.graph.hits.authorityScore >= 0' "true" "g10_hits_why_authority_score_nonnegative"
     assert_jq "$WHY_JSON" '(.data.graph.hits.hubScore | type)' "number" "g10_hits_why_hub_score_number"
     assert_jq "$WHY_JSON" '.data.graph.hits.hubScore >= 0' "true" "g10_hits_why_hub_score_nonnegative"
-    assert_jq "$WHY_JSON" '.data.graph.hits.authorityRank >= 1' "true" "g10_hits_why_authority_rank_valid"
+    # authorityRank is ["integer","null"] in docs/schemas/ee.why.v1.json for the
+    # same reason hubRank is: a memory with no authority mass in THIS snapshot
+    # has no authority rank. In the seeded workspace that is exactly what the
+    # fixture authority becomes once seed_corpus supplies a denser component.
+    # The strong form -- authorityRank == 1 -- is asserted in the isolated
+    # workspace below, where the seeded pair really is the whole graph, so the
+    # claim is moved rather than dropped.
+    assert_jq "$WHY_JSON" '(.data.graph.hits.authorityRank == null) or (.data.graph.hits.authorityRank >= 1)' "true" "g10_hits_why_authority_rank_valid"
     # hubRank is declared ["integer","null"] by docs/schemas/ee.why.v1.json, and
     # a PURE AUTHORITY legitimately has no hub rank -- the seeded authority in
     # this fixture scores hub 0.0 with rank null. Asserting `>= 1` demanded a
     # value the schema explicitly permits to be absent, so it would stay red
     # against a correct implementation. Accept null OR a valid rank. bd-maisx.
     assert_jq "$WHY_JSON" '(.data.graph.hits.hubRank == null) or (.data.graph.hits.hubRank >= 1)' "true" "g10_hits_why_hub_rank_valid_or_absent"
-    assert_jq "$WHY_JSON" '.data.graph.hits.dominantRole // empty' "authority" "g10_hits_why_dominant_role"
+    # Corpus-independent here: assert dominantRole is one of the values the
+    # schema's enum permits. Measured act="weak" in the seeded workspace, which
+    # is CORRECT output -- graph_hits_role_label returns "weak" when both
+    # normalized scores fall below 0.5, and normalization is snapshot-wide.
+    # Demanding "authority" here asserted a property of an isolated fixture
+    # against a contaminated graph. The exact-role claim moves to the isolated
+    # arm; this one still fails on an unknown or empty role.
+    assert_jq "$WHY_JSON" '(.data.graph.hits.dominantRole) as $role | (["authority","hub","balanced","weak","unavailable"] | index($role)) != null' "true" "g10_hits_why_dominant_role"
     assert_jq "$WHY_JSON" '(.data.graph.hits.profileInfluence.groundingBoost | type)' "number" "g10_hits_why_grounding_boost_number"
     assert_jq "$WHY_JSON" '(.data.graph.hits.profileInfluence.orientationBoost | type)' "number" "g10_hits_why_orientation_boost_number"
     assert_jq "$WHY_JSON" '(.data.graph.hits.profileInfluence.balancedBoost | type)' "number" "g10_hits_why_balanced_boost_number"
@@ -179,18 +201,26 @@ if printf '%s' "$CONTEXT_GROUNDING_JSON" | jq . >/dev/null 2>&1 \
     assert_jq_nonempty "$CONTEXT_GROUNDING_JSON" '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' "g10_hits_context_grounding_first_present"
     assert_jq_nonempty "$CONTEXT_ORIENTATION_JSON" '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' "g10_hits_context_orientation_first_present"
     assert_jq_nonempty "$CONTEXT_BALANCED_JSON" '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' "g10_hits_context_balanced_first_present"
+    # Kept, but it is NOT evidence that the HITS boost works. Measured
+    # 2026-10-21 with graph.feature.hits_profiles.enabled=FALSE, grounding
+    # STILL ranks the authority first, because base relevance already orders
+    # the pair that way. An assertion that cannot fail when the feature is off
+    # is a sanity check, not a proof.
     e2e_log_assert_eq "${GROUNDING_FIRST:-missing}" "$HITS_AUTHORITY_ID" "g10_hits_context_grounding_authority_ranked"
-    e2e_log_assert_eq "${ORIENTATION_FIRST:-missing}" "$HITS_HUB_ID" "g10_hits_context_orientation_hub_ranked"
     if [ "${BALANCED_FIRST:-}" = "$HITS_AUTHORITY_ID" ] || [ "${BALANCED_FIRST:-}" = "$HITS_HUB_ID" ]; then
         e2e_log_assert_eq "seed" "seed" "g10_hits_context_balanced_seed_ranked"
     else
         e2e_log_assert_eq "${BALANCED_FIRST:-missing}" "${HITS_AUTHORITY_ID}-or-${HITS_HUB_ID}" "g10_hits_context_balanced_seed_ranked" || true
     fi
-    if [ "${GROUNDING_FIRST:-}" = "${ORIENTATION_FIRST:-}" ]; then
-        e2e_log_assert_eq "$GROUNDING_FIRST" "${ORIENTATION_FIRST}-different" "g10_hits_context_profiles_differ" || true
-    else
-        e2e_log_assert_eq "different" "different" "g10_hits_context_profiles_differ"
-    fi
+    # g10_hits_context_orientation_hub_ranked and g10_hits_context_profiles_differ
+    # were asserted HERE and failed for something the product is not
+    # responsible for: HITS normalization is snapshot-wide, so in the SEEDED
+    # workspace this pair's normalized scores collapse toward 0 against
+    # seed_corpus's denser component and the blend degenerates into an
+    # order-preserving rescale of relevance. Both claims moved to the isolated
+    # arm below, where the pair IS the whole graph and where a flag-off control
+    # shows they are the only two that discriminate. bd-ol177.
+    e2e_log_note "g10_hits_context_profile_order_claims=isolated_arm"
 else
     todo_assert "g10_hits_context_profiles_available" "bd-jy4w.4" "ee context --profile grounding/orientation/balanced is not fully available for the HITS fixture yet."
 fi
@@ -231,7 +261,9 @@ else
     ISO_AUTHORITIES_JSON=$(ee_hits_isolated insights --section authorities --json 2>/dev/null || true)
     ISO_HUB_COUNT=$(printf '%s' "$ISO_HUBS_JSON" | jq '.data.sections[0].items | length' 2>/dev/null || echo 0)
     ISO_AUTHORITY_COUNT=$(printf '%s' "$ISO_AUTHORITIES_JSON" | jq '.data.sections[0].items | length' 2>/dev/null || echo 0)
-    e2e_log_note "g10_hits_isolated hubs=${ISO_HUB_COUNT} authorities=${ISO_AUTHORITY_COUNT}"
+    ISO_HUBS_ERR=$(printf '%s' "$ISO_HUBS_JSON" | jq -r '.error.code // empty' 2>/dev/null)
+    ISO_AUTHORITIES_ERR=$(printf '%s' "$ISO_AUTHORITIES_JSON" | jq -r '.error.code // empty' 2>/dev/null)
+    e2e_log_note "g10_hits_isolated hubs=${ISO_HUB_COUNT} authorities=${ISO_AUTHORITY_COUNT} hubs_error=${ISO_HUBS_ERR:-none} authorities_error=${ISO_AUTHORITIES_ERR:-none}"
 
     # Precondition: the isolated graph really is just the seeded pair.
     e2e_log_assert_num "$ISO_HUB_COUNT" -ge 1 "g10_hits_isolated_hubs_present"
@@ -243,6 +275,59 @@ else
     assert_jq "$ISO_AUTHORITIES_JSON" '.data.sections[0].items[0].memoryId // empty' "$ISO_AUTHORITY_ID" "g10_hits_isolated_seed_authority_ranked_first"
     assert_jq "$ISO_HUBS_JSON" '(.data.sections[0].items[0].hubScore > 0)' "true" "g10_hits_isolated_seed_hub_score_positive"
     assert_jq "$ISO_AUTHORITIES_JSON" '(.data.sections[0].items[0].authorityScore > 0)' "true" "g10_hits_isolated_seed_authority_score_positive"
+
+    # ---------------------------------------------------------------------
+    # The `ee why` role claim, in the only workspace where it is meaningful.
+    #
+    # Measured 2026-10-21 on ee 0.18.0: in the SEEDED workspace this fixture's
+    # authority reports dominantRole="weak" and a null authorityRank, and the
+    # product is RIGHT. graph_hits_role_label (src/core/why.rs:3025) returns
+    # "weak" when BOTH normalized scores are below 0.5, and normalization is
+    # against the max over the whole snapshot -- so once seed_corpus supplies a
+    # denser component, the fixture pair stops being the strong authority it is
+    # in isolation. The seeded assertions below were encoding "the fixture is
+    # the entire graph", which is only true here.
+    #
+    # The role and the exact rank are asserted BESIDE the uncontamination
+    # preconditions above, so this cannot pass vacuously on an empty graph.
+    # ---------------------------------------------------------------------
+    ISO_WHY_JSON=$(ee_hits_isolated why "$ISO_AUTHORITY_ID" --json 2>/dev/null || true)
+    if printf '%s' "$ISO_WHY_JSON" | jq . >/dev/null 2>&1; then
+        assert_jq "$ISO_WHY_JSON" '.data.graph.hits != null' "true" "g10_hits_isolated_why_hits_block_present"
+        assert_jq "$ISO_WHY_JSON" '.data.graph.hits.dominantRole // empty' "authority" "g10_hits_isolated_why_dominant_role_authority"
+        assert_jq "$ISO_WHY_JSON" '(.data.graph.hits.authorityRank == 1)' "true" "g10_hits_isolated_why_authority_rank_first"
+        assert_jq "$ISO_WHY_JSON" '(.data.graph.hits.authorityScore > 0)' "true" "g10_hits_isolated_why_authority_score_positive"
+    else
+        e2e_log_assert_eq "parseable" "unparseable" "g10_hits_isolated_why_available"
+    fi
+
+    # ---------------------------------------------------------------------
+    # The profile-ordering claim, in the only workspace where it is
+    # meaningful. Measured 2026-10-21 on ee 0.18.0 -- same fixture, same
+    # binary, one variable:
+    #
+    #   flag=false   grounding [AUTH, HUB]   orientation [AUTH, HUB]   SAME
+    #   flag=true    grounding [AUTH, HUB]   orientation [HUB, AUTH]   DIFFER
+    #
+    # So the orientation flip and the profile disagreement are produced BY the
+    # HITS boost, with polarity -- not by the two profiles differing in their
+    # other parameters. bd-ol177.
+    # ---------------------------------------------------------------------
+    ISO_GROUNDING_JSON=$(ee_hits_isolated context "G10 HITS fixture graph profile" --profile grounding --max-tokens 400 --json 2>/dev/null || true)
+    ISO_ORIENTATION_JSON=$(ee_hits_isolated context "G10 HITS fixture graph profile" --profile orientation --max-tokens 400 --json 2>/dev/null || true)
+    ISO_GROUNDING_FIRST=$(printf '%s' "$ISO_GROUNDING_JSON" | jq -r '.data.pack.items[0].memoryId // empty' 2>/dev/null || true)
+    ISO_ORIENTATION_FIRST=$(printf '%s' "$ISO_ORIENTATION_JSON" | jq -r '.data.pack.items[0].memoryId // empty' 2>/dev/null || true)
+    e2e_log_note "g10_hits_isolated_order grounding=${ISO_GROUNDING_FIRST:-missing} orientation=${ISO_ORIENTATION_FIRST:-missing}"
+    # Empty-world guard: both packs must name a real memory before either
+    # ordering claim below can mean anything.
+    assert_jq_nonempty "$ISO_GROUNDING_JSON" '.data.pack.items[0].memoryId // empty' "g10_hits_isolated_context_grounding_first_present"
+    assert_jq_nonempty "$ISO_ORIENTATION_JSON" '.data.pack.items[0].memoryId // empty' "g10_hits_isolated_context_orientation_first_present"
+    e2e_log_assert_eq "${ISO_ORIENTATION_FIRST:-missing}" "$ISO_HUB_ID" "g10_hits_context_orientation_hub_ranked"
+    if [ "${ISO_GROUNDING_FIRST:-}" = "${ISO_ORIENTATION_FIRST:-}" ]; then
+        e2e_log_assert_eq "$ISO_GROUNDING_FIRST" "${ISO_ORIENTATION_FIRST}-different" "g10_hits_context_profiles_differ" || true
+    else
+        e2e_log_assert_eq "different" "different" "g10_hits_context_profiles_differ"
+    fi
 fi
 
 if [ "${EE_GRAPH_E2E_INJECT_FAILURE:-0}" = "1" ]; then

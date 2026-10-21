@@ -50,7 +50,8 @@ use crate::cache::pack_l2::{
     PackL2CompressionHit, PackL2WriteOutcome,
 };
 use crate::config::{
-    ConfigFile, EnvVar, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
+    ConfigFile, EnvVar, GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY,
+    GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
     GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY,
     GRAPH_PACK_DNA_MAX_ITEMS_KEY, ReadPoolConfig, WorkspaceLocation, env_var_is_set,
     parse_env_bool_flag, read_env_var,
@@ -3566,6 +3567,17 @@ async fn run_context_pack_with_performance_inner(
     candidate_metrics.graph_boosted_candidates = candidate_metrics
         .graph_boosted_candidates
         .saturating_add(ppr_metrics.reranked_candidates);
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    let hits_boost_metrics = apply_context_profile_hits_boost(
+        read_connection,
+        &options.workspace_path,
+        request.profile,
+        &mut candidates,
+        &mut degraded,
+    );
+    candidate_metrics.graph_boosted_candidates = candidate_metrics
+        .graph_boosted_candidates
+        .saturating_add(hits_boost_metrics.boosted_candidates);
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let proximity_metrics = apply_proximity_to_seed_scores(
         read_connection,
@@ -11146,6 +11158,213 @@ fn push_ppr_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegra
             "ee config set {GRAPH_FEATURE_PPR_ENABLED_KEY} true"
         )),
     );
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ContextProfileHitsBoostMetrics {
+    boosted_candidates: usize,
+}
+
+fn context_hits_profiles_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
+    let config = context_workspace_config(workspace_path, "Context profile HITS boost")?;
+    Ok(config
+        .and_then(|config| config.graph.feature.hits_profiles_enabled)
+        .unwrap_or(false))
+}
+
+fn push_hits_profiles_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
+    push_degradation(
+        degraded,
+        "graph_feature_disabled",
+        ContextResponseSeverity::Medium,
+        format!(
+            "Context profile HITS boost is disabled by {GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY}."
+        ),
+        Some(format!(
+            "ee config set {GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY} true"
+        )),
+    );
+}
+
+/// Apply the requested context profile's HITS authority/hub weights to
+/// candidate relevance.
+///
+/// The weights are declared on [`ContextPackProfile::hits_boost_weights`] and
+/// encode the documented profile semantics: `grounding` leans on authorities,
+/// `orientation` on hubs, `balanced` splits the difference. `compact`,
+/// `thorough` and `submodular` declare no weight and are left untouched, so
+/// selecting them cannot change a score here.
+///
+/// The blend mirrors the convex form `apply_personalized_pagerank_rerank`
+/// uses, extended to two signals, so no combination of weights can push a
+/// score out of the unit interval:
+///
+/// ```text
+/// relevance' = (w_authority * authority)
+///            + (w_hub * hub)
+///            + (1 - w_authority - w_hub) * relevance
+/// ```
+///
+/// `authority` and `hub` are the snapshot's max-normalized HITS scores — the
+/// same two numbers `ee why` reports for the memory under `graph.hits`, so a
+/// reranked item and its explanation cite one set of values.
+fn apply_context_profile_hits_boost(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    profile: ContextPackProfile,
+    candidates: &mut [PackCandidate],
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> ContextProfileHitsBoostMetrics {
+    let weights = profile.hits_boost_weights();
+    let total_weight = weights.authority + weights.hub;
+    if candidates.is_empty() || !total_weight.is_finite() || total_weight <= 0.0 {
+        return ContextProfileHitsBoostMetrics::default();
+    }
+    match context_hits_profiles_feature_enabled(workspace_path) {
+        Ok(true) => {}
+        Ok(false) => {
+            push_hits_profiles_feature_disabled_degradation(degraded);
+            return ContextProfileHitsBoostMetrics::default();
+        }
+        Err(message) => {
+            push_degradation(
+                degraded,
+                "context_config_unavailable",
+                ContextResponseSeverity::Medium,
+                message,
+                Some("Fix or remove .ee/config.toml.".to_string()),
+            );
+            return ContextProfileHitsBoostMetrics::default();
+        }
+    }
+
+    // Deliberately NOT `latest_valid_memory_links_snapshot`: that helper always
+    // pushes a degradation on a miss, and its text and code both name the PPR
+    // rerank. Borrowing it here would report a HITS skip as a PPR skip, which
+    // sends a reader to the wrong subsystem. Same lookup, own attribution.
+    let workspace_ids = graph_context_workspace_ids(connection, workspace_path, degraded);
+    let mut snapshot = None;
+    for workspace_id in &workspace_ids {
+        match connection
+            .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+        {
+            Ok(Some(found)) if found.status == crate::db::GraphSnapshotStatus::Valid => {
+                snapshot = Some(found);
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Context profile HITS boost could not check graph snapshot posture for {workspace_id}: {error}"
+                ),
+                Some("ee graph centrality-refresh".to_string()),
+            ),
+        }
+    }
+    let Some(snapshot) = snapshot else {
+        push_degradation(
+            degraded,
+            "context_graph_snapshot_missing",
+            ContextResponseSeverity::Low,
+            "Context profile HITS boost skipped because no valid memory_links graph snapshot exists.",
+            Some("ee graph centrality-refresh".to_string()),
+        );
+        return ContextProfileHitsBoostMetrics::default();
+    };
+    let centrality = match crate::graph::graph_snapshot_centrality_report(&snapshot) {
+        Ok(centrality) => centrality,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Context profile HITS boost skipped because HITS scores could not be read from graph snapshot {}: {error}",
+                    snapshot.id
+                ),
+                Some("ee graph centrality-refresh".to_string()),
+            );
+            return ContextProfileHitsBoostMetrics::default();
+        }
+    };
+
+    let authority_max =
+        max_finite_hits_score(centrality.scores.iter().map(|score| score.authority));
+    let hub_max = max_finite_hits_score(centrality.scores.iter().map(|score| score.hub));
+    // A snapshot whose HITS pass did not run carries all-zero scores, which
+    // normalize to 0.0 and would quietly scale every candidate's relevance by
+    // `base_weight` without reordering anything. That is a silent magnitude
+    // change dressed up as a rerank, so refuse instead and say which status
+    // produced the zeros.
+    if authority_max <= 0.0 && hub_max <= 0.0 {
+        push_degradation(
+            degraded,
+            "context_graph_snapshot_unavailable",
+            ContextResponseSeverity::Low,
+            format!(
+                "Context profile HITS boost skipped because graph snapshot {} carries no non-zero HITS scores (hits status {}).",
+                snapshot.id,
+                centrality.hits_status.as_str()
+            ),
+            Some("ee graph centrality-refresh".to_string()),
+        );
+        return ContextProfileHitsBoostMetrics::default();
+    }
+    let scores = centrality
+        .scores
+        .iter()
+        .map(|score| {
+            (
+                score.memory_id.clone(),
+                (
+                    normalize_hits_score(score.authority, authority_max),
+                    normalize_hits_score(score.hub, hub_max),
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let base_weight = 1.0 - total_weight;
+    let mut boosted_candidates = 0_usize;
+    for candidate in candidates {
+        let Some((authority, hub)) = scores.get(&candidate.memory_id.to_string()).copied() else {
+            continue;
+        };
+        let base = candidate.relevance.into_inner();
+        let blended = (weights.authority * authority) + (weights.hub * hub) + (base_weight * base);
+        let Some(score) = unit_score(blended) else {
+            continue;
+        };
+        candidate.relevance = score;
+        candidate.why = format!(
+            "{} Context profile `{}` HITS boost blended base={base:.4}, authority={authority:.4} (weight {:.2}), hub={hub:.4} (weight {:.2}), snapshot={}.",
+            candidate.why,
+            profile.as_str(),
+            weights.authority,
+            weights.hub,
+            snapshot.id
+        );
+        boosted_candidates = boosted_candidates.saturating_add(1);
+    }
+
+    ContextProfileHitsBoostMetrics { boosted_candidates }
+}
+
+fn max_finite_hits_score(scores: impl Iterator<Item = f64>) -> f64 {
+    scores
+        .filter(|value| value.is_finite())
+        .fold(0.0_f64, f64::max)
+}
+
+fn normalize_hits_score(value: f64, max_value: f64) -> f32 {
+    if value.is_finite() && max_value.is_finite() && max_value > 0.0 {
+        (value / max_value).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    }
 }
 
 fn apply_proximity_to_seed_scores(
