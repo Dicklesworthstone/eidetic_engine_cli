@@ -92,7 +92,7 @@ fn text_failed(text: &str) -> bool {
 /// targets are presentation metadata, not diagnostic text or exit authority.
 /// Carriage-return updates remain separate observations: a green redraw cannot
 /// erase an earlier failure. Do not emulate cursor motion, erasure or backspace.
-fn terminal_text(text: &str) -> Result<Cow<'_, str>, ()> {
+pub(super) fn terminal_text(text: &str) -> Result<Cow<'_, str>, ()> {
     if !text
         .chars()
         .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\t'))

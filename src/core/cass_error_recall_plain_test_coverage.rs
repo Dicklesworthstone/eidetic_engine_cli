@@ -85,13 +85,21 @@ fn summary(line: &str) -> Result<Value, ()> {
 /// None is not a plain libtest report. Err is recognized but unprovable input
 /// and must never fall through to an unguarded generic command success.
 pub(super) fn project(output: &ToolOutput) -> Result<Option<ToolOutput>, ()> {
-    let text = &output.text;
+    if output.text.len() > MAX_SCANNED_OUTPUT_BYTES {
+        return Err(());
+    }
+    let visible = super::super::outcome::terminal_text(&output.text)?;
+    let text = visible.as_ref();
     if text.trim_start().starts_with(['{', '[']) {
         return Ok(None);
     }
-    if text.len() > MAX_SCANNED_OUTPUT_BYTES {
+    if matches!(visible, std::borrow::Cow::Owned(_))
+        && crate::policy::screen_external_text_for_ingestion(text).instruction_like
+    {
         return Err(());
     }
+    // Only presentation changes. Names, counters, suite boundaries and the
+    // original process status still pass the existing coverage validator.
     let mut events = String::new();
     let mut active = false;
     let mut seen = false;
@@ -186,6 +194,97 @@ mod tests {
             is_error: Some(false),
             exit_code: Some(0),
         }
+    }
+
+    #[test]
+    fn styled_libtest_runs_keep_exact_coverage_and_original_process_authority() {
+        let failed = output(report(&[
+            ("cache::round_trip", "FAILED"),
+            ("control", "ok"),
+        ]));
+        let passed = output(report(&[("control", "ok"), ("cache::round_trip", "ok")]));
+        let decorate = |text: &str| format!("\u{1b}[32m{text}\u{1b}[0m");
+        let styled_failed = output(decorate(&failed.text));
+        let styled_passed = output(decorate(&passed.text));
+        for failure in [&failed, &styled_failed] {
+            let required = Requirement::capture(failure, true);
+            assert!(required.is_guarded());
+            for proof in [&passed, &styled_passed] {
+                assert!(required.is_verified_by(&Proof::capture(proof)));
+                assert_eq!(
+                    project(proof).unwrap().unwrap().text,
+                    project(&passed).unwrap().unwrap().text
+                );
+            }
+            let no_status = ToolOutput {
+                is_error: None,
+                exit_code: None,
+                ..styled_passed.clone()
+            };
+            assert!(!required.is_verified_by(&Proof::capture(&no_status)));
+            let nonzero = ToolOutput {
+                exit_code: Some(101),
+                ..styled_passed.clone()
+            };
+            assert!(!required.is_verified_by(&Proof::capture(&nonzero)));
+        }
+        assert_eq!(styled_failed.text, decorate(&failed.text));
+        assert_eq!(styled_passed.text, decorate(&passed.text));
+    }
+
+    #[test]
+    fn styling_cannot_replace_skip_or_drop_required_libtest_subjects() {
+        let failed = output(report(&[
+            ("cache::round_trip", "FAILED"),
+            ("control", "ok"),
+        ]));
+        let required = Requirement::capture(&failed, true);
+        for results in [
+            vec![("cache::round_trip", "ignored"), ("control", "ok")],
+            vec![("Cache::round_trip", "ok"), ("control", "ok")],
+            vec![("cache::round_trip", "ok"), ("replacement", "ok")],
+            vec![("control", "ok")],
+            vec![],
+        ] {
+            let plain = report(&results);
+            for text in [
+                format!("\u{1b}[32m{plain}\u{1b}[0m"),
+                format!("\u{1b}]8;;https://example.test/report\u{7}{plain}\u{1b}]8;;\u{7}"),
+            ] {
+                let proof = output(text);
+                assert!(proof.succeeded(), "process success is insufficient");
+                assert!(
+                    !required.is_verified_by(&Proof::capture(&proof)),
+                    "{results:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn colored_partial_and_oversized_coverage_never_downgrades_to_command_equality() {
+        let failed = output(report(&[("case", "FAILED")]));
+        let passed = output(report(&[("case", "ok")]));
+        let proof = Proof::capture(&passed);
+        let mut required = Requirement::capture(&failed, true);
+        for text in [
+            "\u{1b}[31mrunning 1 test\ntest case ... FAILED\u{1b}[0m".to_owned(),
+            format!("\u{1b}[31m{}\u{1b}[", failed.text),
+            format!("\u{1b}[31m{}\u{1b}[2K", failed.text),
+        ] {
+            required.refresh(&output(text), true);
+            assert!(required.is_guarded());
+            assert!(!required.is_verified_by(&proof));
+        }
+        required.refresh(&output(format!("\u{1b}[31m{}\u{1b}[0m", failed.text)), true);
+        assert!(required.is_verified_by(&proof));
+        let huge = output(format!(
+            "{}{}",
+            "\u{1b}[0m".repeat(MAX_SCANNED_OUTPUT_BYTES / 4 + 1),
+            passed.text
+        ));
+        assert!(project(&huge).is_err());
+        assert!(!required.is_verified_by(&Proof::capture(&huge)));
     }
 
     #[test]
