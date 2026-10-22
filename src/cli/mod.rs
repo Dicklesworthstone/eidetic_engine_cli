@@ -3456,6 +3456,26 @@ pub struct ContextArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    ///
+    /// ADR 0059 names search, pack and why as the surfaces the fence must reach
+    /// (bd-1n0np.8.13). A pack assembled from a derived asset that trails the
+    /// database is the worst case of the three, because the pack is what an
+    /// agent then reasons from. `eventual` is the existing behaviour and opens
+    /// no store.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when --read-fence observes a derived asset trailing the
+    /// database, rather than packing rows that may be stale.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
 }
 
 impl ContextArgs {
@@ -11365,6 +11385,25 @@ pub struct WhyArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    ///
+    /// The third surface ADR 0059 names (bd-1n0np.8.13). `ee why` explains a
+    /// decision from derived state, so a stale asset here yields a confident
+    /// explanation of something that is no longer true. `eventual` is the
+    /// existing behaviour and opens no store.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when --read-fence observes a derived asset trailing the
+    /// database, rather than explaining from state that may be stale.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
 }
 
 /// Arguments for `ee why-not` — the counterfactual reverse of `ee why`.
@@ -13924,7 +13963,17 @@ where
             ClaimCommand::Verify(args) => handle_claim_verify(&cli, args, stdout, stderr),
         },
         Some(Command::Context(ref args)) => {
-            handle_context_pack_query(process, &cli, args, PACK_COMMAND, true, stdout, stderr)
+            if let Some(exit) = read_fence_preflight(
+                &cli,
+                PACK_COMMAND,
+                args.read_fence,
+                args.strict_read_fence,
+                stdout,
+            ) {
+                exit
+            } else {
+                handle_context_pack_query(process, &cli, args, PACK_COMMAND, true, stdout, stderr)
+            }
         }
         Some(Command::Demo(ref demo_cmd)) => match demo_cmd {
             DemoCommand::List(args) => handle_demo_list(&cli, args, stdout, stderr),
@@ -15608,7 +15657,15 @@ where
             }
         }
         Some(Command::Update(ref args)) => handle_update(&cli, args, stdout, stderr),
-        Some(Command::Why(ref args)) => handle_why(&cli, args, stdout, stderr),
+        Some(Command::Why(ref args)) => {
+            if let Some(exit) =
+                read_fence_preflight(&cli, "why", args.read_fence, args.strict_read_fence, stdout)
+            {
+                exit
+            } else {
+                handle_why(&cli, args, stdout, stderr)
+            }
+        }
         Some(Command::WhyNot(ref args)) => handle_why_not(&cli, args, stdout, stderr),
     }
 }

@@ -179,6 +179,79 @@ fn ee_search_read_fence_defaults_to_eventual_and_parses_every_mode() {
     );
 }
 
+/// `ee context` and `ee why` carry the same fence as `ee search`, because ADR
+/// 0059 names all three (bd-1n0np.8.13).
+///
+/// A DIFFERENT DEFAULT ON ONE SURFACE WOULD BE THE WORST OUTCOME: an agent that
+/// fences its search and then packs from a stale derived asset has paid for the
+/// guarantee and not received it, and nothing in the output would say so. So the
+/// defaults are asserted per surface rather than assumed to be shared, even
+/// though all three read the same parser.
+///
+/// `ee pack` is deliberately absent: it is a subcommand GROUP, so the flag would
+/// have to be placed per leaf, which is a separate decision from threading the
+/// fence through the three surfaces the ADR names.
+#[test]
+fn ee_context_and_why_carry_the_same_read_fence_defaults() {
+    use ee::core::read_fence::ReadFence;
+
+    let context = Cli::try_parse_from(["ee", "context", "some task"])
+        .expect("plain context parses");
+    let Some(Command::Context(args)) = context.command else {
+        panic!("expected context command");
+    };
+    assert_eq!(
+        args.read_fence,
+        ReadFence::Eventual,
+        "context must default to eventual or every pack caller pays for a store read"
+    );
+    assert!(!args.strict_read_fence);
+
+    let context_strict = Cli::try_parse_from([
+        "ee",
+        "context",
+        "some task",
+        "--read-fence",
+        "snapshot:9",
+        "--strict-read-fence",
+    ])
+    .expect("context --read-fence snapshot:9 parses");
+    let Some(Command::Context(args)) = context_strict.command else {
+        panic!("expected context command");
+    };
+    assert_eq!(args.read_fence, ReadFence::Snapshot(9));
+    assert!(args.strict_read_fence);
+
+    let why = Cli::try_parse_from(["ee", "why", "mem-1"]).expect("plain why parses");
+    let Some(Command::Why(args)) = why.command else {
+        panic!("expected why command");
+    };
+    assert_eq!(
+        args.read_fence,
+        ReadFence::Eventual,
+        "why must default to eventual"
+    );
+    assert!(!args.strict_read_fence);
+
+    let why_latest = Cli::try_parse_from(["ee", "why", "mem-1", "--read-fence", "latest"])
+        .expect("why --read-fence latest parses");
+    let Some(Command::Why(args)) = why_latest.command else {
+        panic!("expected why command");
+    };
+    assert_eq!(args.read_fence, ReadFence::Latest);
+
+    for surface in [
+        vec!["ee", "context", "t", "--read-fence", "banana"],
+        vec!["ee", "why", "mem-1", "--read-fence", "banana"],
+    ] {
+        assert!(
+            Cli::try_parse_from(surface.clone()).is_err(),
+            "`{}` must reject an unknown fence mode rather than falling back to eventual",
+            surface.join(" ")
+        );
+    }
+}
+
 /// Exhaustive build sweep: force clap to fully build every leaf subcommand.
 /// `debug_assert()` already does this internally, but keeping an explicit walk
 /// makes the coverage obvious and fails with the offending subcommand path if a
