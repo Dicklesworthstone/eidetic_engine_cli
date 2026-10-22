@@ -1,6 +1,9 @@
 //! One best-effort idle batch per server; no unbounded queue or result cache.
 
-use super::{Arc, AtomicBool, InflightPool, Instant, Mutex, Ordering, PathBuf, thread};
+// `Duration` is deliberately NOT imported here. Its only use is in the
+// cfg(test) `wait_for_batch_settle` signature below, so an unconditional import
+// would be unused in the lib build and red under `-D warnings`.
+use super::{Arc, AtomicBool, Condvar, InflightPool, Instant, Mutex, Ordering, PathBuf, thread};
 use crate::core::cass_prefetch::{
     AgentScope, CassPrefetchCandidate, CassPrefetchCoordinator, DEFAULT_PREFETCH_BUDGET,
     PrefetchGeneration, RecencyWeightedFrequencyPredictor,
@@ -32,13 +35,50 @@ pub(super) struct CassPrefetchWorker {
     shutdown: Arc<AtomicBool>,
     foreground: Arc<InflightPool>,
     coordinator: SharedCoordinator,
+    /// Count of batches that have left the single-flight slot, with the condvar
+    /// that announces each one (bd-16pwc.4).
+    ///
+    /// WHY A COUNTER AND NOT A FLAG. This worker is deliberately
+    /// fire-and-forget, so for 28 comments bd-16pwc.4's last clause -- "a second
+    /// context call reports a prefetch hit" -- could only be written as a race:
+    /// whether the second call saw a staged batch depended on whether the
+    /// background warm had finished, which is machine load. The fix is an await
+    /// point, and a MONOTONIC COUNTER is the one shape that does not reintroduce
+    /// the race on the waiter's side. A waiter reads the count BEFORE triggering
+    /// work and then waits for it to pass that mark, so a batch that completes
+    /// between the trigger and the wait is already counted -- there is no lost
+    /// wakeup and no "it finished too fast" failure mode. A boolean "is a batch
+    /// running" cannot express that: by the time the waiter looks, the answer
+    /// may be false for either of two opposite reasons.
+    ///
+    /// The pair mirrors `InflightPool`'s `inflight`/`idle`, including recovering
+    /// from a poisoned lock rather than propagating, because this side only ever
+    /// increments a count it also holds the lock for.
+    settled: Arc<(Mutex<u64>, Condvar)>,
 }
 
-struct RunningBatch(Arc<AtomicBool>);
+struct RunningBatch {
+    running: Arc<AtomicBool>,
+    settled: Arc<(Mutex<u64>, Condvar)>,
+}
 
 impl Drop for RunningBatch {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        // ORDER MATTERS. Release the single-flight slot BEFORE announcing the
+        // settle, so a waiter that wakes on the count and immediately submits
+        // again finds the slot free instead of racing this drop and silently
+        // getting nothing (`submit` returns early when `reserve` fails).
+        self.running.store(false, Ordering::Release);
+        let (count, signal) = &*self.settled;
+        {
+            let mut settled = count
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *settled += 1;
+        }
+        // Notify with the guard dropped, or every woken waiter blocks straight
+        // back on the mutex this thread still holds.
+        signal.notify_all();
     }
 }
 
@@ -53,6 +93,7 @@ impl CassPrefetchWorker {
             shutdown,
             foreground,
             coordinator,
+            settled: Arc::new((Mutex::new(0), Condvar::new())),
         }
     }
 
@@ -65,7 +106,67 @@ impl CassPrefetchWorker {
         {
             return None;
         }
-        Some(RunningBatch(Arc::clone(&self.running)))
+        Some(RunningBatch {
+            running: Arc::clone(&self.running),
+            settled: Arc::clone(&self.settled),
+        })
+    }
+
+    /// Batches that have left the single-flight slot since this worker was
+    /// built. Read this BEFORE triggering work; see `settled`.
+    ///
+    /// CFG-GATED, and the visibility is the reason rather than squeamishness
+    /// about test hooks. `pub(super)` can only be reached from inside
+    /// `src/daemon`, so the only callers this could ever have are in-crate, and
+    /// the production path has no reason to wait on speculative work -- that is
+    /// the design. Left ungated it would be an unused method under
+    /// `clippy --all-targets -- -D warnings`, i.e. born red.
+    ///
+    /// An out-of-crate integration test cannot use this at any visibility; that
+    /// route needs the count exposed through the server handle, because
+    /// `start_server` constructs the worker internally and never hands it out.
+    #[cfg(test)]
+    pub(super) fn batches_settled(&self) -> u64 {
+        let (count, _signal) = &*self.settled;
+        *count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Block until more than `mark` batches have settled, or `timeout` elapses.
+    /// Returns whether the count passed `mark`.
+    ///
+    /// This counts a batch that was ABANDONED as settled -- shutdown, a
+    /// foreground request interrupting the idle wait, or an unwind all drop
+    /// `RunningBatch` -- which is deliberate. The question a waiter asks is "is
+    /// the speculative work over", not "did it succeed"; conflating the two
+    /// would hang a waiter on exactly the paths this worker exists to take.
+    /// Whether anything was staged is then a question for the coordinator's
+    /// metrics, which is where the answer actually lives.
+    ///
+    /// Cfg-gated for the same reason as `batches_settled`.
+    #[cfg(test)]
+    pub(super) fn wait_for_batch_settle(&self, mark: u64, timeout: std::time::Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let (count, signal) = &*self.settled;
+        let mut current = count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *current <= mark {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (next, result) = signal
+                .wait_timeout(current, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            current = next;
+            if result.timed_out() && *current <= mark {
+                return false;
+            }
+        }
+        true
     }
 
     fn interrupted(&self) -> bool {
@@ -219,6 +320,94 @@ mod tests {
         assert!(second.reserve().is_some());
         first.shutdown.store(true, Ordering::Release);
         assert!(!second.interrupted());
+    }
+
+    /// The await point bd-16pwc.4's last clause needs. Four arms, because the
+    /// first three alone would all pass against a `wait_for_batch_settle` that
+    /// simply returned `true`.
+    #[test]
+    fn batch_settles_are_countable_and_waitable_bd_16pwc_4() {
+        let worker = worker();
+        assert_eq!(
+            worker.batches_settled(),
+            0,
+            "a fresh worker has settled nothing"
+        );
+
+        // 1. A settle advances the count and releases the waiter.
+        let mark = worker.batches_settled();
+        let batch = worker.reserve().unwrap();
+        drop(batch);
+        assert_eq!(worker.batches_settled(), mark + 1);
+        assert!(
+            worker.wait_for_batch_settle(mark, Duration::from_secs(5)),
+            "a waiter marked before the batch must observe its settle"
+        );
+
+        // 2. THE RACE THIS TYPE EXISTS TO CLOSE: the batch finished long before
+        // anyone waited. A flag would read "not running" and be unable to say
+        // whether that meant done or not-yet-started; the mark makes it decidable
+        // and the wait returns immediately rather than blocking for the timeout.
+        let before = worker.batches_settled();
+        assert!(
+            worker.wait_for_batch_settle(before.saturating_sub(1), Duration::ZERO),
+            "an already-passed mark must satisfy the wait without blocking"
+        );
+
+        // 3. PLANTED NEGATIVE. Nothing settles, so the wait must TIME OUT. An
+        // implementation that returned true unconditionally would pass arms 1
+        // and 2 and fail only here.
+        let current = worker.batches_settled();
+        assert!(
+            !worker.wait_for_batch_settle(current, Duration::from_millis(50)),
+            "waiting past the last settle with no work in flight must time out"
+        );
+
+        // 4. An ABANDONED batch still settles. Shutdown is the common case --
+        // the thread returns before warming anything -- and a waiter that hung
+        // on it would hang on exactly the path this worker takes most.
+        let mark = worker.batches_settled();
+        let batch = worker.reserve().unwrap();
+        worker.shutdown.store(true, Ordering::Release);
+        drop(batch);
+        assert!(
+            worker.wait_for_batch_settle(mark, Duration::from_secs(5)),
+            "a batch abandoned for shutdown must still announce its settle"
+        );
+    }
+
+    /// A settle announced from the worker's own thread, which is the shape the
+    /// production path takes: `submit` spawns, the waiter is elsewhere.
+    #[test]
+    fn a_settle_from_another_thread_wakes_the_waiter_bd_16pwc_4() {
+        let worker = worker();
+        let mark = worker.batches_settled();
+        let batch = worker.reserve().unwrap();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(batch);
+        });
+        assert!(
+            worker.wait_for_batch_settle(mark, Duration::from_secs(10)),
+            "the condvar must deliver a settle raised on the worker thread"
+        );
+        handle.join().expect("settling thread joins");
+        assert_eq!(worker.batches_settled(), mark + 1);
+    }
+
+    #[test]
+    fn unwinding_releases_the_slot_and_settles_the_batch_bd_16pwc_4() {
+        let worker = worker();
+        let mark = worker.batches_settled();
+        let result = std::panic::catch_unwind(|| {
+            let _batch = worker.reserve().unwrap();
+            panic!("simulated backend panic");
+        });
+        assert!(result.is_err());
+        assert!(
+            worker.wait_for_batch_settle(mark, Duration::from_secs(5)),
+            "an unwind must settle the batch, not leave a waiter hanging"
+        );
     }
 
     #[test]
