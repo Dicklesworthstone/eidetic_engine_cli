@@ -654,6 +654,36 @@ e2e_log_command() {
 
 # Assert two strings equal. Emits assert_ok or assert_fail.
 # Usage: e2e_log_assert_eq "$got" "$want" "label"
+#
+# SELF-COMPARISON IS THE INTENDED IDIOM ON THE SUCCESS PATH, and it looks
+# exactly like a defect, so it is written down here once.
+#
+# Callers use this function as a VERDICT RECORDER, not as the check. The check
+# is the surrounding shell conditional; this call puts the result into the J1
+# event log under a stable label, so the same label appears whichever way the
+# check went:
+#
+#     if <the real check>; then
+#         e2e_log_assert_eq "true" "true" "$label"              # record a pass
+#     else
+#         e2e_log_assert_eq "$actual" "$expected" "$label"      # record a fail
+#     fi
+#
+# or, equivalently, with an early return instead of an else branch.
+#
+# Consequence: a sweep for "an assertion whose two arguments are the same
+# literal, which can therefore never fail" flags these by the hundred and is
+# wrong every time. Measured 2026-10-22 across all tracked .sh files: 479
+# assert-style calls take two literal arguments, 172 of them compare a literal
+# to itself, and ALL 172 are guarded -- 157 inside a conditional branch, the
+# rest by an early return, by the caller's own branch (see
+# scripts/e2e_overhaul/networkx_differential.sh, where the failure arm logs the
+# same label and exits 3), or by being e2e_lib_smoke.sh's self-test of
+# assert_eq itself. Zero were unconditional passes.
+#
+# What WOULD be a defect is a self-comparing call on a path with no check at
+# all. If you are auditing for that, the discriminator is the guard, not the
+# arguments.
 e2e_log_assert_eq() {
     local got="${1:-}"
     local want="${2:-}"
