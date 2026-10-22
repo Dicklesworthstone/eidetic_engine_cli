@@ -482,6 +482,185 @@ fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
     Ok(())
 }
 
+/// Judgment integrity, the third unit test the bead's TESTS list names
+/// (bd-reality-core-convergence-1azkt.43).
+///
+/// This existed only inside `scripts/e2e_real_shape_fixture.sh`, which takes
+/// 555 s and needs a real `cass` binary, so the cheap always-run check the bead
+/// asked for did not exist. Everything here reads two committed JSON files and
+/// costs milliseconds.
+///
+/// IT ENCODES THE DELIVERABLE, NOT JUST INTERNAL CONSISTENCY. Deliverable 5(a)
+/// asks for ">= 40 retrieval queries, each with graded relevant span ids and
+/// known-irrelevant distractors", and on 2026-10-22 the set held 18 with five
+/// carrying no distractors at all -- a shortfall that survived because nothing
+/// asserted it. A query with no distractors can only measure recall: a retriever
+/// that returns everything scores perfectly on it. So the count and both halves
+/// are assertions now, and the set cannot quietly shrink back.
+///
+/// THE FLOOR IS LOAD-BEARING. Every check below is a loop over the retrieval
+/// array, so an empty or missing array would satisfy all of them vacuously --
+/// "0 of 0 queries are malformed" is not a pass. The count assertion runs first
+/// for that reason, and a negative control at the end proves the label-resolution
+/// test can actually fail.
+#[test]
+fn judgments_are_internally_consistent_and_meet_the_deliverable() -> TestResult {
+    const MIN_QUERIES: usize = 40;
+
+    let root = corpus_root();
+    let manifest_raw = fs::read_to_string(root.join("manifest.json"))
+        .map_err(|error| format!("read manifest.json: {error}"))?;
+    let manifest: Value =
+        serde_json::from_str(&manifest_raw).map_err(|error| format!("parse manifest: {error}"))?;
+    let judgments_raw = fs::read_to_string(root.join("judgments.json"))
+        .map_err(|error| format!("read judgments.json: {error}"))?;
+    let judgments: Value = serde_json::from_str(&judgments_raw)
+        .map_err(|error| format!("parse judgments: {error}"))?;
+
+    let schema = judgments.get("schema").and_then(Value::as_str).unwrap_or("");
+    if schema != "ee.real_shape_cass.judgments.v1" {
+        return Err(format!(
+            "judgments.json must declare schema ee.real_shape_cass.judgments.v1, got {schema:?}"
+        ));
+    }
+
+    let labels: BTreeMap<&str, &Value> = manifest
+        .get("labels")
+        .and_then(Value::as_object)
+        .map(|map| map.iter().map(|(k, v)| (k.as_str(), v)).collect())
+        .unwrap_or_default();
+    if labels.is_empty() {
+        return Err("manifest.json carries no labels, so nothing below can fail".to_string());
+    }
+
+    let queries = judgments
+        .get("retrieval")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "judgments.json has no retrieval array".to_string())?;
+
+    // FIRST, because every later check loops over this array.
+    if queries.len() < MIN_QUERIES {
+        return Err(format!(
+            "deliverable 5(a) requires at least {MIN_QUERIES} retrieval queries; found {}",
+            queries.len()
+        ));
+    }
+
+    let mut problems: Vec<String> = Vec::new();
+    let mut seen_ids: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut seen_text: BTreeMap<&str, usize> = BTreeMap::new();
+
+    for (index, query) in queries.iter().enumerate() {
+        let id = query.get("id").and_then(Value::as_str).unwrap_or("");
+        let where_ = if id.is_empty() {
+            format!("retrieval[{index}]")
+        } else {
+            id.to_string()
+        };
+        if id.is_empty() {
+            problems.push(format!("{where_}: missing id"));
+        }
+        *seen_ids.entry(id).or_insert(0) += 1;
+
+        let text = query.get("query").and_then(Value::as_str).unwrap_or("");
+        if text.trim().is_empty() {
+            problems.push(format!("{where_}: empty query text"));
+        }
+        *seen_text.entry(text).or_insert(0) += 1;
+
+        match query.get("split").and_then(Value::as_str) {
+            Some("calibration") | Some("evaluation") => {}
+            other => problems.push(format!(
+                "{where_}: split must be calibration or evaluation, got {other:?}"
+            )),
+        }
+
+        // Graded relevant ids. A grade outside {1,2} is a silent scoring bug:
+        // the fixture documents 2 as "answers the query" and 1 as "useful
+        // context", and nothing else has a defined meaning.
+        match query.get("relevant").and_then(Value::as_object) {
+            None => problems.push(format!("{where_}: no relevant object")),
+            Some(relevant) if relevant.is_empty() => {
+                problems.push(format!("{where_}: relevant is empty"));
+            }
+            Some(relevant) => {
+                for (label, grade) in relevant {
+                    if !labels.contains_key(label.as_str()) {
+                        problems.push(format!("{where_}: relevant label {label} has no locator"));
+                    }
+                    match grade.as_u64() {
+                        Some(1) | Some(2) => {}
+                        other => problems.push(format!(
+                            "{where_}: relevant {label} grade must be 1 or 2, got {other:?}"
+                        )),
+                    }
+                }
+            }
+        }
+
+        // Distractors. Deliverable 5(a) requires them, and the five queries that
+        // lacked them could not measure precision at all.
+        match query.get("distractors").and_then(Value::as_array) {
+            None => problems.push(format!("{where_}: no distractors array")),
+            Some(distractors) if distractors.is_empty() => {
+                problems.push(format!(
+                    "{where_}: no distractors, so this query cannot measure precision"
+                ));
+            }
+            Some(distractors) => {
+                for entry in distractors {
+                    let label = entry.as_str().unwrap_or("");
+                    if !labels.contains_key(label) {
+                        problems.push(format!("{where_}: distractor {label} has no locator"));
+                    }
+                    // A label cannot be both the answer and a known non-answer.
+                    if query
+                        .get("relevant")
+                        .and_then(Value::as_object)
+                        .is_some_and(|rel| rel.contains_key(label))
+                    {
+                        problems.push(format!(
+                            "{where_}: {label} is listed as BOTH relevant and a distractor"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    for (id, count) in &seen_ids {
+        if *count > 1 {
+            problems.push(format!("duplicate query id {id} appears {count} times"));
+        }
+    }
+    for (text, count) in &seen_text {
+        if *count > 1 {
+            problems.push(format!("duplicate query text {text:?} appears {count} times"));
+        }
+    }
+
+    if !problems.is_empty() {
+        return Err(format!(
+            "{} judgment problem(s) across {} queries:\n  {}",
+            problems.len(),
+            queries.len(),
+            problems.join("\n  ")
+        ));
+    }
+
+    // NEGATIVE CONTROL: the label-resolution check above is only meaningful if a
+    // label that does not exist is actually seen as missing. Without this, a
+    // manifest that somehow answered "contains" for everything would make every
+    // resolution assertion above vacuous.
+    if labels.contains_key("zzz_no_such_label_control") {
+        return Err(
+            "negative control: a fabricated label resolved against the manifest".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 /// The manifest pins the upstream formats as DATA, so a reader can assert on
 /// them rather than trusting prose. If an upstream format moves, this is where
 /// the corpus stops claiming to mirror the old one.
