@@ -2400,19 +2400,53 @@ fn detect_pem_block_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>
             break;
         };
         let begin = search_start + relative_begin;
-        let end = lower[begin..]
-            .find("-----end")
-            .map_or(input.len(), |relative_end| {
-                let marker_start = begin + relative_end;
-                input[marker_start..]
-                    .find('\n')
-                    .map_or(input.len(), |relative_line_end| {
-                        marker_start + relative_line_end
-                    })
-            });
+        let end = matched_pem_block_end(&lower, begin).unwrap_or(input.len());
         push_secret_match(matches, "pem_block", begin, end);
         search_start = end;
     }
+}
+
+/// A complete PEM footer ends the block even when its newline is JSON-escaped
+/// or ordinary prose follows it on the same line. Never guess through an
+/// incomplete/mismatched footer or nested BEGIN: removing the outer marker
+/// could otherwise leave a second block's private body without its marker.
+/// Callers with an incomplete block conservatively redact through input end.
+fn matched_pem_block_end(input_lower: &str, begin: usize) -> Option<usize> {
+    const BEGIN: &str = "-----begin ";
+    const MAX_LABEL_BYTES: usize = 64;
+
+    let header = input_lower.get(begin..)?.strip_prefix(BEGIN)?;
+    let label_end = header.find("-----")?;
+    let label = &header[..label_end];
+    if label.is_empty()
+        || label.len() > MAX_LABEL_BYTES
+        || label.trim() != label
+        || !label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'-'))
+    {
+        return None;
+    }
+    let body_start = begin + BEGIN.len() + label.len() + 5;
+    let after_begin = begin + BEGIN.len();
+    let footer_start = after_begin + input_lower[after_begin..].find("-----end")?;
+    if footer_start < body_start {
+        return None;
+    }
+    let footer = format!("-----end {label}-----");
+    if !input_lower[footer_start..].starts_with(&footer) {
+        return None;
+    }
+    let end = footer_start + footer.len();
+    // Look beyond the selected footer too: its closing hyphens can also be
+    // the opening hyphens of a nested BEGIN whose body follows this block.
+    if input_lower[after_begin..]
+        .find("-----begin")
+        .is_some_and(|offset| after_begin + offset < end)
+    {
+        return None;
+    }
+    Some(end)
 }
 
 /// Raw API-token prefixes, shared by detection and redaction.
@@ -3161,16 +3195,7 @@ fn redact_pem_blocks(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
             break;
         };
         let begin = search_start + relative_begin;
-        let end = lower[begin..]
-            .find("-----end")
-            .map_or(output.len(), |relative_end| {
-                let marker_start = begin + relative_end;
-                output[marker_start..]
-                    .find('\n')
-                    .map_or(output.len(), |relative_line_end| {
-                        marker_start + relative_line_end
-                    })
-            });
+        let end = matched_pem_block_end(&lower, begin).unwrap_or(output.len());
         let placeholder = redaction_placeholder("pem_block");
         output.replace_range(begin..end, &placeholder);
         lower = output.to_ascii_lowercase();
@@ -6008,6 +6033,7 @@ mod tests {
         assert!(report.redacted_reasons.contains(&"pem_block"));
         assert!(report.content.contains(&redaction_placeholder("pem_block")));
         assert!(!report.content.contains(raw_body));
+        assert!(report.content.ends_with(" in memory."));
     }
 
     #[test]

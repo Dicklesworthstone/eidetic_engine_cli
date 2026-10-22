@@ -147,6 +147,16 @@ cover the reported-size pretty-printed record, JSONL without a final newline,
 later valid records, unaffected sessions, over-budget refusal, unchanged
 history on retry, invalid responses and bounded subprocess supervision.
 
+Structured credential screening also preserves complete PEM boundaries inside
+JSON strings. A matching footer ends the replacement before following prose
+and JSON syntax, while incomplete, mismatched, nested or cross-field blocks
+remain withheld. The existing input-size, record-count, unique-key and parser
+depth checks still apply. Newly captured CASS excerpts use producer version 2;
+refresh preserves older retained evidence and its original producer version.
+Real-import regressions cover redacted JSON below and above the retained
+excerpt limit, the full original source commitment, subsequent records and an
+unaffected session.
+
 ## Rejected Alternatives
 
 - Directly reading CASS internals without a stable robot contract.
