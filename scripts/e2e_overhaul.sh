@@ -176,19 +176,37 @@ fi
 
 # ---------------------------------------------------------------------------
 # Preflight.
+#
+# These three refusals are ENVIRONMENT conditions, not product failures, and
+# they exit 76 so scripts/verify.sh reports this stage as ENV_UNRUNNABLE rather
+# than FAIL (STAGE_ENV_UNRUNNABLE_CODE, verify.sh:149; its
+# stage_status_for_exit_code sends every unrecognised code to FAIL, so exit 2
+# read as "gate 6.5 failed").
+#
+# This matters here more than elsewhere: verify.sh invokes this driver at gate
+# 6.5 and NEVER builds a release binary -- grepping verify.sh for `--release`
+# returns nothing -- while line 54 resolves `ee_resolve_binary release`. So on
+# any machine without an out-of-band release build, gate 6.5 reported a product
+# failure for all 23 of its epics without running one of them. bd-e4ymh.
+#
+# Same precedent as scripts/e2e_repo_hygiene.sh, which exits 76 when
+# `git check-ignore` is unavailable (bd-3ghvw): the script already knew it
+# could not run; only the verifier did not.
 # ---------------------------------------------------------------------------
+STAGE_ENV_UNRUNNABLE_EXIT=76
+
 if [ ! -x "$EE_BINARY" ]; then
     echo "j4: ee binary not executable at $EE_BINARY" >&2
     echo "    set EE_BINARY or run: cargo build --release" >&2
-    exit 2
+    exit "$STAGE_ENV_UNRUNNABLE_EXIT"
 fi
 if ! command -v jq >/dev/null 2>&1; then
     echo "j4: jq is required but was not found in PATH" >&2
-    exit 2
+    exit "$STAGE_ENV_UNRUNNABLE_EXIT"
 fi
 if ! command -v python3 >/dev/null 2>&1; then
     echo "j4: python3 is required for ISO timestamp + JSON aggregation" >&2
-    exit 2
+    exit "$STAGE_ENV_UNRUNNABLE_EXIT"
 fi
 
 ISO_RUN_ID="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))')"

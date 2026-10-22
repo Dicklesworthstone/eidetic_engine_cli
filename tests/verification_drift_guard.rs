@@ -4643,6 +4643,38 @@ fn the_environment_unrunnable_exit_code_agrees_across_both_scripts() {
          environment cannot run. Change both or neither."
     );
 
+    // EVERY emitter, not just the first one (bd-e4ymh). This guard originally
+    // compared verify.sh against e2e_repo_hygiene.sh alone, which left any
+    // later adopter free to drift: a second script exiting 2 instead of 76
+    // would still report FAIL, and this test would stay green while saying
+    // nothing about it. scripts/e2e_overhaul.sh is gate 6.5 and adopted the
+    // code when it turned out to refuse at preflight -- it resolves a RELEASE
+    // binary that verify.sh never builds -- so a drift there silently
+    // reinstates "gate 6.5 failed" for all 23 of its epics.
+    for (relative, source) in [
+        ("scripts/e2e_repo_hygiene.sh", &hygiene),
+        (
+            "scripts/e2e_overhaul.sh",
+            &fs::read_to_string(project_root().join("scripts/e2e_overhaul.sh"))
+                .expect("read e2e_overhaul.sh"),
+        ),
+    ] {
+        let declared = read_literal(source, "STAGE_ENV_UNRUNNABLE_EXIT");
+        assert_eq!(
+            declared, classifier,
+            "{relative} exits STAGE_ENV_UNRUNNABLE_EXIT={declared} while verify.sh \
+             classifies {classifier}. Unrecognised codes fall through to FAIL, so \
+             this stage would report a product failure for an environment it \
+             simply cannot run in."
+        );
+        assert!(
+            !source.contains("\n    exit 2\n"),
+            "{relative} still has a bare `exit 2` preflight. Those are environment \
+             refusals and must exit STAGE_ENV_UNRUNNABLE_EXIT, or verify.sh reports \
+             them as FAIL."
+        );
+    }
+
     // The classifier must also still have an arm for it. Agreeing constants with
     // no matching arm would pass the comparison above and still report FAIL.
     assert!(
