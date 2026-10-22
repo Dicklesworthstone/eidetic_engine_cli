@@ -812,3 +812,145 @@ fn malformed_mixed_tails_cannot_turn_a_provisional_fingerprint_into_verified_adv
     }
     Ok(())
 }
+
+const NATIVE_RUSTC_REPORT: &str = "warning: unused variable: `value`\n --> src/widget.rs:1:5\n1 | let value = 0;\n  |     ^^^^^\nerror[E0308]: mismatched types\n --> src/widget.rs:2:1\n2 | fn widget() -> bool { 7 }\n  |                      ^ expected bool\n3 | let sample = \"error[E9999]: source example\";\nerror[E0277]: the trait bound `Widget: Serialize` is not satisfied\n --> src/widget.rs:4:1\n4 | save(widget);\n  |      ^^^^^^\nSome errors have detailed explanations: E0277, E0308.\nFor more information about an error, try `rustc --explain E0277`.\nerror: could not compile `widget` (lib) due to 2 previous errors; 1 warning emitted\n";
+
+fn native_rustc_repair(fixture: &mut Fixture) -> Fallible<String> {
+    fixture.add(
+        "message",
+        "assistant",
+        json!({"type":"assistant","message":{
+            "role":"assistant",
+            "content":"I fixed the mismatched types by returning a boolean from the widget function and added the Serialize derive to resolve the missing trait bound."
+        }}),
+    )
+}
+
+#[test]
+fn standalone_rustc_reports_produce_complete_cited_repairs_without_source_decoys() -> TestResult {
+    let expected = structured_error_diagnostics(NATIVE_RUSTC_REPORT);
+    assert_eq!(expected.len(), 2);
+    assert_eq!(expected[0].layered_key().key, "rustc:E0308");
+    assert_eq!(expected[1].layered_key().key, "rustc:E0277");
+    for output in [
+        NATIVE_RUSTC_REPORT.to_owned(),
+        format!("\u{1b}[31m{NATIVE_RUSTC_REPORT}\u{1b}[0m"),
+        NATIVE_RUSTC_REPORT.replace("E0308", "E03\u{1b}[31m08\u{1b}[0m"),
+        NATIVE_RUSTC_REPORT.replace("error[", "er\u{1b}[1mror\u{1b}[0m["),
+        format!("\u{1b}]8;;https://example.test/compiler\u{7}{NATIVE_RUSTC_REPORT}\u{1b}]8;;\u{7}"),
+    ] {
+        assert_eq!(structured_error_diagnostics(&output), expected);
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        let failure = fixture.result("fail", &output, Some(101))?;
+        let repair = native_rustc_repair(&mut fixture)?;
+        let proof = fixture.verify()?;
+        let original = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.resolved_failures, 1);
+        assert_eq!(report.fingerprints_recorded, 2);
+        assert_eq!(report.incident_cards_recorded, 1);
+        let card_id = incident_card_id(WS, &failure);
+        for diagnostic in &expected {
+            let recall = error_recall_report(&fixture.db, WS, diagnostic)?;
+            assert!(recall.exact);
+            assert!(recall.helpful_repairs.contains(&repair));
+            assert!(recall.helpful_repairs.contains(&card_id));
+            assert_eq!(recall.proof_links, vec![proof.clone()]);
+            assert!(pack_error_recall_query_seed(&fixture.db, WS, diagnostic)?.contains("prior fix:"));
+        }
+        assert!(fixture.db.get_error_fingerprint(WS, "rustc:E9999")?.is_none());
+        let card = fixture.db.get_evidence_span(&card_id)?.ok_or("card")?;
+        assert!(card.excerpt.contains("Symptom: error[E0308]: mismatched types (src/widget.rs:2:1)"));
+        let mut checks = CardChecks::default();
+        checks.observe(&card)?;
+        assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+        for row in original {
+            let current = fixture.db.get_evidence_span(&row.id)?.ok_or("source")?;
+            assert_eq!(current.excerpt, row.excerpt);
+            assert_eq!(current.content_hash, row.content_hash);
+            assert_eq!(current.metadata_json, row.metadata_json);
+            assert_eq!(current.canonical_provenance_uri(), row.canonical_provenance_uri());
+        }
+        assert_eq!(record_session_error_recall(&fixture.db, WS, &fixture.session)?.incident_cards_recorded, 0);
+        for diagnostic in &expected {
+            assert_eq!(fixture.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?.len(), 3);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn standalone_rustc_polls_wait_for_a_complete_later_code_and_keep_the_original_anchor() -> TestResult {
+    let mut fixture = Fixture::new()?;
+    fixture.call("fail", COMMAND, CWD)?;
+    let failure = fixture.result("fail", "error[E0308]: mismatched types\n", None)?;
+    let initial = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(initial.fingerprints_recorded, 1);
+    assert_eq!(initial.repair_links_recorded, 0);
+    fixture.poll("middle")?;
+    fixture.result("middle", "error[E02\u{1b}[3", None)?;
+    let incomplete = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(incomplete.resolved_failures, 0);
+    assert_eq!(incomplete.repair_links_recorded, 0);
+    assert_eq!(incomplete.incident_cards_recorded, 0);
+    fixture.poll("finish")?;
+    fixture.result("finish", "1m77\u{1b}[0m]: the trait bound `Widget: Serialize` is not satisfied\n", Some(101))?;
+    let repair = native_rustc_repair(&mut fixture)?;
+    let proof = fixture.verify()?;
+    let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+    assert_eq!(report.failures_seen, 1);
+    assert_eq!(report.fingerprints_recorded, 2);
+    assert_eq!(report.resolved_failures, 1);
+    assert_eq!(report.incident_cards_recorded, 1);
+    for diagnostic in structured_error_diagnostics(NATIVE_RUSTC_REPORT) {
+        let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        assert!(recall.helpful_repairs.contains(&repair));
+        assert!(recall.helpful_repairs.contains(&incident_card_id(WS, &failure)));
+        assert_eq!(recall.proof_links, vec![proof.clone()]);
+        assert!(fixture.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?
+            .iter().all(|link| link.evidence_ref.as_deref() == Some(failure.as_str())));
+    }
+    let card = fixture.db.get_evidence_span(&incident_card_id(WS, &failure))?.ok_or("card")?;
+    let mut checks = CardChecks::default();
+    checks.observe(&card)?;
+    assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn malformed_final_rustc_reports_never_become_verified_advice_after_a_clean_retry() -> TestResult {
+    let diagnostic = crate::core::error_recall::from_rustc(Some("E0308"), "mismatched types");
+    for tail in [
+        "error[E0277]: ",
+        "error[E027]: missing trait bound",
+        "Caused by:",
+        "\u{1b}[31",
+        "\u{1b}[2K",
+        "unrelated compiler output after the final diagnostic",
+    ] {
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        fixture.result("fail", "error[E0308]: mismatched types\n", None)?;
+        let initial = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(initial.fingerprints_recorded, 1);
+        assert_eq!(initial.repair_links_recorded, 0);
+        fixture.poll("finish")?;
+        fixture.result("finish", tail, Some(101))?;
+        native_rustc_repair(&mut fixture)?;
+        fixture.verify()?;
+        let original = fixture.db.list_evidence_spans_for_session(&fixture.session)?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.resolved_failures, 0, "{tail:?}");
+        assert_eq!(report.repair_links_recorded, 0, "{tail:?}");
+        assert_eq!(report.incident_cards_recorded, 0, "{tail:?}");
+        let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+        assert!(recall.helpful_repairs.is_empty());
+        assert!(recall.proof_links.is_empty());
+        assert!(!pack_error_recall_query_seed(&fixture.db, WS, &diagnostic)?.contains("prior fix:"));
+        assert_eq!(fixture.db.list_evidence_spans_for_session(&fixture.session)?, original);
+        assert_eq!(record_session_error_recall(&fixture.db, WS, &fixture.session)?.incident_cards_recorded, 0);
+    }
+    Ok(())
+}
