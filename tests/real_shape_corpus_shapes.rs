@@ -320,6 +320,168 @@ fn the_envelope_check_fires_on_each_arm_separately() {
     );
 }
 
+/// Generator determinism, which the bead's TESTS list names and which was
+/// previously only a measurement (bd-reality-core-convergence-1azkt.43).
+///
+/// Regenerates the corpus into a TEMP directory with the committed parameters
+/// and compares the generator's own tree digest to the digest recorded in
+/// tests/fixtures/real_shape_cass/SHAPES.md. Two things fail here that nothing
+/// else catches: a renderer change that alters bytes while still satisfying the
+/// envelope table, and a regeneration committed with a different seed or
+/// target-records than the manifest claims.
+///
+/// It never touches the committed fixture -- the output goes to a tempdir, and
+/// only the printed digest is compared.
+///
+/// SKIPS RATHER THAN FAILS when python3 or the generator is absent, because a
+/// tarball without scripts/ cannot answer this and a gate that assumes the
+/// generator is present fails for a reason unrelated to determinism.
+#[test]
+fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
+    const RECORDED_DIGEST: &str =
+        "7bcedd76fcc6c3e9913fa5d30efe54ffccd43eeea72299d56ce581ff65753faa";
+
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let generator = repo.join("scripts").join("real_shape_corpus").join("generate.py");
+    if !generator.exists() {
+        eprintln!("skip: {} is absent", generator.display());
+        return Ok(());
+    }
+
+    let manifest_raw = fs::read_to_string(corpus_root().join("manifest.json"))
+        .map_err(|error| format!("read manifest.json: {error}"))?;
+    let manifest: Value =
+        serde_json::from_str(&manifest_raw).map_err(|error| format!("parse manifest: {error}"))?;
+    let seed = manifest.get("seed").and_then(Value::as_i64).unwrap_or(-1);
+    let target = manifest
+        .get("target_records")
+        .and_then(Value::as_i64)
+        .unwrap_or(-1);
+    // The workspace comes from the manifest, never from the generator's own
+    // default: it is baked into every session PATH, and the paths are part of
+    // the tree digest. Relying on the default would make this test red for a
+    // changed default rather than for lost determinism.
+    let workspace = manifest
+        .get("workspace")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if seed < 0 || target < 0 || workspace.is_empty() {
+        return Err(format!(
+            "manifest.json must record seed, target_records and workspace so this \
+             test can regenerate with the SAME parameters; got seed={seed} \
+             target={target} workspace={workspace:?}"
+        ));
+    }
+
+    // THE OUTPUT DIRECTORY MUST BE EMPTY, and this is not fussiness.
+    // `tree_digest` (generate.py:429) walks the WHOLE out tree and hashes every
+    // file it finds, while `generate` (:282) never clears that tree. So one
+    // stray file -- a leftover from an earlier run, an editor backup, a
+    // .DS_Store -- changes the digest and reds this test for a reason that has
+    // nothing to do with determinism. A pid-stamped name alone does not get
+    // there: pids are reused and nothing here removes the directory afterward.
+    //
+    // For the same reason the recorded digest CANNOT be reproduced by hashing
+    // tests/fixtures/real_shape_cass/ in place: that directory also carries
+    // SHAPES.md, which generate.py does not write. The digest is a property of
+    // a freshly generated tree, which is what this test builds.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let out = std::env::temp_dir()
+        .join(format!("ee-real-shape-determinism-{}-{unique}", std::process::id()));
+    if out.exists() {
+        return Err(format!(
+            "{} already exists; this test needs a tree it alone wrote, because \
+             tree_digest hashes every file present",
+            out.display()
+        ));
+    }
+    let output = std::process::Command::new("python3")
+        .arg(&generator)
+        .arg("--out")
+        .arg(&out)
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--seed")
+        .arg(seed.to_string())
+        .arg("--target-records")
+        .arg(target.to_string())
+        .arg("--digest")
+        .current_dir(&repo)
+        .output();
+    let output = match output {
+        Ok(value) => value,
+        Err(error) => {
+            // THIS IS NOT A SKIP, deliberately. `generate.py` exists -- checked
+            // above -- so this repo intends determinism to be checkable here,
+            // and python3 is not optional for it: 64 tracked .py files and
+            // several verify.sh stages already require it.
+            //
+            // A skip here would be INVISIBLE in the one place it matters. cargo
+            // captures a passing test's stderr, so `eprintln!("skip: ...")`
+            // never reaches an operator reading `test result: ok. N passed`, and
+            // a run that verified nothing would be indistinguishable from a run
+            // that verified the digest. That is the defect this whole file
+            // exists to prevent, so the test refuses to report success it did
+            // not earn. The generator-absent case above is a real skip; this is
+            // a broken environment.
+            return Err(format!(
+                "generate.py is present but python3 could not be run ({error}), \
+                 so determinism was NOT verified and this test will not report \
+                 success. Install python3, or remove the generator if this corpus \
+                 is no longer reproducible."
+            ));
+        }
+    };
+    if !output.status.success() {
+        return Err(format!(
+            "generate.py exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .last()
+                .unwrap_or_default()
+        ));
+    }
+
+    let summary: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "generate.py --digest must print a JSON summary: {error}; stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })?;
+    let digest = summary.get("digest").and_then(Value::as_str).unwrap_or("");
+    if digest != RECORDED_DIGEST {
+        return Err(format!(
+            "regenerating with seed={seed} target_records={target} produced digest\n  \
+             {digest}\nbut tests/fixtures/real_shape_cass/SHAPES.md records\n  \
+             {RECORDED_DIGEST}\nEither the generator is no longer deterministic, or the \
+             committed corpus was produced with different parameters than the manifest \
+             claims. Regenerate deliberately and update SHAPES.md in the same commit."
+        ));
+    }
+
+    // And the regenerated tree must agree with the committed one on the counts
+    // the manifest publishes, so a digest match cannot come from both sides
+    // being equally wrong.
+    let regenerated_manifest = fs::read_to_string(out.join("manifest.json"))
+        .map_err(|error| format!("read regenerated manifest: {error}"))?;
+    let regenerated: Value = serde_json::from_str(&regenerated_manifest)
+        .map_err(|error| format!("parse regenerated manifest: {error}"))?;
+    for key in ["total_records", "seed", "target_records", "workspace"] {
+        if regenerated.get(key) != manifest.get(key) {
+            return Err(format!(
+                "regenerated manifest disagrees on {key}: {:?} vs committed {:?}",
+                regenerated.get(key),
+                manifest.get(key)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The manifest pins the upstream formats as DATA, so a reader can assert on
 /// them rather than trusting prose. If an upstream format moves, this is where
 /// the corpus stops claiming to mirror the old one.
