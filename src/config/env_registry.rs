@@ -777,7 +777,7 @@ impl EnvVar {
                 "Override index publish advisory-lock retry attempts."
             }
             Self::IndexRebuildTimeoutSeconds => {
-                "Override the wall-clock budget for an explicit full index rebuild or re-embed."
+                "Override the wall-clock budget for full index rebuilds, re-embeds, and synchronous index publication."
             }
             Self::Json => "Request JSON output from renderer auto-detection.",
             Self::JournalEnabled => "Enable or disable append-only agent journal capture.",

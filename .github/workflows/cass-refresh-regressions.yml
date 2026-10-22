@@ -104,7 +104,7 @@ jobs:
           cargo test --locked --lib cass::import:: -- --skip cass::import::refresh:: --test-threads=1 \
             2>&1 | tee "$RUNNER_TEMP/cass-refresh-import.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/cass-refresh-import.log"
-      - name: Verify ingestion and durable source commitments
+      - name: Verify ingestion, admission and bounded publication
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
@@ -117,6 +117,7 @@ jobs:
           source-commitment db::tests::cass_source_commitment_
           transcript-admission db::tests::transcript_admission_rechecks_raw_records_for_new_and_existing_rows
           admission-cache db::tests::credential_placeholder_policy_invalidates_old_positive_verdicts_and_reader_proofs
+          publication-budget core::index::tests::coalesced_publication_uses_bounded_rebuild_timeout
           CASES
       - name: Verify CASS contracts, CLI imports and release contracts
         if: ${{ !cancelled() }}

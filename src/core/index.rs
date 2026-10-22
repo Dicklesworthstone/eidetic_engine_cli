@@ -134,12 +134,10 @@ const READ_SURFACE_AUDIT_ACTIONS: [&str; 6] = [
     crate::db::audit_actions::WHY_INSPECTED,
 ];
 
-/// Lock TTL for index publish operations.
-///
-/// The bounded production request is five minutes; the lease keeps a second
-/// five-minute cleanup margin so a cancellation at the budget edge cannot let
-/// another publisher enter while the short masked commit tail is finishing.
+/// Minimum lock TTL for index publish operations. Longer bounded requests
+/// retain ownership through their actual deadline and the cleanup margin.
 const INDEX_PUBLISH_LOCK_TTL_SECS: u64 = 600;
+const INDEX_PUBLISH_LOCK_CLEANUP_MARGIN_SECS: u64 = 300;
 const INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS: usize = 200;
 pub const INDEX_PUBLISH_LOCK_CONTENTION_CODE: &str = "index_publish_lock_contention";
 static INDEX_METADATA_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -284,6 +282,21 @@ fn index_publish_lock_retry_attempts() -> usize {
     .unwrap_or(INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS)
 }
 
+/// A configured rebuild can outlive the old ten-minute lease even when no
+/// other publisher exists: the final ownership fence rejects expired leases.
+/// Cover the caller's remaining deadline plus cleanup, rounding up fractional
+/// seconds. This changes lease lifetime, never the caller's cancellation budget.
+fn index_publish_lock_ttl_secs(cx: &asupersync::Cx) -> u64 {
+    let remaining_secs = cx.remaining_budget().deadline.map_or(0, |remaining| {
+        remaining
+            .as_secs()
+            .saturating_add(u64::from(remaining.subsec_nanos() != 0))
+    });
+    remaining_secs
+        .saturating_add(INDEX_PUBLISH_LOCK_CLEANUP_MARGIN_SECS)
+        .max(INDEX_PUBLISH_LOCK_TTL_SECS)
+}
+
 fn acquire_index_publish_lock_with_retry<F>(
     cx: &asupersync::Cx,
     db: &DbConnection,
@@ -308,7 +321,7 @@ where
         let acquisition = match db.acquire_advisory_lock(
             &lock_id,
             holder_id,
-            Some(INDEX_PUBLISH_LOCK_TTL_SECS),
+            Some(index_publish_lock_ttl_secs(cx)),
             Some("index publish"),
         ) {
             Ok(acquisition) => acquisition,
@@ -1696,7 +1709,8 @@ fn prepare_evidence_counts_for_rebuild(db: &DbConnection, workspace_id: &str) {
     }
 }
 
-/// Default wall-clock budget for an explicit full index rebuild or re-embed.
+/// Default wall-clock budget for an explicit full index rebuild, re-embed,
+/// or automatic coalesced publication after a CASS import.
 ///
 /// Large CASS stores can legitimately exceed the old five-minute hard-coded
 /// request budget (GH #78). Keep a generous bounded default for cancellation
@@ -1714,7 +1728,7 @@ fn normalized_index_rebuild_timeout_secs(raw: Option<&str>) -> u64 {
         .unwrap_or(DEFAULT_INDEX_REBUILD_TIMEOUT_SECS)
 }
 
-/// The wall-clock budget `rebuild_index` and `reembed_index` run under:
+/// The wall-clock budget for rebuild, re-embed and standalone coalesced publication:
 /// `EE_INDEX_REBUILD_TIMEOUT_SECONDS`, normalized, or the default.
 pub(crate) fn index_rebuild_timeout() -> Duration {
     let raw = crate::config::env_registry::read(
@@ -2427,13 +2441,15 @@ fn index_processing_jobs_have_durable_mutation(jobs: &[IndexProcessingJobReport]
 /// the batch-remember lane uses this instead of paying one full rebuild
 /// per line. Claimed jobs complete (or fail) together; jobs another
 /// worker claimed mid-drain are reported as skipped.
+/// CASS import uses this standalone runtime, so it needs the same bounded
+/// maintenance budget as an explicit rebuild of the imported corpus.
 pub(crate) fn process_pending_index_jobs_coalesced(
     db: &DbConnection,
     workspace_id: &str,
     index_dir: &Path,
     job_limit: Option<u32>,
 ) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
-    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+    crate::core::run_cli_with_cx(index_rebuild_timeout(), |cx| async move {
         process_pending_index_jobs_coalesced_with_cx(&cx, db, workspace_id, index_dir, job_limit)
             .await
     })
@@ -17224,6 +17240,237 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn coalesced_publication_uses_bounded_rebuild_timeout() -> TestResult {
+        const CHILD_CASE: &str = "EIDETIC_TEST_COALESCED_TIMEOUT_CASE";
+        const CHILD_SENTINEL: &str = "EE_COALESCED_TIMEOUT_VERIFIED=";
+        if let Some(case) = std::env::var_os(CHILD_CASE) {
+            let case = case.to_str().ok_or("invalid timeout fixture case")?;
+            verify_coalesced_publication_timeout_case(case)?;
+            println!("\n{CHILD_SENTINEL}{case}");
+            return Ok(());
+        }
+
+        // Set configuration only in a child process, never in the shared
+        // parallel test environment. Observe the real publication context;
+        // checking the timeout parser alone missed the hard-coded 300s root.
+        for (case, value) in [
+            ("default", None),
+            ("override", Some("7200")),
+            ("invalid", Some("0")),
+            ("clamped", Some("999999999")),
+            ("caller", Some("7200")),
+            ("cancelled", Some("7200")),
+        ] {
+            let mut command = std::process::Command::new(
+                std::env::current_exe().map_err(|error| error.to_string())?,
+            );
+            command
+                .args([
+                    "--exact",
+                    "core::index::tests::coalesced_publication_uses_bounded_rebuild_timeout",
+                    "--nocapture",
+                ])
+                .env(CHILD_CASE, case);
+            let timeout_var =
+                crate::config::env_registry::EnvVar::IndexRebuildTimeoutSeconds.name();
+            if let Some(value) = value {
+                command.env(timeout_var, value);
+            } else {
+                command.env_remove(timeout_var);
+            }
+            let output = command.output().map_err(|error| error.to_string())?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let sentinel = format!("{CHILD_SENTINEL}{case}");
+            ensure(
+                output.status.success()
+                    && stdout.lines().any(|line| line == sentinel)
+                    && stdout.contains("1 passed"),
+                format!(
+                    "coalesced timeout case {case} failed or did not run:\n{stdout}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn verify_coalesced_publication_timeout_case(case: &str) -> TestResult {
+        let expected_secs = match case {
+            "default" | "invalid" => DEFAULT_INDEX_REBUILD_TIMEOUT_SECS,
+            "override" | "cancelled" => 7_200,
+            "clamped" => MAX_INDEX_REBUILD_TIMEOUT_SECS,
+            "caller" => 60,
+            _ => return Err(format!("unknown timeout fixture case {case}")),
+        };
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database = workspace.join("ee.db");
+        let index_dir = workspace.join("index");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_012345678901234567890123ct";
+        let job_id = "sidx_012345678901234567890123ct";
+        let _embedder_guard = install_test_hash_workspace_embedder(workspace_id);
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("coalesced timeout fixture".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_snapshot_test_memory_job(
+            &connection,
+            workspace_id,
+            "mem_012345678901234567890123ct",
+            job_id,
+            "Imported evidence must remain publishable under its bounded request deadline.",
+        )?;
+
+        let observation = std::rc::Rc::new(RefCell::new(None));
+        let observed = std::rc::Rc::clone(&observation);
+        let cancel = case == "cancelled";
+        install_before_index_publish_hook(move |cx| {
+            let result = (|| -> Result<(Duration, Duration), String> {
+                let remaining = cx
+                    .remaining_budget()
+                    .deadline
+                    .ok_or("unbounded publisher")?;
+                let inspector = DbConnection::open_file_read_only(&database)
+                    .map_err(|error| error.to_string())?;
+                let job = inspector
+                    .get_search_index_job(job_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("claimed publication job missing")?;
+                ensure(
+                    job.status_enum() == Some(SearchIndexJobStatus::Running),
+                    "the observed runtime must own a running publication job",
+                )?;
+                let lock_id = AdvisoryLockId::index(workspace_id);
+                let rows = inspector
+                    .query(
+                        "SELECT acquired_at, expires_at FROM ee_advisory_locks WHERE resource_type = ?1 AND resource_id = ?2",
+                        &[
+                            SqlValue::Text(lock_id.resource_type().to_owned()),
+                            SqlValue::Text(lock_id.resource_id().to_owned()),
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+                ensure(rows.len() == 1, "publisher must retain exactly one lease")?;
+                let acquired = rows[0]
+                    .get(0)
+                    .and_then(|value| value.as_str())
+                    .ok_or("missing lease acquisition")?;
+                let expires = rows[0]
+                    .get(1)
+                    .and_then(|value| value.as_str())
+                    .ok_or("unbounded publication lease")?;
+                let acquired = chrono::DateTime::parse_from_rfc3339(acquired)
+                    .map_err(|error| error.to_string())?;
+                let expires = chrono::DateTime::parse_from_rfc3339(expires)
+                    .map_err(|error| error.to_string())?;
+                let lease = (expires - acquired)
+                    .to_std()
+                    .map_err(|error| error.to_string())?;
+                Ok((remaining, lease))
+            })();
+            *observed.borrow_mut() = Some(result);
+            if cancel {
+                cx.set_cancel_reason(asupersync::CancelReason::deadline());
+            }
+        });
+
+        let started = Instant::now();
+        let result = if case == "caller" {
+            let db = &connection;
+            let directory = &index_dir;
+            crate::core::run_cli_with_cx(Duration::from_secs(expected_secs), |cx| async move {
+                process_pending_index_jobs_coalesced_with_cx(&cx, db, workspace_id, directory, None)
+                    .await
+            })
+            .map_err(|error| error.to_string())?
+        } else {
+            process_pending_index_jobs_coalesced(&connection, workspace_id, &index_dir, None)
+        };
+        let elapsed = started.elapsed();
+        let (remaining, lease) = observation
+            .borrow_mut()
+            .take()
+            .ok_or("publication never reached the real runtime probe")??;
+        let expected = Duration::from_secs(expected_secs);
+        ensure(
+            remaining <= expected && remaining + elapsed + Duration::from_secs(1) >= expected,
+            format!(
+                "{case}: expected {expected:?} request, observed {remaining:?} after {elapsed:?}"
+            ),
+        )?;
+        let cleanup = Duration::from_secs(INDEX_PUBLISH_LOCK_CLEANUP_MARGIN_SECS);
+        ensure(
+            lease >= Duration::from_secs(INDEX_PUBLISH_LOCK_TTL_SECS)
+                && lease >= remaining + cleanup
+                && lease
+                    <= (expected + cleanup).max(Duration::from_secs(INDEX_PUBLISH_LOCK_TTL_SECS)),
+            format!(
+                "{case}: lease {lease:?} does not cover bounded request {remaining:?} plus cleanup"
+            ),
+        )?;
+        ensure(
+            connection
+                .is_lock_held(&AdvisoryLockId::index(workspace_id))
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "publication must release its lease on success or cancellation",
+        )?;
+
+        let reports = if cancel {
+            ensure(
+                matches!(result, Err(IndexRebuildError::Cancelled(_))),
+                "deadline cancellation must retain its type",
+            )?;
+            let job = connection
+                .get_search_index_job(job_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("cancelled job missing")?;
+            ensure(
+                job.status_enum() == Some(SearchIndexJobStatus::Cancelled),
+                "cancelled publication must not claim completion",
+            )?;
+            ensure(
+                !index_dir.exists(),
+                "cancelled staging must not become a published generation",
+            )?;
+            process_pending_index_jobs_coalesced(&connection, workspace_id, &index_dir, None)
+        } else {
+            result
+        }
+        .map_err(|error| error.to_string())?;
+        ensure(
+            reports.len() == 1 && reports[0].job_id == job_id && reports[0].outcome == "completed",
+            format!("{case}: publication did not complete the same durable job: {reports:?}"),
+        )?;
+        let completed = connection
+            .get_search_index_job(job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("completed job missing")?;
+        ensure(
+            completed.status_enum() == Some(SearchIndexJobStatus::Completed),
+            "publication must durably complete its job",
+        )?;
+        ensure(
+            vector_index_snapshot(&index_dir)?.len() == 1
+                && read_index_metadata(&index_dir).generation
+                    == connection
+                        .get_workspace_generation(workspace_id)
+                        .map_err(|error| error.to_string())?,
+            "publication must contain the evidence at the committed database generation",
+        )
     }
 
     fn seed_healthy_session_index_case(
