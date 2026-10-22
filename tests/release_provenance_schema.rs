@@ -131,10 +131,112 @@ fn provenance_docs_and_audit_surface_are_registered() {
 /// ready, while the versions actually being shipped went unchecked. A green
 /// that answers a question nobody asked.
 ///
-/// A row may legitimately be absent from Cargo.lock when it is only pulled in
-/// under an optional feature, so absence is allowed -- but only for rows whose
-/// strategy is conditional. A `must_be_published` crate that is not in the
-/// resolved tree is a contradiction and fails here.
+/// ABSENCE FROM Cargo.lock IS NEVER LEGITIMATE, for any strategy. This comment
+/// used to say the opposite -- "a row may legitimately be absent from Cargo.lock
+/// when it is only pulled in under an optional feature, so absence is allowed
+/// but only for rows whose strategy is conditional" -- and that premise is
+/// false: Cargo resolves optional and feature-gated dependencies into the lock
+/// regardless of which features are activated. The exemption it justified is
+/// what let `fnx-convert` be probed for years while belonging to no build
+/// (bd-wef5o).
+///
+/// ---
+///
+/// One inventory row judged against the resolved tree, or `None` when the row
+/// is consistent with `Cargo.lock`.
+///
+/// EXTRACTED so the planted negative below can exercise the rule on synthetic
+/// inputs. The gate itself reads the real repository, so without a seam there is
+/// no way to show the check CAN fail -- and a check nobody has seen fail is
+/// decoration.
+///
+/// THE ABSENT CASE NO LONGER DEPENDS ON `strategy` (bd-wef5o). It used to read
+///
+///     None if strategy != "must_be_published" => {}
+///
+/// so a row naming a crate that is in `Cargo.lock` under NO version at all was
+/// silently accepted whenever its strategy was something else. `fnx-convert`
+/// sat in exactly that gap: listed in AGENTS.md, probed by the inventory,
+/// present in neither `Cargo.toml` nor `Cargo.lock`, referenced nowhere in
+/// `src/`, and carrying `graph_feature_or_publish` rather than
+/// `must_be_published`. Its crates.io probe answered a question about a crate
+/// the build never pulls in, and contributed a pass to `dep_resolution_ready`,
+/// which is an `all()` over the rows.
+///
+/// The exemption looked defensible -- "maybe it is feature-gated" -- and is
+/// not: Cargo resolves OPTIONAL and feature-gated dependencies into
+/// `Cargo.lock` regardless of which features are activated, so absence from the
+/// lock means the crate is not a dependency under any feature. `fnx-cgse` is
+/// the control and carries the same `graph_feature_or_publish` strategy while
+/// resolving in the lock at 0.2.3.
+fn inventory_row_problem(
+    crate_name: &str,
+    declared: &str,
+    strategy: &str,
+    locked: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    match locked.get(crate_name) {
+        Some(resolved) if resolved == declared => None,
+        Some(resolved) => Some(format!(
+            "  {crate_name}: audit says {declared}, Cargo.lock resolves {resolved} \
+             -- the probe would verify the wrong version on crates.io"
+        )),
+        None => Some(format!(
+            "  {crate_name}: marked {strategy} but absent from Cargo.lock entirely \
+             -- the probe verifies a crate this build does not pull in, under any \
+             feature, and still contributes a pass to dep_resolution_ready"
+        )),
+    }
+}
+
+/// Planted negative for `inventory_row_problem`, covering all three verdicts
+/// and specifically the one bd-wef5o found unguarded.
+#[test]
+fn inventory_row_problem_flags_a_row_absent_from_the_lock_whatever_its_strategy() {
+    // Short bindings throughout: `inventory_row_problem(..).is_none()` is an
+    // 88-character chain against rustfmt's 60-character chain_width, so the
+    // inline form would be reformatted and red the Rustfmt Conformance stage.
+    const COND: &str = "graph_feature_or_publish";
+    const MUST: &str = "must_be_published";
+    let locked: std::collections::BTreeMap<String, String> =
+        [("fnx-cgse".to_owned(), "0.2.3".to_owned())]
+            .into_iter()
+            .collect();
+
+    let matching = inventory_row_problem("fnx-cgse", "0.2.3", COND, &locked);
+    assert!(matching.is_none(), "a row matching the lock is consistent");
+
+    let drifted = inventory_row_problem("fnx-cgse", "0.2.2", COND, &locked);
+    assert!(
+        drifted.is_some(),
+        "a row whose version differs from the lock must be flagged"
+    );
+
+    // THE REGRESSION ARM. Before bd-wef5o this returned None, because the
+    // strategy was not `must_be_published`.
+    let absent = inventory_row_problem("fnx-convert", "0.2.0", COND, &locked);
+    assert!(
+        absent.is_some(),
+        "a row naming a crate absent from Cargo.lock must be flagged regardless \
+         of strategy; this is the hole fnx-convert sat in"
+    );
+    let text = absent.unwrap_or_default();
+    assert!(
+        text.contains("absent from Cargo.lock"),
+        "the message must say what is wrong, not merely that something is: {text}"
+    );
+
+    let absent_must = inventory_row_problem("fnx-convert", "0.2.0", MUST, &locked);
+    assert!(
+        absent_must.is_some(),
+        "the must_be_published case that already worked must keep working"
+    );
+}
+
+/// The gate: every inventory row in scripts/audit_install_pipeline.sh agrees
+/// with Cargo.lock, and every lock crate in an enumerated family has a row.
+/// The per-row rule and the history behind it live on
+/// `inventory_row_problem` above.
 #[test]
 fn post_release_audit_inventory_matches_the_resolved_tree() {
     let audit = repo_file("scripts/audit_install_pipeline.sh");
@@ -179,17 +281,8 @@ fn post_release_audit_inventory_matches_the_resolved_tree() {
     let mut problems = Vec::new();
     for parts in &rows {
         let (crate_name, declared, strategy) = (parts[0], parts[1], parts[4]);
-        match locked.get(crate_name) {
-            Some(resolved) if resolved == declared => {}
-            Some(resolved) => problems.push(format!(
-                "  {crate_name}: audit says {declared}, Cargo.lock resolves {resolved} \
-                 -- the probe would verify the wrong version on crates.io"
-            )),
-            None if strategy != "must_be_published" => {}
-            None => problems.push(format!(
-                "  {crate_name}: marked {strategy} but absent from Cargo.lock \
-                 -- a crate that must be published is not in the resolved tree"
-            )),
+        if let Some(problem) = inventory_row_problem(crate_name, declared, strategy, &locked) {
+            problems.push(problem);
         }
     }
 

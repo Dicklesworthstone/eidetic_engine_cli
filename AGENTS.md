@@ -196,7 +196,7 @@ Run `cargo tree -e features` and grep for these crates. CI must fail if any appe
 | `fsqlite-ext-fts5`, `fsqlite-ext-json` | Lexical FTS fallback and JSON ops |
 | `sqlmodel` (+ `-core`, `-query`, `-schema`, `-session`, `-pool`, `-frankensqlite`) | ORM and migrations on top of FrankenSQLite |
 | `frankensearch` | Hybrid lexical + semantic retrieval (`TwoTierSearcher`) |
-| `fnx-runtime`, `fnx-classes`, `fnx-algorithms`, `fnx-cgse`, `fnx-convert` | FrankenNetworkX graph analytics |
+| `fnx-runtime`, `fnx-classes`, `fnx-algorithms`, `fnx-cgse` | FrankenNetworkX graph analytics (the first three are declared in `Cargo.toml`; `fnx-cgse` arrives transitively) |
 | `clap` + `clap_complete` | CLI argument parsing with shell completions |
 | `serde` + `serde_json` + `serde_yaml` | Stable JSON/YAML output contracts |
 | `toml` + `toml_edit` | Config parsing with formatting preservation |
