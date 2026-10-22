@@ -170,14 +170,43 @@ impl DecisionLineage {
                 return Err(lineage_error());
             }
         }
-        // At most one outgoing predecessor per decision is a valid chain.
+        // A reviewed conflict replacement is a domain relationship between
+        // existing memories, not decision revision ancestry. Only the canonical
+        // expiry audit can establish this distinction: caller-supplied link
+        // metadata cannot hide a malformed ancestor. Keep the exclusion before
+        // LIMIT so a legitimate domain edge does not look like a lineage fork.
+        // At most one remaining outgoing predecessor per decision is a valid chain.
         // Bound a corrupt fan-out's result allocation to page_size + 1; seeing
         // the extra row is already proof that a complete valid page is absent.
         let sql = format!(
-            "SELECT src_memory_id, dst_memory_id FROM memory_links WHERE relation = 'supersedes' AND directed = 1 AND src_memory_id IN ({slots}) ORDER BY src_memory_id ASC, dst_memory_id ASC LIMIT ?{}",
-            page.len() + 1,
+            "WITH conflict_resolution_audits AS (\
+                 SELECT workspace_id, target_id, \
+                        CASE WHEN json_valid(details) THEN details ELSE NULL END AS details \
+                 FROM audit_log WHERE action = 'memory.expire' AND target_type = 'memory' \
+                   AND workspace_id = ?{workspace_slot}\
+             ) \
+             SELECT link.src_memory_id, link.dst_memory_id FROM memory_links AS link \
+             WHERE link.relation = 'supersedes' AND link.directed = 1 \
+               AND link.src_memory_id IN ({slots}) \
+               AND NOT EXISTS (\
+                   SELECT 1 FROM conflict_resolution_audits AS resolution \
+                   JOIN memories AS decision \
+                     ON decision.id = json_extract(resolution.details, '$.resolutionDecisionId') \
+                    AND decision.kind = 'decision' \
+                    AND decision.workspace_id = resolution.workspace_id \
+                   WHERE resolution.target_id = link.dst_memory_id \
+                     AND json_extract(resolution.details, '$.schema') = '{conflict_schema}' \
+                     AND json_extract(resolution.details, '$.linkId') = link.id \
+                     AND json_extract(resolution.details, '$.fromMemoryId') = link.src_memory_id \
+                     AND json_extract(resolution.details, '$.toMemoryId') = link.dst_memory_id\
+               ) \
+             ORDER BY link.src_memory_id ASC, link.dst_memory_id ASC LIMIT ?{limit_slot}",
+            workspace_slot = page.len() + 1,
+            limit_slot = page.len() + 2,
+            conflict_schema = super::CONFLICT_SUPERSESSION_AUDIT_SCHEMA,
         );
         let mut params = params;
+        params.push(Value::Text(self.workspace_id.clone()));
         params.push(Value::BigInt((page.len() + 1) as i64));
         let links = connection
             .query(&sql, &params)

@@ -26,6 +26,18 @@ enum Stage {
     Report,
 }
 
+#[derive(Clone, Copy)]
+struct ConflictSupersession<'a> {
+    keeper: &'a str,
+    loser: &'a str,
+}
+
+struct Supersession<'a> {
+    from_memory_id: &'a str,
+    to_memory_id: &'a str,
+    details: JsonValue,
+}
+
 #[derive(Debug)]
 struct RecordError(DomainError);
 
@@ -47,8 +59,39 @@ pub(super) fn record(options: &DecideRecordOptions<'_>) -> Result<DecideRecordRe
     record_with_boundary(options, |_, _| Ok(()))
 }
 
+pub(super) fn record_conflict(
+    options: &DecideRecordOptions<'_>,
+    keeper: &str,
+) -> Result<DecideRecordReport, DomainError> {
+    let Some(loser) = options.supersedes.filter(|_| !options.dry_run) else {
+        return Err(DomainError::Usage {
+            message: "Conflict supersession requires an applied plan with a losing memory"
+                .to_owned(),
+            repair: Some("Use ee conflict resolve to preview the plan before --apply.".to_owned()),
+        });
+    };
+    // A conflict decision records WHY one existing memory replaces another.
+    // It is not itself a revision of an arbitrary fact, rule, or decision.
+    let mut decision_options = options.clone();
+    decision_options.supersedes = None;
+    decision_options.actor = options.actor.or(Some("ee conflict resolve"));
+    record_with_conflict_boundary(
+        &decision_options,
+        Some(ConflictSupersession { keeper, loser }),
+        |_, _| Ok(()),
+    )
+}
+
 fn record_with_boundary(
     options: &DecideRecordOptions<'_>,
+    boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
+) -> Result<DecideRecordReport, DomainError> {
+    record_with_conflict_boundary(options, None, boundary)
+}
+
+fn record_with_conflict_boundary(
+    options: &DecideRecordOptions<'_>,
+    conflict: Option<ConflictSupersession<'_>>,
     mut boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
 ) -> Result<DecideRecordReport, DomainError> {
     let mut scope = decide_scope(
@@ -153,6 +196,12 @@ fn record_with_boundary(
                 )
                 .into());
             }
+            let conflict = conflict
+                .map(|pair| {
+                    validate_conflict_supersession(&connection, write.workspace_id(), pair, &fields)
+                        .map(|conflict_id| (pair, conflict_id))
+                })
+                .transpose()?;
             let heads = read::record_heads_in_current_snapshot(
                 &connection,
                 write.workspace_id(),
@@ -189,11 +238,42 @@ fn record_with_boundary(
                 warnings: Vec::new(),
             };
             if let Some(predecessor) = predecessor {
-                replace_predecessor(
+                replace_memory(
                     &connection,
                     &write,
-                    predecessor,
-                    &fields,
+                    Supersession {
+                        from_memory_id: write.memory_id(),
+                        to_memory_id: &predecessor.memory_id,
+                        details: json!({
+                            "schema": "ee.decide.supersede.v1",
+                            "normalizedTopic": fields.normalized_topic,
+                            "fromMemoryId": write.memory_id(),
+                            "toMemoryId": predecessor.memory_id,
+                            "supersededAt": stored.updated_at,
+                        }),
+                    },
+                    options.actor,
+                    &stored.updated_at,
+                    &mut report,
+                    &mut boundary,
+                )?;
+            }
+            if let Some((pair, conflict_id)) = conflict {
+                replace_memory(
+                    &connection,
+                    &write,
+                    Supersession {
+                        from_memory_id: pair.keeper,
+                        to_memory_id: pair.loser,
+                        details: json!({
+                            "schema": CONFLICT_SUPERSESSION_AUDIT_SCHEMA,
+                            "conflictId": conflict_id,
+                            "resolutionDecisionId": write.memory_id(),
+                            "fromMemoryId": pair.keeper,
+                            "toMemoryId": pair.loser,
+                            "supersededAt": stored.updated_at,
+                        }),
+                    },
                     options.actor,
                     &stored.updated_at,
                     &mut report,
@@ -223,6 +303,85 @@ fn record_with_boundary(
         ),
     }
     Ok(report)
+}
+
+fn stale_conflict() -> DomainError {
+    DomainError::UsageCodeWithDetails {
+        code: "conflict_resolve_stale_surface",
+        message: "The conflict pair changed before apply; no resolution was recorded.".to_owned(),
+        repair: Some("Run ee conflict list --json and plan against the current pair.".to_owned()),
+        details_json: json!({
+            "failureModeCode": "conflict_resolve_stale_surface",
+            "currentPairs": [],
+        })
+        .to_string(),
+    }
+}
+
+fn validate_conflict_supersession(
+    connection: &DbConnection,
+    workspace_id: &str,
+    pair: ConflictSupersession<'_>,
+    fields: &DecisionFields,
+) -> Result<String, RecordError> {
+    use crate::core::contradiction_detect::{
+        ContradictionDetectionConfig, assemble_conflict_surface,
+    };
+    let ids = [pair.keeper, pair.loser];
+    let seals =
+        crate::core::memory_lifecycle::load_memory_seals_for_admission(connection, workspace_id)
+            .map_err(|_| decide_storage_error("Could not verify conflict source authority"))?;
+    let held =
+        crate::core::memory_lifecycle::pending_memory_review_ids(connection, workspace_id, &ids)
+            .map_err(|_| decide_storage_error("Could not verify conflict source authority"))?;
+    if seals
+        .iter()
+        .any(|seal| seal.is_sealed() && ids.contains(&seal.memory_id.as_str()))
+        || !held.is_empty()
+    {
+        return Err(conflict_authority_error().into());
+    }
+    for id in ids {
+        let memory = connection.get_memory(id)?.ok_or_else(stale_conflict)?;
+        if memory.workspace_id != workspace_id {
+            return Err(DomainError::PolicyDenied {
+                message: "Both conflict memories must belong to the addressed workspace".to_owned(),
+                repair: Some(
+                    "Select a conflict from this workspace's ee conflict list.".to_owned(),
+                ),
+            }
+            .into());
+        }
+        if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+            return Err(conflict_authority_error().into());
+        }
+    }
+    let surface = assemble_conflict_surface(connection, ContradictionDetectionConfig::default());
+    let current = surface
+        .pairs
+        .iter()
+        .find(|current| {
+            (current.memory_a.id == pair.keeper && current.memory_b.id == pair.loser)
+                || (current.memory_a.id == pair.loser && current.memory_b.id == pair.keeper)
+        })
+        .ok_or_else(stale_conflict)?;
+    if fields.topic != format!("conflict:{}", current.conflict_id)
+        || fields.chosen != format!("keep {}", pair.keeper)
+    {
+        return Err(DomainError::Usage {
+            message: "Conflict decision does not match the current pair and keeper".to_owned(),
+            repair: Some("Create a fresh plan with ee conflict resolve.".to_owned()),
+        }
+        .into());
+    }
+    Ok(current.conflict_id.clone())
+}
+
+fn conflict_authority_error() -> DomainError {
+    DomainError::PolicyDenied {
+        message: "Conflict source authority prevents supersession; no resolution was recorded".to_owned(),
+        repair: Some("Review pending feedback or explicitly reveal sealed memories before resolving this pair.".to_owned()),
+    }
 }
 
 fn validated_fields(fields: &DecisionFields) -> Result<String, DomainError> {
@@ -334,11 +493,10 @@ fn memory_audit_id(
     clippy::too_many_arguments,
     reason = "all inputs belong to the one decision transition"
 )]
-fn replace_predecessor(
+fn replace_memory(
     connection: &DbConnection,
     write: &PreparedRememberTxnWrite,
-    predecessor: &DecideItem,
-    fields: &DecisionFields,
+    mut replacement: Supersession<'_>,
     actor: Option<&str>,
     at: &str,
     report: &mut DecideRecordReport,
@@ -347,49 +505,62 @@ fn replace_predecessor(
     let actor = actor.or(Some("ee decide record")).map(str::to_owned);
     let suffix = MemoryId::now().to_string();
     let suffix = suffix.trim_start_matches("mem_");
-    let link_id = format!("link_{suffix}");
+    let existing = connection.get_memory_link_by_edge(
+        replacement.from_memory_id,
+        replacement.to_memory_id,
+        MemoryLinkRelation::Supersedes,
+    )?;
+    if existing.as_ref().is_some_and(|link| !link.directed) {
+        return Err(DomainError::Usage {
+            message: "An existing supersedes link is undirected; no replacement was recorded"
+                .to_owned(),
+            repair: Some(
+                "Repair the supersedes link's direction before resolving this pair.".to_owned(),
+            ),
+        }
+        .into());
+    }
+    let link_id = existing
+        .as_ref()
+        .map_or_else(|| format!("link_{suffix}"), |link| link.id.clone());
     let job_id = format!("sidx_{suffix}");
-    let link_audit = generate_audit_id();
+    let link_audit = existing.is_none().then(generate_audit_id);
     let expire_audit = generate_audit_id();
-    let details = json!({
-        "schema": "ee.decide.supersede.v1",
-        "normalizedTopic": fields.normalized_topic,
-        "fromMemoryId": write.memory_id(),
-        "toMemoryId": predecessor.memory_id,
-        "supersededAt": at,
-    })
-    .to_string();
-    connection.insert_memory_link(
-        &link_id,
-        &CreateMemoryLinkInput {
-            src_memory_id: write.memory_id().to_owned(),
-            dst_memory_id: predecessor.memory_id.clone(),
-            relation: MemoryLinkRelation::Supersedes,
-            weight: 1.0,
-            confidence: 1.0,
-            directed: true,
-            evidence_count: 1,
-            last_reinforced_at: None,
-            source: MemoryLinkSource::Agent,
-            created_by: actor.clone(),
-            metadata_json: Some(details.clone()),
-        },
-    )?;
-    connection.insert_audit(
-        &link_audit,
-        &CreateAuditInput {
-            workspace_id: Some(write.workspace_id().to_owned()),
-            actor: actor.clone(),
-            action: audit_actions::MEMORY_LINK_CREATE.to_owned(),
-            target_type: Some("memory_link".to_owned()),
-            target_id: Some(link_id),
-            details: Some(details.clone()),
-        },
-    )?;
+    replacement.details["linkId"] = json!(link_id);
+    let details = replacement.details.to_string();
+    if let Some(link_audit) = &link_audit {
+        connection.insert_memory_link(
+            &link_id,
+            &CreateMemoryLinkInput {
+                src_memory_id: replacement.from_memory_id.to_owned(),
+                dst_memory_id: replacement.to_memory_id.to_owned(),
+                relation: MemoryLinkRelation::Supersedes,
+                weight: 1.0,
+                confidence: 1.0,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: None,
+                source: MemoryLinkSource::Agent,
+                created_by: actor.clone(),
+                metadata_json: Some(details.clone()),
+            },
+        )?;
+        connection.insert_audit(
+            link_audit,
+            &CreateAuditInput {
+                workspace_id: Some(write.workspace_id().to_owned()),
+                actor: actor.clone(),
+                action: audit_actions::MEMORY_LINK_CREATE.to_owned(),
+                target_type: Some("memory_link".to_owned()),
+                target_id: Some(link_id),
+                details: Some(details.clone()),
+            },
+        )?;
+    }
     boundary(Stage::Link, connection)?;
-    let changed_expiry = connection.expire_memory_valid_to(&predecessor.memory_id, at)?;
-    if !connection.mark_memory_superseded(&predecessor.memory_id, at)? {
-        return Err(decide_storage_error("Decision predecessor changed during replacement").into());
+    let changed_expiry = connection.expire_memory_valid_to(replacement.to_memory_id, at)?;
+    if !connection.mark_memory_superseded(replacement.to_memory_id, at)? {
+        return Err(decide_storage_error("Superseded memory changed during replacement").into());
     }
     connection.insert_audit(
         &expire_audit,
@@ -398,18 +569,18 @@ fn replace_predecessor(
             actor: actor.clone(),
             action: audit_actions::MEMORY_EXPIRE.to_owned(),
             target_type: Some("memory".to_owned()),
-            target_id: Some(predecessor.memory_id.clone()),
+            target_id: Some(replacement.to_memory_id.to_owned()),
             details: Some(details),
         },
     )?;
     let previous = connection
-        .get_memory(&predecessor.memory_id)?
-        .ok_or_else(|| decide_storage_error("Decision predecessor disappeared"))?;
+        .get_memory(replacement.to_memory_id)?
+        .ok_or_else(|| decide_storage_error("Superseded memory disappeared"))?;
     if changed_expiry
         && previous.level == "semantic"
         && connection
             .apply_memory_level_transition_in_current_transaction(
-                &predecessor.memory_id,
+                replacement.to_memory_id,
                 &ApplyMemoryLevelTransitionInput {
                     workspace_id: write.workspace_id().to_owned(),
                     expected_level: Some("semantic".to_owned()),
@@ -425,10 +596,9 @@ fn replace_predecessor(
             )?
             .is_none()
     {
-        return Err(decide_storage_error(
-            "Decision predecessor lifecycle changed during replacement",
-        )
-        .into());
+        return Err(
+            decide_storage_error("Superseded memory lifecycle changed during replacement").into(),
+        );
     }
     boundary(Stage::Predecessor, connection)?;
     connection.insert_search_index_job(
@@ -437,15 +607,15 @@ fn replace_predecessor(
             workspace_id: write.workspace_id().to_owned(),
             job_type: SearchIndexJobType::SingleDocument,
             document_source: Some("memory".to_owned()),
-            document_id: Some(predecessor.memory_id.clone()),
+            document_id: Some(replacement.to_memory_id.to_owned()),
             documents_total: 1,
         },
     )?;
     boundary(Stage::Index, connection)?;
-    report.link_audit_id = Some(link_audit);
+    report.link_audit_id = link_audit;
     report.expire_audit_id = Some(expire_audit);
     report.superseded = Some(DecideMemoryRef {
-        memory_id: predecessor.memory_id.clone(),
+        memory_id: replacement.to_memory_id.to_owned(),
         valid_to: previous.valid_to,
         status: if changed_expiry {
             "expired"

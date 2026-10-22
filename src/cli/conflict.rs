@@ -83,7 +83,7 @@ pub fn execute_conflict_resolution(
     reason: &str,
     actor: Option<&str>,
 ) -> Result<Vec<ResolutionActionResult>, DomainError> {
-    use crate::core::decide::{DecideRecordOptions, decide_record};
+    use crate::core::decide::{DecideRecordOptions, decide_conflict_supersession, decide_record};
     use crate::core::memory::{
         ExpireMemoryOptions, MemoryLinkMode, MemoryLinkOptions, MemoryTagsMode, MemoryTagsOptions,
         expire_memory, update_memory_link, update_memory_tags,
@@ -99,7 +99,7 @@ pub fn execute_conflict_resolution(
                 alternatives,
                 supersedes,
             } => {
-                let report = decide_record(&DecideRecordOptions {
+                let options = DecideRecordOptions {
                     workspace_path: workspace,
                     database_path: Some(database_path),
                     topic,
@@ -111,7 +111,29 @@ pub fn execute_conflict_resolution(
                     dry_run: false,
                     actor,
                     now: None,
-                })?;
+                };
+                let report = if let Some(loser) = supersedes {
+                    let keeper = plan
+                        .keep
+                        .as_deref()
+                        .filter(|keeper| {
+                            plan.verb == crate::core::contradiction_detect::ResolveVerb::Supersede
+                                && plan.lose.as_deref() == Some(loser.as_str())
+                                && ((*keeper == plan.memory_a && loser == &plan.memory_b)
+                                    || (*keeper == plan.memory_b && loser == &plan.memory_a))
+                        })
+                        .ok_or_else(|| DomainError::Usage {
+                            message: "Conflict supersession plan does not identify its two sides"
+                                .to_owned(),
+                            repair: Some(
+                                "Run ee conflict explain and create a fresh resolution plan."
+                                    .to_owned(),
+                            ),
+                        })?;
+                    decide_conflict_supersession(&options, keeper)?
+                } else {
+                    decide_record(&options)?
+                };
                 ResolutionActionResult {
                     action: "recordDecision".to_owned(),
                     audit_ids: [

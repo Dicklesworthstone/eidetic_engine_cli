@@ -2,7 +2,12 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
-use crate::db::CreateWorkspaceInput;
+use crate::core::contradiction_detect::{
+    ConflictResolutionOutcome, ConflictResolutionPlan, ConflictResolveRequest,
+    ContradictionDetectionConfig, PlannedResolutionAction, ResolveVerb, assemble_conflict_surface,
+    plan_conflict_resolution,
+};
+use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
 
 type RowState = Vec<(String, Value)>;
 type TableState = (&'static str, Vec<RowState>);
@@ -80,6 +85,102 @@ impl Fixture {
             now: None,
         })
         .unwrap()
+    }
+
+    fn seed_conflict_memory(&self, kind: &str, level: &str) -> String {
+        let id = MemoryId::now().to_string();
+        self.db
+            .insert_memory(
+                &id,
+                &CreateMemoryInput {
+                    workspace_id: stable_workspace_id(&self.root.path().canonicalize().unwrap()),
+                    level: level.to_owned(),
+                    kind: kind.to_owned(),
+                    content: format!("conflict source {id}"),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .unwrap();
+        id
+    }
+
+    fn seed_conflict_link(
+        &self,
+        keeper: &str,
+        loser: &str,
+        relation: MemoryLinkRelation,
+    ) -> String {
+        let id = format!(
+            "link_{}",
+            MemoryId::now().to_string().trim_start_matches("mem_")
+        );
+        self.db
+            .insert_memory_link(
+                &id,
+                &CreateMemoryLinkInput {
+                    src_memory_id: keeper.to_owned(),
+                    dst_memory_id: loser.to_owned(),
+                    relation,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: None,
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        id
+    }
+
+    fn conflict_plan(&self, keeper: &str, loser: &str) -> ConflictResolutionPlan {
+        let surface = assemble_conflict_surface(&self.db, ContradictionDetectionConfig::default());
+        let outcome = plan_conflict_resolution(
+            &surface,
+            &ConflictResolveRequest {
+                memory_a: keeper,
+                memory_b: loser,
+                verb: ResolveVerb::Supersede,
+                keep: Some(keeper),
+                reason: "A reviewed replacement.",
+                scope_a_tags: Vec::new(),
+                scope_b_tags: Vec::new(),
+            },
+        );
+        let ConflictResolutionOutcome::Plan(plan) = outcome else {
+            panic!("expected conflict plan: {outcome:?}");
+        };
+        plan
+    }
+
+    fn conflict_options<'a>(&'a self, plan: &'a ConflictResolutionPlan) -> DecideRecordOptions<'a> {
+        let PlannedResolutionAction::RecordDecision {
+            topic,
+            chosen,
+            alternatives,
+            supersedes,
+        } = &plan.actions[0]
+        else {
+            panic!("expected decision atom");
+        };
+        let mut request = self.options(None);
+        request.topic = topic;
+        request.chosen = chosen;
+        request.alternatives = alternatives.clone();
+        request.supersedes = supersedes.as_deref();
+        request.rationale = "A reviewed replacement.";
+        request
     }
 }
 
@@ -473,4 +574,386 @@ fn decoded_structured_secrets_are_refused_before_opening_the_destination() {
         assert!(!format!("{error:?}").contains("decision-private-canary"));
         assert!(!root.path().join(".ee").exists());
     }
+}
+
+#[test]
+fn conflict_cli_preview_is_read_only_and_apply_dispatches_the_atomic_writer() {
+    let fixture = Fixture::new();
+    let keeper = fixture.seed_conflict_memory("fact", "semantic");
+    let loser = fixture.seed_conflict_memory("fact", "semantic");
+    fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+    let before = fixture.state();
+    let invoke = |apply| {
+        let mut args = vec![
+            "ee",
+            "conflict",
+            "resolve",
+            keeper.as_str(),
+            loser.as_str(),
+            "--verb",
+            "supersede",
+            "--keep",
+            keeper.as_str(),
+            "--reason",
+            "The replacement was reviewed.",
+            "--workspace",
+            fixture.root.path().to_str().unwrap(),
+            "--json",
+        ];
+        if apply {
+            args.push("--apply");
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = crate::cli::run(
+            args.into_iter().map(std::ffi::OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+        (
+            exit,
+            serde_json::from_slice::<JsonValue>(&stdout).unwrap(),
+            stderr,
+        )
+    };
+    let (exit, preview, stderr) = invoke(false);
+    assert_eq!(exit, crate::models::ProcessExitCode::Success, "{stderr:?}");
+    assert_eq!(preview["data"]["status"], "planned");
+    assert_eq!(preview["data"]["persisted"], false);
+    assert_eq!(fixture.state(), before);
+    let (exit, applied, stderr) = invoke(true);
+    assert_eq!(exit, crate::models::ProcessExitCode::Success, "{stderr:?}");
+    assert_eq!(applied["data"]["status"], "applied");
+    assert_eq!(applied["data"]["persisted"], true);
+    assert_eq!(
+        applied["data"]["results"][0]["auditIds"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(
+        fixture
+            .db
+            .get_memory_superseded_at(&loser)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(fixture.list(false).total_count, 1);
+    let applied_state = fixture.state();
+    let (exit, _, _) = invoke(true);
+    assert_eq!(exit, crate::models::ProcessExitCode::Usage);
+    assert_eq!(fixture.state(), applied_state);
+}
+
+#[test]
+fn scope_split_and_both_valid_cli_apply_persist_their_decision_rationales() {
+    for verb in ["scope-split", "both-valid"] {
+        let fixture = Fixture::new();
+        let keeper = fixture.seed_conflict_memory("fact", "semantic");
+        let loser = fixture.seed_conflict_memory("fact", "semantic");
+        fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+        // Reverse the positional pair to exercise the actual scope-tag consumer.
+        let mut args = vec![
+            "ee",
+            "conflict",
+            "resolve",
+            loser.as_str(),
+            keeper.as_str(),
+            "--verb",
+            verb,
+            "--reason",
+            "The scopes were reviewed.",
+            "--workspace",
+            fixture.root.path().to_str().unwrap(),
+            "--json",
+            "--apply",
+        ];
+        if verb == "scope-split" {
+            args.extend(["--scope-a-tags", "rust", "--scope-b-tags", "python"]);
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = crate::cli::run(
+            args.into_iter().map(std::ffi::OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, crate::models::ProcessExitCode::Success, "{stderr:?}");
+        let report: JsonValue = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(report["data"]["status"], "applied");
+        let decisions = fixture.list(false);
+        assert_eq!(decisions.total_count, 1);
+        assert_eq!(
+            decisions.decisions[0].rationale,
+            "The scopes were reviewed."
+        );
+        if verb == "scope-split" {
+            assert_eq!(fixture.db.get_memory_tags(&loser).unwrap(), vec!["rust"]);
+            assert_eq!(fixture.db.get_memory_tags(&keeper).unwrap(), vec!["python"]);
+        }
+        for id in [&keeper, &loser] {
+            let source = fixture.db.get_memory(id).unwrap().unwrap();
+            assert!(source.valid_to.is_none() && source.tombstoned_at.is_none());
+            assert!(fixture.db.get_memory_superseded_at(id).unwrap().is_none());
+        }
+    }
+}
+
+#[test]
+fn conflict_supersession_refuses_a_foreign_workspace_side_without_mutation() {
+    let fixture = Fixture::new();
+    let keeper = fixture.seed_conflict_memory("fact", "semantic");
+    let loser = fixture.seed_conflict_memory("fact", "semantic");
+    let foreign_workspace = "wsp_00000000000000000000000073";
+    fixture
+        .db
+        .insert_workspace(
+            foreign_workspace,
+            &CreateWorkspaceInput {
+                path: "/tmp/foreign-conflict-workspace".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE memories SET workspace_id = '{foreign_workspace}' WHERE id = '{loser}'"
+        ))
+        .unwrap();
+    fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+    let plan = fixture.conflict_plan(&keeper, &loser);
+    let before = fixture.state();
+    assert!(matches!(
+        record_conflict(&fixture.conflict_options(&plan), &keeper),
+        Err(DomainError::PolicyDenied { .. })
+    ));
+    assert_eq!(fixture.state(), before);
+}
+
+#[test]
+fn conflict_supersession_atomically_replaces_facts_and_rules_without_tombstoning() {
+    for (kind, level) in [("fact", "semantic"), ("rule", "procedural")] {
+        let fixture = Fixture::new();
+        let keeper = fixture.seed_conflict_memory(kind, level);
+        let loser = fixture.seed_conflict_memory(kind, level);
+        fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+        let kept_before = fixture.db.get_memory(&keeper).unwrap().unwrap();
+        let lost_before = fixture.db.get_memory(&loser).unwrap().unwrap();
+        let plan = fixture.conflict_plan(&keeper, &loser);
+        let request = fixture.conflict_options(&plan);
+        assert_eq!(request.alternatives, vec![format!("keep {loser}")]);
+        let report = record_conflict(&request, &keeper).unwrap();
+
+        assert!(report.persisted);
+        assert!(report.decision.supersedes.is_none());
+        assert_eq!(report.decision.chain_depth, 0);
+        assert_eq!(report.superseded.as_ref().unwrap().memory_id, loser);
+        assert_eq!(
+            fixture.db.get_memory(&keeper).unwrap().unwrap(),
+            kept_before
+        );
+        let retired = fixture.db.get_memory(&loser).unwrap().unwrap();
+        assert_eq!(retired.content, lost_before.content);
+        assert!(retired.tombstoned_at.is_none());
+        assert!(retired.valid_to.is_some());
+        assert!(
+            fixture
+                .db
+                .get_memory_superseded_at(&loser)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            retired.level,
+            if level == "semantic" {
+                "episodic"
+            } else {
+                level
+            }
+        );
+        let link = fixture
+            .db
+            .get_memory_link_by_edge(&keeper, &loser, MemoryLinkRelation::Supersedes)
+            .unwrap()
+            .unwrap();
+        assert!(link.directed);
+        assert!(
+            report.memory_audit_id.is_some()
+                && report.link_audit_id.is_some()
+                && report.expire_audit_id.is_some()
+        );
+        let audit = fixture
+            .db
+            .query(
+                "SELECT details FROM audit_log WHERE id = ?1",
+                &[Value::Text(report.expire_audit_id.clone().unwrap())],
+            )
+            .unwrap();
+        let details: JsonValue =
+            serde_json::from_str(audit[0].get(0).and_then(Value::as_str).unwrap()).unwrap();
+        assert_eq!(details["schema"], CONFLICT_SUPERSESSION_AUDIT_SCHEMA);
+        assert_eq!(details["fromMemoryId"], keeper);
+        assert_eq!(details["toMemoryId"], loser);
+        assert_eq!(details["linkId"], link.id);
+        assert_eq!(details["resolutionDecisionId"], report.decision.memory_id);
+        let jobs = fixture
+            .db
+            .query(
+                "SELECT document_id FROM search_index_jobs ORDER BY document_id",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            jobs.len(),
+            2,
+            "decision publication and retired source reindexing"
+        );
+        assert!(
+            jobs.iter()
+                .any(|row| row.get(0).and_then(Value::as_str) == Some(loser.as_str()))
+        );
+        let surface =
+            assemble_conflict_surface(&fixture.db, ContradictionDetectionConfig::default());
+        assert!(surface.pairs.is_empty() && surface.clusters.is_empty());
+        assert_eq!(fixture.list(false).decisions, vec![report.decision.clone()]);
+        let before_replay = fixture.state();
+        assert!(matches!(
+            record_conflict(&request, &keeper),
+            Err(DomainError::UsageCodeWithDetails {
+                code: "conflict_resolve_stale_surface",
+                ..
+            })
+        ));
+        assert_eq!(fixture.state(), before_replay);
+    }
+}
+
+#[test]
+fn conflict_resolution_reuses_an_existing_supersedes_edge() {
+    let fixture = Fixture::new();
+    let keeper = fixture.seed_conflict_memory("fact", "semantic");
+    let loser = fixture.seed_conflict_memory("fact", "semantic");
+    let link_id = fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Supersedes);
+    let plan = fixture.conflict_plan(&keeper, &loser);
+    let report = record_conflict(&fixture.conflict_options(&plan), &keeper).unwrap();
+    assert!(report.persisted && report.link_audit_id.is_none());
+    assert!(report.expire_audit_id.is_some());
+    let links = fixture
+        .db
+        .list_memory_links_for_memory(&keeper, Some(MemoryLinkRelation::Supersedes))
+        .unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].id, link_id);
+    assert!(
+        links[0].metadata_json.is_none(),
+        "existing link provenance is preserved"
+    );
+}
+
+#[test]
+fn conflict_domain_replacement_preserves_a_keeper_decisions_existing_revision_history() {
+    let fixture = Fixture::new();
+    let original = record(&fixture.options(None)).unwrap();
+    let mut revision = fixture.options(None);
+    revision.supersedes = Some(&original.decision.memory_id);
+    let keeper = record(&revision).unwrap();
+    let loser = fixture.seed_conflict_memory("fact", "semantic");
+    fixture.seed_conflict_link(
+        &keeper.decision.memory_id,
+        &loser,
+        MemoryLinkRelation::Contradicts,
+    );
+    let plan = fixture.conflict_plan(&keeper.decision.memory_id, &loser);
+    let resolved =
+        record_conflict(&fixture.conflict_options(&plan), &keeper.decision.memory_id).unwrap();
+    assert_eq!(resolved.decision.chain_depth, 0);
+    let current = fixture.list(false);
+    assert_eq!(current.total_count, 2);
+    let retained = current
+        .decisions
+        .iter()
+        .find(|item| item.memory_id == keeper.decision.memory_id)
+        .unwrap();
+    assert_eq!(retained.chain_depth, 1);
+    assert_eq!(
+        retained.supersedes.as_deref(),
+        Some(original.decision.memory_id.as_str())
+    );
+    assert_eq!(fixture.list(true).total_count, 3);
+}
+
+#[test]
+fn every_precommit_interruption_rolls_back_the_entire_conflict_supersession() {
+    let fixture = Fixture::new();
+    let keeper = fixture.seed_conflict_memory("fact", "semantic");
+    let loser = fixture.seed_conflict_memory("fact", "semantic");
+    fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+    let plan = fixture.conflict_plan(&keeper, &loser);
+    let mut request = fixture.conflict_options(&plan);
+    request.supersedes = None;
+    let before = fixture.state();
+    for stop in [
+        Stage::Memory,
+        Stage::Fields,
+        Stage::Link,
+        Stage::Predecessor,
+        Stage::Index,
+        Stage::Report,
+    ] {
+        let failed = record_with_conflict_boundary(
+            &request,
+            Some(ConflictSupersession {
+                keeper: &keeper,
+                loser: &loser,
+            }),
+            |stage, _| {
+                if stage == stop {
+                    Err(injected_error())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(failed.is_err(), "{stop:?}");
+        assert_eq!(fixture.state(), before, "{stop:?}");
+        assert!(!fixture.root.path().join(".ee/audit.jsonl").exists());
+    }
+}
+
+#[test]
+fn a_conflict_resolved_after_preparation_is_refused_before_source_insert() {
+    let fixture = Fixture::new();
+    let keeper = fixture.seed_conflict_memory("fact", "semantic");
+    let loser = fixture.seed_conflict_memory("fact", "semantic");
+    fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+    let plan = fixture.conflict_plan(&keeper, &loser);
+    let original = fixture.conflict_options(&plan);
+    let mut request = original.clone();
+    request.supersedes = None;
+    let mut winning_state = None;
+    let failed = record_with_conflict_boundary(
+        &request,
+        Some(ConflictSupersession {
+            keeper: &keeper,
+            loser: &loser,
+        }),
+        |stage, _| {
+            if stage == Stage::Prepared {
+                record_conflict(&original, &keeper)?;
+                winning_state = Some(fixture.state());
+            }
+            Ok(())
+        },
+    );
+    assert!(matches!(
+        failed,
+        Err(DomainError::UsageCodeWithDetails {
+            code: "conflict_resolve_stale_surface",
+            ..
+        })
+    ));
+    assert_eq!(fixture.state(), winning_state.unwrap());
+    assert_eq!(fixture.list(false).total_count, 1);
 }

@@ -302,6 +302,46 @@ fn multiple_predecessors_are_not_resolved_by_id_order_or_input_order() {
 }
 
 #[test]
+fn link_metadata_cannot_disguise_a_nondecision_ancestor_as_a_conflict_resolution() {
+    let fixture = Fixture::new();
+    let keeper = fixture.seed(1);
+    let loser = fixture.seed_owned(2, &fixture.workspace, "fact");
+    fixture
+        .db
+        .insert_memory_link(
+            "link_00000000000000000000000001",
+            &CreateMemoryLinkInput {
+                src_memory_id: keeper.clone(),
+                dst_memory_id: loser.clone(),
+                relation: MemoryLinkRelation::Supersedes,
+                weight: 1.0,
+                confidence: 1.0,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: None,
+                source: MemoryLinkSource::Agent,
+                created_by: None,
+                metadata_json: Some(
+                    serde_json::json!({
+                        "schema": super::super::CONFLICT_SUPERSESSION_AUDIT_SCHEMA,
+                        "linkId": "link_00000000000000000000000001",
+                        "resolutionDecisionId": keeper,
+                        "fromMemoryId": keeper,
+                        "toMemoryId": loser,
+                    })
+                    .to_string(),
+                ),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture.depth(&keeper),
+        Err(DomainError::Storage { .. })
+    ));
+    assert!(fixture.list(false, 10).is_err());
+}
+
+#[test]
 fn foreign_or_nondecision_ancestors_never_count_as_owned_decision_history() {
     for foreign in [false, true] {
         let fixture = Fixture::new();
