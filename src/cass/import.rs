@@ -922,10 +922,16 @@ pub fn import_cass_sessions(
                             &session_id,
                         )?
                     };
+                    // A recovered derivation can add searchable evidence after
+                    // the source snapshot's job has already completed. Prefer
+                    // its publication obligation; the coalesced publisher also
+                    // drains any pending source jobs for this session.
+                    let index_job_id =
+                        derive_session_error_recall(&connection, &workspace_id, &session_id)
+                            .or(index_job_id);
                     if index_job_id.is_some() {
                         index_jobs_queued = index_jobs_queued.saturating_add(1);
                     }
-                    derive_session_error_recall(&connection, &workspace_id, &session_id);
                     if changed {
                         cursor.record_imported(&session.source_path);
                         imported = imported.saturating_add(1);
@@ -960,7 +966,9 @@ pub fn import_cass_sessions(
                     }
                     let session_spans = saturating_len(spans.len());
                     spans_imported = spans_imported.saturating_add(session_spans);
-                    derive_session_error_recall(&connection, &workspace_id, &session_id);
+                    let index_job_id =
+                        derive_session_error_recall(&connection, &workspace_id, &session_id)
+                            .unwrap_or(index_job_id);
 
                     cursor.record_imported(&session.source_path);
                     imported = imported.saturating_add(1);
@@ -1818,6 +1826,9 @@ mod ingestion;
 #[allow(dead_code)]
 #[path = "backfill.rs"]
 mod backfill;
+#[cfg(test)]
+#[path = "recall_publication_tests.rs"]
+mod recall_publication_tests;
 #[path = "refresh.rs"]
 mod refresh;
 
@@ -2692,38 +2703,109 @@ fn stable_evidence_id(session_id: &str, span_id: &str) -> String {
 /// its session. A crash or failure after a growing refresh commits must leave
 /// that snapshot retryable even when an older snapshot was already derived.
 /// The transcript is already durable here, so failure never fails the import.
-fn derive_session_error_recall(connection: &DbConnection, workspace_id: &str, session_id: &str) {
-    let result = (|| -> Result<(), DbError> {
-        // Capture the committed identity before the recorder reads any source.
-        // Reading a newer token afterwards could certify older evidence as the
-        // latest snapshot. The token requires only bounded session metadata.
-        let publication_id =
-            refresh::committed_session_publication_id(connection, workspace_id, session_id)?;
-        let marker_id = stable_cass_error_recall_snapshot_audit_id(session_id, &publication_id);
-        if connection.get_audit(&marker_id)?.is_some() {
-            return Ok(());
+fn derive_session_error_recall(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+) -> Option<String> {
+    // Hold the reentrant writer fence, without opening a transaction, across
+    // both transactions below. Otherwise two importers can pass the missing
+    // marker check, and the second recorder can advance the source generation
+    // after the first importer's derived publication has already completed.
+    let result = connection.with_write_owner_fence(
+        |error| error,
+        || {
+            // Capture the committed identity before the recorder reads any source.
+            // Reading a newer token afterwards could certify older evidence as the
+            // latest snapshot. The token requires only bounded session metadata.
+            let publication_id =
+                refresh::committed_session_publication_id(connection, workspace_id, session_id)?;
+            let marker_id = stable_cass_error_recall_snapshot_audit_id(session_id, &publication_id);
+            if let Some(marker) = connection.get_audit(&marker_id)? {
+                return reconcile_error_recall_publication(
+                    connection,
+                    workspace_id,
+                    session_id,
+                    &publication_id,
+                    &marker,
+                );
+            }
+            #[cfg(all(test, unix))]
+            recall_publication_tests::before_recorder();
+            let report = crate::core::cass_error_recall::record_session_error_recall(
+                connection,
+                workspace_id,
+                session_id,
+            )?;
+            record_session_error_recall_completion(
+                connection,
+                workspace_id,
+                session_id,
+                &publication_id,
+                &report,
+            )
+        },
+    );
+    match result {
+        Ok(index_job_id) => index_job_id,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::cass::import",
+                session_id,
+                error = %error,
+                "deriving error recall from the imported session failed; the session itself is imported"
+            );
+            None
         }
-        let report = crate::core::cass_error_recall::record_session_error_recall(
-            connection,
-            workspace_id,
-            session_id,
-        )?;
-        record_session_error_recall_completion(
-            connection,
-            workspace_id,
-            session_id,
-            &publication_id,
-            &report,
-        )
-    })();
-    if let Err(error) = result {
-        tracing::warn!(
-            target: "ee::cass::import",
-            session_id,
-            error = %error,
-            "deriving error recall from the imported session failed; the session itself is imported"
-        );
     }
+}
+
+/// Recover the publication obligation from the durable completion marker.
+/// The caller holds the writer fence. Submission counts remain nonzero when a
+/// retry reuses cards committed before an earlier marker failure.
+fn reconcile_error_recall_publication(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+    publication_id: &str,
+    marker: &crate::db::StoredAuditEntry,
+) -> Result<Option<String>, DbError> {
+    let invalid_marker = || DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: "cass_error_recall_marker_invalid: cannot verify derived publication".to_owned(),
+    };
+    let details: JsonValue = marker
+        .details
+        .as_deref()
+        .and_then(|details| serde_json::from_str(details).ok())
+        .ok_or_else(invalid_marker)?;
+    if marker.workspace_id.as_deref() != Some(workspace_id)
+        || marker.action != crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE
+        || marker.target_type.as_deref() != Some("session")
+        || marker.target_id.as_deref() != Some(session_id)
+        || details["committedPublicationId"].as_str() != Some(publication_id)
+    {
+        return Err(invalid_marker());
+    }
+    let mut has_source_writes = false;
+    for counter in [
+        "fingerprintsRecorded",
+        "repairLinksRecorded",
+        "incidentCardsRecorded",
+    ] {
+        let count = details[counter].as_u64().ok_or_else(invalid_marker)?;
+        has_source_writes |= count > 0;
+    }
+    if !has_source_writes {
+        return Ok(None);
+    }
+    refresh::pending_job(
+        connection,
+        workspace_id,
+        session_id,
+        &stable_cass_error_recall_index_job_id(&marker.id),
+        true,
+    )
 }
 
 fn record_session_error_recall_completion(
@@ -2732,18 +2814,41 @@ fn record_session_error_recall_completion(
     session_id: &str,
     publication_id: &str,
     report: &crate::core::cass_error_recall::CassErrorRecallReport,
-) -> Result<(), DbError> {
-    // The recorder owns its transaction. Fence only this final identity check
-    // and success marker; a concurrent refresh leaves the latest snapshot
-    // unmarked for retry, never certified by older derived work.
+) -> Result<Option<String>, DbError> {
+    // The recorder owns its transaction. This second transaction contains the
+    // final identity check and atomic publication obligation/success marker.
+    // A newer source snapshot stays unmarked for retry, never certified by
+    // older derived work.
     let marker_id = stable_cass_error_recall_snapshot_audit_id(session_id, publication_id);
     with_import_session_transaction(connection, || {
         if refresh::committed_session_publication_id(connection, workspace_id, session_id)?
             != publication_id
-            || connection.get_audit(&marker_id)?.is_some()
         {
-            return Ok(());
+            return Ok(None);
         }
+        if let Some(marker) = connection.get_audit(&marker_id)? {
+            return reconcile_error_recall_publication(
+                connection,
+                workspace_id,
+                session_id,
+                publication_id,
+                &marker,
+            );
+        }
+        let index_job_id = if report.fingerprints_recorded > 0
+            || report.repair_links_recorded > 0
+            || report.incident_cards_recorded > 0
+        {
+            refresh::pending_job(
+                connection,
+                workspace_id,
+                session_id,
+                &stable_cass_error_recall_index_job_id(&marker_id),
+                true,
+            )?
+        } else {
+            None
+        };
         connection.insert_audit(
             &marker_id,
             &CreateAuditInput {
@@ -2768,7 +2873,8 @@ fn record_session_error_recall_completion(
                     .to_string(),
                 ),
             },
-        )
+        )?;
+        Ok(index_job_id)
     })
 }
 
@@ -2791,6 +2897,14 @@ fn stable_cass_error_recall_snapshot_audit_id(session_id: &str, publication_id: 
         stable_cass_error_recall_audit_id(session_id),
     )))
     .to_string()
+}
+
+/// A derived publication is bound to the snapshot and both derivation
+/// revisions through its marker. It must never replace the source checkpoint:
+/// doing so would change the marker identity on every unchanged retry.
+fn stable_cass_error_recall_index_job_id(marker_id: &str) -> String {
+    let hash = blake3_hex(&format!("search-index-job:cass-error-recall:{marker_id}"));
+    format!("sidx_{}", &hash[..26])
 }
 
 fn stable_cass_redaction_audit_id(evidence_id: &str) -> String {
@@ -3004,7 +3118,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         }
 
-        derive_session_error_recall(&db, &workspace_id, &session_id);
+        let _ = derive_session_error_recall(&db, &workspace_id, &session_id);
         ensure(
             db.get_error_fingerprint(&workspace_id, "ee:migration_required")
                 .map_err(|error| error.to_string())?
@@ -3019,7 +3133,7 @@ mod tests {
             .get_audit(&marker_id)
             .map_err(|error| error.to_string())?
             .ok_or("upgraded derivation marker missing")?;
-        derive_session_error_recall(&db, &workspace_id, &session_id);
+        let _ = derive_session_error_recall(&db, &workspace_id, &session_id);
         ensure_equal(
             &db.get_audit(&marker_id)
                 .map_err(|error| error.to_string())?,
@@ -3119,7 +3233,7 @@ mod tests {
             }
 
             fn derive(&self) {
-                derive_session_error_recall(&self.db, &self.workspace, &self.session_id);
+                let _ = derive_session_error_recall(&self.db, &self.workspace, &self.session_id);
             }
 
             fn publication_id(&self) -> String {
@@ -3310,7 +3424,7 @@ mod tests {
             .unwrap();
             assert_eq!(report.failures_seen, 0);
             fixture.refresh();
-            record_session_error_recall_completion(
+            let _ = record_session_error_recall_completion(
                 &fixture.db,
                 &fixture.workspace,
                 &fixture.session_id,
@@ -3346,7 +3460,7 @@ mod tests {
             )
             .unwrap_err();
             assert!(error.to_string().contains("cass_refresh_scope_mismatch"));
-            derive_session_error_recall(&fixture.db, &foreign, &fixture.session_id);
+            let _ = derive_session_error_recall(&fixture.db, &foreign, &fixture.session_id);
             fixture
                 .db
                 .execute_raw(

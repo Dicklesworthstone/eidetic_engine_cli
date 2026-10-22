@@ -664,7 +664,9 @@ fn snapshot_revision(
     format!("blake3:{}", hash.finalize().to_hex())
 }
 
-fn pending_job(
+/// Reconcile one validated session publication without changing an existing
+/// job's status or lease. The caller must hold the database writer fence.
+pub(super) fn pending_job(
     connection: &DbConnection,
     workspace_id: &str,
     session_id: &str,

@@ -92,6 +92,28 @@ refresh library tests, and `db::tests::cass_source_commitment_*`: real database
 and subprocess imports cover old/new representations, subsequent sessions,
 hidden source edits, duplicate-free retries, privacy and transaction rollback.
 
+## Derivation and search publication recovery
+
+Error-recall completion belongs to the committed session snapshot and the
+extractor/card versions. Its durable marker cannot stand in for search-index
+publication: a derivation upgrade or an interrupted import may add fingerprints,
+repair links and incident cards after the source snapshot's job completed.
+
+Derivations that submit index-affecting records therefore own a separate,
+deterministic publication job. That job and the completion audit commit together.
+An unchanged retry reconciles the same job even when the recorder previously
+committed its cards before the audit failed, or when a completed derivation's
+job was lost. The job does not change the source checkpoint identity. The import
+report includes pending derived work so the normal coalesced publisher processes
+it along with any pending source jobs.
+
+The existing reentrant database writer fence covers the completion check,
+recorder transaction and final job/audit transaction. Concurrent importers cannot
+both pass the completion check and then update fingerprints after the first
+attempt has already been published. The recorder retains its own transaction;
+the final completion still revalidates the source snapshot. Recovery preserves
+running publishers' leases and does not restart completed healthy work.
+
 ## Oversized Transcript Recovery (issue #82)
 
 `cass view --json` may pretty-print a transcript's entire `content` string on
