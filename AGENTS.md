@@ -52,6 +52,36 @@ Hard integration rules:
 
 ---
 
+## Private Fleet Identifiers: Never In Tracked Content
+
+**Do not write real worker names, host names, or routable IP addresses into
+anything this repository tracks.** Not source, not docs, not published JSON
+schemas, not test fixtures or golden files, not bead descriptions or bead
+comments, and not path names either — a fixture directory named after a worker
+leaks exactly as much as its contents, and scrubbing only the contents leaves
+the code pointing at a path that no longer exists.
+
+Use neutral placeholders instead:
+
+| For | Use |
+|-----|-----|
+| hosts / workers | `worker-01`, `worker-a`, `windows-host-1` |
+| public addresses | RFC 5737 documentation range, `198.51.100.x` |
+| tailnet peers | CGNAT range, `100.64.0.x` |
+
+`tests/fleet_identifier_guard.rs` enforces this over every git-tracked file and
+fails closed when it cannot see `.beads/issues.jsonl`. It reports an uncapped
+count and an uncapped per-file breakdown, and caps only the quoted excerpts —
+the cap is a disclosure control, so do not widen it to "see more".
+
+This convention lived only in that guard's module header until 2026-10-22
+(bd-42puv). A rule enforced by a test nobody opens is a rule agents break in
+good faith: 1151 of the 4913 lines in the tracker export carry an identifier,
+and every scrubbing pass is re-polluted by the next agent who never read the
+test. If you are about to paste diagnostic output into a bead, scan it first.
+
+---
+
 ## Git Branch: ONLY Use `main`, NEVER `master`
 
 **The default branch is `main`.** All work happens on `main` — commits, PRs, feature branches all merge to `main`. Never reference `master` in code or docs. If you see `master` anywhere, it's a bug that needs fixing.
