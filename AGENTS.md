@@ -994,11 +994,34 @@ release:
 
 - `ee-{target}.tar.xz`
 - `ee-{target}.tar.xz.sha256`
-- `SHA256SUMS`, `ee-v{version}-manifest.json`
+- `ee-{target}.tar.xz.minisig` — **this is the signature that actually ships.**
+  v0.18.0 and v0.17.0 each carry 7 (one per target archive, plus
+  `SHA256SUMS.minisig`); v0.16.0 carries none.
+- `SHA256SUMS`, and `SHA256SUMS.minisig` since v0.17.0
 - `install.sh`, `install.ps1`
-- `ee-{target}.tar.xz.sigstore.json` **only when the Actions signing job
-  runs**; hand-cut releases such as `v0.14.4` publish `signed: false` in the
-  manifest and carry no Sigstore or SLSA asset
+
+**Two assets this list claimed until 2026-10-22 and no release has ever
+carried.** Measured with `gh release view <tag> --json assets` across the three
+most recent releases, so this is an observation of the published artifacts, not
+a reading of the release flow:
+
+| asset | v0.18.0 | v0.17.0 | v0.16.0 |
+|---|---|---|---|
+| `ee-v{version}-manifest.json` | 0 | 0 | 0 |
+| `*.sigstore.json` | 0 | 0 | 0 |
+| `*.minisig` | 7 | 7 | 0 |
+
+- `ee-v{version}-manifest.json` is **not produced by the hand-cut flow.** Whether
+  to restore it or drop the expectation is the open decision on
+  bd-reality-core-convergence-1azkt.7 / `.27`; this list states what ships today
+  rather than pre-empting that. Nothing in `.github/workflows/release.yml` or
+  `scripts/release*` emits it.
+- Because there is no manifest, the previous note that hand-cut releases
+  "publish `signed: false` in the manifest" described a field in a file that
+  does not exist. Signing status is visible from whether `.minisig` assets are
+  present, which is how v0.16.0 (none) differs from v0.17.0 and v0.18.0.
+- A Sigstore/SLSA asset has never appeared, consistent with the Actions signing
+  job being disabled repo-wide.
 
 Homebrew (`Dicklesworthstone/homebrew-tap`) is updated by the disabled
 `update-homebrew` job, so a hand-cut release must also bump the formula by
