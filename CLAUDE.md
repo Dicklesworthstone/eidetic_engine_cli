@@ -121,6 +121,24 @@ Treat the slow case as the budget: `RCH_BUILD_TIMEOUT_SEC`/`RCH_TEST_TIMEOUT_SEC
 at 18000, and **one cargo stage per `--job`** — a second `cargo test` stage needs
 the TEST profile, another dependency tier on top of whatever the first stage cost.
 
+**When that budget fires, rch blames the wrong thing (bd-f4pmz).** Its own
+external timeout kill is reported as resource exhaustion:
+
+```text
+WARN rch::hook: Remote build killed by SIGKILL (exit 137) on <worker>
+  — likely resource exhaustion; will retry on a bigger worker if available
+```
+
+Check the arithmetic before believing it. Measured: the kill landed at
+`9000728ms` against the `9000000ms` budget rch itself configured and echoed back
+(`readback: "kind: job, timeout_secs: 9000"`) — within a second of the ceiling,
+which is the timeout, not the OOM killer. Acting on the warning sends you to
+look for memory pressure and move workers, which is the wrong repair and costs
+another full build. **Exit 137 plus an elapsed time at your configured ceiling
+is a timeout; exit 137 well short of it is worth treating as exhaustion.**
+Either way a SIGKILL is UNGRADEABLE, not RED — there is no verdict in a killed
+run, and `scripts/rch_run.sh` pins that distinction in its self-test.
+
 **`rch exec` DOES have worker pinning: `--worker <ID>`**, "Execute on this exact
 worker; overrides environment/project preferences. Refuses local execution or a
 different worker when unavailable." This line said it did not until 2026-10-14,
