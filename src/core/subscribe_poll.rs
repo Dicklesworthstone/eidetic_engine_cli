@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::time::Instant;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use sqlmodel_core::Value as SqlValue;
+use sqlmodel_core::{Row, Value as SqlValue};
 
 use super::{
     MAX_LIMIT, MemoryDelta, SUBSCRIBE_CURSOR_STALE, SUBSCRIBE_POLL_SCHEMA_V1, SubscribeDegradation,
@@ -207,16 +207,20 @@ impl<'a> SubscriptionSnapshot<'a> {
         watermark::read(self.connection, workspace_id)
     }
 
-    fn page(
+    fn audit_window(
         &self,
         workspace_id: &str,
         cursor: u64,
-        limit: u32,
-        filter: &SubscribeFilter,
-        since_cutoff: Option<DateTime<Utc>>,
-    ) -> Result<DeltaPage, DomainError> {
-        let high_watermark = self.high_watermark(workspace_id)?;
-        let limit = limit.clamp(1, MAX_LIMIT) as usize;
+        high_watermark: u64,
+        limit: usize,
+        after_bound: impl FnOnce() -> Result<(), DomainError>,
+    ) -> Result<Vec<Row>, DomainError> {
+        // Bound and legacy audits are disjoint indexed streams. A COALESCE
+        // workspace predicate makes other workspaces part of every replay
+        // scan. Select an explicit workspace first, then only unbound rows
+        // whose live memory grants that workspace, in the same source snapshot.
+        // Each lane needs at most the complete page plus one lookahead.
+        let retained = limit + 1;
         // Exclude observations before LIMIT/lookahead, not after hydration.
         // Otherwise a busy reader can consume every page and manufacture
         // has_more even when there are no memory changes to deliver.
@@ -224,26 +228,27 @@ impl<'a> SubscriptionSnapshot<'a> {
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
             .join(",");
-        let sql = format!(
-            "SELECT a.rowid, a.id, COALESCE(a.workspace_id, m.workspace_id), \
+        let query = |scope: &str| {
+            format!(
+                "SELECT a.rowid, a.id, COALESCE(a.workspace_id, m.workspace_id), \
                     a.timestamp, a.actor, a.action, a.target_id, m.level, m.kind, m.trust_class, \
                     CASE WHEN a.action = ?6 AND length(CAST(a.details AS BLOB)) <= ?7 \
                          THEN a.details ELSE NULL END, a.target_type \
              FROM audit_log a LEFT JOIN memories m ON m.id = a.target_id \
-             WHERE a.rowid > ?1 AND a.rowid <= ?4 \
+             WHERE {scope} AND a.rowid > ?1 AND a.rowid <= ?4 \
                AND (a.target_type = 'memory' \
                     OR (a.target_type = 'memory_link' AND a.action = ?8) \
                     OR (a.target_type IS NULL \
                     AND (a.action LIKE 'memory.%' OR a.action = ?3))) \
                AND a.target_id IS NOT NULL \
-               AND COALESCE(a.workspace_id, m.workspace_id) = ?5 \
                AND (m.id IS NULL OR m.workspace_id = ?5) \
                AND a.action NOT IN ({observation_slots}) \
              ORDER BY a.rowid ASC LIMIT ?2"
-        );
+            )
+        };
         let mut parameters = vec![
             cursor_sql_value(cursor),
-            SqlValue::BigInt((limit + 1) as i64),
+            SqlValue::BigInt(retained as i64),
             SqlValue::Text(audit_actions::TRUST_CLASS_TRANSITION.to_owned()),
             cursor_sql_value(high_watermark),
             SqlValue::Text(workspace_id.to_owned()),
@@ -256,11 +261,52 @@ impl<'a> SubscriptionSnapshot<'a> {
                 .iter()
                 .map(|action| SqlValue::Text((*action).to_owned())),
         );
-        let rows = self
+        checkpoint()?;
+        let bound = self
             .connection
-            .query(&sql, &parameters)
+            .query(&query("a.workspace_id = ?5"), &parameters)
             .map_err(storage_error)?;
         checkpoint()?;
+        after_bound()?;
+        checkpoint()?;
+        let legacy = self
+            .connection
+            .query(
+                &query("a.workspace_id IS NULL AND m.workspace_id = ?5"),
+                &parameters,
+            )
+            .map_err(storage_error)?;
+        checkpoint()?;
+        let mut merged = BTreeMap::new();
+        for row in bound.into_iter().chain(legacy) {
+            checkpoint()?;
+            let cursor = row
+                .get(0)
+                .and_then(SqlValue::as_i64)
+                .ok_or_else(|| malformed_row("audit row cursor"))?;
+            if merged.insert(cursor, row).is_some() {
+                return Err(malformed_row("disjoint audit cursor"));
+            }
+            if merged.len() > retained {
+                merged.pop_last();
+            }
+        }
+        // Do not hydrate tags or expand revisions/links until both lanes have
+        // completed. A failed/cancelled second read acknowledges no prefix.
+        Ok(merged.into_values().collect())
+    }
+
+    fn page(
+        &self,
+        workspace_id: &str,
+        cursor: u64,
+        limit: u32,
+        filter: &SubscribeFilter,
+        since_cutoff: Option<DateTime<Utc>>,
+    ) -> Result<DeltaPage, DomainError> {
+        let high_watermark = self.high_watermark(workspace_id)?;
+        let limit = limit.clamp(1, MAX_LIMIT) as usize;
+        let rows = self.audit_window(workspace_id, cursor, high_watermark, limit, || Ok(()))?;
         // One lookahead row proves whether the raw page is exhausted. Never
         // acknowledge that row: the next request still has to inspect it.
         let has_more = rows.len() > limit;

@@ -845,3 +845,211 @@ fn concurrent_observations_do_not_advance_a_pinned_page_over_a_later_change() {
     let acknowledged = f.poll(fresh.next_cursor, 1, filter);
     assert!(acknowledged.deltas.is_empty() && acknowledged.invalidations.is_empty());
 }
+
+#[test]
+fn scoped_audit_lanes_replay_in_one_cursor_order_at_every_page_size() {
+    let f = Fixture::new();
+    let local = f.memory(&f.own, 1, "release");
+    let foreign = f.memory(&f.other, 2, "private-lane");
+    let mut expected = Vec::new();
+    for n in 0..65 {
+        f.audit(
+            Some(&f.other),
+            Some(&foreign),
+            Some("memory"),
+            audit_actions::MEMORY_UPDATE,
+        );
+        f.audit(
+            Some(&f.own),
+            Some(&foreign),
+            Some("memory"),
+            audit_actions::MEMORY_UPDATE,
+        );
+        f.audit(None, Some(&foreign), None, audit_actions::MEMORY_UPDATE);
+        f.audit(
+            Some(&f.own),
+            Some(&local),
+            Some("memory"),
+            audit_actions::MEMORY_SHOW,
+        );
+        let scope = if n % 2 == 0 {
+            Some(f.own.as_str())
+        } else {
+            None
+        };
+        expected.push(f.audit(
+            scope,
+            Some(&local),
+            Some("memory"),
+            audit_actions::MEMORY_UPDATE,
+        ));
+    }
+    let tail = f.audit(Some(&f.own), None, None, "index.rebuild");
+    for limit in [1, 2, 3, 7, 32, 64, 128, 10_000] {
+        let mut cursor = 0;
+        let mut actual = Vec::new();
+        loop {
+            let report = f.poll(cursor, limit, SubscribeFilter::default());
+            assert!(report.deltas.len() <= limit as usize);
+            assert_eq!(report.high_watermark, tail);
+            assert!(report.invalidations.is_empty());
+            for delta in &report.deltas {
+                assert_eq!(delta.memory_id, local);
+                assert_eq!(delta.tags, ["release"]);
+                assert_eq!(delta.workspace_id.as_deref(), Some(f.own.as_str()));
+                actual.push(delta.cursor);
+            }
+            assert!(report.next_cursor > cursor, "replay must make progress");
+            cursor = report.next_cursor;
+            if !report.has_more {
+                break;
+            }
+            assert_eq!(
+                Some(&cursor),
+                actual.last(),
+                "lookahead is not acknowledged"
+            );
+        }
+        assert_eq!(actual, expected, "page size {limit}");
+        assert_eq!(cursor, tail);
+        assert_eq!(
+            f.poll(cursor, limit, SubscribeFilter::default())
+                .delta_count,
+            0
+        );
+    }
+}
+
+#[test]
+fn lane_lookahead_preserves_filtered_empty_pages_and_owned_missing_targets() {
+    let f = Fixture::new();
+    let excluded = f.memory(&f.own, 1, "other");
+    let included = f.memory(&f.own, 2, "release");
+    let first = f.audit(
+        Some(&f.own),
+        Some(&excluded),
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    let second = f.audit(None, Some(&excluded), None, audit_actions::MEMORY_CREATE);
+    let third = f.audit(None, Some(&included), None, audit_actions::MEMORY_CREATE);
+    let missing = MemoryId::from_uuid(uuid::Uuid::from_u128(999)).to_string();
+    let last = f.audit(
+        Some(&f.own),
+        Some(&missing),
+        Some("memory"),
+        audit_actions::MEMORY_TOMBSTONE,
+    );
+    let filter = super::super::parse_subscribe_filter(Some("TAG=release")).expect("filter");
+    let empty = f.poll(0, 2, filter.clone());
+    assert!(empty.deltas.is_empty());
+    assert!(empty.invalidations.is_empty());
+    assert_eq!(empty.next_cursor, second);
+    assert!(empty.has_more);
+    assert!(first < second && second < third);
+    let rest = f.poll(empty.next_cursor, 2, filter);
+    assert_eq!(rest.delta_count, 1);
+    assert_eq!(rest.deltas[0].cursor, third);
+    assert_eq!(rest.deltas[0].memory_id, included);
+    assert_eq!(rest.invalidations.len(), 1);
+    assert_eq!(rest.invalidations[0].memory_id, missing);
+    assert_eq!(rest.invalidations[0].cursor, last);
+    assert_eq!(rest.next_cursor, last);
+    assert!(!rest.has_more);
+}
+
+#[test]
+fn both_scoped_lanes_read_the_same_source_snapshot() {
+    let f = Fixture::new();
+    let local = f.memory(&f.own, 1, "release");
+    f.audit(
+        Some(&f.own),
+        Some(&local),
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    let head = f.audit(
+        None,
+        Some(&local),
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    let reader =
+        DbConnection::open(DatabaseConfig::read_only_file(f.database.clone())).expect("reader");
+    let snapshot = SubscriptionSnapshot::begin(&reader).expect("snapshot");
+    assert_eq!(snapshot.high_watermark(&f.own).expect("pinned head"), head);
+    let mut late = 0;
+    let rows = snapshot
+        .audit_window(&f.own, 0, head, 10, || {
+            f.db.execute_raw(&format!(
+                "UPDATE memories SET level = 'semantic' WHERE id = '{local}'"
+            ))
+            .map_err(storage_error)?;
+            late = f.audit(
+                None,
+                Some(&local),
+                Some("memory"),
+                audit_actions::MEMORY_UPDATE,
+            );
+            Ok(())
+        })
+        .expect("consistent lane merge");
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        let raw = raw_delta_from_row(&row).expect("source row");
+        assert_eq!(raw.level.as_deref(), Some("procedural"));
+        assert!(raw.cursor <= head);
+    }
+    snapshot.finish().expect("release read snapshot");
+    let fresh = f.poll(head, 10, SubscribeFilter::default());
+    assert_eq!(fresh.delta_count, 1);
+    assert_eq!(fresh.deltas[0].cursor, late);
+    assert_eq!(fresh.deltas[0].levels, ["semantic"]);
+}
+
+#[test]
+fn failure_between_scoped_lanes_returns_no_prefix_and_preserves_the_callers_transaction() {
+    let f = Fixture::new();
+    let local = f.memory(&f.own, 1, "release");
+    f.audit(
+        Some(&f.own),
+        Some(&local),
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    let head = f.audit(
+        None,
+        Some(&local),
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    f.db.execute_raw("BEGIN IMMEDIATE")
+        .expect("caller transaction");
+    let borrowed = SubscriptionSnapshot {
+        connection: &f.db,
+        active: false,
+    };
+    let mut between = 0;
+    let error = borrowed
+        .audit_window(&f.own, 0, head, 10, || {
+            between += 1;
+            f.db.execute_raw("ALTER TABLE memories RENAME TO private_subscription_memory_fault")
+                .map_err(storage_error)
+        })
+        .expect_err("the second lane must not become an empty success");
+    assert_eq!(between, 1);
+    assert!(
+        !error
+            .message()
+            .contains("private_subscription_memory_fault")
+    );
+    assert!(!error.message().contains(&local));
+    assert!(
+        f.db.begin_read_snapshot().is_err(),
+        "caller still owns its transaction"
+    );
+    f.db.execute_raw("ROLLBACK").expect("repair source");
+    let retry = f.poll(0, 10, SubscribeFilter::default());
+    assert_eq!(retry.delta_count, 2);
+    assert_eq!(retry.next_cursor, head);
+}
