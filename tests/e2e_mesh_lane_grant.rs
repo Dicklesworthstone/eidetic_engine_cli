@@ -2333,14 +2333,32 @@ fn peer_revoke_and_same_node_reenrollment_cannot_resurrect_lane_consent() -> Tes
         &Some("deny"),
         "re-enrollment must inherit the deny baseline instead of resurrecting an allow",
     )?;
+    // bd-mesh-no-stable-node-identity-pt7k5. This expected 3 -- grant, revoke
+    // and re-enrollment each leaving a fence -- which assumed the counter
+    // follows the NODE across a re-enrollment. It does not, and cannot:
+    //
+    //     src/mesh/policy.rs:253
+    //     pub fn lane_grant_generation_for(&self, local_workspace_id: &str,
+    //                                      peer_id: &str) -> u64
+    //         .map_or(0, |state| state.grant_generation)
+    //
+    // The key includes peer_id and the default is 0, so a principal that has
+    // never been granted reads 0 by construction. This file's own other
+    // assertions agree: an un-granted peer is 0 (lines 889, 1113, 1545) and a
+    // first grant makes it 1 (line 1788).
+    //
+    // 0 IS THE PROPERTY, not a shortfall. A re-enrolled principal inheriting
+    // the revoked peer's generation would mean grant history survived the
+    // revoke -- the same resurrection this test exists to forbid, one field
+    // over from the decision it already checks above.
     ensure_equal(
         &json_u64(
             &reenrolled_preview,
             "/grantGeneration",
             "same-node re-enrollment preview",
         )?,
-        &3,
-        "grant, revoke, and re-enrollment must each leave a monotonic generation fence",
+        &0,
+        "a re-enrolled principal must carry NO grant generation from the revoked one",
     )?;
 
     let stale = run_ee_with_stdin(
