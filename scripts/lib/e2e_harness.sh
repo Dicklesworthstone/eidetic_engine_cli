@@ -139,7 +139,28 @@ harness_init() {
     export EE_BIN
     local run_id="${EE_E2E_RUN_ID:-$(python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))')}"
     LOG_DIR="${LOG_DIR:-$REPO_ROOT/tests/logs/wizard_e2e/${HARNESS_TEST_NAME}.${run_id}.${BASHPID:-$$}}"
-    mkdir -p "$LOG_DIR"
+    # FAIL LOUDLY IF THE LOG DIR CANNOT BE CREATED (bd-e2e-harness-would-swallow-logdir-failure-c393s).
+    #
+    # Unchecked, `mkdir -p` printed to stderr and harness_init carried on with
+    # LOG_DIR exported to a path that does not exist. EE_TEST_LOG_PATH is
+    # derived from it on the next line, so every subsequent `e2e_log_note`
+    # wrote nothing while the suite still reported pass/fail on stdout: a
+    # complete-looking verdict with no evidence behind it. The artifact this
+    # destroys is the run's own evidence, which is why it is worth a crash.
+    #
+    # EXIT, NOT RETURN. The bead proposed `return 1`, and that would have
+    # reproduced the swallow one level up: harness_init has 45 call sites and
+    # ZERO of them check its return value, and the callers deliberately do not
+    # run under `set -e` so that assert_* can accumulate failures. A return
+    # would be discarded by every one of them. `exit 2` matches what this same
+    # function already does for its three other refusals (:98, :115, :137).
+    if ! mkdir -p "$LOG_DIR"; then
+        printf '[harness] FATAL: cannot create log dir %s\n' "$LOG_DIR" >&2
+        printf '[harness] refusing: EE_TEST_LOG_PATH derives from it, so every\n' >&2
+        printf '[harness] e2e_log_note would write nowhere and this run would\n' >&2
+        printf '[harness] report pass/fail with no evidence behind it.\n' >&2
+        exit 2
+    fi
     export LOG_DIR
     EE_TEST_LOG_PATH="${EE_TEST_LOG_PATH:-$LOG_DIR/events.jsonl}"
     export EE_TEST_LOG_PATH
