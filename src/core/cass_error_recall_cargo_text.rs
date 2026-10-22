@@ -1,4 +1,4 @@
-//! Code-less Cargo/build/linker diagnostics from native plain-text reports.
+//! Cargo/build/linker diagnostics, including mixed coded-rustc reports.
 //!
 //! Only a native diagnostic, optionally preceded by Cargo progress, claims
 //! this format. Quoted examples, JSON and captured build-script output are
@@ -21,6 +21,7 @@ enum Origin {
 
 struct Diagnostic<'a> {
     origin: Origin,
+    code: Option<&'a str>,
     message: &'a str,
     causes: Vec<&'a str>,
 }
@@ -97,9 +98,58 @@ fn diagnostic(line: &str) -> Result<Option<Diagnostic<'_>>, ()> {
     }
     Ok(Some(Diagnostic {
         origin,
+        code: None,
         message,
         causes: Vec::new(),
     }))
+}
+
+fn rustc_code(code: &str) -> bool {
+    code.len() == 5 && code.starts_with('E') && code.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+}
+
+/// A top-level rustc header in a report already owned by a code-less native
+/// error. Indented build-script stdout is context, never another diagnostic.
+fn coded_diagnostic(line: &str) -> Result<Option<Diagnostic<'_>>, ()> {
+    let Some(rest) = line.strip_prefix("error[") else {
+        return Ok(None);
+    };
+    let (code, message) = rest.split_once("]: ").ok_or(())?;
+    if !rustc_code(code) || message.trim().is_empty() || message.chars().any(char::is_control) {
+        return Err(());
+    }
+    Ok(Some(Diagnostic {
+        origin: Origin::Rustc,
+        code: Some(code),
+        message,
+        causes: Vec::new(),
+    }))
+}
+
+fn rustc_context(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if ["--> ", "::: "].iter().any(|prefix| {
+        trimmed
+            .strip_prefix(prefix)
+            .is_some_and(|rest| !rest.trim().is_empty())
+    }) || trimmed.starts_with('|')
+    {
+        return true;
+    }
+    let number = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    number > 0 && trimmed[number..].starts_with(" |")
+}
+
+fn rustc_footer(line: &str) -> bool {
+    if let Some(code) = line
+        .strip_prefix("For more information about this error, try `rustc --explain ")
+        .and_then(|rest| rest.strip_suffix("`."))
+    {
+        return rustc_code(code);
+    }
+    line.strip_prefix("Some errors have detailed explanations: ")
+        .and_then(|rest| rest.strip_suffix('.'))
+        .is_some_and(|codes| codes.split(", ").all(rustc_code))
 }
 
 fn progress(line: &str) -> bool {
@@ -160,14 +210,15 @@ fn append(
     let description = crate::policy::redact_secret_like_content(&description).content;
     let canonical = match current.origin {
         Origin::Cargo => from_cargo(None, &description),
-        Origin::Rustc => from_rustc(None, &description),
+        Origin::Rustc => from_rustc(current.code, &description),
     };
     if keys.insert(canonical.layered_key().key) && output.len() < MAX_DIAGNOSTICS_PER_FAILURE {
         output.push(canonical);
     }
 }
 
-/// Preserve the existing coded-rustc path when it owns the report. A summary
+/// Preserve the existing coded-rustc path for purely coded reports, but retain
+/// every native class when a code-less error and coded errors share a report. A summary
 /// alone is not a reusable error class. Causes qualify their owning error,
 /// never create additional fingerprints or replace original source records.
 pub(super) fn decode(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()> {
@@ -194,6 +245,13 @@ pub(super) fn decode(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()>
 }
 
 fn decode_plain(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()> {
+    // Probe the whole bounded report before selecting its owner. Stopping at
+    // the first coded header discards code-less errors on either side of it.
+    // The probe grants no admission: the ordered parser below still validates
+    // the entire native report, including suffixes beyond the retained cap.
+    let code_less = super::bounded(text)
+        .lines()
+        .any(|line| !matches!(diagnostic(line), Ok(None)));
     let mut current = None::<Diagnostic<'_>>;
     let mut errors = 0;
     let mut cause_pending = false;
@@ -203,7 +261,7 @@ fn decode_plain(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()> {
         .lines()
         .filter(|line| !line.trim().is_empty())
     {
-        if line.starts_with("error[E") {
+        if !code_less && line.starts_with("error[E") {
             return Ok(None);
         }
         if line.chars().any(|ch| ch.is_control() && ch != '\t') {
@@ -223,7 +281,12 @@ fn decode_plain(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()> {
             cause_pending = false;
             continue;
         }
-        if let Some(next) = diagnostic(line)? {
+        let next = if code_less {
+            coded_diagnostic(line)?.or(diagnostic(line)?)
+        } else {
+            diagnostic(line)?
+        };
+        if let Some(next) = next {
             errors += 1;
             if errors > MAX_ERRORS || text.len() > MAX_SCANNED_OUTPUT_BYTES {
                 return Err(());
@@ -248,6 +311,10 @@ fn decode_plain(text: &str) -> Result<Option<Vec<CanonicalDiagnostic>>, ()> {
             || current
                 .as_ref()
                 .is_some_and(|current| resolver_detail(current.message, line))
+            || current.as_ref().is_some_and(|current| {
+                matches!(current.origin, Origin::Rustc) && rustc_context(line)
+            })
+            || (code_less && rustc_footer(line))
             || compiler_summary(line))
         {
             return Err(());
@@ -278,6 +345,157 @@ mod tests {
             text: text.to_owned(),
             is_error: Some(false),
             exit_code: Some(0),
+        }
+    }
+
+    const CODED: &str = "error[E0308]: mismatched types\n --> src/widget.rs:2:1\n  |\n2 | fn widget() -> bool { 7 }\n  |                      ^ expected bool\n";
+    const LINKER: &str =
+        "error: linking with `cc` failed: exit status: 1\n  = note: undefined symbol\n";
+
+    #[test]
+    fn mixed_native_reports_retain_every_error_family_in_either_order() {
+        for parts in [
+            [BUILD, CODED, LINKER],
+            [CODED, BUILD, LINKER],
+            [LINKER, CODED, BUILD],
+            [BUILD, LINKER, CODED],
+            [CODED, LINKER, BUILD],
+            [LINKER, BUILD, CODED],
+        ] {
+            let expected: Vec<_> = parts
+                .iter()
+                .flat_map(|part| failure_diagnostics(&optimistic(part)))
+                .collect();
+            assert_eq!(expected.len(), 3);
+            let text = parts.join("\n");
+            assert_eq!(decode(&text).unwrap().unwrap(), expected);
+            assert_eq!(failure_diagnostics(&optimistic(&text)), expected);
+            assert_eq!(structured_error_diagnostics(&text), expected);
+            let output = optimistic(&text);
+            assert!(output.failed());
+            assert!(!output.succeeded());
+            assert_eq!(output.text, text);
+            assert!(
+                expected
+                    .iter()
+                    .any(|d| d.layered_key().key == "rustc:E0308")
+            );
+            assert!(expected.iter().any(|d| d.tool.as_str() == "cargo"));
+            assert!(
+                !expected
+                    .iter()
+                    .any(|d| d.layered_key().key == "rustc:E9999")
+            );
+        }
+    }
+
+    #[test]
+    fn styled_mixed_reports_preserve_plain_keys_and_cause_ownership() {
+        let plain = format!("{BUILD}\n{CODED}{LINKER}");
+        let expected = failure_diagnostics(&optimistic(&plain));
+        assert_eq!(expected.len(), 3);
+        for text in [
+            format!("\u{1b}[31m{plain}\u{1b}[0m"),
+            plain.replace("error", "er\u{1b}[1mror\u{1b}[0m"),
+            format!("\u{1b}]8;;https://example.test/build\u{7}{plain}\u{1b}]8;;\u{7}"),
+            plain.replace('\n', "\r\n"),
+        ] {
+            assert_eq!(failure_diagnostics(&optimistic(&text)), expected);
+            assert_eq!(structured_error_diagnostics(&text), expected);
+            assert_eq!(
+                symptom_line(&optimistic(&text)),
+                symptom_line(&optimistic(&plain))
+            );
+        }
+        let changed = plain.replace(
+            "process didn't exit successfully",
+            "registry configuration failed",
+        );
+        let different = failure_diagnostics(&optimistic(&changed));
+        assert_eq!(different.len(), 3);
+        assert_ne!(
+            expected[0].layered_key().key,
+            different[0].layered_key().key
+        );
+        assert_eq!(expected[1..], different[1..]);
+    }
+
+    #[test]
+    fn coded_headers_cannot_abandon_an_unfinished_code_less_cause() {
+        for text in [
+            format!("error: failed to read `Cargo.toml`\nCaused by:\n{CODED}"),
+            format!("{CODED}{BUILD}\nCaused by:"),
+            format!("{BUILD}\nerror[E0308]: "),
+            format!("{BUILD}\nerror[E030]: mismatched types"),
+            format!("{BUILD}\nerror[E0308] mismatched types"),
+            format!("{CODED}\nerror: failed to read `unfinished"),
+        ] {
+            assert!(decode(&text).is_err(), "{text}");
+            assert!(failure_diagnostics(&optimistic(&text)).is_empty());
+            assert!(structured_error_diagnostics(&text).is_empty());
+            assert!(!optimistic(&text).succeeded());
+        }
+    }
+
+    #[test]
+    fn mixed_diagnostic_caps_never_skip_a_malformed_later_report() {
+        let mut text = format!("{BUILD}{CODED}");
+        for code in ["E0277", "E0382", "E0599", "E0425"] {
+            text.push_str(&format!("error[{code}]: another native error\n"));
+        }
+        assert_eq!(
+            failure_diagnostics(&optimistic(&text)).len(),
+            MAX_DIAGNOSTICS_PER_FAILURE
+        );
+        for tail in ["Caused by:", "error[E0308]:", "unexpected unrelated output"] {
+            assert!(decode(&format!("{text}{tail}")).is_err());
+        }
+        let repeated = format!(
+            "{BUILD}{}",
+            "error[E0308]: mismatched types\n".repeat(MAX_ERRORS)
+        );
+        assert!(decode(&repeated).is_err());
+        let oversized = format!("{text}  {}", "界".repeat(MAX_SCANNED_OUTPUT_BYTES));
+        assert!(decode(&oversized).is_err());
+        let duplicate = format!("{BUILD}{CODED}{CODED}{LINKER}");
+        assert_eq!(failure_diagnostics(&optimistic(&duplicate)).len(), 3);
+    }
+
+    #[test]
+    fn mixed_rustc_context_and_native_footers_do_not_invent_error_classes() {
+        let base = format!("{BUILD}{CODED}{LINKER}");
+        let expected = failure_diagnostics(&optimistic(&base));
+        let text = format!(
+            "{base}Some errors have detailed explanations: E0277, E0308.\nFor more information about this error, try `rustc --explain E0308`.\nerror: could not compile `widget` (bin \"widget\") due to 3 previous errors\n"
+        );
+        assert_eq!(failure_diagnostics(&optimistic(&text)), expected);
+        for suffix in [
+            "Some errors have detailed explanations: example.",
+            "For more information about this error, try `rustc --explain E0308`; echo secret.",
+        ] {
+            assert!(decode(&format!("{base}{suffix}")).is_err());
+        }
+        assert!(rustc_context("123 | let 界 = 7;"));
+        assert!(!rustc_context("123 unrelated shell output"));
+        for prefix in ["An example:\n", "```text\n"] {
+            assert!(decode(&format!("{prefix}{base}")).unwrap().is_none());
+        }
+        let example = serde_json::json!({"example": base}).to_string();
+        assert!(decode(&example).unwrap().is_none());
+    }
+
+    #[test]
+    fn pure_coded_reports_keep_the_existing_decoder_and_native_identity() {
+        assert!(decode(CODED).unwrap().is_none());
+        assert_eq!(
+            failure_diagnostics(&optimistic(CODED)),
+            vec![from_rustc(Some("E0308"), "mismatched types")]
+        );
+        for code in ["E0308", "E0000", "E9999"] {
+            assert!(rustc_code(code));
+        }
+        for code in ["", "E030", "E03080", "e0308", "E０38", "E0a08"] {
+            assert!(!rustc_code(code));
         }
     }
 
