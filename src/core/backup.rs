@@ -4544,20 +4544,14 @@ fn restore_database_error(
     message: String,
     import_repair: &str,
 ) -> DomainError {
-    if error.is_storage_panic() {
-        return DomainError::Storage {
+    crate::core::db_failure_or_storage_panic(
+        error,
+        message.clone(),
+        DomainError::Import {
             message,
-            repair: Some(
-                "a storage panic is not a restore-input problem; capture the panic from stderr \
-                 and report it before retrying"
-                    .to_owned(),
-            ),
-        };
-    }
-    DomainError::Import {
-        message,
-        repair: Some(import_repair.to_owned()),
-    }
+            repair: Some(import_repair.to_owned()),
+        },
+    )
 }
 
 fn restore_task_episode_assets(

@@ -62524,11 +62524,19 @@ fn open_causal_database(cli: &Cli) -> Result<(crate::db::DbConnection, String), 
             repair: Some("ee doctor --json".to_owned()),
         }
     })?;
-    conn.migrate()
-        .map_err(|error| DomainError::MigrationRequired {
-            message: format!("Failed to migrate causal evidence database: {error}"),
-            repair: Some("ee init --workspace .".to_owned()),
-        })?;
+    conn.migrate().map_err(|error| {
+        // bd-12ybp: see db_failure_or_storage_panic — a recovered panic must
+        // not be reported as "migration required" (exit 8).
+        let message = format!("Failed to migrate causal evidence database: {error}");
+        crate::core::db_failure_or_storage_panic(
+            &error,
+            message.clone(),
+            DomainError::MigrationRequired {
+                message,
+                repair: Some("ee init --workspace .".to_owned()),
+            },
+        )
+    })?;
     let workspace_id = stable_causal_workspace_id(&workspace_path);
     Ok((conn, workspace_id))
 }

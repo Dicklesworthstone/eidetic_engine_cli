@@ -16846,12 +16846,19 @@ fn open_existing_database(database_path: &Path) -> Result<DbConnection, DomainEr
             message: format!("Failed to open database: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
-    connection
-        .migrate()
-        .map_err(|error| DomainError::MigrationRequired {
-            message: format!("Failed to migrate curation database: {error}"),
-            repair: Some("ee migrate run --workspace . --json".to_owned()),
-        })?;
+    connection.migrate().map_err(|error| {
+        // bd-12ybp: see db_failure_or_storage_panic — a recovered panic must
+        // not be reported as "migration required" (exit 8).
+        let message = format!("Failed to migrate curation database: {error}");
+        crate::core::db_failure_or_storage_panic(
+            &error,
+            message.clone(),
+            DomainError::MigrationRequired {
+                message,
+                repair: Some("ee migrate run --workspace . --json".to_owned()),
+            },
+        )
+    })?;
     Ok(connection)
 }
 

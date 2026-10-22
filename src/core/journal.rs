@@ -2676,12 +2676,19 @@ fn open_journal_database(database_path: &Path) -> Result<DbConnection, DomainErr
             message: format!("Failed to open database: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
-    connection
-        .migrate()
-        .map_err(|error| DomainError::MigrationRequired {
-            message: format!("Failed to migrate journal database: {error}"),
-            repair: Some("ee migrate run --workspace . --json".to_owned()),
-        })?;
+    connection.migrate().map_err(|error| {
+        // bd-12ybp: migrate() can return a recovered DbError::StoragePanic, and
+        // MigrationRequired exits 8 advising the migration that just panicked.
+        let message = format!("Failed to migrate journal database: {error}");
+        crate::core::db_failure_or_storage_panic(
+            &error,
+            message.clone(),
+            DomainError::MigrationRequired {
+                message,
+                repair: Some("ee migrate run --workspace . --json".to_owned()),
+            },
+        )
+    })?;
     Ok(connection)
 }
 
