@@ -14,7 +14,6 @@ use super::{MEMORY_INVALIDATION_SCHEMA_V1, MemoryDelta, MemoryInvalidation, Subs
 use crate::db::DbConnection;
 use crate::models::{DomainError, MemoryId, MemoryLinkId};
 
-const LINK_BATCH: usize = 128;
 const MAX_METADATA_BYTES: usize = 16 * 1024;
 
 fn invalid() -> DomainError {
@@ -86,44 +85,45 @@ fn endpoints(
     workspace: &str,
     pending: &[PendingLink],
 ) -> Result<BTreeMap<String, Option<[String; 2]>>, DomainError> {
+    endpoints_observed(db, workspace, pending, |_| Ok(()))
+}
+
+fn endpoints_observed(
+    db: &DbConnection,
+    workspace: &str,
+    pending: &[PendingLink],
+    mut after_read: impl FnMut(&'static str) -> Result<(), DomainError>,
+) -> Result<BTreeMap<String, Option<[String; 2]>>, DomainError> {
+    // The pinned engine can implement IN batches and joins as full scans.
+    // Point-read each distinct edge and endpoint instead. Cache only successful
+    // workspace checks in this one source snapshot; no cached body or authority
+    // survives a poll. Shared graph hubs are checked once, not once per edge.
     let ids: BTreeSet<_> = pending.iter().map(|entry| entry.link_id.as_str()).collect();
-    let ids: Vec<_> = ids.into_iter().collect();
     let mut result = BTreeMap::new();
-    for batch in ids.chunks(LINK_BATCH) {
+    let mut checked_memories = BTreeSet::new();
+    for expected_id in ids {
         checkpoint()?;
-        let slots = (3..3 + batch.len())
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
+        let rows = db.query(
             "SELECT l.id, \
                 CASE WHEN length(CAST(l.src_memory_id AS BLOB)) <= 128 THEN l.src_memory_id ELSE NULL END, \
                 CASE WHEN length(CAST(l.dst_memory_id AS BLOB)) <= 128 THEN l.dst_memory_id ELSE NULL END, \
-                CASE WHEN s.workspace_id = ?1 AND d.workspace_id = ?1 THEN 1 ELSE 0 END, \
                 CASE WHEN l.metadata_json IS NULL THEN NULL \
                      WHEN length(CAST(l.metadata_json AS BLOB)) <= ?2 THEN l.metadata_json ELSE '' END \
-             FROM memory_links l \
-             LEFT JOIN memories s ON s.id = l.src_memory_id \
-             LEFT JOIN memories d ON d.id = l.dst_memory_id \
-             WHERE l.id IN ({slots})"
-        );
-        let mut parameters = vec![
-            Value::Text(workspace.to_owned()),
-            Value::BigInt(MAX_METADATA_BYTES as i64),
-        ];
-        parameters.extend(batch.iter().map(|id| Value::Text((*id).to_owned())));
-        let rows = db.query(&sql, &parameters).map_err(|_| invalid())?;
+             FROM memory_links l WHERE l.id = ?1",
+            &[Value::Text(expected_id.to_owned()), Value::BigInt(MAX_METADATA_BYTES as i64)],
+        ).map_err(|_| invalid())?;
         checkpoint()?;
-        if rows.len() != batch.len() {
+        after_read("memory_links")?;
+        checkpoint()?;
+        if rows.len() != 1 {
             return Err(invalid());
         }
         for row in rows {
             let id = text(&row, 0)?;
             let source = text(&row, 1)?;
             let target = text(&row, 2)?;
-            if !batch.contains(&id)
+            if id != expected_id
                 || result.contains_key(id)
-                || row.get(3).and_then(Value::as_i64) != Some(1)
                 || source == target
                 || [source, target].into_iter().any(|value| {
                     !value
@@ -133,7 +133,24 @@ fn endpoints(
             {
                 return Err(invalid());
             }
-            let metadata = match row.get(4) {
+            for memory_id in [source, target] {
+                checkpoint()?;
+                if checked_memories.contains(memory_id) {
+                    continue;
+                }
+                let memories = db.query(
+                    "SELECT CASE WHEN workspace_id = ?2 THEN 1 ELSE 0 END FROM memories WHERE id = ?1",
+                    &[Value::Text(memory_id.to_owned()), Value::Text(workspace.to_owned())],
+                ).map_err(|_| invalid())?;
+                checkpoint()?;
+                after_read("memories")?;
+                checkpoint()?;
+                if memories.len() != 1 || memories[0].get(0).and_then(Value::as_i64) != Some(1) {
+                    return Err(invalid());
+                }
+                checked_memories.insert(memory_id.to_owned());
+            }
+            let metadata = match row.get(3) {
                 Some(Value::Null) => None,
                 Some(Value::Text(value)) if !value.is_empty() => Some(value.as_str()),
                 _ => return Err(invalid()),
@@ -345,6 +362,181 @@ mod tests {
                 filter: parse_subscribe_filter(filter).expect("filter"),
             })
         }
+    }
+
+    fn pending_edge(f: &Fixture, source: &str, target: &str, number: u128) -> PendingLink {
+        let id = MemoryLinkId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        f.db.insert_memory_link(
+            &id,
+            &crate::db::CreateMemoryLinkInput {
+                src_memory_id: source.to_owned(),
+                dst_memory_id: target.to_owned(),
+                relation: MemoryLinkRelation::Supports,
+                weight: 1.0,
+                confidence: 0.9,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: None,
+                source: MemoryLinkSource::Human,
+                created_by: None,
+                metadata_json: None,
+            },
+        )
+        .expect("durable source edge");
+        PendingLink {
+            link_id: id,
+            event: routing_event(f, number as u64),
+        }
+    }
+
+    #[test]
+    fn point_reads_deduplicate_edges_and_shared_hubs_without_caching_across_polls() {
+        let f = Fixture::new();
+        let anchor = f.memory(1, false);
+        let mut pending = Vec::new();
+        let mut last = String::new();
+        for n in 1..=257_u128 {
+            let target = f.memory(1000 + n, false);
+            pending.push(pending_edge(&f, &anchor, &target, n));
+            last = target;
+        }
+        for cursor in 258..263 {
+            pending.push(PendingLink {
+                link_id: pending[0].link_id.clone(),
+                event: routing_event(&f, cursor),
+            });
+        }
+        let mut edge_reads = 0;
+        let mut memory_reads = 0;
+        let pairs = endpoints_observed(&f.db, &f.own, &pending, |table| {
+            match table {
+                "memory_links" => edge_reads += 1,
+                "memories" => memory_reads += 1,
+                _ => panic!("unexpected projection"),
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!((edge_reads, memory_reads), (257, 258));
+        assert_eq!(pairs.len(), 257);
+        for pair in pairs.values() {
+            assert_eq!(pair.as_ref().unwrap()[0], anchor);
+        }
+        let notices = notices(&f.db, &f.own, &pending, &SubscribeFilter::default(), None).unwrap();
+        assert_eq!(
+            notices.len(),
+            pending.len() * 2,
+            "deduplicated reads do not deduplicate events"
+        );
+        f.db.execute_raw(&format!(
+            "UPDATE memories SET workspace_id = '{}' WHERE id = '{last}'",
+            f.other
+        ))
+        .unwrap();
+        assert!(
+            endpoints(&f.db, &f.own, &pending).is_err(),
+            "a new poll must reload authority"
+        );
+    }
+
+    #[test]
+    fn edge_and_endpoint_point_reads_borrow_one_pinned_snapshot() {
+        let f = Fixture::new();
+        let first = f.memory(1, false);
+        let second = f.memory(2, false);
+        let pending = vec![pending_edge(&f, &first, &second, 1)];
+        let reader = DbConnection::open(crate::db::DatabaseConfig::read_only_file(
+            f.database.clone(),
+        ))
+        .unwrap();
+        let snapshot = super::super::SubscriptionSnapshot::begin(&reader).unwrap();
+        reader
+            .query("SELECT COUNT(*) FROM memory_links", &[])
+            .unwrap();
+        let mut writes = 0;
+        let pairs = endpoints_observed(&reader, &f.own, &pending, |table| {
+            if table == "memory_links" {
+                f.db.execute_raw(&format!(
+                    "UPDATE memories SET workspace_id = '{}' WHERE id = '{second}'",
+                    f.other
+                ))
+                .map_err(|_| invalid())?;
+                writes += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(writes, 1);
+        assert_eq!(pairs[&pending[0].link_id], Some([first, second]));
+        assert!(
+            reader.begin_read_snapshot().is_err(),
+            "the caller retains its view"
+        );
+        snapshot.finish().unwrap();
+        assert!(endpoints(&reader, &f.own, &pending).is_err());
+    }
+
+    #[test]
+    fn late_point_read_failure_discards_prior_pairs_and_allows_rollback_retry() {
+        let f = Fixture::new();
+        let anchor = f.memory(1, false);
+        let first = f.memory(2, false);
+        let second = f.memory(3, false);
+        let pending = vec![
+            pending_edge(&f, &anchor, &first, 1),
+            pending_edge(&f, &anchor, &second, 2),
+        ];
+        let expected = endpoints(&f.db, &f.own, &pending).unwrap();
+        f.db.execute_raw("BEGIN IMMEDIATE").unwrap();
+        let mut edges = 0;
+        let error = endpoints_observed(&f.db, &f.own, &pending, |table| {
+            if table == "memory_links" {
+                edges += 1;
+                if edges == 2 {
+                    f.db.execute_raw(
+                        "ALTER TABLE memories RENAME TO private_missing_endpoint_authority",
+                    )
+                    .map_err(|_| invalid())?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(edges, 2);
+        assert!(
+            !error
+                .message()
+                .contains("private_missing_endpoint_authority")
+        );
+        assert!(!error.message().contains(&anchor));
+        assert!(f.db.begin_read_snapshot().is_err());
+        f.db.execute_raw("ROLLBACK").unwrap();
+        assert_eq!(endpoints(&f.db, &f.own, &pending).unwrap(), expected);
+    }
+
+    #[test]
+    fn cancellation_between_edge_and_endpoint_reads_never_returns_a_pair() {
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+            let f = Fixture::new();
+            let first = f.memory(1, false);
+            let second = f.memory(2, false);
+            let pending = vec![pending_edge(&f, &first, &second, 1)];
+            f.db.begin_read_snapshot().unwrap();
+            let mut reads = 0;
+            let result = endpoints_observed(&f.db, &f.own, &pending, |table| {
+                assert_eq!(table, "memory_links");
+                reads += 1;
+                cx.cancel_with(asupersync::CancelKind::User, Some("cancel endpoint replay"));
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert_eq!(reads, 1);
+            let _uncancelled = asupersync::Cx::set_current(None);
+            assert!(f.db.begin_read_snapshot().is_err());
+            f.db.rollback_read_snapshot().unwrap();
+            assert_eq!(endpoints(&f.db, &f.own, &pending).unwrap().len(), 1);
+        })
+        .unwrap();
     }
 
     #[test]
