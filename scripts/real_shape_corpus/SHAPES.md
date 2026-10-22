@@ -9,9 +9,20 @@ Regenerate (byte-identical for the same seed):
 
     python3 scripts/real_shape_corpus/generate.py --out /tmp/real_shape_cass --digest
 
-Scale variants (never committed) are seeded recombinations of the authored core:
+Scale variants are seeded recombinations of the authored core:
 
     python3 scripts/real_shape_corpus/generate.py --out /tmp/rs5k --target-records 5000
+
+THIS LINE SAID "(never committed)" UNTIL 2026-10-22, and the committed corpus is
+now a scale variant: `tests/fixtures/real_shape_cass` holds the `--target-records
+4000` expansion (308 sessions, 4009 records, digest 7bcedd76…). The bead that
+owns this corpus asks for "at least 12 sessions, roughly 3-6k records in total"
+under that path, and the authored core alone is 14 sessions and 123 records --
+two orders of magnitude short of the 4,919-span scale at which the original
+probe measured the retrieval slowdown. See `tests/fixtures/real_shape_cass/SHAPES.md`
+for the provenance of the committed tree. Regenerating the core alone still
+works and is still the right thing for reviewing CONTENT; the committed variant
+is what measurements run against.
 
 Measure an `ee` binary against it (report mode, see `probe.py --help`):
 
