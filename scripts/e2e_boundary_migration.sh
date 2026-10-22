@@ -32,6 +32,15 @@ fi
 # shellcheck source=scripts/lib/ee_binary_resolution.sh
 source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
 EE_BINARY="$(ee_resolve_binary debug)"
+# bd-resolve-without-require-binary-guard-jqiws: this suite was the bead's
+# measured example -- its `[[ -x "${EE_BINARY}" ]]` gate passed a Linux ELF on
+# Darwin/arm64 and reported 7 of 8 steps as schema_mismatch:missing for that
+# one fault. `-x` tests the executable BIT, not the FORMAT.
+# Exit 76 is verify.sh's STAGE_ENV_UNRUNNABLE_CODE, deliberately not 2:
+# verify.sh invokes this script and maps unrecognised codes to FAIL.
+if ! ee_require_current_binary "$EE_BINARY" "e2e_boundary_migration"; then
+    exit 76
+fi
 CORPUS_PATH="${REPO_ROOT}/tests/fixtures/boundary_corpus/corpus.json"
 RUN_ID="${EE_E2E_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then

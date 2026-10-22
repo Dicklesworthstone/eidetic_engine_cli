@@ -195,8 +195,13 @@ fi
 # ---------------------------------------------------------------------------
 STAGE_ENV_UNRUNNABLE_EXIT=76
 
-if [ ! -x "$EE_BINARY" ]; then
-    echo "j4: ee binary not executable at $EE_BINARY" >&2
+# bd-resolve-without-require-binary-guard-jqiws: this was `[ ! -x ]`, which
+# tests the executable BIT and not the FORMAT. A foreign-platform build in the
+# shared cargo target dir satisfies `-x` and cannot run, so all 23 epics below
+# would report product failures for one environment fault, with nothing in the
+# output naming it. ee_require_current_binary refuses a missing, foreign-format
+# or stale binary and prints which of the three it is.
+if ! ee_require_current_binary "$EE_BINARY" "j4"; then
     echo "    set EE_BINARY or run: cargo build --release" >&2
     exit "$STAGE_ENV_UNRUNNABLE_EXIT"
 fi
