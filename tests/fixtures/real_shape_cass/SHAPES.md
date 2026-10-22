@@ -17,7 +17,16 @@ Byte-identical for the same arguments: ids come from a seeded RNG and timestamps
 from a fixed epoch, never from the clock. Verified by generating twice, to two
 different destinations, and comparing:
 
-    tree digest   7bcedd76fcc6c3e9913fa5d30efe54ffccd43eeea72299d56ce581ff65753faa
+    tree digest   1db28de47bed27b94c99c497fcace9c107c345360162212222a9263cb9b9cb50
+
+The digest is a property of a FRESHLY GENERATED tree, so it cannot be reproduced
+by hashing this directory in place: `tree_digest` hashes every file it finds and
+this directory also carries SHAPES.md, which the generator does not write.
+Regenerate into an empty directory to check it.
+
+It moved from 7bcedd76... on 2026-10-22, when five retrieval queries that carried
+no distractors gained them. Any judgment or manifest change moves it by
+construction, because judgments.json is generated and therefore hashed.
 
 ## What is here
 

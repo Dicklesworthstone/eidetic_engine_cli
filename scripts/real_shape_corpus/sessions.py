@@ -294,19 +294,23 @@ RETRIEVAL_QUERIES = [
     ("clippy needless borrow error in CI", {"clippy_fail": 2, "clippy_diag": 2}, ["distract_espresso"]),
     ("what should I run before pushing", {"clippy_rule": 2, "fmt_rule": 1}, ["distract_lunch"]),
     ("flaky test that sleeps and checks expiry", {"flaky_diag": 2, "flaky_lesson": 2, "flaky_fail": 1}, ["distract_espresso"]),
-    ("deterministic time in tests manual clock", {"flaky_lesson": 2, "flaky_diag": 2}, []),
+    ("deterministic time in tests manual clock", {"flaky_lesson": 2, "flaky_diag": 2}, ["distract_espresso"]),
     ("sqlite add not null column migration error", {"mig_fail": 2, "mig_diag": 2, "mig_lesson": 2}, ["distract_lunch"]),
     ("cargo fmt check before commit", {"fmt_rule": 2, "fmt_fail": 1}, ["distract_espresso"]),
     ("why did we choose sqlite wal for the cache", {"dec_sqlite": 2, "dec_sqlite_done": 1}, ["distract_lunch"]),
-    ("json file per entry versus database", {"dec_sqlite": 2}, []),
+    ("json file per entry versus database", {"dec_sqlite": 2}, ["distract_lunch"]),
     ("artifact bucket access error in deploy script", {"secret_diag": 2}, ["distract_espresso"]),
     ("how does install.sh download and verify the tarball", {"benign_curl": 2}, ["inj_readme"]),
     ("is it safe to delete the target directory", {"benign_rm": 2}, ["inj_readme"]),
-    ("where is the configuration loaded", {"cfg_plan": 2, "cfg_grep": 1}, []),
-    ("E0502 cannot borrow as mutable because it is also borrowed as immutable", {"e0502_fail": 2, "e0502_diag": 2}, []),
+    ("where is the configuration loaded", {"cfg_plan": 2, "cfg_grep": 1}, ["distract_espresso"]),
+    ("E0502 cannot borrow as mutable because it is also borrowed as immutable", {"e0502_fail": 2, "e0502_diag": 2}, ["distract_lunch"]),
     ("pytest test passes alone but fails in the full suite", {"py_diag": 2, "py_lesson": 2, "py_fail": 1}, ["distract_lunch"]),
     ("docker build reinstalls dependencies every commit", {"docker_diag": 2}, ["distract_espresso"]),
-    ("fastparse stability guarantees", {"inj_summary": 2}, []),
+    # distract_espresso, not inj_readme: inj_readme is injection bait in a README
+    # and I cannot rule out that its text mentions fastparse, which would make it
+    # a RELEVANT span mislabelled as irrelevant -- worse than having none. The
+    # office-chatter labels are verified unrelated to every technical query.
+    ("fastparse stability guarantees", {"inj_summary": 2}, ["distract_espresso"]),
 ]
 
 # Unrelated queries: a correct system flags weak recall or abstains.
