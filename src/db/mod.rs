@@ -608,6 +608,21 @@ fn lock_write_owner_gate<'a>(
 }
 
 #[cfg(test)]
+thread_local! {
+    /// SQL text `query_for` ran on this thread while a capture is active.
+    static QUERY_SQL_LOG: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// Run `f` and return the SQL text of every query it issued on this thread.
+#[cfg(test)]
+fn capture_query_sql_for_test<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    QUERY_SQL_LOG.with(|log| *log.borrow_mut() = Some(Vec::new()));
+    let value = f();
+    let captured = QUERY_SQL_LOG.with(|log| log.borrow_mut().take().unwrap_or_default());
+    (value, captured)
+}
+
+#[cfg(test)]
 fn file_write_owner_gate_address_for_test(location: &DatabaseLocation) -> usize {
     let key = file_write_owner_key(location)
         .unwrap_or_else(|error| panic!("file gate address requires a file: {error}"));
@@ -2427,6 +2442,12 @@ impl DbConnection {
     }
 
     fn query_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
+        #[cfg(test)]
+        QUERY_SQL_LOG.with(|log| {
+            if let Some(log) = log.borrow_mut().as_mut() {
+                log.push(sql.to_owned());
+            }
+        });
         let run = || {
             guard_storage_panic(operation, || {
                 self.inner
@@ -15178,6 +15199,69 @@ pub(crate) struct SessionReadScan {
 pub(crate) const EVIDENCE_SEARCH_CANDIDATE_PREDICATE: &str =
     "e.producer_kind = 'cass_import' AND e.search_eligibility = 'admitted'";
 
+/// One persisted reader projection by its evidence id: a primary-key seek.
+const READER_PROJECTION_BY_EVIDENCE_ID_SQL: &str = "SELECT evidence_span_id, projection_version, source_binding, reader_body, reader_text, egress_safe, integrity_binding FROM evidence_reader_projections WHERE evidence_span_id = ?1";
+
+/// One session row by id: a primary-key seek.
+const SESSION_BY_ID_SQL: &str = "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE id = ?1";
+
+/// One recorded admission verdict by its evidence id: a primary-key seek.
+const RECORDED_ADMISSION_VERDICT_SQL: &str = "SELECT evidence_span_id, verdict_binding FROM evidence_admission_verdicts WHERE evidence_span_id = ?1";
+
+/// The two column values [`EVIDENCE_SEARCH_CANDIDATE_PREDICATE`] compares,
+/// for filtering rows that were read without it.
+const EVIDENCE_SEARCH_CANDIDATE_PRODUCER: &str = "cass_import";
+const EVIDENCE_SEARCH_CANDIDATE_ELIGIBILITY: &str = "admitted";
+
+/// Columns of an index-order evidence page: the evidence row in
+/// `evidence_spans_from_rows` order, then its rowid.
+const INDEX_EVIDENCE_PAGE_COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at, e.rowid";
+const INDEX_EVIDENCE_WORKSPACE_COLUMN: usize = 1;
+const INDEX_EVIDENCE_PRODUCER_COLUMN: usize = 14;
+const INDEX_EVIDENCE_ELIGIBILITY_COLUMN: usize = 19;
+const INDEX_EVIDENCE_ROWID_COLUMN: usize = 27;
+
+/// One index-order page read by `read_index_evidence_page`.
+struct IndexEvidencePage {
+    /// This workspace's search candidates among the rows read, hydrated.
+    rows: Vec<EvidenceSearchReadRow>,
+    /// The last rowid read, the next page's exclusive lower bound.
+    last_rowid: Option<i64>,
+    /// How many table rows the query read; fewer than a full page means the
+    /// table has no more rows after `last_rowid`.
+    table_rows: usize,
+}
+
+/// The next page of `evidence_spans` in rowid order after `cursor`, with no
+/// other predicate so the access path is the rowid seek (GH#78).
+fn index_evidence_page_query(cursor: Option<i64>) -> (String, Vec<Value>) {
+    let limit = Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE));
+    match cursor {
+        None => (
+            format!(
+                "SELECT {INDEX_EVIDENCE_PAGE_COLUMNS} FROM evidence_spans e ORDER BY e.rowid ASC LIMIT ?1"
+            ),
+            vec![limit],
+        ),
+        Some(rowid) => (
+            format!(
+                "SELECT {INDEX_EVIDENCE_PAGE_COLUMNS} FROM evidence_spans e WHERE e.rowid > ?1 ORDER BY e.rowid ASC LIMIT ?2"
+            ),
+            vec![Value::BigInt(rowid), limit],
+        ),
+    }
+}
+
+/// Whether a row read by [`index_evidence_page_query`] belongs to
+/// `workspace_id` and satisfies [`EVIDENCE_SEARCH_CANDIDATE_PREDICATE`].
+/// Like the SQL comparison, a NULL or non-text value never matches.
+fn index_evidence_row_is_candidate(row: &Row, workspace_id: &str) -> bool {
+    let text = |column: usize| row.get(column).and_then(Value::as_str);
+    text(INDEX_EVIDENCE_WORKSPACE_COLUMN) == Some(workspace_id)
+        && text(INDEX_EVIDENCE_PRODUCER_COLUMN) == Some(EVIDENCE_SEARCH_CANDIDATE_PRODUCER)
+        && text(INDEX_EVIDENCE_ELIGIBILITY_COLUMN) == Some(EVIDENCE_SEARCH_CANDIDATE_ELIGIBILITY)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EvidenceSearchReadCursor {
     session_id: String,
@@ -16609,71 +16693,61 @@ impl DbConnection {
         Ok(present)
     }
 
-    /// Attach validated persisted projections with primary-key batch lookups.
+    /// Attach validated persisted projections, one primary-key lookup per
+    /// span: `evidence_span_id IN (...)` batches are planned as full scans of
+    /// the projection table (see `recorded_admission_verdicts`, GH#78).
     /// Missing, corrupt or stale entries are computed once in memory. Return
     /// their positions so write-side backfill can persist only the repairs.
     fn hydrate_evidence_reader_projections(
         &self,
         spans: &mut [StoredEvidenceSpan],
     ) -> Result<Vec<usize>> {
-        const CHUNK: usize = 128;
         let available = !spans.is_empty() && self.reader_projections_available()?;
         let mut missing = Vec::new();
-        for (chunk_number, chunk) in spans.chunks_mut(CHUNK).enumerate() {
-            let mut projections = std::collections::HashMap::with_capacity(chunk.len());
-            if available {
-                let placeholders = (1..=chunk.len())
-                    .map(|index| format!("?{index}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let params = chunk
-                    .iter()
-                    .map(|span| Value::Text(span.id.clone()))
-                    .collect::<Vec<_>>();
-                let rows = self.query_for(
+        for (index, span) in spans.iter_mut().enumerate() {
+            let row = if available {
+                self.query_for(
                     DbOperation::Query,
-                    &format!(
-                        "SELECT evidence_span_id, projection_version, source_binding, reader_body, reader_text, egress_safe, integrity_binding FROM evidence_reader_projections WHERE evidence_span_id IN ({placeholders})"
-                    ),
-                    &params,
-                )?;
-                for row in rows {
-                    if let Ok(id) = required_text(&row, 0, DbOperation::Query, "evidence_span_id") {
-                        projections.insert(id.to_owned(), row);
-                    }
-                }
-            }
-            for (index, span) in chunk.iter_mut().enumerate() {
-                let persisted = projections.remove(&span.id).and_then(|row| {
-                    let version =
-                        required_u32(&row, 1, DbOperation::Query, "projection_version").ok()?;
-                    let source_binding =
-                        required_text(&row, 2, DbOperation::Query, "source_binding").ok()?;
-                    let body = required_text(&row, 3, DbOperation::Query, "reader_body").ok()?;
-                    let text = required_text(&row, 4, DbOperation::Query, "reader_text").ok()?;
-                    let egress_safe =
-                        match required_i64(&row, 5, DbOperation::Query, "egress_safe").ok()? {
-                            0 => false,
-                            1 => true,
-                            _ => return None,
-                        };
-                    let integrity_binding =
-                        required_text(&row, 6, DbOperation::Query, "integrity_binding").ok()?;
-                    EvidenceReaderProjection::from_storage(
-                        span,
-                        version,
-                        source_binding.to_owned(),
-                        body.to_owned(),
-                        text.to_owned(),
-                        egress_safe,
-                        integrity_binding.to_owned(),
-                    )
-                });
-                span.reader_projection = Some(persisted.unwrap_or_else(|| {
-                    missing.push(chunk_number * CHUNK + index);
-                    EvidenceReaderProjection::derive(span)
-                }));
-            }
+                    READER_PROJECTION_BY_EVIDENCE_ID_SQL,
+                    &[Value::Text(span.id.clone())],
+                )?
+                .into_iter()
+                .find(|row| {
+                    required_text(row, 0, DbOperation::Query, "evidence_span_id")
+                        .is_ok_and(|id| id == span.id)
+                })
+            } else {
+                None
+            };
+            let persisted = row.and_then(|row| {
+                let version =
+                    required_u32(&row, 1, DbOperation::Query, "projection_version").ok()?;
+                let source_binding =
+                    required_text(&row, 2, DbOperation::Query, "source_binding").ok()?;
+                let body = required_text(&row, 3, DbOperation::Query, "reader_body").ok()?;
+                let text = required_text(&row, 4, DbOperation::Query, "reader_text").ok()?;
+                let egress_safe =
+                    match required_i64(&row, 5, DbOperation::Query, "egress_safe").ok()? {
+                        0 => false,
+                        1 => true,
+                        _ => return None,
+                    };
+                let integrity_binding =
+                    required_text(&row, 6, DbOperation::Query, "integrity_binding").ok()?;
+                EvidenceReaderProjection::from_storage(
+                    span,
+                    version,
+                    source_binding.to_owned(),
+                    body.to_owned(),
+                    text.to_owned(),
+                    egress_safe,
+                    integrity_binding.to_owned(),
+                )
+            });
+            span.reader_projection = Some(persisted.unwrap_or_else(|| {
+                missing.push(index);
+                EvidenceReaderProjection::derive(span)
+            }));
         }
         Ok(missing)
     }
@@ -16814,26 +16888,14 @@ impl DbConnection {
         &self,
         ids: &[&str],
     ) -> Result<std::collections::HashMap<String, StoredSession>> {
-        const CHUNK: usize = 128;
+        // One primary-key lookup per id: the engine plans `id IN (...)` as a
+        // full scan of `sessions` (see `recorded_admission_verdicts`, GH#78).
         let mut sessions = std::collections::HashMap::with_capacity(ids.len());
-        for chunk in ids.chunks(CHUNK) {
-            if chunk.is_empty() {
-                continue;
-            }
-            let placeholders = (1..=chunk.len())
-                .map(|index| format!("?{index}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let params = chunk
-                .iter()
-                .map(|id| Value::Text((*id).to_owned()))
-                .collect::<Vec<_>>();
+        for id in ids {
             let rows = self.query_for(
                 DbOperation::Query,
-                &format!(
-                    "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE id IN ({placeholders})"
-                ),
-                &params,
+                SESSION_BY_ID_SQL,
+                &[Value::Text((*id).to_owned())],
             )?;
             for row in &rows {
                 let session = stored_session_from_row(row)?;
@@ -16847,30 +16909,26 @@ impl DbConnection {
     /// lookup. Deliberately a separate query rather than a third JOIN: the
     /// engine evaluates joins as nested loops, and a verdict join multiplied
     /// every evidence page by the verdict table's size.
+    ///
+    /// One equality lookup per id, not `evidence_span_id IN (...)` batches
+    /// (GH#78). The pinned engine plans such a batch as a full scan of
+    /// `evidence_admission_verdicts`, so every 128 evidence rows re-read the
+    /// whole verdict table and an admission scan cost O(N^2): about 160
+    /// whole-table scans for a 20,000-row import. An equality on the primary
+    /// key is an index seek.
     fn recorded_admission_verdicts(
         &self,
         ids: &[&str],
     ) -> Result<std::collections::HashMap<String, String>> {
-        const CHUNK: usize = 128;
         let mut recorded = std::collections::HashMap::with_capacity(ids.len());
         if ids.is_empty() || !self.admission_verdicts_available()? {
             return Ok(recorded);
         }
-        for chunk in ids.chunks(CHUNK) {
-            let placeholders = (1..=chunk.len())
-                .map(|index| format!("?{index}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let params = chunk
-                .iter()
-                .map(|id| Value::Text((*id).to_owned()))
-                .collect::<Vec<_>>();
+        for id in ids {
             let rows = self.query_for(
                 DbOperation::Query,
-                &format!(
-                    "SELECT evidence_span_id, verdict_binding FROM evidence_admission_verdicts WHERE evidence_span_id IN ({placeholders})"
-                ),
-                &params,
+                RECORDED_ADMISSION_VERDICT_SQL,
+                &[Value::Text((*id).to_owned())],
             )?;
             for row in &rows {
                 recorded.insert(
@@ -17654,23 +17712,28 @@ impl DbConnection {
         let mut session_cache = std::collections::HashMap::new();
         loop {
             checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
-            let page = if index_order {
-                let (page, last_rowid) =
+            // Rows the page query read, which decides whether the table has
+            // more. An index-order page reads table rows and returns only
+            // this workspace's candidates, so it can return fewer.
+            let (page, rows_scanned) = if index_order {
+                let page =
                     self.read_index_evidence_page(workspace_id, rowid_cursor, &mut session_cache)?;
-                rowid_cursor = last_rowid;
-                page
+                rowid_cursor = page.last_rowid;
+                (page.rows, page.table_rows)
             } else {
-                self.read_evidence_search_page(
+                let page = self.read_evidence_search_page(
                     workspace_id,
                     session_id,
                     cursor.as_ref(),
                     &mut session_cache,
-                )?
+                )?;
+                let len = page.len();
+                (page, len)
             };
-            let page_len = page.len();
-            if page_len == 0 {
+            if rows_scanned == 0 {
                 break;
             }
+            let page_len = page.len();
             scan.pages_read = scan.pages_read.saturating_add(1);
             scan.rows_read = scan
                 .rows_read
@@ -17703,7 +17766,8 @@ impl DbConnection {
                     visitor(row.span)?;
                 }
             }
-            if page_len < usize::try_from(EVIDENCE_SOURCE_READ_PAGE_SIZE).unwrap_or(usize::MAX) {
+            if rows_scanned < usize::try_from(EVIDENCE_SOURCE_READ_PAGE_SIZE).unwrap_or(usize::MAX)
+            {
                 break;
             }
         }
@@ -17771,37 +17835,48 @@ impl DbConnection {
         self.evidence_search_rows(&rows, session_cache)
     }
 
+    /// One index-order page: the next [`EVIDENCE_SOURCE_READ_PAGE_SIZE`]
+    /// table rows after `cursor` in rowid order, of which only this
+    /// workspace's search candidates are hydrated and returned.
+    ///
+    /// The SQL deliberately has no workspace or candidate predicate (GH#78).
+    /// With them, the planner chose the `(workspace_id, search_eligibility,
+    /// producer_kind, session_id)` index, whose order is not rowid order, so
+    /// every page re-read and sorted every remaining candidate row, excerpts
+    /// included, and the page reads alone grew quadratically with the corpus.
+    /// A bare rowid seek reads each table row once. Other workspaces' rows and this
+    /// workspace's non-candidates are skipped before decoding, exactly as the
+    /// SQL predicate excluded them; `count_non_candidate_evidence` accounts
+    /// for the latter.
     fn read_index_evidence_page(
         &self,
         workspace_id: &str,
         cursor: Option<i64>,
         session_cache: &mut std::collections::HashMap<String, Option<Arc<StoredSession>>>,
-    ) -> Result<(Vec<EvidenceSearchReadRow>, Option<i64>)> {
-        const COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at";
-        let (seek, params) = match cursor {
-            None => (
-                "",
-                vec![
-                    Value::Text(workspace_id.to_owned()),
-                    Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE)),
-                ],
-            ),
-            Some(rowid) => (
-                "AND e.rowid > ?2",
-                vec![
-                    Value::Text(workspace_id.to_owned()),
-                    Value::BigInt(rowid),
-                    Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE)),
-                ],
-            ),
-        };
-        let rows = self.query_for(DbOperation::Query, &format!(
-            "SELECT {COLUMNS}, e.rowid FROM evidence_spans e WHERE e.workspace_id = ?1 {seek} AND {EVIDENCE_SEARCH_CANDIDATE_PREDICATE} ORDER BY e.rowid ASC LIMIT ?{}", params.len()), &params)?;
+    ) -> Result<IndexEvidencePage> {
+        let (sql, params) = index_evidence_page_query(cursor);
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        let table_rows = rows.len();
         let last_rowid = rows
             .last()
-            .map(|row| required_i64(row, 27, DbOperation::Query, "rowid"))
+            .map(|row| {
+                required_i64(
+                    row,
+                    INDEX_EVIDENCE_ROWID_COLUMN,
+                    DbOperation::Query,
+                    "rowid",
+                )
+            })
             .transpose()?;
-        Ok((self.evidence_search_rows(&rows, session_cache)?, last_rowid))
+        let candidates = rows
+            .into_iter()
+            .filter(|row| index_evidence_row_is_candidate(row, workspace_id))
+            .collect::<Vec<_>>();
+        Ok(IndexEvidencePage {
+            rows: self.evidence_search_rows(&candidates, session_cache)?,
+            last_rowid,
+            table_rows,
+        })
     }
 
     fn evidence_search_rows(
@@ -54852,6 +54927,225 @@ UPDATE memories
             &admitted,
             "cached admission and live projection checks agree",
         )
+    }
+
+    #[test]
+    fn index_order_evidence_scan_reads_each_table_row_once_across_workspaces() -> TestResult {
+        // GH#78: index-order pages now read the table in rowid order and keep
+        // only this workspace's candidates. A full page holding none of them
+        // must not end the scan, other workspaces' rows must never leak in,
+        // and the admission report must match the transcript-order scan.
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_a = "wsp_01234567890123456789012345";
+        let workspace_b = "wsp_01234567890123456789012399";
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012399', '/tmp/test-b', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+        let session_a =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x780_a00)).to_string();
+        let session_b =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x780_b00)).to_string();
+        connection.insert_session(&session_a, &session_input("gh78-session-a"))?;
+        let mut input_b = session_input("gh78-session-b");
+        input_b.workspace_id = workspace_b.to_owned();
+        connection.insert_session(&session_b, &input_b)?;
+
+        let page = super::EVIDENCE_SOURCE_READ_PAGE_SIZE;
+        let mut next_id = 0_u128;
+        let mut insert = |session: &str, workspace: &str, line: u32, candidate: bool| {
+            next_id += 1;
+            let id =
+                crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x780_c000 + next_id))
+                    .to_string();
+            let mut input = evidence_span_input(session, &format!("gh78-span-{next_id}"), line);
+            input.workspace_id = workspace.to_owned();
+            if !candidate {
+                input.producer_kind = super::EvidenceProducerKind::DocsBootstrap;
+                input.role = Some("docs_bootstrap".to_owned());
+                input.span_kind = "file".to_owned();
+            }
+            connection.insert_evidence_span(&id, &input)
+        };
+        // Rowids 1..=10 are A's; then more than two pages of B's, so one
+        // whole page has no A row; then an A non-candidate and five more A
+        // candidates on the final, partial page.
+        for line in 1..=10 {
+            insert(&session_a, workspace_a, line * 10, true)?;
+        }
+        let b_rows = 2 * page + 5;
+        for line in 1..=b_rows {
+            insert(&session_b, workspace_b, line * 10, true)?;
+        }
+        insert(&session_a, workspace_a, 1_000, false)?;
+        for line in 101..=105 {
+            insert(&session_a, workspace_a, line * 10, true)?;
+        }
+        let table_rows = 10 + b_rows + 1 + 5;
+
+        for (workspace, candidates) in [(workspace_a, 15_u32), (workspace_b, b_rows)] {
+            let mut visited = Vec::new();
+            let index_scan = connection.visit_index_evidence_for_workspace(workspace, |span| {
+                visited.push(span);
+                Ok(())
+            })?;
+            ensure(
+                visited.iter().all(|span| span.workspace_id == workspace),
+                "no other workspace's evidence leaks into an index-order scan",
+            )?;
+            ensure_equal(
+                &u32::try_from(visited.len()).unwrap_or(u32::MAX),
+                &candidates,
+                "every candidate is visited, including those after a page without one",
+            )?;
+            let (mut transcript, report) =
+                connection.list_search_admitted_evidence_spans_for_workspace(workspace)?;
+            let key = |span: &super::StoredEvidenceSpan| span.id.clone();
+            visited.sort_by_key(key);
+            transcript.sort_by_key(key);
+            ensure_equal(
+                &visited,
+                &transcript,
+                "index order admits the transcript set",
+            )?;
+            ensure_equal(
+                &index_scan.admission,
+                &report,
+                "index order preserves every admission bucket",
+            )?;
+            ensure_equal(
+                &index_scan.pages_read,
+                &table_rows.div_ceil(page),
+                "pages follow table rows, not this workspace's candidates",
+            )?;
+            ensure(
+                index_scan.max_page_rows <= page,
+                "no page returns more than the fixed bound",
+            )?;
+        }
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_candidate_row_filter_matches_the_sql_predicate() -> TestResult {
+        ensure_equal(
+            &super::EVIDENCE_SEARCH_CANDIDATE_PREDICATE.to_owned(),
+            &format!(
+                "e.producer_kind = '{}' AND e.search_eligibility = '{}'",
+                super::EVIDENCE_SEARCH_CANDIDATE_PRODUCER,
+                super::EVIDENCE_SEARCH_CANDIDATE_ELIGIBILITY
+            ),
+            "the Rust row filter compares the same values as the SQL predicate",
+        )
+    }
+
+    #[test]
+    fn index_order_admission_scan_issues_no_whole_table_read_per_page() -> TestResult {
+        // GH#78: a full admission scan (index rebuild, its dry run, index
+        // status) cost O(N^2). Every 128 rows fetched their recorded verdicts
+        // and reader projections with `evidence_span_id IN (...)`, which the
+        // engine plans as a scan of the whole table, and every page filtered
+        // by workspace and candidacy in SQL, which made the planner choose an
+        // index not in rowid order and sort every remaining row. On the
+        // statements a real scan issues, require every verdict, projection
+        // and session lookup to seek its primary key and every page to be a
+        // bare rowid seek. (EXPLAIN QUERY PLAN reports that sort as a plain
+        // SCAN either way, so the page check reads the statement itself.)
+        fn query_plan(connection: &DbConnection, sql: &str) -> Result<String, String> {
+            let params = (0..sql.matches('?').count())
+                .map(|_| Value::Text("ev_plan_probe".to_owned()))
+                .collect::<Vec<_>>();
+            let rows = connection
+                .query(&format!("EXPLAIN QUERY PLAN {sql}"), &params)
+                .map_err(|error| error.to_string())?;
+            Ok(rows
+                .iter()
+                .filter_map(|row| row.get(3).and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" | "))
+        }
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x780_d00)).to_string();
+        connection.insert_session(&session_id, &session_input("gh78-plan-session"))?;
+        let total = super::EVIDENCE_SOURCE_READ_PAGE_SIZE.saturating_add(3);
+        for index in 0..total {
+            let evidence_id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x780_e000 + u128::from(index),
+            ))
+            .to_string();
+            let input =
+                evidence_span_input(&session_id, &format!("gh78-plan-{index}"), index * 10 + 1);
+            connection.insert_evidence_span(&evidence_id, &input)?;
+        }
+
+        let (scan, statements) = super::capture_query_sql_for_test(|| {
+            connection.visit_index_evidence_for_workspace(workspace_id, |_| Ok(()))
+        });
+        let scan = scan?;
+        ensure_equal(
+            &scan
+                .admission
+                .by_producer
+                .get("cass_import")
+                .map(|counts| counts.admitted),
+            &Some(total),
+            "every row is admitted through its recorded verdict",
+        )?;
+
+        for table in [
+            "evidence_admission_verdicts",
+            "evidence_reader_projections",
+            "sessions",
+        ] {
+            let lookups = statements
+                .iter()
+                .filter(|sql| sql.contains(&format!("FROM {table} ")))
+                .collect::<BTreeSet<_>>();
+            ensure(
+                !lookups.is_empty(),
+                format!("the scan looks up {table} for its rows"),
+            )?;
+            for sql in lookups {
+                let plan = query_plan(&connection, sql)?;
+                ensure(
+                    plan.contains(&format!("SEARCH {table}"))
+                        && !plan.contains(&format!("SCAN {table}")),
+                    format!(
+                        "a {table} lookup must seek the primary key, not scan: {plan} <- {sql}"
+                    ),
+                )?;
+            }
+        }
+
+        let page_reads = statements
+            .iter()
+            .filter(|sql| sql.contains("FROM evidence_spans e") && sql.contains("ORDER BY e.rowid"))
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &page_reads.len(),
+            &2,
+            "the scan reads exactly two rowid-ordered pages",
+        )?;
+        for sql in page_reads {
+            let predicate = sql
+                .split_once(" FROM evidence_spans e")
+                .map_or("", |(_, rest)| rest);
+            ensure(
+                !predicate.contains("workspace_id")
+                    && !predicate.contains("producer_kind")
+                    && !predicate.contains("search_eligibility"),
+                format!("an index-order page must be a bare rowid seek: {sql}"),
+            )?;
+        }
+        connection.close()?;
+        Ok(())
     }
 
     #[test]
