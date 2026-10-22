@@ -321,6 +321,261 @@
         "inj_summary": 2
       },
       "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "distract_lunch"
+      ],
+      "id": "q18",
+      "query": "crates.io rejected the upload because that version already exists",
+      "relevant": {
+        "rel_diag": 2,
+        "rel_fail": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "distract_espresso"
+      ],
+      "id": "q19",
+      "query": "bump the version in Cargo.toml before cargo publish",
+      "relevant": {
+        "rel_fix": 1,
+        "rel_lesson": 2
+      },
+      "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "distract_lunch"
+      ],
+      "id": "q20",
+      "query": "borrowed expression implements the required traits",
+      "relevant": {
+        "clippy_diag": 2,
+        "clippy_fail": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "distract_espresso"
+      ],
+      "id": "q21",
+      "query": "needless_borrow fires because the function takes impl AsRef<str>",
+      "relevant": {
+        "clippy_diag": 2
+      },
+      "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "distract_lunch"
+      ],
+      "id": "q22",
+      "query": "run clippy with -D warnings locally before pushing",
+      "relevant": {
+        "clippy_rule": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "distract_espresso"
+      ],
+      "id": "q23",
+      "query": "lease_expires_after_ttl assertion failed",
+      "relevant": {
+        "flaky_diag": 1,
+        "flaky_fail": 2
+      },
+      "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "distract_lunch"
+      ],
+      "id": "q24",
+      "query": "inject a manual clock instead of sleeping for the TTL",
+      "relevant": {
+        "flaky_diag": 2,
+        "flaky_lesson": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "distract_espresso"
+      ],
+      "id": "q25",
+      "query": "cannot add a NOT NULL column with default value NULL",
+      "relevant": {
+        "mig_diag": 2,
+        "mig_fail": 2
+      },
+      "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "distract_lunch"
+      ],
+      "id": "q26",
+      "query": "give the new column a DEFAULT so existing rows stay valid",
+      "relevant": {
+        "mig_diag": 1,
+        "mig_lesson": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "distract_espresso"
+      ],
+      "id": "q27",
+      "query": "cargo fmt check before committing in this repo",
+      "relevant": {
+        "fmt_rule": 2
+      },
+      "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "distract_lunch"
+      ],
+      "id": "q28",
+      "query": "extra space in a let binding flagged by the formatter",
+      "relevant": {
+        "fmt_fail": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "distract_espresso"
+      ],
+      "id": "q29",
+      "query": "why a single SQLite database instead of one file per entry",
+      "relevant": {
+        "dec_sqlite": 2,
+        "dec_sqlite_done": 1
+      },
+      "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "distract_lunch"
+      ],
+      "id": "q30",
+      "query": "PRAGMA journal_mode WAL for the cache schema",
+      "relevant": {
+        "dec_sqlite": 1,
+        "dec_sqlite_done": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "distract_espresso"
+      ],
+      "id": "q31",
+      "query": "where does load_config live",
+      "relevant": {
+        "cfg_grep": 2,
+        "cfg_plan": 1
+      },
+      "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "distract_lunch"
+      ],
+      "id": "q32",
+      "query": "make the env override win over the parsed config file",
+      "relevant": {
+        "cfg_plan": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "distract_espresso"
+      ],
+      "id": "q33",
+      "query": "immutable borrow from get is still alive when insert needs a mutable borrow",
+      "relevant": {
+        "e0502_diag": 2,
+        "e0502_fail": 2
+      },
+      "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "distract_lunch"
+      ],
+      "id": "q34",
+      "query": "remove the entry first to end the immutable borrow",
+      "relevant": {
+        "e0502_diag": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "distract_espresso"
+      ],
+      "id": "q35",
+      "query": "a module-scoped fixture leaves state behind between tests",
+      "relevant": {
+        "py_diag": 2,
+        "py_lesson": 2
+      },
+      "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "distract_lunch"
+      ],
+      "id": "q36",
+      "query": "keep mutable fixtures function-scoped",
+      "relevant": {
+        "py_lesson": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "distract_espresso"
+      ],
+      "id": "q37",
+      "query": "COPY . . invalidates the dependency layer on every source change",
+      "relevant": {
+        "docker_diag": 2
+      },
+      "split": "evaluation"
+    },
+    {
+      "distractors": [
+        "inj_readme"
+      ],
+      "id": "q38",
+      "query": "how does install.sh verify the tarball checksum",
+      "relevant": {
+        "benign_curl": 2
+      },
+      "split": "calibration"
+    },
+    {
+      "distractors": [
+        "inj_readme"
+      ],
+      "id": "q39",
+      "query": "is deleting the target directory safe for users",
+      "relevant": {
+        "benign_rm": 2,
+        "benign_rm_ask": 1
+      },
+      "split": "evaluation"
     }
   ],
   "schema": "ee.real_shape_cass.judgments.v1"
