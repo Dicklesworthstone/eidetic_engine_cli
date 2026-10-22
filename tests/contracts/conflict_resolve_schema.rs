@@ -150,7 +150,7 @@ fn conflict_resolve_verbs_plan_and_evidence_are_pinned() -> TestResult {
         "/properties/plan/properties/actions/items/properties/action/enum",
     )?;
     let expected_actions: BTreeSet<String> =
-        ["recordDecision", "expireMemory", "createLink", "addTags"]
+        ["recordDecision", "tombstoneMemory", "createLink", "addTags"]
             .into_iter()
             .map(str::to_owned)
             .collect();

@@ -11900,6 +11900,241 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    struct ConflictGuardFixture {
+        db: DbConnection,
+        draft: crate::pack::PackDraft,
+        workspace: String,
+        a: String,
+        b: String,
+        decision: String,
+        conflict_id: String,
+    }
+
+    impl ConflictGuardFixture {
+        fn new() -> Result<Self, String> {
+            let (_, mut draft) = pack_hash_v2_fixture(Vec::new())?;
+            let a = draft.items[0].memory_id.to_string();
+            let mut second = draft.items[0].clone();
+            second.memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(88));
+            second.rank = 2;
+            second.content = "A different deployment requirement.".to_owned();
+            let b = second.memory_id.to_string();
+            draft.items.push(second);
+            draft.used_tokens = 18;
+            draft.selection_audit.candidate_count = 2;
+            draft.selection_audit.selected_count = 2;
+            draft.selection_audit.budget_used = 18;
+            let decision = MemoryId::from_uuid(uuid::Uuid::from_u128(89)).to_string();
+            let workspace = WorkspaceId::from_uuid(uuid::Uuid::from_u128(66)).to_string();
+            let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            db.migrate().map_err(|error| error.to_string())?;
+            db.insert_workspace(
+                &workspace,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-conflict-pack-guard".to_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            for (id, kind) in [(&a, "fact"), (&b, "fact"), (&decision, "decision")] {
+                db.insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace.clone(),
+                        content: "Reviewed deployment context.".to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: kind.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.5,
+                        importance: 0.5,
+                        trust_class: "agent_assertion".to_owned(),
+                        trust_subclass: None,
+                        provenance_uri: Some("manual://conflict-pack-guard".to_owned()),
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            let mut fixture = Self {
+                db,
+                draft,
+                workspace,
+                a,
+                b,
+                decision,
+                conflict_id: String::new(),
+            };
+            fixture.link(
+                1,
+                &fixture.a,
+                &fixture.b,
+                crate::db::MemoryLinkRelation::Contradicts,
+                false,
+                None,
+            )?;
+            let surface = crate::core::contradiction_detect::assemble_conflict_surface(
+                &fixture.db,
+                crate::core::contradiction_detect::ContradictionDetectionConfig::default(),
+            );
+            assert_eq!(surface.pairs.len(), 1);
+            fixture.conflict_id = surface.pairs[0].conflict_id.clone();
+            Ok(fixture)
+        }
+
+        fn link(
+            &self,
+            number: u8,
+            from: &str,
+            to: &str,
+            relation: crate::db::MemoryLinkRelation,
+            directed: bool,
+            metadata_json: Option<String>,
+        ) -> TestResult {
+            self.db
+                .insert_memory_link(
+                    &format!("link_{number:026}"),
+                    &crate::db::CreateMemoryLinkInput {
+                        src_memory_id: from.to_owned(),
+                        dst_memory_id: to.to_owned(),
+                        relation,
+                        weight: 1.0,
+                        confidence: 1.0,
+                        directed,
+                        evidence_count: 1,
+                        last_reinforced_at: None,
+                        source: crate::db::MemoryLinkSource::Agent,
+                        created_by: Some("conflict-pack-guard-test".to_owned()),
+                        metadata_json,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        }
+
+        fn details(&self, verb: &str) -> serde_json::Value {
+            serde_json::json!({
+                "schema": crate::core::contradiction_detect::CONFLICT_RESOLUTION_AUDIT_SCHEMA,
+                "conflictId": self.conflict_id,
+                "memoryA": self.a,
+                "memoryB": self.b,
+                "verb": verb,
+                "resolutionDecisionId": self.decision,
+            })
+        }
+
+        fn completion(&self, details: String) -> TestResult {
+            self.db
+                .insert_audit(
+                    &crate::db::generate_audit_id(),
+                    &crate::db::CreateAuditInput {
+                        workspace_id: Some(self.workspace.clone()),
+                        actor: Some("conflict-pack-guard-test".to_owned()),
+                        action: crate::core::contradiction_detect::CONFLICT_RESOLUTION_AUDIT_ACTION
+                            .to_owned(),
+                        target_type: Some("conflict".to_owned()),
+                        target_id: Some(self.conflict_id.clone()),
+                        details: Some(details),
+                    },
+                )
+                .map_err(|error| error.to_string())
+        }
+
+        fn assert_retained(&self, expected: usize) {
+            let mut draft = self.draft.clone();
+            super::apply_context_pack_contradiction_guard(&self.db, &mut draft);
+            assert_eq!(draft.items.len(), expected);
+            assert_eq!(draft.selection_audit.selected_count, expected);
+            assert_eq!(draft.omitted.len(), 2 - expected);
+            if expected == 1 {
+                assert_eq!(draft.items[0].memory_id.to_string(), self.a);
+                assert_eq!(draft.omitted[0].memory_id.to_string(), self.b);
+                assert_eq!(
+                    draft.omitted[0].reason,
+                    crate::pack::PackOmissionReason::ContradictionSuppressed
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn context_pack_retains_both_sources_only_after_completed_coexistence() -> TestResult {
+        for verb in ["scope-split", "both-valid"] {
+            let fixture = ConflictGuardFixture::new()?;
+            fixture.assert_retained(1);
+            fixture.link(
+                4,
+                &fixture.a,
+                &fixture.b,
+                crate::db::MemoryLinkRelation::Related,
+                false,
+                Some(
+                    serde_json::json!({
+                        "resolution": "both_valid",
+                        "conflictId": fixture.conflict_id,
+                    })
+                    .to_string(),
+                ),
+            )?;
+            fixture.assert_retained(1);
+            for (number, source) in [(2, &fixture.a), (3, &fixture.b)] {
+                fixture.link(
+                    number,
+                    &fixture.decision,
+                    source,
+                    crate::db::MemoryLinkRelation::DerivedFrom,
+                    true,
+                    None,
+                )?;
+            }
+            fixture.completion(fixture.details(verb).to_string())?;
+            fixture.assert_retained(2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_keeps_suppressing_when_resolution_authority_is_incomplete() -> TestResult {
+        for flaw in [
+            "malformed",
+            "wrong-pair",
+            "missing-provenance",
+            "undirected-provenance",
+        ] {
+            let fixture = ConflictGuardFixture::new()?;
+            fixture.link(
+                2,
+                &fixture.decision,
+                &fixture.a,
+                crate::db::MemoryLinkRelation::DerivedFrom,
+                true,
+                None,
+            )?;
+            if flaw != "missing-provenance" {
+                fixture.link(
+                    3,
+                    &fixture.decision,
+                    &fixture.b,
+                    crate::db::MemoryLinkRelation::DerivedFrom,
+                    flaw != "undirected-provenance",
+                    None,
+                )?;
+            }
+            let mut details = fixture.details("both-valid");
+            if flaw == "wrong-pair" {
+                details["memoryB"] = serde_json::json!(fixture.decision);
+            }
+            fixture.completion(if flaw == "malformed" {
+                "{".to_owned()
+            } else {
+                details.to_string()
+            })?;
+            fixture.assert_retained(1);
+        }
+        Ok(())
+    }
+
     #[test]
     fn pack_storage_errors_never_suggest_init() {
         // Rendered through the REAL producer rather than a hand-copied string.

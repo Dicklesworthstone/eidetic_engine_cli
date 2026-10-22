@@ -126,6 +126,20 @@ pub struct DecideRecordReport {
     pub warnings: Vec<String>,
 }
 
+/// Evidence for one planned action, committed with the resolution rationale.
+#[derive(Clone, Debug)]
+pub(crate) struct ConflictResolutionActionResult {
+    pub action: String,
+    pub audit_ids: Vec<String>,
+    pub created_memory_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ConflictResolutionReport {
+    pub decision: DecideRecordReport,
+    pub results: Vec<ConflictResolutionActionResult>,
+}
+
 impl DecideRecordReport {
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
@@ -260,14 +274,13 @@ pub fn decide_record(options: &DecideRecordOptions<'_>) -> Result<DecideRecordRe
     atomic::record(options)
 }
 
-/// Apply a conflict supersession without treating an arbitrary memory as a
-/// decision predecessor. The decision, replacement, audits and index work share
-/// the normal decision writer's transaction.
-pub(crate) fn decide_conflict_supersession(
+/// Apply a complete reviewed conflict plan in the normal decision writer's
+/// transaction. Its rationale is independent of ordinary decision ancestry.
+pub(crate) fn decide_conflict_resolution(
     options: &DecideRecordOptions<'_>,
-    keeper: &str,
-) -> Result<DecideRecordReport, DomainError> {
-    atomic::record_conflict(options, keeper)
+    plan: &crate::core::contradiction_detect::ConflictResolutionPlan,
+) -> Result<ConflictResolutionReport, DomainError> {
+    atomic::record_resolution(options, plan)
 }
 
 pub fn decide_list(options: &DecideListOptions<'_>) -> Result<DecideListReport, DomainError> {

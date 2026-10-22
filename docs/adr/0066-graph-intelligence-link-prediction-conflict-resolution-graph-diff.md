@@ -93,11 +93,11 @@ CHECK constraint uses the family identifiers `memory_links`,
 [--apply]` — **dry-run is the default**; `--apply` is required to mutate
 (the curate-disposition convention for all new write verbs in this wave).
 
-| Verb | Durable effect (all via existing `apply_curation_candidate` machinery, one transaction scope, full audit) |
+| Verb | Durable effect (existing decision/lifecycle primitives, one writer transaction, full audit) |
 |---|---|
 | `supersede` | requires `--keep`; loser gets supersede link + validity-window close via the standard lifecycle |
-| `scope-split` | both survive; `--scope-a/--scope-b` tag/validity args annotate each side; link re-typed |
-| `both-valid` | link re-typed to scoped-coexistence with rationale; contradiction cleared |
+| `scope-split` | both survive; `--scope-a-tags/--scope-b-tags` annotate the positional sides; audited coexistence settles the pair |
+| `both-valid` | audited coexistence with rationale settles the pair; original conflict edges remain history |
 | `reject-one` | requires `--keep`; loser tombstoned via the existing curation path |
 
 - Stale-surface guard: the live conflict surface is re-derived first; if
@@ -108,6 +108,15 @@ CHECK constraint uses the family identifiers `memory_links`,
   verbs considered), `chosen`, `rationale`, `supersedes` (loser id, when
   applicable). Future packs explaining the area carry the why.
 - Policy: `reject-one` against a protected rule exits 7.
+
+The writer revalidates the complete plan and source authority after acquiring
+the transaction. The rationale, all planned effects, two directed
+`derived_from` provenance links, audits and durable indexing obligations commit
+together. A `conflict.resolve` completion audit binds the canonical pair,
+workspace, verb and rationale decision. Both the actionable conflict surface
+and pack guard consume that same decision-backed completion; arbitrary related
+link metadata cannot suppress a conflict. Historical rationale visibility does
+not undo a completed resolution.
 
 ### 4. Graph diff (`ee graph diff`)
 

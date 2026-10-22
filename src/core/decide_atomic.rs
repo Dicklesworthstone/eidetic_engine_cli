@@ -2,6 +2,11 @@
 //! predecessor, lineage, audit, and durable index obligations.
 
 use super::*;
+use crate::core::contradiction_detect::{
+    CONFLICT_RESOLUTION_AUDIT_ACTION, CONFLICT_RESOLUTION_AUDIT_SCHEMA, ConflictResolutionOutcome,
+    ConflictResolutionPlan, ConflictResolveRequest, ContradictionDetectionConfig,
+    PlannedResolutionAction, ResolveVerb, assemble_conflict_surface, plan_conflict_resolution,
+};
 use crate::core::memory::{
     PreparedRememberTxnWrite, RememberMemoryOptions, finish_prepared_remember_txn_write,
     prepare_remember_txn_write_for_connection, record_prepared_remember_txn_write_in_txn,
@@ -23,13 +28,10 @@ enum Stage {
     Link,
     Predecessor,
     Index,
+    ResolutionAction,
+    Provenance,
+    Completion,
     Report,
-}
-
-#[derive(Clone, Copy)]
-struct ConflictSupersession<'a> {
-    keeper: &'a str,
-    loser: &'a str,
 }
 
 struct Supersession<'a> {
@@ -59,41 +61,92 @@ pub(super) fn record(options: &DecideRecordOptions<'_>) -> Result<DecideRecordRe
     record_with_boundary(options, |_, _| Ok(()))
 }
 
-pub(super) fn record_conflict(
+pub(super) fn record_resolution(
     options: &DecideRecordOptions<'_>,
-    keeper: &str,
-) -> Result<DecideRecordReport, DomainError> {
-    let Some(loser) = options.supersedes.filter(|_| !options.dry_run) else {
-        return Err(DomainError::Usage {
-            message: "Conflict supersession requires an applied plan with a losing memory"
-                .to_owned(),
-            repair: Some("Use ee conflict resolve to preview the plan before --apply.".to_owned()),
-        });
+    plan: &ConflictResolutionPlan,
+) -> Result<ConflictResolutionReport, DomainError> {
+    record_resolution_with_boundary(options, plan, |_, _| Ok(()))
+}
+
+fn record_resolution_with_boundary(
+    options: &DecideRecordOptions<'_>,
+    plan: &ConflictResolutionPlan,
+    boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
+) -> Result<ConflictResolutionReport, DomainError> {
+    let decisions: Vec<_> = plan
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            PlannedResolutionAction::RecordDecision {
+                topic,
+                chosen,
+                alternatives,
+                supersedes,
+            } => Some((topic, chosen, alternatives, supersedes)),
+            _ => None,
+        })
+        .collect();
+    let [(topic, chosen, alternatives, supersedes)] = decisions.as_slice() else {
+        return Err(invalid_conflict_plan());
     };
-    // A conflict decision records WHY one existing memory replaces another.
-    // It is not itself a revision of an arbitrary fact, rule, or decision.
+    if options.dry_run
+        || options.revisit_by.is_some()
+        || options.topic != topic.as_str()
+        || options.chosen != chosen.as_str()
+        || &options.alternatives != *alternatives
+        || options.supersedes != supersedes.as_deref()
+    {
+        return Err(invalid_conflict_plan());
+    }
+    // A rationale explains a resolution; it is not a revision of either
+    // source, even when one source is itself a decision.
     let mut decision_options = options.clone();
     decision_options.supersedes = None;
     decision_options.actor = options.actor.or(Some("ee conflict resolve"));
-    record_with_conflict_boundary(
-        &decision_options,
-        Some(ConflictSupersession { keeper, loser }),
-        |_, _| Ok(()),
-    )
+    let now = options.now.unwrap_or_else(Utc::now);
+    let fields = prepare_decision_fields(
+        options.topic,
+        options.chosen,
+        &options.alternatives,
+        options.rationale,
+        None,
+        None,
+        now,
+    )?;
+    let _ = validated_fields(&fields)?;
+    let mut scope = decide_scope(options.workspace_path, options.database_path, false)?;
+    let heads = read::load_record_heads(&mut scope, &fields, now)?;
+    let mut prior = heads
+        .iter()
+        .filter(|head| head.normalized_topic == fields.normalized_topic);
+    let predecessor = prior.next().map(|head| head.memory_id.clone());
+    if prior.next().is_some()
+        || predecessor
+            .as_deref()
+            .is_some_and(|id| id == plan.memory_a || id == plan.memory_b)
+    {
+        return Err(invalid_conflict_plan());
+    }
+    // A previously recorded rationale can predate terminal conflict handling.
+    // Propose its ordinary decision revision here; the writer rechecks the
+    // exact head, topic and hidden-source authority before accepting it.
+    decision_options.supersedes = predecessor.as_deref();
+    decision_options.now = Some(now);
+    record_with_optional_resolution_boundary(&decision_options, Some(plan), boundary)
 }
 
 fn record_with_boundary(
     options: &DecideRecordOptions<'_>,
     boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
 ) -> Result<DecideRecordReport, DomainError> {
-    record_with_conflict_boundary(options, None, boundary)
+    record_with_optional_resolution_boundary(options, None, boundary).map(|report| report.decision)
 }
 
-fn record_with_conflict_boundary(
+fn record_with_optional_resolution_boundary(
     options: &DecideRecordOptions<'_>,
-    conflict: Option<ConflictSupersession<'_>>,
+    resolution: Option<&ConflictResolutionPlan>,
     mut boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
-) -> Result<DecideRecordReport, DomainError> {
+) -> Result<ConflictResolutionReport, DomainError> {
     let mut scope = decide_scope(
         options.workspace_path,
         options.database_path,
@@ -137,40 +190,43 @@ fn record_with_conflict_boundary(
             .map(|item| lineage::successor_depth(item.chain_depth))
             .transpose()?
             .unwrap_or(0);
-        return Ok(DecideRecordReport {
-            schema: DECIDE_RECORD_SCHEMA_V1,
-            version: env!("CARGO_PKG_VERSION"),
-            status: "would_record".to_owned(),
-            dry_run: true,
-            persisted: false,
-            workspace_id: scope.workspace_id,
-            database_path: scope.database_path.display().to_string(),
-            decision: DecideItem {
-                memory_id: preview.memory_id.to_string(),
-                topic: fields.topic.clone(),
-                normalized_topic: fields.normalized_topic.clone(),
-                chosen: fields.chosen.clone(),
-                alternatives: fields.alternatives.clone(),
-                options: fields.options.clone(),
-                rationale: fields.rationale.clone(),
-                supersedes: fields.supersedes.clone(),
-                chain_depth,
-                revisit_by: fields.revisit_by.clone(),
-                revisit_status: revisit_status(fields.revisit_by.as_deref(), now, None),
-                superseded: false,
-                valid_to: None,
-                created_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
+        return Ok(ConflictResolutionReport {
+            decision: DecideRecordReport {
+                schema: DECIDE_RECORD_SCHEMA_V1,
+                version: env!("CARGO_PKG_VERSION"),
+                status: "would_record".to_owned(),
+                dry_run: true,
+                persisted: false,
+                workspace_id: scope.workspace_id,
+                database_path: scope.database_path.display().to_string(),
+                decision: DecideItem {
+                    memory_id: preview.memory_id.to_string(),
+                    topic: fields.topic.clone(),
+                    normalized_topic: fields.normalized_topic.clone(),
+                    chosen: fields.chosen.clone(),
+                    alternatives: fields.alternatives.clone(),
+                    options: fields.options.clone(),
+                    rationale: fields.rationale.clone(),
+                    supersedes: fields.supersedes.clone(),
+                    chain_depth,
+                    revisit_by: fields.revisit_by.clone(),
+                    revisit_status: revisit_status(fields.revisit_by.as_deref(), now, None),
+                    superseded: false,
+                    valid_to: None,
+                    created_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
+                },
+                superseded: predecessor.map(|item| DecideMemoryRef {
+                    memory_id: item.memory_id.clone(),
+                    valid_to: item.valid_to.clone(),
+                    status: "would_supersede".to_owned(),
+                }),
+                memory_audit_id: None,
+                memory_index_job_id: None,
+                link_audit_id: None,
+                expire_audit_id: None,
+                warnings: Vec::new(),
             },
-            superseded: predecessor.map(|item| DecideMemoryRef {
-                memory_id: item.memory_id.clone(),
-                valid_to: item.valid_to.clone(),
-                status: "would_supersede".to_owned(),
-            }),
-            memory_audit_id: None,
-            memory_index_job_id: None,
-            link_audit_id: None,
-            expire_audit_id: None,
-            warnings: Vec::new(),
+            results: Vec::new(),
         });
     }
 
@@ -196,12 +252,14 @@ fn record_with_conflict_boundary(
                 )
                 .into());
             }
-            let conflict = conflict
-                .map(|pair| {
-                    validate_conflict_supersession(&connection, write.workspace_id(), pair, &fields)
-                        .map(|conflict_id| (pair, conflict_id))
-                })
-                .transpose()?;
+            if let Some(plan) = resolution {
+                validate_conflict_resolution(
+                    &connection,
+                    write.workspace_id(),
+                    plan,
+                    options.rationale,
+                )?;
+            }
             let heads = read::record_heads_in_current_snapshot(
                 &connection,
                 write.workspace_id(),
@@ -258,33 +316,27 @@ fn record_with_conflict_boundary(
                     &mut boundary,
                 )?;
             }
-            if let Some((pair, conflict_id)) = conflict {
-                replace_memory(
+            let results = if let Some(plan) = resolution {
+                apply_resolution(
                     &connection,
                     &write,
-                    Supersession {
-                        from_memory_id: pair.keeper,
-                        to_memory_id: pair.loser,
-                        details: json!({
-                            "schema": CONFLICT_SUPERSESSION_AUDIT_SCHEMA,
-                            "conflictId": conflict_id,
-                            "resolutionDecisionId": write.memory_id(),
-                            "fromMemoryId": pair.keeper,
-                            "toMemoryId": pair.loser,
-                            "supersededAt": stored.updated_at,
-                        }),
-                    },
+                    plan,
                     options.actor,
                     &stored.updated_at,
                     &mut report,
                     &mut boundary,
-                )?;
-            }
+                )?
+            } else {
+                Vec::new()
+            };
             // All fallible source-dependent report construction is pre-COMMIT.
             report.decision.chain_depth =
                 lineage::chain_depth(&connection, write.workspace_id(), write.memory_id())?;
             boundary(Stage::Report, &connection)?;
-            Ok::<_, RecordError>(report)
+            Ok::<_, RecordError>(ConflictResolutionReport {
+                decision: report,
+                results,
+            })
         })
         .map_err(|error| error.0)?;
 
@@ -292,12 +344,12 @@ fn record_with_conflict_boundary(
     // Retain the ordinary best-effort remember publication behavior, without
     // allowing any derived/reporting failure to erase the source acknowledgement.
     match finish_prepared_remember_txn_write(&connection, write) {
-        Ok(finished) if finished.index_status != "indexed" => report.warnings.push(
+        Ok(finished) if finished.index_status != "indexed" => report.decision.warnings.push(
             "Decision committed; search indexing remains queued, failed, or unverified. Do not repeat the decision write. Inspect memoryIndexJobId or run ee index rebuild for this workspace."
                 .to_owned(),
         ),
         Ok(_) => {}
-        Err(_) => report.warnings.push(
+        Err(_) => report.decision.warnings.push(
             "Decision committed, but post-commit follow-up is incomplete. Do not repeat the decision write. Inspect memoryId and run ee doctor --json; the durable index job remains recoverable."
                 .to_owned(),
         ),
@@ -318,16 +370,20 @@ fn stale_conflict() -> DomainError {
     }
 }
 
-fn validate_conflict_supersession(
+fn invalid_conflict_plan() -> DomainError {
+    DomainError::Usage {
+        message: "Conflict resolution does not match its complete reviewed plan".to_owned(),
+        repair: Some("Use ee conflict resolve to create a fresh plan before --apply.".to_owned()),
+    }
+}
+
+fn validate_conflict_resolution(
     connection: &DbConnection,
     workspace_id: &str,
-    pair: ConflictSupersession<'_>,
-    fields: &DecisionFields,
-) -> Result<String, RecordError> {
-    use crate::core::contradiction_detect::{
-        ContradictionDetectionConfig, assemble_conflict_surface,
-    };
-    let ids = [pair.keeper, pair.loser];
+    plan: &ConflictResolutionPlan,
+    reason: &str,
+) -> Result<(), RecordError> {
+    let ids = [plan.memory_a.as_str(), plan.memory_b.as_str()];
     let seals =
         crate::core::memory_lifecycle::load_memory_seals_for_admission(connection, workspace_id)
             .map_err(|_| decide_storage_error("Could not verify conflict source authority"))?;
@@ -357,31 +413,303 @@ fn validate_conflict_supersession(
         }
     }
     let surface = assemble_conflict_surface(connection, ContradictionDetectionConfig::default());
-    let current = surface
-        .pairs
-        .iter()
-        .find(|current| {
-            (current.memory_a.id == pair.keeper && current.memory_b.id == pair.loser)
-                || (current.memory_a.id == pair.loser && current.memory_b.id == pair.keeper)
-        })
-        .ok_or_else(stale_conflict)?;
-    if fields.topic != format!("conflict:{}", current.conflict_id)
-        || fields.chosen != format!("keep {}", pair.keeper)
-    {
-        return Err(DomainError::Usage {
-            message: "Conflict decision does not match the current pair and keeper".to_owned(),
-            repair: Some("Create a fresh plan with ee conflict resolve.".to_owned()),
+    let scope_tags = |id: &str| {
+        plan.actions
+            .iter()
+            .find_map(|action| match action {
+                PlannedResolutionAction::AddTags { memory_id, tags } if memory_id == id => {
+                    Some(tags.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let request = ConflictResolveRequest {
+        memory_a: &plan.memory_a,
+        memory_b: &plan.memory_b,
+        verb: plan.verb,
+        keep: plan.keep.as_deref(),
+        reason,
+        scope_a_tags: scope_tags(&plan.memory_a),
+        scope_b_tags: scope_tags(&plan.memory_b),
+    };
+    match plan_conflict_resolution(&surface, &request) {
+        ConflictResolutionOutcome::Plan(current) if &current == plan => Ok(()),
+        ConflictResolutionOutcome::StaleSurface { .. } => Err(stale_conflict().into()),
+        ConflictResolutionOutcome::PolicyDenied { message, repair } => {
+            Err(DomainError::PolicyDenied {
+                message,
+                repair: Some(repair),
+            }
+            .into())
         }
-        .into());
+        _ => Err(invalid_conflict_plan().into()),
     }
-    Ok(current.conflict_id.clone())
 }
 
 fn conflict_authority_error() -> DomainError {
     DomainError::PolicyDenied {
-        message: "Conflict source authority prevents supersession; no resolution was recorded".to_owned(),
+        message: "Conflict source authority prevents resolution; no resolution was recorded".to_owned(),
         repair: Some("Review pending feedback or explicitly reveal sealed memories before resolving this pair.".to_owned()),
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one caller-owned resolution transaction"
+)]
+fn apply_resolution(
+    connection: &DbConnection,
+    write: &PreparedRememberTxnWrite,
+    plan: &ConflictResolutionPlan,
+    actor: Option<&str>,
+    at: &str,
+    report: &mut DecideRecordReport,
+    boundary: &mut impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
+) -> Result<Vec<ConflictResolutionActionResult>, RecordError> {
+    let details = json!({
+        "schema": CONFLICT_RESOLUTION_AUDIT_SCHEMA,
+        "conflictId": plan.conflict_id,
+        "memoryA": plan.memory_a,
+        "memoryB": plan.memory_b,
+        "verb": plan.verb.as_str(),
+        "resolutionDecisionId": write.memory_id(),
+    });
+    let mut results = Vec::with_capacity(plan.actions.len());
+    for action in &plan.actions {
+        let result = match action {
+            PlannedResolutionAction::RecordDecision { .. } => {
+                let mut audit_ids: Vec<_> = [
+                    report.memory_audit_id.clone(),
+                    report.link_audit_id.clone(),
+                    report.expire_audit_id.clone(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                if plan.verb == ResolveVerb::Supersede {
+                    let keeper = plan.keep.as_deref().ok_or_else(invalid_conflict_plan)?;
+                    let loser = plan.lose.as_deref().ok_or_else(invalid_conflict_plan)?;
+                    replace_memory(
+                        connection,
+                        write,
+                        Supersession {
+                            from_memory_id: keeper,
+                            to_memory_id: loser,
+                            details: json!({
+                                "schema": CONFLICT_SUPERSESSION_AUDIT_SCHEMA,
+                                "conflictId": plan.conflict_id,
+                                "resolutionDecisionId": write.memory_id(),
+                                "fromMemoryId": keeper,
+                                "toMemoryId": loser,
+                                "supersededAt": at,
+                            }),
+                        },
+                        actor,
+                        at,
+                        report,
+                        boundary,
+                    )?;
+                    audit_ids.extend(
+                        [report.link_audit_id.clone(), report.expire_audit_id.clone()]
+                            .into_iter()
+                            .flatten(),
+                    );
+                }
+                ConflictResolutionActionResult {
+                    action: "recordDecision".to_owned(),
+                    audit_ids,
+                    created_memory_id: Some(write.memory_id().to_owned()),
+                }
+            }
+            PlannedResolutionAction::TombstoneMemory { memory_id, reason } => {
+                let audit = connection
+                    .tombstone_memory_audited_in_current_transaction(
+                        memory_id,
+                        write.workspace_id(),
+                        actor,
+                        Some(reason),
+                    )?
+                    .ok_or_else(stale_conflict)?;
+                queue_conflict_source_index(connection, write.workspace_id(), memory_id)?;
+                ConflictResolutionActionResult {
+                    action: "tombstoneMemory".to_owned(),
+                    audit_ids: vec![audit],
+                    created_memory_id: None,
+                }
+            }
+            PlannedResolutionAction::AddTags { memory_id, tags } => {
+                let current = connection.get_memory_tags(memory_id)?;
+                let added: Vec<_> = tags
+                    .iter()
+                    .filter(|tag| !current.contains(tag))
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                let mut audit_ids = Vec::new();
+                if !added.is_empty() {
+                    audit_ids.push(connection.add_memory_tags_audited_in_current_transaction(
+                        memory_id,
+                        write.workspace_id(),
+                        &added,
+                        actor,
+                    )?);
+                    queue_conflict_source_index(connection, write.workspace_id(), memory_id)?;
+                }
+                ConflictResolutionActionResult {
+                    action: "addTags".to_owned(),
+                    audit_ids,
+                    created_memory_id: None,
+                }
+            }
+            PlannedResolutionAction::CreateLink { from, to, relation } => {
+                let relation =
+                    MemoryLinkRelation::parse(relation).ok_or_else(invalid_conflict_plan)?;
+                let audit = record_resolution_link(
+                    connection,
+                    write,
+                    CreateMemoryLinkInput {
+                        src_memory_id: from.clone(),
+                        dst_memory_id: to.clone(),
+                        relation,
+                        weight: 1.0,
+                        confidence: 1.0,
+                        directed: false,
+                        evidence_count: 1,
+                        last_reinforced_at: None,
+                        source: MemoryLinkSource::Agent,
+                        created_by: actor.map(str::to_owned),
+                        metadata_json: None,
+                    },
+                    &details,
+                )?;
+                ConflictResolutionActionResult {
+                    action: "createLink".to_owned(),
+                    audit_ids: audit.into_iter().collect(),
+                    created_memory_id: None,
+                }
+            }
+        };
+        results.push(result);
+        boundary(Stage::ResolutionAction, connection)?;
+    }
+    let decision = results
+        .iter_mut()
+        .find(|result| result.action == "recordDecision")
+        .ok_or_else(invalid_conflict_plan)?;
+    // Rationale provenance is a different relation from decision revision
+    // ancestry. Both source rows remain addressable, including rejected history.
+    for source in [&plan.memory_a, &plan.memory_b] {
+        let audit = record_resolution_link(
+            connection,
+            write,
+            CreateMemoryLinkInput {
+                src_memory_id: write.memory_id().to_owned(),
+                dst_memory_id: source.clone(),
+                relation: MemoryLinkRelation::DerivedFrom,
+                weight: 1.0,
+                confidence: 1.0,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: None,
+                source: MemoryLinkSource::Agent,
+                created_by: actor.map(str::to_owned),
+                metadata_json: None,
+            },
+            &details,
+        )?;
+        decision.audit_ids.extend(audit);
+        boundary(Stage::Provenance, connection)?;
+    }
+    let audit_id = generate_audit_id();
+    connection.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(write.workspace_id().to_owned()),
+            actor: actor.map(str::to_owned),
+            action: CONFLICT_RESOLUTION_AUDIT_ACTION.to_owned(),
+            target_type: Some("conflict".to_owned()),
+            target_id: Some(plan.conflict_id.clone()),
+            details: Some(details.to_string()),
+        },
+    )?;
+    decision.audit_ids.push(audit_id);
+    boundary(Stage::Completion, connection)?;
+    Ok(results)
+}
+
+fn queue_conflict_source_index(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Result<(), RecordError> {
+    let id = format!(
+        "sidx_{}",
+        MemoryId::now().to_string().trim_start_matches("mem_")
+    );
+    connection.insert_search_index_job(
+        &id,
+        &CreateSearchIndexJobInput {
+            workspace_id: workspace_id.to_owned(),
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_owned()),
+            document_id: Some(memory_id.to_owned()),
+            documents_total: 1,
+        },
+    )?;
+    Ok(())
+}
+
+fn record_resolution_link(
+    connection: &DbConnection,
+    write: &PreparedRememberTxnWrite,
+    mut input: CreateMemoryLinkInput,
+    details: &JsonValue,
+) -> Result<Option<String>, RecordError> {
+    let existing = connection.get_memory_link_by_edge(
+        &input.src_memory_id,
+        &input.dst_memory_id,
+        input.relation,
+    )?;
+    let reverse = if !input.directed && existing.is_none() {
+        connection.get_memory_link_by_edge(
+            &input.dst_memory_id,
+            &input.src_memory_id,
+            input.relation,
+        )?
+    } else {
+        None
+    };
+    if existing.is_some() || reverse.is_some() {
+        // Preserve pre-existing link direction and provenance. The canonical
+        // resolution audit, not arbitrary link metadata, settles the conflict.
+        return Ok(None);
+    }
+    let id = format!(
+        "link_{}",
+        MemoryId::now().to_string().trim_start_matches("mem_")
+    );
+    let mut details = details.clone();
+    details["linkId"] = json!(id);
+    details["fromMemoryId"] = json!(input.src_memory_id);
+    details["toMemoryId"] = json!(input.dst_memory_id);
+    details["relation"] = json!(input.relation.as_str());
+    input.metadata_json = Some(details.to_string());
+    connection.insert_memory_link(&id, &input)?;
+    let audit_id = generate_audit_id();
+    connection.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(write.workspace_id().to_owned()),
+            actor: input.created_by,
+            action: audit_actions::MEMORY_LINK_CREATE.to_owned(),
+            target_type: Some("memory_link".to_owned()),
+            target_id: Some(id),
+            details: Some(details.to_string()),
+        },
+    )?;
+    Ok(Some(audit_id))
 }
 
 fn validated_fields(fields: &DecisionFields) -> Result<String, DomainError> {

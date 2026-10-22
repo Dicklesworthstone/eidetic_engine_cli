@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.conflict.resolve.v1.json",
   "title": "ee.conflict.resolve.v1",
-  "description": "Audited conflict-resolution report for ee conflict resolve (ADR 0066). The verb (supersede|reject-one|scope-split|both-valid) is planned against the LIVE conflict surface (stale pairs are refused with conflict_resolve_stale_surface) and mapped onto existing audited atoms only: decide record (which also creates the supersede link and closes the loser's validity window), memory expire, memory link, memory tags. Dry-run is the default; --apply executes the plan fail-fast and reports per-atom audit ids. The rationale is persisted as a kind=decision memory so future packs carry the WHY.",
+  "description": "Audited conflict-resolution report for ee conflict resolve (ADR 0066). Dry-run is the default. Under --apply, the writer revalidates the complete plan against the live conflict surface and source authority, then commits all effects, rationale, provenance, audit and durable index work in one transaction. Supersede retires the losing revision; reject-one tombstones it; scope-split and both-valid preserve both sources. A canonical completion audit settles the pair for both the conflict surface and pack guard. Failed or stale plans persist no partial resolution.",
   "type": "object",
   "required": ["schema", "status", "dryRun", "persisted", "verb", "reason", "plan"],
   "additionalProperties": false,
@@ -61,7 +61,7 @@
             "properties": {
               "action": {
                 "type": "string",
-                "enum": ["recordDecision", "expireMemory", "createLink", "addTags"]
+                "enum": ["recordDecision", "tombstoneMemory", "createLink", "addTags"]
               }
             }
           }

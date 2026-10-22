@@ -16321,17 +16321,17 @@ fn apply_context_pack_contradiction_guard(connection: &DbConnection, draft: &mut
         tracing::warn!(
             target: "ee::pack::contradiction_guard",
             error = read_error,
-            "skipping context pack contradiction guard because memory links could not be read"
+            "context pack contradiction guard is using the available explicit evidence"
         );
-        return;
     }
     let detected = gathered
         .edges
         .iter()
         .map(|edge| (edge.memory_a.clone(), edge.memory_b.clone()))
         .collect::<Vec<_>>();
+    let resolved = gathered.resolved_pairs.into_iter().collect::<Vec<_>>();
     let unresolved =
-        crate::core::contradiction_guard::unresolved_contradiction_pairs(&detected, &[]);
+        crate::core::contradiction_guard::unresolved_contradiction_pairs(&detected, &resolved);
     let suppressed = draft.apply_contradiction_guard(&unresolved, false);
     if suppressed > 0 {
         tracing::debug!(

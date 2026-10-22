@@ -2,11 +2,6 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
-use crate::core::contradiction_detect::{
-    ConflictResolutionOutcome, ConflictResolutionPlan, ConflictResolveRequest,
-    ContradictionDetectionConfig, PlannedResolutionAction, ResolveVerb, assemble_conflict_surface,
-    plan_conflict_resolution,
-};
 use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
 
 type RowState = Vec<(String, Value)>;
@@ -145,17 +140,26 @@ impl Fixture {
     }
 
     fn conflict_plan(&self, keeper: &str, loser: &str) -> ConflictResolutionPlan {
+        self.resolution_plan(keeper, loser, ResolveVerb::Supersede)
+    }
+
+    fn resolution_plan(
+        &self,
+        keeper: &str,
+        loser: &str,
+        verb: ResolveVerb,
+    ) -> ConflictResolutionPlan {
         let surface = assemble_conflict_surface(&self.db, ContradictionDetectionConfig::default());
         let outcome = plan_conflict_resolution(
             &surface,
             &ConflictResolveRequest {
                 memory_a: keeper,
                 memory_b: loser,
-                verb: ResolveVerb::Supersede,
+                verb,
                 keep: Some(keeper),
                 reason: "A reviewed replacement.",
-                scope_a_tags: Vec::new(),
-                scope_b_tags: Vec::new(),
+                scope_a_tags: vec!["scope-a".to_owned()],
+                scope_b_tags: vec!["scope-b".to_owned()],
             },
         );
         let ConflictResolutionOutcome::Plan(plan) = outcome else {
@@ -170,7 +174,11 @@ impl Fixture {
             chosen,
             alternatives,
             supersedes,
-        } = &plan.actions[0]
+        } = plan
+            .actions
+            .iter()
+            .find(|action| matches!(action, PlannedResolutionAction::RecordDecision { .. }))
+            .unwrap()
         else {
             panic!("expected decision atom");
         };
@@ -630,7 +638,7 @@ fn conflict_cli_preview_is_read_only_and_apply_dispatches_the_atomic_writer() {
             .as_array()
             .unwrap()
             .len(),
-        3
+        6
     );
     assert!(
         fixture
@@ -696,7 +704,28 @@ fn scope_split_and_both_valid_cli_apply_persist_their_decision_rationales() {
             let source = fixture.db.get_memory(id).unwrap().unwrap();
             assert!(source.valid_to.is_none() && source.tombstoned_at.is_none());
             assert!(fixture.db.get_memory_superseded_at(id).unwrap().is_none());
+            let provenance = fixture
+                .db
+                .get_memory_link_by_edge(
+                    &decisions.decisions[0].memory_id,
+                    id,
+                    MemoryLinkRelation::DerivedFrom,
+                )
+                .unwrap()
+                .unwrap();
+            assert!(provenance.directed);
         }
+        let surface =
+            assemble_conflict_surface(&fixture.db, ContradictionDetectionConfig::default());
+        assert!(surface.pairs.is_empty() && surface.clusters.is_empty());
+        assert!(
+            fixture
+                .db
+                .get_memory_link_by_edge(&keeper, &loser, MemoryLinkRelation::Contradicts,)
+                .unwrap()
+                .is_some(),
+            "the original conflict evidence remains history"
+        );
     }
 }
 
@@ -726,7 +755,7 @@ fn conflict_supersession_refuses_a_foreign_workspace_side_without_mutation() {
     let plan = fixture.conflict_plan(&keeper, &loser);
     let before = fixture.state();
     assert!(matches!(
-        record_conflict(&fixture.conflict_options(&plan), &keeper),
+        record_resolution(&fixture.conflict_options(&plan), &plan),
         Err(DomainError::PolicyDenied { .. })
     ));
     assert_eq!(fixture.state(), before);
@@ -744,7 +773,7 @@ fn conflict_supersession_atomically_replaces_facts_and_rules_without_tombstoning
         let plan = fixture.conflict_plan(&keeper, &loser);
         let request = fixture.conflict_options(&plan);
         assert_eq!(request.alternatives, vec![format!("keep {loser}")]);
-        let report = record_conflict(&request, &keeper).unwrap();
+        let report = record_resolution(&request, &plan).unwrap().decision;
 
         assert!(report.persisted);
         assert!(report.decision.supersedes.is_none());
@@ -820,7 +849,7 @@ fn conflict_supersession_atomically_replaces_facts_and_rules_without_tombstoning
         assert_eq!(fixture.list(false).decisions, vec![report.decision.clone()]);
         let before_replay = fixture.state();
         assert!(matches!(
-            record_conflict(&request, &keeper),
+            record_resolution(&request, &plan),
             Err(DomainError::UsageCodeWithDetails {
                 code: "conflict_resolve_stale_surface",
                 ..
@@ -837,7 +866,9 @@ fn conflict_resolution_reuses_an_existing_supersedes_edge() {
     let loser = fixture.seed_conflict_memory("fact", "semantic");
     let link_id = fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Supersedes);
     let plan = fixture.conflict_plan(&keeper, &loser);
-    let report = record_conflict(&fixture.conflict_options(&plan), &keeper).unwrap();
+    let report = record_resolution(&fixture.conflict_options(&plan), &plan)
+        .unwrap()
+        .decision;
     assert!(report.persisted && report.link_audit_id.is_none());
     assert!(report.expire_audit_id.is_some());
     let links = fixture
@@ -866,8 +897,9 @@ fn conflict_domain_replacement_preserves_a_keeper_decisions_existing_revision_hi
         MemoryLinkRelation::Contradicts,
     );
     let plan = fixture.conflict_plan(&keeper.decision.memory_id, &loser);
-    let resolved =
-        record_conflict(&fixture.conflict_options(&plan), &keeper.decision.memory_id).unwrap();
+    let resolved = record_resolution(&fixture.conflict_options(&plan), &plan)
+        .unwrap()
+        .decision;
     assert_eq!(resolved.decision.chain_depth, 0);
     let current = fixture.list(false);
     assert_eq!(current.total_count, 2);
@@ -891,8 +923,7 @@ fn every_precommit_interruption_rolls_back_the_entire_conflict_supersession() {
     let loser = fixture.seed_conflict_memory("fact", "semantic");
     fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
     let plan = fixture.conflict_plan(&keeper, &loser);
-    let mut request = fixture.conflict_options(&plan);
-    request.supersedes = None;
+    let request = fixture.conflict_options(&plan);
     let before = fixture.state();
     for stop in [
         Stage::Memory,
@@ -900,22 +931,18 @@ fn every_precommit_interruption_rolls_back_the_entire_conflict_supersession() {
         Stage::Link,
         Stage::Predecessor,
         Stage::Index,
+        Stage::ResolutionAction,
+        Stage::Provenance,
+        Stage::Completion,
         Stage::Report,
     ] {
-        let failed = record_with_conflict_boundary(
-            &request,
-            Some(ConflictSupersession {
-                keeper: &keeper,
-                loser: &loser,
-            }),
-            |stage, _| {
-                if stage == stop {
-                    Err(injected_error())
-                } else {
-                    Ok(())
-                }
-            },
-        );
+        let failed = record_resolution_with_boundary(&request, &plan, |stage, _| {
+            if stage == stop {
+                Err(injected_error())
+            } else {
+                Ok(())
+            }
+        });
         assert!(failed.is_err(), "{stop:?}");
         assert_eq!(fixture.state(), before, "{stop:?}");
         assert!(!fixture.root.path().join(".ee/audit.jsonl").exists());
@@ -930,23 +957,15 @@ fn a_conflict_resolved_after_preparation_is_refused_before_source_insert() {
     fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
     let plan = fixture.conflict_plan(&keeper, &loser);
     let original = fixture.conflict_options(&plan);
-    let mut request = original.clone();
-    request.supersedes = None;
+    let request = original.clone();
     let mut winning_state = None;
-    let failed = record_with_conflict_boundary(
-        &request,
-        Some(ConflictSupersession {
-            keeper: &keeper,
-            loser: &loser,
-        }),
-        |stage, _| {
-            if stage == Stage::Prepared {
-                record_conflict(&original, &keeper)?;
-                winning_state = Some(fixture.state());
-            }
-            Ok(())
-        },
-    );
+    let failed = record_resolution_with_boundary(&request, &plan, |stage, _| {
+        if stage == Stage::Prepared {
+            record_resolution(&original, &plan)?;
+            winning_state = Some(fixture.state());
+        }
+        Ok(())
+    });
     assert!(matches!(
         failed,
         Err(DomainError::UsageCodeWithDetails {
@@ -956,4 +975,268 @@ fn a_conflict_resolved_after_preparation_is_refused_before_source_insert() {
     ));
     assert_eq!(fixture.state(), winning_state.unwrap());
     assert_eq!(fixture.list(false).total_count, 1);
+}
+
+#[test]
+fn every_non_superseding_resolution_rolls_back_each_action_and_final_receipt() {
+    for verb in [
+        ResolveVerb::RejectOne,
+        ResolveVerb::ScopeSplit,
+        ResolveVerb::BothValid,
+    ] {
+        let fixture = Fixture::new();
+        let keeper = fixture.seed_conflict_memory("fact", "semantic");
+        let loser = fixture.seed_conflict_memory("fact", "semantic");
+        fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+        let plan = fixture.resolution_plan(&keeper, &loser, verb);
+        let request = fixture.conflict_options(&plan);
+        let before = fixture.state();
+        let stops = [
+            (Stage::Memory, 1),
+            (Stage::Fields, 1),
+            (Stage::Provenance, 1),
+            (Stage::Provenance, 2),
+            (Stage::Completion, 1),
+            (Stage::Report, 1),
+        ]
+        .into_iter()
+        .chain((1..=plan.actions.len()).map(|number| (Stage::ResolutionAction, number)));
+        for (stop, occurrence) in stops {
+            let mut seen = 0;
+            let result = record_resolution_with_boundary(&request, &plan, |stage, _| {
+                if stage == stop {
+                    seen += 1;
+                    if seen == occurrence {
+                        return Err(injected_error());
+                    }
+                }
+                Ok(())
+            });
+            assert!(result.is_err(), "{verb:?}: {stop:?} #{occurrence}");
+            assert_eq!(
+                seen, occurrence,
+                "the failure boundary must actually be reached"
+            );
+            assert_eq!(fixture.state(), before, "{verb:?}: {stop:?} #{occurrence}");
+            assert!(!fixture.root.path().join(".ee/index").exists());
+            assert!(!fixture.root.path().join(".ee/audit.jsonl").exists());
+        }
+    }
+}
+
+#[test]
+fn rejecting_a_memory_retains_its_body_and_records_canonical_lifecycle_and_provenance() {
+    let fixture = Fixture::new();
+    let keeper = fixture.seed_conflict_memory("fact", "semantic");
+    let loser = fixture.seed_conflict_memory("fact", "semantic");
+    let original_link =
+        fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+    let kept = fixture.db.get_memory(&keeper).unwrap().unwrap();
+    let lost = fixture.db.get_memory(&loser).unwrap().unwrap();
+    let mut plan = fixture.resolution_plan(&keeper, &loser, ResolveVerb::RejectOne);
+    let rationale = "The source says \"withdrawn\".\nThe replacement was reviewed.";
+    let PlannedResolutionAction::TombstoneMemory { reason, .. } = &mut plan.actions[0] else {
+        panic!("reject must preview its actual tombstone effect");
+    };
+    *reason = rationale.to_owned();
+    let mut request = fixture.conflict_options(&plan);
+    request.rationale = rationale;
+    let report = record_resolution(&request, &plan).unwrap();
+    assert_eq!(report.results[0].action, "tombstoneMemory");
+    assert_eq!(fixture.db.get_memory(&keeper).unwrap().unwrap(), kept);
+    let retired = fixture.db.get_memory(&loser).unwrap().unwrap();
+    assert_eq!(retired.content, lost.content);
+    assert!(retired.tombstoned_at.is_some());
+    assert!(
+        fixture
+            .db
+            .get_memory_superseded_at(&loser)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .db
+            .get_memory_link(&original_link)
+            .unwrap()
+            .is_some()
+    );
+    let audits = fixture
+        .db
+        .query(
+            "SELECT action, details FROM audit_log WHERE target_id = ?1 ORDER BY id",
+            &[Value::Text(loser.clone())],
+        )
+        .unwrap();
+    let mut has_lifecycle = false;
+    let mut has_tombstone = false;
+    for audit in audits {
+        let action = audit.get(0).and_then(Value::as_str).unwrap();
+        let details: JsonValue =
+            serde_json::from_str(audit.get(1).and_then(Value::as_str).unwrap()).unwrap();
+        if action == audit_actions::MEMORY_TOMBSTONE {
+            has_tombstone = true;
+            assert_eq!(details["reason"], rationale);
+        }
+        if action == audit_actions::MEMORY_LEVEL_TRANSITION {
+            has_lifecycle = true;
+            assert_eq!(details["newLevel"], "tombstoned");
+        }
+    }
+    assert!(has_tombstone && has_lifecycle);
+    let decision = &report.decision.decision.memory_id;
+    for source in [&keeper, &loser] {
+        assert!(
+            fixture
+                .db
+                .get_memory_link_by_edge(decision, source, MemoryLinkRelation::DerivedFrom)
+                .unwrap()
+                .unwrap()
+                .directed
+        );
+    }
+    assert_eq!(fixture.db.count_table_rows("search_index_jobs").unwrap(), 2);
+    assert_eq!(
+        fixture.list(false).decisions,
+        vec![report.decision.decision.clone()]
+    );
+    assert!(
+        assemble_conflict_surface(&fixture.db, ContradictionDetectionConfig::default())
+            .pairs
+            .is_empty()
+    );
+    let after = fixture.state();
+    assert!(matches!(
+        record_resolution(&request, &plan),
+        Err(DomainError::UsageCodeWithDetails {
+            code: "conflict_resolve_stale_surface",
+            ..
+        })
+    ));
+    assert_eq!(fixture.state(), after);
+}
+
+#[test]
+fn full_plan_revalidation_rejects_extra_or_rebound_mutations_before_writing() {
+    let fixture = Fixture::new();
+    let keeper = fixture.seed_conflict_memory("fact", "semantic");
+    let loser = fixture.seed_conflict_memory("fact", "semantic");
+    let unrelated = fixture.seed_conflict_memory("fact", "semantic");
+    fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+    let original = fixture.resolution_plan(&keeper, &loser, ResolveVerb::ScopeSplit);
+    let before = fixture.state();
+    for mutation in 0..3 {
+        let mut plan = original.clone();
+        match mutation {
+            0 => plan.actions.push(PlannedResolutionAction::AddTags {
+                memory_id: unrelated.clone(),
+                tags: vec!["unreviewed".to_owned()],
+            }),
+            1 => {
+                let PlannedResolutionAction::AddTags { memory_id, .. } = &mut plan.actions[0]
+                else {
+                    unreachable!()
+                };
+                *memory_id = unrelated.clone();
+            }
+            _ => {
+                let PlannedResolutionAction::AddTags { tags, .. } = &mut plan.actions[0] else {
+                    unreachable!()
+                };
+                tags.push("unreviewed".to_owned());
+            }
+        }
+        assert!(matches!(
+            record_resolution(&fixture.conflict_options(&plan), &plan),
+            Err(DomainError::Usage { .. })
+        ));
+        assert_eq!(fixture.state(), before);
+    }
+}
+
+#[test]
+fn a_loser_becoming_a_protected_rule_after_planning_refuses_rejection_atomically() {
+    let fixture = Fixture::new();
+    let keeper = fixture.seed_conflict_memory("fact", "semantic");
+    let loser = fixture.seed_conflict_memory("fact", "semantic");
+    fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+    let plan = fixture.resolution_plan(&keeper, &loser, ResolveVerb::RejectOne);
+    let mut protected_state = None;
+    let result =
+        record_resolution_with_boundary(&fixture.conflict_options(&plan), &plan, |stage, _| {
+            if stage == Stage::Prepared {
+                fixture.db.execute_raw(&format!(
+                "UPDATE memories SET kind = 'rule', level = 'procedural' WHERE id = '{loser}'"
+            )).unwrap();
+                protected_state = Some(fixture.state());
+            }
+            Ok(())
+        });
+    assert!(matches!(result, Err(DomainError::PolicyDenied { .. })));
+    assert_eq!(fixture.state(), protected_state.unwrap());
+    assert!(!fixture.root.path().join(".ee/index").exists());
+}
+
+#[test]
+fn resolution_revises_an_existing_rationale_without_confusing_source_ancestry() {
+    for verb in [
+        ResolveVerb::Supersede,
+        ResolveVerb::RejectOne,
+        ResolveVerb::ScopeSplit,
+        ResolveVerb::BothValid,
+    ] {
+        let fixture = Fixture::new();
+        let keeper = fixture.seed_conflict_memory("fact", "semantic");
+        let loser = fixture.seed_conflict_memory("fact", "semantic");
+        fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+        let plan = fixture.resolution_plan(&keeper, &loser, verb);
+        let mut legacy = fixture.conflict_options(&plan);
+        legacy.supersedes = None;
+        let previous = record(&legacy).unwrap();
+        let previous_body = fixture
+            .db
+            .get_memory(&previous.decision.memory_id)
+            .unwrap()
+            .unwrap()
+            .content;
+        let applied = record_resolution(&fixture.conflict_options(&plan), &plan).unwrap();
+        let decision = &applied.decision.decision;
+        assert_eq!(
+            decision.supersedes.as_deref(),
+            Some(previous.decision.memory_id.as_str())
+        );
+        assert_eq!(decision.chain_depth, 1);
+        assert_eq!(fixture.list(false).decisions, vec![decision.clone()]);
+        assert_eq!(fixture.list(true).total_count, 2);
+        assert_eq!(
+            fixture
+                .db
+                .get_memory(&previous.decision.memory_id)
+                .unwrap()
+                .unwrap()
+                .content,
+            previous_body
+        );
+        assert!(
+            fixture
+                .db
+                .get_memory_superseded_at(&previous.decision.memory_id)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            assemble_conflict_surface(&fixture.db, ContradictionDetectionConfig::default())
+                .pairs
+                .is_empty()
+        );
+        let receipt = applied
+            .results
+            .iter()
+            .find(|result| result.action == "recordDecision")
+            .unwrap();
+        assert!(
+            receipt.audit_ids.len() >= 6,
+            "ordinary revision, provenance and completion remain auditable"
+        );
+    }
 }

@@ -32636,11 +32636,17 @@ impl DbConnection {
         reason: Option<&str>,
     ) -> Result<Option<String>> {
         self.with_transaction(|| {
-            self.tombstone_memory_audited_inner(memory_id, workspace_id, actor, reason)
+            self.tombstone_memory_audited_in_current_transaction(
+                memory_id,
+                workspace_id,
+                actor,
+                reason,
+            )
         })
     }
 
-    fn tombstone_memory_audited_inner(
+    /// Reuse the audited tombstone lifecycle inside a caller-owned transaction.
+    pub(crate) fn tombstone_memory_audited_in_current_transaction(
         &self,
         memory_id: &str,
         workspace_id: &str,
@@ -32659,7 +32665,7 @@ impl DbConnection {
         }
 
         let audit_id = generate_audit_id();
-        let details = reason.map(|r| format!(r#"{{"reason":"{}"}}"#, r));
+        let details = reason.map(|reason| serde_json::json!({ "reason": reason }).to_string());
 
         self.insert_audit(
             &audit_id,
@@ -32735,11 +32741,17 @@ impl DbConnection {
         actor: Option<&str>,
     ) -> Result<String> {
         self.with_transaction(|| {
-            self.add_memory_tags_audited_inner(memory_id, workspace_id, tags, actor)
+            self.add_memory_tags_audited_in_current_transaction(
+                memory_id,
+                workspace_id,
+                tags,
+                actor,
+            )
         })
     }
 
-    fn add_memory_tags_audited_inner(
+    /// Reuse tag mutation and its audit inside a caller-owned transaction.
+    pub(crate) fn add_memory_tags_audited_in_current_transaction(
         &self,
         memory_id: &str,
         workspace_id: &str,
