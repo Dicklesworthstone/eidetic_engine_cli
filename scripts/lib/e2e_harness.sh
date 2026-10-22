@@ -378,6 +378,19 @@ jq_read() {
     local json="$1" filter="$2" label="${3:-jq_read}" outvar="$4"
     local value jq_err rc token parent leaf missing="" seen=0 resolved=0
     JQ_READ_STATUS="harness_error"
+
+    # THE OUT-VARIABLE MUST NOT SHADOW ONE OF THIS FUNCTION'S OWN LOCALS.
+    # `printf -v value ...` inside a function that has `local value` writes the
+    # LOCAL, so the caller's variable is never assigned, stays empty, and the
+    # caller takes its absent/skip branch -- which is the exact silent skip this
+    # helper exists to prevent, reintroduced through its own interface. Refuse
+    # loudly instead; a caller cannot debug a write that went somewhere else.
+    case "$outvar" in
+        json | filter | label | outvar | value | jq_err | rc | token | parent | leaf | missing | seen | resolved | "")
+            _harness_fail "$label: HARNESS ERROR -- jq_read cannot write to out-variable '$outvar'; it shadows one of jq_read's own locals (or is empty), so the assignment would silently go nowhere. Rename the caller's variable."
+            return 0
+            ;;
+    esac
     printf -v "$outvar" '%s' ""
 
     value="$(printf '%s' "$json" | jq -r "$filter" 2>/dev/null)"
