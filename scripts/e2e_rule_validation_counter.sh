@@ -97,7 +97,8 @@ rule_id="$(printf '%s' "$rule_add_out" | jq -r '.data.ruleId // ""')"
 if [ -n "$rule_id" ]; then
     record_pass "rule_id_present"
 else
-    record_failure "rule_id_present" "data.ruleId missing"
+    record_absent_value "rule_id_present" "$rule_add_out" '.data' 'ruleId' \
+        "ee rule add emitted a ruleId key with no value"
     exit 1
 fi
 
@@ -216,7 +217,10 @@ source_memory_id="$(printf '%s' "$memory_out" | jq -r '.data.memory_id // .data.
 if [ -n "$source_memory_id" ]; then
     record_pass "learn_loop_source_memory_id_present"
 else
-    record_failure "learn_loop_source_memory_id_present" "remember returned no memory id"
+    # Both spellings, because the read above hedges between them and `ee remember`
+    # emits both -- one of them present means the read resolves.
+    record_absent_value "learn_loop_source_memory_id_present" "$memory_out" '.data' 'memory_id,memoryId' \
+        "ee remember emitted a memory id key with no value"
     exit 1
 fi
 
@@ -233,7 +237,8 @@ learn_rule_id="$(printf '%s' "$learn_rule_out" | jq -r '.data.ruleId // empty')"
 if [ -n "$learn_rule_id" ]; then
     record_pass "learn_loop_rule_id_present"
 else
-    record_failure "learn_loop_rule_id_present" "learn-loop rule add returned no ruleId"
+    record_absent_value "learn_loop_rule_id_present" "$learn_rule_out" '.data' 'ruleId' \
+        "learn-loop rule add emitted a ruleId key with no value"
     exit 1
 fi
 
@@ -263,7 +268,8 @@ backup_path="$(printf '%s' "$backup_out" | jq -r '.data.backupPath // empty')"
 if [ -n "$backup_path" ]; then
     record_pass "learn_loop_backup_path_present"
 else
-    record_failure "learn_loop_backup_path_present" "backup create returned no backupPath"
+    record_absent_value "learn_loop_backup_path_present" "$backup_out" '.data' 'backupPath' \
+        "backup create emitted a backupPath key with no value"
     exit 1
 fi
 restore_path="$WORKSPACE-restored"
