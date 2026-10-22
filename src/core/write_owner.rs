@@ -4275,6 +4275,81 @@ mod tests {
         assert_eq!(op.operation_type(), "custom");
     }
 
+    /// The owner's retained observations become per-source rolling stats
+    /// (bd-1n0np.8.5, ADR 0059) -- and a write with no source identity
+    /// contributes nothing.
+    ///
+    /// This covers the link that had no caller at all. `compute_source_write_stats`
+    /// was well tested as a pure function over synthetic observations, and
+    /// `WriteOwner::source_write_stats` -- the accessor that feeds it the
+    /// observations the owner actually retained -- had ZERO callers outside this
+    /// module, production or test. So the chokepoint half of the acceptance was
+    /// unexercised even though both ends of it worked.
+    ///
+    /// THE NEGATIVE ARM IS THE REGRESSION GUARD. `src/core/memory.rs` hard-coded
+    /// `source_id: None` on the only production constructor of `MemoryCreate`,
+    /// and `write_stream_observation` short-circuits on None, so every real
+    /// `ee remember` recorded nothing and every window stayed empty forever. The
+    /// second arm here is what that bug looks like from the owner's side: a
+    /// sourceless write leaves the stats empty, so if the production call site
+    /// ever reverts to None this is the shape that should fail.
+    #[test]
+    fn owner_stats_group_retained_writes_by_source_and_ignore_sourceless_ones() {
+        fn memory_write(source: Option<&str>, content: &str, at_ms: u64) -> WriteOperation {
+            WriteOperation::MemoryCreate {
+                workspace_id: "ws".into(),
+                content: content.into(),
+                level: "semantic".into(),
+                kind: "note".into(),
+                tags: vec![],
+                source_id: source.map(str::to_owned),
+                trust_class: "agent_assertion".into(),
+                provenance_uri: Some("manual://test".into()),
+                observed_at_ms: at_ms,
+            }
+        }
+
+        let config = WriteStreamStatsConfig::new(0, 10_000, 128);
+
+        let mut stats = WriteOwnerStats::default();
+        stats.record_operation(&memory_write(Some("agent:Alpha"), "first", 10));
+        stats.record_operation(&memory_write(Some("agent:Alpha"), "second", 20));
+        stats.record_operation(&memory_write(Some("agent:Beta"), "third", 30));
+        let computed = stats.source_write_stats(config);
+
+        assert_eq!(
+            computed.len(),
+            2,
+            "two distinct sources must yield two stat rows, got {computed:?}"
+        );
+        let alpha = computed
+            .iter()
+            .find(|row| row.source_id == "agent:Alpha")
+            .expect("alpha stats");
+        assert_eq!(alpha.write_count, 2);
+        assert_eq!(alpha.evidence_present_count, 2, "both carry a provenance uri");
+        assert_eq!(
+            alpha.trust_class_counts.get("agent_assertion").copied(),
+            Some(2)
+        );
+        let beta = computed
+            .iter()
+            .find(|row| row.source_id == "agent:Beta")
+            .expect("beta stats");
+        assert_eq!(beta.write_count, 1);
+
+        // The shape of the production bug this wiring fixed.
+        let mut sourceless = WriteOwnerStats::default();
+        sourceless.record_operation(&memory_write(None, "first", 10));
+        sourceless.record_operation(&memory_write(None, "second", 20));
+        assert!(
+            sourceless.source_write_stats(config).is_empty(),
+            "a write with no source identity must contribute no stats; if this \
+             starts passing with rows, the None short-circuit in \
+             write_stream_observation changed"
+        );
+    }
+
     #[test]
     fn write_result_accessors() {
         let success = WriteResult::Success {

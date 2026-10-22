@@ -1551,7 +1551,31 @@ fn remember_memory_outcome_inner_with_store(
         level: prepared.level.as_str().to_owned(),
         kind: prepared.kind.as_str().to_owned(),
         tags: prepared.tags.clone(),
-        source_id: None,
+        // THIS ONE `None` KILLED THE ENTIRE WRITE-IMMUNE LAYER IN PRODUCTION
+        // (bd-1n0np.8.5, ADR 0059).
+        //
+        // `WriteOperation::write_stream_observation` begins with
+        // `normalized_write_source_id(source_id.as_deref())?` -- the `?`
+        // short-circuits on None, so a write with no source produced NO
+        // observation at all. This is the only production constructor of
+        // `MemoryCreate`, so every real `ee remember` recorded nothing, and
+        // therefore:
+        //   * `WriteOwnerStats::record_operation` had nothing to retain,
+        //   * `WriteOwner::source_write_stats` computed over an empty deque,
+        //   * `evaluate_write_immune_quarantine` was never fed a real source.
+        // The per-source rolling stats, the near-duplicate detector and the
+        // quarantine evaluator were all written, unit-tested and reachable --
+        // and all of them were being handed an empty window forever. The
+        // capability existed everywhere except at the one call site that feeds it.
+        //
+        // The identity is the one the acceptance names first (EE_AGENT_NAME),
+        // read through the SAME accessor the trust_class branch three lines
+        // below already consults, so the two cannot disagree about who is
+        // writing. A write with no agent identity still yields None and still
+        // records no observation, which is correct: the sources this layer
+        // reasons about are agents, import batches and mesh peers, not an
+        // anonymous human at a terminal.
+        source_id: super::memory_scope::current_agent_name(),
         trust_class: if prepared.attempt_family.is_some()
             && super::memory_scope::current_agent_name().is_some()
         {
