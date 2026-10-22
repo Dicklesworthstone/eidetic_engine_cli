@@ -40,13 +40,13 @@
       "snapshotIdentity": {
         "version": 4,
         "inputSchema": "ee.pack.hash_input.v4",
-        "digest": "blake3:34c287085a01eea7313a535e0c68f705145ba16aa388ebd10a107ac186f4230d",
+        "digest": "blake3:f19304c6de5ea455557ef6736ea604fc5b358f7b1aca121f398000aa3814f12f",
         "numericDomain": "q20.12",
         "componentDigestsAvailableLocally": true,
         "components": {
           "request": "blake3:21190cd6c9fae87aabbf8552fa67a60e199208cef8b709ceb9b7f55fadd7d372",
           "referenceTime": "blake3:4160ecdd3725d0dcf52f6d265c3c606fe1283ecc27bcbb3a938ee63ceea984c0",
-          "qualityScoring": "blake3:ea32eeada39187bc1c33dde0349ff35cf387dd66838e7241b8a93d749c7f29e4",
+          "qualityScoring": "blake3:f97aa4cb8dc2ed384f57dbcbc5ffad5314e073ac84cd79edac4d9848c1518958",
           "items": "blake3:503fca4b398d7470512e09791933e3dcd16dd8e0b9a26e1361a1764752ada421",
           "omitted": "blake3:c04fbbe10e7d82d830e0a004bc993f4f74549926b683bd7243abff961483476a",
           "degraded": "blake3:c3293b29d4586e428c490204f8782b970c68ce6e2bd3666b1a017b02ebba9b0a",

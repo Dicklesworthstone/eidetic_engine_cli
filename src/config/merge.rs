@@ -66,6 +66,7 @@ pub const SCORING_HARMFUL_PENALTY_FLOOR_KEY: &str = "scoring.harmful_penalty_flo
 pub const SCORING_SCOPE_MATCH_BONUS_KEY: &str = "scoring.scope_match_bonus";
 pub const SCORING_CANDIDATE_MULTIPLIER_KEY: &str = "scoring.candidate_multiplier";
 pub const SCORING_ESTABLISHED_MULTIPLIER_KEY: &str = "scoring.established_multiplier";
+pub const SCORING_ANCHOR_MATCH_BIAS_CAP_KEY: &str = "scoring.anchor_match_bias_cap";
 pub const SEARCH_RERANK_KEY: &str = "search.rerank";
 pub const SEARCH_RERANK_TOP_K_KEY: &str = "search.rerank_top_k";
 pub const SEARCH_QUERY_MISS_RETENTION_DAYS_KEY: &str = "search.query_miss_retention_days";
@@ -481,6 +482,10 @@ impl MergedConfig {
             (
                 SCORING_ESTABLISHED_MULTIPLIER_KEY,
                 self.values.scoring.established_multiplier,
+            ),
+            (
+                SCORING_ANCHOR_MATCH_BIAS_CAP_KEY,
+                self.values.scoring.anchor_match_bias_cap,
             ),
         ] {
             if let Some(value) = value {
@@ -1216,6 +1221,7 @@ pub fn built_in_config(expander: &PathExpander) -> ConfigFile {
             scope_match_bonus: Some(1.2),
             candidate_multiplier: Some(0.5),
             established_multiplier: Some(1.0),
+            anchor_match_bias_cap: Some(0.08),
         },
         pack: PackConfig {
             default_profile: Some("balanced".to_string()),
@@ -1974,6 +1980,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.scoring.established_multiplier,
                 &layers.user.scoring.established_multiplier,
                 &layers.defaults.scoring.established_multiplier,
+            ),
+            anchor_match_bias_cap: pick_field(
+                &mut sources,
+                SCORING_ANCHOR_MATCH_BIAS_CAP_KEY,
+                &layers.cli.scoring.anchor_match_bias_cap,
+                &layers.environment.scoring.anchor_match_bias_cap,
+                &layers.project.scoring.anchor_match_bias_cap,
+                &layers.user.scoring.anchor_match_bias_cap,
+                &layers.defaults.scoring.anchor_match_bias_cap,
             ),
         },
         pack: PackConfig {
@@ -4679,7 +4694,7 @@ mod tests {
         let expected = ConfigFile::parse(
             "[scoring]\nrecency_tau_days = 30\nconfidence_floor = 0.1\nutility_floor = 0.5\n\
              harmful_penalty_per_hit = 0.1\nharmful_penalty_floor = 0.2\nscope_match_bonus = 1.2\n\
-             candidate_multiplier = 0.5\nestablished_multiplier = 1\n",
+             candidate_multiplier = 0.5\nestablished_multiplier = 1\nanchor_match_bias_cap = 0.08\n",
         )
         .map_err(|error| error.to_string())?;
         ensure_equal(&defaults.scoring, &expected.scoring, "scoring defaults")?;
@@ -4690,7 +4705,7 @@ mod tests {
             .iter()
             .filter(|entry| entry.key.starts_with("scoring."))
             .collect::<Vec<_>>();
-        ensure_equal(&entries.len(), &8, "all active scoring knobs must be shown")?;
+        ensure_equal(&entries.len(), &9, "all active scoring knobs must be shown")?;
         for entry in entries {
             ensure_equal(
                 &merged.source(entry.key),
@@ -4712,11 +4727,12 @@ mod tests {
             "scope_match_bonus",
             "candidate_multiplier",
             "established_multiplier",
+            "anchor_match_bias_cap",
         ] {
-            let values = if key == "scope_match_bonus" {
-                ["1.1", "1.2", "1.3", "1.4", "1.5"]
-            } else {
-                ["0.1", "0.2", "0.3", "0.4", "0.5"]
+            let values = match key {
+                "scope_match_bonus" => ["1.1", "1.2", "1.3", "1.4", "1.5"],
+                "anchor_match_bias_cap" => ["0.01", "0.02", "0.03", "0.04", "0"],
+                _ => ["0.1", "0.2", "0.3", "0.4", "0.5"],
             };
             let layer = |value: &str| {
                 ConfigFile::parse(&format!("[scoring]\n{key} = {value}\n"))

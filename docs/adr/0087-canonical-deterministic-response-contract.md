@@ -163,21 +163,41 @@ read in batches from the owning database with the request cutoff. Native
 rule counters are observed only when their source timestamp can support that
 cutoff. Missing observations remain explicitly unavailable and have neutral
 multipliers; a workspace read does not establish a separate global store's
-feedback. Graph centrality, redundancy, drift, anchor and bead observations
-remain unconnected to this scoring pass.
+feedback. Exact artifact anchors are derived once from the query and compared
+with anchors extracted from each already admitted live memory body using the
+same precision extractor as ingestion. Every distinct matching kind/hash pair
+adds 0.04, up to the configured cap. Indexed content and anchor metadata do not
+establish authority. Native rules and other candidates without an admitted full
+memory body keep this signal unavailable. Graph centrality, redundancy, drift
+and bead observations remain unconnected to this scoring pass.
 
-The eight `[scoring]` controls are `recency_tau_days`, `confidence_floor`,
+The nine `[scoring]` controls are `recency_tau_days`, `confidence_floor`,
 `utility_floor`, `harmful_penalty_per_hit`, `harmful_penalty_floor`,
-`scope_match_bonus`, `candidate_multiplier`, and `established_multiplier`.
+`scope_match_bonus`, `candidate_multiplier`, `established_multiplier`, and
+`anchor_match_bias_cap`. The anchor cap defaults to 0.08 and accepts finite
+values from 0.0 through 0.08. Set `scoring.anchor_match_bias_cap = 0.0` to disable
+the boost, or reduce the cap to keep a smaller exact-match preference. For
+example, a workspace can set:
+
+```toml
+[scoring]
+anchor_match_bias_cap = 0.02
+```
+
 The policy digest binds their resolved f32 bits and a versioned algorithm tag,
 rather than config file bytes, Debug formatting, or inactive controls.
 
 Pack candidates use the weighted ranking divided by a common bound from
-the active scope/maturity coefficients. The same bound applies to every lane;
+the active scope/maturity coefficients plus the anchor cap when the query has
+precision anchors. Queries without precision anchors retain their original
+scores and projection bound. The same bound applies to every lane;
 scores above one retain their ordering instead of collapsing at a clamp.
 The raw ranking remains available for search ordering and graph seeds.
 `metadata.qualityScoring` and `--explain` expose the measured components
 without relabeling engine relevance as a calibrated quality estimate.
+Anchor diagnostics expose the exact-match count, capped score and live-content
+source without adding raw paths or query surfaces. An observed non-match is
+zero; an unavailable signal is null with a neutral zero contribution.
 
 Daemon handoffs bind the scoring policy and explicit reference clock, and
 recompute trusted scores after source revalidation. Reuse requires positive

@@ -139,13 +139,23 @@ impl SearchScoringConfig {
                 config.established_multiplier,
                 defaults.established_maturity_multiplier,
             ),
+            anchor_match_bias_cap: resolved(
+                config.anchor_match_bias_cap,
+                defaults.anchor_match_bias_cap,
+            ),
             ..defaults
         })
     }
 
+    /// Effective exact-anchor cap, shared by scoring and policy identity.
+    #[must_use]
+    pub fn anchor_match_cap(self) -> f32 {
+        finite_nonnegative(self.anchor_match_bias_cap).min(DEFAULT_ANCHOR_MATCH_BIAS_CAP)
+    }
+
     /// Common bound for every lane, including candidates with neutral signals.
-    /// Include the fixed proven-rule boost as well as configurable maturities;
-    /// otherwise unit-interval pack projection clips distinct proven-rule scores.
+    /// Include the fixed proven-rule boost, configurable maturities and active
+    /// anchor cap so unit-interval pack projection preserves distinct scores.
     #[must_use]
     pub fn ranking_bound(self) -> f32 {
         self.scope_match_bonus.max(1.0)
@@ -154,12 +164,13 @@ impl SearchScoringConfig {
                 .max(self.established_maturity_multiplier)
                 .max(RetrievalMaturity::ProceduralProven.multiplier())
                 .max(1.0)
+            + self.anchor_match_cap()
     }
 
     /// Identity of the active policy, binding exact resolved floating-point bits.
     /// Bind the projection bound too, so corrections to fixed maturity bonuses
     /// cannot reuse cached packs produced with an obsolete normalization bound.
-    /// Inactive graph, redundancy and affinity knobs are deliberately excluded.
+    /// Inactive graph, redundancy and bead affinity knobs are excluded.
     #[must_use]
     pub fn policy_hash(self) -> String {
         let mut hasher = blake3::Hasher::new();
@@ -179,6 +190,7 @@ impl SearchScoringConfig {
             ("ranking_bound", self.ranking_bound()),
             // Packs ranked before recency had a floor must not be reused.
             ("recency_floor", DEFAULT_RECENCY_FLOOR),
+            ("anchor_match_bias_cap", self.anchor_match_cap()),
         ] {
             hasher.update(&(name.len() as u64).to_le_bytes());
             hasher.update(name.as_bytes());
@@ -593,7 +605,7 @@ impl SearchScoreComponents {
             * graph_centrality
             * redundancy
             * freshness_drift;
-        let anchor_match_cap = finite_nonnegative(config.anchor_match_bias_cap.abs());
+        let anchor_match_cap = config.anchor_match_cap();
         let anchor_match = finite_signed(signals.anchor_match.unwrap_or(0.0))
             .clamp(-anchor_match_cap, anchor_match_cap);
         let bead_affinity_cap = finite_nonnegative(config.bead_affinity_bias_cap.abs());
@@ -1548,6 +1560,18 @@ mod tests {
                 established_maturity_multiplier: 4.0,
                 ..defaults
             },
+            SearchScoringConfig {
+                anchor_match_bias_cap: 0.0,
+                ..defaults
+            },
+            SearchScoringConfig {
+                anchor_match_bias_cap: 0.02,
+                ..defaults
+            },
+            SearchScoringConfig {
+                anchor_match_bias_cap: 10.0,
+                ..defaults
+            },
         ];
         let maturities = [
             RetrievalMaturity::Working,
@@ -1565,15 +1589,18 @@ mod tests {
             for maturity in maturities {
                 for scope_match in [false, true] {
                     for base in [0.0, 0.25, 0.75, 1.0] {
-                        let signals = SearchScoringSignals {
-                            scope_match,
-                            ..SearchScoringSignals::new(base, maturity)
-                        };
-                        let score = final_score(signals, config);
-                        assert!(
-                            score <= bound + f32::EPSILON * bound,
-                            "{maturity:?}, scope={scope_match}, base={base}: {score} > {bound}"
-                        );
+                        for anchor_match in [None, Some(config.anchor_match_cap())] {
+                            let signals = SearchScoringSignals {
+                                scope_match,
+                                anchor_match,
+                                ..SearchScoringSignals::new(base, maturity)
+                            };
+                            let score = final_score(signals, config);
+                            assert!(
+                                score <= bound + f32::EPSILON * bound,
+                                "{maturity:?}, scope={scope_match}, base={base}, anchor={anchor_match:?}: {score} > {bound}"
+                            );
+                        }
                     }
                 }
             }
@@ -1583,19 +1610,21 @@ mod tests {
     #[test]
     fn pack_projection_preserves_distinct_proven_rule_scores() {
         let config = SearchScoringConfig::default();
-        assert_close(config.ranking_bound(), 1.8);
+        assert_close(config.ranking_bound(), 1.88);
         let bases = [0.7, 0.8, 0.9, 1.0];
         let projected = bases.map(|base| {
             let signals = SearchScoringSignals {
                 scope_match: true,
+                anchor_match: Some(config.anchor_match_cap()),
                 ..SearchScoringSignals::new(base, RetrievalMaturity::ProceduralProven)
             };
             let score = final_score(signals, config);
             (score / config.ranking_bound()).clamp(0.0, 1.0)
         });
-        // The old 1.2 bound clipped every one of these distinct scores to 1.0.
-        for (actual, expected) in projected.into_iter().zip(bases) {
-            assert_close(actual, expected);
+        // The old 1.2 bound clipped all of these; a 1.8 bound would clip the
+        // strongest score once exact anchors are active.
+        for (actual, base) in projected.into_iter().zip(bases) {
+            assert_close(actual, (base * 1.8 + 0.08) / 1.88);
         }
         assert!(projected.windows(2).all(|pair| pair[0] < pair[1]));
     }
@@ -1642,7 +1671,52 @@ mod tests {
         legacy.update(&(name.len() as u64).to_le_bytes());
         legacy.update(name.as_bytes());
         legacy.update(&DEFAULT_RECENCY_FLOOR.to_bits().to_le_bytes());
+        let inactive_anchors_hash = format!("blake3:{}", legacy.finalize().to_hex());
+        assert_ne!(
+            config.policy_hash(),
+            inactive_anchors_hash,
+            "packs ranked without exact anchors must not be reused"
+        );
+
+        let name = "anchor_match_bias_cap";
+        legacy.update(&(name.len() as u64).to_le_bytes());
+        legacy.update(name.as_bytes());
+        legacy.update(&config.anchor_match_cap().to_bits().to_le_bytes());
         let expected_hash = format!("blake3:{}", legacy.finalize().to_hex());
         assert_eq!(config.policy_hash(), expected_hash);
+    }
+
+    #[test]
+    fn anchor_policy_hash_and_bound_follow_the_effective_cap() {
+        let defaults = SearchScoringConfig::default();
+        let disabled = SearchScoringConfig {
+            anchor_match_bias_cap: 0.0,
+            ..defaults
+        };
+        let smaller = SearchScoringConfig {
+            anchor_match_bias_cap: 0.02,
+            ..defaults
+        };
+        assert_ne!(defaults.policy_hash(), disabled.policy_hash());
+        assert_ne!(defaults.policy_hash(), smaller.policy_hash());
+        assert_ne!(disabled.policy_hash(), smaller.policy_hash());
+        assert_close(disabled.ranking_bound(), 1.8);
+        assert_close(smaller.ranking_bound(), 1.82);
+        for cap in [10.0, f32::MAX] {
+            let config = SearchScoringConfig {
+                anchor_match_bias_cap: cap,
+                ..defaults
+            };
+            assert_eq!(config.policy_hash(), defaults.policy_hash());
+            assert_eq!(config.ranking_bound(), defaults.ranking_bound());
+        }
+        for cap in [-1.0, f32::NAN, f32::INFINITY] {
+            let config = SearchScoringConfig {
+                anchor_match_bias_cap: cap,
+                ..defaults
+            };
+            assert_eq!(config.policy_hash(), disabled.policy_hash());
+            assert_eq!(config.ranking_bound(), disabled.ranking_bound());
+        }
     }
 }

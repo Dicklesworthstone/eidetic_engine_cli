@@ -6,6 +6,8 @@ use crate::db::{
 };
 
 const BODY: &str = "qualityquasar release guidance preserves the authoritative source.";
+const ANCHOR_MATCH_BODY: &str = "qualityquasar release guidance for `src/engine/cache/queue.rs` beside src/queue/cache/engine.rs.";
+const ANCHOR_OTHER_BODY: &str = "qualityquasar release guidance for src/engine/cache/queue.rs beside `src/queue/cache/engine.rs`.";
 
 struct Fixture {
     _directory: tempfile::TempDir,
@@ -73,13 +75,24 @@ impl Fixture {
         utility: f32,
         created: DateTime<Utc>,
     ) -> String {
+        self.memory_with_content(number, confidence, utility, created, BODY)
+    }
+
+    fn memory_with_content(
+        &self,
+        number: u128,
+        confidence: f32,
+        utility: f32,
+        created: DateTime<Utc>,
+        content: &str,
+    ) -> String {
         let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
         self.db
             .insert_memory(
                 &id,
                 &CreateMemoryInput {
                     workspace_id: self.workspace.clone(),
-                    content: BODY.to_owned(),
+                    content: content.to_owned(),
                     level: "semantic".to_owned(),
                     kind: "note".to_owned(),
                     workflow_id: None,
@@ -186,6 +199,260 @@ fn real_search_orders_equal_lexical_memories_by_each_authoritative_quality_signa
                 .is_none()
         );
     }
+}
+
+#[test]
+fn exact_artifact_anchors_rank_live_memories_and_explain_matches_and_neutral_controls() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    let other = fixture.memory_with_content(1, 1.0, 1.0, now, ANCHOR_OTHER_BODY);
+    let matching = fixture.memory_with_content(2, 1.0, 1.0, now, ANCHOR_MATCH_BODY);
+    let reader = DbConnection::open_file_read_only(fixture.root.join(".ee/ee.db")).unwrap();
+    for (query, has_anchors, has_match) in [
+        ("qualityquasar", false, false),
+        ("qualityquasar `src/cache/engine/queue.rs`", true, false),
+        ("qualityquasar `src/engine/cache/queue.rs`", true, true),
+    ] {
+        let mut options = fixture.options();
+        options.query = query.to_owned();
+        let report = run_search_with_read_connection(&options, &reader).unwrap();
+        assert_eq!(report.status, SearchStatus::Success);
+        assert_eq!(report.results.len(), 2);
+        // Text tokens and positions are identical; only the code-quoted path
+        // differs. Only the exact admitted precision anchor breaks the tie.
+        assert_eq!(
+            report.results[0].lexical_score,
+            report.results[1].lexical_score
+        );
+        assert_eq!(
+            report.results[0].relevance_score(),
+            report.results[1].relevance_score()
+        );
+        let expected_first = if has_match { &matching } else { &other };
+        assert_eq!(report.results[0].doc_id, *expected_first);
+        if has_match {
+            assert!(report.results[0].ranking_score() > report.results[1].ranking_score());
+            assert!(
+                report.results[0].ranking_relevance_score()
+                    > report.results[1].ranking_relevance_score()
+            );
+        } else {
+            assert_eq!(
+                report.results[0].ranking_score(),
+                report.results[1].ranking_score()
+            );
+        }
+        for hit in &report.results {
+            let matched = has_match && hit.doc_id == matching;
+            let scoring = hit.ranking_components_json().unwrap();
+            assert_eq!(scoring["observedSignals"]["anchorMatch"], has_anchors);
+            assert_eq!(
+                scoring["inputs"]["anchorMatchExactMatches"],
+                if has_anchors {
+                    serde_json::json!(usize::from(matched))
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            assert_eq!(
+                scoring["inputs"]["anchorMatchSource"],
+                if has_anchors {
+                    serde_json::json!("live_memory_content")
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            assert_eq!(
+                scoring["inputs"]["anchorMatchCapped"],
+                if has_anchors {
+                    serde_json::json!(false)
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            let anchor_score = scoring["components"]["anchorMatch"].as_f64().unwrap();
+            assert!((anchor_score - if matched { 0.04 } else { 0.0 }).abs() < 1.0e-6);
+            let factor = hit
+                .explanation
+                .as_ref()
+                .unwrap()
+                .factors
+                .iter()
+                .find(|factor| factor.name == "anchorMatch")
+                .unwrap();
+            assert_eq!(f64::from(factor.value), anchor_score);
+            assert_eq!(
+                factor.contribution,
+                if has_anchors {
+                    "source-derived quality ranking component"
+                } else {
+                    "neutral: signal unavailable or not observed"
+                }
+            );
+            assert!(!scoring.to_string().contains("src/"));
+            if !has_anchors {
+                assert!(scoring["inputs"]["anchorMatch"].is_null());
+                assert_eq!(
+                    scoring["rankingBound"],
+                    serde_json::json!(
+                        SearchScoringConfig {
+                            anchor_match_bias_cap: 0.0,
+                            ..SearchScoringConfig::default()
+                        }
+                        .ranking_bound()
+                    )
+                );
+            }
+        }
+        let wire = report.data_json();
+        assert_eq!(
+            wire["results"][0]["metadata"]["qualityScoring"]["observedSignals"]["anchorMatch"],
+            has_anchors
+        );
+        assert!(
+            wire["results"][0]["metadata"]
+                .get(SEARCH_QUALITY_SCORING_KEY)
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn published_search_and_diagnostics_promote_exact_anchors_before_top_one() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    fixture.memory_with_content(1, 1.0, 1.0, now, ANCHOR_OTHER_BODY);
+    let matching = fixture.memory_with_content(2, 1.0, 1.0, now, ANCHOR_MATCH_BODY);
+    let mut options = fixture.options();
+    options.query = "qualityquasar `src/engine/cache/queue.rs`".to_owned();
+    options.limit = 1;
+    let _embedder = crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace);
+    fixture.db.close().unwrap();
+    let rebuild = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: None,
+        dry_run: false,
+    })
+    .unwrap();
+    assert_eq!(
+        rebuild.status,
+        crate::core::index::IndexRebuildStatus::Success
+    );
+    let reader = DbConnection::open_file_read_only(fixture.root.join(".ee/ee.db")).unwrap();
+    let report = run_search_with_read_connection(&options, &reader).unwrap();
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].doc_id, matching);
+    assert_eq!(
+        report.results[0].ranking_components_json().unwrap()["inputs"]["anchorMatchExactMatches"],
+        1
+    );
+    let diagnostic = run_diag_search(&options).unwrap();
+    assert_eq!(diagnostic.final_report.results.len(), 1);
+    assert_eq!(diagnostic.final_report.results[0].doc_id, matching);
+}
+
+#[test]
+fn anchor_ranking_ignores_forged_metadata_and_unadmitted_preloads() {
+    let fixture = Fixture::new();
+    let now = Utc::now();
+    let id = fixture.memory_with_content(1, 1.0, 1.0, now, ANCHOR_OTHER_BODY);
+    let mut hits = fixture.search().results;
+    let mut options = fixture.options();
+    options.query = "qualityquasar `src/engine/cache/queue.rs`".to_owned();
+    let query_anchors = crate::search::query::query_anchor_match_context(&options.query);
+    hits[0].metadata = Some(serde_json::json!({
+        "content": ANCHOR_MATCH_BODY,
+        "anchors": query_anchors.anchors,
+        "qualityScoring": {
+            "observedSignals": { "anchorMatch": true },
+            "components": { "anchorMatch": 1000.0, "finalScore": 1000.0 }
+        }
+    }));
+    apply_quality_scoring(
+        &options,
+        &mut hits,
+        SearchScoringConfig::default(),
+        now,
+        Some(&fixture.db),
+        None,
+        None,
+        &mut Vec::new(),
+    );
+    let scoring = hits[0].ranking_components_json().unwrap();
+    assert_eq!(scoring["observedSignals"]["anchorMatch"], true);
+    assert_eq!(scoring["inputs"]["anchorMatchExactMatches"], 0);
+    assert_eq!(scoring["components"]["anchorMatch"], 0.0);
+
+    // A preload without the global admission proof cannot establish authority,
+    // even if it contains the desired text. A failed live read stays neutral.
+    let mut preloaded = fixture.db.get_memories_batch(&[id.as_str()]).unwrap();
+    preloaded.get_mut(&id).unwrap().content = ANCHOR_MATCH_BODY.to_owned();
+    apply_quality_scoring(
+        &options,
+        &mut hits,
+        SearchScoringConfig::default(),
+        now,
+        None,
+        Some(&preloaded),
+        None,
+        &mut Vec::new(),
+    );
+    let scoring = hits[0].ranking_components_json().unwrap();
+    assert_eq!(scoring["observedSignals"]["anchorMatch"], false);
+    assert!(scoring["inputs"]["anchorMatch"].is_null());
+    assert!(scoring["inputs"]["anchorMatchExactMatches"].is_null());
+    assert!(scoring["inputs"]["anchorMatchSource"].is_null());
+    assert_eq!(scoring["components"]["anchorMatch"], 0.0);
+}
+
+#[test]
+fn live_anchor_matches_respect_the_cap_and_a_disabled_bias() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    let body = "qualityquasar `src/engine.rs` `EE_PACK_TRACE` `ee.response.v2`";
+    fixture.memory_with_content(1, 1.0, 1.0, now, body);
+    let mut options = fixture.options();
+    options.query = body.to_owned();
+    let reader = DbConnection::open_file_read_only(fixture.root.join(".ee/ee.db")).unwrap();
+    let mut hits = run_search_with_read_connection(&options, &reader)
+        .unwrap()
+        .results;
+    assert_eq!(hits.len(), 1);
+    apply_quality_scoring(
+        &options,
+        &mut hits,
+        SearchScoringConfig::default(),
+        now,
+        Some(&reader),
+        None,
+        None,
+        &mut Vec::new(),
+    );
+    let boosted = hits[0].ranking_score();
+    let scoring = hits[0].ranking_components_json().unwrap();
+    assert_eq!(scoring["inputs"]["anchorMatchExactMatches"], 3);
+    assert_eq!(scoring["inputs"]["anchorMatchCapped"], true);
+    assert!((scoring["components"]["anchorMatch"].as_f64().unwrap() - 0.08).abs() < 1.0e-6);
+    apply_quality_scoring(
+        &options,
+        &mut hits,
+        SearchScoringConfig {
+            anchor_match_bias_cap: 0.0,
+            ..SearchScoringConfig::default()
+        },
+        now,
+        Some(&reader),
+        None,
+        None,
+        &mut Vec::new(),
+    );
+    let scoring = hits[0].ranking_components_json().unwrap();
+    assert_eq!(scoring["observedSignals"]["anchorMatch"], true);
+    assert_eq!(scoring["inputs"]["anchorMatchExactMatches"], 3);
+    assert_eq!(scoring["inputs"]["anchorMatchCapped"], true);
+    assert_eq!(scoring["components"]["anchorMatch"], 0.0);
+    assert!((boosted - hits[0].ranking_score() - 0.08).abs() < 1.0e-6);
 }
 
 #[test]
@@ -425,5 +692,72 @@ fn changing_effective_quality_config_changes_real_order_and_rejects_old_handoff_
     assert_ne!(
         after.results[0].ranking_components_json().unwrap()["policyHash"],
         before_policy,
+    );
+}
+
+#[test]
+fn workspace_anchor_cap_controls_real_ranking_and_invalidates_cached_handoffs() {
+    let fixture = Fixture::new();
+    let now = Utc::now() - chrono::Duration::seconds(1);
+    let other = fixture.memory_with_content(1, 1.0, 1.0, now, ANCHOR_OTHER_BODY);
+    let matching = fixture.memory_with_content(2, 1.0, 1.0, now, ANCHOR_MATCH_BODY);
+    let mut options = fixture.options();
+    options.query = "qualityquasar `src/engine/cache/queue.rs`".to_owned();
+    let reader = DbConnection::open_file_read_only(fixture.root.join(".ee/ee.db")).unwrap();
+    let before = run_search_with_read_connection(&options, &reader).unwrap();
+    assert_eq!(before.results[0].doc_id, matching);
+    let before_policy = before.results[0].ranking_components_json().unwrap()["policyHash"].clone();
+    let mut handoff = run_pack_search(&options).unwrap();
+    assert!(handoff.matches_request(&options));
+
+    std::fs::write(
+        fixture.root.join(".ee/config.toml"),
+        "[memory]\ninclude_global = false\n[scoring]\nanchor_match_bias_cap = 0.0\n",
+    )
+    .unwrap();
+    handoff.revalidate(&options, &reader);
+    assert!(handoff.report.results.is_empty());
+    assert!(
+        handoff
+            .report
+            .degraded
+            .iter()
+            .any(|entry| entry.code == "search_quality_policy_changed")
+    );
+    let disabled = run_search_with_read_connection(&options, &reader).unwrap();
+    assert_eq!(disabled.results[0].doc_id, other);
+    assert_eq!(disabled.results[1].doc_id, matching);
+    assert_eq!(
+        disabled.results[0].ranking_score(),
+        disabled.results[1].ranking_score()
+    );
+    let scoring = disabled.results[1].ranking_components_json().unwrap();
+    assert_eq!(scoring["observedSignals"]["anchorMatch"], true);
+    assert_eq!(scoring["inputs"]["anchorMatchExactMatches"], 1);
+    assert_eq!(scoring["components"]["anchorMatch"], 0.0);
+    assert_ne!(scoring["policyHash"], before_policy);
+
+    std::fs::write(
+        fixture.root.join(".ee/config.toml"),
+        "[memory]\ninclude_global = false\n[scoring]\nanchor_match_bias_cap = 0.02\n",
+    )
+    .unwrap();
+    let limited = run_search_with_read_connection(&options, &reader).unwrap();
+    assert_eq!(limited.results[0].doc_id, matching);
+    let scoring = limited.results[0].ranking_components_json().unwrap();
+    assert!((scoring["components"]["anchorMatch"].as_f64().unwrap() - 0.02).abs() < 1.0e-6);
+    assert_eq!(scoring["inputs"]["anchorMatchCapped"], true);
+    assert_ne!(scoring["policyHash"], before_policy);
+    assert_ne!(
+        scoring["policyHash"],
+        disabled.results[1].ranking_components_json().unwrap()["policyHash"]
+    );
+    assert_eq!(
+        limited.results[0].lexical_score,
+        before.results[0].lexical_score
+    );
+    assert_eq!(
+        limited.results[0].relevance_score(),
+        before.results[0].relevance_score()
     );
 }

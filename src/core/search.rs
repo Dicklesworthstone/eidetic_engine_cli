@@ -28,8 +28,9 @@ use crate::models::degradation::{
 use crate::models::model_registry::{EmbedBackend, ModelPurpose, ModelRegistryStatus};
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
-    DomainError, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats,
-    ProvenanceUri, TrustClass, UnitScore, degraded_recovery_actions,
+    DomainError, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryAnchorSource, MemoryId, MemoryScope,
+    MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore, degraded_recovery_actions,
+    extract_precision_memory_anchors,
 };
 use crate::obs::audit_events::query_hash as audit_query_hash;
 use crate::pack::{
@@ -66,8 +67,8 @@ use crate::search::plan_cache::{
     compute_search_config_hash, lookup_or_insert_process_plan,
 };
 use crate::search::scoring::{
-    RetrievalMaturity, SEARCH_SCORING_POLICY_V1, SearchScoreComponents, SearchScoringConfig,
-    SearchScoringSignals,
+    AnchorMatchCandidateSignals, RetrievalMaturity, SEARCH_SCORING_POLICY_V1,
+    SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, anchor_match_score,
 };
 use crate::search::{
     NativeReranker, Reranker, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
@@ -7350,6 +7351,10 @@ impl ScoreExplanation {
                     ("graphCentrality", "1 when graph centrality is not observed"),
                     ("redundancy", "1 when redundancy is not observed"),
                     ("freshnessDrift", "1 when anchor freshness is not observed"),
+                    (
+                        "anchorMatch",
+                        "min(0.04 * exact_matches, anchor_match_bias_cap, 0.08) from live memory content; 0 when unobserved",
+                    ),
                 ] {
                     let Some(value) = components.get(key).and_then(serde_json::Value::as_f64)
                     else {
@@ -7378,7 +7383,7 @@ impl ScoreExplanation {
                 hit.ranking_score(),
                 "final EE quality ranking; engine relevance is unchanged",
                 "metadata.qualityScoring.components.finalScore",
-                "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch; unobserved optional terms are neutral",
+                "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch + anchorMatch; unobserved optional terms are neutral",
             ));
             explanation.summary.push_str(&format!(
                 " EE quality ranking {:.6}; original relevance and calibration are unchanged.",
@@ -12575,6 +12580,18 @@ pub(crate) fn apply_quality_scoring(
     };
     let local_ids: BTreeSet<&str> = local_ids.into_iter().collect();
     let policy = config.policy_hash();
+    let query_anchors = crate::search::query::query_anchor_match_context(&options.query);
+    // A plain-prose query cannot receive an anchor boost. Preserve its existing
+    // pack projection, while anchor-bearing queries share a bound across lanes.
+    let ranking_bound = if query_anchors.is_cold_start() {
+        SearchScoringConfig {
+            anchor_match_bias_cap: 0.0,
+            ..config
+        }
+        .ranking_bound()
+    } else {
+        config.ranking_bound()
+    };
     for hit in hits.iter_mut() {
         if let Some(object) = hit
             .metadata
@@ -12592,6 +12609,7 @@ pub(crate) fn apply_quality_scoring(
         let mut maturity = None;
         let mut harmful_count = None;
         let mut scope_match = None;
+        let mut anchor_match = None;
         let entity_type;
         if let Some(memory) = local_memories
             .get(&hit.doc_id)
@@ -12620,6 +12638,32 @@ pub(crate) fn apply_quality_scoring(
             } else if admitted_global_ids.is_some_and(|ids| ids.contains(&hit.doc_id)) {
                 // A workspace DB cannot observe a separate store's feedback.
                 scope_match = Some(options.memory_scope == MemoryScope::Global);
+            }
+            let admitted_anchor_source = local_ids.contains(hit.doc_id.as_str())
+                || (!local_memories.contains_key(&hit.doc_id)
+                    && admitted_global_ids.is_some_and(|ids| ids.contains(&hit.doc_id)));
+            if admitted_anchor_source && !query_anchors.is_cold_start() {
+                // Source, revision, seal and scope admission already ran. Reuse
+                // the loaded live body, never indexed anchor/content metadata.
+                let anchors = extract_precision_memory_anchors(
+                    &memory.id,
+                    &memory.content,
+                    MemoryAnchorSource::IndexRebuild,
+                    Some("memory.content"),
+                );
+                let candidate = AnchorMatchCandidateSignals::new().with_anchors(
+                    anchors.into_iter().map(|anchor| {
+                        (
+                            anchor.anchor_kind.as_str().to_owned(),
+                            anchor.anchor_value_hash,
+                        )
+                    }),
+                );
+                anchor_match = Some(anchor_match_score(
+                    &query_anchors,
+                    &candidate,
+                    config.anchor_match_cap(),
+                ));
             }
         } else if rule_admission::is_rule_hit(hit) {
             // admit_hits replaced this metadata from the native source row.
@@ -12672,12 +12716,13 @@ pub(crate) fn apply_quality_scoring(
         signals.utility_score = utility.unwrap_or(1.0);
         signals.harmful_count = harmful_count.unwrap_or(0);
         signals.scope_match = scope_match.unwrap_or(false);
+        signals.anchor_match = anchor_match.map(|score| score.value);
         let components = SearchScoreComponents::from_signals(signals, config);
         let scoring = serde_json::json!({
             "schema": SEARCH_SCORING_POLICY_V1,
             "policyHash": policy,
             "entityType": entity_type,
-            "rankingBound": config.ranking_bound(),
+            "rankingBound": ranking_bound,
             "referenceTime": reference_time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "components": components,
             "observedSignals": {
@@ -12685,13 +12730,17 @@ pub(crate) fn apply_quality_scoring(
                 "utility": utility.is_some(), "maturity": maturity.is_some(),
                 "harmfulPenalty": harmful_count.is_some(), "scopeMatch": scope_match.is_some(),
                 "graphCentrality": false, "redundancy": false, "freshnessDrift": false,
-                "anchorMatch": false, "beadAffinity": false
+                "anchorMatch": anchor_match.is_some(), "beadAffinity": false
             },
             "inputs": {
                 "ageDays": age_days, "confidence": confidence, "utility": utility,
                 "maturity": maturity, "harmfulCount": harmful_count, "scopeMatch": scope_match,
                 "graphCentrality": null, "redundancy": null, "freshnessDrift": null,
-                "anchorMatch": null, "beadAffinity": null
+                "anchorMatch": anchor_match.map(|score| score.value),
+                "anchorMatchExactMatches": anchor_match.map(|score| score.exact_matches),
+                "anchorMatchCapped": anchor_match.map(|score| score.capped),
+                "anchorMatchSource": anchor_match.map(|_| "live_memory_content"),
+                "beadAffinity": null
             }
         });
         let metadata = hit.metadata.get_or_insert_with(|| serde_json::json!({}));
