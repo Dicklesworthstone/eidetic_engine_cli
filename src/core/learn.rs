@@ -7112,4 +7112,319 @@ mod tests {
         );
         connection.close().map_err(|e| e.to_string())
     }
+
+    // bd-learn-rs-truncation-residual-iq8o2: the seven tests below were lost
+    // collateral in 5c3392996, which truncated this file mid-expression (53
+    // insertions, 339 deletions) and left the lib unparseable until 1679e0fa4
+    // restored only the 20 lines needed to close the delimiters. A symbol diff
+    // against bc4dd2a77 showed every function lost was a #[test], and none of
+    // the seven concerns the similarity-based closure paths that commit set out
+    // to remove -- they cover redaction, peer provenance, two refusal paths and
+    // the generated_at sentinel. So they were accidental, not deliberate.
+    // Restored verbatim from bc4dd2a77; all six struct literals below were
+    // field-checked against today's definitions before pasting.
+    #[test]
+    fn experiment_proposal_json_redacts_sensitive_evidence_ids() -> TestResult {
+        let raw_evidence = "/data/private/cluster.json?token=ghp_FAKEabc123def456ghi7890";
+        let report = LearnExperimentProposalReport {
+            schema: LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1.to_string(),
+            proposals: vec![ExperimentProposal {
+                experiment_id: "exp_sensitive".to_string(),
+                question_id: "q_sensitive".to_string(),
+                title: "Review sensitive evidence".to_string(),
+                hypothesis: "Sensitive evidence can be reviewed safely.".to_string(),
+                status: "proposed".to_string(),
+                topic: "sensitive".to_string(),
+                expected_value: 0.5,
+                uncertainty_reduction: 0.25,
+                confidence: 0.4,
+                budget: ExperimentBudget {
+                    attention_tokens: 100,
+                    max_runtime_seconds: 30,
+                    dry_run_required: true,
+                    budget_class: "small".to_string(),
+                },
+                safety: ExperimentSafetyPlan {
+                    boundary: "dry_run_only".to_string(),
+                    dry_run_first: true,
+                    mutation_allowed: false,
+                    review_required: true,
+                    stop_conditions: Vec::new(),
+                    denied_reasons: Vec::new(),
+                },
+                decision_impact: ExperimentDecisionImpact {
+                    decision_id: "decision_sensitive".to_string(),
+                    target_artifact_ids: vec![raw_evidence.to_string()],
+                    current_decision: "retain".to_string(),
+                    possible_change: "review".to_string(),
+                    impact_score: 0.5,
+                },
+                evidence_ids: vec![raw_evidence.to_string()],
+                next_command: "ee learn experiment run exp_sensitive --dry-run --json".to_string(),
+            }],
+            total_candidates: 1,
+            returned: 1,
+            min_expected_value: 0.0,
+            max_attention_tokens: 100,
+            max_runtime_seconds: 30,
+            generated_at: stable_learning_generated_at(),
+        };
+
+        let rendered = report.to_json();
+        assert!(rendered.contains("[REDACTED_PATH]"));
+        assert!(rendered.contains("[REDACTED:"));
+        assert!(!rendered.contains(raw_evidence));
+        assert!(!rendered.contains("/data/private"));
+        assert!(!rendered.contains("ghp_FAKE"));
+        assert_eq!(
+            report.proposals[0].evidence_ids,
+            vec![raw_evidence.to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn learn_experiment_proposals_preserve_peer_evidence_provenance() -> TestResult {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-peer-propose")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let memory_id = "mem_00000000000000000000002001";
+        seed_memory(
+            &connection,
+            &workspace_id,
+            memory_id,
+            "peer_cluster",
+            "Run remote-cache evidence through local review before promoting peer rules.",
+        )?;
+        for (index, peer_id) in ["peer_alpha01", "peer_beta002"].into_iter().enumerate() {
+            connection
+                .insert_feedback_event(
+                    &format!("fb_peerlearn{index:017}"),
+                    &CreateFeedbackEventInput {
+                        workspace_id: workspace_id.clone(),
+                        target_type: "memory".to_string(),
+                        target_id: memory_id.to_string(),
+                        signal: "confirmation".to_string(),
+                        weight: 1.0,
+                        source_type: "agent_inference".to_string(),
+                        source_id: Some(format!(
+                            "peer_evidence|{peer_id}|mem_remote_peer_{index}|0.125|2026-05-01T00:0{index}:00Z|0.8"
+                        )),
+                        reason: Some("Cached peer evidence supported the workflow.".to_string()),
+                        evidence_json: Some(
+                            serde_json::json!({
+                                "evidenceIds": [memory_id],
+                                "peerEvidence": peer_id,
+                            })
+                            .to_string(),
+                        ),
+                        session_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = propose_experiments(&LearnExperimentProposeOptions {
+            workspace: dir.path().to_path_buf(),
+            limit: 5,
+            topic: Some("peer_cluster".to_string()),
+            min_expected_value: 0.0,
+            max_attention_tokens: 900,
+            max_runtime_seconds: 180,
+            safety_boundary: ExperimentSafetyBoundary::DryRunOnly,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.proposals.len(), 1);
+        assert!(
+            report.proposals[0]
+                .evidence_ids
+                .iter()
+                .any(|id| id.starts_with("peer_evidence|peer_alpha01|")),
+            "peer evidence refs must survive the capped sample list"
+        );
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let candidates = connection
+            .list_curation_candidates(&workspace_id, Some("rule"), Some("pending"), None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source_type, "agent_inference");
+        assert_eq!(
+            candidates[0].proposed_trust_class.as_deref(),
+            Some("agent_assertion")
+        );
+        assert!(
+            candidates[0]
+                .source_id
+                .as_deref()
+                .is_some_and(|source_id| source_id.contains("peer_evidence|peer_alpha01|"))
+        );
+        assert!(candidates[0].reason.contains("Peer-origin evidence"));
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn learn_experiment_run_rejects_non_dry_run_before_loading_registry() -> TestResult {
+        match run_experiment(&LearnExperimentRunOptions {
+            experiment_id: "exp_database_contract_fixture".to_string(),
+            dry_run: false,
+            ..Default::default()
+        }) {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                assert!(message.contains("--dry-run"));
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|repair| repair.contains("learn experiment run"))
+                );
+                Ok(())
+            }
+            Err(error) => Err(format!("expected policy denial, got {}", error.code())),
+            Ok(_) => Err("expected policy denial, got success".to_string()),
+        }
+    }
+
+    #[test]
+    fn learn_experiment_run_reports_not_found_for_unregistered_experiment() -> TestResult {
+        let (dir, _database, _workspace_id) = seed_learning_workspace("ee-learn-run-missing")?;
+        match run_experiment(&LearnExperimentRunOptions {
+            workspace: dir.path().to_path_buf(),
+            experiment_id: "exp_unknown_experiment".to_string(),
+            dry_run: true,
+            ..Default::default()
+        }) {
+            Err(DomainError::NotFound {
+                resource,
+                id,
+                repair,
+            }) => {
+                assert_eq!(resource, "learning experiment");
+                assert_eq!(id, "exp_unknown_experiment");
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|repair| repair.contains("learn experiment propose"))
+                );
+                Ok(())
+            }
+            Err(error) => Err(format!("expected not_found, got {}", error.code())),
+            Ok(_) => Err("expected not_found, got success".to_string()),
+        }
+    }
+
+    #[test]
+    fn learn_experiment_run_uses_registered_persisted_proposal() -> TestResult {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-run")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        for index in 0..4 {
+            let memory_id = format!("mem_{index:026}");
+            let feedback_id = format!("fb_{index:026}");
+            seed_memory(
+                &connection,
+                &workspace_id,
+                &memory_id,
+                "registered_cluster",
+                "Replay stored evidence before promoting a learning rule.",
+            )?;
+            seed_feedback(
+                &connection,
+                &workspace_id,
+                &feedback_id,
+                &memory_id,
+                "confirmation",
+            )?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let proposal_report = propose_experiments(&LearnExperimentProposeOptions {
+            workspace: dir.path().to_path_buf(),
+            limit: 1,
+            topic: Some("registered_cluster".to_string()),
+            min_expected_value: 0.0,
+            max_attention_tokens: 900,
+            max_runtime_seconds: 180,
+            safety_boundary: ExperimentSafetyBoundary::HumanReview,
+        })
+        .map_err(|error| error.message())?;
+        let proposal = proposal_report
+            .proposals
+            .first()
+            .ok_or_else(|| "expected a registered experiment proposal".to_string())?;
+
+        let run = run_experiment(&LearnExperimentRunOptions {
+            workspace: dir.path().to_path_buf(),
+            experiment_id: proposal.experiment_id.clone(),
+            max_attention_tokens: 600,
+            max_runtime_seconds: 90,
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(run.schema, LEARN_EXPERIMENT_RUN_SCHEMA_V1);
+        assert_eq!(run.status, "dry_run_ready");
+        assert_eq!(run.experiment_id, proposal.experiment_id);
+        assert_eq!(run.experiment_kind, "active_learning_replay");
+        assert!(run.dry_run);
+        assert_eq!(run.budget.requested_attention_tokens, 600);
+        assert!(run.budget.planned_attention_tokens <= 600);
+        assert!(run.safety.dry_run_first);
+        assert!(!run.safety.mutation_allowed);
+        assert_eq!(run.steps.len(), 3);
+        assert!(run.steps.iter().all(|step| !step.writes_storage));
+        assert_eq!(run.observations.len(), 1);
+        assert!(!run.observations[0].evidence_ids.is_empty());
+        assert_eq!(run.outcome_preview.status, "pending_review");
+        assert!(
+            run.next_actions
+                .iter()
+                .any(|action| action.contains("ee learn observe"))
+        );
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let observations = connection
+            .list_learning_observations(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            observations.is_empty(),
+            "dry-run experiment should not persist observations"
+        );
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn learning_generated_at_changes_across_calls() {
+        // Wall-clock generator: calls separated by any amount of time
+        // are allowed to differ (and typically will at nanosecond
+        // resolution). At minimum, neither is the epoch.
+        let a = super::stable_learning_generated_at();
+        let b = super::stable_learning_generated_at();
+        assert!(!a.starts_with("1970"));
+        assert!(!b.starts_with("1970"));
+        // Both are valid RFC 3339 strings (parseable).
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&a).is_ok(),
+            "a parses as RFC 3339: {a}"
+        );
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&b).is_ok(),
+            "b parses as RFC 3339: {b}"
+        );
+    }
+
+    /// Lock in the fix: `stable_learning_generated_at` no longer returns
+    /// the 1970-01-01 epoch sentinel. This is the regression test for
+    /// the 2026-05-10 walkthrough's most-cited stub.
+    #[test]
+    fn learning_generated_at_is_not_epoch_sentinel() {
+        let ts = super::stable_learning_generated_at();
+        assert!(
+            !ts.starts_with("1970-01-01"),
+            "stable_learning_generated_at must reflect wall-clock; got `{ts}`"
+        );
+        assert!(
+            ts.starts_with("20") || ts.starts_with("21"),
+            "expected 21st-century RFC 3339 timestamp; got `{ts}`"
+        );
+    }
 }
