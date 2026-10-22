@@ -1061,6 +1061,11 @@ where
             receiver.try_recv()
         };
         match received {
+            // After a failure, drain only to unblock the bounded producer and
+            // finish cleanup. In particular, a later recoverable line-cap
+            // error must not replace an earlier aggregate-cap or handler
+            // failure and change the importer's refusal decision.
+            Ok(_) if stream_error.is_some() || handler_error.is_some() => {}
             Ok(Ok(line)) => {
                 if let Err(error) = record_stdout_line_stats(
                     &line,
@@ -1069,17 +1074,16 @@ where
                     peak_stdout_line_bytes,
                 ) {
                     *stream_error = Some(error);
-                    continue;
+                    return false;
                 }
-                if stream_error.is_none()
-                    && handler_error.is_none()
-                    && let Err(error) = handle_line(line.text)
-                {
+                if let Err(error) = handle_line(line.text) {
                     *handler_error = Some(error);
+                    return false;
                 }
             }
             Ok(Err(error)) => {
                 *stream_error = Some(error);
+                return false;
             }
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => {
@@ -1583,6 +1587,10 @@ impl CassOutcome {
         self.stderr.is_empty()
     }
 }
+
+#[cfg(test)]
+#[path = "process_failure_tests.rs"]
+mod failure_tests;
 
 #[cfg(test)]
 mod tests {

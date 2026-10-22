@@ -126,6 +126,13 @@ first refusal, structured cap diagnostics and the committed partial counts.
 Malformed JSON, invalid UTF-8, mismatched source paths, other resource-cap
 errors, timeouts and storage failures retain their error behavior.
 
+The first stdout failure remains authoritative during reader cleanup. An
+aggregate-limit or handler failure must not be replaced by a later oversized
+line from the same subprocess: that would incorrectly turn a fatal response
+into a recoverable session refusal. The supervisor starts cleanup immediately
+after the first failure, then drains the bounded queue without admitting more
+records or changing the original error.
+
 There is intentionally no configurable or unlimited cap in this fix. A fixed
 8 MiB recovery window accommodates the reported 1,136,663-byte line and common
 JSON escape expansion without multiplying caller-controlled allocation limits.
