@@ -48,6 +48,9 @@ mod typescript;
 #[path = "cass_error_recall_cargo_text.rs"]
 mod cargo_text;
 
+#[path = "cass_error_recall_python_traceback.rs"]
+mod traceback;
+
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
@@ -66,7 +69,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// retaining cause-specific templates and the existing exact retry proof gate.
 /// V17 refreshes final streamed diagnostic snapshots and withholds repair
 /// credit when a formerly valid prefix ends in a malformed native report.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v17";
+/// V18 mines complete Python script tracebacks and syntax reports while
+/// refusing partial chains as repair proof, without changing source identity.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v18";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -1182,6 +1187,11 @@ fn content_text(value: &Value) -> Option<String> {
 /// class and record nothing. Messages are secret-redacted before they are
 /// canonicalized, and only masked signatures are ever stored.
 pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnostic> {
+    match traceback::decode(&output.text) {
+        Ok(Some(diagnostics)) => return diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     match test_coverage::nextest::decode(&output.text) {
         Ok(Some(decoded)) => return decoded.diagnostics,
         Err(()) => return Vec::new(),
@@ -1292,6 +1302,11 @@ fn stable_error_code(code: &str) -> bool {
 /// diagnostic that CASS import records. Public readers can reuse this before
 /// their free-text fallback, so imported errors and later logs share a key.
 pub(crate) fn structured_error_diagnostics(text: &str) -> Vec<CanonicalDiagnostic> {
+    match traceback::decode(text) {
+        Ok(Some(diagnostics)) => return diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     match test_coverage::nextest::decode(text) {
         Ok(Some(decoded)) => return decoded.diagnostics,
         Err(()) => return Vec::new(),
@@ -1514,6 +1529,15 @@ fn structured_output_allows_completion(text: &str) -> bool {
 /// error (with the `-->` location that follows it), else the first failing
 /// test or panic. Secret-redacted; never the whole log.
 fn symptom_line(output: &ToolOutput) -> Option<String> {
+    match traceback::decode(&output.text) {
+        Ok(Some(diagnostics)) => {
+            return diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.message_template.clone());
+        }
+        Err(()) => return None,
+        Ok(None) => {}
+    }
     match test_coverage::nextest::decode(&output.text) {
         Ok(Some(decoded)) => {
             return decoded

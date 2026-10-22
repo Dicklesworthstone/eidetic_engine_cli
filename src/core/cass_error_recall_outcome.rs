@@ -56,6 +56,7 @@ fn exit_report(text: &str) -> ExitReport {
 
 pub(super) fn failed(output: &ToolOutput) -> bool {
     output.is_error == Some(true)
+        || matches!(super::traceback::decode(&output.text), Ok(Some(_)))
         || output.exit_code.is_some_and(|code| code != 0)
         || match terminal_text(bounded(&output.text)) {
             Ok(text) => text_failed(&text),
@@ -238,6 +239,11 @@ fn runner_duration(text: &str) -> bool {
 }
 
 pub(super) fn succeeded(output: &ToolOutput) -> bool {
+    // A printed failure or an incomplete native traceback cannot certify a
+    // repair, even when an outer wrapper retained a zero exit status.
+    if !matches!(super::traceback::decode(&output.text), Ok(None)) {
+        return false;
+    }
     // Diagnostic extraction may inspect a prefix, but that prefix can never
     // certify success when a failure or final status could follow the bound.
     if output.text.len() > MAX_SCANNED_OUTPUT_BYTES || output.failed() {
