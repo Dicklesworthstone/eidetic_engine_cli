@@ -4452,6 +4452,69 @@ mod tests {
         }
     }
 
+    /// bd-2vq2z.15: the semantic-weight lint must fire on a hash tier and stay
+    /// silent on a neural one.
+    ///
+    /// This is a unit test and not an e2e arm on purpose. The first attempt to
+    /// verify the wiring through `ee doctor` could not trigger it at all: the
+    /// worker had a real model installed, so `get_index_status` reported
+    /// `mode: "neural_local"`, `deterministic` was false, and the lint
+    /// correctly returned None. A fixture that cannot reach the condition
+    /// proves nothing about the join, and forcing a hash tier end-to-end means
+    /// defeating model discovery rather than testing this function.
+    ///
+    /// Both polarities are asserted. The negative arm is the one that matters:
+    /// without it, a version of this function that appended unconditionally
+    /// would pass.
+    #[test]
+    fn semantic_weight_lint_fires_only_on_a_hash_tier_bd_2vq2z_15() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee).map_err(|error| error.to_string())?;
+        std::fs::write(
+            ee.join("config.toml"),
+            "search = { semantic_weight = 0.45 }\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let base = CheckResult::ok("embedding", "posture reported");
+
+        let hash_tier = with_semantic_weight_lint_advisory(base.clone(), temp.path(), true);
+        if !hash_tier
+            .message
+            .contains(crate::core::config_explain::LINT_WEIGHT_WITHOUT_NEURAL_TIER)
+        {
+            return Err(format!(
+                "a configured semantic weight on a deterministic tier must carry the lint code; got {:?}",
+                hash_tier.message
+            ));
+        }
+        if matches!(hash_tier.severity, CheckSeverity::Ok) {
+            return Err("the advisory must lift an Ok severity to Warning".to_owned());
+        }
+
+        let neural_tier = with_semantic_weight_lint_advisory(base.clone(), temp.path(), false);
+        if neural_tier.message != base.message {
+            return Err(format!(
+                "a neural tier must leave the message untouched; got {:?}",
+                neural_tier.message
+            ));
+        }
+
+        // Empty-world guard: no configured weight means nothing to warn about,
+        // on either tier. Without this, a function that keyed off the tier
+        // alone would satisfy both arms above.
+        let bare = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let unset = with_semantic_weight_lint_advisory(base.clone(), bare.path(), true);
+        if unset.message != base.message {
+            return Err(format!(
+                "no configured weight must produce no advisory; got {:?}",
+                unset.message
+            ));
+        }
+        Ok(())
+    }
+
     /// bd-bigu7: a config.toml that exists and does not parse must be
     /// REPORTED, which is what gives `fix_workspace_config_malformed_toml` a
     /// reachable trigger. Before this, CONFIG_PARSE_ERROR had zero emitters
