@@ -54,9 +54,16 @@ emit_event() {
 require_tool() {
     local tool="${1:?tool required}"
     if ! command -v "$tool" >/dev/null 2>&1; then
-        emit_event "setup" "blocked" 2 "missing required tool: $tool" 0
+        # A missing tool is the same class as the git check-ignore refusal
+        # below: this environment cannot run the check, so the stage
+        # established nothing. It exited 2 while that one exited 76, which left
+        # this script disagreeing with ITSELF about what an environment refusal
+        # is -- and verify.sh reported the exit-2 path as a hygiene FAIL
+        # (stage_status_for_exit_code sends unrecognised codes to FAIL).
+        # bd-e4ymh.
+        emit_event "setup" "blocked" "$STAGE_ENV_UNRUNNABLE_EXIT" "missing required tool: $tool" 0
         printf 'repo_hygiene: missing required tool: %s\n' "$tool" >&2
-        exit 2
+        exit "$STAGE_ENV_UNRUNNABLE_EXIT"
     fi
 }
 

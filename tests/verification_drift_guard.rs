@@ -4658,6 +4658,20 @@ fn the_environment_unrunnable_exit_code_agrees_across_both_scripts() {
             &fs::read_to_string(project_root().join("scripts/e2e_overhaul.sh"))
                 .expect("read e2e_overhaul.sh"),
         ),
+        (
+            "scripts/e2e_overhaul/tailscale_local_probe.sh",
+            &fs::read_to_string(
+                project_root().join("scripts/e2e_overhaul/tailscale_local_probe.sh"),
+            )
+            .expect("read tailscale_local_probe.sh"),
+        ),
+        (
+            "scripts/e2e_overhaul/tailscale_peer_autodiscovery.sh",
+            &fs::read_to_string(
+                project_root().join("scripts/e2e_overhaul/tailscale_peer_autodiscovery.sh"),
+            )
+            .expect("read tailscale_peer_autodiscovery.sh"),
+        ),
     ] {
         let declared = read_literal(source, "STAGE_ENV_UNRUNNABLE_EXIT");
         assert_eq!(
