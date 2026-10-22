@@ -1936,10 +1936,20 @@ mod tests {
         })
         .expect_err("existing regular member should reject repro pack write");
 
+        // bd-kgt76, same class: the OR read `contains("File exists") || contains("exists")`,
+        // and "exists" SUBSUMES "File exists", so the effective predicate was the broad one.
+        // Any error merely mentioning "exists" satisfied a message claiming an exclusive-create
+        // failure. Assert the product's own failure code and the EEXIST condition separately.
+        // "File exists" (unix strerror) and "already exists" (windows) are unrelated strings,
+        // so neither disjunct below is dead.
+        let message = error.message();
         assert!(
-            error.message().contains("File exists") || error.message().contains("exists"),
-            "expected exclusive create failure, got: {}",
-            error.message()
+            message.contains("pack_artifact_write_failed"),
+            "expected a pack artifact write failure, got: {message}"
+        );
+        assert!(
+            message.contains("File exists") || message.contains("already exists"),
+            "expected an exclusive-create (EEXIST) failure, got: {message}"
         );
         assert_eq!(
             fs::read_to_string(&env_path).map_err(|error| error.to_string())?,

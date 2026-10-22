@@ -18030,11 +18030,16 @@ mod tests {
                     message.contains("Gaps-only") && message.contains("summary"),
                     "policy-denied message must name the kind; got `{message}`"
                 );
+                // bd-kgt76: the check is on `--gaps-only` alone. The earlier form also
+                // accepted a bare "gaps-only", which SUBSUMES the dashed spelling, so a
+                // hint reading "use gaps-only mode" passed an assertion whose own message
+                // demands the flag. The emitter above (the PolicyDenied in
+                // ingest_reflection_result) names `--gaps-only` in a plain literal, so
+                // narrowing this costs nothing today and catches a hint that drops it.
+                let repair_hint = repair.as_deref().unwrap_or("");
                 assert!(
-                    repair
-                        .as_deref()
-                        .is_some_and(|r| r.contains("gaps-only") || r.contains("--gaps-only")),
-                    "repair hint must mention the gaps-only flag; got `{repair:?}`"
+                    repair_hint.contains("--gaps-only"),
+                    "repair hint must name the --gaps-only flag; got `{repair:?}`"
                 );
                 Ok(())
             }
