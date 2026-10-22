@@ -10033,8 +10033,23 @@ async fn run_search_inner_with_performance(
                 raw_hits.extend(global_hits);
                 sort_search_hits_by_score_order(&mut raw_hits);
             }
+            // bd-search-warm-latency-0bh05: close this span at the dedupe, not
+            // three operations later. `record_elapsed` is `start.elapsed()`, so
+            // recording it after apply_live_evidence_visibility and
+            // admit_hits charged BOTH of those to "search::dedupeDocId" -- a
+            // span named for one operation that measured three, and one that
+            // strictly contained the sibling span recorded just above it.
+            //
+            // That is not a rounding problem. Measured on an EMPTY store (0
+            // documents, so dedupe has nothing to collapse), dedupeDocId was
+            // the LARGEST span in the whole run at a 161ms median, which reads
+            // as "deduplication is the bottleneck" and sends anyone optimising
+            // it straight at the wrong function. This bead's own acceptance
+            // asks for a timing split "so regressions are attributable"; an
+            // overlapping span is the one thing that cannot be.
             let dedupe_doc_id_start = Instant::now();
             let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
+            trace.record_elapsed("search::dedupeDocId", dedupe_doc_id_start);
             let evidence_visibility_start = Instant::now();
             let raw_hits =
                 apply_live_evidence_visibility(options, raw_hits, &mut degraded, read_connection);
@@ -10044,7 +10059,6 @@ async fn run_search_inner_with_performance(
                 "search::evidenceLiveAdmissionVisibility",
                 evidence_visibility_start,
             );
-            trace.record_elapsed("search::dedupeDocId", dedupe_doc_id_start);
             let dedupe_mi_start = Instant::now();
             let (raw_hits, mi_duplicates_collapsed, mi_eligible_count) =
                 if options.dedup_mode == SearchDedupMode::MutualInformation {
