@@ -195,7 +195,9 @@ pub(super) fn preview_report(plan: PromotionPlan, twin: Option<String>) -> Promo
 /// The caller owns the snapshot/transaction. Expired, sealed, superseded,
 /// differently trusted, and differently typed twins cannot absorb a source.
 /// Authored bounds must match as instants, including null/unbounded starts and
-/// ends. Promotion changes scope, never the source's lifetime or attestation.
+/// ends. Distinct default capture starts may corroborate one row only when
+/// both origins have positive, snapshot-bound creation evidence. Promotion
+/// changes scope, never either row's lifetime or attestation.
 pub(super) fn find_twin(
     db: &DbConnection,
     workspace: &str,
@@ -244,11 +246,17 @@ pub(super) fn find_twin(
         }
         let start = from.map(timestamp).transpose()?;
         let end = to.map(timestamp).transpose()?;
-        if start != source_start
-            || end != source_end
-            || !payload.matches_fields(&source.kind, optional_text(row.get(6))?)?
-        {
+        if end != source_end || !payload.matches_fields(&source.kind, optional_text(row.get(6))?)? {
             continue;
+        }
+        if start != source_start {
+            let Some(proof) = payload.default_start() else {
+                continue;
+            };
+            let target = db.get_memory(id)?.ok_or_else(invalid_authority)?;
+            if !super::validity::default_starts_compatible(db, source, proof, &target)? {
+                continue;
+            }
         }
         return Ok(Some(id.clone()));
     }

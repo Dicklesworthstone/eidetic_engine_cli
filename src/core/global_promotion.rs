@@ -17,6 +17,9 @@ mod admission;
 #[path = "global_promotion_payload.rs"]
 mod payload;
 
+#[path = "global_promotion_validity.rs"]
+mod validity;
+
 use payload::PromotionPayload;
 
 pub const GLOBAL_PROMOTION_PLAN_SCHEMA_V1: &str = "ee.global_promotion.plan.v1";
@@ -400,7 +403,7 @@ fn promotion_audit_details(
     global_id: &str,
     already_promoted: bool,
     payload: &PromotionPayload,
-) -> String {
+) -> Value {
     json!({
         "schema": GLOBAL_PROMOTION_REPORT_SCHEMA_V1,
         "originWorkspaceId": memory.workspace_id,
@@ -409,7 +412,6 @@ fn promotion_audit_details(
         "alreadyPromoted": already_promoted,
         "sourcePayload": payload.audit_evidence(),
     })
-    .to_string()
 }
 
 /// A durable twin does not prove its derived index was published. Recover the
@@ -528,6 +530,11 @@ fn persist_global_promotion(
                 (id, false, Some(job))
             }
         };
+        let destination = connection.get_memory(&id)?.ok_or_else(|| {
+            global_mutation_error("Promoted destination is missing from its transaction")
+        })?;
+        let mut details = promotion_audit_details(memory, &id, already_promoted, payload);
+        details["destinationCreatedAt"] = json!(destination.created_at);
         connection.insert_audit(
             &generate_audit_id(),
             &CreateAuditInput {
@@ -536,12 +543,7 @@ fn persist_global_promotion(
                 action: "memory.promote_global".to_owned(),
                 target_type: Some("memory".to_owned()),
                 target_id: Some(id.clone()),
-                details: Some(promotion_audit_details(
-                    memory,
-                    &id,
-                    already_promoted,
-                    payload,
-                )),
+                details: Some(details.to_string()),
             },
         )?;
         Ok((id, already_promoted, job))
@@ -607,7 +609,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
                     &global_memory_id,
                     already_promoted,
                     &payload,
-                )),
+                ).to_string()),
             },
         )
         .map_err(|_| {

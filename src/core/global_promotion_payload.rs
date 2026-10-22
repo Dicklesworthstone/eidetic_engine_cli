@@ -22,6 +22,7 @@ use crate::models::memory::{
 pub(super) struct PromotionPayload {
     typed_fields: Option<String>,
     family_evidence: Option<Value>,
+    default_start: Option<super::validity::DefaultStartProof>,
 }
 
 fn invalid_payload() -> DbError {
@@ -105,6 +106,8 @@ impl PromotionPayload {
             Self {
                 typed_fields,
                 family_evidence,
+                default_start: super::validity::capture_default_start(db, memory)
+                    .map_err(|_| "Could not verify promotion capture validity".to_owned())?,
             },
             None,
         ))
@@ -112,6 +115,10 @@ impl PromotionPayload {
 
     pub(super) fn matches_fields(&self, kind: &str, raw: Option<&str>) -> crate::db::Result<bool> {
         Ok(self.typed_fields == canonical_fields(kind, raw)?)
+    }
+
+    pub(super) fn default_start(&self) -> Option<&super::validity::DefaultStartProof> {
+        self.default_start.as_ref()
     }
 
     pub(super) fn apply(&self, db: &DbConnection, memory_id: &str) -> crate::db::Result<()> {
@@ -133,6 +140,7 @@ impl PromotionPayload {
                 format!("blake3:{}", blake3::hash(fields.as_bytes()).to_hex())
             }),
             "attemptFamily": self.family_evidence,
+            "captureDefaultStart": self.default_start,
         })
     }
 }

@@ -413,16 +413,21 @@ fn validate_conflict_resolution(
         }
     }
     let surface = assemble_conflict_surface(connection, ContradictionDetectionConfig::default());
-    let scope_tags = |id: &str| {
-        plan.actions
-            .iter()
-            .find_map(|action| match action {
+    let (scope_a_tags, scope_b_tags) = if plan.verb == ResolveVerb::ScopeSplit {
+        let scope_tags = |id: &str| {
+            plan.actions.iter().find_map(|action| match action {
                 PlannedResolutionAction::AddTags { memory_id, tags } if memory_id == id => {
                     Some(tags.clone())
                 }
                 _ => None,
             })
-            .unwrap_or_default()
+        };
+        (
+            scope_tags(&plan.memory_a).ok_or_else(invalid_conflict_plan)?,
+            scope_tags(&plan.memory_b).ok_or_else(invalid_conflict_plan)?,
+        )
+    } else {
+        (Vec::new(), Vec::new())
     };
     let request = ConflictResolveRequest {
         memory_a: &plan.memory_a,
@@ -430,8 +435,8 @@ fn validate_conflict_resolution(
         verb: plan.verb,
         keep: plan.keep.as_deref(),
         reason,
-        scope_a_tags: scope_tags(&plan.memory_a),
-        scope_b_tags: scope_tags(&plan.memory_b),
+        scope_a_tags,
+        scope_b_tags,
     };
     match plan_conflict_resolution(&surface, &request) {
         ConflictResolutionOutcome::Plan(current) if &current == plan => Ok(()),

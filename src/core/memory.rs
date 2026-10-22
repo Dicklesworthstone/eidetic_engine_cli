@@ -5457,13 +5457,36 @@ fn emit_remember_audit_events(
     audit_details: &str,
     policy_bypass: Option<&RememberPolicyBypassReport>,
 ) -> crate::db::Result<()> {
+    // The original inputs distinguish an omitted start from an authored one.
+    // Bind them to the actual creation instant after insertion, including the
+    // audit-lane path, rather than guessing that equal timestamps imply intent.
+    let captured = connection.query(
+        "SELECT created_at FROM memories WHERE id = ?1 AND workspace_id = ?2",
+        &[
+            sqlmodel_core::Value::Text(memory_id.to_owned()),
+            sqlmodel_core::Value::Text(memory_input.workspace_id.clone()),
+        ],
+    )?;
+    let invalid_capture = || crate::db::DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: "Could not bind memory creation audit to its captured row".to_owned(),
+    };
+    let created_at = captured
+        .first()
+        .filter(|_| captured.len() == 1)
+        .and_then(|row| row.get(0))
+        .and_then(sqlmodel_core::Value::as_str)
+        .ok_or_else(invalid_capture)?;
+    let mut audit_details: serde_json::Value =
+        serde_json::from_str(audit_details).map_err(|_| invalid_capture())?;
+    audit_details["captureValidityInput"]["createdAt"] = serde_json::json!(created_at);
     let memory_audit = CreateAuditInput {
         workspace_id: Some(memory_input.workspace_id.clone()),
         actor: Some("ee remember".to_owned()),
         action: audit_actions::MEMORY_CREATE.to_owned(),
         target_type: Some("memory".to_owned()),
         target_id: Some(memory_id.to_owned()),
-        details: Some(audit_details.to_owned()),
+        details: Some(audit_details.to_string()),
     };
     emit_with_direct_fallback(
         audit_lane,
@@ -5570,6 +5593,12 @@ fn remember_audit_details(
         "provenanceUri": input.provenance_uri,
         "workflowId": input.workflow_id,
         "tagCount": input.tags.len(),
+        "captureValidityInput": {
+            "schema": "ee.memory.capture_validity_input.v1",
+            "contentHash": format!("blake3:{}", blake3::hash(input.content.as_bytes()).to_hex()),
+            "validFromInput": input.valid_from,
+            "validToInput": input.valid_to,
+        },
         "attemptFamily": attempt_family.map(|family| serde_json::json!({
             "familyAlias": crate::models::public_attempt_family_alias(&family.family_id),
             "declaredSize": family.declared_size,

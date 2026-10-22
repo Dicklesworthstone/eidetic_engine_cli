@@ -1125,7 +1125,7 @@ fn full_plan_revalidation_rejects_extra_or_rebound_mutations_before_writing() {
     fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
     let original = fixture.resolution_plan(&keeper, &loser, ResolveVerb::ScopeSplit);
     let before = fixture.state();
-    for mutation in 0..3 {
+    for mutation in 0..4 {
         let mut plan = original.clone();
         match mutation {
             0 => plan.actions.push(PlannedResolutionAction::AddTags {
@@ -1139,11 +1139,14 @@ fn full_plan_revalidation_rejects_extra_or_rebound_mutations_before_writing() {
                 };
                 *memory_id = unrelated.clone();
             }
-            _ => {
+            2 => {
                 let PlannedResolutionAction::AddTags { tags, .. } = &mut plan.actions[0] else {
                     unreachable!()
                 };
                 tags.push("unreviewed".to_owned());
+            }
+            _ => {
+                plan.actions.remove(0);
             }
         }
         assert!(matches!(

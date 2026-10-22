@@ -45,6 +45,13 @@
           "provenanceUri": null,
           "workflowId": "<scrubbed>",
           "tagCount": 2,
+          "captureValidityInput": {
+            "contentHash": "<scrubbed>",
+            "createdAt": "<scrubbed>",
+            "schema": "ee.memory.capture_validity_input.v1",
+            "validFromInput": null,
+            "validToInput": null
+          },
           "policyBypass": null
         }
       },
