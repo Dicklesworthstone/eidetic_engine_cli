@@ -538,6 +538,42 @@ name = "Step Assertion Isolation Contract"
 expected_seconds_p50 = 1
 regression_factor = 1.5
 
+# The two jq-vacuity stages (bd-9h1z5, 2026-10-22). Two seconds declared for a
+# pair of scans measured at 0.08s and 0.11s, following the convention of the
+# group above: a sub-second static check declares 1s.
+#
+# ON THE BUDGET QUESTION bd-9h1z5 ASKED TO BE DECIDED FIRST. That bead's
+# blocker reads "verify budget admits no new stage", and it was true when
+# filed: the non-benchmark p50s totalled EXACTLY 608 against the 608 ceiling,
+# so any measured stage of any size would have redded the guard on arrival.
+# bd-2di61 landed the NEXT DAY (2026-10-20) and moved the exclusion from one
+# literal stage name to the opt-in-flag property, which freed the four gated
+# stages' 162s. The blocker died with it; it was a filing-time fact, not a
+# standing property.
+#
+# Re-measured here rather than taken from the prose above, which is itself
+# stale in the other direction -- it says 566 of 608 with 42s of headroom, and
+# the real sum at ec3d369e2 is 575 of 608 over 97 counted stages, so 33s. Nine
+# seconds of stages were added after that sentence was written. Adding these
+# two makes it 577.
+#
+# The unmeasured route was checked and rejected rather than overlooked: a stage
+# declaring `expected_seconds_p50_unmeasured = true` carries no p50 and spends
+# nothing, but UNMEASURED_STAGE_ALLOWANCE in verification_drift_guard.rs is a
+# down-only ratchet sitting at exactly 27 against 27 such stages today, so a
+# 28th reds that assert instead. A cheap stage with an honest measurement is
+# the only route that does not require weakening something.
+
+[[stage]]
+name = "JQ Vacuity Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "JQ Vacuity Lint"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
 [[stage]]
 name = "Local Cargo Tripwire Contract"
 expected_seconds_p50 = 3

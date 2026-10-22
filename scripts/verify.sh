@@ -2096,6 +2096,29 @@ run_stage "RCH Remediation Guidance Contract" "python3 scripts/check-rch-remedia
 run_stage "Shard Coverage Contract" "python3 scripts/check-shard-coverage.py"
 run_stage "Step Assertion Isolation Contract" "python3 scripts/check-step-assertion-isolation.py"
 
+# Gate 3.9051: jq `//` and negation vacuity (bd-9h1z5, class fixed under bd-o8e1n).
+#
+# TWO STAGES WITH OPPOSITE POSTURES, deliberately, the same split
+# check-rch-doc-examples.py already uses:
+#
+#   Contract  --self-test   FAILS. It runs the detector against planted
+#                           fixtures ONLY -- the real pre-fix line from
+#                           bd-o8e1n plus six hand-written shapes and four
+#                           negatives -- and never against repository content,
+#                           so it cannot red because somebody edited an e2e
+#                           script. It protects the instrument, which is the
+#                           part bd-9h1z5 says was worth preserving: the
+#                           original detector was validated and then lost with
+#                           the scratchpad it lived in.
+#   Lint      (no flag)     REPORTS and exits 0. Every one of the 16 hits in
+#                           the tree today is judged in the script's own
+#                           baseline, with the reason per site, so a new hit
+#                           prints as UNJUDGED against a clean field. Promote
+#                           to failing after one clean full-suite observation,
+#                           and ratchet on the judged SET rather than a count.
+run_stage "JQ Vacuity Contract" "python3 scripts/check-jq-vacuity.py --self-test"
+run_stage "JQ Vacuity Lint" "python3 scripts/check-jq-vacuity.py"
+
 # Gate 3.91: Local Cargo tripwire contract (bd-1n3x1.10). This deterministic
 # self-test validates command-shape denials, JSON repair actions, and fixture
 # process classification without scanning live peer processes or running Cargo.
