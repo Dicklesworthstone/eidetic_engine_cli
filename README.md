@@ -1231,17 +1231,28 @@ mid-task state.
 
 | Command | Purpose |
 |---|---|
+| `ee handoff preview --workspace . --json` | Show what `create` would capture, without writing a capsule |
 | `ee handoff create --workspace . --out <capsule.json> --json` | Write a signed capsule |
-| `ee handoff inspect <capsule.json> --workspace . --json` | Inspect capsule contents without consuming it |
-| `ee handoff preview <capsule.json> --workspace . --json` | Show resume effects before consuming it |
-| `ee handoff resume <capsule.json> --workspace . --json` | Consume the capsule and re-warm context |
-| `ee handoff rotate-key <capsule.json> --workspace . --json` | Re-sign after suspected exposure |
+| `ee handoff inspect <capsule.json> --workspace . --json` | Validate a capsule and show its contents |
+| `ee handoff resume <capsule.json> --workspace . --json` | Verify a capsule and render the context the next agent resumes from |
+| `ee handoff rotate-key --capsule <capsule.json> --workspace . --json` | Re-sign after suspected exposure |
 
-Capsules carry bead context, recent commits, reservations, last pack ID,
-posture, next steps, redaction summary, and content hashes. They are
-HMAC-signed files, so treat the capsule path as a credential. Use `ee support
-bundle` for bug reports and `ee export` for memory transfer; handoff is for
-resuming work.
+Capsules carry bead context, recent commits, Agent Mail reservation evidence,
+last pack ID, posture, next steps, redaction summary, and content hashes. They
+are HMAC-signed files, so treat the capsule path as a credential. Use `ee
+support bundle` for bug reports and `ee export` for memory transfer; handoff is
+for resuming work.
+
+Reservations come from a redacted Agent Mail snapshot, not from a live mailbox
+query. `preview`, `create` and `resume` read
+`<workspace>/.ee/agent-mail-snapshot.json`, or the file passed with
+`--agent-mail-snapshot <path>`; run `scripts/agent_mail_snapshot.sh` just before
+capturing or resuming. The snapshot must belong to this checkout's canonical
+path. When one mail project serves a checkout at a different path, pass that
+project's key (the `project_key` the snapshot producer reports) with
+`--agent-mail-project-key sha256:<hex>`. A missing, stale or mismatched snapshot
+is recorded as unverified with no count, never as zero reservations. See
+[Handoff reservation evidence](docs/swarm/coordination_runbook.md#handoff-reservation-evidence).
 
 ### Swarm schema contracts
 

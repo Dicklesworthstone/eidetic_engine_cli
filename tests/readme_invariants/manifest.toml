@@ -236,3 +236,21 @@ readme_line_anchor = 2292
 sentence_hash = "blake3:6430dcca283570b80337493089515e35f85a2cb1d1b93e508096550aba9f04ad"
 classification = "quantitative"
 verify = { type = "defer_bead", id = "bd-snkcp", defer_until = "2026-10-09" }
+
+# GH#80: handoff reservation evidence is bound to the checkout, and evidence
+# that cannot be verified is reported without a count instead of as zero.
+[[invariant]]
+id = "rfm-025-handoff-snapshot-canonical-binding"
+readme_section = "Handoff and resume"
+readme_line_anchor = 1250
+sentence_hash = "blake3:debe9998b56acaaa7e7db02783867f0d37e3a7b7682358847295e789f233f1cb"
+classification = "constraint"
+verify = { type = "test", path = "tests/handoff_agent_mail_snapshot.rs" }
+
+[[invariant]]
+id = "rfm-026-handoff-unverified-reservations-are-not-zero"
+readme_section = "Handoff and resume"
+readme_line_anchor = 1254
+sentence_hash = "blake3:1dd163789f606f66d07443c65004f69a5ed586fdc92f014f1a267ff6631c6af8"
+classification = "promise"
+verify = { type = "test", path = "tests/handoff_agent_mail_snapshot.rs" }
