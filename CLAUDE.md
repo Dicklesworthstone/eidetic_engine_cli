@@ -245,10 +245,12 @@ here, but nothing enforces it and it is **not** congruent with the hosted CI
 gates — several of those are disabled, so a green run is necessary, not
 sufficient. It does gate rustfmt (Rustfmt Conformance, added in `453291c25`).
 
-### Two ways a test run reports success having verified NOTHING
+### Three ways a test run reports success having verified NOTHING
 
-Both exit 0, both print `ok.`, and both have cost this project hours. Neither is
-detectable from the exit code, so **read the denominator, never the status.**
+All three exit 0, all three print `ok.`, and all three have cost this project
+hours. None is detectable from the exit code, so **read the denominator, never
+the status.** The third is the worst, because its green is real — it just
+belongs to a different process.
 
 **1. A multi-target run stops at the first failing target (bd-dwe8f).** Cargo
 runs targets in order and stops at the first failure. The lib target carries
@@ -278,7 +280,37 @@ with exit 0. Measured 2026-10-17: that cost a 56-minute release-profile dispatch
 and produced no verdict. Prefer a long unique substring and omit `--exact`, so a
 module rename degrades to a correct match instead of to silence.
 
-**The defence is an assertion inside the job, not a habit.** Both traps are
+**3. A CHILD PROCESS PRINTS ITS OWN SUMMARY ONTO THE SAME STREAM (bd-6g6s2).**
+Several `ee` tests spawn a child that itself runs tests — the `ee` binary, a
+nested cargo invocation, an e2e harness. The child emits a complete, well-formed
+libtest summary that is textually identical in form to the target's:
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10041 filtered out
+```
+
+Nothing in that line says which process wrote it, and it can land **before the
+parent target has finished**, so a log that is still being written already
+contains a green summary. Measured 2026-09-18: tail-reading one of these nearly
+closed a P0 fail-open security fix (bd-zjcx6) on a green belonging to another
+process, and the orchestrator had independently reported the job complete, so
+every pressure pointed at believing it.
+
+**The discriminator is the announcement, and it is cheap.** libtest prints
+`running N tests` *before* it runs them. A summary belongs to that announcement
+only when `passed + failed + ignored == N`. Pair each announcement with its
+summary; a run whose announced `N` is tiny relative to the target is somebody
+else's process. `scripts/rch_run.sh` implements exactly this pairing and
+self-tests it (`--self-test`, 31 arms, including a `--job` whose body runs cargo
+test and the same job when its announcements do not reconcile).
+
+**And on that target the exit code is not a verdict either.** An unfiltered
+`--lib --test contracts` run exits 101 regardless of the change under test,
+because the lib target carries known pre-existing failures (baseline 9795
+passed / 11 failed / 4 ignored of 9810). Both the exit status and the last
+summary line are unreliable there; the announced denominator is what is left.
+
+**The defence is an assertion inside the job, not a habit.** All three traps are
 invisible for as long as the dispatch takes, so have the job grade itself and
 exit nonzero:
 
@@ -295,6 +327,15 @@ test $(( ${P:-0} + ${F:-0} )) -eq <N filters> || { echo 'VERDICT=NONE'; exit 90;
 
 `Running` proves the target executed; `passed + failed` proves which tests did.
 `filtered out` is not part of that sum.
+
+**That `tail -1` is safe only when nothing in the job spawns a test-running
+child** — otherwise it is trap 3 above, written into the defence against it. Use
+it when you dispatch one target and know its tests spawn no nested runner. When
+you are not sure, or the body is a `--job` shell script, SUM across every
+`test result:` line (`awk '{s+=$1}'`) and require the total to equal the
+expected count, or pair `running N tests` with its summary as
+`scripts/rch_run.sh` does. Summing is also what a multi-target `--no-fail-fast`
+run needs, since `tail -1` there grades only the last target.
 
 **The `sed` is not optional, and this is measured, not theoretical.** An earlier
 version of this block omitted it. A dispatch on 2026-10-17 then ran the target,
