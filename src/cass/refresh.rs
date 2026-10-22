@@ -63,22 +63,35 @@ pub(super) fn reconcile_session_publication(
     session_id: &str,
 ) -> Result<Option<String>, DbError> {
     with_import_session_transaction(connection, || {
-        let stored = connection
-            .get_session(session_id)?
-            .ok_or_else(|| refusal("cass_refresh_session_missing"))?;
-        if stored.workspace_id != workspace_id {
-            return Err(refusal("cass_refresh_scope_mismatch"));
-        }
-        let mut metadata = metadata_object(stored.metadata_json.as_deref())?;
-        let checkpoint = take_checkpoint(&mut metadata, workspace_id, session_id)?;
-        let job_id = checkpoint.map_or_else(
-            || stable_search_index_job_id(workspace_id, session_id),
-            |saved| saved.index_job_id,
-        );
+        let job_id = committed_session_publication_id(connection, workspace_id, session_id)?;
         // A missing derived queue row is repairable from this durable identity.
         // Never change the evidence, checkpoint, or a live publisher's lease.
         pending_job(connection, workspace_id, session_id, &job_id, true)
     })
+}
+
+/// Identify the last committed import snapshot without scanning its evidence.
+/// The original import has a stable job identity; every refresh checkpoint
+/// binds a new publication identity to its predecessor and complete snapshot.
+/// Callers that record completed derived work must read this before processing
+/// evidence and revalidate it under their final writer transaction.
+pub(super) fn committed_session_publication_id(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+) -> Result<String, DbError> {
+    let stored = connection
+        .get_session(session_id)?
+        .ok_or_else(|| refusal("cass_refresh_session_missing"))?;
+    if stored.workspace_id != workspace_id {
+        return Err(refusal("cass_refresh_scope_mismatch"));
+    }
+    let mut metadata = metadata_object(stored.metadata_json.as_deref())?;
+    let checkpoint = take_checkpoint(&mut metadata, workspace_id, session_id)?;
+    Ok(checkpoint.map_or_else(
+        || stable_search_index_job_id(workspace_id, session_id),
+        |saved| saved.index_job_id,
+    ))
 }
 
 /// The caller obtained a complete bounded `cass view` snapshot before entering
