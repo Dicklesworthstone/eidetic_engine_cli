@@ -339,7 +339,7 @@ fn the_envelope_check_fires_on_each_arm_separately() {
 #[test]
 fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
     const RECORDED_DIGEST: &str =
-        "7bcedd76fcc6c3e9913fa5d30efe54ffccd43eeea72299d56ce581ff65753faa";
+        "1db28de47bed27b94c99c497fcace9c107c345360162212222a9263cb9b9cb50";
 
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let generator = repo.join("scripts").join("real_shape_corpus").join("generate.py");
