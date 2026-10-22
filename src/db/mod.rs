@@ -3144,11 +3144,6 @@ impl DbError {
         }
     }
 
-    /// Another writer holds the store's lock: the flock gate gave up on a
-    /// holder that made no progress or hit its wait deadline, or the SQL layer
-    /// reported typed lock contention. Decided from the error's structure,
-    /// never from the text an outer layer renders around it (bd-ixxzq).
-    #[must_use]
     /// Whether this is a RECOVERED PANIC rather than an ordinary storage
     /// failure.
     ///
@@ -3170,6 +3165,11 @@ impl DbError {
         matches!(self, Self::StoragePanic { .. })
     }
 
+    /// Another writer holds the store's lock: the flock gate gave up on a
+    /// holder that made no progress or hit its wait deadline, or the SQL layer
+    /// reported typed lock contention. Decided from the error's structure,
+    /// never from the text an outer layer renders around it (bd-ixxzq).
+    #[must_use]
     pub fn is_write_lock_contention(&self) -> bool {
         match self {
             Self::InvalidPath {
