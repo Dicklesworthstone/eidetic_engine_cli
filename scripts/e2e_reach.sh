@@ -230,9 +230,28 @@ if printf '%s' "$doctor_out" | jq -e '
     [.. | objects | select(((.code? // "") | tostring | startswith("config_")))]
     | length >= 1
 ' >/dev/null 2>&1; then
+    # bd-zv1ux: assert severity is PRESENT and advisory, not "advisory or absent".
+    #
+    # This read `(.severity? // "advisory") == "advisory"`, where the default
+    # EQUALS the comparand, so a finding emitting no severity at all satisfied an
+    # assertion whose entire purpose is to constrain severity -- and `all` over an
+    # empty list is true, so it passed twice over for two different reasons.
+    # Demonstrated against both shapes with jq 1.7.1 before the change: the old
+    # form returns true for a findings list containing one object with no
+    # severity, and true for `[]`.
+    #
+    # Safe to tighten because severity is structurally always emitted:
+    # ConfigLintFinding.severity (src/core/config_explain.rs) is a
+    # non-Option static str whose only constructor sets it, and the hygiene
+    # classifier's four config_* constants are REASON strings inside a
+    # `reasons` array rather than `.code` values, so this selector cannot
+    # reach them.
     assert_jq "$doctor_out" '
-        all([.. | objects | select(((.code? // "") | tostring | startswith("config_")))][]; (.severity? // "advisory") == "advisory")
-    ' "doctor config-lint findings are advisory-only"
+        ([.. | objects | select(((.code? // "") | tostring | startswith("config_")))]) as $findings
+        | ($findings | length) >= 1
+          and ($findings | all(has("severity")))
+          and ($findings | all(.severity == "advisory"))
+    ' "doctor config-lint findings each carry severity and it is advisory"
     assert_jq "$doctor_out" '
         ((.data.posture // .data.overall.posture // .data.health.posture // "") | tostring) != "blocked"
     ' "doctor top-line posture is not blocked by advisory config-lint"

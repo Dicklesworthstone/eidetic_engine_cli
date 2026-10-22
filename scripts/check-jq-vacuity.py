@@ -272,23 +272,11 @@ JUDGED: dict[tuple[str, str, str], dict] = {
         "reason": "The default is CORRECT rather than merely strict: an item carrying no "
         "anchor path genuinely is not the graph-only memory this assertion excludes.",
     },
-    (
-        "scripts/e2e_reach.sh",
-        "vacuous-eq",
-        '// "advisory") == "advisory"',
-    ): {
-        "occurrences": 1,
-        "verdict": "GENUINE, MILD",
-        "reason": "THE ONE REAL FINDING of this pass, left in place rather than fixed "
-        "silently. `all(...; (.severity? // \"advisory\") == \"advisory\")` is an acceptance "
-        "assertion whose purpose is to constrain severity, and a finding that emits NO "
-        "severity field satisfies it -- so were the product to stop emitting severity "
-        "altogether, the assertion would still pass. Mild because the surrounding `jq -e` "
-        "guard proves at least one config_ finding exists, so the `all()` is not vacuous over "
-        "an empty list, and because advisory is in fact the product default. Fixing it means "
-        "asserting the field is PRESENT and equal, which is a change to an e2e assertion and "
-        "wants its own bead rather than a drive-by edit inside a detector commit.",
-    },
+    # scripts/e2e_reach.sh / vacuous-eq / '// "advisory") == "advisory"' WAS HERE,
+    # carrying verdict "GENUINE, MILD". FIXED under bd-zv1ux, so the line is
+    # deleted rather than kept with a note -- that is what a shrink-only
+    # baseline means, and the detector reported the entry as a STALE JUDGEMENT
+    # the moment the site changed, which is how this deletion was prompted.
 }
 
 
