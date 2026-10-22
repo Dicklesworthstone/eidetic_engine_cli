@@ -4524,6 +4524,42 @@ fn copy_derived_artifacts_to_restore(
     Ok(restored)
 }
 
+/// bd-12ybp: classify a restore-path database failure, carving a RECOVERED
+/// PANIC out of the import framing.
+///
+/// `guard_storage_panic` (src/db/mod.rs) converts a frankensqlite panic into
+/// `DbError::StoragePanic` so it can flow through the ordinary error path, and
+/// its contract is that callers render it as `DomainError::Storage` — exit 3,
+/// `ee.error.v2`. The restore path's natural domain variant is `Import`, which
+/// exits 5 and advises "retry restore with a fresh --side-path". That advice is
+/// correct for a corrupt restored database and WRONG for a panic during result
+/// assembly, which a fresh side-path reproduces: the operator is told to redo
+/// an expensive restore that cannot succeed, and the exit code reports a data
+/// problem where there is a storage fault.
+///
+/// Ordinary storage failures keep the Import framing, because for those the
+/// restore really is what failed and the side-path advice really is the repair.
+fn restore_database_error(
+    error: &crate::db::DbError,
+    message: String,
+    import_repair: &str,
+) -> DomainError {
+    if error.is_storage_panic() {
+        return DomainError::Storage {
+            message,
+            repair: Some(
+                "a storage panic is not a restore-input problem; capture the panic from stderr \
+                 and report it before retrying"
+                    .to_owned(),
+            ),
+        };
+    }
+    DomainError::Import {
+        message,
+        repair: Some(import_repair.to_owned()),
+    }
+}
+
 fn restore_task_episode_assets(
     restored_database_path: &Path,
     restored_derived: &[BackupRestoredDerivedAssetReport],
@@ -4546,21 +4582,23 @@ fn restore_task_episode_assets(
             ),
             repair: Some("retry restore with a fresh --side-path".to_owned()),
         })?;
-    connection.migrate().map_err(|error| DomainError::Import {
-        message: format!(
-            "failed preparing restored database '{}' for task-episode restore: {error}",
-            restored_database_path.display()
-        ),
-        repair: Some("retry restore with a fresh --side-path".to_owned()),
-    })?;
-    let workspaces = connection
-        .list_workspaces()
-        .map_err(|error| DomainError::Import {
-            message: format!(
-                "failed reading restored workspaces for task-episode restore: {error}"
+    connection.migrate().map_err(|error| {
+        restore_database_error(
+            &error,
+            format!(
+                "failed preparing restored database '{}' for task-episode restore: {error}",
+                restored_database_path.display()
             ),
-            repair: Some("retry restore with a fresh --side-path".to_owned()),
-        })?;
+            "retry restore with a fresh --side-path",
+        )
+    })?;
+    let workspaces = connection.list_workspaces().map_err(|error| {
+        restore_database_error(
+            &error,
+            format!("failed reading restored workspaces for task-episode restore: {error}"),
+            "retry restore with a fresh --side-path",
+        )
+    })?;
 
     let mut restored_count = 0u32;
     for asset in episode_assets {
@@ -12834,6 +12872,51 @@ mod tests {
     };
     use crate::models::{EvidenceId, MemoryId, MemoryLinkId, SessionId, WorkspaceId};
     use tempfile::TempDir;
+
+    /// bd-12ybp: the MAPPING half. bd-3unde proved that a
+    /// `DomainError::Storage` renders exit 3 and `ee.error.v2`, but it
+    /// constructed that value as its own premise, so the step where a
+    /// recovered `DbError::StoragePanic` BECOMES a `DomainError::Storage` was
+    /// never executed anywhere. This asserts it on the restore path, which was
+    /// the one measured site mapping a potentially-panicking db call onto a
+    /// non-Storage variant.
+    ///
+    /// Both arms matter. A fix that returned Storage unconditionally would
+    /// satisfy the first assertion and silently destroy the Import framing
+    /// that an ordinary corrupt-restore failure needs, along with the only
+    /// repair advice that helps there.
+    #[test]
+    fn restore_database_error_carves_out_a_recovered_storage_panic_bd_12ybp() {
+        let panicked = crate::db::DbError::StoragePanic {
+            operation: crate::db::DbOperation::Query,
+            message: "frankensqlite result assembly".to_owned(),
+        };
+        match restore_database_error(&panicked, "ctx".to_owned(), "retry with --side-path") {
+            DomainError::Storage { repair, .. } => {
+                let repair = repair.unwrap_or_default();
+                assert!(
+                    !repair.contains("side-path"),
+                    "a panic must not be given the restore-input repair; got `{repair}`"
+                );
+            }
+            other => panic!("a recovered storage panic must map to Storage, got {other:?}"),
+        }
+
+        let ordinary = crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "short row".to_owned(),
+        };
+        match restore_database_error(&ordinary, "ctx".to_owned(), "retry with --side-path") {
+            DomainError::Import { repair, .. } => {
+                assert_eq!(
+                    repair.as_deref(),
+                    Some("retry with --side-path"),
+                    "an ordinary storage failure keeps the restore-input repair"
+                );
+            }
+            other => panic!("an ordinary db failure must stay an Import error, got {other:?}"),
+        }
+    }
     use uuid::Uuid;
 
     type TestResult = Result<(), String>;

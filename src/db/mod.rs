@@ -3149,6 +3149,27 @@ impl DbError {
     /// reported typed lock contention. Decided from the error's structure,
     /// never from the text an outer layer renders around it (bd-ixxzq).
     #[must_use]
+    /// Whether this is a RECOVERED PANIC rather than an ordinary storage
+    /// failure.
+    ///
+    /// [`guard_storage_panic`] turns a frankensqlite panic into
+    /// [`Self::StoragePanic`] so it flows through the normal error path, and
+    /// its contract is that callers render it as `DomainError::Storage`, which
+    /// exits 3. Callers that map a `DbError` onto a DIFFERENT domain variant
+    /// for domain reasons — an import, a migration — need this to carve the
+    /// panic back out, because a panic is a storage fault whatever operation
+    /// provoked it and the domain repair advice for it is actively wrong.
+    ///
+    /// bd-12ybp: `src/core/backup.rs` mapped `connection.migrate()` failures
+    /// during a task-episode restore to `DomainError::Import` (exit 5) with
+    /// the repair "retry restore with a fresh --side-path". That is right for a
+    /// corrupt restored database and wrong for a panic, which a fresh
+    /// side-path reproduces.
+    #[must_use]
+    pub const fn is_storage_panic(&self) -> bool {
+        matches!(self, Self::StoragePanic { .. })
+    }
+
     pub fn is_write_lock_contention(&self) -> bool {
         match self {
             Self::InvalidPath {
