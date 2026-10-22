@@ -71,7 +71,9 @@ pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// credit when a formerly valid prefix ends in a malformed native report.
 /// V18 mines complete Python script tracebacks and syntax reports while
 /// refusing partial chains as repair proof, without changing source identity.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v18";
+/// V19 validates standalone native rustc reports, including terminal styling
+/// and warning preludes, instead of salvaging raw error-looking substrings.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v19";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -1579,12 +1581,8 @@ fn symptom_line(output: &ToolOutput) -> Option<String> {
     }
     match cargo_text::decode(&output.text) {
         Ok(Some(diagnostics)) => {
-            return diagnostics.first().map(|diagnostic| {
-                format!(
-                    "{}: {}",
-                    diagnostic.tool.as_str(),
-                    diagnostic.message_template
-                )
+            return diagnostics.first().and_then(|diagnostic| {
+                cargo_text::symptom(&output.text, diagnostic)
             });
         }
         Err(()) => return None,
