@@ -323,6 +323,15 @@ fn screen_scanning_view(content: &str) -> (ExternalIngestionScreenReport, usize)
         // can also lose their identifying context during an earlier rewrite.
         // Reuse that implementation, not a second provider table or parser.
         let report = redact_git_capture_text(content);
+        let report = match encoded_json::preserve_json_strings(content, report) {
+            Ok(report) => report,
+            Err(_) => {
+                return withhold_encoded_record(
+                    content,
+                    "external_ingestion_encoded_json_redaction_invalid",
+                );
+            }
+        };
         let span_count = report.matches.len();
         (
             report.content,

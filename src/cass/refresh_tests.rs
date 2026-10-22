@@ -1081,8 +1081,8 @@ mod oversized_transcripts {
     use serde_json::{Value, json};
 
     use super::super::super::{
-        CassHistoryRefusal, CassImportError, CassImportOptions, CassImportReport,
-        ImportSessionStatus, import_cass_sessions, stable_session_id,
+        CASS_EXCERPT_PRODUCER_VERSION, CassHistoryRefusal, CassImportError, CassImportOptions,
+        CassImportReport, ImportSessionStatus, import_cass_sessions, stable_session_id,
     };
     use crate::cass::process::CASS_VIEW_STDOUT_LINE_MAX_BYTES;
     use crate::cass::{CassClient, CassError};
@@ -1434,7 +1434,10 @@ esac
                 assert_source_commitment(row, source);
                 let metadata: Value =
                     serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
-                assert_eq!(metadata["cassSource"]["excerptProducerVersion"], 2);
+                assert_eq!(
+                    metadata["cassSource"]["excerptProducerVersion"],
+                    CASS_EXCERPT_PRODUCER_VERSION
+                );
                 assert_eq!(
                     row.content_hash,
                     format!("blake3:{}", blake3::hash(row.excerpt.as_bytes()).to_hex())
@@ -1513,6 +1516,155 @@ esac
             );
             assert_eq!(db.count_table_rows("sessions").unwrap(), 2);
             assert_eq!(db.count_table_rows("evidence_spans").unwrap(), 4);
+            db.close().unwrap();
+        }
+    }
+
+    #[test]
+    fn yaml_and_url_redaction_keep_bounded_searchable_imports_and_stable_retries() {
+        for pretty in [false, true] {
+            let fixture = ImportFixture::new();
+            fixture.sessions_with_agent(&[("affected", 5), ("later", 1)], "claude_code");
+            let cases = [
+                ("quartzyamlshortrepair", true, false),
+                ("quartzyamllongrepair", true, true),
+                ("quartzurlshortrepair", false, false),
+                ("quartzurllongrepair", false, true),
+            ];
+            let sources = cases.map(|(repair, yaml, long)| {
+                let padding = if long { "Observed café context.\n".repeat(4_096) } else { String::new() };
+                if yaml {
+                    json!({"type": "assistant", "message": {"role": "assistant", "content":
+                        format!("password: |\r\n  violet-private-value\r\n{repair} The cache repair passed.\n{padding}")},
+                        "metadata": {"password": "amber-metadata-value", "fixture": repair}})
+                } else {
+                    json!({"type": "assistant", "message": {"role": "assistant", "content": [
+                        {"type": "text", "text": "Verified https://example.test"},
+                        {"type": "text", "text": format!("ops@example.test confirmed {repair}. The cache repair passed.\n{padding}")}
+                    ]}, "metadata": {"fixture": repair}})
+                }.to_string()
+            });
+            for (source, (_, _, long)) in sources.iter().zip(cases) {
+                assert_eq!(source.len() > 65_536, long);
+                assert!(source.len() < crate::cass::transcript::MAX_SOURCE_BYTES);
+            }
+            fixture.view(
+                "affected",
+                fixture.encoded_view(
+                    "affected",
+                    &[
+                        &sources[0],
+                        &sources[1],
+                        &sources[2],
+                        &sources[3],
+                        VALID_RECORD,
+                    ],
+                    pretty,
+                ),
+            );
+            fixture.view(
+                "later",
+                fixture.encoded_view("later", &[LATER_RECORD], pretty),
+            );
+
+            let first = fixture.import().unwrap();
+            assert_eq!(first.status, "completed");
+            assert_eq!(first.sessions_imported, 2);
+            assert_eq!(first.spans_imported, 6);
+            assert_eq!(first.evidence_admission.admitted, 6);
+            assert_eq!(first.evidence_admission.quarantined, 0);
+            let db = DbConnection::open_file(&fixture.database).unwrap();
+            let workspace_id = fixture.workspace_id();
+            let affected_id = fixture.session_id("affected");
+            let session = db.get_session(&affected_id).unwrap().unwrap();
+            let rows = db.list_evidence_spans_for_session(&affected_id).unwrap();
+            assert_eq!(rows.len(), 5);
+            for (index, (source, (repair, yaml, long))) in sources.iter().zip(cases).enumerate() {
+                let line = u32::try_from(index + 1).unwrap();
+                let row = rows.iter().find(|row| row.start_line == line).unwrap();
+                assert_eq!(row.end_line, line);
+                assert!(row.excerpt.len() <= 65_536);
+                let value: Value = serde_json::from_str(&row.excerpt).unwrap();
+                assert_eq!(value["type"], "assistant");
+                assert_eq!(value["message"]["role"], "assistant");
+                assert_eq!(value["metadata"]["fixture"], repair);
+                assert_eq!(row.secret_redaction_status, "redacted");
+                assert_eq!(
+                    row.redaction_classes_json,
+                    if yaml {
+                        "[\"password\"]"
+                    } else {
+                        "[\"email_address\"]"
+                    }
+                );
+                if yaml {
+                    assert_eq!(value["metadata"]["password"], "[REDACTED:password]");
+                } else {
+                    assert_eq!(value["message"]["content"].as_array().unwrap().len(), 2);
+                    assert_eq!(
+                        value["message"]["content"][0]["text"],
+                        "Verified https://example.test"
+                    );
+                }
+                assert!(!row.excerpt.contains("violet-private-value"));
+                assert!(!row.excerpt.contains("amber-metadata-value"));
+                assert!(!row.excerpt.contains("ops@example.test"));
+                assert_eq!(row.excerpt.contains("[REDACTED:truncated_source]"), long);
+                assert_source_commitment(row, source);
+                let metadata: Value =
+                    serde_json::from_str(row.metadata_json.as_deref().unwrap()).unwrap();
+                assert_eq!(
+                    metadata["cassSource"]["excerptProducerVersion"],
+                    CASS_EXCERPT_PRODUCER_VERSION
+                );
+                assert!(row.is_search_admitted_for_session(&workspace_id, &session));
+                assert!(row.is_direct_pack_admitted_for_session(&workspace_id, &session));
+                let admitted = db
+                    .get_search_admitted_evidence_span(&row.id, &workspace_id)
+                    .unwrap()
+                    .unwrap();
+                let document = crate::search::evidence_span_to_document(&admitted).into_indexable();
+                assert!(document.content.contains(repair));
+                assert!(document.content.contains("The cache repair passed."));
+            }
+            let valid = rows.iter().find(|row| row.start_line == 5).unwrap();
+            assert_eq!(valid.secret_redaction_status, "clean");
+            assert!(valid.is_direct_pack_admitted_for_session(&workspace_id, &session));
+            assert_source_commitment(valid, VALID_RECORD);
+            let later_id = fixture.session_id("later");
+            let later = db.get_session(&later_id).unwrap().unwrap();
+            let later_rows = db.list_evidence_spans_for_session(&later_id).unwrap();
+            assert_eq!(later_rows.len(), 1);
+            assert_eq!(later_rows[0].secret_redaction_status, "clean");
+            assert!(later_rows[0].is_direct_pack_admitted_for_session(&workspace_id, &later));
+            assert_source_commitment(&later_rows[0], LATER_RECORD);
+            let audits = db
+                .list_audit_by_action("cass.evidence.redacted", None)
+                .unwrap();
+            assert_eq!(audits.len(), 4);
+            db.close().unwrap();
+
+            let retry = fixture.import().unwrap();
+            assert_eq!(retry.status, "completed");
+            assert_eq!(retry.sessions_skipped, 2);
+            assert_eq!(retry.sessions_imported, 0);
+            assert_eq!(retry.spans_imported, 0);
+            let db = DbConnection::open_file(&fixture.database).unwrap();
+            assert_eq!(
+                db.list_evidence_spans_for_session(&affected_id).unwrap(),
+                rows
+            );
+            assert_eq!(
+                db.list_evidence_spans_for_session(&later_id).unwrap(),
+                later_rows
+            );
+            assert_eq!(
+                db.list_audit_by_action("cass.evidence.redacted", None)
+                    .unwrap(),
+                audits
+            );
+            assert_eq!(db.count_table_rows("sessions").unwrap(), 2);
+            assert_eq!(db.count_table_rows("evidence_spans").unwrap(), 6);
             db.close().unwrap();
         }
     }

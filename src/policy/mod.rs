@@ -3168,6 +3168,13 @@ fn redact_url_passwords(input: &str, reasons: &mut Vec<&'static str>) -> (String
         let value_start = scheme_marker + colon_relative + 1;
         if value_start < at_index {
             let placeholder = redaction_placeholder("url_password");
+            // Decoded transcript projection screens this text again. Only
+            // the exact generated placeholder is already safe; a credential
+            // with that prefix or suffix still needs complete replacement.
+            if output[value_start..at_index] == placeholder {
+                search_start = at_index + 1;
+                continue;
+            }
             output.replace_range(value_start..at_index, &placeholder);
             lower = output.to_ascii_lowercase();
             reasons.push("url_password");
@@ -4505,7 +4512,10 @@ mod tests {
                     );
 
                     if redacted {
-                        assert!(changed, "`{code}` pushed a reason without reporting a change");
+                        assert!(
+                            changed,
+                            "`{code}` pushed a reason without reporting a change"
+                        );
                         assert!(
                             !output.contains(token.as_str()),
                             "`{code}` reported redaction but left the token in the output"

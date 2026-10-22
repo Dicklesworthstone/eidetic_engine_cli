@@ -39,7 +39,7 @@ const PAGED_VIEW_CONTEXT: u32 = 64;
 const IMPORT_SOURCE_KIND: &str = "cass";
 const CASS_REDACTION_AUDIT_SCHEMA_V1: &str = "ee.cass.redaction_audit.v1";
 const CASS_REDACTION_AUDIT_ACTION: &str = "cass.evidence.redacted";
-const CASS_EXCERPT_PRODUCER_VERSION: u32 = 2;
+const CASS_EXCERPT_PRODUCER_VERSION: u32 = 3;
 const CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1: &str = "ee.cass.subprocess_diagnostics.v1";
 /// Upper bound on the total `cass view --json` stdout we will buffer before
 /// parsing. Real `cass` emits a single pretty-printed `{...,"lines":[...]}`

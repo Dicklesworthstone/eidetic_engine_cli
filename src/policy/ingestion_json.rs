@@ -14,6 +14,11 @@ use crate::policy::{TranscriptRecordClass, classify_transcript_record};
 // limit so encoded input cannot consume unbounded parse or screening work.
 const MAX_ENCODED_RECORDS: usize = 256;
 
+#[path = "ingestion_json_redaction.rs"]
+mod redaction;
+
+pub(super) use redaction::preserve_json_strings;
+
 #[derive(Debug)]
 pub(super) struct InvalidEncodedJson;
 
@@ -291,7 +296,7 @@ mod tests {
             format!("Build succeeded. label-ghp_Q-123-45-6789-{tail} End.")})
         .to_string()
         .replace("ghp_", "\\u0067hp_");
-        let old = super::super::screen_scanning_view(&raw).0;
+        let old = crate::policy::redact_git_capture_text(&raw);
         assert!(old.content.contains("\\u0067hp_Q-"));
         assert!(old.content.contains(&tail));
         let current = screen_external_text_for_ingestion(&raw);
@@ -752,7 +757,7 @@ mod tests {
             "metadata": "-----END PRIVATE KEY----- The retry passed."
         })
         .to_string();
-        let old_style = super::super::screen_scanning_view(&cross_field).0.content;
+        let old_style = crate::policy::redact_git_capture_text(&cross_field).content;
         assert!(serde_json::from_str::<Value>(&old_style).is_ok());
         assert_eq!(
             classify_transcript_record(&cross_field),

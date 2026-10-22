@@ -169,15 +169,32 @@ cover the reported-size pretty-printed record, JSONL without a final newline,
 later valid records, unaffected sessions, over-budget refusal, unchanged
 history on retry, invalid responses and bounded subprocess supervision.
 
-Structured credential screening also preserves complete PEM boundaries inside
+## Structured transcript redaction
+
+Structured credential screening preserves complete PEM boundaries inside
 JSON strings. A matching footer ends the replacement before following prose
 and JSON syntax, while incomplete, mismatched, nested or cross-field blocks
 remain withheld. The existing input-size, record-count, unique-key and parser
-depth checks still apply. Newly captured CASS excerpts use producer version 2;
+depth checks still apply.
+
+Redaction applies credential matches within validated JSON strings and keys.
+The original whole-record scan retains provider context from neighboring fields;
+decoded string and key/value scans resolve escaped newlines and credential
+boundaries before any replacement. YAML block secrets stop before subsequent
+repair prose, and a URL cannot consume the JSON envelope or borrow a password
+from a neighboring email field. Ambiguous crossings remain withheld. Quoted
+JSON inside a string stays text. The resulting records must retain unique
+keys and their original authority, and instruction screening sees the complete
+repaired content. Exact generated URL-password placeholders remain unchanged
+on subsequent plain-text screening; partial or extended placeholders do not
+hide a credential.
+
+Newly captured CASS excerpts use producer version 3;
 refresh preserves older retained evidence and its original producer version.
-Real-import regressions cover redacted JSON below and above the retained
-excerpt limit, the full original source commitment, subsequent records and an
-unaffected session.
+Real-import regressions cover PEM and YAML secrets and URL/email combinations
+below and above the retained excerpt limit, both CASS wire formats, the full
+original source commitment, subsequent records, an unaffected session and
+unchanged retries.
 
 ## Rejected Alternatives
 
