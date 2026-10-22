@@ -634,3 +634,181 @@ fn split_cargo_presentation_waits_for_complete_native_diagnostics_before_learnin
     }
     Ok(())
 }
+
+#[test]
+fn mixed_native_failures_share_one_verified_repair_without_captured_error_classes() -> TestResult {
+    let cargo =
+        format!("{ROOT}{CAUSE}  --- stdout\n  error[E9999]: captured build-script example\n");
+    let coded = "error[E0308]: mismatched types\n --> src/widget.rs:2:1\n2 | fn widget() -> bool { 7 }\n  |                      ^ expected bool\n";
+    let linker = "error: linking with `cc` failed: exit status: 1\n  = note: undefined symbol\n";
+    for order in [
+        [cargo.as_str(), coded, linker],
+        [coded, linker, cargo.as_str()],
+        [linker, cargo.as_str(), coded],
+    ] {
+        for styled in [false, true] {
+            let plain = order.join("\n");
+            let output = if styled {
+                format!("\u{1b}[31m{plain}\u{1b}[0m")
+            } else {
+                plain.clone()
+            };
+            let diagnostics = structured_error_diagnostics(&output);
+            assert_eq!(diagnostics.len(), 3);
+            assert_eq!(diagnostics, structured_error_diagnostics(&plain));
+            let mut fixture = Fixture::new()?;
+            fixture.call("fail", COMMAND, CWD)?;
+            let failure = fixture.result("fail", &output, Some(101))?;
+            let repair = fixture.repair()?;
+            let proof = fixture.verify()?;
+            let before = fixture
+                .db
+                .list_evidence_spans_for_session(&fixture.session)?;
+            let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+            assert_eq!(report.failures_seen, 1);
+            assert_eq!(report.resolved_failures, 1);
+            assert_eq!(report.fingerprints_recorded, 3);
+            assert_eq!(report.incident_cards_recorded, 1);
+            let card_id = incident_card_id(WS, &failure);
+            for diagnostic in &diagnostics {
+                let recall = error_recall_report(&fixture.db, WS, diagnostic)?;
+                assert!(recall.exact);
+                assert!(recall.helpful_repairs.contains(&repair));
+                assert!(recall.helpful_repairs.contains(&card_id));
+                assert_eq!(recall.proof_links, vec![proof.clone()]);
+                assert!(
+                    pack_error_recall_query_seed(&fixture.db, WS, diagnostic)?
+                        .contains("prior fix:")
+                );
+                assert!(
+                    fixture
+                        .db
+                        .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+                        .iter()
+                        .all(|link| link.evidence_ref.as_deref() == Some(failure.as_str()))
+                );
+            }
+            assert!(
+                fixture
+                    .db
+                    .get_error_fingerprint(WS, "rustc:E9999")?
+                    .is_none()
+            );
+            let card = fixture.db.get_evidence_span(&card_id)?.ok_or("card")?;
+            let mut checks = CardChecks::default();
+            checks.observe(&card)?;
+            assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+            for source in before {
+                let after = fixture.db.get_evidence_span(&source.id)?.ok_or("source")?;
+                assert_eq!(after.excerpt, source.excerpt);
+                assert_eq!(after.content_hash, source.content_hash);
+                assert_eq!(after.metadata_json, source.metadata_json);
+                assert_eq!(
+                    after.canonical_provenance_uri(),
+                    source.canonical_provenance_uri()
+                );
+            }
+            assert_eq!(
+                record_session_error_recall(&fixture.db, WS, &fixture.session)?
+                    .incident_cards_recorded,
+                0
+            );
+            for diagnostic in &diagnostics {
+                assert_eq!(
+                    fixture
+                        .db
+                        .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+                        .len(),
+                    3
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn streamed_mixed_failures_keep_one_anchor_and_add_the_later_native_class() -> TestResult {
+    let coded = "error[E0308]: mismatched types\n";
+    let cargo = format!("{ROOT}{CAUSE}");
+    for (prefix, tail) in [(coded, cargo.as_str()), (cargo.as_str(), coded)] {
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        let failure = fixture.result("fail", prefix, None)?;
+        let pending = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(pending.resolved_failures, 0);
+        assert_eq!(pending.repair_links_recorded, 0);
+        fixture.poll("finish")?;
+        fixture.result("finish", tail, Some(101))?;
+        let repair = fixture.repair()?;
+        let proof = fixture.verify()?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.resolved_failures, 1);
+        assert_eq!(report.fingerprints_recorded, 2);
+        assert_eq!(report.incident_cards_recorded, 1);
+        let diagnostics = structured_error_diagnostics(&format!("{prefix}{tail}"));
+        assert_eq!(diagnostics.len(), 2);
+        for diagnostic in &diagnostics {
+            let recall = error_recall_report(&fixture.db, WS, diagnostic)?;
+            assert!(recall.helpful_repairs.contains(&repair));
+            assert!(
+                recall
+                    .helpful_repairs
+                    .contains(&incident_card_id(WS, &failure))
+            );
+            assert_eq!(recall.proof_links, vec![proof.clone()]);
+        }
+        let card = fixture
+            .db
+            .get_evidence_span(&incident_card_id(WS, &failure))?
+            .ok_or("card")?;
+        let mut checks = CardChecks::default();
+        checks.observe(&card)?;
+        assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_mixed_tails_cannot_turn_a_provisional_fingerprint_into_verified_advice() -> TestResult
+{
+    for (prefix, tail) in [
+        (format!("{ROOT}{CAUSE}"), "error[E0308]: \n".to_owned()),
+        (
+            "error[E0308]: mismatched types\n".to_owned(),
+            format!("{ROOT}\nCaused by:"),
+        ),
+    ] {
+        let mut fixture = Fixture::new()?;
+        fixture.call("fail", COMMAND, CWD)?;
+        fixture.result("fail", &prefix, None)?;
+        let pending = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(pending.repair_links_recorded, 0);
+        fixture.poll("finish")?;
+        fixture.result("finish", &tail, Some(101))?;
+        fixture.repair()?;
+        fixture.verify()?;
+        let report = record_session_error_recall(&fixture.db, WS, &fixture.session)?;
+        assert_eq!(report.resolved_failures, 0);
+        assert_eq!(report.repair_links_recorded, 0);
+        assert_eq!(report.incident_cards_recorded, 0);
+        assert!(structured_error_diagnostics(&format!("{prefix}{tail}")).is_empty());
+        for diagnostic in [
+            crate::core::error_recall::from_rustc(Some("E0308"), "mismatched types"),
+            structured_error_diagnostics(&format!("{ROOT}{CAUSE}"))
+                .into_iter()
+                .next()
+                .ok_or("cargo diagnostic")?,
+        ] {
+            let recall = error_recall_report(&fixture.db, WS, &diagnostic)?;
+            assert!(recall.helpful_repairs.is_empty());
+            assert!(recall.proof_links.is_empty());
+        }
+        assert_eq!(
+            record_session_error_recall(&fixture.db, WS, &fixture.session)?.incident_cards_recorded,
+            0
+        );
+    }
+    Ok(())
+}
