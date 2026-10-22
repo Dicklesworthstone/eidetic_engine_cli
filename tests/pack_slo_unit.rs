@@ -177,7 +177,7 @@ fn pack_slo_warns_when_concurrent_limit_is_reached() {
     assert_eq!(slo.degradations[0].code, PACK_CONCURRENT_LIMIT_REACHED_CODE);
     assert_eq!(slo.degradations[0].severity.as_str(), "low");
     assert!(slo.degradations[0].message.contains("Concurrent pack"));
-    assert!(slo.degradations[0].message.contains("queue depth 1"));
+    assert!(slo.degradations[0].message.contains("queue depth"));
     assert!(
         slo.degradations[0]
             .repair
@@ -468,6 +468,191 @@ fn pack_slo_measured_failure_preserves_signed_resource_evidence_and_cached_produ
         assert_eq!(
             cached_json, parsed,
             "cached body preserves producer measurement, not current hit timing"
+        );
+    }
+    Ok(())
+}
+
+fn render_slo_identity_fixture(
+    slo: PackAssemblySlo,
+    candidates: Vec<PackCandidate>,
+) -> Result<Value, String> {
+    let request = ContextRequest::from_query("resource-aware pack identity")
+        .map_err(|error| error.to_string())?;
+    let mut draft = assemble_draft_with_profile_and_options(
+        ContextPackProfile::Balanced,
+        request.query.clone(),
+        request.budget,
+        candidates,
+        PackAssemblyOptions::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut degraded = slo.context_degradations();
+    draft.hash = Some(ee::core::context::compute_pack_hash(
+        &request, &draft, &degraded,
+    ));
+    degraded.extend(slo.timing_degradations());
+    let mut response =
+        ContextResponse::new(request, draft, degraded).map_err(|error| error.to_string())?;
+    response.data.slo = Some(slo);
+    let parsed: Value = serde_json::from_str(&render_context_response_json(&response))
+        .map_err(|error| error.to_string())?;
+    assert!(
+        parsed["data"]["pack"]["hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "the renderer must expose the computed identity"
+    );
+    assert!(
+        parsed["data"]["pack"]["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "text equality must compare actual shipped prompt text"
+    );
+    assert_published_slo_fields(&parsed["data"]["pack"]["slo"])?;
+    Ok(parsed)
+}
+
+/// bd-ve7c6: work counters remain observable without changing the identity
+/// of identical selected content in the same resource-failure state.
+#[test]
+fn pack_slo_work_measurements_preserve_hash_and_shipped_text() -> TestResult {
+    for profile in [
+        PackResourceProfile::Lean,
+        PackResourceProfile::Standard,
+        PackResourceProfile::SwarmHeavy,
+    ] {
+        let budget = profile.budget_class();
+        let memories = || vec![candidate(1, "Keep pack assembly bounded.")];
+        let baseline = render_slo_identity_fixture(
+            PackAssemblySlo::evaluate(profile, actuals(budget.candidates_scanned_max + 1, 0, 1)),
+            memories(),
+        )?;
+        for (scanned, edges, elapsed) in [
+            (budget.candidates_scanned_max + 7, 0, 0),
+            (
+                1,
+                budget.graph_traversal_max_edges + 1,
+                budget.elapsed_ms_warning,
+            ),
+            (
+                budget.candidates_scanned_max + 17,
+                budget.graph_traversal_max_edges + 7,
+                budget.elapsed_ms_failure,
+            ),
+            (usize::MAX, usize::MAX, u64::MAX),
+        ] {
+            let measured = render_slo_identity_fixture(
+                PackAssemblySlo::evaluate(profile, actuals(scanned, edges, elapsed)),
+                memories(),
+            )?;
+            assert_eq!(
+                measured["data"]["pack"]["hash"], baseline["data"]["pack"]["hash"],
+                "{profile}: work measurements must not fork identical pack identity"
+            );
+            assert_eq!(
+                measured["data"]["pack"]["text"], baseline["data"]["pack"]["text"],
+                "{profile}: work measurements must not enter shipped prompt text"
+            );
+            let shown = &measured["data"]["pack"]["slo"];
+            assert_eq!(shown["resourceStatus"], "failure");
+            assert_eq!(
+                shown["degradations"][0]["code"],
+                PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE
+            );
+            assert_eq!(shown["actuals"]["candidateCount"], Value::from(scanned));
+            assert_eq!(shown["actuals"]["scannedCount"], Value::from(scanned));
+            assert_eq!(shown["actuals"]["graphEdgesTraversed"], Value::from(edges));
+            assert_eq!(shown["actuals"]["elapsedMs"], Value::from(elapsed));
+        }
+
+        // Equal selected memories must not erase a meaningful change in the
+        // resource verdict. Both the clean state and the exact-cap warning
+        // remain distinct from the hard-budget failure.
+        for scanned in [1, budget.candidates_scanned_max] {
+            let allowed = render_slo_identity_fixture(
+                PackAssemblySlo::evaluate(profile, actuals(scanned, 0, 1)),
+                memories(),
+            )?;
+            assert_ne!(
+                allowed["data"]["pack"]["hash"],
+                baseline["data"]["pack"]["hash"]
+            );
+        }
+    }
+    Ok(())
+}
+
+/// bd-ve7c6: admission refusals have canonical content, while the retry
+/// instruction and queue occupancy stay available in the structured SLO.
+#[test]
+fn pack_slo_backoff_measurements_preserve_hash_and_shipped_text() -> TestResult {
+    for profile in [
+        PackResourceProfile::Lean,
+        PackResourceProfile::Standard,
+        PackResourceProfile::SwarmHeavy,
+    ] {
+        let budget = profile.budget_class();
+        let baseline = render_slo_identity_fixture(
+            PackAssemblySlo::concurrent_limit_reached(
+                profile,
+                actuals(0, 0, 1),
+                1,
+                budget.concurrent_pack_max,
+            ),
+            Vec::new(),
+        )?;
+        for (queue, retry, elapsed) in [
+            (budget.concurrent_pack_max, 0, 0),
+            (
+                budget.concurrent_pack_max + 3,
+                250,
+                budget.elapsed_ms_warning,
+            ),
+            (usize::MAX, u64::MAX, u64::MAX),
+        ] {
+            let measured = render_slo_identity_fixture(
+                PackAssemblySlo::concurrent_limit_reached(
+                    profile,
+                    actuals(0, 0, elapsed),
+                    retry,
+                    queue,
+                ),
+                Vec::new(),
+            )?;
+            assert_eq!(
+                measured["data"]["pack"]["hash"], baseline["data"]["pack"]["hash"],
+                "{profile}: queue occupancy and backoff must not fork pack identity"
+            );
+            assert_eq!(
+                measured["data"]["pack"]["text"], baseline["data"]["pack"]["text"],
+                "{profile}: queue occupancy and backoff must not enter shipped prompt text"
+            );
+            let shown = &measured["data"]["pack"]["slo"];
+            assert_eq!(shown["resourceStatus"], "warning");
+            assert_eq!(
+                shown["degradations"][0]["code"],
+                PACK_CONCURRENT_LIMIT_REACHED_CODE
+            );
+            assert_eq!(shown["admission"]["outcome"], "backoff");
+            assert_eq!(shown["admission"]["queueDepth"], Value::from(queue));
+            assert_eq!(shown["admission"]["retryAfterMs"], Value::from(retry));
+            assert_eq!(
+                shown["admission"]["concurrentPackMax"],
+                Value::from(budget.concurrent_pack_max)
+            );
+            assert_eq!(shown["actuals"]["elapsedMs"], Value::from(elapsed));
+        }
+
+        // Two empty packs still differ when one was admitted and the other
+        // was refused. Dropping the refusal code from hashing fails here.
+        let admitted_empty = render_slo_identity_fixture(
+            PackAssemblySlo::evaluate(profile, actuals(0, 0, 1)),
+            Vec::new(),
+        )?;
+        assert_ne!(
+            admitted_empty["data"]["pack"]["hash"],
+            baseline["data"]["pack"]["hash"]
         );
     }
     Ok(())

@@ -11126,6 +11126,63 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    #[test]
+    fn pack_hash_resource_posture_preserves_identity_without_runtime_measurements()
+    -> Result<(), String> {
+        use super::{ContextPackOutputOptions, compute_pack_hash_components};
+        use crate::pack::{PackAssemblySlo, PackAssemblySloActuals, PackResourceProfile};
+
+        let (request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let actuals = |scanned_count, graph_edges_traversed| PackAssemblySloActuals {
+            candidate_count: scanned_count,
+            scanned_count,
+            index_generation: Some(12),
+            graph_generation: Some(12),
+            graph_edges_traversed,
+            elapsed_ms: 0,
+            memory_bytes_peak: 4096,
+        };
+        let hash = |slo: &PackAssemblySlo| {
+            compute_pack_hash_components(
+                &request,
+                &draft,
+                &slo.context_degradations(),
+                ContextPackOutputOptions::default(),
+                None,
+                None,
+                None,
+            )
+        };
+        let profile = PackResourceProfile::Standard;
+        let clean = hash(&PackAssemblySlo::evaluate(profile, actuals(0, 0)));
+        for (first, second) in [
+            (
+                PackAssemblySlo::evaluate(profile, actuals(241, 0)),
+                PackAssemblySlo::evaluate(profile, actuals(5000, 50_000)),
+            ),
+            (
+                PackAssemblySlo::concurrent_limit_reached(profile, actuals(0, 0), 10, 4),
+                PackAssemblySlo::concurrent_limit_reached(
+                    profile,
+                    actuals(0, 0),
+                    u64::MAX,
+                    usize::MAX,
+                ),
+            ),
+        ] {
+            assert_ne!(first, second, "the measured runs must actually differ");
+            assert!(!first.context_degradations().is_empty());
+            let first = hash(&first);
+            let second = hash(&second);
+            assert_eq!(first.digests, second.digests);
+            assert_eq!(first.composite_hash, second.composite_hash);
+            assert_ne!(first.digests.degraded, clean.digests.degraded);
+            assert_ne!(first.digests.rendered_text, clean.digests.rendered_text);
+            assert_ne!(first.composite_hash, clean.composite_hash);
+        }
+        Ok(())
+    }
+
     /// ADR 0087 finding 1: evidence scores were hashed as raw f32 bytes. v2
     /// quantizes them like every other hashed score.
     #[test]

@@ -63,6 +63,16 @@ appears in the envelope's `degraded[]`. Moving it into a dedicated telemetry
 field is a deferred schema decision owned by
 `bd-pack-timing-telemetry-field-2pfzo`.
 
+Resource-limit and admission-refusal degradations remain canonical: an empty
+pack refused admission must remain distinguishable from an admitted empty pack.
+Their message and repair text bind the posture and configured limits, never
+the observed queue depth, backoff interval, candidate count, or graph traversal
+count (`bd-ve7c6`). Those measurements remain available in `data.pack.slo` under
+`actuals` and `admission`. Equal postures under the same resource profile thus
+render and hash identically even when their measurements differ; a changed
+posture or selected item still changes identity. The exact-cap
+`pack_assembly_slow` warning is unchanged because its condition fixes the count.
+
 `pack.text` is canonical but not the hashed bytes; the hash binds its
 inputs. The shipped text is rendered without non-canonical telemetry entries,
 so a timing overrun changes neither its degradation bullets nor the counts

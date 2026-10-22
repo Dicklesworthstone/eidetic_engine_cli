@@ -4252,7 +4252,6 @@ impl PackAssemblySlo {
             degradations.push(pack_assembly_budget_exceeded_degradation(
                 profile,
                 &budget_class,
-                &actuals,
             ));
             PackAssemblySloStatus::Failure
         } else if actuals.scanned_count == budget_class.candidates_scanned_max {
@@ -4311,8 +4310,6 @@ impl PackAssemblySlo {
             degradations: vec![pack_concurrent_limit_reached_degradation(
                 profile,
                 &budget_class,
-                retry_after_ms,
-                queue_depth,
             )],
         }
     }
@@ -5904,17 +5901,16 @@ fn pack_assembly_elapsed_degradation(
 fn pack_assembly_budget_exceeded_degradation(
     profile: PackResourceProfile,
     budget: &PackSloBudgetClass,
-    actuals: &PackAssemblySloActuals,
 ) -> PackAssemblySloDegradation {
+    // This prose is hash-bearing. Keep measurements in actuals, while the
+    // profile's fixed limits and exceeded posture remain canonical (bd-ve7c6).
     PackAssemblySloDegradation {
         code: PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
         severity: ContextResponseSeverity::Medium,
         message: format!(
-            "Pack assembly exceeded the {} resource-profile budget: scanned {}/{} candidates, traversed {}/{} graph edges.",
+            "Pack assembly exceeded the {} resource-profile budget of {} candidates or {} graph edges. See pack.slo.actuals for the measured counts.",
             profile.as_str(),
-            actuals.scanned_count,
             budget.candidates_scanned_max,
-            actuals.graph_edges_traversed,
             budget.graph_traversal_max_edges
         ),
         repair: Some(
@@ -5927,22 +5923,22 @@ fn pack_assembly_budget_exceeded_degradation(
 fn pack_concurrent_limit_reached_degradation(
     profile: PackResourceProfile,
     budget: &PackSloBudgetClass,
-    retry_after_ms: u64,
-    queue_depth: usize,
 ) -> PackAssemblySloDegradation {
+    // Admission refusal is canonical; queue depth and backoff are per-run
+    // observations retained in PackAdmissionPosture (bd-ve7c6).
     PackAssemblySloDegradation {
         code: PACK_CONCURRENT_LIMIT_REACHED_CODE,
         severity: ContextResponseSeverity::Low,
         message: format!(
-            "Concurrent pack limit reached for the {} resource profile: queue depth {} meets the configured cap of {} pack slot{}.",
+            "Concurrent pack limit reached for the {} resource profile: queue depth meets the configured cap of {} pack slot{}.",
             profile.as_str(),
-            queue_depth,
             budget.concurrent_pack_max,
             plural_s(budget.concurrent_pack_max)
         ),
-        repair: Some(format!(
-            "Wait and retry in about {retry_after_ms} ms, reduce concurrent ee context calls, or use --resource-profile swarm_heavy."
-        )),
+        repair: Some(
+            "Wait for a pack slot and retry; see pack.slo.admission.retryAfterMs for the current backoff, reduce concurrent ee pack calls, or use --resource-profile swarm_heavy."
+                .to_string(),
+        ),
     }
 }
 
