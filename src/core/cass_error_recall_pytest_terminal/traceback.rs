@@ -169,7 +169,12 @@ fn chained_summaries(text: &str) -> Option<Vec<&str>> {
             if sections == MAX_CHAIN {
                 return None;
             }
-            append_chain_section(&text[start..offset], sections == 0, &mut frames, &mut result)?;
+            append_chain_section(
+                &text[start..offset],
+                sections == 0,
+                &mut frames,
+                &mut result,
+            )?;
             sections += 1;
             start = offset + raw.len();
         }
@@ -255,15 +260,16 @@ pub(super) fn inspect(text: &str) -> Option<Decoded> {
     // header may follow ordinary stdout from the same invocation.
     let ordinary = visible.lines().any(|line| line == HEADER);
     if !ordinary
-        && !visible.lines().any(|line| {
-            line.trim_start() == "+ Exception Group Traceback (most recent call last):"
-        })
+        && !visible
+            .lines()
+            .any(|line| line.trim_start() == "+ Exception Group Traceback (most recent call last):")
     {
         return None;
     }
-    let summaries = if visible.lines().any(|line| {
-        line.trim_start() == exception_group::ROOT_HEADER.trim_start()
-    }) {
+    let summaries = if visible
+        .lines()
+        .any(|line| line.trim_start() == exception_group::ROOT_HEADER.trim_start())
+    {
         chained_summaries(&visible)
     } else {
         summaries(&visible)

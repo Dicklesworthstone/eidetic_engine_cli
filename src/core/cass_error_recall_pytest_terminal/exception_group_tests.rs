@@ -1,9 +1,9 @@
-use super::*;
 use super::super::{diagnostic, inspect};
+use super::*;
+use crate::core::cass_error_recall::test_coverage::{Proof, Requirement};
 use crate::core::cass_error_recall::{
     ToolOutput, failure_diagnostics, structured_error_diagnostics,
 };
-use crate::core::cass_error_recall::test_coverage::{Proof, Requirement};
 
 fn group(leaves: &[&str]) -> String {
     let count = leaves.len();
@@ -15,7 +15,10 @@ fn group(leaves: &[&str]) -> String {
         if index == 0 {
             text.push_str("  +-+---------------- 1 ----------------\n");
         } else {
-            text.push_str(&format!("    +---------------- {} ----------------\n", index + 1));
+            text.push_str(&format!(
+                "    +---------------- {} ----------------\n",
+                index + 1
+            ));
         }
         text.push_str(&format!("    | {leaf}\n"));
     }
@@ -35,15 +38,24 @@ fn refused(text: &str) {
     assert!(summaries(text).is_none(), "{text}");
     let decoded = inspect(text).expect("recognized group failure");
     assert!(decoded.failed && !decoded.allows_completion);
-    assert!(decoded.diagnostics.is_empty(), "no prefix may escape: {text}");
+    assert!(
+        decoded.diagnostics.is_empty(),
+        "no prefix may escape: {text}"
+    );
     assert!(!output(text).succeeded());
 }
 
 #[test]
 fn grouped_leaves_share_plain_exception_fingerprints_and_never_certify_success() {
-    let leaves = ["ValueError: invalid configuration", "TypeError: expected bytes"];
+    let leaves = [
+        "ValueError: invalid configuration",
+        "TypeError: expected bytes",
+    ];
     let text = group(&leaves);
-    let expected = leaves.iter().map(|leaf| diagnostic(leaf)).collect::<Vec<_>>();
+    let expected = leaves
+        .iter()
+        .map(|leaf| diagnostic(leaf))
+        .collect::<Vec<_>>();
     assert_eq!(summaries(&text).unwrap(), leaves);
     let decoded = inspect(&text).unwrap();
     assert_eq!(decoded.diagnostics, expected);
@@ -78,9 +90,15 @@ fn nested_last_children_use_the_native_shared_closing_border() {
     );
     assert_eq!(
         summaries(text).unwrap(),
-        ["ValueError: first", "TypeError: second", "RuntimeError: third"]
+        [
+            "ValueError: first",
+            "TypeError: second",
+            "RuntimeError: third"
+        ]
     );
-    refused(&format!("{text}    +------------------------------------\n"));
+    refused(&format!(
+        "{text}    +------------------------------------\n"
+    ));
     let mut sibling = text.replace("outer (2 sub-exceptions)", "outer (3 sub-exceptions)");
     sibling.push_str("    +---------------- 3 ----------------\n    | LookupError: fourth\n    +------------------------------------\n");
     assert_eq!(summaries(&sibling).unwrap().len(), 4);
@@ -110,8 +128,14 @@ fn counts_ordinals_margins_and_tail_corruption_refuse_all_leaf_keys() {
         valid.replace("(2 sub-exceptions)", "(1 sub-exception)"),
         valid.replace("(2 sub-exceptions)", "(02 sub-exceptions)"),
         valid.replace("(2 sub-exceptions)", "(0 sub-exceptions)"),
-        valid.replace("(2 sub-exceptions)", "(999999999999999999999999 sub-exceptions)"),
-        valid.replace("---------------- 2 ----------------", "---------------- 1 ----------------"),
+        valid.replace(
+            "(2 sub-exceptions)",
+            "(999999999999999999999999 sub-exceptions)",
+        ),
+        valid.replace(
+            "---------------- 2 ----------------",
+            "---------------- 1 ----------------",
+        ),
         valid.replace("    | TypeError", "   | TypeError"),
         valid.replace("    +------------------------------------\n", ""),
         valid.replace("TypeError: second", "OK"),
@@ -143,12 +167,19 @@ fn formatter_elisions_notes_and_chains_cannot_salvage_a_partial_group() {
 #[test]
 fn the_diagnostic_display_cap_never_short_circuits_tree_validation() {
     let leaves = [
-        "ValueError: first", "TypeError: second", "LookupError: third",
-        "RuntimeError: fourth", "AssertionError: fifth", "OSError: sixth",
+        "ValueError: first",
+        "TypeError: second",
+        "LookupError: third",
+        "RuntimeError: fourth",
+        "AssertionError: fifth",
+        "OSError: sixth",
     ];
     let text = group(&leaves);
     assert_eq!(summaries(&text).unwrap().len(), leaves.len());
-    assert_eq!(inspect(&text).unwrap().diagnostics.len(), super::super::MAX_DIAGNOSTICS_PER_FAILURE);
+    assert_eq!(
+        inspect(&text).unwrap().diagnostics.len(),
+        super::super::MAX_DIAGNOSTICS_PER_FAILURE
+    );
     refused(&text.replace("OSError: sixth", "unfinished"));
     let duplicate = group(&[leaves[0], leaves[0]]);
     assert_eq!(inspect(&duplicate).unwrap().diagnostics.len(), 1);
@@ -161,20 +192,28 @@ fn nested(groups: usize) -> String {
         text.push_str(&format!("{margin}| ExceptionGroup: nested (1 sub-exception)\n{margin}+-+---------------- 1 ----------------\n"));
     }
     let margin = "  ".repeat(groups + 1);
-    text.push_str(&format!("{margin}| ValueError: leaf\n{margin}+------------------------------------\n"));
+    text.push_str(&format!(
+        "{margin}| ValueError: leaf\n{margin}+------------------------------------\n"
+    ));
     text
 }
 
 #[test]
 fn depth_nodes_bytes_and_frames_are_bounded_before_emitting_any_diagnostic() {
-    assert_eq!(summaries(&nested(MAX_GROUP_DEPTH)).unwrap(), ["ValueError: leaf"]);
+    assert_eq!(
+        summaries(&nested(MAX_GROUP_DEPTH)).unwrap(),
+        ["ValueError: leaf"]
+    );
     refused(&nested(MAX_GROUP_DEPTH + 1));
     let leaves = vec!["ValueError: leaf"; MAX_GROUP_NODES - 1];
     assert_eq!(summaries(&group(&leaves)).unwrap().len(), leaves.len());
     refused(&group(&vec!["ValueError: leaf"; MAX_GROUP_NODES]));
     let valid = group(&["ValueError: leaf"]);
     let extra_frames = "  |   File \"task.py\", line 9, in main\n".repeat(MAX_FRAMES);
-    refused(&valid.replace("  | ExceptionGroup:", &format!("{extra_frames}  | ExceptionGroup:")));
+    refused(&valid.replace(
+        "  | ExceptionGroup:",
+        &format!("{extra_frames}  | ExceptionGroup:"),
+    ));
     refused(&format!("{valid}{}", " ".repeat(MAX_SCANNED_OUTPUT_BYTES)));
     refused(&format!("{}\n{valid}", "\n".repeat(MAX_LINES)));
 }
@@ -215,7 +254,9 @@ fn grouping_never_downgrades_an_existing_executed_test_requirement() {
     assert!(requirement.is_guarded());
     assert!(!requirement.is_verified_by(&Proof::capture(&output("done"))));
     // A pytest traceback tree is still governed by the native test report.
-    let native = failed_test.text.replace("=== 1 failed", &format!("{}=== 1 failed", grouped.text));
+    let native = failed_test
+        .text
+        .replace("=== 1 failed", &format!("{}=== 1 failed", grouped.text));
     assert!(Requirement::capture(&output(&native), true).is_guarded());
 }
 
@@ -224,8 +265,13 @@ fn quoted_and_shifted_group_examples_do_not_supply_exception_keys() {
     let text = group(&["ValueError: example"]);
     let quoted = serde_json::json!({"example": text}).to_string();
     assert!(inspect(&quoted).is_none());
-    let shifted = text.lines().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
+    let shifted = text
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(inspect(&shifted).unwrap().diagnostics.is_empty());
-    let earlier_damaged = format!("    + Exception Group Traceback (most recent call last):\n{text}");
+    let earlier_damaged =
+        format!("    + Exception Group Traceback (most recent call last):\n{text}");
     refused(&earlier_damaged);
 }

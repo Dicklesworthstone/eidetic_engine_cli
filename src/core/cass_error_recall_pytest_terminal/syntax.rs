@@ -30,7 +30,10 @@ fn exception_summary(line: &str) -> bool {
 
 fn caret(line: &str) -> bool {
     line.strip_prefix("    ").is_some_and(|marker| {
-        marker.contains('^') && marker.bytes().all(|byte| matches!(byte, b' ' | b'^' | b'~'))
+        marker.contains('^')
+            && marker
+                .bytes()
+                .all(|byte| matches!(byte, b' ' | b'^' | b'~'))
     })
 }
 
@@ -68,9 +71,7 @@ pub(super) fn inspect(text: &str) -> Option<Decoded> {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    let probe = text[..end]
-        .lines()
-        .find(|line| !line.trim().is_empty())?;
+    let probe = text[..end].lines().find(|line| !line.trim().is_empty())?;
     if !probe.contains("  File \"") {
         return None;
     }

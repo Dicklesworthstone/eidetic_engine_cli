@@ -41,7 +41,11 @@ fn reference(matrix: &[Vec<f64>], threshold: f64) -> (Vec<Vec<usize>>, Trace, us
         let Some((left, right, score, union)) = best else {
             return (members, trace, calls);
         };
-        trace.push((members[left].clone(), members[right].clone(), score.to_bits()));
+        trace.push((
+            members[left].clone(),
+            members[right].clone(),
+            score.to_bits(),
+        ));
         members[left] = union;
         members.remove(right);
     }
@@ -156,7 +160,10 @@ fn sparse_scratch_never_reduces_a_pair_twice_in_one_merge_phase() {
     );
     let (expected, expected_trace, _) = reference(&matrix, 0.5);
     assert_eq!((members, trace), (expected, expected_trace));
-    assert_eq!(matrix, before, "scheduling must not modify its source matrix");
+    assert_eq!(
+        matrix, before,
+        "scheduling must not modify its source matrix"
+    );
 }
 
 #[test]
@@ -238,7 +245,10 @@ fn sparse_invocations_do_not_share_membership_or_linkage_state() {
     let first = observed(&separated, 0.5);
     assert_eq!(first.0.len(), 3);
     let together = vec![vec![1.0; count]; count];
-    assert_eq!(observed(&together, 0.5).0, vec![(0..count).collect::<Vec<_>>()]);
+    assert_eq!(
+        observed(&together, 0.5).0,
+        vec![(0..count).collect::<Vec<_>>()]
+    );
     assert_eq!(observed(&separated, 0.5), first);
 }
 

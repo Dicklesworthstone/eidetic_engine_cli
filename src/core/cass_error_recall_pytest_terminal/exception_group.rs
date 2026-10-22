@@ -139,7 +139,10 @@ impl<'a> Parser<'a> {
             return None;
         }
         self.index += 1;
-        let first = format!("{}+-+---------------- 1 ----------------", "  ".repeat(depth));
+        let first = format!(
+            "{}+-+---------------- 1 ----------------",
+            "  ".repeat(depth)
+        );
         let group = explicit_group
             || summary.starts_with("ExceptionGroup:")
             || summary.starts_with("BaseExceptionGroup:")

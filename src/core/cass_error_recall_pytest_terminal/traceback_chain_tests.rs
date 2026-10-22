@@ -1,11 +1,13 @@
 use super::*;
+use crate::core::cass_error_recall::test_coverage::{Proof, Requirement};
 use crate::core::cass_error_recall::{
     ToolOutput, failure_diagnostics, structured_error_diagnostics,
 };
-use crate::core::cass_error_recall::test_coverage::{Proof, Requirement};
 
 fn ordinary(summary: &str) -> String {
-    format!("{HEADER}\n  File \"private_task.py\", line 7, in main\n    private_source()\n{summary}\n")
+    format!(
+        "{HEADER}\n  File \"private_task.py\", line 7, in main\n    private_source()\n{summary}\n"
+    )
 }
 
 fn group(summary: &str) -> String {
@@ -58,7 +60,11 @@ fn malformed_group_prefix_cannot_be_replaced_by_a_valid_ordinary_suffix() {
         first.replace("  |   File", "  |    File"),
         first.replace("ValueError: invalid queue configuration", "unfinished"),
     ] {
-        let text = joined(&bad, CAUSE, &ordinary("RuntimeError: queue startup aborted"));
+        let text = joined(
+            &bad,
+            CAUSE,
+            &ordinary("RuntimeError: queue startup aborted"),
+        );
         assert!(chained_summaries(&text).is_none());
         let decoded = inspect(&text).unwrap();
         assert!(decoded.failed && !decoded.allows_completion);
@@ -72,14 +78,20 @@ fn malformed_group_prefix_cannot_be_replaced_by_a_valid_ordinary_suffix() {
 fn every_section_must_be_complete_even_after_the_diagnostic_display_limit() {
     let mut parts = vec![group("ValueError: bad queue")];
     for summary in [
-        "TypeError: bad worker", "RuntimeError: bad state", "LookupError: bad key",
-        "OSError: bad resource", "IndexError: bad offset",
+        "TypeError: bad worker",
+        "RuntimeError: bad state",
+        "LookupError: bad key",
+        "OSError: bad resource",
+        "IndexError: bad offset",
     ] {
         parts.push(ordinary(summary));
     }
     let complete = parts.join(&format!("\n{CAUSE}\n\n"));
     assert_eq!(chained_summaries(&complete).unwrap().len(), 6);
-    assert_eq!(inspect(&complete).unwrap().diagnostics.len(), MAX_DIAGNOSTICS_PER_FAILURE);
+    assert_eq!(
+        inspect(&complete).unwrap().diagnostics.len(),
+        MAX_DIAGNOSTICS_PER_FAILURE
+    );
     for tail in [
         group("ValueError: bad queue").replace("(1 sub-exception)", "(3 sub-exceptions)"),
         format!("{HEADER}\n  File \"unfinished"),
@@ -89,7 +101,11 @@ fn every_section_must_be_complete_even_after_the_diagnostic_display_limit() {
         assert!(inspect(&text).unwrap().diagnostics.is_empty());
         assert!(!optimistic(&text).succeeded());
     }
-    let repeated = joined(&group("ValueError: bad queue"), CAUSE, &ordinary("ValueError: bad queue"));
+    let repeated = joined(
+        &group("ValueError: bad queue"),
+        CAUSE,
+        &ordinary("ValueError: bad queue"),
+    );
     assert_eq!(inspect(&repeated).unwrap().diagnostics.len(), 1);
 }
 
@@ -116,7 +132,9 @@ fn connectors_cannot_hide_missing_sections_or_arbitrary_intermediate_output() {
 fn chain_and_frame_budgets_are_shared_across_ordinary_and_group_sections() {
     let one = group("ValueError: invalid queue configuration");
     let separator = format!("\n{CAUSE}\n\n");
-    let exact = std::iter::repeat_n(one.as_str(), MAX_CHAIN).collect::<Vec<_>>().join(&separator);
+    let exact = std::iter::repeat_n(one.as_str(), MAX_CHAIN)
+        .collect::<Vec<_>>()
+        .join(&separator);
     assert_eq!(chained_summaries(&exact).unwrap().len(), MAX_CHAIN);
     assert!(chained_summaries(&joined(&exact, CAUSE, &one)).is_none());
 
@@ -155,7 +173,10 @@ fn group_and_source_margins_do_not_become_top_level_chain_boundaries() {
     }
     // Branch-local chains still require a separate tree grammar; do not
     // mistake their indented connector for an outer section and salvage it.
-    let nested = b.replace("    | TypeError:", &format!("    | {CAUSE}\n    | TypeError:"));
+    let nested = b.replace(
+        "    | TypeError:",
+        &format!("    | {CAUSE}\n    | TypeError:"),
+    );
     assert!(chained_summaries(&nested).is_none());
 }
 
@@ -169,7 +190,12 @@ fn mixed_chains_preserve_redaction_and_do_not_expose_group_or_source_payloads() 
     let decoded = inspect(&text).unwrap();
     assert_eq!(decoded.diagnostics, inspect(&expected).unwrap().diagnostics);
     let projection = format!("{:?} {:?}", decoded.diagnostics, decoded.symptom);
-    for hidden in [secret.as_str(), "private_group_label", "private_group.py", "private_source"] {
+    for hidden in [
+        secret.as_str(),
+        "private_group_label",
+        "private_group.py",
+        "private_source",
+    ] {
         assert!(!projection.contains(hidden));
     }
 }
@@ -182,7 +208,9 @@ fn mixed_command_failures_never_weaken_a_test_inventory_requirement() {
         &ordinary("RuntimeError: queue startup aborted"),
     ));
     assert!(!Requirement::capture(&chain, true).is_guarded());
-    let tests = optimistic("=== test session starts ===\ncollected 1 item\ntests/test_queue.py::test_drain FAILED [100%]\n=== 1 failed in 0.01s ===\n");
+    let tests = optimistic(
+        "=== test session starts ===\ncollected 1 item\ntests/test_queue.py::test_drain FAILED [100%]\n=== 1 failed in 0.01s ===\n",
+    );
     let mut required = Requirement::capture(&tests, true);
     required.refresh(&chain, true);
     assert!(required.is_guarded());

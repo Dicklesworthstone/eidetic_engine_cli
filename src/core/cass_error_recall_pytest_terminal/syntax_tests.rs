@@ -1,11 +1,13 @@
 use super::*;
+use crate::core::cass_error_recall::test_coverage::{Proof, Requirement};
 use crate::core::cass_error_recall::{
     ToolOutput, failure_diagnostics, structured_error_diagnostics,
 };
-use crate::core::cass_error_recall::test_coverage::{Proof, Requirement};
 
 fn report(summary: &str) -> String {
-    format!("  File \"/private/project/queue.py\", line 7\n    private_source_sentinel(:\n                            ^\n{summary}\n")
+    format!(
+        "  File \"/private/project/queue.py\", line 7\n    private_source_sentinel(:\n                            ^\n{summary}\n"
+    )
 }
 
 fn optimistic(text: &str) -> ToolOutput {
@@ -30,7 +32,10 @@ fn native_parser_errors_reach_public_and_import_diagnostics_without_a_traceback(
         assert!(decoded.execution.is_command_failure());
         assert_eq!(structured_error_diagnostics(&text), decoded.diagnostics);
         for exit_code in [None, Some(0), Some(1)] {
-            let output = ToolOutput { exit_code, ..optimistic(&text) };
+            let output = ToolOutput {
+                exit_code,
+                ..optimistic(&text)
+            };
             assert_eq!(failure_diagnostics(&output), decoded.diagnostics);
             assert!(output.failed());
             assert!(!output.succeeded());
@@ -46,12 +51,19 @@ fn source_and_caret_are_optional_but_never_fingerprint_payloads() {
         let text = format!("  File \"<string>\", line 1\n{body}SyntaxError: invalid syntax\n");
         assert_eq!(inspect(&text).unwrap().diagnostics, vec![expected.clone()]);
     }
-    let text = report("SyntaxError: invalid syntax")
-        .replace("private_source_sentinel(:", "SyntaxError: fake_secret error[E0308]: printed code");
+    let text = report("SyntaxError: invalid syntax").replace(
+        "private_source_sentinel(:",
+        "SyntaxError: fake_secret error[E0308]: printed code",
+    );
     let decoded = inspect(&text).unwrap();
     assert_eq!(decoded.diagnostics, vec![expected]);
     let projection = format!("{:?} {:?}", decoded.diagnostics, decoded.symptom);
-    for private in ["/private/project", "private_source_sentinel", "fake_secret", "E0308"] {
+    for private in [
+        "/private/project",
+        "private_source_sentinel",
+        "fake_secret",
+        "E0308",
+    ] {
         assert!(!projection.contains(private));
     }
 }
@@ -64,10 +76,16 @@ fn imported_syntax_errors_and_runtime_syntax_exceptions_share_identity() {
         "{}\n  File \"other.py\", line 80, in <module>\n    compile(bad_source)\n{summary}\n",
         super::super::HEADER,
     );
-    assert_eq!(structured_error_diagnostics(&standalone), structured_error_diagnostics(&runtime));
+    assert_eq!(
+        structured_error_diagnostics(&standalone),
+        structured_error_diagnostics(&runtime)
+    );
     // A quoted traceback header in displayed source must not steal dispatch.
     let source = standalone.replace("private_source_sentinel(:", super::super::HEADER);
-    assert_eq!(structured_error_diagnostics(&source), vec![diagnostic(summary)]);
+    assert_eq!(
+        structured_error_diagnostics(&source),
+        vec![diagnostic(summary)]
+    );
 }
 
 #[test]
@@ -75,7 +93,9 @@ fn source_locations_styles_and_line_endings_do_not_change_error_identity() {
     let plain = report("SyntaxError: invalid syntax");
     let expected = structured_error_diagnostics(&plain);
     for text in [
-        plain.replace("/private/project/queue.py", "λ/路径.py").replace("line 7", "line 991"),
+        plain
+            .replace("/private/project/queue.py", "λ/路径.py")
+            .replace("line 7", "line 991"),
         plain.replace('\n', "\r\n"),
         format!("\n\n{plain}\n"),
         format!("\u{1b}[31m{plain}\u{1b}[0m"),
@@ -155,7 +175,10 @@ fn syntax_diagnostics_redact_summary_secrets_before_generating_keys() {
     let summary = format!("SyntaxError: api_key={secret}");
     let safe = crate::policy::redact_secret_like_content(&summary).content;
     let decoded = inspect(&report(&summary)).unwrap();
-    assert_eq!(decoded.diagnostics, inspect(&report(&safe)).unwrap().diagnostics);
+    assert_eq!(
+        decoded.diagnostics,
+        inspect(&report(&safe)).unwrap().diagnostics
+    );
     let projected = format!("{:?} {:?}", decoded.diagnostics, decoded.symptom);
     assert!(!projected.contains(&secret));
     assert!(!projected.contains(&secret.to_ascii_lowercase()));
@@ -165,7 +188,9 @@ fn syntax_diagnostics_redact_summary_secrets_before_generating_keys() {
 fn a_parser_error_cannot_downgrade_an_existing_executed_test_requirement() {
     let syntax = optimistic(&report("SyntaxError: invalid syntax"));
     assert!(!Requirement::capture(&syntax, true).is_guarded());
-    let tests = optimistic("=== test session starts ===\ncollected 1 item\ntests/test_queue.py::test_drain FAILED [100%]\n=== 1 failed in 0.01s ===\n");
+    let tests = optimistic(
+        "=== test session starts ===\ncollected 1 item\ntests/test_queue.py::test_drain FAILED [100%]\n=== 1 failed in 0.01s ===\n",
+    );
     let mut required = Requirement::capture(&tests, true);
     assert!(required.is_guarded());
     required.refresh(&syntax, true);

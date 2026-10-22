@@ -1,8 +1,6 @@
 //! Exercise grouped Python failures through real migrated storage, not mocks.
 
-use crate::core::cass_error_recall::{
-    record_session_error_recall, structured_error_diagnostics,
-};
+use crate::core::cass_error_recall::{record_session_error_recall, structured_error_diagnostics};
 use crate::core::error_diagnosis::{error_recall_report, pack_error_recall_query_seed};
 use crate::core::incident_card::{incident_card_id, proof::CardChecks};
 use crate::db::{
@@ -27,7 +25,8 @@ fn failure() -> String {
         "    +---------------- 2 ----------------\n",
         "    | RuntimeError: test_drain worker used stale queue\n",
         "    +------------------------------------\n",
-    ).to_owned()
+    )
+    .to_owned()
 }
 
 fn evidence_id(number: u32) -> String {
@@ -72,31 +71,34 @@ fn episode(failure: &str, proof: &str, retry: &str) -> TestResult<Episode> {
     )?;
     let rows = [
         (
-            "tool_call", "assistant",
+            "tool_call",
+            "assistant",
             json!({"type":"tool_use","id":"failed","name":"Bash",
                 "input":{"command":COMMAND}}),
         ),
         (
-            "tool_result", "user",
+            "tool_result",
+            "user",
             json!({"type":"tool_result","tool_use_id":"failed",
                 "content":failure,"is_error":true}),
         ),
         ("message", "assistant", json!({"type":"text","text":REPAIR})),
         (
-            "tool_call", "assistant",
+            "tool_call",
+            "assistant",
             json!({"type":"tool_use","id":"retry","name":"Bash",
                 "input":{"command":retry}}),
         ),
         (
-            "tool_result", "user",
+            "tool_result",
+            "user",
             json!({"type":"tool_result","tool_use_id":"retry",
                 "content":proof,"is_error":false}),
         ),
     ];
     for (offset, (kind, role, block)) in rows.iter().enumerate() {
         let number = u32::try_from(offset + 1)?;
-        let excerpt = json!({"type":role,"message":{"role":role,"content":[block]}})
-            .to_string();
+        let excerpt = json!({"type":role,"message":{"role":role,"content":[block]}}).to_string();
         db.insert_evidence_span(
             &evidence_id(number),
             &CreateEvidenceSpanInput {
@@ -133,7 +135,9 @@ fn grouped_failures_reach_cited_recall_and_pack_expansion_without_source_rewrite
     let diagnostics = structured_error_diagnostics(&failed);
     assert_eq!(diagnostics.len(), 2);
     let episode = episode(&failed, "queue workers completed", COMMAND)?;
-    let before = episode.db.list_evidence_spans_for_session(&episode.session)?;
+    let before = episode
+        .db
+        .list_evidence_spans_for_session(&episode.session)?;
     let report = record_session_error_recall(&episode.db, WS, &episode.session)?;
     assert_eq!(report.failures_seen, 1);
     assert_eq!(report.fingerprints_recorded, 2);
@@ -141,7 +145,10 @@ fn grouped_failures_reach_cited_recall_and_pack_expansion_without_source_rewrite
     assert_eq!(report.repair_links_recorded, 4);
     assert_eq!(report.incident_cards_recorded, 1);
     let card_id = incident_card_id(WS, &episode.failure);
-    let card = episode.db.get_evidence_span(&card_id)?.ok_or("missing card")?;
+    let card = episode
+        .db
+        .get_evidence_span(&card_id)?
+        .ok_or("missing card")?;
     let mut checks = CardChecks::default();
     checks.observe(&card)?;
     assert!(checks.withheld(&episode.db, WS)?.is_empty());
@@ -151,26 +158,45 @@ fn grouped_failures_reach_cited_recall_and_pack_expansion_without_source_rewrite
         assert!(recall.helpful_repairs.contains(&episode.repair));
         assert!(recall.helpful_repairs.contains(&card_id));
         assert_eq!(recall.proof_links, std::slice::from_ref(&episode.proof));
-        let links = episode.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?;
+        let links = episode
+            .db
+            .list_error_repair_links(WS, &diagnostic.layered_key().key)?;
         assert_eq!(links.len(), 3);
-        assert!(links.iter().all(|link| {
-            link.evidence_ref.as_deref() == Some(episode.failure.as_str())
-        }));
+        assert!(
+            links
+                .iter()
+                .all(|link| { link.evidence_ref.as_deref() == Some(episode.failure.as_str()) })
+        );
         let seed = pack_error_recall_query_seed(&episode.db, WS, diagnostic)?;
         assert!(seed.contains("prior fix:") && seed.contains("fresh queue"));
         assert!(!seed.contains("private_group_label"));
         assert!(!seed.contains("private_source_sentinel"));
     }
     for source in before {
-        let after = episode.db.get_evidence_span(&source.id)?.ok_or("missing source")?;
+        let after = episode
+            .db
+            .get_evidence_span(&source.id)?
+            .ok_or("missing source")?;
         assert_eq!(after.excerpt, source.excerpt);
         assert_eq!(after.content_hash, source.content_hash);
         assert_eq!(after.metadata_json, source.metadata_json);
-        assert_eq!(after.canonical_provenance_uri(), source.canonical_provenance_uri());
+        assert_eq!(
+            after.canonical_provenance_uri(),
+            source.canonical_provenance_uri()
+        );
     }
-    assert_eq!(record_session_error_recall(&episode.db, WS, &episode.session)?.incident_cards_recorded, 0);
+    assert_eq!(
+        record_session_error_recall(&episode.db, WS, &episode.session)?.incident_cards_recorded,
+        0
+    );
     for diagnostic in &diagnostics {
-        assert_eq!(episode.db.list_error_repair_links(WS, &diagnostic.layered_key().key)?.len(), 3);
+        assert_eq!(
+            episode
+                .db
+                .list_error_repair_links(WS, &diagnostic.layered_key().key)?
+                .len(),
+            3
+        );
     }
     Ok(())
 }
@@ -181,10 +207,22 @@ fn grouped_or_damaged_retries_and_different_commands_never_teach_a_helpful_repai
     let diagnostics = structured_error_diagnostics(&failed);
     for (proof, command) in [
         (failed.clone(), COMMAND),
-        (failed.replace("    +------------------------------------\n", ""), COMMAND),
-        (failed.replace("---------------- 2 ----------------", "---------------- ... ----------------"), COMMAND),
+        (
+            failed.replace("    +------------------------------------\n", ""),
+            COMMAND,
+        ),
+        (
+            failed.replace(
+                "---------------- 2 ----------------",
+                "---------------- ... ----------------",
+            ),
+            COMMAND,
+        ),
         (format!("{failed}Process exited with code 0\n"), COMMAND),
-        ("queue workers completed".to_owned(), "python other_queue.py"),
+        (
+            "queue workers completed".to_owned(),
+            "python other_queue.py",
+        ),
     ] {
         let episode = episode(&failed, &proof, command)?;
         let report = record_session_error_recall(&episode.db, WS, &episode.session)?;
@@ -196,7 +234,9 @@ fn grouped_or_damaged_retries_and_different_commands_never_teach_a_helpful_repai
             assert!(recall.exact);
             assert!(recall.helpful_repairs.is_empty());
             assert!(recall.proof_links.is_empty());
-            assert!(!pack_error_recall_query_seed(&episode.db, WS, diagnostic)?.contains("prior fix:"));
+            assert!(
+                !pack_error_recall_query_seed(&episode.db, WS, diagnostic)?.contains("prior fix:")
+            );
         }
     }
     Ok(())
@@ -209,7 +249,10 @@ fn an_incomplete_group_cannot_leave_prefix_fingerprints_even_after_a_clean_retry
     for partial in [
         full.replace("(2 sub-exceptions)", "(3 sub-exceptions)"),
         full.replace("    +------------------------------------\n", ""),
-        full.replace("RuntimeError: test_drain worker used stale queue", "unfinished"),
+        full.replace(
+            "RuntimeError: test_drain worker used stale queue",
+            "unfinished",
+        ),
     ] {
         let episode = episode(&partial, "queue workers completed", COMMAND)?;
         let report = record_session_error_recall(&episode.db, WS, &episode.session)?;
