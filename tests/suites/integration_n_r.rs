@@ -144,6 +144,8 @@ mod rerank_model_manifest_smoke;
 mod rerank_posture_contract;
 #[path = "../resource_admission_queue_pressure_conformance.rs"]
 mod resource_admission_queue_pressure_conformance;
+#[path = "../real_shape_corpus_shapes.rs"]
+mod real_shape_corpus_shapes;
 #[path = "../resource_admission_report_conformance.rs"]
 mod resource_admission_report_conformance;
 #[path = "../response_envelope_conformance_matrix.rs"]
