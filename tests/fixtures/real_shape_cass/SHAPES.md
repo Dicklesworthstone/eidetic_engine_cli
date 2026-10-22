@@ -9,13 +9,32 @@ the bytes actually committed under this directory.
 
 ## Exactly how to reproduce this tree
 
+Generate into an EMPTY directory, never over this one:
+
     python3 scripts/real_shape_corpus/generate.py \
-        --out tests/fixtures/real_shape_cass \
-        --target-records 4000 --digest
+        --out "$(mktemp -d)" --workspace /work/ledger \
+        --seed 43 --target-records 4000 --digest
+
+To refresh the committed copy, generate into a fresh directory first, confirm the
+digest, then copy the changed files across. Generating directly over this
+directory cannot reproduce the digest, for the reason stated below: SHAPES.md
+lives here and the generator does not write it, so it would be hashed as a stray
+file. (`--workspace` and `--seed` match the generator's defaults; they are spelled
+out because they are baked into every session path and therefore into the digest.)
 
 Byte-identical for the same arguments: ids come from a seeded RNG and timestamps
-from a fixed epoch, never from the clock. Verified by generating twice, to two
-different destinations, and comparing:
+from a fixed epoch, never from the clock. The digest is **blake2b-256**
+(`hashlib.blake2b(digest_size=32)`, generate.py:430) over every file in the tree,
+each path followed by its bytes, walked in sorted order.
+
+bd-reality-core-convergence-1azkt.43's acceptance says "equal blake3". The
+property it asks for -- the same seed yielding byte-identical output -- is what is
+verified; the algorithm differs deliberately, because this generator imports only
+the standard library and `hashlib` carries blake2b but not blake3. Reading blake3
+literally would mean adding a third-party dependency to a script whose whole point
+is that it needs none.
+
+Verified by generating twice, to two different destinations, and comparing:
 
     tree digest   c846e3c4378814797a8e6af85377b3f08f43a0962f90b28575a7290fb3e2a5a6
 
