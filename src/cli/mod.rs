@@ -9548,6 +9548,25 @@ pub struct SearchArgs {
     /// continuation cursor (ADR 0063 §3, bd-7lvbg.3).
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
+
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    ///
+    /// ADR 0059 requires the fence to reach the RETRIEVAL surfaces, not only
+    /// `ee diag store-integrity` (bd-1n0np.8.13). `eventual` is the existing
+    /// behaviour and costs nothing: the gate returns before opening a store, so
+    /// a caller that does not ask for a fence is byte-for-byte unaffected.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when --read-fence observes a derived asset trailing the
+    /// database, rather than serving rows that may be stale.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
 }
 
 /// Arguments for `ee similar`.
@@ -15322,7 +15341,22 @@ where
         }
         Some(Command::Impact(ref args)) => handle_impact(&cli, args, stdout, stderr),
         Some(Command::Search(ref args)) => {
-            handle_search(process, &cli, args, invocation_started, stdout, stderr)
+            // The fence is evaluated HERE rather than inside handle_search,
+            // because handle_search fans out to handle_search_family and
+            // handle_search_all_workspaces as well, and a fence that only
+            // covered the plain path would be a fence with two holes in it
+            // (bd-1n0np.8.13).
+            if let Some(exit) = read_fence_preflight(
+                &cli,
+                "search",
+                args.read_fence,
+                args.strict_read_fence,
+                stdout,
+            ) {
+                exit
+            } else {
+                handle_search(process, &cli, args, invocation_started, stdout, stderr)
+            }
         }
         Some(Command::Similar(ref args)) => handle_similar(&cli, args, stdout, stderr),
         Some(Command::Sentinel(ref command)) => handle_sentinel(&cli, command, stdout, stderr),
@@ -32582,19 +32616,129 @@ fn observed_store_generations(workspace_root: &Path) -> Option<ObservedStoreGene
 ///
 /// An explicit flag always wins over an observation, so the deterministic
 /// pure-calculation mode stays available for replaying a captured incident.
+/// Pre-flight read fence for a retrieval surface (ADR 0059, bd-1n0np.8.13).
+///
+/// ADR 0059 advertises a read fence that "can fail closed", and until now the
+/// only surface that evaluated one was `ee diag store-integrity` -- a REPORTING
+/// command. A report an operator has to remember to run is not a fence: the
+/// retrieval surfaces would still serve rows from a derived asset trailing the
+/// database, silently, which is the exact condition the fence exists to refuse.
+/// `src/core/read_fence.rs` had the evaluator and `store_integrity.rs` had the
+/// report builder; neither was reachable from a read path.
+///
+/// Returns `Some(exit)` when the caller asked for a fence the store cannot
+/// honour, and `None` when the read should proceed.
+///
+/// IT COSTS NOTHING ON THE DEFAULT PATH, deliberately. `eventual` without
+/// `--strict-read-fence` returns before resolving generations, so no store is
+/// opened, no output changes, and no existing caller or golden moves. The whole
+/// behaviour is opt-in, which is why this could land without regenerating a
+/// single snapshot -- and on this host regenerated goldens cannot be retrieved
+/// from a worker at all, so a change that churned them would be unlandable.
+///
+/// FAILING CLOSED IS AN EXIT CODE, NOT A PANIC: `UnsatisfiedDegradedMode`,
+/// matching what `handle_diag_store_integrity` already returns for
+/// `strict_failed`, so the two surfaces cannot disagree about what a failed
+/// fence means. The payload carries the whole read-fence report rather than a
+/// bare message, because "stale" without the generations is not actionable.
+fn read_fence_preflight<W>(
+    cli: &Cli,
+    command: &str,
+    read_fence: crate::core::read_fence::ReadFence,
+    strict_read_fence: bool,
+    stdout: &mut W,
+) -> Option<ProcessExitCode>
+where
+    W: Write,
+{
+    // The default asks nothing of the store. Return before any side effect.
+    if read_fence == crate::core::read_fence::ReadFence::Eventual && !strict_read_fence {
+        return None;
+    }
+
+    // None/None means "observe the store", which is what a reader wants: it has
+    // no generations of its own to pin.
+    let (db_generation, asset_generations, generation_source) =
+        resolve_store_integrity_generations(cli, None, None);
+
+    let report = crate::core::store_integrity::run_store_integrity_report(
+        crate::core::store_integrity::StoreIntegrityOptions {
+            read_fence,
+            db_generation,
+            asset_generations,
+            strict_read_fence,
+            generation_source,
+            // A reader supplies no write observations, so the write-immune half
+            // of the report is empty by construction. The defaults are passed
+            // explicitly rather than left implicit so this cannot drift from the
+            // diag surface's configuration without someone noticing.
+            write_stream_config: crate::core::write_owner::WriteStreamStatsConfig::new(
+                0,
+                crate::core::write_owner::DEFAULT_WRITE_STREAM_WINDOW_MS,
+                crate::core::write_owner::DEFAULT_WRITE_STREAM_NEAR_DUPLICATE_HAMMING,
+            ),
+            write_observations: Vec::new(),
+            quarantine_config: crate::core::write_owner::WriteImmuneQuarantineConfig::default(),
+        },
+    );
+
+    if !report.read_fence.strict_failed {
+        return None;
+    }
+
+    let degraded = serde_json::json!([{
+        "code": "read_fence_stale_derived_asset",
+        "severity": "blocking",
+        "message": format!(
+            "{command} refused to serve rows: a derived asset trails the \
+             database under the requested read fence"
+        ),
+        "repair": report.read_fence.repair.clone().unwrap_or_else(|| {
+            crate::core::read_fence::READ_FENCE_GENERIC_REPAIR.to_owned()
+        }),
+    }]);
+    let write_exit = write_stdout(
+        stdout,
+        &(serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": false,
+            "data": {
+                "schema": crate::core::store_integrity::STORE_INTEGRITY_READ_FENCE_SCHEMA_V1,
+                "command": command,
+                "readFence": report.read_fence,
+            },
+            "degraded": degraded,
+        })
+        .to_string()
+            + "\n"),
+    );
+    // A failed write outranks the fence verdict, the same way
+    // handle_diag_store_integrity orders them: reporting an exit code for a
+    // payload that never reached the caller would be a lie about what happened.
+    if write_exit == ProcessExitCode::Success {
+        Some(ProcessExitCode::UnsatisfiedDegradedMode)
+    } else {
+        Some(write_exit)
+    }
+}
+
+/// Resolve the generations a store-integrity verdict is computed from.
+///
+/// Takes the two optional inputs rather than a `DiagStoreIntegrityArgs`, because
+/// `ee diag store-integrity` is no longer the only caller: the retrieval
+/// surfaces gate on the same verdict and have no such args struct to offer
+/// (bd-1n0np.8.13). `None` for both means "observe the store", which is exactly
+/// what a retrieval caller wants.
 fn resolve_store_integrity_generations(
     cli: &Cli,
-    args: &DiagStoreIntegrityArgs,
+    supplied_db: Option<u64>,
+    supplied_assets: Option<Vec<(String, u64)>>,
 ) -> (
     u64,
     Vec<(String, u64)>,
     crate::core::store_integrity::GenerationSource,
 ) {
     use crate::core::store_integrity::GenerationSource;
-
-    let supplied_db = args.db_generation;
-    let supplied_assets =
-        (!args.asset_generations.is_empty()).then(|| args.asset_generations.clone());
 
     // Both inputs pinned: there is nothing to observe, and opening a store
     // would be a side effect with no effect on the answer.
@@ -32686,7 +32830,11 @@ where
     // pure-calculation mode that `tests/store_integrity_surface.rs` drives
     // and keeps this command usable for replaying a captured incident.
     let (db_generation, asset_generations, generation_source) =
-        resolve_store_integrity_generations(cli, args);
+        resolve_store_integrity_generations(
+            cli,
+            args.db_generation,
+            (!args.asset_generations.is_empty()).then(|| args.asset_generations.clone()),
+        );
 
     let report = crate::core::store_integrity::run_store_integrity_report(
         crate::core::store_integrity::StoreIntegrityOptions {
