@@ -21,6 +21,21 @@
 # deliberately left alone; this file is partly a log, and rewriting the numbers
 # inside a dated observation would destroy the thing that makes it evidence.
 #
+# SUPERSEDED THE NEXT DAY -- there are 42 seconds of headroom, not zero. Read
+# the opt-in-flag paragraph below before acting on the dated measurement that
+# follows. bd-2di61 (2026-10-20) broadened the budget exclusion from the single
+# literal name "Performance Benchmarks" to EVERY stage verify.sh gates behind an
+# opt-in flag, which took the non-benchmark total from 608/608 to 566/608.
+# scripts/verify.sh:2087 records the same transition independently.
+#
+# The measurement below is left exactly as written, per this file's own rule
+# about dated observations. What is corrected is its STANDING ADVICE: "Read that
+# before planning a stage" sent every later reader to a ceiling that had already
+# moved, and at least three beads want an e2e stage that the paragraph appears
+# to forbid. A stale warning in an authoritative file does not sit still; it
+# deters work. Recomputing independently here (excluding the four opt-in stages)
+# lands at ~566-577 against 608, i.e. comfortably under either way.
+#
 # THERE IS CURRENTLY ZERO HEADROOM. The non-benchmark p50s total EXACTLY 608
 # against the 608 ceiling (measured 2026-10-19, 120 stages, 27 unmeasured,
 # benchmarks excluded). Any new stage carrying a measured p50 -- of any size,
