@@ -6,8 +6,8 @@
 //! rewrite, and retain every other source byte. Quoted JSON stays ordinary text.
 
 use crate::policy::{
-    SecretRedactionMatch, SecretRedactionReport, key_value_redaction_code, redact_git_capture_text,
-    redaction_placeholder,
+    SecretRedactionMatch, SecretRedactionReport, is_secret_redaction_placeholder,
+    key_value_redaction_code, redact_git_capture_text, redaction_placeholder,
 };
 
 use super::{InvalidEncodedJson, decode_records, same_record_classes};
@@ -178,7 +178,7 @@ fn already_redacted(input: &str, matched: &SecretRedactionMatch) -> bool {
         if matched.pattern_id == "url_password" {
             value == redaction_placeholder("url_password")
         } else {
-            value.starts_with("[REDACTED:")
+            is_secret_redaction_placeholder(value)
         }
     })
 }

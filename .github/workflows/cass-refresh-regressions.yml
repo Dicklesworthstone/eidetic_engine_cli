@@ -116,6 +116,7 @@ jobs:
           ingestion policy::ingestion::
           source-commitment db::tests::cass_source_commitment_
           transcript-admission db::tests::transcript_admission_rechecks_raw_records_for_new_and_existing_rows
+          admission-cache db::tests::credential_placeholder_policy_invalidates_old_positive_verdicts_and_reader_proofs
           CASES
       - name: Verify CASS contracts, CLI imports and release contracts
         if: ${{ !cancelled() }}

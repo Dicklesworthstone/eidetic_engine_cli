@@ -15076,7 +15076,7 @@ where
 /// classification, reader projection, ingestion screening or any admission
 /// clause changes meaning: every recorded verdict then stops matching, rows
 /// revalidate in full, and the next write-side backfill records fresh verdicts.
-pub const EVIDENCE_ADMISSION_VERDICT_REVISION: u32 = 3;
+pub const EVIDENCE_ADMISSION_VERDICT_REVISION: u32 = 4;
 
 /// Closed producer vocabulary for the shared evidence table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54342,6 +54342,176 @@ UPDATE memories
                 .is_empty(),
             "a deleted span leaves no verdict behind",
         )
+    }
+
+    #[test]
+    fn credential_placeholder_policy_invalidates_old_positive_verdicts_and_reader_proofs()
+    -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const OLD_REVISION: u32 = 3;
+        const SAFE_BODY: &str = "password: [REDACTED:password] quartzmarkerrepair passed.";
+        const UNSAFE_BODY: &str =
+            "password: [REDACTED:password]violet-private-value quartzmarkerrepair passed.";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8547_0201)).to_string();
+        connection.insert_session(&session_id, &session_input("placeholder-verdict-session"))?;
+        let session = connection
+            .get_session(&session_id)?
+            .ok_or_else(|| TestFailure::new("placeholder verdict session missing"))?;
+        let mut safe_id = None;
+
+        for (offset, body, expected) in [(2_u32, SAFE_BODY, true), (3, UNSAFE_BODY, false)] {
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x8547_0200 + u128::from(offset),
+            ))
+            .to_string();
+            let mut input = evidence_span_input(&session_id, &id, offset);
+            input.excerpt =
+                serde_json::json!({"role": "assistant", "content": SAFE_BODY}).to_string();
+            input.content_hash = super::canonical_evidence_hash(&input.excerpt);
+            connection.insert_evidence_span(&id, &input)?;
+            let mut historical = connection
+                .get_evidence_span(&id)?
+                .ok_or_else(|| TestFailure::new("placeholder verdict evidence missing"))?;
+            historical.excerpt =
+                serde_json::json!({"role": "assistant", "content": body}).to_string();
+            historical.content_hash = super::canonical_evidence_hash(&historical.excerpt);
+            historical.canonical_excerpt_hash = Some(historical.content_hash.clone());
+            let mut metadata: serde_json::Value = serde_json::from_str(
+                historical
+                    .metadata_json
+                    .as_deref()
+                    .ok_or_else(|| TestFailure::new("placeholder security metadata missing"))?,
+            )
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+            metadata["canonicalExcerptHash"] = serde_json::json!(historical.content_hash);
+            historical.metadata_json = Some(metadata.to_string());
+            connection.execute_for(
+                DbOperation::Execute,
+                "UPDATE evidence_spans SET excerpt = ?1, content_hash = ?2, canonical_excerpt_hash = ?2, metadata_json = ?3 WHERE id = ?4",
+                &[Value::Text(historical.excerpt.clone()), Value::Text(historical.content_hash.clone()), Value::Text(metadata.to_string()), Value::Text(id.clone())],
+            )?;
+
+            // Model the prior policy's positive cache for this exact source,
+            // including valid metadata/hashes and its independently bound
+            // reader bytes. Only the policy revision may invalidate it.
+            let old_binding = super::admission_verdict_binding(
+                historical.admission_verdict_hasher(OLD_REVISION),
+                true,
+            );
+            connection.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO evidence_admission_verdicts (evidence_span_id, verdict, verdict_binding, verdict_revision, decided_at) VALUES (?1, 'admitted', ?2, ?3, ?4) ON CONFLICT(evidence_span_id) DO UPDATE SET verdict = excluded.verdict, verdict_binding = excluded.verdict_binding, verdict_revision = excluded.verdict_revision, decided_at = excluded.decided_at",
+                &[Value::Text(id.clone()), Value::Text(old_binding.clone()), Value::BigInt(i64::from(OLD_REVISION)), Value::Text(historical.updated_at.clone())],
+            )?;
+            let projection_version = crate::cass::transcript::TRANSCRIPT_PROJECTION_VERSION;
+            let mut source_hasher = blake3::Hasher::new();
+            source_hasher.update(b"ee.evidence.reader_projection.source.v1");
+            source_hasher.update(&projection_version.to_le_bytes());
+            source_hasher.update(
+                historical
+                    .admission_verdict_hasher(OLD_REVISION)
+                    .finalize()
+                    .as_bytes(),
+            );
+            let source_binding = format!("blake3:{}", source_hasher.finalize().to_hex());
+            let reader_text = format!("assistant: {body}");
+            let mut integrity_hasher = blake3::Hasher::new();
+            integrity_hasher.update(b"ee.evidence.reader_projection.content.v1");
+            integrity_hasher.update(&projection_version.to_le_bytes());
+            integrity_hasher.update(&[1]);
+            for field in [source_binding.as_str(), body, reader_text.as_str()] {
+                integrity_hasher.update(&(field.len() as u64).to_le_bytes());
+                integrity_hasher.update(field.as_bytes());
+            }
+            let integrity_binding = format!("blake3:{}", integrity_hasher.finalize().to_hex());
+            connection.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO evidence_reader_projections (evidence_span_id, projection_version, source_binding, reader_body, reader_text, egress_safe, integrity_binding, projected_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7) ON CONFLICT(evidence_span_id) DO UPDATE SET projection_version = excluded.projection_version, source_binding = excluded.source_binding, reader_body = excluded.reader_body, reader_text = excluded.reader_text, egress_safe = excluded.egress_safe, integrity_binding = excluded.integrity_binding, projected_at = excluded.projected_at",
+                &[Value::Text(id.clone()), Value::BigInt(i64::from(projection_version)), Value::Text(source_binding), Value::Text(body.to_owned()), Value::Text(reader_text), Value::Text(integrity_binding), Value::Text(historical.updated_at.clone())],
+            )?;
+
+            let loaded = connection
+                .get_evidence_span(&id)?
+                .ok_or_else(|| TestFailure::new("historical placeholder evidence missing"))?;
+            ensure_equal(
+                &loaded.excerpt,
+                &historical.excerpt,
+                "history remains untouched",
+            )?;
+            ensure(
+                loaded
+                    .recorded_admission_verdict(Some(&old_binding))
+                    .is_none(),
+                "the old positive verdict cannot authorize the current policy",
+            )?;
+            ensure_equal(
+                &loaded.cached_reader_egress_safe(),
+                &Some(expected),
+                "old reader egress proof revalidates under the current policy",
+            )?;
+            ensure_equal(
+                &loaded.is_search_admitted_with_recorded_verdict(
+                    WORKSPACE,
+                    &session,
+                    Some(&old_binding),
+                ),
+                &expected,
+                "search rechecks credentials behind an old positive verdict",
+            )?;
+            ensure_equal(
+                &loaded.is_derivation_admitted_with_recorded_verdict(
+                    WORKSPACE,
+                    &session,
+                    Some(&old_binding),
+                ),
+                &expected,
+                "derivation rechecks credentials behind an old positive verdict",
+            )?;
+            ensure_equal(
+                &loaded.is_direct_pack_admitted_for_session(WORKSPACE, &session),
+                &expected,
+                "pack admission rejects unsafe historical reader bytes",
+            )?;
+            if expected {
+                ensure(
+                    loaded.reader_text().contains("quartzmarkerrepair passed."),
+                    "exact sanitized markers remain readable",
+                )?;
+                safe_id = Some(id);
+            } else {
+                ensure(
+                    loaded.reader_text().is_empty(),
+                    "the unsafe historical projection cannot expose its cached text",
+                )?;
+            }
+        }
+        let (admitted, _) =
+            connection.list_search_admitted_evidence_spans_for_workspace(WORKSPACE)?;
+        ensure_equal(
+            &admitted.len(),
+            &1_usize,
+            "only the sanitized control remains admitted",
+        )?;
+        ensure_equal(
+            &Some(admitted[0].id.clone()),
+            &safe_id,
+            "the correct row remains admitted",
+        )?;
+        ensure_equal(
+            &connection.backfill_evidence_reader_projections(Some(WORKSPACE))?,
+            &2_u64,
+            "both historical reader proofs need the current policy binding",
+        )?;
+        ensure_equal(
+            &connection.backfill_evidence_admission_verdicts(Some(WORKSPACE))?,
+            &2_u64,
+            "both historical verdicts need the current policy binding",
+        )?;
+        Ok(())
     }
 
     /// A connection on a schema before V127 records and reuses no verdicts,

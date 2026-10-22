@@ -185,16 +185,25 @@ repair prose, and a URL cannot consume the JSON envelope or borrow a password
 from a neighboring email field. Ambiguous crossings remain withheld. Quoted
 JSON inside a string stays text. The resulting records must retain unique
 keys and their original authority, and instruction screening sees the complete
-repaired content. Exact generated URL-password placeholders remain unchanged
-on subsequent plain-text screening; partial or extended placeholders do not
-hide a credential.
+repaired content. Only complete canonical placeholders remain unchanged on
+subsequent plain-text screening. A marker with an attached credential suffix,
+an unknown marker class, or an incomplete marker is still screened. A marker
+elsewhere in the same compact JSON record cannot suppress entropy screening
+of an unrelated value. Provider-specific placeholders produced before generic
+key/value screening retain their class, while URL passwords require the exact
+URL-password placeholder.
 
-Newly captured CASS excerpts use producer version 3;
+Newly captured CASS excerpts use producer version 4;
 refresh preserves older retained evidence and its original producer version.
+The evidence admission verdict revision also advances, invalidating old
+positive verdicts and the reader projections bound to them. Existing rows
+must pass the corrected screening policy before search, pack or derivation
+can reuse their content.
 Real-import regressions cover PEM and YAML secrets and URL/email combinations
 below and above the retained excerpt limit, both CASS wire formats, the full
 original source commitment, subsequent records, an unaffected session and
-unchanged retries.
+unchanged retries. Marker regressions also cover forged credential suffixes,
+unrelated high-entropy values, and exact placeholders that must stay searchable.
 
 ## Rejected Alternatives
 

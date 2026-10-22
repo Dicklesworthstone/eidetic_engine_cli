@@ -3,7 +3,8 @@
 use serde_json::{Value, json};
 
 use crate::policy::{
-    classify_transcript_record, redact_secret_like_content, screen_external_text_for_ingestion,
+    RAW_TOKEN_PATTERNS, SECRET_KEY_PATTERNS, classify_transcript_record,
+    redact_secret_like_content, redaction_placeholder, screen_external_text_for_ingestion,
 };
 
 fn screened_message(
@@ -150,6 +151,193 @@ fn url_password_placeholders_are_idempotent_only_when_exact() {
         format!("{screened_url} then {screened_url}")
     );
     assert!(!redact_secret_like_content(&report.content).redacted);
+}
+
+#[test]
+fn key_value_marker_prefixes_never_exempt_attached_secrets() {
+    for value in [
+        "[REDACTED:password]violet-private-value",
+        "violet-private-value[REDACTED:password]",
+        "violet-private-value[REDACTED:password]amber-private-value",
+        "[REDACTED:unknown_class]violet-private-value",
+        "[REDACTED:unknown_class]",
+        "[redacted:password]violet-private-value",
+        "[REDACTED:password",
+        "[REDACTED:[REDACTED:password]]violet-private-value",
+        "[REDACTED:password]violet-private-value[REDACTED:password]",
+    ] {
+        for quote in ["", "\"", "'", "`"] {
+            let body = format!("Before password={quote}{value}{quote}; quartzrepair passed.");
+            let expected =
+                format!("Before password={quote}[REDACTED:password]{quote}; quartzrepair passed.");
+            let plain = redact_secret_like_content(&body);
+            assert!(plain.redacted, "{value} with {quote:?}");
+            assert_eq!(plain.content, expected, "{value} with {quote:?}");
+            assert_eq!(plain.redacted_reasons, ["password"]);
+            assert!(plain.matches.iter().any(|matched| {
+                matched.pattern_id == "password" && body[matched.start..matched.end] == *value
+            }));
+
+            let (raw, report) = screened_message(&body, json!({"password": value, "attempt": 3}));
+            // Historical rows containing this input must fail live decoded
+            // admission, even before a new import repairs their excerpt.
+            assert!(crate::cass::transcript::project_transcript(&raw).is_none());
+            assert!(report.redacted, "{value} with {quote:?}");
+            assert_eq!(report.redacted_reasons, ["password"]);
+            let screened: Value = serde_json::from_str(&report.content).unwrap();
+            assert_eq!(screened["message"]["content"], expected);
+            assert_eq!(screened["metadata"]["password"], "[REDACTED:password]");
+            assert_eq!(screened["metadata"]["attempt"], 3);
+            assert!(!report.content.contains("violet-private-value"));
+            assert!(!report.content.contains("amber-private-value"));
+            assert_eq!(
+                classify_transcript_record(&raw),
+                classify_transcript_record(&report.content)
+            );
+            let reader = format!("assistant: {expected}");
+            assert_eq!(
+                crate::cass::transcript::reader_text(&report.content).as_deref(),
+                Some(reader.as_str())
+            );
+            let retry = screen_external_text_for_ingestion(&report.content);
+            assert_eq!(retry.content, report.content);
+            assert!(!retry.redacted);
+        }
+    }
+}
+
+#[test]
+fn complete_generated_key_value_markers_are_idempotent_and_readable() {
+    let mut codes = SECRET_KEY_PATTERNS
+        .iter()
+        .map(|pattern| pattern.code)
+        .chain(RAW_TOKEN_PATTERNS.iter().map(|&(_, code, _, _)| code))
+        .chain([
+            "url_password",
+            "pem_block",
+            "jwt_token",
+            "high_entropy_secret",
+            "email_address",
+            "phone_number",
+            "ssn",
+        ])
+        .collect::<Vec<_>>();
+    codes.sort_unstable();
+    codes.dedup();
+    for code in codes {
+        let marker = redaction_placeholder(code);
+        let body = format!("Before password={marker}; quartzrepair passed.");
+        let plain = redact_secret_like_content(&body);
+        assert!(!plain.redacted, "{code}");
+        assert_eq!(plain.content, body, "{code}");
+        let (raw, report) = screened_message(&body, json!({"password": marker}));
+        assert!(!report.redacted, "{code}");
+        assert_eq!(report.content, raw, "{code}");
+        let reader = format!("assistant: {body}");
+        assert_eq!(
+            crate::cass::transcript::reader_text(&report.content).as_deref(),
+            Some(reader.as_str()),
+            "{code}"
+        );
+    }
+}
+
+#[test]
+fn provider_replacements_under_secret_keys_remain_readable() {
+    for &(prefix, reason, minimum, contextual) in RAW_TOKEN_PATTERNS {
+        let token = format!("{prefix}{}", "Q".repeat(minimum));
+        let context = if contextual {
+            "Twilio verification."
+        } else {
+            "Verification."
+        };
+        let body = format!("{context} password={token}; quartzrepair passed.");
+        let (_, report) = screened_message(&body, json!({"password": token}));
+        assert!(report.redacted, "{prefix}");
+        assert!(!report.content.contains(&token), "{prefix}");
+        assert!(
+            report.redacted_reasons.iter().any(|code| code == reason),
+            "{prefix}"
+        );
+        let reader = crate::cass::transcript::reader_text(&report.content).unwrap();
+        assert!(reader.contains("quartzrepair passed."), "{prefix}");
+        let retry = screen_external_text_for_ingestion(&report.content);
+        assert_eq!(retry.content, report.content, "{prefix}");
+        assert!(!retry.redacted, "{prefix}");
+    }
+}
+
+#[test]
+fn redaction_markers_cannot_suppress_adjacent_high_entropy_credentials() {
+    let secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(2);
+    for (body, expected) in [
+        (
+            format!("Observed [REDACTED:password]{secret}; quartzrepair passed."),
+            "Observed [REDACTED:password][REDACTED:high_entropy_secret]; quartzrepair passed.",
+        ),
+        (
+            format!("Observed {secret}[REDACTED:password]; quartzrepair passed."),
+            "Observed [REDACTED:high_entropy_secret][REDACTED:password]; quartzrepair passed.",
+        ),
+        (
+            format!("Observed [REDACTED:{secret}]; quartzrepair passed."),
+            "Observed [REDACTED:[REDACTED:high_entropy_secret]]; quartzrepair passed.",
+        ),
+    ] {
+        let plain = redact_secret_like_content(&body);
+        assert!(plain.redacted);
+        assert_eq!(plain.content, expected);
+        assert_eq!(plain.redacted_reasons, ["high_entropy_secret"]);
+        let (raw, report) = screened_message(&body, json!({}));
+        assert!(crate::cass::transcript::project_transcript(&raw).is_none());
+        assert!(report.redacted);
+        assert!(!report.content.contains(&secret));
+        let screened: Value = serde_json::from_str(&report.content).unwrap();
+        assert_eq!(screened["message"]["content"], expected);
+        let reader = format!("assistant: {expected}");
+        assert_eq!(
+            crate::cass::transcript::reader_text(&report.content).as_deref(),
+            Some(reader.as_str())
+        );
+        let retry = screen_external_text_for_ingestion(&report.content);
+        assert_eq!(retry.content, report.content);
+        assert!(!retry.redacted);
+    }
+}
+
+#[test]
+fn redaction_markers_cannot_suppress_unrelated_compact_json_credentials() {
+    let secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(2);
+    let metadata = [
+        format!(r#"{{"marker":"[REDACTED:password]","value":"{secret}"}}"#),
+        format!(r#"{{"value":"{secret}","marker":"[REDACTED:password]"}}"#),
+    ];
+    for metadata in metadata {
+        let raw =
+            format!(r#"{{"type":"assistant","content":"quartzrepair","metadata":{metadata}}}"#);
+        assert!(!raw.chars().any(char::is_whitespace));
+        let plain = redact_secret_like_content(&raw);
+        assert!(plain.redacted);
+        assert_eq!(plain.redacted_reasons, ["high_entropy_secret"]);
+        let report = screen_external_text_for_ingestion(&raw);
+        assert!(report.redacted);
+        assert_eq!(report.redacted_reasons, ["high_entropy_secret"]);
+        assert!(!report.content.contains(&secret));
+        let screened: Value = serde_json::from_str(&report.content).unwrap();
+        assert_eq!(screened["content"], "quartzrepair");
+        assert_eq!(screened["metadata"]["marker"], "[REDACTED:password]");
+        assert_eq!(
+            screened["metadata"]["value"],
+            "[REDACTED:high_entropy_secret]"
+        );
+        assert_eq!(
+            crate::cass::transcript::reader_text(&report.content).as_deref(),
+            Some("assistant: quartzrepair")
+        );
+        let retry = screen_external_text_for_ingestion(&report.content);
+        assert_eq!(retry.content, report.content);
+        assert!(!retry.redacted);
+    }
 }
 
 #[test]
