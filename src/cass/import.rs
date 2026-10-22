@@ -3501,7 +3501,7 @@ mod tests {
             ])
             .expect_err("changed endpoint must discard the complete snapshot");
             ensure(
-                is_unstable_view(&error),
+                view_session_refusal(&error) == Some(CassHistoryRefusal::Unstable),
                 "live growth or truncation is retryable",
             )?;
         }
@@ -3513,7 +3513,7 @@ mod tests {
             let error = collect_view_fixture(&[view_window_fixture(1, 5, 8), page])
                 .expect_err("malformed page");
             ensure(
-                !is_unstable_view(&error),
+                view_session_refusal(&error).is_none(),
                 "malformed source still fails the batch",
             )?;
         }
