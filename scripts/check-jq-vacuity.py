@@ -101,6 +101,11 @@ PATH = re.compile(r"\.(?:[A-Za-z_]\w*|\[[^\]]*\])(?:\.[A-Za-z_]\w*|\[[^\]]*\])*"
 TRUTHY_EXCLUDED = {"false", "null"}
 
 
+# Floor for the empty-world guard in `main`. The tree holds ~285 shell files, so
+# anything under this means the scan resolved nothing rather than found nothing.
+MINIMUM_SHELL_FILES = 50
+
+
 def blank_comments(text: str) -> str:
     """Blank `#`-to-end-of-line, where `#` begins a word.
 
@@ -466,6 +471,29 @@ def main() -> int:
         return self_test()
 
     report = audit(Path(args.root).resolve())
+
+    # EMPTY-WORLD FLOOR, and it is not hypothetical for this script. The stage
+    # runs `python3 scripts/check-jq-vacuity.py` with --root defaulting to the
+    # CWD, and verify.sh never cds to the repository root globally -- its only
+    # `cd "$REPO_ROOT"` is inside a subshell in `fuzz_smoke()` (verify.sh:1089).
+    # So invoked from anywhere else the glob matches nothing, every hit list is
+    # empty, and the run prints "no vacuous jq comparisons found" and exits 0.
+    # A detector whose whole subject is assertions that pass on an empty world
+    # must not have that failure mode itself.
+    #
+    # Loud and NONZERO even in the reporting mode, because this is an instrument
+    # fault rather than a finding, and the posture note above only promises not
+    # to fail on HITS.
+    if report["files_scanned"] < MINIMUM_SHELL_FILES:
+        print(
+            f"check-jq-vacuity: scanned only {report['files_scanned']} shell file(s) "
+            f"under {Path(args.root).resolve()}; this tree holds hundreds, so the "
+            f"scan resolved nothing and its empty result means nothing. Run it from "
+            f"the repository root or pass --root.",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
