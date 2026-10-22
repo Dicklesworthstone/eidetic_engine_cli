@@ -3918,7 +3918,8 @@ fn build_repair_fields(obj: &mut JsonBuilder, repair: &str) {
     obj.field_str("repairKind", repair_command_kind_name(repair));
 }
 
-fn repair_command_kind_name(repair: &str) -> &'static str {
+/// The `repairKind` wire name for `repair`.
+pub(crate) fn repair_command_kind_name(repair: &str) -> &'static str {
     match classify_repair_command(repair) {
         RepairCommandKind::Actionable => "actionable",
         RepairCommandKind::Template => "template",

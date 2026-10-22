@@ -24760,6 +24760,7 @@ where
 
 fn write_index_rebuild_error<W, E>(
     error: &IndexRebuildError,
+    budget: Option<&CancelledCommandBudget>,
     mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
@@ -24770,7 +24771,7 @@ where
 {
     let mode = mode.into();
     if let IndexRebuildError::Cancelled(reason) = error {
-        return write_cancelled_error(reason, mode, stdout, stderr);
+        return write_cancelled_error_with_budget(reason, budget, mode, stdout, stderr);
     }
 
     if mode != ErrorRenderMode::Human
@@ -25019,7 +25020,17 @@ where
                 _ => write_status,
             }
         }
-        Err(error) => write_index_rebuild_error(&error, cli.renderer(), stdout, stderr),
+        Err(error) => write_index_rebuild_error(
+            &error,
+            Some(&CancelledCommandBudget::index_maintenance(
+                "rebuild",
+                &options.workspace_path,
+                options.dry_run,
+            )),
+            cli.renderer(),
+            stdout,
+            stderr,
+        ),
     }
 }
 
@@ -25104,7 +25115,17 @@ where
                 _ => write_status,
             }
         }
-        Err(error) => write_index_rebuild_error(&error, cli.renderer(), stdout, stderr),
+        Err(error) => write_index_rebuild_error(
+            &error,
+            Some(&CancelledCommandBudget::index_maintenance(
+                "reembed",
+                &options.workspace_path,
+                options.dry_run,
+            )),
+            cli.renderer(),
+            stdout,
+            stderr,
+        ),
     }
 }
 
@@ -56771,11 +56792,67 @@ where
     W: Write,
     E: Write,
 {
+    write_cancelled_error_with_budget(reason, None, mode, stdout, stderr)
+}
+
+/// The operator-tunable wall-clock budget a command ran under, so a deadline
+/// cancellation can name the knob that raises it.
+struct CancelledCommandBudget {
+    env_var: &'static str,
+    seconds: u64,
+    max_seconds: u64,
+    /// The command to rerun, without the environment prefix.
+    rerun: String,
+}
+
+impl CancelledCommandBudget {
+    /// GH#78: `ee index rebuild` and `ee index reembed` (and their
+    /// `--dry-run` plans) run under `EE_INDEX_REBUILD_TIMEOUT_SECONDS`.
+    fn index_maintenance(operation: &'static str, workspace: &Path, dry_run: bool) -> Self {
+        let workspace_arg = shell_quote_cli_arg(&workspace.display().to_string());
+        Self {
+            env_var: "EE_INDEX_REBUILD_TIMEOUT_SECONDS",
+            seconds: crate::core::index::index_rebuild_timeout().as_secs(),
+            max_seconds: crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS,
+            rerun: format!(
+                "ee --workspace {workspace_arg} index {operation}{} --json",
+                if dry_run { " --dry-run" } else { "" }
+            ),
+        }
+    }
+
+    /// A copy-pasteable rerun with four times the budget, and never less
+    /// than the default budget (a budget lowered below it would otherwise
+    /// take several reruns to recover), capped at the accepted maximum.
+    fn repair(&self) -> String {
+        let raised = self
+            .seconds
+            .saturating_mul(4)
+            .max(crate::core::index::DEFAULT_INDEX_REBUILD_TIMEOUT_SECS)
+            .min(self.max_seconds);
+        format!("{}={raised} {}", self.env_var, self.rerun)
+    }
+}
+
+/// A cancellation envelope. A deadline that `budget` governs also carries a
+/// repair raising that budget; any other cancellation is reported unchanged.
+fn write_cancelled_error_with_budget<W, E>(
+    reason: &CancelReason,
+    budget: Option<&CancelledCommandBudget>,
+    mode: impl Into<ErrorRenderMode>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
     let kind = cancel_kind_code(reason.kind);
     let message = cancel_message(reason);
     let mode = mode.into();
+    let budget = budget.filter(|_| reason.kind == asupersync::CancelKind::Deadline);
     if mode != ErrorRenderMode::Human {
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": {
                 "code": "cancelled",
@@ -56787,11 +56864,28 @@ where
                 }
             }
         });
+        if let Some(budget) = budget {
+            let repair = budget.repair();
+            json["error"]["repairKind"] =
+                serde_json::json!(output::repair_command_kind_name(&repair));
+            json["error"]["repair"] = serde_json::json!(repair);
+            json["error"]["details"]["budgetEnv"] = serde_json::json!(budget.env_var);
+            json["error"]["details"]["budgetSeconds"] = serde_json::json!(budget.seconds);
+            json["error"]["details"]["maxBudgetSeconds"] = serde_json::json!(budget.max_seconds);
+        }
         write_machine_error_payload(mode, &json, stdout);
     } else {
-        let rendered = output::redact_mesh_approval_bearers(&format!(
-            "error: cancelled ({kind}): {message}\n"
-        ));
+        let mut rendered = format!("error: cancelled ({kind}): {message}\n");
+        if let Some(budget) = budget {
+            rendered.push_str(&format!(
+                "\nThe {}s wall-clock budget ran out; {} raises it (at most {}s).\n\nNext:\n  {}\n",
+                budget.seconds,
+                budget.env_var,
+                budget.max_seconds,
+                budget.repair()
+            ));
+        }
+        let rendered = output::redact_mesh_approval_bearers(&rendered);
         let _ = stderr.write_all(rendered.as_bytes());
     }
     ProcessExitCode::Cancelled
@@ -94903,7 +94997,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        let exit = write_index_rebuild_error(&error, true, &mut stdout, &mut stderr);
+        let exit = write_index_rebuild_error(&error, None, true, &mut stdout, &mut stderr);
 
         let stdout = String::from_utf8(stdout).map_err(|error| error.to_string())?;
         let stderr = String::from_utf8(stderr).map_err(|error| error.to_string())?;
@@ -94929,6 +95023,128 @@ mod tests {
             "contention holder id",
         )?;
         ensure(stderr.is_empty(), "contention json stderr must be empty")
+    }
+
+    #[test]
+    fn index_maintenance_deadline_names_the_budget_that_raises_it() -> TestResult {
+        // GH#78: a rebuild cancelled by its own budget reported only
+        // "Deadline exceeded.", so the knob that raises the budget went unfound.
+        let workspace = Path::new("/tmp/ee gh78 workspace");
+        let seconds = crate::core::index::index_rebuild_timeout().as_secs();
+        let raised = seconds.saturating_mul(4).clamp(
+            crate::core::index::DEFAULT_INDEX_REBUILD_TIMEOUT_SECS,
+            crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS,
+        );
+        for (operation, dry_run, rerun) in [
+            (
+                "rebuild",
+                false,
+                "ee --workspace '/tmp/ee gh78 workspace' index rebuild --json",
+            ),
+            (
+                "reembed",
+                true,
+                "ee --workspace '/tmp/ee gh78 workspace' index reembed --dry-run --json",
+            ),
+        ] {
+            let budget =
+                super::CancelledCommandBudget::index_maintenance(operation, workspace, dry_run);
+            let error = IndexRebuildError::Cancelled(CancelReason::deadline());
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit =
+                write_index_rebuild_error(&error, Some(&budget), true, &mut stdout, &mut stderr);
+            let payload: serde_json::Value = serde_json::from_slice(&stdout)
+                .map_err(|error| format!("deadline JSON parse failed: {error}"))?;
+            ensure_equal(&exit, &ProcessExitCode::Cancelled, "deadline exit")?;
+            ensure_equal(
+                &payload["error"]["code"],
+                &serde_json::json!("cancelled"),
+                "deadline code",
+            )?;
+            ensure_equal(
+                &payload["error"]["details"]["cancelKind"],
+                &serde_json::json!("deadline"),
+                "deadline kind",
+            )?;
+            ensure_equal(
+                &payload["error"]["details"]["budgetEnv"],
+                &serde_json::json!("EE_INDEX_REBUILD_TIMEOUT_SECONDS"),
+                "budget env",
+            )?;
+            ensure_equal(
+                &payload["error"]["details"]["budgetSeconds"],
+                &serde_json::json!(seconds),
+                "budget seconds",
+            )?;
+            ensure_equal(
+                &payload["error"]["details"]["maxBudgetSeconds"],
+                &serde_json::json!(crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS),
+                "max budget seconds",
+            )?;
+            ensure_equal(
+                &payload["error"]["repair"],
+                &serde_json::json!(format!("EE_INDEX_REBUILD_TIMEOUT_SECONDS={raised} {rerun}")),
+                "repair raises the budget and reruns the same command",
+            )?;
+            ensure_equal(
+                &payload["error"]["repairKind"],
+                &serde_json::json!("actionable"),
+                "the budget repair runs as written",
+            )?;
+            // A budget lowered far below the default is raised to at least
+            // the default, so one rerun suffices; the cap still holds.
+            for (budget_seconds, expected) in [
+                (1, crate::core::index::DEFAULT_INDEX_REBUILD_TIMEOUT_SECS),
+                (
+                    crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS,
+                    crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS,
+                ),
+            ] {
+                let lowered = super::CancelledCommandBudget {
+                    seconds: budget_seconds,
+                    ..super::CancelledCommandBudget::index_maintenance(
+                        operation, workspace, dry_run,
+                    )
+                };
+                ensure_equal(
+                    &lowered.repair(),
+                    &format!("EE_INDEX_REBUILD_TIMEOUT_SECONDS={expected} {rerun}"),
+                    "the raised budget is at least the default and at most the cap",
+                )?;
+            }
+            ensure(stderr.is_empty(), "deadline json stderr must be empty")?;
+
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            write_index_rebuild_error(&error, Some(&budget), false, &mut stdout, &mut stderr);
+            let human = String::from_utf8(stderr).map_err(|error| error.to_string())?;
+            ensure_contains(
+                &human,
+                "EE_INDEX_REBUILD_TIMEOUT_SECONDS raises it",
+                "human knob",
+            )?;
+            ensure_contains(&human, &budget.repair(), "human repair")?;
+            ensure(stdout.is_empty(), "human deadline stdout must be empty")?;
+
+            // Any other cancellation was not caused by this budget, so the
+            // envelope must not blame it.
+            let error = IndexRebuildError::Cancelled(CancelReason::user("operator interrupt"));
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            write_index_rebuild_error(&error, Some(&budget), true, &mut stdout, &mut stderr);
+            let payload: serde_json::Value = serde_json::from_slice(&stdout)
+                .map_err(|error| format!("user-cancel JSON parse failed: {error}"))?;
+            ensure(
+                payload["error"].get("repair").is_none(),
+                "a non-deadline cancellation carries no budget repair",
+            )?;
+            ensure(
+                payload["error"]["details"].get("budgetEnv").is_none(),
+                "a non-deadline cancellation names no budget",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

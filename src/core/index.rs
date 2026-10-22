@@ -1696,11 +1696,13 @@ fn prepare_evidence_counts_for_rebuild(db: &DbConnection, workspace_id: &str) {
     }
 }
 
-/// Default wall-clock budget for an explicit full index rebuild.
+/// Default wall-clock budget for an explicit full index rebuild or re-embed.
 ///
 /// Large CASS stores can legitimately exceed the old five-minute hard-coded
 /// request budget (GH #78). Keep a generous bounded default for cancellation
 /// hygiene, while allowing an operator to raise it without recompiling ee.
+/// `ee index reembed` re-embeds the same full corpus, and its preview runs the
+/// same exact source plan as `rebuild --dry-run`, so both share this budget.
 pub const DEFAULT_INDEX_REBUILD_TIMEOUT_SECS: u64 = 3_600;
 /// Upper bound accepted from `EE_INDEX_REBUILD_TIMEOUT_SECONDS`.
 pub const MAX_INDEX_REBUILD_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
@@ -1712,7 +1714,9 @@ fn normalized_index_rebuild_timeout_secs(raw: Option<&str>) -> u64 {
         .unwrap_or(DEFAULT_INDEX_REBUILD_TIMEOUT_SECS)
 }
 
-fn index_rebuild_timeout() -> Duration {
+/// The wall-clock budget `rebuild_index` and `reembed_index` run under:
+/// `EE_INDEX_REBUILD_TIMEOUT_SECONDS`, normalized, or the default.
+pub(crate) fn index_rebuild_timeout() -> Duration {
     let raw = crate::config::env_registry::read(
         crate::config::env_registry::EnvVar::IndexRebuildTimeoutSeconds,
     );
@@ -1890,7 +1894,9 @@ pub async fn rebuild_index_with_cx(
 pub fn reembed_index(
     options: &IndexReembedOptions,
 ) -> Result<IndexReembedReport, IndexRebuildError> {
-    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+    // A re-embed rebuilds every document, so a fixed five-minute budget
+    // cancelled it on exactly the stores `rebuild` was given room for (GH #78).
+    crate::core::run_cli_with_cx(index_rebuild_timeout(), |cx| async move {
         reembed_index_with_cx(&cx, options).await
     })
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
