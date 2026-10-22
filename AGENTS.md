@@ -52,6 +52,48 @@ Hard integration rules:
 
 ---
 
+## Control Markers Must Not Match Their Own Command Line
+
+**A log contains the command that produced it.** So any sentinel a grader
+greps for is already in the log *before the run emits a single byte of its
+own output*. Both directions fail silently and both produce confident,
+well-formed, wrong answers:
+
+- **false positive** — a monitor sees its terminal marker in the echoed
+  command and reports a verdict for a run that has not started;
+- **false negative** — an assertion "finds" a secret that was only ever its
+  own query, because `ee search` echoes the query at `.data.query`,
+  `.data.queryAssist.captureTemplate.content` and `.command`. A string
+  present nowhere in the corpus returns 0 results and is still in the
+  response.
+
+**Namespace the marker.** Write `EE_GRADE_RC=` or `RS_HARNESS_RC=`, never a
+bare `HARNESS_RC=`. A prefix cannot be half-applied: either the token is
+distinctive or it is not.
+
+The alternatives are worse, and both have failed here. `grep '^MARKER'`
+works but has to be remembered at *every* call site, and forgetting it once
+is invisible. The `[m]arker` bracket trick was applied to one alternative of
+an alternation and forgotten on the others, by someone who knew the trick,
+so 2 of 5 hits were the searcher's own command line.
+
+If a bare marker is unavoidable — a grader built around `cargo`'s own
+`test result:` line, say — filter the echoed script out explicitly
+(`grep -v '^echo'`) and say in the grader why. A grader that greps
+`VERDICT=[A-Z]+` and matches the text of its own `echo` has been observed
+reporting `VERDICT=PASS` for a job that produced no output at all.
+
+**A watcher's terminal condition must be something the watched thing
+demonstrably prints.** A driver ending in `exit 99` prints nothing, so a
+watcher waiting for `^exit 99` in its log waits forever on a finished
+process. Produce the marker deliberately once before relying on it.
+
+Full incident set and the three-shapes analysis (constant-green,
+constant-red, and cannot-pass assertions are the same defect — the verdict
+does not vary with the property): bd-2phcw.
+
+---
+
 ## Private Fleet Identifiers: Never In Tracked Content
 
 **Do not write real worker names, host names, or routable IP addresses into
