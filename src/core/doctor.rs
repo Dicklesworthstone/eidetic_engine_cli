@@ -3168,6 +3168,48 @@ fn embedding_posture_check_result(
 /// bd-h1xbv: a present bundled model whose `.verified` receipt is missing or
 /// stale is re-hashed by every process that loads it. Say so on the embedding
 /// check, advisory only (results are unaffected), and point at the re-mint.
+/// Join the configured `search.semantic_weight` to the ACTIVE vector tier
+/// (bd-2vq2z.15).
+///
+/// `lint_semantic_weight_without_neural_tier` has existed in
+/// `core::config_explain` with zero callers. Both facts it needs were already
+/// computed inside this check and nothing joined them: the tier arrives as
+/// `posture.deterministic` from `get_index_status`, and the weight is one
+/// `workspace_config` read away, which this module already does elsewhere
+/// (`materialized_peer_group_counts`, :890).
+///
+/// Without the join, an operator who sets `search.semantic_weight = 0.45` on a
+/// deterministic-hash box is told nothing at all: the posture check reports the
+/// tier without mentioning the weight, and `ee config explain` is not a surface
+/// anyone runs before being confused. That silence is the exact trap this bead
+/// was filed for -- `semantic_weight` reads as "turn on neural semantic
+/// search", and setting it on a hash-fallback tier does no such thing.
+///
+/// `neural_tier_active` is `!deterministic`: the lint's own message says the
+/// condition is "the active vector tier is deterministic hash, not neural".
+fn with_semantic_weight_lint_advisory(
+    mut check: CheckResult,
+    workspace_path: &Path,
+    deterministic_tier: bool,
+) -> CheckResult {
+    let configured_weight =
+        workspace_config(workspace_path).and_then(|config| config.search.semantic_weight);
+    let Some(finding) = crate::core::config_explain::lint_semantic_weight_without_neural_tier(
+        configured_weight,
+        !deterministic_tier,
+    ) else {
+        return check;
+    };
+    check.message.push_str(&format!(
+        " Advisory code: {}. {}",
+        finding.code, finding.message
+    ));
+    if matches!(check.severity, CheckSeverity::Ok) {
+        check.severity = CheckSeverity::Warning;
+    }
+    check.advisory()
+}
+
 fn with_model_receipt_stale_advisory(mut check: CheckResult, receipt_stale: bool) -> CheckResult {
     if !receipt_stale {
         return check;
@@ -3226,16 +3268,20 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
     };
     match get_index_status(&options) {
         Ok(report) => match &report.embedding {
-            Some(posture) => with_model_receipt_stale_advisory(
-                embedding_posture_check_result(
-                    posture.semantic,
-                    posture.mode,
-                    &posture.fast_model_id,
-                    posture.fast_dimension,
-                    posture.deterministic,
-                    &trap_present,
+            Some(posture) => with_semantic_weight_lint_advisory(
+                with_model_receipt_stale_advisory(
+                    embedding_posture_check_result(
+                        posture.semantic,
+                        posture.mode,
+                        &posture.fast_model_id,
+                        posture.fast_dimension,
+                        posture.deterministic,
+                        &trap_present,
+                    ),
+                    !super::index::stale_receipt_potion_model_dirs().is_empty(),
                 ),
-                !super::index::stale_receipt_potion_model_dirs().is_empty(),
+                workspace_path,
+                posture.deterministic,
             ),
             None => embedding_posture_unavailable_check(
                 &trap_present,
