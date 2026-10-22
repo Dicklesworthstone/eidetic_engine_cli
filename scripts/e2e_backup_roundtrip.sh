@@ -133,8 +133,23 @@ if printf '%s' "$rs" | jq -e '.success == true' >/dev/null 2>&1; then
     # authentication.recordsRoot, which covers only the emitted memory, tag and
     # link lines. The controls below show that root is stable across backups of
     # unchanged content and moves when that content changes.
-    rs_db="$(printf '%s' "$rs" | jq -r '.data.restoredDatabasePath // .data.databasePath // empty')"
-    rs_imported="$(printf '%s' "$rs" | jq -r '.data.counts.memoriesImported // 0')"
+    # jq_read, not bare reads (bd-orll0). Both of these gate the round-trip
+    # identity assertion, and the `else` below does not merely skip it -- it
+    # states a CAUSE, naming bd-1n0np.23.2 and quoting ${rs_imported} as
+    # evidence that the restore producer is immature. A wrong path would make
+    # rs_imported "0" via its own `// 0` default and that message would then
+    # blame the product for a misread, which is the expensive failure mode here.
+    # rs_db additionally hedges between two spellings, which is the signature
+    # this bead was filed for: an author who knew the path would not hedge.
+    # Each status is captured IMMEDIATELY: JQ_READ_STATUS is a single global and
+    # holds only the most recent read, so testing it after two reads would miss
+    # a wrong first path behind a good second one.
+    jq_read "$rs" '.data.restoredDatabasePath // .data.databasePath // empty' \
+        "restore database path" rs_db
+    rs_db_status="$JQ_READ_STATUS"
+    jq_read "$rs" '.data.counts.memoriesImported // 0' \
+        "restore imported count" rs_imported
+    rs_imported_status="$JQ_READ_STATUS"
     if [ -n "$rs_db" ] && [ -n "$records_hash" ] && [ "$rs_imported" -gt 0 ] 2>/dev/null; then
         cr2="$(ee_json backup create --workspace "$WS" --database "$rs_db" --json)"
         if printf '%s' "$cr2" | jq -e '.success == true' >/dev/null 2>&1; then
@@ -149,8 +164,14 @@ if printf '%s' "$rs" | jq -e '.success == true' >/dev/null 2>&1; then
         else
             log_drop 1 "round-trip re-backup over restored DB unavailable on this binary; restore success asserted above"
         fi
-    else
-        log_drop 1 "round-trip re-hash pending (bd-1n0np.23.2): restore imported ${rs_imported} record(s) on this binary, so a re-backup cannot yet reproduce the source recordsHash; when the restore producer fully materializes the durable records, assert the re-backup reproduces the original recordsHash byte-for-byte"
+    elif [ "$rs_db_status" != "missing_key" ] && [ "$rs_db_status" != "harness_error" ] &&
+         [ "$rs_imported_status" != "missing_key" ] && [ "$rs_imported_status" != "harness_error" ]; then
+        # The explanation below is only honest when the reads resolved. If either
+        # path were wrong, jq_read has already failed naming it, and repeating
+        # the producer-immaturity story here would attribute a misread to the
+        # product -- and do it citing a bead number, which is how a measurement
+        # error acquires a paper trail.
+        log_drop 1 "round-trip re-hash pending (bd-1n0np.23.2): restore imported ${rs_imported:-0} record(s) on this binary, so a re-backup cannot yet reproduce the source recordsHash; when the restore producer fully materializes the durable records, assert the re-backup reproduces the original recordsHash byte-for-byte"
     fi
 else
     rs_msg="$(printf '%s' "$rs" | jq -r '.error.message // "unknown"' 2>/dev/null)"

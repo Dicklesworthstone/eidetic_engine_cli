@@ -296,6 +296,118 @@ assert_jq() {
     esac
 }
 
+# jq_read <json> <filter> <label> <outvar> -- a bare-jq read that cannot decay
+# into a silent skip (bd-orll0).
+#
+# THE DEFECT CLASS. 108 sites across scripts/e2e_*.sh read a value with a bare
+# `jq -r` into a shell variable, and 8 of them then branch on whether that
+# variable came back empty to decide WHETHER TO ASSERT AT ALL. A read naming the
+# wrong path yields empty, the else branch fires, and the script records a drop
+# that reads as "the feature is not built yet" rather than "I looked in the wrong
+# place". assert_jq and its null-path diagnostic are never reached, because no
+# assertion runs. Two confirmed instances: bd-psna1 (blindSpots read at three
+# spellings the envelope never had) and the coverageRatio read in
+# scripts/e2e_gap_honesty.sh (fixed in 4f11475eb), which lived in the SAME FILE
+# as the first and survived its fix.
+#
+# WHY has() AND NOT `== null`. _assert_jq_resolvable_null_paths above asks "is
+# this path null", which CANNOT separate a wrong spelling from a run that had no
+# value -- both are null. Asking the PARENT whether it carries the KEY does
+# separate them, and that discrimination is the only thing this helper adds:
+#
+#     parent is an object and LACKS the key   -> the read is in the WRONG PLACE
+#     parent HAS the key, value is null       -> genuinely absent this run
+#
+# Validated against a live `ee insights --json` envelope: `.data` is an object of
+# 14 keys, and has("coverageRatio") and has("blindSpots") are BOTH false, so this
+# check flags both historical instances, while has("mode") is true so a real key
+# is not flagged.
+#
+# THE CHECK IS DRIVEN BY THE FILTER'S PATHS, NOT BY EMPTINESS, and that is load
+# bearing. Three of the eight sites default with `// 0` or `// ""`, so their read
+# NEVER comes back empty: a missing key arrives as a plausible "0" and the
+# caller's own `-gt 0` test then skips just as quietly. Keying the diagnostic on
+# the path tokens catches those; keying it on emptiness would not.
+#
+# A FILTER THAT HEDGES IS ONLY WRONG IF EVERY SPELLING IS WRONG. `.data.a //
+# .data.b` is reported missing only when NEITHER parent carries its key, because
+# one resolving spelling means the read works.
+#
+# RETURNS 0 ALWAYS, reporting through <outvar> and JQ_READ_STATUS. Both are
+# forced, not stylistic:
+#   * A non-zero return would abort scripts/e2e_rule_validation_counter.sh on a
+#     bare assignment -- it runs under `set -euo pipefail` and holds four of the
+#     eight sites.
+#   * The status cannot come back from `v="$(jq_read ...)"`, because command
+#     substitution runs in a SUBSHELL and the assignment would be lost. Hence
+#     the out-variable rather than stdout.
+#
+# JQ_READ_STATUS is one of:
+#   value          <outvar> holds a non-empty, non-null value
+#   absent         the paths resolve but there is no value; the caller should
+#                  take whatever drop or skip it already intended
+#   missing_key    every path named by the filter is absent from its parent
+#                  object; a FAILURE naming them has already been recorded
+#   harness_error  the filter did not compile or the input is not JSON; a
+#                  FAILURE has already been recorded
+#
+# JQ_READ_STATUS IS ONE GLOBAL AND HOLDS ONLY THE MOST RECENT READ. A caller that
+# does two reads before branching must capture each status immediately
+# (`st1="$JQ_READ_STATUS"`), or a wrong first path hides behind a good second one
+# and the branch runs as though both resolved. This is not hypothetical -- the
+# first draft of the e2e_backup_roundtrip.sh conversion had exactly that bug.
+#
+# BEST EFFORT, LIKE ITS SIBLING. Only root-anchored `.data.<key>...` tokens are
+# inspected. Interpolated paths ("${items_path}[].${id_field}") and anything
+# behind an iterator are invisible here and fall through as `absent`, which is
+# exactly the behaviour the call site had before -- no better, no worse. Nor is a
+# missing INTERMEDIATE object flagged: `.data.counts` being absent entirely is
+# genuinely ambiguous (a command may omit an optional object), and flagging it
+# would red a script whose feature works, which is the worse error. A diagnostic
+# that overstated its coverage would recreate, one level up, the defect it exists
+# to fix.
+jq_read() {
+    local json="$1" filter="$2" label="${3:-jq_read}" outvar="$4"
+    local value jq_err rc token parent leaf missing="" seen=0 resolved=0
+    JQ_READ_STATUS="harness_error"
+    printf -v "$outvar" '%s' ""
+
+    value="$(printf '%s' "$json" | jq -r "$filter" 2>/dev/null)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        jq_err="$(printf '%s' "$json" | jq -r "$filter" 2>&1 >/dev/null)"
+        _harness_fail "$label: HARNESS ERROR -- bare read failed (jq exit $rc) for [$filter]: $(printf '%s' "$jq_err" | tr '\n' ' ' | cut -c1-300)"
+        return 0
+    fi
+
+    for token in $(printf '%s' "$filter" | grep -oE '\.data(\.[A-Za-z_][A-Za-z0-9_]*)+' | sort -u); do
+        seen=$((seen + 1))
+        parent="${token%.*}"
+        leaf="${token##*.}"
+        # Only the unambiguous shape counts: the parent EXISTS as an object and
+        # does not carry the key. Anything else is left to the caller.
+        if printf '%s' "$json" | jq -e "($parent | type == \"object\") and (($parent | has(\"$leaf\")) | not)" >/dev/null 2>&1; then
+            missing="${missing:+$missing, }$token"
+        else
+            resolved=$((resolved + 1))
+        fi
+    done
+
+    if [ "$seen" -gt 0 ] && [ "$resolved" -eq 0 ]; then
+        _harness_fail "$label: WRONG PATH, not a missing feature -- every root-anchored path in [$filter] names a key its parent object does not carry: $missing. The payload's parent object exists, so this read can never produce a value and the branch it guards would have been skipped silently."
+        JQ_READ_STATUS="missing_key"
+        return 0
+    fi
+
+    if [ -n "$value" ] && [ "$value" != "null" ]; then
+        printf -v "$outvar" '%s' "$value"
+        JQ_READ_STATUS="value"
+    else
+        JQ_READ_STATUS="absent"
+    fi
+    return 0
+}
+
 # assert_exit <expected_code> <label> -- <command...>
 assert_exit() {
     local expected="$1" label="$2"; shift 2; [ "${1:-}" = "--" ] && shift
