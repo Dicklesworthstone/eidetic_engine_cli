@@ -4450,6 +4450,115 @@ mod tests {
         workspace_secret_risk_overrides_safe_classification,
     };
 
+    /// bd-ls4a7: `RAW_TOKEN_PATTERNS` is ONE table with TWO consumers. The
+    /// detector decides whether a write is permitted; the redactor performs the
+    /// removal. Sharing the table makes row-level drift impossible, which is
+    /// what bd-vcch1 fixed and what check-pinned-definitions.sh now gates, but
+    /// the two threshold comparisons are still INDEPENDENTLY WRITTEN
+    /// (`suffix_len >= min_suffix_len` in each function), and nothing asserted
+    /// the two agree in BEHAVIOUR. A disagreement is not cosmetic: it means a
+    /// token that blocks a write without being redacted, or one redacted
+    /// without blocking.
+    ///
+    /// DIFFERENTIAL, so it needs no oracle. For every row it asserts only that
+    /// both consumers reach the SAME verdict, never which verdict is correct.
+    /// Whether 40 is the right threshold for `sk-proj-` is a redaction-policy
+    /// call and is deliberately NOT encoded here -- encoding it would make this
+    /// test fail on a legitimate policy change.
+    ///
+    /// Both wrappers used below pass `require_left_boundary = true`, so the two
+    /// sides are compared under the same boundary rule rather than across two.
+    #[test]
+    fn detector_and_redactor_agree_on_every_raw_token_row_bd_ls4a7() {
+        let rows = super::RAW_TOKEN_PATTERNS;
+        let shapes = 3usize;
+        let lengths = 3usize;
+        let mut checked = 0usize;
+        let mut positive_verdicts = 0usize;
+
+        for &(prefix, code, min_suffix_len, _requires_context) in rows {
+            for suffix_len in [
+                min_suffix_len.saturating_sub(1),
+                min_suffix_len,
+                min_suffix_len + 1,
+            ] {
+                let token = format!("{prefix}{}", "a".repeat(suffix_len));
+                for input in [
+                    token.clone(),
+                    format!("export SECRET={token}"),
+                    format!("the value is {token} and then prose"),
+                ] {
+                    let mut matches = Vec::new();
+                    super::detect_raw_api_token_matches(input.as_str(), &mut matches);
+                    let detected = matches.iter().any(|found| found.pattern_id == code);
+
+                    let mut reasons = Vec::new();
+                    let (output, changed) =
+                        super::redact_raw_api_tokens(input.as_str(), &mut reasons);
+                    let redacted = reasons.contains(&code);
+
+                    assert_eq!(
+                        detected, redacted,
+                        "detector and redactor disagree for `{code}` at suffix_len \
+                         {suffix_len}: detected={detected} redacted={redacted} \
+                         input={input:?}"
+                    );
+
+                    if redacted {
+                        assert!(changed, "`{code}` pushed a reason without reporting a change");
+                        assert!(
+                            !output.contains(token.as_str()),
+                            "`{code}` reported redaction but left the token in the output"
+                        );
+                        positive_verdicts += 1;
+                    }
+                    checked += 1;
+                }
+            }
+        }
+
+        assert_eq!(
+            checked,
+            rows.len() * lengths * shapes,
+            "input matrix did not cover every row"
+        );
+        // EMPTY-WORLD GUARD. Agreement is trivially satisfied when neither
+        // consumer ever fires, so without this the whole test passes on a world
+        // where redaction is broken everywhere.
+        assert!(
+            positive_verdicts > 0,
+            "no row ever produced a redaction, so agreement proved nothing"
+        );
+    }
+
+    /// Positive control for the differential test above, against the drift
+    /// class it exists to catch: one gate written `>=` and the other `>`.
+    ///
+    /// WHAT THIS PROVES: that an `assert_eq!` on the two verdicts fails when
+    /// the two comparisons disagree at the boundary, which is the realistic
+    /// way two independently-written `suffix_len >= min_suffix_len` sites drift
+    /// apart.
+    ///
+    /// WHAT IT DOES NOT PROVE: that the REAL functions have ever disagreed, or
+    /// that the test above would catch every possible divergence. It operates
+    /// on local copies of the comparison, because sabotaging the shipped gates
+    /// to watch the real test go red would mean editing shared source. So the
+    /// claim is about the assertion's SHAPE, not about the product.
+    #[test]
+    fn the_raw_token_agreement_assertion_can_fail_bd_ls4a7() {
+        let min_suffix_len = 40usize;
+        let suffix_len = min_suffix_len;
+
+        let detector_fires = suffix_len >= min_suffix_len;
+        let redactor_fires = suffix_len > min_suffix_len;
+
+        assert_ne!(
+            detector_fires, redactor_fires,
+            "a desynchronized pair must disagree exactly at the threshold, or \
+             the differential assertion above cannot detect this drift class"
+        );
+    }
+
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "policy");
