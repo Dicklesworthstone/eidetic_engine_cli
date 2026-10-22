@@ -49,6 +49,14 @@ HARNESS_FAIL=0
 HARNESS_STEP=0
 HARNESS_DROPS=0
 HARNESS_FAILURES=()
+# Set by jq_read and read by CALLERS in other scripts, which is why reporting
+# goes through a global rather than stdout: a `v="$(jq_read ...)"` capture would
+# run in a subshell and lose the status. shellcheck cannot see a use across that
+# source boundary and reports SC2034 against whichever assignment inside the
+# function it saw last, so a per-line directive just chases the warning around.
+# `export` is the remedy SC2034's own text names for a variable consumed
+# externally, and it settles all four assignment sites at once.
+export JQ_READ_STATUS=""
 HARNESS_START_NS=0
 HARNESS_TMP_WORKSPACES=()
 

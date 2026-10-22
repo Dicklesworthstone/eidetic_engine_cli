@@ -138,6 +138,11 @@ step "apply refuses bulk auto-import without --approved-only"
 # the same honest-looking line. jq_read separates them, because a `.data` that
 # exists without a `runId` key can never yield a value and is reported as a
 # WRONG PATH, while a genuinely absent runId still takes the drop below.
+# Pre-initialised rather than suppressed with a directive: jq_read assigns this
+# through `printf -v`, which shellcheck's static model cannot follow, and a bare
+# declaration here removes the whole SC2154 class at the source instead of
+# silencing it at each of the three use sites below.
+run_id=""
 jq_read "$run" '.data.runId // empty' "bootstrap run id" run_id
 if [ "$JQ_READ_STATUS" = "value" ] && ee_supports bootstrap apply; then
     refuse="$(ee_json bootstrap apply "$run_id" --include SKILL.md --include 'references/**/*.md' --workspace "$WS" --json)"

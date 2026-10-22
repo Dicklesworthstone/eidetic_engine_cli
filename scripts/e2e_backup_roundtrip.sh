@@ -144,6 +144,12 @@ if printf '%s' "$rs" | jq -e '.success == true' >/dev/null 2>&1; then
     # Each status is captured IMMEDIATELY: JQ_READ_STATUS is a single global and
     # holds only the most recent read, so testing it after two reads would miss
     # a wrong first path behind a good second one.
+    #
+    # Declared before the calls because jq_read assigns through `printf -v`,
+    # which shellcheck's static model cannot follow; this removes the SC2154
+    # class at the source rather than silencing it at each use.
+    rs_db=""
+    rs_imported=""
     jq_read "$rs" '.data.restoredDatabasePath // .data.databasePath // empty' \
         "restore database path" rs_db
     rs_db_status="$JQ_READ_STATUS"
