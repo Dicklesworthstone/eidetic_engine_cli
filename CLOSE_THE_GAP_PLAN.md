@@ -2752,3 +2752,51 @@ spending 32 minutes of an idle lane to turn any of it into a verdict. `.42` was
 already carrying two independent readings — a source audit on 2026-10-20 and a
 black-box measurement on the shipped v0.18.0 — and still needed a third before
 anyone would close it. Writing the test is not the expensive part here.
+
+### 18.10 The arithmetic behind §18.5, and the single action that answers it
+
+§18.5 described the pattern — a correct fix's default outcome here is that it
+stays open — as an observation. It is measurable, and the number is larger than
+the two beads §18.9 happened to find.
+
+**26 open beads have a test file that names them. Six are P0. The 38 citing
+files land in only 14 cargo test targets.** Measured at cf0df2719 by matching
+every open/in_progress/blocked bead id against the text of all 531 files under
+`tests/`, requiring the character after the id not to continue it — a bare
+substring test credits `…1azkt.1` for every citation by `.10`, `.11`, `.13` and
+`.18`. The targets concentrate hard: `integration_a_d` alone carries seven
+beads, `integration_g_m` five, `integration_s_z` five, `integration_n_r` four.
+
+So one dispatched `cargo test --locked --no-fail-fast --tests` run grades every
+one of them, for the price of one build.
+
+**The prior for what that run returns is already in the tracker, and it is
+emphatic.** bd-hwye2 enumerated 33 red rows in `integration_s_z`, split them by
+a two-host two-base intersection, and re-measured its 16-row Group B at HEAD on
+2026-10-17: **15 were already fixed; 1 was real.** Its author's own summary is
+"Group B is clear." A 94% stale-red rate in the only sample anybody has taken
+is the argument.
+
+Filed as **bd-z368i** (P1), `related` to bd-hwye2 (the prior), bd-lkizl (85
+closed beads citing a compile as behavioural proof — the same delivery
+mechanism), and to `.10` and `.42`.
+
+What the bead deliberately does NOT claim is that 26 beads become closeable. The
+counter-example is `.10` from §18.9: its named target ran, 53 passed, 0 failed,
+and the bead correctly stays open because the 53 are the instrument's own
+calibration and the two product-pointing arms are `#[ignore]`d. **A test file
+citing a bead is not a test proving it.** The deliverable is therefore a
+per-bead evidence table with ignored counts reported separately and never
+folded into passed, and "its test does not test it" admitted as a third
+legitimate outcome beside green and red.
+
+Two grading constraints are load-bearing rather than stylistic, and a
+multi-target run is more exposed to both than the single-target runs in §18.9.
+`--no-fail-fast` is mandatory, because cargo stops at the first failing target
+while the command still reads as the broader check. And `tail -1` is wrong by
+construction: several `ee` tests spawn children that emit their own complete
+libtest summaries onto the same stream, sometimes before the parent target
+finishes, so the summaries must be summed and reconciled against the `running N
+tests` announcements per target. `--lib` stays out of the same invocation
+entirely — its 11 chronic failures make the run's exit status uninterpretable,
+and it needs its own filtered dispatch.
