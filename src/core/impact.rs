@@ -344,24 +344,23 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
         .database_path
         .clone()
         .unwrap_or_else(|| default_workspace_database_path(&options.workspace_path));
-    let connection = DbConnection::open_file(&database_path)?;
+    let connection = DbConnection::open_file_read_only(&database_path)?;
+    // Pin all three tiers before reading workspace identity or anchors. Search
+    // and graph expansion borrow this snapshot instead of opening another view.
+    let source_snapshot = graph_neighbors::Snapshot::begin(&connection)?;
     let workspace_id = resolve_workspace_id(&connection, &workspace_root)?;
     let scope_context = MemoryScopeContext::for_workspace(
         &workspace_root,
         options.memory_scope,
         options.strict_scope,
     );
+    let admission =
+        graph_neighbors::MemoryAdmission::new(&connection, &workspace_id, &scope_context);
     let mut scope_stats = scope_context.stats();
     let exact_anchors = connection
         .query_memory_anchors(query_anchor.anchor_kind, &query_anchor.anchor_value_hash)?;
-    let mut exact_results = exact_impact_results(
-        &connection,
-        &workspace_id,
-        &scope_context,
-        &mut scope_stats,
-        &exact_anchors,
-        options.limit,
-    )?;
+    let mut exact_results =
+        exact_impact_results(&admission, &mut scope_stats, &exact_anchors, options.limit)?;
     let exact_anchor_count = exact_results.len();
 
     let mut fallback_report = None;
@@ -398,7 +397,7 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
             Ok(report) => {
                 fallback_status = ImpactFallbackStatus::Searched;
                 append_fallback_results(
-                    &connection,
+                    &admission,
                     &report,
                     &mut seen_memory_ids,
                     limit,
@@ -418,9 +417,7 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
     // anchor-proximity neighbors. An optional graph failure must not discard
     // the independently usable results from the first two phases.
     let (graph_results, graph_phase) = graph_neighbors::read(
-        &connection,
-        &workspace_id,
-        &scope_context,
+        &admission,
         &mut scope_stats,
         &surface,
         &seen_memory_ids,
@@ -432,6 +429,7 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
         result.rank = index + 1;
     }
 
+    source_snapshot.finish()?;
     Ok(ImpactReport {
         schema: IMPACT_SCHEMA_V1,
         surface,
@@ -448,15 +446,16 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
 }
 
 fn exact_impact_results(
-    connection: &DbConnection,
-    workspace_id: &str,
-    scope_context: &MemoryScopeContext,
+    admission: &graph_neighbors::MemoryAdmission<'_>,
     scope_stats: &mut MemoryScopeStats,
     anchors: &[StoredMemoryAnchor],
     limit: u32,
 ) -> Result<Vec<ImpactResult>, ImpactError> {
     let mut grouped = BTreeMap::<String, Vec<StoredMemoryAnchor>>::new();
     for anchor in anchors {
+        if !graph_neighbors::anchor_valid(anchor) {
+            continue;
+        }
         grouped
             .entry(anchor.memory_id.clone())
             .or_default()
@@ -469,39 +468,34 @@ fn exact_impact_results(
         return Ok(results);
     }
     for (memory_id, mut memory_anchors) in grouped {
-        let Some(memory) = connection.get_memory(&memory_id)? else {
-            scope_stats.record_candidate_id(false, Some(&memory_id));
+        let admitted = admission.admit(&memory_id)?;
+        scope_stats.record_candidate_id(admitted.is_some(), Some(&memory_id));
+        let Some(admitted) = admitted else {
             continue;
         };
-        if memory.tombstoned_at.is_some() {
-            scope_stats.record_candidate_id(false, Some(&memory_id));
-            continue;
-        }
-        let tags = connection.get_memory_tags(&memory_id)?;
-        let workspace_candidate =
-            memory.workspace_id == workspace_id || memory_tags_include_global_scope(&tags);
-        let in_scope =
-            workspace_candidate && scope_context.memory_in_scope_with_tags(&memory, &tags);
-        scope_stats.record_candidate_id(in_scope, Some(&memory_id));
-        if !in_scope {
-            continue;
-        }
         memory_anchors.sort_by(|left, right| {
             left.anchor_kind
                 .cmp(&right.anchor_kind)
                 .then_with(|| left.anchor_value_hash.cmp(&right.anchor_value_hash))
                 .then_with(|| left.memory_id.cmp(&right.memory_id))
         });
-        let anchor = memory_anchors.first().cloned();
+        let anchor = memory_anchors
+            .iter()
+            .map(ImpactAnchorSummary::from_anchor)
+            .find(|summary| {
+                let rendered = summary.data_json().to_string();
+                crate::policy::redact_secret_like_content(&rendered).content == rendered
+            });
+        let Some(anchor) = anchor else {
+            continue;
+        };
         results.push(ImpactResult {
             rank: 0,
             memory_id,
             match_type: ImpactMatchType::ExactAnchor,
-            score: anchor
-                .as_ref()
-                .map_or(1.0, |stored| stored.confidence.clamp(0.0, 1.0)),
-            memory: ImpactMemorySummary::from_memory(&memory),
-            anchor: anchor.as_ref().map(ImpactAnchorSummary::from_anchor),
+            score: anchor.confidence,
+            memory: admitted.summary,
+            anchor: Some(anchor),
             fallback_hit: None,
             graph_path: None,
         });
@@ -513,7 +507,7 @@ fn exact_impact_results(
 }
 
 fn append_fallback_results(
-    connection: &DbConnection,
+    admission: &graph_neighbors::MemoryAdmission<'_>,
     report: &SearchReport,
     seen_memory_ids: &mut BTreeSet<String>,
     limit: usize,
@@ -543,18 +537,21 @@ fn append_fallback_results(
             break;
         }
         let memory_id = hit.doc_id.as_str();
-        if !memory_id.starts_with("mem_") || !seen_memory_ids.insert(memory_id.to_owned()) {
+        if !memory_id.starts_with("mem_") || seen_memory_ids.contains(memory_id) {
             continue;
         }
-        let Some(memory) = connection.get_memory(memory_id)? else {
+        // Search may have redacted or screened its own projection. Never
+        // replace that result with an unchecked raw memory summary.
+        let Some(admitted) = admission.admit(memory_id)? else {
             continue;
         };
+        seen_memory_ids.insert(memory_id.to_owned());
         results.push(ImpactResult {
             rank: 0,
             memory_id: memory_id.to_owned(),
             match_type: ImpactMatchType::SearchFallback,
             score: hit.relevance_score(),
-            memory: ImpactMemorySummary::from_memory(&memory),
+            memory: admitted.summary,
             anchor: None,
             fallback_hit: rendered_by_memory_id.get(memory_id).cloned(),
             graph_path: None,

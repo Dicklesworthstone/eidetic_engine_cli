@@ -80,7 +80,8 @@ fn read_graph(
         false,
     );
     let mut stats = scope.stats();
-    read(db, WS, &scope, &mut stats, &surface(), excluded, limit)
+    let admission = MemoryAdmission::new(db, WS, &scope);
+    read(&admission, &mut stats, &surface(), excluded, limit)
 }
 
 fn fixture() -> (DbConnection, String, String) {
@@ -257,4 +258,237 @@ fn disabled_graph_feature_does_not_touch_source_tables() {
     let (results, phase) = read_graph(&db, &BTreeSet::new(), 8);
     assert!(results.is_empty());
     assert_eq!(phase.reason, Some("graph_feature_disabled"));
+}
+
+fn hold_memory(db: &DbConnection, memory: &str) {
+    db.insert_feedback_quarantine(
+        "fq_00000000000000000000000933",
+        &CreateFeedbackQuarantineInput {
+            workspace_id: WS.to_owned(),
+            source_id: "PRIVATE-IMPACT-REVIEW".to_owned(),
+            target_type: "memory".to_owned(),
+            target_id: memory.to_owned(),
+            signal: "harmful".to_owned(),
+            weight: 1.0,
+            source_type: "outcome_observed".to_owned(),
+            proposed_event_id: None,
+            recorded_at: BASE.to_owned(),
+            reason: "PRIVATE-IMPACT-REVIEW".to_owned(),
+            event_reason: None,
+            evidence_json: None,
+            session_id: None,
+            raw_event_hash: format!("blake3:{}", "a".repeat(64)),
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn public_exact_impact_admits_live_sources_before_filling_the_limit() {
+    const SECRET: &str = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for restriction in [
+        "tombstoned",
+        "superseded",
+        "expired",
+        "future",
+        "sealed",
+        "held",
+        "placeholder",
+        "foreign",
+        "secret_body",
+        "secret_provenance",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().canonicalize().unwrap();
+        let path = workspace.join("impact.ee.db");
+        let db = DbConnection::open_file(&path).unwrap();
+        initialize(&db, &workspace);
+        let hidden = seed(&db, WS, 1, "PRIVATE-IMPACT-CANARY for `EE_IMPACT_ROUTE`.");
+        let live = seed(&db, WS, 2, ROOT_BODY);
+        match restriction {
+            "tombstoned" | "superseded" | "expired" | "future" => {
+                let (column, value) = match restriction {
+                    "tombstoned" => ("tombstoned_at", BASE),
+                    "superseded" => ("superseded_at", BASE),
+                    "expired" => ("valid_to", BASE),
+                    _ => ("valid_from", "2099-01-01T00:00:00Z"),
+                };
+                db.execute_raw(&format!(
+                    "UPDATE memories SET {column} = '{value}' WHERE id = '{hidden}'"
+                ))
+                .unwrap();
+            }
+            "sealed" => db
+                .insert_memory_seal(&hidden, &format!("blake3:{}", "a".repeat(64)), BASE)
+                .unwrap(),
+            "held" => hold_memory(&db, &hidden),
+            "placeholder" => db
+                .execute_raw(&format!(
+                    "UPDATE memories SET content = '{}' WHERE id = '{hidden}'",
+                    crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+                ))
+                .unwrap(),
+            "foreign" => db
+                .execute_raw(&format!(
+                    "UPDATE memories SET workspace_id = '{OTHER}' WHERE id = '{hidden}'"
+                ))
+                .unwrap(),
+            "secret_body" => db
+                .execute_raw(&format!(
+                    "UPDATE memories SET content = 'PRIVATE-IMPACT-CANARY {SECRET}' WHERE id = '{hidden}'"
+                ))
+                .unwrap(),
+            "secret_provenance" => db
+                .execute_raw(&format!(
+                    "UPDATE memories SET provenance_uri = 'https://example.invalid/{SECRET}' WHERE id = '{hidden}'"
+                ))
+                .unwrap(),
+            _ => unreachable!(),
+        }
+        // Keep the stale anchor in place: the result limit must be filled by
+        // admitted memory, rather than trusting an exact index/anchor match.
+        assert!(!db.list_memory_anchors(&hidden).unwrap().is_empty());
+        let before = std::fs::read(&path).unwrap();
+        let report = super::super::run_impact(&super::super::ImpactOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(path.clone()),
+            index_dir: Some(workspace.join("absent-index")),
+            surface: super::super::ImpactSurfaceQuery {
+                kind: MemoryAnchorKind::EnvVar,
+                value: "EE_IMPACT_ROUTE".to_owned(),
+            },
+            limit: 1,
+            speed: crate::search::SpeedMode::Instant,
+            source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        })
+        .unwrap();
+        assert_eq!(report.results.len(), 1, "{restriction}");
+        assert_eq!(report.results[0].memory_id, live, "{restriction}");
+        assert_eq!(report.exact_anchor_count, 1, "{restriction}");
+        assert_eq!(
+            report.fallback_status,
+            super::super::ImpactFallbackStatus::SkippedLimitFilled,
+            "{restriction}"
+        );
+        let rendered = report.data_json().to_string();
+        assert!(!rendered.contains("PRIVATE-IMPACT"), "{restriction}");
+        assert!(!rendered.contains(SECRET), "{restriction}");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "{restriction}");
+    }
+}
+
+#[test]
+fn fallback_rehydration_cannot_reintroduce_sealed_or_secret_memory() {
+    use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
+    use crate::core::search::{
+        ScoreSource, SearchHit, SearchReport, SearchSourceMode, SearchStatus,
+    };
+    use crate::models::model_registry::EmbedBackend;
+
+    let (db, hidden, live) = fixture();
+    db.insert_memory_seal(&hidden, &format!("blake3:{}", "a".repeat(64)), BASE)
+        .unwrap();
+    let secret = seed(&db, WS, 3, TARGET_BODY);
+    db.execute_raw(&format!(
+        "UPDATE memories SET provenance_uri = 'https://example.invalid/sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' WHERE id = '{secret}'"
+    ))
+    .unwrap();
+    // A cached/index result is only a candidate. Recheck the authoritative
+    // source even when search previously admitted or redacted its own hit.
+    let report = SearchReport {
+        status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
+        query: "impact route".to_owned(),
+        requested_limit: 3,
+        results: [&hidden, &secret, &live]
+            .into_iter()
+            .map(|id| SearchHit {
+                doc_id: id.clone(),
+                score: 0.91,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(0.91),
+                rerank_score: None,
+                metadata: None,
+                explanation: None,
+            })
+            .collect(),
+        elapsed_ms: 0.0,
+        errors: Vec::new(),
+        degraded: Vec::new(),
+        runtime_profile: RuntimeProfileReport::for_profile(
+            OperatingProfile::Workstation,
+            "impact_admission_test",
+        ),
+        rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+        rerank_configured_top_k: 50,
+        rerank_runtime_available: false,
+        relevance_floor_applied: None,
+        candidates_below_floor: 0,
+        query_assist: None,
+        source_mode_requested: SearchSourceMode::LexicalOnly,
+        source_mode_applied: SearchSourceMode::LexicalOnly,
+        source_mode_fallback: false,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        index_freshness: None,
+    };
+    let scope = MemoryScopeContext::for_workspace(
+        std::path::Path::new("/impact-graph"),
+        MemoryScope::Swarm,
+        false,
+    );
+    let snapshot = Snapshot::begin(&db).unwrap();
+    let admission = MemoryAdmission::new(&db, WS, &scope);
+    let mut seen = BTreeSet::new();
+    let mut results = Vec::new();
+    let mut count = 0;
+    super::super::append_fallback_results(
+        &admission,
+        &report,
+        &mut seen,
+        1,
+        &mut results,
+        &mut count,
+    )
+    .unwrap();
+    snapshot.finish().unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].memory_id, live);
+    assert_eq!(seen, BTreeSet::from([live]));
+    let rendered = results[0].data_json().to_string();
+    assert!(!rendered.contains("sk-proj-"));
+    assert!(!rendered.contains(&hidden));
+    db.begin_read_snapshot().unwrap();
+    db.rollback_read_snapshot().unwrap();
+}
+
+#[test]
+fn impact_does_not_create_a_missing_source_database() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("missing-impact.ee.db");
+    let result = super::super::run_impact(&super::super::ImpactOptions {
+        workspace_path: root.path().to_path_buf(),
+        database_path: Some(path.clone()),
+        index_dir: None,
+        surface: super::super::ImpactSurfaceQuery {
+            kind: MemoryAnchorKind::EnvVar,
+            value: "EE_IMPACT_ROUTE".to_owned(),
+        },
+        limit: 1,
+        speed: crate::search::SpeedMode::Instant,
+        source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+    });
+    assert!(result.is_err());
+    assert!(!path.exists());
 }

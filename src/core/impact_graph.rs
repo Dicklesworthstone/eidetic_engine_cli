@@ -56,9 +56,7 @@ impl ImpactGraphPhase {
 }
 
 pub(super) fn read(
-    db: &DbConnection,
-    workspace: &str,
-    scope: &MemoryScopeContext,
+    admission: &MemoryAdmission<'_>,
     stats: &mut MemoryScopeStats,
     surface: &ImpactResolvedSurface,
     excluded: &BTreeSet<String>,
@@ -76,16 +74,8 @@ pub(super) fn read(
             ImpactGraphPhase::empty("not_available", Some("graph_feature_disabled")),
         );
     }
-    let mut graph_stats = scope.stats();
-    match collect(
-        db,
-        workspace,
-        scope,
-        &mut graph_stats,
-        surface,
-        excluded,
-        limit,
-    ) {
+    let mut graph_stats = admission.scope.stats();
+    match collect(admission, &mut graph_stats, surface, excluded, limit) {
         Ok(result) => {
             stats.merge(&graph_stats);
             result
@@ -100,16 +90,16 @@ pub(super) fn read(
 fn unavailable() -> DbError {
     DbError::MalformedRow {
         operation: crate::db::DbOperation::Query,
-        message: "Could not verify impact graph sources; no graph advice returned".to_owned(),
+        message: "Could not verify impact memory sources; no unchecked advice returned".to_owned(),
     }
 }
 
-struct Snapshot<'a> {
+pub(super) struct Snapshot<'a> {
     db: &'a DbConnection,
     owned: bool,
 }
 impl<'a> Snapshot<'a> {
-    fn begin(db: &'a DbConnection) -> Result<Self, DbError> {
+    pub(super) fn begin(db: &'a DbConnection) -> Result<Self, DbError> {
         let owned = match db.begin_read_snapshot() {
             Ok(()) => true,
             Err(error) if crate::db::db_error_is_nested_transaction(&error) => false,
@@ -117,7 +107,7 @@ impl<'a> Snapshot<'a> {
         };
         Ok(Self { db, owned })
     }
-    fn finish(mut self) -> Result<(), DbError> {
+    pub(super) fn finish(mut self) -> Result<(), DbError> {
         if self.owned {
             self.db.rollback_read_snapshot()?;
             self.owned = false;
@@ -134,17 +124,145 @@ impl Drop for Snapshot<'_> {
 }
 
 #[derive(Clone)]
-struct Admitted {
+pub(super) struct Admitted {
     workspace: String,
-    summary: ImpactMemorySummary,
+    pub(super) summary: ImpactMemorySummary,
+}
+
+/// One admission policy and reference time for every impact result tier.
+/// Callers keep the source snapshot alive while this context is in use.
+pub(super) struct MemoryAdmission<'a> {
+    db: &'a DbConnection,
+    workspace: &'a str,
+    scope: &'a MemoryScopeContext,
+    at: DateTime<Utc>,
+}
+
+impl<'a> MemoryAdmission<'a> {
+    pub(super) fn new(
+        db: &'a DbConnection,
+        workspace: &'a str,
+        scope: &'a MemoryScopeContext,
+    ) -> Self {
+        Self {
+            db,
+            workspace,
+            scope,
+            at: Utc::now(),
+        }
+    }
+
+    pub(super) fn admit(&self, id: &str) -> Result<Option<Admitted>, DbError> {
+        let params = [Value::Text(id.to_owned())];
+        let rows = self.db.query(
+            "SELECT workspace_id, length(CAST(content AS BLOB)), tombstoned_at, superseded_at FROM memories WHERE id = ?1", &params,
+        )?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        if rows.len() != 1 {
+            return Err(unavailable());
+        }
+        if !matches!(row.get(2), Some(Value::Null))
+            || !row
+                .get(1)
+                .and_then(Value::as_i64)
+                .is_some_and(|bytes| (1..=BODY_LIMIT).contains(&bytes))
+            || match row.get(3) {
+                Some(Value::Null) => false,
+                Some(Value::Text(value)) => timestamp(value).is_none_or(|at| at <= self.at),
+                _ => true,
+            }
+        {
+            return Ok(None);
+        }
+        let owner = text(row, 0)?;
+        let tags = self.db.get_memory_tags(id)?;
+        if owner != self.workspace && !memory_tags_include_global_scope(&tags) {
+            return Ok(None);
+        }
+        if !crate::core::memory_lifecycle::pending_memory_review_ids(self.db, owner, &[id])?
+            .is_empty()
+        {
+            return Ok(None);
+        }
+        let seals = self.db.query(
+            "SELECT content_commitment, sealed_at, revealed_at, reveal_verified FROM memory_seals WHERE memory_id = ?1", &params,
+        )?;
+        if !seals.is_empty() {
+            if seals.len() != 1 {
+                return Err(unavailable());
+            }
+            let seal = &seals[0];
+            let revealed = seal.get(2).and_then(Value::as_str);
+            if revealed.is_none()
+                || seal.get(3).and_then(Value::as_i64) != Some(1)
+                || validate_attestation_seal_fields(
+                    text(seal, 0)?,
+                    text(seal, 1)?,
+                    revealed,
+                    Some(true),
+                )
+                .is_err()
+            {
+                return Ok(None);
+            }
+        }
+        let Some(memory) = self.db.get_memory(id)? else {
+            return Err(unavailable());
+        };
+        if memory.id != id || memory.workspace_id != owner {
+            return Err(unavailable());
+        }
+        let (Some(created), Some(updated)) =
+            (timestamp(&memory.created_at), timestamp(&memory.updated_at))
+        else {
+            return Ok(None);
+        };
+        if created > self.at || updated > self.at {
+            return Ok(None);
+        }
+        let start = memory.valid_from.as_deref().map(timestamp);
+        let end = memory.valid_to.as_deref().map(timestamp);
+        if matches!(start, Some(None)) || matches!(end, Some(None)) {
+            return Ok(None);
+        }
+        let (start, end) = (start.flatten(), end.flatten());
+        if start.is_some_and(|at| at > self.at)
+            || end.is_some_and(|at| at < self.at)
+            || start.zip(end).is_some_and(|(start, end)| start > end)
+        {
+            return Ok(None);
+        }
+        if !self.scope.memory_in_scope_with_tags(&memory, &tags)
+            || memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+        {
+            return Ok(None);
+        }
+        let screen = crate::policy::screen_external_text_for_ingestion(&memory.content);
+        if screen.redacted
+            || screen.instruction_like
+            || !matches!(screen.instruction_risk, "none" | "low")
+            || screen.content != memory.content
+        {
+            return Ok(None);
+        }
+        let summary = ImpactMemorySummary::from_memory(&memory);
+        let rendered = summary.data_json().to_string();
+        if crate::policy::redact_secret_like_content(&rendered).content != rendered {
+            return Ok(None);
+        }
+        Ok(Some(Admitted {
+            workspace: memory.workspace_id,
+            summary,
+        }))
+    }
 }
 
 struct Reader<'a> {
     db: &'a DbConnection,
-    workspace: &'a str,
-    scope: &'a MemoryScopeContext,
+    admission: &'a MemoryAdmission<'a>,
     stats: &'a mut MemoryScopeStats,
-    at: DateTime<Utc>,
     phase: ImpactGraphPhase,
     memories: BTreeMap<String, Option<Admitted>>,
     surfaces: BTreeMap<(MemoryAnchorKind, String), Vec<StoredMemoryAnchor>>,
@@ -171,7 +289,7 @@ fn hash(value: &str) -> bool {
     })
 }
 
-fn anchor_valid(anchor: &StoredMemoryAnchor) -> bool {
+pub(super) fn anchor_valid(anchor: &StoredMemoryAnchor) -> bool {
     anchor
         .memory_id
         .parse::<MemoryId>()
@@ -256,114 +374,10 @@ impl Reader<'_> {
         if let Some(value) = self.memories.get(id) {
             return Ok(value.clone());
         }
-        let admitted = self.admit(id)?;
+        let admitted = self.admission.admit(id)?;
         self.stats.record_candidate_id(admitted.is_some(), Some(id));
         self.memories.insert(id.to_owned(), admitted.clone());
         Ok(admitted)
-    }
-
-    fn admit(&self, id: &str) -> Result<Option<Admitted>, DbError> {
-        let params = [Value::Text(id.to_owned())];
-        let rows = self.db.query(
-            "SELECT workspace_id, length(CAST(content AS BLOB)), tombstoned_at, superseded_at FROM memories WHERE id = ?1", &params,
-        )?;
-        let Some(row) = rows.first() else {
-            return Ok(None);
-        };
-        if rows.len() != 1 {
-            return Err(unavailable());
-        }
-        if !matches!(row.get(2), Some(Value::Null))
-            || !row
-                .get(1)
-                .and_then(Value::as_i64)
-                .is_some_and(|bytes| (1..=BODY_LIMIT).contains(&bytes))
-            || match row.get(3) {
-                Some(Value::Null) => false,
-                Some(Value::Text(value)) => timestamp(value).is_none_or(|at| at <= self.at),
-                _ => true,
-            }
-        {
-            return Ok(None);
-        }
-        let owner = text(row, 0)?;
-        if !crate::core::memory_lifecycle::pending_memory_review_ids(self.db, owner, &[id])?
-            .is_empty()
-        {
-            return Ok(None);
-        }
-        let seals = self.db.query(
-            "SELECT content_commitment, sealed_at, revealed_at, reveal_verified FROM memory_seals WHERE memory_id = ?1", &params,
-        )?;
-        if !seals.is_empty() {
-            if seals.len() != 1 {
-                return Err(unavailable());
-            }
-            let seal = &seals[0];
-            let revealed = seal.get(2).and_then(Value::as_str);
-            if revealed.is_none()
-                || seal.get(3).and_then(Value::as_i64) != Some(1)
-                || validate_attestation_seal_fields(
-                    text(seal, 0)?,
-                    text(seal, 1)?,
-                    revealed,
-                    Some(true),
-                )
-                .is_err()
-            {
-                return Ok(None);
-            }
-        }
-        let Some(memory) = self.db.get_memory(id)? else {
-            return Err(unavailable());
-        };
-        if memory.id != id || memory.workspace_id != owner {
-            return Err(unavailable());
-        }
-        let (Some(created), Some(updated)) =
-            (timestamp(&memory.created_at), timestamp(&memory.updated_at))
-        else {
-            return Ok(None);
-        };
-        if created > self.at || updated > self.at {
-            return Ok(None);
-        }
-        let start = memory.valid_from.as_deref().map(timestamp);
-        let end = memory.valid_to.as_deref().map(timestamp);
-        if matches!(start, Some(None)) || matches!(end, Some(None)) {
-            return Ok(None);
-        }
-        let (start, end) = (start.flatten(), end.flatten());
-        if start.is_some_and(|at| at > self.at)
-            || end.is_some_and(|at| at < self.at)
-            || start.zip(end).is_some_and(|(start, end)| start > end)
-        {
-            return Ok(None);
-        }
-        let tags = self.db.get_memory_tags(id)?;
-        if !(memory.workspace_id == self.workspace || memory_tags_include_global_scope(&tags))
-            || !self.scope.memory_in_scope_with_tags(&memory, &tags)
-            || memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
-        {
-            return Ok(None);
-        }
-        let screen = crate::policy::screen_external_text_for_ingestion(&memory.content);
-        if screen.redacted
-            || screen.instruction_like
-            || !matches!(screen.instruction_risk, "none" | "low")
-            || screen.content != memory.content
-        {
-            return Ok(None);
-        }
-        let summary = ImpactMemorySummary::from_memory(&memory);
-        let rendered = summary.data_json().to_string();
-        if crate::policy::redact_secret_like_content(&rendered).content != rendered {
-            return Ok(None);
-        }
-        Ok(Some(Admitted {
-            workspace: memory.workspace_id,
-            summary,
-        }))
     }
 }
 
@@ -429,21 +443,18 @@ fn witness(
 }
 
 fn collect(
-    db: &DbConnection,
-    workspace: &str,
-    scope: &MemoryScopeContext,
+    admission: &MemoryAdmission<'_>,
     stats: &mut MemoryScopeStats,
     surface: &ImpactResolvedSurface,
     excluded: &BTreeSet<String>,
     limit: usize,
 ) -> Result<(Vec<ImpactResult>, ImpactGraphPhase), DbError> {
+    let db = admission.db;
     let snapshot = Snapshot::begin(db)?;
     let mut reader = Reader {
         db,
-        workspace,
-        scope,
+        admission,
         stats,
-        at: Utc::now(),
         phase: ImpactGraphPhase::empty("ok", None),
         memories: BTreeMap::new(),
         surfaces: BTreeMap::new(),
