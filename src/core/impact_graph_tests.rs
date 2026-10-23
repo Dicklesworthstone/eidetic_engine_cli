@@ -471,6 +471,76 @@ fn fallback_rehydration_cannot_reintroduce_sealed_or_secret_memory() {
 }
 
 #[test]
+#[cfg(feature = "lexical-bm25")]
+fn public_impact_fallback_fills_after_exact_duplicates_and_private_sources() {
+    const SECRET: &str = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().canonicalize().unwrap();
+    let path = workspace.join("impact.ee.db");
+    let db = DbConnection::open_file(&path).unwrap();
+    initialize(&db, &workspace);
+    // Shared content and timestamps keep the lexical match comparable;
+    // stable memory IDs order the two unanchored candidates below the exact hit.
+    let exact = seed(&db, WS, 1, ROOT_BODY);
+    let private = seed(&db, WS, 2, ROOT_BODY);
+    let live = seed(&db, WS, 3, ROOT_BODY);
+    db.execute_raw(&format!(
+        "UPDATE memories SET provenance_uri = 'https://example.invalid/{SECRET}' WHERE id = '{private}'"
+    ))
+    .unwrap();
+    // Model memories that search can find before their typed anchors exist.
+    // Graph expansion cannot mask a failure to fill from the fallback tier.
+    db.execute_raw(&format!(
+        "DELETE FROM memory_anchors WHERE memory_id IN ('{private}', '{live}')"
+    ))
+    .unwrap();
+    assert!(!db.list_memory_anchors(&exact).unwrap().is_empty());
+    assert!(db.list_memory_anchors(&private).unwrap().is_empty());
+    assert!(db.list_memory_anchors(&live).unwrap().is_empty());
+
+    let report = super::super::run_impact(&super::super::ImpactOptions {
+        workspace_path: workspace.clone(),
+        database_path: Some(path),
+        index_dir: Some(workspace.join("absent-index")),
+        surface: super::super::ImpactSurfaceQuery {
+            kind: MemoryAnchorKind::EnvVar,
+            value: "EE_IMPACT_ROUTE".to_owned(),
+        },
+        limit: 2,
+        speed: crate::search::SpeedMode::Instant,
+        source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Verified,
+        strict_scope: false,
+    })
+    .unwrap();
+
+    assert_eq!(report.exact_anchor_count, 1);
+    assert_eq!(report.fallback_count, 1);
+    assert_eq!(report.results.len(), 2);
+    assert_eq!(report.results[0].memory_id, exact);
+    assert_eq!(report.results[0].match_type, ImpactMatchType::ExactAnchor);
+    assert_eq!(report.results[1].memory_id, live);
+    assert_eq!(
+        report.results[1].match_type,
+        ImpactMatchType::SearchFallback
+    );
+    let candidates = report.fallback_report.as_ref().unwrap();
+    assert_eq!(
+        candidates
+            .results
+            .iter()
+            .map(|hit| hit.doc_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![exact.as_str(), private.as_str(), live.as_str()],
+        "the public search must actually return both candidates impact skips"
+    );
+    let rendered = report.data_json().to_string();
+    assert!(!rendered.contains(SECRET));
+    assert!(!rendered.contains(&private));
+}
+
+#[test]
 fn impact_does_not_create_a_missing_source_database() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("missing-impact.ee.db");

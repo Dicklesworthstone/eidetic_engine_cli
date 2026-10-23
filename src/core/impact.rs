@@ -349,10 +349,11 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
     // and graph expansion borrow this snapshot instead of opening another view.
     let source_snapshot = graph_neighbors::Snapshot::begin(&connection)?;
     let workspace_id = resolve_workspace_id(&connection, &workspace_root)?;
-    let scope_context = MemoryScopeContext::for_workspace(
+    let scope_context = MemoryScopeContext::for_workspace_with_connection(
         &workspace_root,
         options.memory_scope,
         options.strict_scope,
+        Some(&connection),
     );
     let admission =
         graph_neighbors::MemoryAdmission::new(&connection, &workspace_id, &scope_context);
@@ -372,7 +373,11 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
         .collect();
     let limit = usize::try_from(options.limit).unwrap_or(usize::MAX);
     if exact_results.len() < limit {
-        let fallback_limit = options.limit.saturating_sub(exact_results.len() as u32);
+        // Search returns a bounded candidate window, not just the unfilled
+        // slots: exact duplicates and impact-ineligible sources must not
+        // crowd lower-ranked admitted memories out of those slots.
+        let fallback_limit =
+            crate::core::search::quality_scoring_candidate_limit(options.limit, options.speed);
         let search_options = SearchOptions {
             workspace_path: workspace_root.clone(),
             database_path: options.database_path.clone(),
