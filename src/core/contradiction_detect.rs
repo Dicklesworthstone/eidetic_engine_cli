@@ -563,6 +563,25 @@ pub struct ConflictSurface {
 }
 
 impl ConflictSurface {
+    pub(crate) fn empty(config: ContradictionDetectionConfig) -> Self {
+        Self {
+            schema: CONFLICT_SURFACE_SCHEMA_V1,
+            pairs: Vec::new(),
+            clusters: Vec::new(),
+            explicit_edge_count: 0,
+            gathered_signals: GATHERED_SIGNAL_KINDS
+                .iter()
+                .map(|signal| signal.as_str().to_owned())
+                .collect(),
+            deferred_signals: DEFERRED_SIGNAL_KINDS
+                .iter()
+                .map(|signal| signal.as_str().to_owned())
+                .collect(),
+            fuzzy_near_conflict_skipped: config.include_fuzzy_near_conflict,
+            degraded: Vec::new(),
+        }
+    }
+
     /// Pairs/clusters that implicate `memory_id` (for `ee conflict explain`).
     #[must_use]
     pub fn focused_on(&self, memory_id: &str) -> ConflictSurface {
@@ -634,28 +653,159 @@ fn preferred_side(
 
 /// Assemble the read-only conflict surface from the database (bd-1n0np.7.3).
 ///
-/// Reuses the explicit-evidence gather and detector, then joins each canonical
-/// conflicting pair with both current memory rows so
-/// the surface can report both bodies, the higher-trust/fresher side, and the
-/// load-bearing weight. A pair whose memory rows cannot be read is dropped with a
-/// visible `degraded` note (never silent). Deterministic: pairs sort by
-/// load-bearing weight desc, then `conflict_id`.
+/// This database-wide helper admits only current, visible sources and never
+/// joins a pair across workspaces. Public callers addressing one workspace must
+/// use [`assemble_conflict_surface_for_workspace`]. Graph, lifecycle authority
+/// and bodies share one source snapshot; an existing caller transaction is
+/// borrowed without committing or releasing it. Bodies pass the same public
+/// screen as recall. Pairs sort by load-bearing weight desc, then `conflict_id`.
 #[must_use]
 pub fn assemble_conflict_surface(
     connection: &DbConnection,
     config: ContradictionDetectionConfig,
 ) -> ConflictSurface {
-    let gathered = gather_explicit_conflict_edges(connection);
+    assemble_conflict_surface_scoped(connection, None, config)
+}
 
-    let mut degraded: Vec<String> = Vec::new();
-    if let Some(error) = &gathered.read_error {
-        degraded.push(error.clone());
+/// Assemble conflicts belonging entirely to the addressed workspace.
+#[must_use]
+pub fn assemble_conflict_surface_for_workspace(
+    connection: &DbConnection,
+    workspace_id: &str,
+    config: ContradictionDetectionConfig,
+) -> ConflictSurface {
+    assemble_conflict_surface_scoped(connection, Some(workspace_id), config)
+}
+
+/// Also shared with the CLI so workspace binding belongs to the source snapshot.
+pub(crate) struct ConflictReadSnapshot<'a> {
+    connection: &'a DbConnection,
+    owned: bool,
+}
+
+impl<'a> ConflictReadSnapshot<'a> {
+    pub(crate) fn begin(connection: &'a DbConnection) -> crate::db::Result<Self> {
+        let owned = match connection.begin_read_snapshot() {
+            Ok(()) => true,
+            Err(error) if crate::db::db_error_is_nested_transaction(&error) => false,
+            Err(error) => return Err(error),
+        };
+        Ok(Self { connection, owned })
     }
+
+    pub(crate) fn finish(mut self) -> crate::db::Result<()> {
+        if self.owned {
+            self.connection.rollback_read_snapshot()?;
+            self.owned = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ConflictReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if self.owned && self.connection.rollback_read_snapshot().is_err() {
+            tracing::error!("failed to release the owned conflict read snapshot");
+        }
+    }
+}
+
+fn withheld_conflict_surface(
+    config: ContradictionDetectionConfig,
+    reason: &str,
+) -> ConflictSurface {
+    let mut surface = ConflictSurface::empty(config);
+    surface.degraded.push(reason.to_owned());
+    surface
+}
+
+fn assemble_conflict_surface_scoped(
+    connection: &DbConnection,
+    workspace_id: Option<&str>,
+    config: ContradictionDetectionConfig,
+) -> ConflictSurface {
+    let Ok(snapshot) = ConflictReadSnapshot::begin(connection) else {
+        return withheld_conflict_surface(
+            config,
+            "conflict surface withheld: a coherent source snapshot could not be opened",
+        );
+    };
+    let surface = assemble_conflict_surface_in_snapshot(connection, workspace_id, config);
+    if snapshot.finish().is_err() {
+        return withheld_conflict_surface(
+            config,
+            "conflict surface withheld: the source snapshot could not be released",
+        );
+    }
+    surface
+}
+
+/// Establish membership from identity metadata before loading any source bodies.
+fn conflict_source_workspaces(
+    connection: &DbConnection,
+    workspace_id: Option<&str>,
+    current_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, Vec<String>>, &'static str> {
+    use sqlmodel_core::Value;
+
+    const UNAVAILABLE: &str =
+        "conflict surface withheld: source workspace membership could not be read";
+    let mut workspaces = BTreeMap::<String, Vec<String>>::new();
+    let ids: Vec<_> = current_ids.iter().collect();
+    for page in ids.chunks(256) {
+        let slots = (1..=page.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!("SELECT id, workspace_id FROM memories WHERE id IN ({slots})");
+        let mut values: Vec<_> = page.iter().map(|id| Value::Text(id.to_string())).collect();
+        if let Some(workspace_id) = workspace_id {
+            values.push(Value::Text(workspace_id.to_owned()));
+            sql.push_str(&format!(" AND workspace_id = ?{}", values.len()));
+        }
+        sql.push_str(" ORDER BY workspace_id, id");
+        for row in connection.query(&sql, &values).map_err(|_| UNAVAILABLE)? {
+            let id = row.get(0).and_then(Value::as_str).ok_or(UNAVAILABLE)?;
+            let workspace = row.get(1).and_then(Value::as_str).ok_or(UNAVAILABLE)?;
+            if !current_ids.contains(id)
+                || workspace.is_empty()
+                || workspace_id.is_some_and(|expected| expected != workspace)
+            {
+                return Err(UNAVAILABLE);
+            }
+            workspaces
+                .entry(workspace.to_owned())
+                .or_default()
+                .push(id.to_owned());
+        }
+    }
+    Ok(workspaces)
+}
+
+fn assemble_conflict_surface_in_snapshot(
+    connection: &DbConnection,
+    workspace_id: Option<&str>,
+    config: ContradictionDetectionConfig,
+) -> ConflictSurface {
+    use super::memory_lifecycle::{load_memory_seals_for_admission, pending_memory_review_ids};
+
+    let gathered = gather_explicit_conflict_edges(connection);
+    if gathered.read_error.is_some() {
+        return withheld_conflict_surface(
+            config,
+            "conflict surface withheld: explicit evidence or resolution authority could not be read",
+        );
+    }
+    let mut degraded = BTreeSet::new();
 
     // Deduplicate to canonical pairs, keeping the heaviest signal per pair.
     let mut pair_signal: BTreeMap<(String, String), ExplicitConflictSignal> = BTreeMap::new();
     for edge in &gathered.edges {
         if let Some(pair) = canonical_pair(edge) {
+            // Only a completed, decision-backed resolution settles this tension.
+            if gathered.resolved_pairs.contains(&pair) {
+                continue;
+            }
             pair_signal
                 .entry(pair)
                 .and_modify(|s| {
@@ -667,50 +817,98 @@ pub fn assemble_conflict_surface(
         }
     }
 
-    // Revision retirement is separate from author validity and tombstoning.
-    // Read it from the source of truth; StoredMemory does not carry this field.
+    // Superseded and tombstoned identities are history. Author-supplied valid_to
+    // alone does not establish retirement; read revision state from its source
+    // of truth rather than treating it as a StoredMemory body field.
     let memory_ids: Vec<String> = pair_signal
         .keys()
         .flat_map(|(low, high)| [low.clone(), high.clone()])
         .collect();
-    let current_ids = connection
-        .filter_current_memory_ids(&memory_ids)
-        .unwrap_or_else(|_| {
-            degraded.push(
-                "conflict surface withheld: memory revision state could not be read".to_owned(),
+    let current_ids = match connection.filter_current_memory_ids(&memory_ids) {
+        Ok(ids) => ids,
+        Err(_) => {
+            return withheld_conflict_surface(
+                config,
+                "conflict surface withheld: memory revision state could not be read",
             );
-            BTreeSet::new()
-        });
+        }
+    };
+    let workspaces = match conflict_source_workspaces(connection, workspace_id, &current_ids) {
+        Ok(workspaces) => workspaces,
+        Err(reason) => return withheld_conflict_surface(config, reason),
+    };
+
+    // Verify authority before hydrating bodies. Read each admitted source once,
+    // even when it participates in many pairs, and screen only an in-memory copy.
+    let mut memories = BTreeMap::new();
+    for (workspace, ids) in workspaces {
+        let seals = match load_memory_seals_for_admission(connection, &workspace) {
+            Ok(seals) => seals,
+            Err(_) => {
+                degraded.insert(
+                    "conflict sources withheld: live seal authority could not be read".to_owned(),
+                );
+                continue;
+            }
+        };
+        let candidates: Vec<_> = ids.iter().map(String::as_str).collect();
+        let held = match pending_memory_review_ids(connection, &workspace, &candidates) {
+            Ok(held) => held,
+            Err(_) => {
+                degraded.insert(
+                    "conflict sources withheld: pending memory review authority could not be read"
+                        .to_owned(),
+                );
+                continue;
+            }
+        };
+        let sealed: BTreeSet<_> = seals
+            .iter()
+            .filter(|seal| seal.is_sealed())
+            .map(|seal| seal.memory_id.as_str())
+            .collect();
+        for id in ids {
+            if sealed.contains(id.as_str()) || held.contains(&id) {
+                continue;
+            }
+            let Ok(Some(mut memory)) = connection.get_memory(&id) else {
+                degraded.insert(
+                    "conflict sources withheld: a cited memory row could not be read".to_owned(),
+                );
+                continue;
+            };
+            if memory.workspace_id != workspace
+                || memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+            {
+                continue;
+            }
+            let public_body = crate::policy::redact_public_replay_body(&memory.content);
+            if public_body.redacted {
+                degraded.insert("conflict bodies redacted by public-read policy".to_owned());
+            }
+            memory.content = public_body.content;
+            memories.insert(id, memory);
+        }
+    }
+
     let mut pairs: Vec<ConflictPairView> = Vec::new();
     for ((low, high), signal) in &pair_signal {
-        // Only a completed, decision-backed resolution settles this tension.
-        if gathered
-            .resolved_pairs
-            .contains(&(low.clone(), high.clone()))
-        {
-            continue;
-        }
-        let (Ok(Some(a)), Ok(Some(b))) = (connection.get_memory(low), connection.get_memory(high))
-        else {
-            degraded.push(format!(
-                "conflict pair {low}<->{high} skipped: a cited memory row could not be read"
-            ));
+        let (Some(a), Some(b)) = (memories.get(low), memories.get(high)) else {
             continue;
         };
-        // Superseded and tombstoned identities are history. An author-supplied
-        // valid_to alone does not establish that either side was superseded.
-        if !current_ids.contains(low) || !current_ids.contains(high) {
+        // A link cannot grant access to a source from a different workspace.
+        if a.workspace_id != b.workspace_id {
             continue;
         }
-        let (preferred, reason, a_pref, b_pref) = preferred_side(&a, &b);
+        let (preferred, reason, a_pref, b_pref) = preferred_side(a, b);
         pairs.push(ConflictPairView {
             conflict_id: conflict_pair_id(low, high),
             signal: signal.as_str().to_owned(),
             load_bearing_milli: signal.weight_milli(),
             preferred_side: preferred.to_owned(),
             preferred_reason: reason.to_owned(),
-            memory_a: member_view(&a, a_pref),
-            memory_b: member_view(&b, b_pref),
+            memory_a: member_view(a, a_pref),
+            memory_b: member_view(b, b_pref),
         });
     }
 
@@ -767,7 +965,7 @@ pub fn assemble_conflict_surface(
             .map(|s| s.as_str().to_owned())
             .collect(),
         fuzzy_near_conflict_skipped: report.fuzzy_near_conflict_skipped,
-        degraded,
+        degraded: degraded.into_iter().collect(),
     }
 }
 
@@ -1880,6 +2078,89 @@ mod tests {
         let second =
             assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
         assert_eq!(first, second, "conflict surface is deterministic");
+    }
+
+    #[test]
+    fn surface_releases_owned_snapshot_and_borrows_caller_transaction() {
+        let connection = open_seeded_db();
+        seed_memory(&connection, MEM_A);
+        seed_memory(&connection, MEM_B);
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Contradicts,
+        );
+        let before =
+            assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert_eq!(before.pairs.len(), 1);
+        connection
+            .begin_read_snapshot()
+            .expect("surface released its owned snapshot");
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET content = 'transaction-local conflict advice' WHERE id = '{MEM_B}'"
+            ))
+            .unwrap();
+
+        let borrowed =
+            assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert_eq!(borrowed.pairs.len(), 1);
+        assert_eq!(
+            borrowed.pairs[0].memory_b.content,
+            "transaction-local conflict advice"
+        );
+        let error = connection
+            .begin_read_snapshot()
+            .expect_err("surface must preserve the caller's transaction");
+        assert!(crate::db::db_error_is_nested_transaction(&error));
+        connection.rollback_read_snapshot().unwrap();
+        let after = assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert_eq!(
+            after, before,
+            "borrowed reads must not commit caller writes"
+        );
+    }
+
+    #[test]
+    fn failed_surface_admission_releases_only_its_owned_snapshot() {
+        let connection = open_seeded_db();
+        seed_memory(&connection, MEM_A);
+        seed_memory(&connection, MEM_B);
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Contradicts,
+        );
+        connection
+            .execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_memory_seals")
+            .unwrap();
+        for borrowed in [false, true] {
+            if borrowed {
+                connection.begin_read_snapshot().unwrap();
+            }
+            let surface =
+                assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+            assert!(surface.pairs.is_empty() && surface.clusters.is_empty());
+            assert_eq!(surface.explicit_edge_count, 0);
+            assert!(!surface.degraded.is_empty());
+            let public = serde_json::to_string(&surface).unwrap();
+            assert!(!public.contains(MEM_A) && !public.contains(MEM_B));
+            if borrowed {
+                let error = connection
+                    .begin_read_snapshot()
+                    .expect_err("failed admission must preserve a caller snapshot");
+                assert!(crate::db::db_error_is_nested_transaction(&error));
+            } else {
+                connection
+                    .begin_read_snapshot()
+                    .expect("failed admission must release its owned snapshot");
+            }
+            connection.rollback_read_snapshot().unwrap();
+        }
     }
 
     // ---- resolution planner (bd-3a1op.4) ---------------------------------

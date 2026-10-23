@@ -1,7 +1,7 @@
 //! bd-1n0np.7.3 — `ee conflict list|explain|cluster` read-only contradiction surface.
 //!
 //! Thin CLI layer over
-//! [`crate::core::contradiction_detect::assemble_conflict_surface`] (which reuses
+//! [`crate::core::contradiction_detect::assemble_conflict_surface_for_workspace`] (which reuses
 //! the 7.2 gather + explicit-evidence detector). list|explain|cluster are
 //! read-only. `resolve` (bd-3a1op.4, ADR 0066) plans via the pure
 //! [`crate::core::contradiction_detect::plan_conflict_resolution`] engine and,
@@ -13,8 +13,8 @@ use std::path::Path;
 use clap::{Args, Subcommand};
 
 use crate::core::contradiction_detect::{
-    ConflictResolutionPlan, ConflictSurface, ContradictionDetectionConfig, PlannedResolutionAction,
-    assemble_conflict_surface,
+    ConflictReadSnapshot, ConflictResolutionPlan, ConflictSurface, ContradictionDetectionConfig,
+    PlannedResolutionAction, assemble_conflict_surface_for_workspace,
 };
 use crate::db::DbConnection;
 use crate::models::{DomainError, RESPONSE_SCHEMA_V2};
@@ -150,7 +150,7 @@ fn open_workspace_db(workspace: &Path) -> Result<DbConnection, DomainError> {
             repair: Some("Run `ee init --workspace . --json` first.".to_owned()),
         });
     }
-    DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+    DbConnection::open_file_read_only(&database_path).map_err(|error| DomainError::Storage {
         message: format!("Failed to open workspace database: {error}"),
         repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
     })
@@ -159,10 +159,28 @@ fn open_workspace_db(workspace: &Path) -> Result<DbConnection, DomainError> {
 /// Build the full read-only conflict surface for a workspace.
 pub fn build_conflict_surface(workspace: &Path) -> Result<ConflictSurface, DomainError> {
     let connection = open_workspace_db(workspace)?;
-    Ok(assemble_conflict_surface(
+    let snapshot =
+        ConflictReadSnapshot::begin(&connection).map_err(|_| conflict_snapshot_error())?;
+    let binding = crate::core::workspace::addressed_workspace_row(
         &connection,
-        ContradictionDetectionConfig::default(),
-    ))
+        workspace,
+        &workspace.join(".ee").join("ee.db"),
+    )?;
+    let config = ContradictionDetectionConfig::default();
+    let surface = binding.map_or_else(
+        || ConflictSurface::empty(config),
+        |row| assemble_conflict_surface_for_workspace(&connection, &row.id, config),
+    );
+    snapshot.finish().map_err(|_| conflict_snapshot_error())?;
+    Ok(surface)
+}
+
+fn conflict_snapshot_error() -> DomainError {
+    DomainError::Storage {
+        message: "Could not read a coherent conflict source snapshot; no partial result returned"
+            .to_owned(),
+        repair: Some("Retry ee conflict; use ee doctor --json if the failure persists.".to_owned()),
+    }
 }
 
 /// Build the surface filtered to the conflicts implicating one memory
