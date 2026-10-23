@@ -108,6 +108,15 @@
 #   # P50_PROVENANCE unmeasured_reason=<token>          (and NO p50 declared)
 #   # P50_PROVENANCE inherited_unverified_reason=<token> declared_p50_s=<p50>
 #
+# `host=` TAKES A PSEUDONYM, NEVER A REAL HOST NAME (`mac-dev-1`, `worker-01`),
+# per AGENTS.md "Private Fleet Identifiers: Never In Tracked Content". This is
+# the field that keeps re-polluting the tree, and not out of carelessness:
+# provenance exists to say WHERE a number came from, so it naturally reaches for
+# the machine's real name. `tests/fleet_identifier_guard.rs` fails closed on it.
+# Keep the pseudonym STABLE across entries -- comparability between two
+# measurements is the only thing this field buys, and a fresh placeholder each
+# time buys nothing.
+#
 # The third spelling exists because the file previously had no honest exit. A
 # cargo p50 nobody had timed could be left as a plausible-looking number, which
 # is the fabrication bd-vihzq was filed about, or dropped to `unmeasured`, which
@@ -549,7 +558,7 @@ name = "Step Assertion Isolation Contract"
 # (sys.executable + __file__) for a self-test. The guard is matching
 # conservatively on the string, which is the right direction to be wrong in,
 # so this record satisfies it with a real measurement rather than arguing.
-# P50_PROVENANCE measured=2026-10-20 host=mac-mini-old load=3.27 samples_s=0.15,0.11,0.11 median_s=0.11 declared_p50_s=1
+# P50_PROVENANCE measured=2026-10-20 host=mac-dev-1 load=3.27 samples_s=0.15,0.11,0.11 median_s=0.11 declared_p50_s=1
 expected_seconds_p50 = 1
 regression_factor = 1.5
 
