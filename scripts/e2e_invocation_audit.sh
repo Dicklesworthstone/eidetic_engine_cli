@@ -164,7 +164,8 @@ e2e_orphans() {
         #     (measured: HAS_DOT_GIT=no), so without this flag every
         #     gitignored-but-synced directory becomes searchable there. The one
         #     that matters is beads_compliance_audit/ -- 8397 files on the
-        #     worker, gitignored at .gitignore:322, not excluded by .rchignore --
+        #     worker, gitignored by the `/beads_compliance_audit/` rule in
+        #     .gitignore, not excluded by .rchignore --
         #     whose bead JSON mentions script paths in TITLES:
         #
         #       {"title":"sandbox: e2e script scripts/e2e_sandbox.sh (...)"}

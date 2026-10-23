@@ -212,6 +212,20 @@ tests/logs/
 /pass*.jsonl
 /fix_*.sh
 /find_*.sh
+# rch dispatch landing zones. `rch exec --job --result-dir <DIR>` documents DIR
+# as "Repository-relative", so a dispatch that wants its logs back has no
+# choice but to drop a directory in the tree — pointing it at a scratchpad is
+# not available. Directory-only and depth-1 anchored, so a fixture FILE whose
+# name ends in _out stays visible. t_out/, e2e_out/ and partition_out/ all
+# arrived this way and then had nowhere to go, because Rule 1 forbids deleting
+# them.
+/*_out/
+# Ad-hoc rch probe scripts dropped at the root while triaging one bead, named
+# after the bead they were investigating. Scratch, like /fix_*.sh above.
+/.rch_*.sh
+# br's write-ahead-log index: a transient per-process working directory, not
+# tracker state. The authoritative export is .beads/issues.jsonl.
+.beads/.br-wal-index-*/
 /*-upgrade-progress.json
 
 # scripts/audit_install_pipeline.sh writes a timestamped JSON snapshot per
