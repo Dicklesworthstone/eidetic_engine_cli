@@ -25146,6 +25146,8 @@ where
             Some(&CancelledCommandBudget::index_maintenance(
                 "rebuild",
                 &options.workspace_path,
+                options.database_path.as_deref(),
+                options.index_dir.as_deref(),
                 options.dry_run,
             )),
             cli.renderer(),
@@ -25241,6 +25243,8 @@ where
             Some(&CancelledCommandBudget::index_maintenance(
                 "reembed",
                 &options.workspace_path,
+                options.database_path.as_deref(),
+                options.index_dir.as_deref(),
                 options.dry_run,
             )),
             cli.renderer(),
@@ -57132,16 +57136,33 @@ struct CancelledCommandBudget {
 impl CancelledCommandBudget {
     /// GH#78: `ee index rebuild` and `ee index reembed` (and their
     /// `--dry-run` plans) run under `EE_INDEX_REBUILD_TIMEOUT_SECONDS`.
-    fn index_maintenance(operation: &'static str, workspace: &Path, dry_run: bool) -> Self {
-        let workspace_arg = shell_quote_cli_arg(&workspace.display().to_string());
+    /// The rerun keeps an explicit `--database` and `--index-dir`, so the
+    /// repair raises the budget for the store that ran out of it rather than
+    /// rebuilding the workspace's default store.
+    fn index_maintenance(
+        operation: &'static str,
+        workspace: &Path,
+        database: Option<&Path>,
+        index_dir: Option<&Path>,
+        dry_run: bool,
+    ) -> Self {
+        let quoted = |path: &Path| shell_quote_cli_arg(&path.display().to_string());
+        let mut rerun = format!("ee --workspace {} index {operation}", quoted(workspace));
+        if let Some(database) = database {
+            rerun.push_str(&format!(" --database {}", quoted(database)));
+        }
+        if let Some(index_dir) = index_dir {
+            rerun.push_str(&format!(" --index-dir {}", quoted(index_dir)));
+        }
+        if dry_run {
+            rerun.push_str(" --dry-run");
+        }
+        rerun.push_str(" --json");
         Self {
             env_var: "EE_INDEX_REBUILD_TIMEOUT_SECONDS",
             seconds: crate::core::index::index_rebuild_timeout().as_secs(),
             max_seconds: crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS,
-            rerun: format!(
-                "ee --workspace {workspace_arg} index {operation}{} --json",
-                if dry_run { " --dry-run" } else { "" }
-            ),
+            rerun,
         }
     }
 
@@ -95730,20 +95751,43 @@ mod tests {
             crate::core::index::DEFAULT_INDEX_REBUILD_TIMEOUT_SECS,
             crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS,
         );
-        for (operation, dry_run, rerun) in [
+        // An explicit store is part of "the same command": without it the
+        // repair would rebuild the workspace's default store instead.
+        let database = Path::new("/srv/ee stores/ee.db");
+        let index_dir = Path::new("/srv/ee stores/index");
+        for (operation, database, index_dir, dry_run, rerun) in [
             (
                 "rebuild",
+                None,
+                None,
                 false,
                 "ee --workspace '/tmp/ee gh78 workspace' index rebuild --json",
             ),
             (
                 "reembed",
+                None,
+                None,
                 true,
                 "ee --workspace '/tmp/ee gh78 workspace' index reembed --dry-run --json",
             ),
+            (
+                "rebuild",
+                Some(database),
+                Some(index_dir),
+                true,
+                "ee --workspace '/tmp/ee gh78 workspace' index rebuild --database '/srv/ee stores/ee.db' --index-dir '/srv/ee stores/index' --dry-run --json",
+            ),
+            (
+                "reembed",
+                Some(database),
+                None,
+                false,
+                "ee --workspace '/tmp/ee gh78 workspace' index reembed --database '/srv/ee stores/ee.db' --json",
+            ),
         ] {
-            let budget =
-                super::CancelledCommandBudget::index_maintenance(operation, workspace, dry_run);
+            let budget = super::CancelledCommandBudget::index_maintenance(
+                operation, workspace, database, index_dir, dry_run,
+            );
             let error = IndexRebuildError::Cancelled(CancelReason::deadline());
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
@@ -95799,7 +95843,7 @@ mod tests {
                 let lowered = super::CancelledCommandBudget {
                     seconds: budget_seconds,
                     ..super::CancelledCommandBudget::index_maintenance(
-                        operation, workspace, dry_run,
+                        operation, workspace, database, index_dir, dry_run,
                     )
                 };
                 ensure_equal(
