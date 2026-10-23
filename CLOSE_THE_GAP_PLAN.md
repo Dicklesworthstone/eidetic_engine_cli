@@ -2192,3 +2192,209 @@ same zeros whether the product worked or not. Both are small, bounded, and
 they are what makes every later number believable. The product work of the
 last three weeks does not need more ambition; it needs a measurement it can be
 graded by.
+
+## 18. 2026-10-23 execution pass: the instrument now works, and it found things
+
+Not a new reality check. This is the execution record for the steering in
+§17.8, kept here because §17's findings are only honest while their
+dispositions are visible beside them. Same evidence authority as §17.1 — the
+sha256-verified shipped v0.18.0 archive, black-box, isolated `HOME`/`XDG_*`
+roots on physical paths — plus, for the first time in this bridge, **numbers
+produced by the project's own instrument rather than by a hand-rolled probe**.
+
+### 18.1 N2 is closed, and the first real baselines exist
+
+`.67` closed on an execution at `ce034a12b`. `scripts/real_shape_corpus/probe.py`
+now carries all four required outcomes with both directions of every control:
+`--self-test` runs 24 binary-free arms and 28 with a binary. The repaired probe
+produced the oracle-scale v0.18.0 baselines `.63` had been blocked on for three
+weeks (308 sessions / 4,009 spans / 988 admitted / 3,021 quarantined):
+
+| §16.5 metric | measured | target | verdict |
+| --- | --- | --- | --- |
+| UTR | **0.9998** | ≥ 0.95 | MET |
+| TTFUC (pack p50) | **0.571 s** (max 0.759 s) | ≤ 2 s cold | MET |
+| PAP | **1.00 precision / 0.833 recall**, 5 proposals, 0 polluted | ≥ 0.70 both | MET |
+| FAR | **0.0** over 335 packed items | ≤ 0.05 | MET |
+| WCS slope | **0.437** over 502 → 4,009 records | ≤ 0.15 | **MISSED** |
+
+Supporting readings: search p50 0.253 s; import 0.171 s/session; negative-query
+flag rate 1.0; `ask` negative-abstain rate 1.0; `scenario_hit_at_5` 0.925.
+
+**WCS is the one new red, and it is the first measurement of invariant I-2 on
+real shape.** `remember` p50 went 0.372 s at 502 records to 0.923 s at 4,009 —
+an 8× corpus for a 2.5× write cost, slope 0.437 against a ≤ 0.15 target. Two
+points only, so the figure is directional rather than final; a third point is
+needed before it is quoted as the verdict. Note it supersedes nothing: §17's
+≈0.04 was measured from 10 memories to 4,009 spans, a range dominated by fixed
+cost, and over that range the slope genuinely is flat. The 502 → 4,009 band is
+where the growth lives.
+
+**Two readings on this corpus must never be quoted without their reason.**
+`recall_at_5` fell 0.4583 → 0.0375 → 0.0 across 502 → 4,009 → 12,009 records on
+a product that retrieved correctly the whole way up, because the oracle reaches
+scale by seeding copies of each judged scenario while judgments label only the
+authored core. `scenario_hit_at_5` is the scale-invariant form of the same
+question and stayed 1.0 / 0.925. **Anyone promoting `.50` to ENFORCE must gate
+on `scenario_hit_at_5`, not `recall_at_5`.** This cost a correction to the
+probe's own fail-closed guard (`cb246f91e`): as first shipped it keyed on
+`recall_at_5` and therefore false-fired at 12,009 records — the constant-red
+half of `bd-2phcw`, reintroduced inside the gate written against it. The arm
+that now pins it is a twin that must NOT fire.
+
+**And the honest limit on every number above: they are the LEXICAL
+configuration.** The default download policy cannot be measured, because it
+returns zero results (N1). The only embedding configuration in which ee's own
+outcome metrics can be measured today is the one that turns the model off.
+
+### 18.2 N1 is attributed to exact source, and deliberately not yet fixed
+
+Reproduced exactly — `init` → `import cass` → `search`, nothing written between,
+so all five surfaces observe one immutable snapshot: search 0 results with
+`index_incompatible`; `ee index status` health **READY**, `degradationCode`
+null, `repairHint` null, generations equal (139/139), 60 docs; `ee status`
+`posture.overall` **OK**; `ee doctor --full` **posture OK** with
+`search_index = ok "Search index is ready"`.
+
+The chain, with lines: a hash-tier build records `storedModelId`,
+`storedDimension`, `storedModelRevision` and `storedModelHash` as **null**;
+`embedding_space_compatibility_error` (`src/core/index.rs:5936`) opens
+`let (stored_model_id, stored_dimension) = stored?;` and so returns
+*compatible* whenever the stored side declares nothing — its doc comment states
+the assumption ("a lexical/hash-tier index legitimately carries no
+fingerprint") that frankensearch contradicts by binding a producer revision
+regardless of tier; `determine_health` therefore receives
+`compatibility_error = false`; and `check_search_index`
+(`src/core/doctor.rs:3616`) maps `IndexHealth` over only four states, so
+`Ready → CheckResult::ok` and doctor has no finding and no repair to offer. The
+decisive identity lives in frankensearch's own index header
+(`index.embedder_revision()` vs `query.identity_fingerprint()`), which **no
+readiness surface consults**.
+
+Two corrections to §17's N1 row. Doctor does not report "zero non-ok checks" —
+it reports posture OK with five warnings, and the relevant one,
+`embedding_posture`, **misdiagnoses** this store as a quality degradation
+("deterministic-hash fallback … Explicit memories remain available through
+lexical or anchored retrieval"). Zero are. So the condition is not merely
+unreported; it is reported as something an agent would reasonably act on
+differently.
+
+Recommended fix recorded on `.66`: resolve a **workspace-scoped** embedder stack
+in the readiness path and compare fingerprints, never touching the process
+global — the mechanism `src/core/index.rs:18557` already uses for exactly this
+divergence. Not implemented in this pass: it changes the readiness contract,
+needs a degraded-code fixture plus its `docs/degraded_code_taxonomy.md` row in
+the same commit, and will move goldens. None of that could be graded locally.
+
+### 18.3 The unification: one divergence, three symptoms
+
+N1 is not a reporting bug on its own. **Which embedder a process resolves
+depends on which code path asked first, and nothing binds the answer per
+snapshot.** Measured on one store at one instant: `index status` reports
+`semantic false / source frankensearch_hash_fallback / available_model_count 0`
+while a complete, `.verified` 489 MB potion model sits in the model root and
+`search`, in its own process, resolves a producer that rejects the stored
+vectors.
+
+Three symptoms, same fact:
+
+1. **`.66`** — the readiness surfaces resolve the non-semantic side, so they
+   see no conflict and report healthy.
+2. **`.56`** — the model-load subtraction added in `cf8c95030` (which **did**
+   ship in v0.18.0) reads the process-global `DEFAULT_SEARCH_EMBEDDER_LOAD`
+   OnceLock on both halves of its guard. On a store whose model comes from the
+   workspace registry that global is never initialised, so it subtracts **zero**
+   and `pack_assembly_elapsed_over_budget` still fires on **6 of 6** packs
+   (assembly 894/564/550/553/629/633 ms against a 500 ms threshold). The proof
+   is arithmetic: the cold pack paid ~330 ms more than the warm ones and its
+   reported assembly rose by the same ~330 ms, which cannot happen if the load
+   is being subtracted. Control: with the model absent the warning fires on
+   2 of 40, and 0 of 20 at 502 records — the threshold is not the problem.
+   Raised P3 → P2, not for latency (contents are unaffected and the message
+   says so) but because a warning on 100% of the primary command's invocations
+   trains agents to ignore `degraded[]`, which is the channel the honesty
+   contract runs on.
+3. **`bd-3k1mg` / `bd-qf3l4`** (closed) — the same divergence broke coalesced
+   drains with a `producer_revision` mismatch, and was repaired **pointwise** at
+   one call site rather than as a property.
+
+This already has an owning P0 — **`.2`, "make index publication and embedder
+selection deterministic across CLI processes"**, whose acceptance includes
+"equal snapshots choose one backend/model and semantic result across
+processes". No new bead was filed; the evidence went onto `.2` and `.66`/`.56`
+are linked to it as `related`. Its EVIDENCE STATUS block previously rested on a
+provenance-less 0.14.2 binary; the divergence now has a reproduction on a
+binary with a known commit plus two downstream symptoms carrying numbers.
+
+### 18.4 bd-betm5: the Learn loop's last link
+
+Three conjuncts govern gap coverage — not tombstoned, `created_at >
+cluster.last_seen_at`, and carrying the exact `knowledge-gap:<clusterId>` tag.
+Executed with the new third diagnostic in `scripts/e2e_memory_debt.sh`
+(27 steps, this bead's the only failure):
+
+- **tag conjunct: satisfied.** `coverTags` is literally
+  `["docking","knowledge-gap:gap_80bd12d26846daceb312"]` against a cluster
+  whose `clusterId` is `gap_80bd12d26846daceb312`.
+- **recency conjunct: satisfied, and the suspected mechanism is eliminated.**
+  The worry was that the second `ee learn gaps` re-observes the misses and
+  advances the window past the answer. It does not: `lastSeenAt` is
+  byte-identical before and after (`2026-10-23T05:11:53.826655000+00:00`) with
+  `scannedMissCount` 3 both times, and the remember landed ~1 s later.
+- **so the cause on that binary is that the predicate is not in it.**
+  `5c3392996` ("let hash-only gaps close via explicit coverage tags") landed
+  **2026-10-14 18:14, eight hours after the v0.18.0 release commit**, and
+  `GAP_COVERAGE_TAG_PREFIX` exists only in it and its test commit. The shipped
+  binary proves it from outside: its `suggestedCommand` carries **no `--tags`
+  at all**, so an agent following the product's own suggestion could not bind
+  an answer to a gap even in principle.
+
+**The trap that hid this, and it generalises.** The suite's staleness guard
+passed and printed `binary_version=0.18.0 source_version=0.18.0`, which reads
+like an attestation. It is semver equality, not commit identity, and the two
+sides differed by the one commit implementing the feature under test — exactly
+what its own header warns about (`bd-smxdr`). **Any measurement in this bridge
+must name the commit, not the version.**
+
+A dispatched HEAD verdict was launched with the prediction pre-registered on
+the bead (pass, with a non-null `coveredBy`) so the result cannot be
+rationalised afterwards.
+
+Smaller finding, separately actionable: `ee remember --json` returns 39 data
+fields — `audit_id`, `confidence`, `revision_number`, `valid_from`, `valid_to`,
+`version`, `tags` and more — and **no `createdAt` in either spelling**. So the
+timestamp the recency conjunct turns on is not observable from the write that
+is supposed to close the gap, and neither an agent nor a test can confirm that
+conjunct from outside the process.
+
+### 18.5 The pattern this pass exposes, which is bigger than any one bead
+
+Three of the beads examined today were **already fixed in source and still
+open**, because the only artifact anyone can measure is a published binary that
+predates the fix: `.56`'s subtraction shipped and is inert, `bd-betm5`'s
+predicate landed eight hours after the tag, and `.44`/R1's config override was
+fixed and verified only by source reading. With hosted Actions off
+(`bd-actions-disabled-repo-wide-33mfm`), cargo tripwired locally, and — until
+`ce034a12b` — the real-corpus probe constant-red, **the project's default
+outcome for a correct fix is that it stays open.** That is the same shape as
+§17's N1/N2 one level up: the work is not the bottleneck, the verdict is.
+
+Concretely, two cheap changes would move this more than any single product fix:
+decide the Actions allowed-actions policy (configuration, not code), and give
+the repaired probe a home in the gate set once `bd-2di61` settles the
+gated-stage exclusion. Until then every claim in this bridge rests on one
+developer's laptop and a hand-verified archive.
+
+### 18.6 Dispositions
+
+| §17 finding | 2026-10-23 disposition |
+| --- | --- |
+| N1 readiness incoherence | attributed to exact source; `.66` holds the recommended fix; linked to `.2` |
+| N2 probe false reds | **CLOSED** (`.67`, `ce034a12b`); baselines captured; guard sentinel corrected (`cb246f91e`) |
+| N3 Actions disabled | unchanged; now identified as the single highest-leverage non-code decision (§18.5) |
+| N4 FAR / relevance band | **FAR measured 0.0** over 335 items on the oracle; the λ-feasibility precondition on `.11`/`.12` stands |
+| N5 release-probe asset | unchanged (`.68`) |
+| N6 open beads across releases | sharpened: §18.5 explains the mechanism, not just the count |
+| N7 upstream repair hint | unchanged (`.69`) |
+| N8 workflow sprawl | unchanged |
+| N9 leaked staging dirs | unchanged; the probe no longer adds to it (controls use auto-cleaned roots) |
