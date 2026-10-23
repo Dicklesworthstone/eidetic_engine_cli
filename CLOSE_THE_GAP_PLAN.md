@@ -2662,3 +2662,93 @@ does not reproduce. The durable-vs-rebuildable inventory exists and is good —
 108 tables, each with `owner`, `disposition`, `coverage`, `rowCount` and
 `schemaCovered`. And export is understated rather than incomplete: all 14
 sessions and all 123 spans ship under `derived/`, not in `records.jsonl`.
+
+### 18.9 Two P0 test suites executed for the first time, and the runbook was inside the test
+
+The dispatch lane costs ~32 minutes and is idle most of the time, so the highest
+-leverage use of it is grading suites that nobody has ever run. Two P0 beads own
+test files named after themselves. Both files compile, both are mounted into
+live shard targets, and neither had a recorded execution.
+
+**Finding: the test target names are not the file names.** A first dispatch
+failed instantly with `error: no test target named 'index_retention_e2e' in
+default-run packages`. Files under `tests/` are `#[path]`-mounted into shard
+targets in `tests/suites/`, so a test's real id is `<file_stem>::<fn>` and the
+target is the shard. Six test files are named for still-open beads; all six need
+the shard+module-prefix form, not their own name.
+
+#### `.42` (retained index generations): 3/3 green, three of six acceptance bullets
+
+`--test integration_g_m -- index_retention_e2e::`, announced 3, passed 3,
+failed 0, reconciled, one `Running` line, one summary, 132.33s. The arms are
+real product behaviour, not self-tests: `vacuum` previews 5 planted stale
+copies and deletes none, `--apply` reclaims exactly those 5 and writes an audit
+row, a second `--apply` reclaims nothing, and 8 consecutive `remember` calls
+each hold retained ≤ 2 **while the live generation strictly advances** — that
+second conjunct is what stops the bound being satisfied by publications that
+stopped happening.
+
+Not proven, and not rounded up: the write count is 8, not the acceptance's
+1,100, so the allocator's 0..1000 ceiling — the bead's actual hard-failure mode
+— is untouched. The 28 inline GC unit tests, which are where every negative
+bullet lives (never reclaim the active generation, a leased one, live staging,
+or a rejected-quarantine dir), have also never been executed; they sit in the
+lib target, whose unfiltered run exits 101 on 11 chronic failures, so they need
+a module filter to be gradeable at all. And `scripts/e2e_index_retention.sh`,
+which the acceptance names, does not exist — it is the only item with nothing
+behind it, and also the only one that would produce the per-write BYTES series
+the disk-bound claim is about. The integration test counts directories.
+
+#### `.10` (source-attested retrieval oracle): the instrument passes its own calibration, and has never been pointed at anything
+
+`--test integration_n_r -- retrieval_index_regression_oracle::`, announced 55,
+passed 53, failed 0, **ignored 2**, reconciled. Read the 2:
+
+    concurrent_retrieval_over_one_generation_is_classified
+      ... ignored, "oracle: point it at a candidate deliberately"
+    read_only_window_attribution
+      ... ignored, "attribution probe for the durable-mutation red; run it deliberately"
+
+The 53 green are `classifier::*`, `attestation::*`, `build_environment::*`,
+`model_cell_controls::*` — the oracle's self-tests. They prove the instrument
+works, and the module header is explicit that this is deliberate: the live probe
+is `#[ignore]` because under swarm load `Inconclusive` is the likely outcome and
+a load-dependent red in a shared suite is the manufactured-wrong-answer failure
+the design exists to prevent. That reasoning is correct. The consequence is that
+the bead's decisive bullet — "reproduce or fail to reproduce the released-binary
+divergence; either outcome becomes the implementation baseline" — has no
+evidence either way, and a green on 53 calibration tests must not be read as
+one. That would be bd-2phcw's three-shapes defect from the other side: a
+verdict that does not vary with the property, because the property is never
+read.
+
+**The dispatch this bead needed was written into its own refusal path.**
+`tests/retrieval_index_regression_oracle.rs:756` — the message `attest_fields`
+emits when `ORACLE_REQUIRE_ATTESTATION=1` finds an unattested candidate — spells
+out the whole command: which `VERGEN_*` to forward, why `VERGEN_GIT_DIRTY=false`
+is honest only under a no-overlay baseline, and that `scripts/rch_verify.sh`
+spells the same thing `--treeish <sha> --committed-tree`. Somebody wrote the
+runbook into the error text and nobody ran it. Dispatched now on the pinned
+lane, which is acceptance bullet 1 verbatim, with `--event-log` for bullet 6 and
+a pre-registered reading of all four verdict classes recorded on the bead before
+the result returns.
+
+**Mechanical finding worth keeping: `rch exec --job` can never carry a committed
+baseline.** `--job` is mutually exclusive with `--clean-overlay` (exit 2) while
+`--base`/`--no-overlay` *require* `--clean-overlay` (exit 1). So the lane that
+gives you `--result-dir` and a shell body is working-tree-sync only, and cannot
+satisfy a source-attestation bullet at all. That is why the test prescribes a
+plain `rch exec`; it is not a flag combination to work around. The gradeable
+form of two ignored arms is one cargo invocation, because libtest accepts
+several filters after `--`.
+
+#### The pattern, now measured twice more
+
+§18.5 said the project's default outcome for a correct fix is that it stays
+open, because there is no local cargo, Actions is off repo-wide, and the probe
+is red. These two beads sharpen it: the code was written, the tests were
+written, the runbook was written, and the only missing step was somebody
+spending 32 minutes of an idle lane to turn any of it into a verdict. `.42` was
+already carrying two independent readings — a source audit on 2026-10-20 and a
+black-box measurement on the shipped v0.18.0 — and still needed a third before
+anyone would close it. Writing the test is not the expensive part here.
