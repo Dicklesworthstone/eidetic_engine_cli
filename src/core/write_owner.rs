@@ -4327,7 +4327,10 @@ mod tests {
             .find(|row| row.source_id == "agent:Alpha")
             .expect("alpha stats");
         assert_eq!(alpha.write_count, 2);
-        assert_eq!(alpha.evidence_present_count, 2, "both carry a provenance uri");
+        assert_eq!(
+            alpha.evidence_present_count, 2,
+            "both carry a provenance uri"
+        );
         assert_eq!(
             alpha.trust_class_counts.get("agent_assertion").copied(),
             Some(2)

@@ -342,7 +342,10 @@ fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
         "c846e3c4378814797a8e6af85377b3f08f43a0962f90b28575a7290fb3e2a5a6";
 
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let generator = repo.join("scripts").join("real_shape_corpus").join("generate.py");
+    let generator = repo
+        .join("scripts")
+        .join("real_shape_corpus")
+        .join("generate.py");
     if !generator.exists() {
         eprintln!("skip: {} is absent", generator.display());
         return Ok(());
@@ -389,8 +392,10 @@ fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let out = std::env::temp_dir()
-        .join(format!("ee-real-shape-determinism-{}-{unique}", std::process::id()));
+    let out = std::env::temp_dir().join(format!(
+        "ee-real-shape-determinism-{}-{unique}",
+        std::process::id()
+    ));
     if out.exists() {
         return Err(format!(
             "{} already exists; this test needs a tree it alone wrote, because \
@@ -517,7 +522,10 @@ fn judgments_are_internally_consistent_and_meet_the_deliverable() -> TestResult 
     let judgments: Value = serde_json::from_str(&judgments_raw)
         .map_err(|error| format!("parse judgments: {error}"))?;
 
-    let schema = judgments.get("schema").and_then(Value::as_str).unwrap_or("");
+    let schema = judgments
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if schema != "ee.real_shape_cass.judgments.v1" {
         return Err(format!(
             "judgments.json must declare schema ee.real_shape_cass.judgments.v1, got {schema:?}"
@@ -635,7 +643,9 @@ fn judgments_are_internally_consistent_and_meet_the_deliverable() -> TestResult 
     }
     for (text, count) in &seen_text {
         if *count > 1 {
-            problems.push(format!("duplicate query text {text:?} appears {count} times"));
+            problems.push(format!(
+                "duplicate query text {text:?} appears {count} times"
+            ));
         }
     }
 

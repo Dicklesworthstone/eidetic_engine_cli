@@ -1581,9 +1581,9 @@ fn symptom_line(output: &ToolOutput) -> Option<String> {
     }
     match cargo_text::decode(&output.text) {
         Ok(Some(diagnostics)) => {
-            return diagnostics.first().and_then(|diagnostic| {
-                cargo_text::symptom(&output.text, diagnostic)
-            });
+            return diagnostics
+                .first()
+                .and_then(|diagnostic| cargo_text::symptom(&output.text, diagnostic));
         }
         Err(()) => return None,
         Ok(None) => {}

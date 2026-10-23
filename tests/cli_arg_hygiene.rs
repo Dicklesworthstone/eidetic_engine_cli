@@ -127,8 +127,7 @@ fn remember_and_note_typed_field_flags_do_not_collide_with_global_fields() {
 fn ee_search_read_fence_defaults_to_eventual_and_parses_every_mode() {
     use ee::core::read_fence::ReadFence;
 
-    let default = Cli::try_parse_from(["ee", "search", "some query"])
-        .expect("plain search parses");
+    let default = Cli::try_parse_from(["ee", "search", "some query"]).expect("plain search parses");
     let Some(Command::Search(args)) = default.command else {
         panic!("expected search command");
     };
@@ -160,14 +159,9 @@ fn ee_search_read_fence_defaults_to_eventual_and_parses_every_mode() {
 
     // The snapshot form carries a generation, so a malformed one must be a parse
     // error rather than a silent fallback to eventual.
-    let snapshot = Cli::try_parse_from([
-        "ee",
-        "search",
-        "some query",
-        "--read-fence",
-        "snapshot:12",
-    ])
-    .expect("search --read-fence snapshot:12 parses");
+    let snapshot =
+        Cli::try_parse_from(["ee", "search", "some query", "--read-fence", "snapshot:12"])
+            .expect("search --read-fence snapshot:12 parses");
     let Some(Command::Search(args)) = snapshot.command else {
         panic!("expected search command");
     };
@@ -195,8 +189,8 @@ fn ee_search_read_fence_defaults_to_eventual_and_parses_every_mode() {
 fn ee_context_and_why_carry_the_same_read_fence_defaults() {
     use ee::core::read_fence::ReadFence;
 
-    let context = Cli::try_parse_from(["ee", "context", "some task"])
-        .expect("plain context parses");
+    let context =
+        Cli::try_parse_from(["ee", "context", "some task"]).expect("plain context parses");
     let Some(Command::Context(args)) = context.command else {
         panic!("expected context command");
     };

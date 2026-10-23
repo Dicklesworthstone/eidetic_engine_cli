@@ -904,8 +904,7 @@ pub fn storeless_workspace_error(database_path: &std::path::Path) -> crate::mode
 /// Repair advice for a recovered storage panic. A panic is not an input
 /// problem, so none of the ordinary "retry the operation" lines help: the
 /// retry reproduces it.
-pub const STORAGE_PANIC_REPAIR: &str =
-    "a storage panic is not an input problem; capture the panic from stderr and report it \
+pub const STORAGE_PANIC_REPAIR: &str = "a storage panic is not an input problem; capture the panic from stderr and report it \
      before retrying";
 
 /// Classify a `DbError` that a caller would otherwise map onto a domain-shaped

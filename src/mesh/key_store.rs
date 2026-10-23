@@ -2638,8 +2638,8 @@ mod tests {
     /// safe, rather than the coincidence that currently satisfies it.
     #[test]
     fn memory_content_cap_cannot_exceed_the_key_store_record_cap_bd_1kgjt() {
-        let content_cap = u64::try_from(crate::models::MAX_CONTENT_BYTES)
-            .expect("MAX_CONTENT_BYTES fits in u64");
+        let content_cap =
+            u64::try_from(crate::models::MAX_CONTENT_BYTES).expect("MAX_CONTENT_BYTES fits in u64");
         assert!(
             content_cap <= MAX_RECORD_BYTES,
             "models::MAX_CONTENT_BYTES ({content_cap}) must not exceed \

@@ -1025,8 +1025,7 @@ fn collect_mesh_degraded_code_constants()
     // `\s*` spans the line break, which matters: responder_broker.rs declares
     // MESH_RESPONDER_IDENTITY_UPGRADE_REQUIRED_CODE with its value on the
     // following line, and a single-line pattern would miss it.
-    const DECLARATION_PATTERN: &str =
-        r#"pub const ([A-Z0-9_]+_CODE):\s*&str\s*=\s*"([a-z0-9_]+)""#;
+    const DECLARATION_PATTERN: &str = r#"pub const ([A-Z0-9_]+_CODE):\s*&str\s*=\s*"([a-z0-9_]+)""#;
     let declaration = Regex::new(DECLARATION_PATTERN)
         .map_err(|error| format!("compile mesh code declaration regex: {error}"))?;
     let mut declared: Vec<(String, String)> = declaration

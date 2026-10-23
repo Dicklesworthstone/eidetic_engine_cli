@@ -32886,12 +32886,11 @@ where
     // Explicit flags still win, which preserves the deterministic
     // pure-calculation mode that `tests/store_integrity_surface.rs` drives
     // and keeps this command usable for replaying a captured incident.
-    let (db_generation, asset_generations, generation_source) =
-        resolve_store_integrity_generations(
-            cli,
-            args.db_generation,
-            (!args.asset_generations.is_empty()).then(|| args.asset_generations.clone()),
-        );
+    let (db_generation, asset_generations, generation_source) = resolve_store_integrity_generations(
+        cli,
+        args.db_generation,
+        (!args.asset_generations.is_empty()).then(|| args.asset_generations.clone()),
+    );
 
     let report = crate::core::store_integrity::run_store_integrity_report(
         crate::core::store_integrity::StoreIntegrityOptions {
