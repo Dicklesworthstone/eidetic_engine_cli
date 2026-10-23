@@ -2800,3 +2800,94 @@ finishes, so the summaries must be summed and reconciled against the `running N
 tests` announcements per target. `--lib` stays out of the same invocation
 entirely — its 11 chronic failures make the run's exit status uninterpretable,
 and it needs its own filtered dispatch.
+
+### 18.11 The oracle fired: RACE_REPRODUCED, and the cause is not what the shape suggests
+
+§18.9 reported that `.10`'s instrument had never been pointed at a candidate. It
+has now, and it returned a verdict: **`RACE_REPRODUCED`** on `pack.hash`, at an
+attested commit. This is the first product classification this bridge has for
+the retrieval/index divergence, and `.10`'s gate — "no code fix lands before
+this classification" — is discharged.
+
+    base          cf0df2719        gitDirty false   sourceState clean
+    target        x86_64-unknown-linux-gnu   profile debug   version 0.18.0
+    featureSet    embed-fast,fts5,graph,json,lexical-bm25
+    binarySha256  503054924fea…7e7bde2
+    franken-stack version-identical to franken-stack.lock, 9/9 declared
+                  families, 0 mismatches (checked, not assumed)
+    run           announced 2, 1 passed 1 failed, reconciled, one summary, 828s
+
+Pack only. Search was `RACE_ABSENT` in all three rounds with 8/8 probes agreeing
+and `results.order` byte-identical between the warm and cold serial reads;
+`indexInvisible: []` throughout, so the `.66`-shaped condition did not occur
+here. `read_only_window_attribution` PASSED, so the durable-mutation-under-
+read-only red does not reproduce either.
+
+**The whole run contains exactly two pack hashes**, and which windows got which
+is the finding:
+
+    serial baseline (serialIsFirstTouch)  65aac94e…
+    round 0, 8 concurrent probes          65aac94e…   agree
+    round 1, 8 concurrent probes          cd61f5a5…   diverge
+    round 2, 8 concurrent probes          cd61f5a5…   diverge
+
+So it is **not** a race among simultaneous readers — all eight concurrent probes
+agree with each other in both failing rounds — and it is **not**
+serial-vs-concurrent either, because round 0 was concurrent and agreed. The
+shape is **early vs late**: the first two pack windows produce one hash and
+every later one produces the other, stably. Filed as **bd-wubqf** (P0), since
+"same workspace → byte-identical context pack hash" is listed in AGENTS.md
+under Determinism (non-negotiable), and the failure is a function of how many
+packs a workspace has already served — which is how a test that passes in
+isolation fails in a suite and makes the suite look like the problem.
+
+**I nearly attributed this to the wrong bead, and the discipline that caught it
+was the one §18.8.1 cost three write-ups to learn.** `bd-ve7c6` ("pack hash
+binds live runtime measurements: `queue_depth` and `retry_after_ms` are
+interpolated into hash-bearing degradation prose") predicts this signature
+almost exactly, and it is filed twice over as "found by reading, not by
+execution" — so this run looked like its missing proof. The data refuses it: the
+hash-bearing degraded set is byte-equal on both sides of the divergence
+(`embed_model_unavailable,pack_assembly_elapsed_over_budget` on the serial
+baseline and on every concurrent probe), and neither code `bd-ve7c6` names fired
+anywhere. An identical canonical input cannot carry a hash difference. That
+negative result is recorded on `bd-ve7c6` itself, because the dangerous outcome
+was not being wrong for an hour — it was leaving a dispatch on the record that a
+later reader would cite as confirmation.
+
+**The cheap discriminator is pre-registered rather than theorised**: re-run the
+serial baseline *after* the concurrent rounds. If it reports `cd61f5a5`, the
+variable is accumulated state and "race" is the wrong frame entirely; if it
+reports `65aac94e`, the concurrent context really is the variable and round 0 is
+the anomaly. Nothing else in the captured evidence separates those, and they
+need opposite fixes. The oracle already takes a cold serial read and stamps
+`serialIsFirstTouch`; it simply never re-baselines at the end.
+
+**Two instrument defects, found by using the instrument.** The final verdict
+reports "round 3" and "round 5" when only rounds 0–2 ran — those are flat
+indices over the six (round, kind) windows, so a reader who trusts the verdict
+looks for rounds that do not exist. And the verdict diffs hashes without diffing
+selections: it captured `pack.selection` for the serial baseline and none for
+the concurrent probes, so it can say the hashes differ but not what differs,
+which is exactly what attribution needs next.
+
+**`.56` got independent confirmation for free**, and in the configuration that
+settles it: **25 of 25** pack invocations emitted
+`pack_assembly_elapsed_over_budget` — one serial plus 3 × 8 concurrent, at
+1.6–2.0 s against a 500 ms budget — while every probe ran
+`embed_backend: hash_fallback` with `embed_model_unavailable` and the index
+reported `embeddingMode: deterministic_hash`. There was no model to load, so the
+alternative story that the warning honestly reports a one-off model load is
+closed off: there is nothing to subtract and the warning is still universal.
+
+**`.10` is NOT closed, and that departs from what I pre-registered.** I wrote on
+the bead that a semantic red would close it as the baseline. Two acceptance
+bullets are unmet: the cold/warm MODEL cells were never exercised (`cell:
+"none"` throughout — `ORACLE_MODEL` was deliberately left unset because the
+model cells need worker network and "no network is INFRA_ERROR", which would
+have bought an unattributable non-verdict instead of this classification), and
+bullet 1's pinned-Franken-stack lane is blocked by **bd-zpr8x**. The
+franken-stack came back version-identical to the lock, but `rch exec` does not
+materialise siblings at lock *revisions*, so the revisions stay unattested.
+Saying so beats closing on partial acceptance, which is the pattern the
+honesty-only / implements-surface taxonomy exists to prevent.
