@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "read_fence_stale_derived_asset",
+  "introduced_by": { "bead": "bd-1n0np.8.13", "epic_letter": "R" },
+  "surfaces": ["pack", "search", "why"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The addressed search-index generation trails its database generation and the caller requested latest with strict enforcement. Canonical pack queries, query-file builds, and the context alias all refuse admission before retrieval.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# Select an existing index whose source generation is behind the addressed database."
+    ],
+    "invocation": "ee pack 'prepare release' --workspace . --read-fence latest --strict-read-fence --json"
+  },
+  "expected_emission": {
+    "code": "read_fence_stale_derived_asset",
+    "severity": "high",
+    "message_contains": ["refused to serve rows", "a derived asset trails the database"],
+    "repair_contains": "ee index rebuild",
+    "repair_string": "ee index rebuild --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

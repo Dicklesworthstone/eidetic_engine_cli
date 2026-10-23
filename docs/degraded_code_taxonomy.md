@@ -424,6 +424,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `index_corrupt` | high | bd-17c65.2.1 (B1) |
 | `index_missing` | medium | bd-17c65.2.1 (B1) |
 | `index_stale` | high | bd-17c65.2.1 (B1) |
+| `read_fence_generation_unavailable` | high | bd-1n0np.8.13 (ADR 0059) |
+| `read_fence_stale_derived_asset` | high | bd-1n0np.8.13 (ADR 0059) |
 | `evidence_live_admission_filtered` | warning | bd-4frzq (P0) |
 | `rule_live_admission_filtered` | low | bd-vp087 |
 | `low_recall_after_floor` | info | bd-17c65.2.1 (B1) |

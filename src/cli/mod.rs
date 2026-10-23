@@ -3823,6 +3823,19 @@ pub struct PackArgs {
     /// Fail closed when relevant evidence exists outside the requested memory scope.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_scope: bool,
+
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when the requested read fence cannot be satisfied before packing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
 }
 
 /// Pack subcommands: build, replay, diff.
@@ -3890,6 +3903,19 @@ pub struct PackBuildArgs {
     /// Fail closed when relevant evidence exists outside the requested memory scope.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_scope: bool,
+
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when the requested read fence cannot be satisfied before packing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
 
     /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
     #[arg(long, short = 'p')]
@@ -4035,6 +4061,8 @@ impl PackArgs {
             strict_source_mode: self.strict_source_mode,
             memory_scope: self.memory_scope,
             strict_scope: self.strict_scope,
+            read_fence: self.read_fence,
+            strict_read_fence: self.strict_read_fence,
             profile: self.profile.clone(),
             pack_profile: self.pack_profile,
             resource_profile: self.resource_profile,
@@ -13963,17 +13991,7 @@ where
             ClaimCommand::Verify(args) => handle_claim_verify(&cli, args, stdout, stderr),
         },
         Some(Command::Context(ref args)) => {
-            if let Some(exit) = read_fence_preflight(
-                &cli,
-                PACK_COMMAND,
-                args.read_fence,
-                args.strict_read_fence,
-                stdout,
-            ) {
-                exit
-            } else {
-                handle_context_pack_query(process, &cli, args, PACK_COMMAND, true, stdout, stderr)
-            }
+            handle_context_pack_query(process, &cli, args, PACK_COMMAND, true, stdout, stderr)
         }
         Some(Command::Demo(ref demo_cmd)) => match demo_cmd {
             DemoCommand::List(args) => handle_demo_list(&cli, args, stdout, stderr),
@@ -15396,7 +15414,11 @@ where
             // covered the plain path would be a fence with two holes in it
             // (bd-1n0np.8.13).
             if let Some(exit) = read_fence_preflight(
-                &cli,
+                || IndexStatusOptions {
+                    workspace_path: cli.resolve_workspace(),
+                    database_path: args.database.clone(),
+                    index_dir: args.index_dir.clone(),
+                },
                 "search",
                 args.read_fence,
                 args.strict_read_fence,
@@ -15658,9 +15680,17 @@ where
         }
         Some(Command::Update(ref args)) => handle_update(&cli, args, stdout, stderr),
         Some(Command::Why(ref args)) => {
-            if let Some(exit) =
-                read_fence_preflight(&cli, "why", args.read_fence, args.strict_read_fence, stdout)
-            {
+            if let Some(exit) = read_fence_preflight(
+                || IndexStatusOptions {
+                    workspace_path: cli.resolve_workspace(),
+                    database_path: args.database.clone(),
+                    index_dir: None,
+                },
+                "why",
+                args.read_fence,
+                args.strict_read_fence,
+                stdout,
+            ) {
                 exit
             } else {
                 handle_why(&cli, args, stdout, stderr)
@@ -32646,13 +32676,8 @@ struct ObservedStoreGenerations {
 /// workspace that has no store, so every failure path yields `None` and the
 /// caller falls back to the supplied flags. `None` is reported as
 /// `GenerationSource::Unavailable` and never as a fresh store.
-fn observed_store_generations(workspace_root: &Path) -> Option<ObservedStoreGenerations> {
-    let status = get_index_status(&IndexStatusOptions {
-        workspace_path: workspace_root.to_path_buf(),
-        database_path: None,
-        index_dir: None,
-    })
-    .ok()?;
+fn observed_store_generations(options: &IndexStatusOptions) -> Option<ObservedStoreGenerations> {
+    let status = get_index_status(options).ok()?;
     // The search index is the only derived asset with a generation reader
     // today. The graph asset is deliberately OMITTED rather than reported at
     // the database generation: an absent asset is invisible to the read
@@ -32699,7 +32724,7 @@ fn observed_store_generations(workspace_root: &Path) -> Option<ObservedStoreGene
 /// fence means. The payload carries the whole read-fence report rather than a
 /// bare message, because "stale" without the generations is not actionable.
 fn read_fence_preflight<W>(
-    cli: &Cli,
+    store_options: impl FnOnce() -> IndexStatusOptions,
     command: &str,
     read_fence: crate::core::read_fence::ReadFence,
     strict_read_fence: bool,
@@ -32716,7 +32741,9 @@ where
     // None/None means "observe the store", which is what a reader wants: it has
     // no generations of its own to pin.
     let (db_generation, asset_generations, generation_source) =
-        resolve_store_integrity_generations(cli, None, None);
+        resolve_store_integrity_generations(&store_options(), None, None);
+    let generations_unavailable =
+        generation_source == crate::core::store_integrity::GenerationSource::Unavailable;
 
     let report = crate::core::store_integrity::run_store_integrity_report(
         crate::core::store_integrity::StoreIntegrityOptions {
@@ -32743,16 +32770,33 @@ where
         return None;
     }
 
+    let (code, message, repair) =
+        if generations_unavailable {
+            (
+                "read_fence_generation_unavailable",
+                format!(
+                    "{command} refused to serve rows: database and search-index generations \
+                 could not both be observed under the requested read fence"
+                ),
+                crate::core::store_integrity::READ_FENCE_GENERATION_UNAVAILABLE_REPAIR.to_owned(),
+            )
+        } else {
+            (
+                "read_fence_stale_derived_asset",
+                format!(
+                    "{command} refused to serve rows: a derived asset trails the \
+                 database under the requested read fence"
+                ),
+                report.read_fence.repair.clone().unwrap_or_else(|| {
+                    crate::core::read_fence::READ_FENCE_GENERIC_REPAIR.to_owned()
+                }),
+            )
+        };
     let degraded = serde_json::json!([{
-        "code": "read_fence_stale_derived_asset",
-        "severity": "blocking",
-        "message": format!(
-            "{command} refused to serve rows: a derived asset trails the \
-             database under the requested read fence"
-        ),
-        "repair": report.read_fence.repair.clone().unwrap_or_else(|| {
-            crate::core::read_fence::READ_FENCE_GENERIC_REPAIR.to_owned()
-        }),
+        "code": code,
+        "severity": "high",
+        "message": message,
+        "repair": repair,
     }]);
     let write_exit = write_stdout(
         stdout,
@@ -32787,7 +32831,7 @@ where
 /// (bd-1n0np.8.13). `None` for both means "observe the store", which is exactly
 /// what a retrieval caller wants.
 fn resolve_store_integrity_generations(
-    cli: &Cli,
+    options: &IndexStatusOptions,
     supplied_db: Option<u64>,
     supplied_assets: Option<Vec<(String, u64)>>,
 ) -> (
@@ -32803,7 +32847,7 @@ fn resolve_store_integrity_generations(
         return (db_generation, asset_generations, GenerationSource::Supplied);
     }
 
-    let Some(observed) = observed_store_generations(&cli.resolve_workspace()) else {
+    let Some(observed) = observed_store_generations(options) else {
         return (
             supplied_db.unwrap_or(0),
             supplied_assets.unwrap_or_default(),
@@ -32816,6 +32860,12 @@ fn resolve_store_integrity_generations(
     let assets_supplied = supplied_assets.is_some();
     let db_from_store = supplied_db.is_none() && observed.db_generation.is_some();
     let assets_from_store = !assets_supplied && !observed.asset_generations.is_empty();
+    // A known database generation cannot establish index freshness when no
+    // index generation exists, nor can an orphan index establish database
+    // freshness. Keep the observations, but never label an incomplete fence
+    // as a measured coherent store.
+    let generations_complete = (supplied_db.is_some() || observed.db_generation.is_some())
+        && (assets_supplied || !observed.asset_generations.is_empty());
     let db_generation = supplied_db.or(observed.db_generation).unwrap_or(0);
     let asset_generations = supplied_assets.unwrap_or(observed.asset_generations);
 
@@ -32825,10 +32875,11 @@ fn resolve_store_integrity_generations(
     // we asked of it is `Unavailable`, not a store reporting zero.
     let any_observed = db_from_store || assets_from_store;
     let any_supplied = supplied_db.is_some() || assets_supplied;
-    let generation_source = match (any_observed, any_supplied) {
-        (true, true) => GenerationSource::Mixed,
-        (true, false) => GenerationSource::Observed,
-        (false, _) => GenerationSource::Unavailable,
+    let generation_source = match (generations_complete, any_observed, any_supplied) {
+        (false, _, _) => GenerationSource::Unavailable,
+        (true, true, true) => GenerationSource::Mixed,
+        (true, true, false) => GenerationSource::Observed,
+        (true, false, _) => GenerationSource::Unavailable,
     };
 
     (db_generation, asset_generations, generation_source)
@@ -32887,7 +32938,11 @@ where
     // pure-calculation mode that `tests/store_integrity_surface.rs` drives
     // and keeps this command usable for replaying a captured incident.
     let (db_generation, asset_generations, generation_source) = resolve_store_integrity_generations(
-        cli,
+        &IndexStatusOptions {
+            workspace_path: cli.resolve_workspace(),
+            database_path: None,
+            index_dir: None,
+        },
         args.db_generation,
         (!args.asset_generations.is_empty()).then(|| args.asset_generations.clone()),
     );
@@ -43369,6 +43424,22 @@ where
     W: Write,
     E: Write,
 {
+    // Canonical `pack <task>` calls this handler directly, as does the
+    // deprecated context alias. Keep admission before every output/cache/
+    // streaming path so neither entry point can bypass the requested fence.
+    if let Some(exit) = read_fence_preflight(
+        || IndexStatusOptions {
+            workspace_path: cli.resolve_workspace(),
+            database_path: args.database.clone(),
+            index_dir: args.index_dir.clone(),
+        },
+        command,
+        args.read_fence,
+        args.strict_read_fence,
+        stdout,
+    ) {
+        return exit;
+    }
     if let Some(output_path) = args.output.as_deref()
         && let Err(error) = validate_output_parent(output_path)
     {
@@ -46912,6 +46983,8 @@ where
             include_stale: args.include_stale,
             relevance_floor: args.relevance_floor,
             mesh_mode: args.mesh_mode,
+            read_fence: args.read_fence,
+            strict_read_fence: args.strict_read_fence,
             memory_scope: args
                 .memory_scope
                 .or(lens_memory_scope)
@@ -47010,6 +47083,22 @@ where
         .or_else(|| request.workspace_path.take())
         .unwrap_or_else(|| PathBuf::from("."));
     let workspace_root = resolve_cli_workspace_path(&workspace_path);
+
+    // A query document may address a different workspace than the process
+    // cwd. Observe the same store that this build will actually retrieve.
+    if let Some(exit) = read_fence_preflight(
+        || IndexStatusOptions {
+            workspace_path: workspace_root.clone(),
+            database_path: args.database.clone(),
+            index_dir: args.index_dir.clone(),
+        },
+        PACK_COMMAND,
+        args.read_fence,
+        args.strict_read_fence,
+        stdout,
+    ) {
+        return exit;
+    }
 
     match error_recall_query_seed(
         &workspace_root,

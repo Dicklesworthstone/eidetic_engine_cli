@@ -182,9 +182,9 @@ fn ee_search_read_fence_defaults_to_eventual_and_parses_every_mode() {
 /// defaults are asserted per surface rather than assumed to be shared, even
 /// though all three read the same parser.
 ///
-/// `ee pack` is deliberately absent: it is a subcommand GROUP, so the flag would
-/// have to be placed per leaf, which is a separate decision from threading the
-/// fence through the three surfaces the ADR names.
+/// Canonical pack queries and both query-file build forms share this contract;
+/// their parser, forwarding, and admission regressions live in
+/// `cli::pack_stream_tests`.
 #[test]
 fn ee_context_and_why_carry_the_same_read_fence_defaults() {
     use ee::core::read_fence::ReadFence;
