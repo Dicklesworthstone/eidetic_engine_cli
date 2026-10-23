@@ -2490,12 +2490,14 @@ and the `real_corpus_cass_unavailable` code its self-test bullet names is not
 actually emitted by the probe, which is the same dead-code shape `.67` was filed
 for and must be either emitted or restated.
 
-### 18.8 A backup is written already 95% denied, and reports success
+### 18.8 The default backup level is not recovery-grade for evidence, and nothing says so
 
-**Heading corrected after the fact.** This section first said "a restore
-reports success while denying 95% of a store's evidence", and the restore is not
-the bug — see the refutation at the end of this section. The behaviour below is
-unchanged and measured; the attribution moved one step upstream.
+**Heading corrected twice, and the second correction overturns my own
+conclusion.** This section first said "a restore reports success while denying
+95% of a store's evidence", then "the backup is written already 95% denied". The
+*measurements* in both were right. **Both attributions were wrong: the denial is
+intentional.** The settling evidence and the narrowed defects are at the end of
+this section — read that before quoting anything above it.
 
 `.13`'s ninth acceptance bullet asks to "replace planned-only coverage with
 executed current-candidate evidence". Executed today, create → verify → restore
@@ -2583,12 +2585,72 @@ recover it. It is not confined to disaster recovery either — any handoff,
 migration or shared-corpus workflow that round-trips a store loses 95% of its
 packable evidence, at `--redaction minimal`, the gentlest setting.
 
-Cheapest regression arm: assert the admitted/quarantined/denied **histogram**
-across a round trip rather than the span count (the count is exactly what
-already round-trips correctly, which is why this survived), and assert the
-manifest against itself — the inventory's verdict `rowCount` must equal the
-`admitted` count in the span artifact, an invariant violated inside a single
-file that needs no second store to detect.
+### 18.8.1 Settled: the denial is intentional, and two narrower defects remain
+
+**Both attributions above are wrong.** `redact_evidence`
+(`src/core/backup_evidence_export.rs:60-118`) returns early for
+`RedactionLevel::None` and otherwise ends:
+
+```rust
+if excerpt != row.excerpt || !provenance_admitted || auxiliary_changed {
+    …
+    row.search_eligibility = "denied".to_owned();
+    row.pack_eligibility  = "denied".to_owned();
+}
+```
+
+So **if the export redacted the excerpt, it denies the span** — defensible, since
+a redacted excerpt is not the evidence. Swept across all five levels on one
+store at one instant:
+
+| `--redaction` | artifact `packEligibility` | `secretRedactionStatus` |
+| --- | --- | --- |
+| `none` | **admitted 46 / quarantined 77** | redacted 109 / clean 14 |
+| `minimal` *(default)* | denied 117 / admitted 6 | redacted 117 / clean 6 |
+| `standard` | denied 117 / admitted 6 | redacted 117 / clean 6 |
+| `strict` | denied 123 | redacted 123 |
+| `paranoid` | denied 123 | redacted 123 |
+| *source DB* | *admitted 46 / quarantined 77* | — |
+
+`--redaction none` round-trips eligibility **exactly**, including the
+`quarantined` state — which also kills the "two-state channel" theory above
+(that was reasoning from the `evidence_admission_verdicts` CHECK constraint
+instead of measuring). Denial tracks redaction one-for-one at every level. And
+note the `none` row: 109 spans were *already* redacted upstream by import-time
+secret screening and keep their eligibility, so the export correctly
+distinguishes "redacted upstream" from "redacted by me".
+
+**What is still a defect, narrowed to three things:**
+
+1. **The manifest contradicts its own artifact.** At `minimal` the
+   `recoveryInventory` reports `evidence_admission_verdicts rowCount 46` while
+   the span artifact in the same file holds 6 admitted. One describes the source
+   store, the other what was exported, and nothing distinguishes them. Not a
+   design decision — an inconsistency inside a single file, detectable with no
+   second store.
+2. **Nothing says the backup is not recovery-grade for evidence.** At the
+   default level `backup create` reports `status: "completed"`, `degraded: []`,
+   `issues: 0`, and restore reports `evidenceSpansRestored: 123`. All true, all
+   reading as full fidelity, with no signal that 117 of 123 spans will be
+   unpackable and that `ee index rebuild` cannot recover them. `degraded[]`
+   exists for exactly this, and the response *was* affected.
+3. **The default is the lossy one.** `--redaction` defaults to `minimal` while
+   this bead's goal is "lossless, privacy-preserving recovery". Those are in
+   real tension for evidence excerpts and the default silently picks privacy;
+   the configuration that meets the goal is neither the default nor signposted.
+
+Cheapest arms: emit a degraded entry naming the counts and the
+`--redaction none` repair; assert the manifest's internal invariant; and pin
+both measured properties — that `none` reproduces the source histogram exactly,
+and that at `minimal` the denied count equals the redacted count, since that
+equality is what makes the denial defensible rather than arbitrary.
+
+**Method note on myself.** Three write-ups, two wrong attributions, and the same
+move corrected both: stop reasoning about the mechanism and measure one more
+variable. The projection count killed version 1; the five-level sweep killed
+version 2. Each was one command, and `--redaction` was visible in
+`backup create --help` the entire time. The instrument was fine here — the
+theory kept outrunning the data.
 
 What is genuinely good and retires part of `.13`'s PROBLEM statement: the
 dry-run non-mutation contract **passes**, measured with the control that makes
