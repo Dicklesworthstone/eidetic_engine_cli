@@ -46928,6 +46928,24 @@ where
             task_key: args.task_key.clone(),
             no_baseline_write: args.no_baseline_write,
             max_delta_bytes: args.max_delta_bytes,
+            // bd-1n0np.8.13: `ee pack <task>` has no --read-fence of its own to
+            // forward. 8bfe0649f added these two fields to ContextArgs and
+            // deliberately left `Command::Pack` out, because Pack is a subcommand
+            // GROUP and the flag would have to be placed per leaf -- but this
+            // bridge builds a ContextArgs inside handle_pack, so the decision to
+            // skip the pack surface has to be written HERE, explicitly, rather
+            // than inherited from a flag that does not exist.
+            //
+            // These are the clap defaults the field declarations carry, so the
+            // pack path behaves exactly as it did before the fence landed:
+            // `eventual` opens no store and runs no preflight. Note the dispatch
+            // arm for `Command::Pack` calls handle_pack_command directly, with no
+            // read_fence_preflight, so nothing downstream reads these values on
+            // this path today; they are set to the inert values on purpose so
+            // that if a preflight is ever added to the pack leaves, it inherits
+            // the surface's real flag rather than a silently-fenced default.
+            read_fence: crate::core::read_fence::ReadFence::Eventual,
+            strict_read_fence: false,
         };
         return handle_context_pack_query(
             process,
