@@ -93,6 +93,11 @@ pub fn parse_snapshot_graph(
         .transpose()?;
     let node_values = snapshot_array(&metrics, "nodes")?;
     let edge_values = snapshot_array(&metrics, "edges")?;
+    let snapshot_pagerank_observed = snapshot_pagerank_is_observed(
+        metrics
+            .get("centrality")
+            .and_then(|centrality| centrality.get("algorithmStatus")),
+    )?;
     let mut nodes = BTreeMap::new();
     for node in node_values {
         let id = snapshot_text(
@@ -107,6 +112,14 @@ pub fn parse_snapshot_graph(
                     .filter(|score| score.is_finite() && *score >= 0.0)
                     .ok_or_else(|| "snapshot pagerank must be nonnegative and finite".to_owned())?,
             ),
+        };
+        let node_pagerank_observed = snapshot_pagerank_is_observed(node.get("metricStatus"))?;
+        // Cooperative refresh persists zero placeholders for unavailable metrics.
+        // Either producer status can withhold authority, even when they disagree.
+        let pagerank = if snapshot_pagerank_observed && node_pagerank_observed {
+            pagerank
+        } else {
+            None
         };
         if nodes.insert(id.to_owned(), pagerank).is_some() {
             return Err("snapshot contains duplicate node identities".to_owned());
@@ -233,6 +246,28 @@ fn snapshot_text<'a>(value: Option<&'a serde_json::Value>, field: &str) -> Resul
         .and_then(serde_json::Value::as_str)
         .filter(|text| !text.trim().is_empty())
         .ok_or_else(|| format!("snapshot {field} must be a nonempty string"))
+}
+
+fn snapshot_pagerank_is_observed(
+    metric_status: Option<&serde_json::Value>,
+) -> Result<bool, String> {
+    let Some(metric_status) = metric_status else {
+        return Ok(true);
+    };
+    let metric_status = metric_status
+        .as_object()
+        .ok_or_else(|| "snapshot metric status must be an object".to_owned())?;
+    let Some(pagerank_status) = metric_status.get("pagerank") else {
+        return Ok(true);
+    };
+    let status = pagerank_status
+        .as_str()
+        .and_then(crate::graph::CentralityAlgorithmStatus::from_str)
+        .ok_or_else(|| "snapshot pagerank status is unsupported".to_owned())?;
+    Ok(matches!(
+        status,
+        crate::graph::CentralityAlgorithmStatus::Computed
+    ))
 }
 
 /// Select by the represented instant, not RFC3339 text ordering. Keep the
@@ -818,6 +853,87 @@ mod tests {
         assert_eq!(report.nodes_added.len(), GRAPH_DIFF_DETAIL_CAP);
         assert!(report.truncated.nodes_added);
         assert_eq!(report.detail_cap, GRAPH_DIFF_DETAIL_CAP);
+    }
+
+    #[test]
+    fn unavailable_pagerank_preserves_topology_without_fabricated_movers() {
+        let baseline = serde_json::json!({
+            "schema": "ee.graph.snapshot.metrics.v1",
+            "graphType": "memory_links",
+            "nodes": [{"id": "m1", "pagerank": 0.0}],
+            "edges": [],
+        });
+        let updated = serde_json::json!({
+            "schema": "ee.graph.snapshot.metrics.v1",
+            "graphType": "memory_links",
+            "centrality": {"algorithmStatus": {"pagerank": "computed"}},
+            "nodes": [
+                {"id": "m1", "pagerank": 0.4, "metricStatus": {"pagerank": "computed"}},
+                {"id": "m2", "pagerank": 0.6, "metricStatus": {"pagerank": "computed"}},
+            ],
+            "edges": [{"source": "m1", "target": "m2", "relation": "supports", "directed": true}],
+        });
+        let to = parse_snapshot_graph("to", 2, "t", &updated.to_string()).unwrap();
+        let with_statuses = |node_status: Option<&str>, snapshot_status: Option<&str>| {
+            let mut metrics = baseline.clone();
+            if let Some(status) = node_status {
+                metrics["nodes"][0]["metricStatus"] = serde_json::json!({"pagerank": status});
+            }
+            if let Some(status) = snapshot_status {
+                metrics["centrality"] =
+                    serde_json::json!({"algorithmStatus": {"pagerank": status}});
+            }
+            metrics
+        };
+
+        for unavailable in ["skipped", "timed_out", "cancelled", "failed"] {
+            for (node_status, snapshot_status) in [
+                (Some(unavailable), None),
+                (None, Some(unavailable)),
+                (Some(unavailable), Some("computed")),
+                (Some("computed"), Some(unavailable)),
+            ] {
+                let metrics = with_statuses(node_status, snapshot_status);
+                let from = parse_snapshot_graph("from", 1, "t", &metrics.to_string()).unwrap();
+                assert_eq!(from.nodes.len(), 1);
+                assert_eq!(from.nodes["m1"], None);
+                let report = diff_snapshots("memory_links", &from, &to);
+                assert!(
+                    report.movers.is_empty(),
+                    "unavailable metric became a mover: {metrics}"
+                );
+                assert_eq!(report.summary.centrality_omitted, 1);
+                assert_eq!(report.nodes_added, vec!["m2".to_owned()]);
+                assert_eq!(report.summary.edges_added, 1);
+            }
+        }
+
+        // An observed zero and legacy values without status remain real measurements.
+        for (node_status, snapshot_status) in [
+            (None, None),
+            (Some("computed"), None),
+            (None, Some("computed")),
+            (Some("computed"), Some("computed")),
+        ] {
+            let metrics = with_statuses(node_status, snapshot_status);
+            let from = parse_snapshot_graph("from", 1, "t", &metrics.to_string()).unwrap();
+            assert_eq!(from.nodes["m1"], Some(0.0));
+            let report = diff_snapshots("memory_links", &from, &to);
+            assert_eq!(report.summary.centrality_omitted, 0);
+            assert_eq!(report.movers.len(), 1);
+            assert_eq!(report.movers[0].memory_id, "m1");
+            assert_eq!(report.movers[0].delta, 0.4);
+        }
+
+        for invalid_status in [
+            serde_json::json!("unknown"),
+            serde_json::Value::Null,
+            serde_json::json!(false),
+        ] {
+            let mut metrics = baseline.clone();
+            metrics["nodes"][0]["metricStatus"] = serde_json::json!({"pagerank": invalid_status});
+            assert!(parse_snapshot_graph("invalid", 1, "t", &metrics.to_string()).is_err());
+        }
     }
 
     #[test]
