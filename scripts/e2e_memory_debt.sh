@@ -269,6 +269,17 @@ G2="${LAST_STDOUT}"
 if [[ "${COVER_EXIT}" -eq 0 && "${LAST_EXIT}" -eq 0 ]] \
     && jq -e '[(.gaps // .data.gaps)[]? | select(.status == "likely_covered" and .coveredBy != null)] | length >= 1' \
         "${G2}" >/dev/null 2>&1; then
+    # Publish the WITNESS on the pass path, not only a diagnosis on the fail
+    # path. bd-betm5's acceptance asks to be closed "cited with the coveredBy
+    # value that proves the link, not just the step's status", and a green run
+    # printed nothing -- so the one value the bead asked for was the one value
+    # no passing run emitted.
+    #
+    # Deliberately NOT routed through event()'s third argument: that argument
+    # lands in `first_failure_diagnosis`, a field other suites and
+    # tests/advanced_subsystem_logged_e2e.rs read as "why it failed". A success
+    # witness there would be a non-empty failure diagnosis on a passing step.
+    echo "[witness] remembered_demand_marks_cluster_covered: $(jq -c '[(.gaps // .data.gaps)[]? | select(.coveredBy != null) | {clusterId, status, coveredBy, coveredByCreatedAt}]' "${G2}" 2>/dev/null) remembered=${COVER_ID:-<none>} coverTags=${COVER_TAGS:-<none>}"
     event remembered_demand_marks_cluster_covered pass
 else
     event remembered_demand_marks_cluster_covered fail "cover=${COVER_EXIT} exit=${LAST_EXIT} remembered=${COVER_ID:-<none>} gapId=${GAP_ID:-<none>} coverCreatedAt=${COVER_CREATED:-<none>} coverTags=${COVER_TAGS:-<none>}; $(jq -c '[(.gaps // .data.gaps)[]? | {clusterId, status, coveredBy, coveredByCreatedAt, lastSeenAt, nearestStatus: .nearestExistingEvidenceStatus, nearest: [(.nearestExistingEvidence // [])[] | {memoryId, reason}]}]' "${G2}" 2>/dev/null)"
