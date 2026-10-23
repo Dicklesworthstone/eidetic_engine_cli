@@ -2459,3 +2459,63 @@ both published versions measured, HEAD not (no dispatch was launched for it),
 and the `real_corpus_cass_unavailable` code its self-test bullet names is not
 actually emitted by the probe, which is the same dead-code shape `.67` was filed
 for and must be either emitted or restated.
+
+### 18.8 A restore reports success while denying 95% of a store's evidence
+
+`.13`'s ninth acceptance bullet asks to "replace planned-only coverage with
+executed current-candidate evidence". Executed today, create → verify → restore
+on the shipped v0.18.0, and it found a **data-safety defect in the recovery
+path**:
+
+| surface | source | restored |
+| --- | --- | --- |
+| `dbEvidenceCount` | 123 | 123 |
+| `dbEvidenceAdmittedCount` | **46** | **6** |
+| `dbEvidenceQuarantinedCount` | 77 | 0 |
+| `dbEvidenceDeniedCount` | 0 | **117** |
+| `indexDocumentCounts.evidence` | 46 | 6 |
+| `dbGeneration` | 139 | 139 |
+
+The restore reported `status: "completed"`, `degraded: []`, `issues: 0`,
+`cassSessionsRestored: 14`, `evidenceSpansRestored: 123`. So the span **count**
+round-trips perfectly and the admission **verdicts** do not. Two things make it
+worse than a count mismatch. It is a **severity escalation**: the source's 77
+*quarantined* spans return as *denied*, along with 40 of the 46 *admitted* —
+quarantine is reviewable, denied is terminal. And **it does not heal**: `search`,
+`pack` and a full `ee index rebuild` against the restored store leave it at
+6 admitted / 117 denied, so this is not a lazy rebuild catching up on first use.
+
+Control: the same procedure on a memory-only store restores 3 of 3 memories with
+full fidelity, so the defect is specific to evidence admission, not to restore.
+
+The manifest's own inventory shows the fault line. `evidence_spans` is
+`export_restore_required` and comes back intact; **every table that decides
+whether a span may be packed** — `evidence_reader_projections` (123 rows),
+`evidence_admission_verdicts` (46), `evidence_admission_counts` (2),
+`evidence_admission_count_state` (1) — is `derived_rebuildable /
+rebuild_on_restore`. Since R2 established that search and pack read
+`reader_text` from `evidence_reader_projections`, the likely chain is that those
+projections are not actually rebuilt, admission cannot read text it cannot
+project, and so it denies. The confirming measurement is the projection row
+count in the restored store, which this pass had no public surface for — so the
+mechanism is a hypothesis while the behaviour above is measured.
+
+**This is the same class as `.56` and `.66`:** something classified as
+rebuildable whose rebuild does not happen, with no surface reporting the gap. It
+is the third instance recorded on `.2` today, and the first where the
+consequence is lost user data rather than a wrong number.
+
+Also found, smaller: `counts.issues` does not reach `degraded[]` in either
+direction — the restore that lost nothing reported `issues: 3`, the restore that
+denied 117 spans reported `issues: 0`, and neither produced a degraded entry.
+
+What is genuinely good and retires part of `.13`'s PROBLEM statement: the
+dry-run non-mutation contract **passes**, measured with the control that makes
+it non-vacuous (two pure filesystem snapshots with nothing between are
+identical; a read-only `ee audit timeline` moves `.ee/ee.write.lock`; `backup
+create --dry-run` moves *nothing at all*, so it perturbs the store less than a
+read does). The `db.check_integrity` dry-run failure in the PROBLEM statement
+does not reproduce. The durable-vs-rebuildable inventory exists and is good —
+108 tables, each with `owner`, `disposition`, `coverage`, `rowCount` and
+`schemaCovered`. And export is understated rather than incomplete: all 14
+sessions and all 123 spans ship under `derived/`, not in `records.jsonl`.
