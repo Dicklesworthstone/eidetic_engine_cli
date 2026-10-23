@@ -2460,7 +2460,12 @@ and the `real_corpus_cass_unavailable` code its self-test bullet names is not
 actually emitted by the probe, which is the same dead-code shape `.67` was filed
 for and must be either emitted or restated.
 
-### 18.8 A restore reports success while denying 95% of a store's evidence
+### 18.8 A backup is written already 95% denied, and reports success
+
+**Heading corrected after the fact.** This section first said "a restore
+reports success while denying 95% of a store's evidence", and the restore is not
+the bug — see the refutation at the end of this section. The behaviour below is
+unchanged and measured; the attribution moved one step upstream.
 
 `.13`'s ninth acceptance bullet asks to "replace planned-only coverage with
 executed current-candidate evidence". Executed today, create → verify → restore
@@ -2508,6 +2513,52 @@ consequence is lost user data rather than a wrong number.
 Also found, smaller: `counts.issues` does not reach `degraded[]` in either
 direction — the restore that lost nothing reported `issues: 3`, the restore that
 denied 117 spans reported `issues: 0`, and neither produced a degraded entry.
+
+**THE HYPOTHESIS ABOVE IS REFUTED, and the real finding is worse.** The
+pre-registered test — count the projections in the restored store — was run
+with `sqlite3 "file:<db>?immutable=1"`:
+
+```
+source    evidence_spans 123 | evidence_reader_projections 123 | verdicts 46
+restored  evidence_spans 123 | evidence_reader_projections 123 | verdicts  6
+```
+
+Projections are **123 in both**. They restore perfectly. So the loss is not a
+missing rebuild, and `pack_eligibility` is a column on `evidence_spans`, which
+is `export_restore_required` — carried by the artifact, not rebuilt. Reading the
+artifact itself:
+
+| | admitted | quarantined | denied |
+| --- | --- | --- | --- |
+| source DB `evidence_spans.pack_eligibility` | 46 | 77 | 0 |
+| exported `derived/cass/evidence-spans-0000.json` | **6** | — | **117** |
+| same manifest, `recoveryInventory` verdict rowCount | **46** | — | — |
+
+**One backup artifact contains two mutually inconsistent records of the same
+fact**, and the restore is faithful to the wrong one. Re-creating the backup
+from the unchanged store reproduces 6/117 exactly, so it is deterministic, not a
+timing artifact. The 6 it keeps are a true subset of the DB's 46, and the 46 are
+indistinguishable on `producer_kind` (`cass_import`), `instruction_risk`
+(`none`) and `search_eligibility` (`admitted`) — the one clean separator is the
+excerpt's shape: all 40 dropped spans begin `{"parentUuid":…` (ordinary
+conversation messages) while the 6 kept are summary/timestamp records. Note also
+that `evidence_admission_verdicts` has `CHECK (verdict IN ('admitted','denied'))`
+— **no `quarantined`** — so a three-state column is being round-tripped through
+a two-state channel, which accounts for the 77 exactly.
+
+So the correct framing is: **`ee backup create` writes a backup whose evidence
+is already 95% denied, and reports success.** The damage is baked into the
+artifact operators keep and ship, which is why nothing on the restore side could
+recover it. It is not confined to disaster recovery either — any handoff,
+migration or shared-corpus workflow that round-trips a store loses 95% of its
+packable evidence, at `--redaction minimal`, the gentlest setting.
+
+Cheapest regression arm: assert the admitted/quarantined/denied **histogram**
+across a round trip rather than the span count (the count is exactly what
+already round-trips correctly, which is why this survived), and assert the
+manifest against itself — the inventory's verdict `rowCount` must equal the
+`admitted` count in the span artifact, an invariant violated inside a single
+file that needs no second store to detect.
 
 What is genuinely good and retires part of `.13`'s PROBLEM statement: the
 dry-run non-mutation contract **passes**, measured with the control that makes
