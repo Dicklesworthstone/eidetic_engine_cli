@@ -146,8 +146,23 @@ def describe_envelope(payload, err):
 
 # Metrics whose zero is indistinguishable from a dead harness. Each entry is
 # (dotted path into summary["metrics"], human label).
+#
+# recall_at_5 is DELIBERATELY NOT HERE, and the reason is measured. The oracle
+# reaches scale by seeding copies of each judged scenario while judgments label
+# only the authored core, so at scale a correct answer is usually a seeded copy
+# rather than the judged span itself: label-exact recall@5 fell 0.4583 at 502
+# records to 0.0375 at 4009 and to exactly 0.0 at 12009, on a product that was
+# retrieving correctly the whole time (scenario_hit_at_5 stayed 1.0 / 0.925).
+# Guarding on it made this guard fire on legitimate scale behaviour -- the
+# "constant-red is the same defect as constant-green" failure it exists to
+# prevent, reintroduced one level up.
+#
+# scenario_hit_at_5 is the scale-invariant form of the same question (did the
+# top 5 include a span from a judged scenario, copy or original), so it is the
+# correct sentinel: it can only be zero if retrieval genuinely returned nothing
+# relevant, which is the condition worth failing closed on.
 ZERO_GUARDED = [
-    ("recall_at_5.mean", "recall_at_5 mean"),
+    ("scenario_hit_at_5.value", "scenario_hit_at_5"),
     ("FAR.packed_items", "packed items"),
     ("UTR.value", "UTR"),
 ]
@@ -717,12 +732,16 @@ def self_test(ee=None):
             f"({silent_described!r})", silent_described == "no JSON on stdout")
 
         print("FAIL-CLOSED arms -- a measured zero on a non-empty corpus is a harness error:")
-        healthy = {"recall_at_5": {"mean": 0.83}, "FAR": {"packed_items": 29}, "UTR": {"value": 1.0}}
+        healthy = {"scenario_hit_at_5": {"value": 0.925}, "recall_at_5": {"mean": 0.0375},
+                   "FAR": {"packed_items": 29}, "UTR": {"value": 1.0}}
         arm("healthy metrics pass the guard",
             zero_guard(healthy, [], 4009, 40) is None)
-        zero_recall = dict(healthy, recall_at_5={"mean": 0.0})
-        problem = zero_guard(zero_recall, [{"pack_degraded": ["index_incompatible"]}], 4009, 40)
-        arm(f"TWIN: recall 0.0 on 4009 records is refused: {str(problem)[:60]}",
+        arm("TWIN THAT MUST NOT FIRE: label-exact recall_at_5 0.0 at scale is NOT refused, "
+            "because the oracle's seeded copies deflate it by design",
+            zero_guard(dict(healthy, recall_at_5={"mean": 0.0}), [], 12009, 20) is None)
+        problem = zero_guard(dict(healthy, scenario_hit_at_5={"value": 0.0}),
+                             [{"pack_degraded": ["index_incompatible"]}], 4009, 40)
+        arm(f"TWIN: scenario_hit_at_5 0.0 on 4009 records is refused: {str(problem)[:60]}",
             problem is not None and "must not be empty" in problem)
         arm("the refusal names the degraded code that caused it",
             problem is not None and "index_incompatible" in problem)
