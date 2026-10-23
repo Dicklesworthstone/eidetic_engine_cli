@@ -47372,22 +47372,24 @@ fn error_recall_query_seed(
         return Ok(None);
     };
     let error_log = error_log_text(error_log)?;
-    // Native logs must use the same key as the CASS failure-arc extractor.
-    // Otherwise an imported EE/RCH repair can never match this public reader.
-    let canonical = crate::core::cass_error_recall::structured_error_diagnostics(&error_log)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| {
-            let redacted_message = crate::policy::redact_secret_like_content(&error_log).content;
-            let code = rustc_code_from_message(&error_log);
-            crate::core::error_recall::from_rustc(code.as_deref(), &redacted_message)
-        });
+    // Native logs must use the same keys as the CASS failure-arc extractor.
+    // A later diagnostic may have the applicable repair even when the first
+    // class is unseen. The shared reader deduplicates and bounds the expansion.
+    let mut diagnostics = crate::core::cass_error_recall::structured_error_diagnostics(&error_log);
+    if diagnostics.is_empty() {
+        let redacted_message = crate::policy::redact_secret_like_content(&error_log).content;
+        let code = rustc_code_from_message(&error_log);
+        diagnostics.push(crate::core::error_recall::from_rustc(
+            code.as_deref(),
+            &redacted_message,
+        ));
+    }
     let connection = open_attest_database_for_workspace(workspace, database)?;
     let workspace_id = bound_cli_workspace_id(&connection, workspace)?;
-    let seed = crate::core::error_diagnosis::pack_error_recall_query_seed(
+    let seed = crate::core::error_diagnosis::pack_error_recall_query_seed_for_diagnostics(
         &connection,
         &workspace_id,
-        &canonical,
+        &diagnostics,
     )
     .map_err(|error| DomainError::Storage {
         message: format!("Failed to recall repair evidence for the pack: {error}"),
@@ -71876,6 +71878,142 @@ mod tests {
 
     use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsTopic};
     use crate::core::init::{InitOptions, init_workspace};
+
+    #[test]
+    fn pack_error_log_recalls_later_native_diagnostic_from_text_and_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::core::error_diagnosis::{ErrorRepairLinkRecording, record_error_repair_links};
+        use crate::db::{
+            CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
+            EvidenceProducerKind,
+        };
+
+        let directory = tempfile::tempdir()?;
+        let workspace = directory.path().canonicalize()?;
+        let database = workspace.join("multi-error.db");
+        let connection = DbConnection::open_file(&database)?;
+        connection.migrate()?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )?;
+        let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(930)).to_string();
+        connection.insert_session(
+            &session,
+            &CreateSessionInput {
+                workspace_id: workspace_id.to_owned(),
+                cass_session_id: "/sessions/multi-error.jsonl".to_owned(),
+                source_path: None,
+                agent_name: Some("claude_code".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 0,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(b"multi-error-session").to_hex()),
+                metadata_json: None,
+            },
+        )?;
+        let evidence = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(930)).to_string();
+        let excerpt = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": "LATER_NATIVE_REPAIR implements the missing serialization trait."
+                }]
+            }
+        })
+        .to_string();
+        connection.insert_evidence_span(
+            &evidence,
+            &CreateEvidenceSpanInput {
+                workspace_id: workspace_id.to_owned(),
+                session_id: session.clone(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: format!("{session}:1"),
+                span_kind: "message".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: None,
+                end_byte: None,
+                role: Some("assistant".to_owned()),
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                excerpt,
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )?;
+        record_error_repair_links(
+            &connection,
+            workspace_id,
+            &crate::core::error_recall::from_rustc(Some("E0277"), "trait bound is not satisfied"),
+            &ErrorRepairLinkRecording {
+                helpful_repairs: vec![evidence],
+                ..ErrorRepairLinkRecording::default()
+            },
+        )?;
+        let mut log = ["E0308", "E0277"]
+            .into_iter()
+            .map(|code| {
+                serde_json::json!({
+                    "reason": "compiler-message",
+                    "message": {
+                        "$message_type": "diagnostic",
+                        "message": "compiler diagnostic",
+                        "code": {"code": code},
+                        "level": "error",
+                        "spans": [],
+                        "children": []
+                    }
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        log.push_str("\n{\"reason\":\"build-finished\",\"success\":false}\n");
+        assert_eq!(
+            crate::core::cass_error_recall::structured_error_diagnostics(&log).len(),
+            2
+        );
+        let seed = super::error_recall_query_seed(&workspace, Some(&database), Some(&log))?
+            .ok_or("missing multi-error query seed")?;
+        assert!(seed.contains("unseen fingerprint:rustc:E0308"));
+        assert!(seed.contains("known fingerprint:rustc:E0277"));
+        assert!(seed.contains("LATER_NATIVE_REPAIR"));
+        let log_path = workspace.join("failure.jsonl");
+        std::fs::write(&log_path, &log)?;
+        assert_eq!(
+            Some(seed),
+            super::error_recall_query_seed(
+                &workspace,
+                Some(&database),
+                Some(log_path.to_str().ok_or("non-UTF-8 fixture path")?),
+            )?
+        );
+
+        let free_text = "build output: error[E0277]: trait bound is not satisfied";
+        assert!(crate::core::cass_error_recall::structured_error_diagnostics(free_text).is_empty());
+        let fallback =
+            super::error_recall_query_seed(&workspace, Some(&database), Some(free_text))?
+                .ok_or("missing free-text fallback")?;
+        assert_eq!(
+            fallback,
+            crate::core::error_diagnosis::pack_error_recall_query_seed(
+                &connection,
+                workspace_id,
+                &crate::core::error_recall::from_rustc(Some("E0277"), free_text),
+            )?
+        );
+        assert!(super::error_recall_query_seed(&workspace, Some(&database), None)?.is_none());
+        Ok(())
+    }
 
     /// GH#26: `ee model status` must mirror high-severity
     /// `modelLifecycle.degraded[]` entries into the top-level envelope instead

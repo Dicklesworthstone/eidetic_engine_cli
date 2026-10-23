@@ -421,11 +421,204 @@ pub fn pack_error_recall_query_seed(
     canonical: &CanonicalDiagnostic,
 ) -> Result<String> {
     let snapshot = memory::Snapshot::begin_or_borrow(connection)?;
+    let collected = collect_pack_recall_seed(
+        connection,
+        workspace_id,
+        canonical,
+        Utc::now(),
+        PACK_RECALL_EXCERPT_LIMIT,
+    )?;
+    let mut seed = collected.metadata;
+    for fragment in collected.fragments {
+        match fragment {
+            PackRecallFragment::Excerpt { target_id, text } => {
+                append_pack_recall_fragment(&mut seed, " helpful_repair:", &target_id);
+                append_pack_recall_fragment(&mut seed, "\nprior fix: ", &text);
+            }
+            PackRecallFragment::MemoryHint(id) => {
+                append_pack_recall_fragment(&mut seed, " helpful_repair:", &id);
+            }
+        }
+    }
+    snapshot.finish()?;
+    Ok(seed)
+}
+
+/// Recall each distinct diagnostic class in one native failure log.
+///
+/// Match the importer's four-class bound, retaining producer order and skipping
+/// duplicate fingerprints. Each class gets a turn before any class receives a
+/// second excerpt. All classes share the existing four-excerpt and 4096-byte
+/// query budgets; metadata shares 512 bytes, and omitted classes are explicit.
+/// A repair marked harmful for any selected class cannot become unqualified
+/// positive advice for another class in the same request.
+///
+/// Source admission, feedback and body hydration use the single-error reader's
+/// gates in one snapshot. Empty input returns no expansion; a single distinct
+/// class retains the scalar reader's exact output and ordering.
+///
+/// # Errors
+///
+/// Propagates database or authority errors without returning a partial seed.
+pub fn pack_error_recall_query_seed_for_diagnostics(
+    connection: &DbConnection,
+    workspace_id: &str,
+    diagnostics: &[CanonicalDiagnostic],
+) -> Result<String> {
+    const CLASS_LIMIT: usize = 4;
+    const OMITTED: &str = "\nadditional diagnostic classes omitted";
+
+    let mut keys = BTreeSet::new();
+    let mut selected = Vec::new();
+    let mut omitted = false;
+    for diagnostic in diagnostics {
+        let key = ErrorFingerprint::from_canonical(diagnostic)
+            .layered_key()
+            .key;
+        if keys.contains(&key) {
+            continue;
+        }
+        if selected.len() == CLASS_LIMIT {
+            omitted = true;
+            break;
+        }
+        keys.insert(key);
+        selected.push(diagnostic);
+    }
+    if selected.is_empty() {
+        return Ok(String::new());
+    }
+    if selected.len() == 1 {
+        return pack_error_recall_query_seed(connection, workspace_id, selected[0]);
+    }
+
+    let snapshot = memory::Snapshot::begin_or_borrow(connection)?;
     let reference_time = Utc::now();
+    let collected = selected
+        .into_iter()
+        .map(|canonical| {
+            collect_pack_recall_seed(
+                connection,
+                workspace_id,
+                canonical,
+                reference_time,
+                PACK_RECALL_TARGET_LIMIT as usize,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Cross-class feedback is checked against only the bounded typed candidates,
+    // never link prose. A contested target cannot sneak in through another key.
+    let targets: BTreeSet<_> = collected
+        .iter()
+        .flat_map(|seed| &seed.fragments)
+        .map(PackRecallFragment::target_id)
+        .collect();
+    let targets: Vec<_> = targets.into_iter().collect();
+    let mut harmful = BTreeSet::new();
+    for seed in &collected {
+        for targets in targets.chunks(PACK_RECALL_TARGET_LIMIT as usize) {
+            harmful.extend(feedback::harmful_targets(
+                connection,
+                workspace_id,
+                &seed.fingerprint_key,
+                targets,
+            )?);
+        }
+    }
+
+    let metadata_budget = PACK_RECALL_METADATA_BYTES
+        .saturating_sub(collected.len() - 1)
+        .saturating_sub(if omitted { OMITTED.len() } else { 0 });
+    let per_class = metadata_budget / collected.len();
+    let mut seed = collected
+        .iter()
+        .map(|seed| bounded_pack_recall_text(&seed.metadata, per_class))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if omitted {
+        seed.push_str(OMITTED);
+    }
+
+    let mut positions = vec![0; collected.len()];
+    let mut excerpts: BTreeSet<&str> = BTreeSet::new();
+    let mut expanded_targets: BTreeSet<&str> = BTreeSet::new();
+    while excerpts.len() < PACK_RECALL_EXCERPT_LIMIT {
+        let mut advanced = false;
+        for (class, position) in collected.iter().zip(&mut positions) {
+            while let Some(fragment) = class.fragments.get(*position) {
+                *position += 1;
+                let PackRecallFragment::Excerpt { target_id, text } = fragment else {
+                    continue;
+                };
+                if harmful.contains(target_id) || excerpts.contains(text.as_str()) {
+                    continue;
+                }
+                let fragment_bytes =
+                    " helpful_repair:".len() + target_id.len() + "\nprior fix: ".len() + text.len();
+                if fragment_bytes > PACK_RECALL_QUERY_BYTES.saturating_sub(seed.len()) {
+                    continue;
+                }
+                append_pack_recall_fragment(&mut seed, " helpful_repair:", target_id);
+                append_pack_recall_fragment(&mut seed, "\nprior fix: ", text);
+                excerpts.insert(text.as_str());
+                expanded_targets.insert(target_id.as_str());
+                advanced = true;
+                break;
+            }
+            if excerpts.len() == PACK_RECALL_EXCERPT_LIMIT {
+                break;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    for class in &collected {
+        for fragment in &class.fragments {
+            if let PackRecallFragment::MemoryHint(id) = fragment
+                && !harmful.contains(id)
+                && expanded_targets.insert(id.as_str())
+            {
+                append_pack_recall_fragment(&mut seed, " helpful_repair:", id);
+            }
+        }
+    }
+    snapshot.finish()?;
+    Ok(seed)
+}
+
+enum PackRecallFragment {
+    Excerpt { target_id: String, text: String },
+    MemoryHint(String),
+}
+
+impl PackRecallFragment {
+    fn target_id(&self) -> &str {
+        match self {
+            Self::Excerpt { target_id, .. } | Self::MemoryHint(target_id) => target_id,
+        }
+    }
+}
+
+struct PackRecallSeed {
+    fingerprint_key: String,
+    metadata: String,
+    fragments: Vec<PackRecallFragment>,
+}
+
+/// Collect typed, admitted fragments without changing single-class precedence.
+/// The caller owns the common snapshot and reference time for every class.
+fn collect_pack_recall_seed(
+    connection: &DbConnection,
+    workspace_id: &str,
+    canonical: &CanonicalDiagnostic,
+    reference_time: chrono::DateTime<Utc>,
+    excerpt_limit: usize,
+) -> Result<PackRecallSeed> {
     let fingerprint = ErrorFingerprint::from_canonical(canonical);
     let outcome = diagnose_error(connection, workspace_id, canonical)?;
     let metadata = ErrorRecallReport::from_outcome(&fingerprint, &outcome).query_seed();
-    let mut seed = bounded_pack_recall_text(&metadata, PACK_RECALL_METADATA_BYTES);
     let selected = feedback::pack_selection(
         connection,
         workspace_id,
@@ -451,9 +644,10 @@ pub fn pack_error_recall_query_seed(
             .cmp(&left.span.is_derived_incident_card())
             .then_with(|| left.span.id.cmp(&right.span.id))
     });
+    let mut fragments = Vec::new();
     let mut excerpts = BTreeSet::new();
     for row in evidence {
-        if excerpts.len() == PACK_RECALL_EXCERPT_LIMIT {
+        if excerpts.len() == excerpt_limit {
             break;
         }
         let text = row.span.reader_text();
@@ -461,42 +655,51 @@ pub fn pack_error_recall_query_seed(
         if text.is_empty() || !excerpts.insert(text.clone()) {
             continue;
         }
-        append_pack_recall_fragment(&mut seed, " helpful_repair:", &row.span.id);
-        append_pack_recall_fragment(&mut seed, "\nprior fix: ", &text);
+        fragments.push(PackRecallFragment::Excerpt {
+            target_id: row.span.id,
+            text,
+        });
     }
     let mut expanded_memories = BTreeSet::new();
-    if excerpts.len() < PACK_RECALL_EXCERPT_LIMIT {
+    if excerpts.len() < excerpt_limit {
         for (id, text) in selected.memories {
-            if excerpts.len() == PACK_RECALL_EXCERPT_LIMIT {
+            if excerpts.len() == excerpt_limit {
                 break;
             }
             if !excerpts.insert(text.clone()) {
                 continue;
             }
-            append_pack_recall_fragment(&mut seed, " helpful_repair:", &id);
-            append_pack_recall_fragment(&mut seed, "\nprior fix: ", &text);
+            fragments.push(PackRecallFragment::Excerpt {
+                target_id: id.clone(),
+                text,
+            });
             expanded_memories.insert(id);
         }
     }
     for memory_id in selected.memory_hints {
         if !expanded_memories.contains(&memory_id) {
-            append_pack_recall_fragment(&mut seed, " helpful_repair:", &memory_id);
+            fragments.push(PackRecallFragment::MemoryHint(memory_id));
         }
     }
-    if excerpts.len() < PACK_RECALL_EXCERPT_LIMIT {
+    if excerpts.len() < excerpt_limit {
         for (id, text) in selected.rules {
-            if excerpts.len() == PACK_RECALL_EXCERPT_LIMIT {
+            if excerpts.len() == excerpt_limit {
                 break;
             }
             if !excerpts.insert(text.clone()) {
                 continue;
             }
-            append_pack_recall_fragment(&mut seed, " helpful_repair:", &id);
-            append_pack_recall_fragment(&mut seed, "\nprior fix: ", &text);
+            fragments.push(PackRecallFragment::Excerpt {
+                target_id: id,
+                text,
+            });
         }
     }
-    snapshot.finish()?;
-    Ok(seed)
+    Ok(PackRecallSeed {
+        fingerprint_key: outcome.fingerprint_key,
+        metadata: bounded_pack_recall_text(&metadata, PACK_RECALL_METADATA_BYTES),
+        fragments,
+    })
 }
 
 fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
@@ -657,8 +860,8 @@ mod tests {
     use super::{
         ErrorRepairLinkRecording, PACK_RECALL_EXCERPT_LIMIT, PACK_RECALL_QUERY_BYTES,
         PACK_RECALL_TARGET_LIMIT, diagnose_error, error_recall_report,
-        pack_error_recall_query_seed, persist_error_repair_links, record_error_fingerprint,
-        record_error_repair_links,
+        pack_error_recall_query_seed, pack_error_recall_query_seed_for_diagnostics,
+        persist_error_repair_links, record_error_fingerprint, record_error_repair_links,
     };
     use crate::core::error_recall::from_rustc;
     use crate::db::{
@@ -838,6 +1041,337 @@ mod tests {
             },
         )?;
         Ok(id)
+    }
+
+    #[test]
+    fn multi_error_recall_finds_later_known_class_and_preserves_scalar_output() -> TestResult {
+        let connection = migrated_db_with_workspace();
+        let unknown = from_rustc(Some("E0308"), "mismatched types");
+        let known = from_rustc(Some("E0277"), "trait bound is not satisfied");
+        let session = recall_session(&connection, WS, 920)?;
+        let repair = recall_span(
+            &connection,
+            WS,
+            &session,
+            920,
+            "LATER_CLASS_REPAIR adds the missing serialization implementation.",
+            false,
+        )?;
+        record_error_repair_links(
+            &connection,
+            WS,
+            &known,
+            &ErrorRepairLinkRecording {
+                helpful_repairs: vec![repair],
+                ..ErrorRepairLinkRecording::default()
+            },
+        )?;
+        let scalar = pack_error_recall_query_seed(&connection, WS, &known)?;
+        assert!(scalar.contains("LATER_CLASS_REPAIR"));
+        assert!(!pack_error_recall_query_seed(&connection, WS, &unknown)?.contains("prior fix:"));
+        assert_eq!(
+            scalar,
+            pack_error_recall_query_seed_for_diagnostics(
+                &connection,
+                WS,
+                &[known.clone(), known.clone()],
+            )?
+        );
+
+        let diagnostics = [unknown, known];
+        let seed = pack_error_recall_query_seed_for_diagnostics(&connection, WS, &diagnostics)?;
+        assert!(seed.contains("unseen fingerprint:rustc:E0308"));
+        assert!(seed.contains("known fingerprint:rustc:E0277"));
+        assert!(seed.contains("LATER_CLASS_REPAIR"));
+        assert_eq!(seed.matches("\nprior fix: ").count(), 1);
+        assert_eq!(
+            seed,
+            pack_error_recall_query_seed_for_diagnostics(&connection, WS, &diagnostics)?
+        );
+        // No diagnostics require neither a schema nor a source transaction.
+        let empty = DbConnection::open_memory()?;
+        assert!(pack_error_recall_query_seed_for_diagnostics(&empty, WS, &[])?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn multi_error_recall_shares_budget_fairly_and_deduplicates_text() -> TestResult {
+        let connection = migrated_db_with_workspace();
+        let first = from_rustc(Some("E0277"), "trait bound is not satisfied");
+        let second = from_rustc(Some("E0308"), "mismatched types");
+        let session = recall_session(&connection, WS, 921)?;
+        let mut first_repairs = Vec::new();
+        for number in 1..=4 {
+            first_repairs.push(recall_span(
+                &connection,
+                WS,
+                &session,
+                number,
+                &format!(
+                    "FIRST_CLASS_REPAIR_{number} corrects the implementation. {}",
+                    "🦀".repeat(800)
+                ),
+                false,
+            )?);
+        }
+        let mut second_repairs = vec![first_repairs[0].clone()];
+        for number in 1..=2 {
+            second_repairs.push(recall_span(
+                &connection,
+                WS,
+                &session,
+                number + 10,
+                &format!(
+                    "SECOND_CLASS_REPAIR_{number} corrects the type. {}",
+                    "🦀".repeat(800)
+                ),
+                false,
+            )?);
+        }
+        for (canonical, helpful_repairs) in [(&first, first_repairs), (&second, second_repairs)] {
+            record_error_repair_links(
+                &connection,
+                WS,
+                canonical,
+                &ErrorRepairLinkRecording {
+                    helpful_repairs,
+                    ..ErrorRepairLinkRecording::default()
+                },
+            )?;
+        }
+        let seed = pack_error_recall_query_seed_for_diagnostics(
+            &connection,
+            WS,
+            &[first.clone(), first, second],
+        )?;
+        assert!(seed.len() <= PACK_RECALL_QUERY_BYTES);
+        assert_eq!(
+            seed.matches("\nprior fix: ").count(),
+            PACK_RECALL_EXCERPT_LIMIT
+        );
+        assert_eq!(seed.matches("FIRST_CLASS_REPAIR_1").count(), 1);
+        assert!(seed.contains("FIRST_CLASS_REPAIR_2"));
+        assert!(seed.contains("SECOND_CLASS_REPAIR_1"));
+        assert!(seed.contains("SECOND_CLASS_REPAIR_2"));
+        assert!(!seed.contains("FIRST_CLASS_REPAIR_3"));
+        assert!(!seed.contains("FIRST_CLASS_REPAIR_4"));
+        assert!(
+            seed.find("SECOND_CLASS_REPAIR_1")
+                .ok_or("second class missing")?
+                < seed
+                    .find("FIRST_CLASS_REPAIR_2")
+                    .ok_or("second round missing")?
+        );
+        assert_eq!(seed.matches(" [truncated]").count(), 4);
+        assert!(seed.contains('🦀'));
+        assert!(!seed.contains(&"🦀".repeat(200)));
+        Ok(())
+    }
+
+    #[test]
+    fn multi_error_recall_bounds_distinct_classes_and_marks_omissions() -> TestResult {
+        let connection = migrated_db_with_workspace();
+        let session = recall_session(&connection, WS, 922)?;
+        let mut diagnostics = Vec::new();
+        for number in 1..=5 {
+            let canonical = from_rustc(Some(&format!("E{number:04}")), "compiler diagnostic");
+            let repair = recall_span(
+                &connection,
+                WS,
+                &session,
+                number,
+                &format!("CLASS_{number}_REPAIR fixes its compiler diagnostic."),
+                false,
+            )?;
+            record_error_repair_links(
+                &connection,
+                WS,
+                &canonical,
+                &ErrorRepairLinkRecording {
+                    helpful_repairs: vec![repair],
+                    ..ErrorRepairLinkRecording::default()
+                },
+            )?;
+            diagnostics.push(canonical.clone());
+            diagnostics.push(canonical);
+        }
+        let seed = pack_error_recall_query_seed_for_diagnostics(&connection, WS, &diagnostics)?;
+        for number in 1..=4 {
+            assert!(seed.contains(&format!("CLASS_{number}_REPAIR")));
+            assert!(seed.contains(&format!("fingerprint:rustc:E{number:04}")));
+        }
+        assert!(!seed.contains("CLASS_5_REPAIR"));
+        assert!(!seed.contains("fingerprint:rustc:E0005"));
+        assert!(seed.contains("additional diagnostic classes omitted"));
+        assert!(seed.len() <= PACK_RECALL_QUERY_BYTES);
+        assert_eq!(
+            seed.matches("\nprior fix: ").count(),
+            PACK_RECALL_EXCERPT_LIMIT
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn multi_error_recall_withholds_cross_class_harm_and_refills_after_admission() -> TestResult {
+        let connection = migrated_db_with_workspace();
+        let first = from_rustc(Some("E0277"), "trait bound is not satisfied");
+        let second = from_rustc(Some("E0308"), "mismatched types");
+        let session = recall_session(&connection, WS, 923)?;
+        let mut contested = Vec::new();
+        for number in 1..=5 {
+            contested.push(recall_span(
+                &connection,
+                WS,
+                &session,
+                number,
+                &format!("CONTESTED_REPAIR_{number} was harmful to the second error class."),
+                false,
+            )?);
+        }
+        let safe_first = recall_span(
+            &connection,
+            WS,
+            &session,
+            6,
+            "SAFE_FIRST_REPAIR handles both failure classes.",
+            false,
+        )?;
+        let safe_second = recall_span(
+            &connection,
+            WS,
+            &session,
+            7,
+            "SAFE_SECOND_REPAIR preserves the type contract.",
+            false,
+        )?;
+        let denied = recall_span(
+            &connection,
+            WS,
+            &session,
+            8,
+            "DENIED_MULTI_REPAIR cannot supply pack evidence.",
+            false,
+        )?;
+        connection.execute_raw(&format!(
+            "UPDATE evidence_spans SET pack_eligibility = 'denied' WHERE id = '{denied}'"
+        ))?;
+        let poisoned = recall_span(
+            &connection,
+            WS,
+            &session,
+            9,
+            "ORIGINAL_MULTI_REPAIR was admitted before an unscreened mutation.",
+            false,
+        )?;
+        connection.execute_raw(&format!(
+            "UPDATE evidence_spans SET excerpt = 'UNSCREENED_MULTI_REPAIR' WHERE id = '{poisoned}'"
+        ))?;
+        const FOREIGN_WS: &str = "wsp_01234567890123456789012346";
+        connection.insert_workspace(
+            FOREIGN_WS,
+            &CreateWorkspaceInput {
+                path: "/tmp/multi-error-foreign".to_owned(),
+                name: None,
+            },
+        )?;
+        let foreign_session = recall_session(&connection, FOREIGN_WS, 924)?;
+        let foreign = recall_span(
+            &connection,
+            FOREIGN_WS,
+            &foreign_session,
+            10,
+            "FOREIGN_MULTI_REPAIR belongs to another workspace.",
+            false,
+        )?;
+        let mut helpful_repairs = contested.clone();
+        helpful_repairs.extend([safe_first, denied, poisoned, foreign]);
+        record_error_repair_links(
+            &connection,
+            WS,
+            &first,
+            &ErrorRepairLinkRecording {
+                helpful_repairs,
+                ..ErrorRepairLinkRecording::default()
+            },
+        )?;
+        record_error_repair_links(
+            &connection,
+            WS,
+            &second,
+            &ErrorRepairLinkRecording {
+                helpful_repairs: vec![safe_second],
+                harmful_repairs: contested,
+                ..ErrorRepairLinkRecording::default()
+            },
+        )?;
+        assert!(
+            pack_error_recall_query_seed(&connection, WS, &first)?.contains("CONTESTED_REPAIR_1"),
+            "single-class history remains scoped to that error class"
+        );
+        let seed = pack_error_recall_query_seed_for_diagnostics(&connection, WS, &[first, second])?;
+        assert!(seed.contains("SAFE_FIRST_REPAIR"));
+        assert!(seed.contains("SAFE_SECOND_REPAIR"));
+        assert_eq!(seed.matches("\nprior fix: ").count(), 2);
+        for forbidden in [
+            "CONTESTED_REPAIR",
+            "DENIED_MULTI_REPAIR",
+            "ORIGINAL_MULTI_REPAIR",
+            "UNSCREENED_MULTI_REPAIR",
+            "FOREIGN_MULTI_REPAIR",
+        ] {
+            assert!(!seed.contains(forbidden), "unadmitted text: {forbidden}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn multi_error_recall_preserves_callers_transaction_and_releases_owned_snapshot() -> TestResult
+    {
+        let connection = migrated_db_with_workspace();
+        let diagnostics = [
+            from_rustc(Some("E0277"), "trait bound is not satisfied"),
+            from_rustc(Some("E0308"), "mismatched types"),
+        ];
+        let result: crate::db::Result<()> = connection.with_transaction(|| {
+            for canonical in &diagnostics {
+                record_error_fingerprint(&connection, WS, canonical)?;
+            }
+            let seed = pack_error_recall_query_seed_for_diagnostics(&connection, WS, &diagnostics)?;
+            assert!(seed.contains("known fingerprint:rustc:E0277"));
+            assert!(seed.contains("known fingerprint:rustc:E0308"));
+            connection.execute_raw("INSERT INTO missing_multi_recall_rollback_probe VALUES (1)")?;
+            Ok(())
+        });
+        assert!(result.is_err());
+        for canonical in &diagnostics {
+            assert!(!diagnose_error(&connection, WS, canonical)?.is_known());
+        }
+        pack_error_recall_query_seed_for_diagnostics(&connection, WS, &diagnostics)?;
+        connection.begin_read_snapshot()?;
+        pack_error_recall_query_seed_for_diagnostics(&connection, WS, &diagnostics)?;
+        connection.commit_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn multi_error_recall_authority_failure_returns_no_partial_seed() -> TestResult {
+        let connection = migrated_db_with_workspace();
+        let diagnostics = [
+            from_rustc(Some("E0277"), "trait bound is not satisfied"),
+            from_rustc(Some("E0308"), "mismatched types"),
+        ];
+        connection.execute_raw(
+            "ALTER TABLE error_repair_links RENAME TO unavailable_multi_recall_links",
+        )?;
+        assert!(
+            pack_error_recall_query_seed_for_diagnostics(&connection, WS, &diagnostics).is_err()
+        );
+        connection.begin_read_snapshot()?;
+        assert!(
+            pack_error_recall_query_seed_for_diagnostics(&connection, WS, &diagnostics).is_err()
+        );
+        connection.rollback_read_snapshot()?;
+        Ok(())
     }
 
     #[test]
