@@ -770,10 +770,12 @@ pub fn show_gaps(options: &LearnGapsOptions) -> Result<LearnGapsReport, DomainEr
             )
         })
         .collect::<Vec<_>>();
+    // Preserve covered history without allowing it to crowd open demand out of
+    // a bounded report. Demand score still orders clusters within each status.
     gaps.sort_by(|left, right| {
-        right
-            .demand_score
-            .total_cmp(&left.demand_score)
+        (left.status != "open")
+            .cmp(&(right.status != "open"))
+            .then_with(|| right.demand_score.total_cmp(&left.demand_score))
             .then_with(|| right.miss_count.cmp(&left.miss_count))
             .then_with(|| left.query_hash.cmp(&right.query_hash))
     });

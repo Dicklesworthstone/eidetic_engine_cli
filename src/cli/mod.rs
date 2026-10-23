@@ -42842,6 +42842,7 @@ fn orient_learn_gaps_value(
             let top_gaps = report
                 .gaps
                 .iter()
+                .filter(|gap| gap.status == "open")
                 .map(|gap| {
                     serde_json::json!({
                         "clusterId": &gap.cluster_id,
@@ -42852,11 +42853,13 @@ fn orient_learn_gaps_value(
                     })
                 })
                 .collect::<Vec<_>>();
+            // clusterCount preserves the demand history. Capture suggestions
+            // describe only work that remains open in the current source view.
             serde_json::json!({
                 "schema": "ee.orient.learn_gaps.v1",
-                "status": if report.cluster_count > 0 { "present" } else { "empty" },
+                "status": if top_gaps.is_empty() { "empty" } else { "present" },
                 "clusterCount": report.cluster_count,
-                "returned": report.gaps.len(),
+                "returned": top_gaps.len(),
                 "scannedMissCount": report.scanned_miss_count,
                 "retentionDays": report.retention_days,
                 "degraded": report.degraded,
@@ -76166,6 +76169,205 @@ mod tests {
             }
             other => Err(format!("expected search command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn orient_learn_gaps_retires_covered_suggestions_without_hiding_open_demand() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let connection =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("orient-gap-demand".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (query_hash, misses) in [
+            ("hash_open_demand", 3),
+            ("hash_covered_alpha", 6),
+            ("hash_covered_beta", 7),
+            ("hash_covered_gamma", 8),
+        ] {
+            for _ in 0..misses {
+                connection
+                    .insert_audit(
+                        &crate::db::generate_audit_id(),
+                        &crate::db::CreateAuditInput {
+                            workspace_id: Some(workspace_id.clone()),
+                            actor: None,
+                            action: crate::db::audit_actions::SEARCH_MISS_RECORDED.to_owned(),
+                            target_type: Some("query_hash".to_owned()),
+                            target_id: Some(query_hash.to_owned()),
+                            details: Some(
+                                serde_json::json!({
+                                    "schema": "ee.search.query_miss.v1",
+                                    "queryHash": query_hash,
+                                    "reason": "no_relevant_results",
+                                    "queryTextStored": false,
+                                    "queryVectorStored": false,
+                                })
+                                .to_string(),
+                            ),
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        let options = crate::core::learn::LearnGapsOptions {
+            workspace: workspace.to_path_buf(),
+            since: None,
+            limit: 10,
+        };
+        let before = crate::core::learn::show_gaps(&options).map_err(|error| error.to_string())?;
+        ensure_equal(&before.cluster_count, &4, "four repeated demand clusters")?;
+        let open_gap = before
+            .gaps
+            .iter()
+            .find(|gap| gap.query_hash == "hash_open_demand")
+            .ok_or_else(|| "lower-demand open cluster missing".to_owned())?;
+        let record_answer =
+            |index: usize, gap: &crate::core::learn::LearnGapCluster| -> Result<String, String> {
+                let memory_id = format!("mem_{index:026}");
+                connection
+                    .insert_memory(
+                        &memory_id,
+                        &crate::db::CreateMemoryInput {
+                            workspace_id: workspace_id.clone(),
+                            level: "procedural".to_owned(),
+                            kind: "rule".to_owned(),
+                            content: format!("Recorded answer for {}.", gap.query_hash),
+                            workflow_id: None,
+                            confidence: 0.8,
+                            utility: 0.5,
+                            importance: 0.5,
+                            provenance_uri: None,
+                            trust_class: "human_explicit".to_owned(),
+                            trust_subclass: None,
+                            tags: vec![format!("knowledge-gap:{}", gap.cluster_id)],
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(memory_id)
+            };
+        for (index, gap) in before
+            .gaps
+            .iter()
+            .filter(|gap| gap.query_hash != open_gap.query_hash)
+            .enumerate()
+        {
+            record_answer(index + 1, gap)?;
+        }
+
+        let history = crate::core::learn::show_gaps(&options).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &history.gaps.len(),
+            &4,
+            "covered gap history remains accessible",
+        )?;
+        ensure_equal(
+            &history
+                .gaps
+                .iter()
+                .filter(|gap| gap.status == "likely_covered")
+                .count(),
+            &3,
+            "three live answers close their explicit gaps",
+        )?;
+        let limited = crate::core::learn::show_gaps(&crate::core::learn::LearnGapsOptions {
+            limit: 1,
+            ..options.clone()
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &limited.gaps.first().map(|gap| gap.cluster_id.as_str()),
+            &Some(open_gap.cluster_id.as_str()),
+            "covered high-demand history must not crowd out open work",
+        )?;
+        let repeat = crate::core::learn::show_gaps(&options).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &history.gaps,
+            &repeat.gaps,
+            "gap ordering remains deterministic",
+        )?;
+
+        let mut degraded = Vec::new();
+        let summary = super::orient_learn_gaps_value(workspace, &mut degraded);
+        ensure(degraded.is_empty(), "learning summary remains available")?;
+        ensure_equal(
+            &summary["status"],
+            &serde_json::json!("present"),
+            "open demand status",
+        )?;
+        ensure_equal(
+            &summary["returned"],
+            &serde_json::json!(1),
+            "one open capture suggestion",
+        )?;
+        ensure_equal(
+            &summary["clusterCount"],
+            &serde_json::json!(4),
+            "history count is preserved",
+        )?;
+        ensure_equal(
+            &summary["topGaps"][0]["clusterId"],
+            &serde_json::json!(open_gap.cluster_id),
+            "orientation suggests the remaining open cluster",
+        )?;
+        ensure(
+            summary["topGaps"][0]["suggestedCommand"]
+                .as_str()
+                .is_some_and(|command| command.contains(&open_gap.cluster_id)),
+            "suggested capture retains its explicit coverage binding",
+        )?;
+
+        let final_answer = record_answer(4, open_gap)?;
+        let all_covered = super::orient_learn_gaps_value(workspace, &mut degraded);
+        ensure_equal(
+            &all_covered["status"],
+            &serde_json::json!("empty"),
+            "no unmet demand",
+        )?;
+        ensure_equal(
+            &all_covered["returned"],
+            &serde_json::json!(0),
+            "covered work is not re-proposed",
+        )?;
+        ensure_equal(
+            &all_covered["topGaps"],
+            &serde_json::json!([]),
+            "no duplicate capture prompts",
+        )?;
+        ensure_equal(
+            &all_covered["clusterCount"],
+            &serde_json::json!(4),
+            "covered history retained",
+        )?;
+
+        connection
+            .tombstone_memory(&final_answer)
+            .map_err(|error| error.to_string())?;
+        let reopened = super::orient_learn_gaps_value(workspace, &mut degraded);
+        ensure_equal(
+            &reopened["returned"],
+            &serde_json::json!(1),
+            "lost coverage reopens demand",
+        )?;
+        ensure_equal(
+            &reopened["topGaps"][0]["clusterId"],
+            &serde_json::json!(open_gap.cluster_id),
+            "withdrawn answer restores the same capture target",
+        )?;
+        ensure(degraded.is_empty(), "gap lifecycle reads remain healthy")
     }
 
     #[test]
