@@ -1,4 +1,4 @@
-# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01)**
+# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01, 2026-10-22)**
 
 > Track A: mesh / team-confederation acceptance reconciliation after the Unix
 > EE-to-EE campaign. Track B: core-product, durability, verification, and
@@ -9,7 +9,44 @@
 > revision required by `AGENTS.md` *Reality-Check Cadence*. Do not create a
 > second plan file at the repo root.
 >
-> **2026-10-01 real-data re-baseline (§16, read this first).** The shipped
+> **2026-10-22 re-baseline (§17, read this first; it supersedes the §16 header
+> below).** Track R worked. Measured black-box on the shipped `v0.18.0` against
+> the `.43` oracle corpus, five of the six headline 2026-10-01 failures are
+> fixed and two of the five outcome metrics now MEET their targets:
+> **UTR 1.0000** (was ~0.65, target ≥ 0.95) and **PAP precision 1.00 / recall
+> 0.83** (was 0/10, target ≥ 0.70). Search is **0.83 s** and pack **1.14 s** at
+> 4,009 spans (were 11.1 s / 8.7 s), import is **0.60 s per session** (was ~18 s),
+> retained generations are **2** (were one full copy per write, capped at 1,000),
+> and CASS evidence now reads as projected `assistant:` / `user:` text instead
+> of raw JSONL envelopes.
+>
+> Three things block the bridge, and the first two are new:
+> - **A fully populated store can return zero results while every health
+>   surface says it is fine.** With the default model-download policy, a
+>   CASS-imported store answers every query with 0 results and
+>   `index_incompatible`, while `ee index status` reports `ready`/no
+>   degradation, `ee status` reports `posture.overall = ok`, and **`ee doctor`
+>   reports `posture: ok` with zero non-ok checks**. The per-response repair
+>   (`ee index rebuild`) is correct and works; no health surface ever offers it.
+>   NO_BEAD at audit → `.66` (P0).
+> - **The instrument for every Track R metric cannot run on the developer's own
+>   platform.** `scripts/real_shape_corpus/probe.py` (`.63`) dies at import on
+>   macOS, reports an empty reason when it does, and its model passthrough sets
+>   a variable that is not in the env registry. Run as shipped it publishes
+>   UTR null, FAR null and **recall@5 = 0.0** against a product that retrieves
+>   correctly — a false-red gate. NO_BEAD at audit → `.67` (P0).
+> - **Hosted verification has been dark for 14 days.** GitHub Actions is
+>   `enabled: false` repo-wide; the last run of anything was 2026-10-08 and it
+>   failed on an **allowed-actions policy** ("all actions must be from a
+>   repository owned by Dicklesworthstone") that rejects `actions/checkout@v4`,
+>   `dtolnay/rust-toolchain@nightly` and `cargo-deny-action` — a configuration
+>   failure, not a code verdict. Owned by `bd-actions-disabled-repo-wide-33mfm`;
+>   the policy root cause is recorded there by this pass.
+>
+> `bd-3k1mg`, `bd-16imy` and `bd-3h6bz` — three named §15 archive criteria —
+> are now closed. §8 rows were revised in place; §17 carries the evidence.
+>
+> **2026-10-01 real-data re-baseline (§16, historical).** The shipped
 > `v0.16.0` now passes the small-store loop end to end: concurrent determinism,
 > complete fresh-store backup, and cited `ask`. On real Claude Code transcripts
 > it fails usefulness and scale:
@@ -1127,12 +1164,12 @@ candidate before `.2` changes the implementation.
 | 1 | Local-first single CLI; core commands need no daemon | **WORKING** | Real direct CLI paths and source-backed storage exist. |
 | 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean; custom BM25 is test-only and global recall plus weighted fusion/diagnostics use Frankensearch. Production pack PPR now degrades explicitly, but direct/exported local PPR and release/proof identity remain open. `.4`, `.18`; `.15` awaits focused runtime proof. |
 | 3 | Manual memory → DB → search → pack → why | **WORKING (bounded release proof)** | Fresh v0.14.4 isolated serial offline probe returns the exact memory, pack provenance, and persisted ledger through why. Current-source and concurrent acceptance remain `.10`, `.2`/`.3`. |
-| 4 | CASS import makes permitted prior incident content searchable and safely packable | **PARTIAL (plumbing WORKING; usefulness WRONG_APPROACH on real transcripts)** | 2026-10-01 (§16): the pinned fixture loop in §A still holds. On real Claude Code transcripts, though, `cass` at its standard path is refused by default and the documented `[cass].binary` opt-in is dead code (R1). Spans are raw JSONL envelopes, about 35% scaffolding (R2). Import takes about 18 s per session (R11). Search and pack slow to 9–11 s after 4.9k spans (R4). Owners: `.43`, `.44`, `.45`, `.47`, `.48`, `.64`. |
-| 5 | Hybrid BM25 + neural-local retrieval by default | **WORKING on small stores; REGRESSED at realistic evidence scale** | 2026-10-01: public v0.16.0 reports `rrf_fused`/`neural_local`, and 8/8 concurrent searches agree. With 4.9k CASS spans, search takes 11.1 s because of triple full admission scans plus N+1 hydration (§16 R4). Owners: `.64`, `.47`; whole-process concurrency still `.2`, `.3`. |
+| 4 | CASS import makes permitted prior incident content searchable and safely packable | **WORKING on the oracle corpus; first-run onboarding still fails** | 2026-10-22 (§17.2): on the `.43` oracle, v0.18.0 imports 308 sessions / 4,009 spans at 0.60 s per session, admits 988 and quarantines 3,021 by kind, and search/pack return **projected** `assistant:` / `user:` text at **UTR 1.0000**. The `[cass] binary` opt-in is live at all three former dead sites and executes. Remaining: a standard `~/.local/bin/cass` is still refused by default so README Quick Start step 2 exits 5 (the refusal is now actionable and names both opt-ins) — `.44`; and **N1**, where a CASS-populated store can return zero results under the default download policy — `.66`. Measured against the emulator, not real transcripts: this host has no cass index. |
+| 5 | Hybrid BM25 + neural-local retrieval by default | **WORKING at 4k spans; one default-policy path returns nothing (N1)** | 2026-10-22: at 4,009 spans search is 0.83–1.19 s and pack 1.14 s (were 11.1 s / 8.7 s), with `degraded: []` under a coherent neural index. The scale cliff is gone. But under the **default** model-download policy the same corpus answers every query with 0 results and `index_incompatible` while three health surfaces report healthy (§17.3 N1) — `.66`. Whole-process concurrency still `.2`, `.3`. |
 | 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **WORKING (bounded, released binary)** | 2026-10-01: v0.16.0 serial packs are byte-stable; 6/6 concurrent packs equal the serial hash; packs and searches racing a writer report one coherent stale-flagged snapshot (§16.2). The 100-run, linearizability and crash matrix remain `.3`. ADR 0087 identity slices remain `bd-pack-identity-*`. |
 | 7 | Retrieval scores and pack quality mean what their names claim | **PARTIAL / UNPROVEN** | Pure lexical pools now use Frankensearch min-max normalization and retain raw BM25, but the query-relative/calibration contract and every downstream admission/quality consumer remain unproven. `.11`, `.12`. |
 | 8 | Explainable packs with typed identity, provenance, freshness, trust, and score reasons | **PARTIAL** | Rendering is strong for admitted memories; rule/evidence v3 identity, calibration, and deterministic admission remain open. |
-| 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **WRONG_APPROACH on real transcripts** | 2026-10-01 (§16 R3, R7): `review session --propose` on a real session gave 6/10 raw-envelope template candidates at confidence 0.85. The session-arc path read "0 failed" as a failure. Sourceless native rules are searchable and cited by `ask` but cannot be packed (`ee.pack.v3` slice c unlanded). Owners: `.46`, `.59`, `.60`, `bd-vp087`, `bd-2vq2z.9`. |
+| 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **WORKING on the oracle; packable-rule identity still partial** | 2026-10-22 (§17.2): **PAP is precision 1.00 / recall 0.833** on the oracle (5 proposals, 0 polluted by any `must_not_propose` substring), against 0/10 on 2026-10-01 — target ≥ 0.70/0.70 **MET**. Rule hits now resolve into packs (`resolve_rule_hit` / `RuleHitResolution`, `src/core/context.rs:14188`) and README documents `entityKind: "rule"`. Remaining: typed `RuleId`/`EvidenceId` pack identity (`bd-vp087`, in progress; `ee.pack.v3` consumer sweep still pending at `src/pack/mod.rs:1247`), incident cards `.59`, fingerprints `.60`. |
 | 10 | Maintain loop links, decays, consolidates, validates, repairs, and converges | **PARTIAL / UNPROVEN** | Decay/machinery exist; public consolidate → apply → index → retrieve is `bd-1oep7`. |
 | 11 | Complete durable backup, verify, migration, restore, and rebuild | **WORKING on a fresh store; evolved-store proof open** | 2026-10-01: v0.16.0 `recoveryInventory` reports complete schema and snapshot coverage with 0 uncovered required tables; verify passes; side-path restore selects identical pack items (§16.2). `.13` is proof-owed (commented). Evolved, CASS-populated stores remain `.14`. |
 | 12 | Graceful offline degradation remains useful and truthful | **PARTIAL** | Honest fallback/abstention exists; released binary may instead return no result/error, and uncalibrated quality is misleading. |
@@ -1142,11 +1179,11 @@ candidate before `.2` changes the implementation.
 | 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL / UNPROVEN** | Core graph/team/serve/insight implementations are substantial. Several formerly placeholder insight sections now have real code and regression assertions; remaining acceptance is tracked by `bd-2pos6` and `.34`, not inferred from stale placeholder labels. `.9` owns stable claims. |
 | 17 | Multi-agent local writes preserve integrity and truthful freshness | **PARTIAL / UNPROVEN** | Strong tests exist; current full-suite proof is red and evidence/linkage/index generation gaps remain. |
 | 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists. The 2026-09-17 amendment, decided on delegated authority, resolves the two-human criterion mismatch (`.8`); this is not a new current-source runtime proof. |
-| 19 | Canonical readiness verification and green CI | **REGRESSED (main red) / UNPROVEN** | 2026-10-01: `CI Static` has been red on main since 2026-09-30 on four steps, including an 11-test file declared by no module whose companion source exists only in a delivery-workflow patch (§16 R6, `.41`). There is no test-id manifest, the proof capsule never populates, and 44 of 80 per-feature workflows publish to main (§16 R8; `.5`, `.58`, `bd-fy92m`). Full `CI` has been disabled since 2026-08-27. |
-| 20 | Reproducible performance and usable first-agent latency | **FAILING at realistic scale** | 2026-10-01: about 1.1 s of model cold start in every process (R14, `.61`). `remember` is O(corpus) because incremental intake became test-only on 2026-08-06 (R13, `.57`). Search, pack and status take 11 s / 8.7 s / 3 s after 4.9k spans, and the warm daemon does not help (R4, `.64`, `.47`). README rows remain historical; `.6` owns evidence. |
+| 19 | Canonical readiness verification and green CI | **REGRESSED (hosted verification dark) / UNPROVEN** | 2026-10-22 (§17.3 N3): **Actions is `enabled: false` repo-wide.** The last run of any workflow was 2026-10-08T22:58Z and it failed on an allowed-actions policy, not on code — `actions/checkout@v4`, `dtolnay/rust-toolchain@nightly` and `cargo-deny-action` are rejected because "all actions must be from a repository owned by Dicklesworthstone". ~994 non-tracker commits carry no hosted verdict. `.41` closed honestly on `CI Static` run 37056106739 (`c211215a7`, 2026-10-02); that green is now 20 days stale and cannot be re-established while the policy stands. Workflow files grew to 88, of which **47** publish to main (N8). Local static gates are all green and prove presence, not behavior — none of them sees N1. Owners: `bd-actions-disabled-repo-wide-33mfm`, `bd-479c6`, `.5`, `.58`, `bd-fy92m`. |
+| 20 | Reproducible performance and usable first-agent latency | **MEETING its targets at 4k spans; 50k and README rows still unproven** | 2026-10-22 (§17.2): at 4,009 spans search 0.83–1.19 s, pack 1.14 s, status 0.37 s, `ask` 0.89 s, import 0.60 s/session, `why` 0.079 s. `remember` is 0.92–1.07 s at 10 memories and 1.24–1.33 s at 4,009 spans, a log-log slope of ≈ 0.04 against the ≤ 0.15 WCS target. Caveats that keep this row open: the slope is a two-point estimate and the 50k point is unmeasured; `single_document_as_full_rebuild` is still the intake label (`src/core/index.rs:4485`) so `.57`'s wiring is unlanded and the risk is structural; `bd-xayfm` remains open with a colder cold-start basis (2.5–3 s, tokenizer build) than this host measured, and `.61` closed as a duplicate of it with no work done. README rows remain historical; `.6` owns evidence. |
 | 21 | Hermetic multi-platform release/install chain | **PARTIAL / UNPROVEN** | Current release has archives/checksums/installers but no candidate checks/provenance set; tag-only workflow inputs remain non-hermetic. `.7`, `.18`, `.20`, `.21`. |
 | 22 | Canonical walking skeleton proves init → remember → search → pack → why | **WORKING (released binary, serial)** | 2026-10-01: public v0.16.0 init → remember → search → pack → why → replay → outcome → ask passes black-box in an isolated store (§16.2). Readiness-gate wiring remains `.5`/`.17`. |
-| 23 | Recommended agent journey is coherent and fast without a daemon | **PARTIAL (fails once CASS history is imported)** | 2026-10-01: TTFUC is about 1.3 s on 10 memories but 8.7 s once 4.9k CASS spans are imported. The outcome metrics (UTR/TTFUC/PAP/FAR/WCS) and the hook budget are now defined in §16.5 and gated by `.50`. |
+| 23 | Recommended agent journey is coherent and fast without a daemon | **WORKING at 4k spans; the journey's own first step can still fail silently** | 2026-10-22: TTFUC is 1.14 s cold at 4,009 imported spans (was 8.7 s), inside the ≤ 2 s target, with no daemon. The journey's weak link is no longer latency but N1: a user who follows README Quick Start (`init` → `import cass` → `pack`) under the default download policy can reach a store that reports healthy and packs nothing. `.66` owns that; the metric program still runs through `.63`/`.50`, which `.67` must first make trustworthy. |
 | 24 | No-silent-mutation lifecycle, helpful/harmful feedback, decay/inversion | **PARTIAL / UNPROVEN** | Machinery exists; exact later-pack behavior, audit semantics, and docs wording need behavioral proof or maturity demotion. `.9`, `.17`, `bd-2mpct`. |
 
 ---
@@ -1891,3 +1928,267 @@ child closes the real-data gap only if `.50`'s metrics are in ENFORCE mode
 and green on a candidate from a green main (`.41`/`.58` → `.19`). Bead count,
 report-mode numbers, or green unit tests on clean fixtures do not meet that
 bar. That is the exact failure this pass found.
+
+---
+
+## 17. 2026-10-22 reality check: Track R landed; the instruments did not
+
+**Verdict.** The real-data work of the last three weeks worked. On the data
+`ee` exists for, the shipped `v0.18.0` now does what the README says: it mines
+a CASS corpus, packs readable incident text inside a token budget, proposes
+usable rules, and answers with citations — fast, at 4k spans, with bounded
+disk. Five of the six headline 2026-10-01 failures are fixed and two of the
+five §16.5 outcome metrics meet their targets.
+
+What did not improve is the project's ability to *see* any of that. The gate
+that measures Track R cannot run on the developer's platform and reports zeros
+for a product that retrieves correctly. Hosted verification has produced no
+verdict in fourteen days and ~994 non-tracker commits, for a configuration
+reason nobody had diagnosed. And one new product defect lets a fully populated
+store answer every query with nothing while `status`, `index status` and
+`doctor` all report it healthy.
+
+That is a different failure shape again. 2026-08 was "the loops are open".
+2026-10-01 was "the loops break on real data". 2026-10-22 is **"the loops
+work and nothing can prove it"** — three independent measurement surfaces are
+broken, and each one fails in the direction that hides good news and would hide
+bad news equally.
+
+### 17.1 Evidence authority
+
+| Item | Value |
+| --- | --- |
+| Source HEAD | `2bad70949` (2026-10-22 22:51:50 -0400), `v0.18.0-940-g2bad70949`, package `0.18.0`. 1,892 commits since the 2026-10-01 pass (`552f7ba4f`), 994 of them not tracker syncs; top scopes `index` 76, `cass` 70, `e2e` 52, `ci` 44, `recall` 40, `learn` 37 |
+| Shipped binary | public `v0.18.0` `ee-aarch64-apple-darwin.tar.xz`, SHA-256 verified **OK** against its published `.sha256`. `ee version --json` attests clean `969f0cbf19a5fdaa367328350c937cf566063efc`, tag `v0.18.0`, release profile, `aarch64-apple-darwin`, and the full franken-stack version list |
+| Probe isolation | private `HOME` / `XDG_*` roots under `/private/tmp`. **Physical paths only**: on macOS `/var` and `/tmp` are symlinks and ee's CASS path guard correctly refuses a binary path with a symlink component |
+| CASS provisioning | the `.43` emulator (`scripts/real_shape_corpus/cass_fixture.py`, every line prefixed `stub`). **Real `cass` could not be used: this host has no cass index** — `cass sessions` exits 3 `missing-db`, "Run 'cass index --full'". So no claim here rests on real transcripts; it rests on the committed real-shape oracle |
+| Oracle corpus | `tests/fixtures/real_shape_cass`, 311 files, graded `judgments.json` with distractors, secret bait and injection bait. Served 308 sessions / 4,009 spans; ee admitted 988 and quarantined 3,021 (`tool_call` 1,434, `tool_result` 1,434, `metadata` 90, `record_projection:unavailable` 63) |
+| Tracker | 4,918 records: 4,611 closed, 255 open, 33 blocked, 16 in progress, 3 deferred. Bridge epic: 68 records — 18 closed, 40 open, 8 in progress, 2 blocked |
+| Hosted CI | **Actions is `enabled: false` repo-wide.** Last run of any workflow: 2026-10-08T22:58Z (`CI Static`, failure). 88 workflow files, 47 carrying `contents: write` or `git push`, 31 applying patches or asserting blob hashes at runtime |
+| Distribution | GitHub `v0.18.0` (2026-10-14), crates.io `0.18.0`, Homebrew formula `0.18.0` — all coherent. 7 `.minisig` signatures (v0.16.0 had none). No Sigstore, SLSA, or manifest asset. **No `release-probe-*.json` asset on v0.17.0 or v0.18.0**, although v0.16.0 published one |
+
+Static gates at HEAD, all green locally: `cargo fmt --check`; forbidden-deps
+(root and fuzz trees); vision coverage 144 surfaces, 0 stubbed, 0 missing, 0%
+gap; contract-drift radar ok (43 docs, 241 schemas, 606 documented codes
+against 608 fixtures, 0 violations); verification-drift 0; closure lint 231
+beads, 0 violations, 86 baseline matches; bridge staleness now names Part III
+correctly and emits one low `vision_coverage_gap_low`; plan drift 0 warnings.
+
+They still prove presence, not behavior — and §17.3 N1 is a defect that every
+one of them passes over.
+
+### 17.2 What works, measured on the shipped binary
+
+1. **Walking skeleton.** `init` (1.34 s) → `remember` ×10 → `search` → `pack`
+   → `why` → `status` → `index status` → `capabilities` → `doctor`, all exit 0
+   with v2 envelopes. `why` resolves the persisted pack selection in 0.079 s.
+2. **Two outcome metrics now meet their targets.**
+
+   | Metric | v0.16.0 (2026-10-01) | v0.18.0 (2026-10-22) | Target | Verdict |
+   | --- | --- | --- | --- | --- |
+   | **UTR** | ~0.65 | **1.0000** (29 evidence blocks, 5,255 content bytes, zero JSON keys / uuids / message ids / escapes) | ≥ 0.95 | **MET** |
+   | **PAP** | 0/10 | **precision 1.00, recall 0.833** (5 proposals, 0 polluted by `must_not_propose` substrings) | ≥ 0.70 / ≥ 0.70 | **MET** |
+   | **TTFUC** | 8.7 s at 4.9k spans | **1.14 s** pack at 4,009 spans (0.35 s p50 on the 123-record base corpus) | ≤ 2 s cold | **MET at this scale** |
+   | **WCS** | 2.0 s → 6.6 s for 10 → 983 docs | `remember` 0.92–1.07 s at 10 memories, **1.24–1.33 s at 4,009 spans** (log-log slope ≈ 0.04) | slope ≤ 0.15 | **MET at this scale; 50k point unmeasured** |
+   | **FAR** | 1/9, uncalibrated | **1/10, uncalibrated** | ≤ 0.05 at a calibrated floor | **unchanged — see N4** |
+
+3. **The CASS loop produces readable incidents.** Evidence now arrives as
+   projected transcript text, not envelopes: `assistant: Published vault 1.2.0.
+   Lesson for next time: bump the version in Cargo.toml and commit it before
+   running cargo publish; crates.io rejects a…`. A persisted `reader_text`
+   column, `src/db/evidence_reader_projection.rs`, and `TRANSCRIPT_PROJECTION_VERSION = 2`
+   back it; `src/search/mod.rs:1098` and `src/core/context.rs:15437` both
+   consume `span.reader_text()`. R2 is fixed in the surfaces that matter.
+4. **Scale cliff gone.** At 4,009 spans / 988 admitted evidence / 308 sessions:
+   search 0.83–1.19 s (was 11.1 s), pack 1.14 s (was 8.7 s), status 0.37 s (was
+   3.0 s), `ask` 0.89 s. Import 0.603 s per session (was ~18 s), about 30×.
+5. **Retention is bounded.** 2 retained generations after 11 writes, and still
+   2 after an explicit rebuild — against one full index copy per write and a
+   hard failure at 1,000 in v0.16.0. `index_retention_gc` keeps the newest 2
+   valid generations, `reclaim_after_publish` runs inside the exclusive
+   generation fence, and `ee index vacuum --apply` is audited. Store size 54 MB
+   for the 4k-span corpus.
+6. **CASS trust is wired and honest.** The `[cass] binary` override is live at
+   all three former dead sites (`src/cli/mod.rs:24501`, `src/core/status.rs:1395`,
+   and `src/output/mod.rs`, which no longer discovers on its own) and it
+   **executes**. A standard `~/.local/bin/cass` is still refused by default, but
+   the refusal now names the path, both opt-ins, and carries
+   `repairKind: "actionable"`.
+7. **`ask` is honest and useful.** A direct hit answers with the exact span
+   cited at confidence 0.678 and `confidenceCalibration.status =
+   "heuristic_uncalibrated"`, `calibrationId: null`. An unrelated question
+   abstains (`no_confident_answer`, confidence 0.218). Oracle rates:
+   negative-abstain 1.00, negative-query flag rate 1.00. A distractor search
+   returns results but flags `weak_query_recall`.
+8. **Three §15 archive criteria closed.** `bd-3k1mg`, `bd-16imy` and
+   `bd-3h6bz` are all closed. `.43` closed today on executed evidence with a
+   mutation control and a non-vacuous determinism verdict.
+
+### 17.3 What does not work
+
+| # | Finding (measured) | Status | Owner |
+| --- | --- | --- | --- |
+| **N1** | **A populated store returns zero results while every health surface reports it healthy.** Reproduced three times from a clean root: import the oracle under the **default** model-download policy, then `ee search` returns **0 results** with `index_incompatible` and `ee pack` **0 items**, while `ee index status` reports `health: ready`, `degradationCode: null`, 988 evidence + 308 session documents, equal generations (4368/4368) and equal corpus revision; `ee status` reports `posture.overall: ok`; and **`ee doctor` reports `posture: ok` with zero non-ok checks**. The search-side degraded entry is correct and actionable ("the stored vector producer identity cannot be verified against the active embedder", repair `ee index rebuild --workspace .`) and both `ee index reembed` and `ee index rebuild` restore full retrieval (10 results, `degraded: []`). The trigger is the documented default path: with no model present, `ee` builds the index with `deterministic_hash`, then acquires and verifies the real 507 MB model during the same run, after which the existing index is no longer compatible. Setting `EE_EMBED_DOWNLOAD=off` is coherent and returns results with an honest `embed_model_unavailable`; the **default** is the broken case. A memory-only store is unaffected, so this is specific to CASS-populated stores. Adjacent to closed `bd-fresh-workspace-hash-fallback-kvltg` and outside the coherence test `ready_index_posture_is_coherent_across_public_cli_surfaces` that closed §B. | **NEW — total retrieval loss, silent to every health surface** | NO_BEAD at audit → `.66` (P0) |
+| **N2** | **The Track R measuring instrument is broken three ways and publishes false reds.** `scripts/real_shape_corpus/probe.py` (`.63`): (a) it allocates its root with `tempfile.mkdtemp()`, which on macOS yields `/var/folders/…`; `/var` is a symlink, so ee's CASS path guard refuses the emulator and the probe dies at the import step — **the identical defect was diagnosed and fixed for `tests/no_mocks_e2e.rs` in §A on 2026-09-01 and not carried over**; (b) its harness reports only `stderr`, while `ee` writes error envelopes to **stdout**, so the failure message is the empty string `"ee import cass failed (5): "` and the real reason is only in `import.json`; (c) its model passthrough sets **`EE_MODEL_DIR`**, which appears **0 times** in `src/config/env_registry.rs` and `docs/env_vars.md` — the registered name is `EE_EMBED_MODEL_DIR`. Run as shipped against v0.18.0 it reports `UTR: null`, `FAR: null`, `recall_at_5: 0.0` across 40 judged queries and 0 packed items. With a physical `TMPDIR` and a real model dir the same binary and corpus return 10 results per query and UTR 1.0000. **Every Track R metric in §16.5 is gated on this script, which is why no Track R bead carries a before/after number three weeks on.** | **NEW — false-red gate; (c) is R1's dead-config shape reproduced inside the gate** | NO_BEAD at audit → `.67` (P0) |
+| **N3** | **Hosted verification has been dark for 14 days, for a configuration reason.** Actions is `enabled: false` repo-wide; the last run of anything was 2026-10-08T22:58Z and its root cause is **not** code: `##[error]The actions actions/checkout@v4, dtolnay/rust-toolchain@nightly, and embarkstudios/cargo-deny-action@… are not allowed … because all actions must be from a repository owned by Dicklesworthstone`. An allowed-actions policy restricted to owner-owned actions fails every job before checkout. ~994 non-tracker commits have landed with no hosted verdict. `.41` closed legitimately on a specific green (`CI Static` run 37056106739 on `c211215a7`, 2026-10-02) — that green is now 20 days and ~994 commits stale and cannot be re-established while the policy stands. | **NEW root cause on an owned gap** | `bd-actions-disabled-repo-wide-33mfm` (P0, open) + `bd-479c6`; policy cause recorded by this pass |
+| **N4** | **Relevance does not discriminate at the tail, so FAR cannot be fixed by a threshold.** "prepare release" on a 10-memory store packs **10/10** items, `omittedCount: 0`, at **4.2%** budget utilization — so nothing was forced in by budget pressure. The office-espresso distractor ranks **4th** with relevance **0.1906**, inside a band of 0.1743–0.1936 that also contains "clippy warnings are errors" (0.1848) and "forbidden dependencies" (0.1821). The separation between a distractor and a genuinely relevant rule is 0.006. `.11`'s conformal-risk plan chooses a threshold λ; **no λ separates that band**, so a discriminative score is a prerequisite, not a consequence, of calibration. | **UNCHANGED (1/10 vs 1/9), sharper diagnosis** | `.11`, `.12`; evidence comment added |
+| **N5** | **Published releases carry no black-box evidence.** `.7.1` closed 2026-09-23 delivering `scripts/release_binary_probe.sh`, and `ci-static.yml:515` runs it `--self-test`. v0.16.0 published a `release-probe-aarch64-apple-darwin.json` (12 checks, `verdict: pass`); **v0.17.0 and v0.18.0 publish none.** The gate exists and is self-tested; nothing in either release proves it ran against the artifact users install. | **NEW regression in release evidence** | NO_BEAD at audit → `.68` (P1) |
+| **N6** | **Two releases shipped past an open authorization boundary.** v0.17.0 (2026-10-03) and v0.18.0 (2026-10-14) were published while `.20` ("human-authorize publication only after verified private staging"), `.27` (signed/attested release) and `.65` (the 0.16.1 hotfix candidate those two overtook) are all still open. §13.5 says an open publication bead is not authorization. The releases are good — coherent across three channels, signed with minisign, self-attesting their commit — which is exactly why the gap is procedural rather than harmful, and why `.20`/`.27` need to be reconciled to what actually happens rather than left as unmet gates. | **NEW process gap** | `.20`, `.27`, `.65`; reconcile or demote |
+| **N7** | **ee discards a precise upstream repair.** When `cass sessions` fails with `kind: "missing-db"` and the upstream hint "Run 'cass index --full' to create the database", ee reports `repair: "run cass health --json"` with `repairKind: "unknown"`, dropping the one instruction that fixes it. The structured `subprocessDiagnostics` are good and the DB path is correctly redacted. | **NEW small truth defect** | NO_BEAD at audit → `.69` (P2) |
+| **N8** | **Delivery-lane topology grew.** 88 workflow files (was 80), **47** carrying `contents: write` or `git push` (was 44), 31 patching or hash-asserting at runtime (was 38). All 88 are currently inert because of N3, so `.58`'s "turn them into manifest-shard runners" cannot be validated until Actions returns. | **WORSE** | `.58`, `bd-fy92m`, `bd-5glwp` |
+| **N9** | **Unchanged small defects, each re-measured.** 414 leaked `.potion-multilingual-128M-download-*` staging dirs in the real model root — **exactly the 2026-10-01 count** (`.55`). `ee eval list` outside the repo still errors `Fixture directory does not exist: tests/fixtures/eval` with the repair "Ensure tests/fixtures/eval/ exists" (`.53`). `pack_assembly_elapsed_over_budget` still fires on an ordinary successful 29-item pack (`.56`, in progress). Local `cosine` still ranks semantic spans in `src/core/ask_semantic.rs:332`, local BFS still walks causal ancestry in `src/graph/causal.rs:390`, and PPR signals still surface through `graph suggest-links` (`.4`; `.15` remains blocked on upstream personalization). `single_document_as_full_rebuild` is still the label for single-document intake (`src/core/index.rs:4485`), so `.57`'s wiring is unlanded even though wall-clock write cost no longer scales with the corpus at this size. | **UNCHANGED** | `.53`–`.57`, `.4`, `.15` |
+
+### 17.4 Answers to the five reality-check questions
+
+1. **Working now:** everything in §17.2. Four of five outcome metrics meet
+   their targets at the measured scale, three §15 criteria closed, and the
+   product does the job the README advertises on the corpus it advertises.
+2. **Not working:** N1–N9. The decisive ones are N1 (a healthy-looking store
+   that answers nothing) and N2 (the gate that would have caught N1 reports
+   zeros for everything, so a real zero and a harness zero are indistinguishable).
+3. **Blocking:**
+   - **Measurement, not implementation.** Three independent surfaces that are
+     supposed to tell the truth about the product cannot: the Track R probe
+     (N2), hosted CI (N3), and `doctor`/`status`/`index status` for the N1
+     condition. The implementation outran all three.
+   - **No discriminative relevance.** N4 means `.11`/`.12` cannot be closed by
+     calibration alone.
+   - **The oracle is served by an emulator here.** The host has no cass index
+     (`cass sessions` → `missing-db`), so nothing in this pass measured real
+     transcripts. `.62`'s premise is now literal: the product's heaviest
+     potential user cannot use it without `cass index --full`.
+4. **Would closing every open bead close the gap? No.** N1, N2, N5 and N7 had
+   no owner at audit, and N1 is the kind of defect that would ship: it is
+   invisible to `fmt`, forbidden-deps, vision coverage (144/144, 0% gap),
+   contract-drift, closure lint, `status`, and `doctor`. N3's root cause was
+   unrecorded on its own P0 bead. §8 rows 4, 5, 9, 20 and 23 were also stale in
+   the pessimistic direction and are revised below.
+5. **Vision goals with no bead:** retrieval that is *provably* non-empty on a
+   store the product itself reports healthy (README *Graceful Degradation*:
+   "Each degradation surfaces in the JSON `degraded` array with a repair
+   command" — true per-response, false on the three health surfaces); and a
+   measurement instrument that fails closed rather than reporting zero
+   (AGENTS.md *Control Markers*, "constant-green, constant-red, and cannot-pass
+   assertions are the same defect"). Both are now `.66` and `.67`.
+
+### 17.5 Bridge delta — Track V (make the instruments tell the truth)
+
+New children of `bd-reality-core-convergence-1azkt`, all graph-reachable from
+`.22`. Existing owners keep their scope; no competing plan or epic was created.
+
+- **V0 `.70` (P0, the generalization).** Ambition round 1 asked what N1, N2 and
+  N3 have in common, and the answer is one defect in three subsystems: **every
+  verdict surface in this project can emit a value indistinguishable from the
+  healthy case without saying which.** `doctor` renders an unevaluated dimension
+  as `posture: ok`; the probe renders a dead harness as `recall_at_5: 0.0`; a CI
+  conclusion renders a policy refusal as `failure`. So the standing property is
+  a **tri-state verdict contract** — *measured healthy*, *measured unhealthy*,
+  *could not measure* — with a code-derived census of every health, gate and
+  metric surface, a declared third state for each, a cargo-free gate that fails
+  when a surface cannot express it, and a terminator classification for verdicts
+  that come from a subprocess or a remote lane. AGENTS.md already names the
+  class in the abstract (bd-2phcw: constant-green, constant-red and cannot-pass
+  are the same defect); this makes it enumerable. `.66` and `.67` land first and
+  become its positive control; its negative control is a legitimately two-state
+  surface that must NOT be flagged, so the gate cannot become noise and get
+  exempted wholesale. No new posture layer — the third state lives inside the
+  existing `posture` / `degraded[]` / capability contracts.
+- **V1 `.66` (P0, N1).** One coherent readiness answer, and a `doctor` check
+  that sees `index_incompatible`. `ee search`, `ee pack`, `ee index status`,
+  `ee status` and `ee doctor` must not be able to report mutually exclusive
+  readiness for one snapshot; the condition must appear as a non-ok `doctor`
+  check carrying the working `ee index rebuild` repair; and acquiring the model
+  mid-run must either re-stamp the index or declare the store degraded at every
+  surface. Acceptance is adversarial and non-vacuous: a positive control that
+  reproduces the zero-result state and fails before the fix, a negative control
+  on a memory-only store, and an explicit assertion that `doctor` has at least
+  one non-ok check whenever retrieval returns zero on a non-empty index.
+- **V2 `.67` (P0, N2).** Make the probe scaffold fail closed. Canonicalize its
+  root to a physical path (reuse the §A trusted-target-root resolution rather
+  than re-deriving it), report `stdout` envelopes in harness errors because
+  that is where `ee` writes them, use `EE_EMBED_MODEL_DIR`, and add a
+  self-test that asserts a *known-good* corpus produces non-zero recall — so a
+  harness fault can never be published as a product zero. `.63` depends on this.
+- **V3 `.68` (P1, N5).** Publish the release probe's capture as a release asset
+  for every tag, and make a missing capture fail the release rather than the
+  release succeed silently. Reuses `scripts/release_binary_probe.sh`.
+- **V4 `.69` (P2, N7).** Carry the upstream repair when a subprocess supplies
+  one, instead of substituting a generic hint.
+- **N3** is recorded on `bd-actions-disabled-repo-wide-33mfm` with the policy
+  error text and the three rejected actions; the fix is an allowed-actions
+  policy decision (allow the three, or vendor them), not code.
+- **N4** is recorded on `.11`/`.12` with the measured 0.1743–0.1936 band, and
+  ambition round 3 adds a **feasibility precondition** before any λ is fitted:
+  compute the ROC of the relevance projection over the `.43` oracle's judged
+  relevant-versus-distractor items and report AUC plus the *minimum achievable
+  FAR at the target recall*. If that minimum exceeds α, **no threshold
+  satisfies the target** and the work is upstream of calibration — better
+  features, a different fusion, or reranking — so the calibration step must
+  fail with that explicit reason instead of emitting a λ. The judgments,
+  distractor labels (`distract_espresso`, `distract_lunch`) and
+  `negative_queries` already exist in
+  `tests/fixtures/real_shape_cass/judgments.json`, so this is cheap and it turns
+  "calibration is pending" into a decidable question. Sequence the unsupervised
+  elbow fallback first: on the measured distribution the largest normalized gap
+  falls between rank 2 (0.3968) and rank 3 (0.1936), which cuts the "prepare
+  release" pack to exactly the two correct items.
+- **N6** is recorded on `.20`/`.27`: reconcile the authorization gate with the
+  hand-cut release practice, or demote the claim.
+
+### 17.6 Order and steering
+
+```
+.66 coherent readiness + doctor check ──┬─► .70 tri-state verdict census + gate ──┐
+.67 probe fails closed ─────────────────┴─► .63 report-mode baselines ─► .50 (ENFORCE) ──┤
+bd-actions-disabled-repo-wide-33mfm (policy decision) ──► .58 shard runners ──► .19 ─────┼─► .20/.27 ─► .21 ─► .22
+.11 ROC feasibility ─► .11 elbow ─► .11 λ ─► .12 quality thresholds ─────────────────────┘
+.68 release-probe asset ; .69 upstream repair ; .53–.57 any time
+```
+
+`.66` is deliberately **not** blocked on `.10`. Refinement pass 3 removed that
+edge: `.10` owns a general source-attested retrieval/index oracle, and gating a
+user-facing P0 behind it is the dependency deadlock this plan warns about (the
+same reason `.5` was allowed to proceed while the product was red). `.66`'s own
+acceptance requires a positive control that fails at the parent commit, which is
+the source attribution for this defect, and that control becomes an input to
+`.10` rather than waiting on it.
+
+### 17.7 Beads, ambition and refinement record
+
+The skill ran in its documented order, applied in place, with no competing plan
+or epic created. Both frozen prompts are retained verbatim on the root bead.
+
+- **Phase 3a.** `.66`–`.69` filed with blocking edges to `.22`, `.19` and `.63`.
+- **Phase 4, three ambition rounds.** Round 1 produced `.70` (the tri-state
+  verdict contract above). Round 2 hardened it with a code-derived enumeration,
+  an empty-world guard, and a negative control for legitimately two-state
+  surfaces. Round 3 produced the `.11`/`.12` ROC feasibility precondition.
+- **Phase 5, five refinement passes.**
+
+| Pass | Finding → change |
+| --- | --- |
+| 1 | `.66`'s own invariant was wrong as first written: "doctor must be non-ok whenever retrieval returns zero against a non-empty index" would fire on every legitimate no-match query and turn `doctor` red for any unanswerable question — the noise-then-blanket-exemption failure that `degraded[]` nearly suffered before E5. Narrowed to key on an index/embedder-caused degradation rather than on the absence of results. |
+| 2 | Both new E2E scripts must emit `ee.test_event.v1` per step with stdout/stderr separation, as every other E2E in §12 does; otherwise a future CI failure is as unreadable as the probe failure this pass fixed. |
+| 3 | Removed the `.66 → .10` edge as over-coupling (see §17.6). |
+| 4 | Paired every absence assertion with a presence assertion — the exact 988 admitted-evidence count and at least one exact span id — so an empty corpus or a dead harness cannot pass. That is precisely how N2 passed. |
+| 5 | Scope: no new posture layer, no new report family, and the honest `EE_EMBED_DOWNLOAD=off` degradation path explicitly preserved. No further material change; stop condition met. |
+
+**Final validation.** 4,923 tracker records. Five new children (`.66`–`.70`),
+all graph-reachable from `.22`. `br dep cycles` reports **0 active cycles**.
+`bv --robot-triage` completes and ranks `.5`, `.15` and `.18` as its top picks.
+Dated evidence comments were added to `.4`, `.11`, `.12`, `.20`, `.27`, `.42`,
+`.44`–`.48`, `.53`–`.57`, `.63`–`.65`, `bd-xayfm` and
+`bd-actions-disabled-repo-wide-33mfm`. **No pre-existing issue changed status
+and nothing was closed by this pass.** Cargo was not run locally (tripwire) and
+no RCH dispatch was launched; every product claim above is a black-box
+measurement of the published v0.18.0 archive.
+
+### 17.8 Steering
+
+Steering: **fix the two instruments before funding more product work.** N1 is
+the proof that the current gate set cannot see a total retrieval failure, and
+N2 is the proof that the one gate aimed at real data would have reported the
+same zeros whether the product worked or not. Both are small, bounded, and
+they are what makes every later number believable. The product work of the
+last three weeks does not need more ambition; it needs a measurement it can be
+graded by.
