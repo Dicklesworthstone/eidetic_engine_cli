@@ -2358,9 +2358,39 @@ sides differed by the one commit implementing the feature under test — exactly
 what its own header warns about (`bd-smxdr`). **Any measurement in this bridge
 must name the commit, not the version.**
 
-A dispatched HEAD verdict was launched with the prediction pre-registered on
-the bead (pass, with a non-null `coveredBy`) so the result cannot be
-rationalised afterwards.
+**The dispatched HEAD verdict came back and the pre-registered prediction held.
+`bd-betm5` is CLOSED.** Base `7f765483b`, `BUILD_EXIT=0`, `E2E_EXIT=0`, remote
+exit 0 in 32m25s, `remembered_demand_marks_cluster_covered: pass` with 12 of 12
+labels green, graded against a binary that job compiled. The pass predicate
+requires `status == "likely_covered"` **and** `coveredBy != null`, so the
+coverage link is established.
+
+So the shape of that bead was: real when filed against 0.17.0, fixed
+2026-10-14, open for nine days because no verdict existed. **The second instance
+of §18.5 confirmed by execution today.**
+
+`a55b8c75e` fixes the reason the literal `coveredBy` id was unavailable: the
+suite printed a rich diagnosis on the FAIL path and *nothing* on the PASS path,
+so the one value the bead's acceptance asked for was the one value no passing
+run emitted. A `[witness]` line now prints it beside the pass event — not
+through `event()`'s third argument, which lands in `first_failure_diagnosis`, a
+field other suites read as "why it failed". Both directions were observed before
+committing, since v0.18.0 cannot take the pass path locally.
+
+The `createdAt` hole is now **`bd-h1f81`** (P2) rather than a loose note: ee's
+own suggested command tells an agent to write a memory whose `created_at` must
+beat a timestamp ee publishes, and then does not report the `created_at` it
+wrote. Four validity-window fields are exposed and the row's own creation time
+is not.
+
+**One process lesson from the aborted first dispatch, which is mine and not the
+tooling's.** It synced `ce034a12b` and spent 33 minutes to report
+`BUILD_EXIT=101` with the `read_fence` duplicate-initializer errors — i.e. it
+rediscovered §18.5's broken-main window the expensive way. Two guards worth
+keeping: run `git merge-base --is-ancestor <last-compile-fix> HEAD` *before*
+dispatching, and never read a dispatch's fate from the wrapper's exit status —
+I ended the command with `; echo "dispatch exit=$?"`, which masked a remote
+exit of 90 as a local 0. Read `BUILD_EXIT`/`E2E_EXIT` out of the log.
 
 Smaller finding, separately actionable: `ee remember --json` returns 39 data
 fields — `audit_id`, `confidence`, `revision_number`, `valid_from`, `valid_to`,
