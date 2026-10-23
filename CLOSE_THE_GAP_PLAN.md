@@ -2218,7 +2218,9 @@ weeks (308 sessions / 4,009 spans / 988 admitted / 3,021 quarantined):
 | FAR | **0.0** over 335 packed items | ≤ 0.05 | MET |
 | WCS slope | **0.437** over 502 → 4,009 records | ≤ 0.15 | **MISSED** |
 
-Supporting readings: search p50 0.253 s; import 0.171 s/session; negative-query
+Supporting readings: search p50 0.253 s; import 0.171 s/session (but see the
+correction in §18.7 — the 30× import claim in §17.2 does NOT survive
+instrument measurement); negative-query
 flag rate 1.0; `ask` negative-abstain rate 1.0; `scenario_hit_at_5` 0.925.
 
 **WCS is the one new red, and it is the first measurement of invariant I-2 on
@@ -2398,3 +2400,62 @@ developer's laptop and a hand-verified archive.
 | N7 upstream repair hint | unchanged (`.69`) |
 | N8 workflow sprawl | unchanged |
 | N9 leaked staging dirs | unchanged; the probe no longer adds to it (controls use auto-cleaned roots) |
+
+### 18.7 One instrument, both releases — and a correction to §17.2
+
+With the probe repaired, **v0.16.0 and v0.18.0 were measured by the same
+instrument on the same corpus** (the `.43` oracle at 308 sessions / 4,009 spans,
+both archives sha256-verified against their published `.sha256`). Until now
+every Track R delta in this bridge compared a hand-measurement against a
+different hand-measurement. These are comparable:
+
+| metric | v0.16.0 | v0.18.0 | target |
+| --- | --- | --- | --- |
+| UTR | 0.4994 | **0.9998** | ≥ 0.95 |
+| TTFUC pack p50 | 4.102 s | **0.571 s** | ≤ 2 s |
+| pack max | 14.232 s | 0.759 s | — |
+| search p50 | 3.766 s | 0.253 s | — |
+| PAP precision / recall | 0.0 / 0.0 | **1.00 / 0.833** | ≥ 0.70 |
+| PAP proposals | 11, none acceptable | 5, all acceptable | — |
+| FAR | 0.0 | 0.0 | ≤ 0.05 |
+| packed items | 678 | 335 | — |
+| `ask` answered / cited-relevant | 0.0 / 0.0 | 0.625 / 0.625 | — |
+| negative-query flag rate | 0.333 | 1.0 | — |
+| `remember` p50 | 3.624 s | 0.923 s | — |
+| evidence admission | *surface absent* | 988 admitted / 3,021 quarantined | — |
+
+Two readings deserve stating. **Packed items halved while UTR doubled** — the
+pack got smaller and better at once, which is §16.5's thesis in two numbers. And
+**PAP improved by proposing less, not more**: eleven proposals none of which
+were acceptable became five that all were, across the same six judged arcs. The
+entire remaining 0.167 recall gap is one arc (`rustc-borrow-error`) that now
+yields no proposal at all. `ee ask` answering nothing at all on v0.16.0 was
+never previously quantified anywhere in this bridge.
+
+**THE CORRECTION.** §17.2 and the `ce034a12b` commit message report import at
+"~18 s/session → 0.603 s/session, about 30×". **That does not survive
+instrument measurement.** On this corpus the instrument puts v0.16.0 at
+0.213 s/session and v0.18.0 at 0.171 s/session — **1.25×, not 30×**. The two
+figures are not comparable rather than one being fabricated: the 18 s/session
+came from a configuration with the embedding model ACTIVE, where import pays
+per-span embedding cost, and both runs above have `EE_EMBED_DOWNLOAD=off`, which
+removes that cost from both sides. So the defensible claim is narrower, and it
+should replace the old one wherever quoted:
+
+> With embedding disabled, import throughput improved 1.25× between v0.16.0 and
+> v0.18.0. The large import speedup attributed to Track R is a property of the
+> **embedding** path and has **not** been reproduced by this instrument, because
+> the only configuration the instrument can measure is the one with embedding
+> off (`.66`).
+
+That is a genuine hole in the Track R evidence, not a bookkeeping nit: the
+headline import number cannot be re-derived until `.66` makes the default policy
+measurable. It is the second place in this bridge where `.66` is the thing
+standing between a claim and its proof, the first being every §16.5 metric in
+§18.1.
+
+`.63` is consequently **2 of 4 acceptance items done, 1 partial, 1 not done** —
+both published versions measured, HEAD not (no dispatch was launched for it),
+and the `real_corpus_cass_unavailable` code its self-test bullet names is not
+actually emitted by the probe, which is the same dead-code shape `.67` was filed
+for and must be either emitted or restated.
