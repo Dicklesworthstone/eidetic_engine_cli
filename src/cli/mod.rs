@@ -5589,8 +5589,8 @@ pub struct GraphDiffArgs {
     pub to: Option<String>,
 
     /// RFC3339 timestamp: use the nearest snapshot at or before it as `from`.
-    #[arg(long, value_name = "RFC3339", conflicts_with_all = ["from", "to"])]
-    pub since: Option<String>,
+    #[arg(long, value_name = "RFC3339", value_parser = parse_rfc3339_arg, conflicts_with_all = ["from", "to"])]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Arguments for `ee graph suggest-links` (ADR 0066 / bd-3a1op.3).
@@ -38060,7 +38060,7 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::graph_diff::{diff_snapshots, parse_snapshot_graph};
+    use crate::core::graph_diff::{diff_snapshots, parse_snapshot_graph, snapshot_at_or_before};
 
     let graph_type = match args.graph.parse::<crate::db::GraphSnapshotType>() {
         Ok(graph_type) => graph_type,
@@ -38142,10 +38142,18 @@ where
         };
         (from_row, to_row)
     } else if let Some(since) = &args.since {
-        // RFC3339 UTC timestamps compare lexically; nearest ≤ since.
-        let from_row = snapshots
-            .iter()
-            .find(|row| row.created_at.as_str() <= since.as_str());
+        let from_row =
+            match snapshot_at_or_before(snapshots.iter().map(|row| row.created_at.as_str()), since)
+            {
+                Ok(index) => index.and_then(|index| snapshots.get(index)),
+                Err(message) => {
+                    let domain_error = DomainError::Storage {
+                        message,
+                        repair: Some("ee graph snapshot refresh --workspace . --json".to_owned()),
+                    };
+                    return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
+                }
+            };
         (from_row, snapshots.first())
     } else {
         (snapshots.get(1), snapshots.first())
@@ -38156,7 +38164,7 @@ where
             .from
             .clone()
             .or_else(|| args.to.clone())
-            .or_else(|| args.since.clone())
+            .or_else(|| args.since.as_ref().map(chrono::DateTime::to_rfc3339))
             .unwrap_or_else(|| "latest two".to_owned());
         let envelope = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
@@ -80848,6 +80856,34 @@ mod tests {
                 format!("failed or read-only suggestion request wrote candidates: {candidates:?}"),
             )
         }
+    }
+
+    #[test]
+    fn graph_diff_since_validates_and_normalizes_rfc3339() -> TestResult {
+        for invalid in ["not-a-time", "2026-08-01", "2026-08-01T25:00:00Z"] {
+            ensure(
+                super::Cli::try_parse_from(["ee", "graph", "diff", "--since", invalid]).is_err(),
+                "invalid graph-diff timestamp must be a usage error",
+            )?;
+        }
+        let cli = super::Cli::try_parse_from([
+            "ee",
+            "graph",
+            "diff",
+            "--since",
+            "2026-08-01T02:00:00.123456789+02:00",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Some(super::Command::Graph(super::GraphCommand::Diff(args))) = cli.command else {
+            return Err("expected graph diff arguments".to_owned());
+        };
+        ensure_equal(
+            &args
+                .since
+                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+            &Some("2026-08-01T00:00:00.123456789Z".to_owned()),
+            "graph diff must preserve the RFC3339 instant and fractional precision",
+        )
     }
 
     #[cfg(feature = "graph")]

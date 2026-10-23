@@ -68,13 +68,9 @@ pub fn edge_key(source: &str, target: &str, relation: &str, directed: bool) -> S
     format!("edge_{}", &hash.as_str()[..26])
 }
 
-/// Parse a snapshot's `metrics_json` into a diff-ready view.
-///
-/// Reads the flat `nodes` / `edges` arrays written by
-/// `graph_snapshot_metrics_json` (falling back to `graph.nodes` /
-/// `graph.edges` for older payload shapes). Unparseable JSON is an error;
-/// missing arrays yield an empty side (honest: an empty snapshot diffs as
-/// all-added / all-removed).
+/// Parse persisted flat or legacy nested topology without inventing an empty
+/// graph from missing or malformed rows. Explicit empty arrays remain valid.
+/// Typed snapshot families store relation metadata under edge attributes.
 pub fn parse_snapshot_graph(
     snapshot_id: &str,
     snapshot_version: u32,
@@ -83,53 +79,107 @@ pub fn parse_snapshot_graph(
 ) -> Result<SnapshotGraphView, String> {
     let metrics: serde_json::Value = serde_json::from_str(metrics_json)
         .map_err(|error| format!("snapshot {snapshot_id} metrics_json did not parse: {error}"))?;
-
-    let node_values = metrics
-        .get("nodes")
-        .or_else(|| metrics.pointer("/graph/nodes"))
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    if !metrics.is_object() {
+        return Err("snapshot metrics must be a JSON object".to_owned());
+    }
+    if let Some(schema) = metrics.get("schema")
+        && schema.as_str() != Some("ee.graph.snapshot.metrics.v1")
+    {
+        return Err("snapshot metrics schema is unsupported".to_owned());
+    }
+    let graph_type = metrics
+        .get("graphType")
+        .map(|value| snapshot_text(Some(value), "graphType"))
+        .transpose()?;
+    let node_values = snapshot_array(&metrics, "nodes")?;
+    let edge_values = snapshot_array(&metrics, "edges")?;
     let mut nodes = BTreeMap::new();
-    for node in &node_values {
-        let Some(id) = node
-            .get("id")
-            .or_else(|| node.get("memoryId"))
-            .and_then(serde_json::Value::as_str)
-        else {
-            continue;
+    for node in node_values {
+        let id = snapshot_text(
+            consistent_alias(node.get("id"), node.get("memoryId"), "node identity")?,
+            "node identity",
+        )?;
+        let pagerank = match node.get("pagerank") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_f64()
+                    .filter(|score| score.is_finite() && *score >= 0.0)
+                    .ok_or_else(|| "snapshot pagerank must be nonnegative and finite".to_owned())?,
+            ),
         };
-        let pagerank = node.get("pagerank").and_then(serde_json::Value::as_f64);
-        nodes.insert(id.to_owned(), pagerank);
+        if nodes.insert(id.to_owned(), pagerank).is_some() {
+            return Err("snapshot contains duplicate node identities".to_owned());
+        }
     }
 
-    let edge_values = metrics
-        .get("edges")
-        .or_else(|| metrics.pointer("/graph/edges"))
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     let mut edges = BTreeMap::new();
-    for edge in &edge_values {
-        let source = edge
-            .get("source")
-            .or_else(|| edge.get("sourceMemoryId"))
-            .and_then(serde_json::Value::as_str);
-        let target = edge
-            .get("target")
-            .or_else(|| edge.get("targetMemoryId"))
-            .and_then(serde_json::Value::as_str);
-        let (Some(source), Some(target)) = (source, target) else {
-            continue;
+    for edge in edge_values {
+        let source = snapshot_text(
+            consistent_alias(
+                edge.get("source"),
+                edge.get("sourceMemoryId"),
+                "edge source",
+            )?,
+            "edge source",
+        )?;
+        let target = snapshot_text(
+            consistent_alias(
+                edge.get("target"),
+                edge.get("targetMemoryId"),
+                "edge target",
+            )?,
+            "edge target",
+        )?;
+        if !nodes.contains_key(source) || !nodes.contains_key(target) {
+            return Err("snapshot edge references an undeclared node".to_owned());
+        }
+        let attrs = match edge.get("attrs") {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_object()
+                    .ok_or_else(|| "snapshot edge attrs must be an object".to_owned())?,
+            ),
         };
-        let relation = edge
-            .get("relation")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("related");
-        let directed = edge
-            .get("directed")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        let relation = consistent_alias(
+            edge.get("relation"),
+            attrs.and_then(|attrs| attrs.get("relation")),
+            "edge relation",
+        )?;
+        let typed_relation = match graph_type {
+            Some("revision_dag") => attrs.and_then(|attrs| attrs.get("transition_kind")),
+            Some("rule_provenance") => attrs.and_then(|attrs| attrs.get("rule_role")),
+            _ => None,
+        };
+        let relation = match consistent_alias(relation, typed_relation, "edge relation")? {
+            Some(value) => snapshot_text(Some(value), "edge relation")?,
+            None => match graph_type {
+                Some("causal_evidence") => "causal_evidence",
+                None if attrs.is_none() => "related",
+                _ => return Err("snapshot edge relation is missing".to_owned()),
+            },
+        };
+        let directed = match consistent_alias(
+            edge.get("directed"),
+            attrs.and_then(|attrs| attrs.get("directed")),
+            "edge directedness",
+        )? {
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "snapshot edge directedness must be boolean".to_owned())?,
+            None => match graph_type {
+                Some("causal_evidence" | "revision_dag" | "contradiction_subgraph") => true,
+                Some("rule_provenance") => false,
+                None if attrs.is_none() => false,
+                _ => return Err("snapshot edge directedness is missing".to_owned()),
+            },
+        };
+        let (source, target) = if directed || source <= target {
+            (source, target)
+        } else {
+            (target, source)
+        };
         let key = edge_key(source, target, relation, directed);
         edges.insert(
             key.clone(),
@@ -150,6 +200,61 @@ pub fn parse_snapshot_graph(
         nodes,
         edges,
     })
+}
+
+fn snapshot_array<'a>(
+    metrics: &'a serde_json::Value,
+    field: &str,
+) -> Result<&'a [serde_json::Value], String> {
+    metrics
+        .get(field)
+        .or_else(|| metrics.get("graph").and_then(|graph| graph.get(field)))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("snapshot {field} must be an explicit array"))
+}
+
+fn consistent_alias<'a>(
+    first: Option<&'a serde_json::Value>,
+    second: Option<&'a serde_json::Value>,
+    field: &str,
+) -> Result<Option<&'a serde_json::Value>, String> {
+    match (first, second) {
+        (Some(left), Some(right)) if left != right => {
+            Err(format!("snapshot {field} aliases disagree"))
+        }
+        (Some(value), _) | (None, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn snapshot_text<'a>(value: Option<&'a serde_json::Value>, field: &str) -> Result<&'a str, String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| format!("snapshot {field} must be a nonempty string"))
+}
+
+/// Select by the represented instant, not RFC3339 text ordering. Keep the
+/// first row on a timestamp tie so the caller's snapshot-version order wins.
+pub(crate) fn snapshot_at_or_before<'a>(
+    timestamps: impl IntoIterator<Item = &'a str>,
+    since: &chrono::DateTime<chrono::Utc>,
+) -> Result<Option<usize>, String> {
+    let mut nearest: Option<(usize, chrono::DateTime<chrono::Utc>)> = None;
+    for (index, raw) in timestamps.into_iter().enumerate() {
+        let timestamp = chrono::DateTime::parse_from_rfc3339(raw)
+            .map(|at| at.with_timezone(&chrono::Utc))
+            .map_err(|_| "persisted graph snapshot timestamp must be RFC3339".to_owned())?;
+        if timestamp <= *since
+            && nearest
+                .as_ref()
+                .is_none_or(|(_, current)| timestamp > *current)
+        {
+            nearest = Some((index, timestamp));
+        }
+    }
+    Ok(nearest.map(|(index, _)| index))
 }
 
 /// One matched community pair with its membership churn.
@@ -500,7 +605,7 @@ mod tests {
 
     use super::{
         COMMUNITY_MATCH_JACCARD_THRESHOLD, DiffEdge, GRAPH_DIFF_DETAIL_CAP, SnapshotGraphView,
-        diff_communities, diff_snapshots, edge_key, parse_snapshot_graph,
+        diff_communities, diff_snapshots, edge_key, parse_snapshot_graph, snapshot_at_or_before,
     };
     use std::collections::BTreeMap;
 
@@ -713,6 +818,216 @@ mod tests {
         assert_eq!(report.nodes_added.len(), GRAPH_DIFF_DETAIL_CAP);
         assert!(report.truncated.nodes_added);
         assert_eq!(report.detail_cap, GRAPH_DIFF_DETAIL_CAP);
+    }
+
+    #[test]
+    fn typed_snapshot_edges_preserve_producer_relations_and_directions() {
+        for (family, attrs, relation, directed) in [
+            (
+                "revision_dag",
+                serde_json::json!({"transition_kind": "supersedes"}),
+                "supersedes",
+                true,
+            ),
+            (
+                "rule_provenance",
+                serde_json::json!({"rule_role": "supporting"}),
+                "supporting",
+                false,
+            ),
+            (
+                "contradiction_subgraph",
+                serde_json::json!({"relation": "contradicts", "directed": false}),
+                "contradicts",
+                false,
+            ),
+            (
+                "causal_evidence",
+                serde_json::json!({"method": "temporal", "contribution_score": 0.7}),
+                "causal_evidence",
+                true,
+            ),
+        ] {
+            let metrics = serde_json::json!({
+                "schema": "ee.graph.snapshot.metrics.v1",
+                "graphType": family,
+                "nodes": [{"id": "m1"}, {"id": "m2"}],
+                "edges": [{"source": "m1", "target": "m2", "attrs": attrs}],
+            });
+            let from = parse_snapshot_graph("from", 1, "t", &metrics.to_string()).unwrap();
+            let edge = from.edges.values().next().unwrap();
+            assert_eq!(edge.relation, relation);
+            assert_eq!(edge.directed, directed);
+            let mut reversed = metrics;
+            reversed["edges"][0]["source"] = serde_json::json!("m2");
+            reversed["edges"][0]["target"] = serde_json::json!("m1");
+            let to = parse_snapshot_graph("to", 2, "t", &reversed.to_string()).unwrap();
+            let diff = diff_snapshots(family, &from, &to);
+            assert_eq!(diff.summary.edges_added, if directed { 1 } else { 0 });
+            assert_eq!(diff.summary.edges_removed, if directed { 1 } else { 0 });
+            if !directed {
+                assert_eq!(from.edges, to.edges);
+            }
+        }
+    }
+
+    #[test]
+    fn revision_relation_changes_are_real_structural_changes() {
+        let metrics = |relation| {
+            serde_json::json!({
+                "schema": "ee.graph.snapshot.metrics.v1",
+                "graphType": "revision_dag",
+                "nodes": [{"id": "m1"}, {"id": "m2"}],
+                "edges": [{
+                    "source": "m1", "target": "m2",
+                    "attrs": {"transition_kind": relation}
+                }],
+            })
+            .to_string()
+        };
+        let from = parse_snapshot_graph("from", 1, "t", &metrics("supersedes")).unwrap();
+        let to = parse_snapshot_graph("to", 2, "t", &metrics("derived_from")).unwrap();
+        let diff = diff_snapshots("revision_dag", &from, &to);
+        assert_eq!(diff.summary.edges_added, 1);
+        assert_eq!(diff.summary.edges_removed, 1);
+        assert_eq!(diff.edges_added[0].relation, "derived_from");
+        assert_eq!(diff.edges_removed[0].relation, "supersedes");
+    }
+
+    #[test]
+    fn explicit_empty_and_legacy_nested_snapshots_remain_valid() {
+        for metrics in [
+            serde_json::json!({"nodes": [], "edges": []}),
+            serde_json::json!({"graph": {"nodes": [], "edges": []}}),
+            serde_json::json!({
+                "schema": "ee.graph.snapshot.metrics.v1",
+                "graphType": "revision_dag",
+                "nodes": [], "edges": []
+            }),
+        ] {
+            let parsed = parse_snapshot_graph("empty", 1, "t", &metrics.to_string()).unwrap();
+            assert!(parsed.nodes.is_empty());
+            assert!(parsed.edges.is_empty());
+        }
+        let legacy = serde_json::json!({
+            "graph": {
+                "nodes": [{"memoryId": "m1"}, {"memoryId": "m2"}],
+                "edges": [{"sourceMemoryId": "m2", "targetMemoryId": "m1"}],
+            }
+        });
+        let parsed = parse_snapshot_graph("legacy", 1, "t", &legacy.to_string()).unwrap();
+        let edge = parsed.edges.values().next().unwrap();
+        assert_eq!(edge.source, "m1");
+        assert_eq!(edge.target, "m2");
+        assert_eq!(edge.relation, "related");
+        assert!(!edge.directed);
+    }
+
+    #[test]
+    fn malformed_snapshot_rows_never_become_empty_or_partial_success() {
+        for metrics in [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({"nodes": [], "edges": {}}),
+            serde_json::json!({"nodes": null, "edges": []}),
+            serde_json::json!({
+                "nodes": null, "edges": [],
+                "graph": {"nodes": [], "edges": []}
+            }),
+            serde_json::json!({"schema": "unsupported", "nodes": [], "edges": []}),
+            serde_json::json!({"nodes": [{}], "edges": []}),
+            serde_json::json!({"nodes": [{"id": ""}], "edges": []}),
+            serde_json::json!({"nodes": [{"id": "m1", "memoryId": "m2"}], "edges": []}),
+            serde_json::json!({"nodes": [{"id": "m1"}, {"id": "m1"}], "edges": []}),
+            serde_json::json!({"nodes": [{"id": "m1", "pagerank": "unknown"}], "edges": []}),
+            serde_json::json!({"nodes": [{"id": "m1", "pagerank": -1}], "edges": []}),
+            serde_json::json!({"nodes": [{"id": "m1"}], "edges": [{}]}),
+            serde_json::json!({
+                "nodes": [{"id": "m1"}],
+                "edges": [{"source": "m1", "target": "missing"}]
+            }),
+            serde_json::json!({
+                "nodes": [{"id": "m1"}],
+                "edges": [{"source": "m1", "sourceMemoryId": "m2", "target": "m1"}]
+            }),
+            serde_json::json!({
+                "nodes": [{"id": "m1"}],
+                "edges": [{"source": "m1", "target": "m1", "directed": "false"}]
+            }),
+            serde_json::json!({
+                "nodes": [{"id": "m1"}],
+                "edges": [{"source": "m1", "target": "m1", "attrs": []}]
+            }),
+            serde_json::json!({
+                "nodes": [{"id": "m1"}],
+                "edges": [{
+                    "source": "m1", "target": "m1",
+                    "relation": "supports", "attrs": {"relation": "contradicts"}
+                }]
+            }),
+            serde_json::json!({
+                "nodes": [{"id": "m1"}],
+                "edges": [{
+                    "source": "m1", "target": "m1",
+                    "directed": true, "attrs": {"directed": false}
+                }]
+            }),
+            serde_json::json!({
+                "graphType": "revision_dag",
+                "nodes": [{"id": "m1"}],
+                "edges": [{"source": "m1", "target": "m1", "attrs": {}}]
+            }),
+        ] {
+            assert!(
+                parse_snapshot_graph("malformed", 1, "t", &metrics.to_string()).is_err(),
+                "malformed topology was accepted: {metrics}"
+            );
+        }
+    }
+
+    #[test]
+    fn since_selection_uses_instants_and_preserves_fractional_precision() {
+        let history = [
+            "2026-08-01T01:00:00+02:00",
+            "2026-08-01T00:00:00.123456789Z",
+            "2026-08-01T00:00:00Z",
+        ];
+        let cutoff = |text| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        assert_eq!(
+            snapshot_at_or_before(history, &cutoff("2026-08-01T02:00:00.2+02:00")).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            snapshot_at_or_before(history, &cutoff("2026-08-01T00:00:00.123456788Z")).unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            snapshot_at_or_before(history, &cutoff("2026-07-31T23:00:00Z")).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            snapshot_at_or_before(history, &cutoff("2026-07-31T22:59:59Z")).unwrap(),
+            None
+        );
+        assert_eq!(
+            snapshot_at_or_before(
+                ["2026-08-01T00:00:00Z", "2026-08-01T02:00:00+02:00"],
+                &cutoff("2026-08-01T00:00:00Z")
+            )
+            .unwrap(),
+            Some(0)
+        );
+        assert!(
+            snapshot_at_or_before(
+                ["2026-08-01T00:00:00Z", "not a timestamp"],
+                &cutoff("2026-08-01T00:00:00Z")
+            )
+            .is_err()
+        );
     }
 
     #[test]
