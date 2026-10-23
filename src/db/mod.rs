@@ -55232,6 +55232,109 @@ UPDATE memories
     }
 
     #[test]
+    fn index_order_evidence_scan_alternating_workspaces_on_exact_page_multiple() -> TestResult {
+        // GH#78 rowid pages: two workspaces alternate row by row and the
+        // table holds exactly two pages, so every page mixes both, and the
+        // scan ends on an empty read after a full page. Each workspace must
+        // visit every one of its candidates exactly once.
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_a = "wsp_01234567890123456789012345";
+        let workspace_b = "wsp_01234567890123456789012398";
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012398', '/tmp/test-alt-b', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+        let session_a =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x781_a00)).to_string();
+        let session_b =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x781_b00)).to_string();
+        connection.insert_session(&session_a, &session_input("gh78-alt-session-a"))?;
+        let mut input_b = session_input("gh78-alt-session-b");
+        input_b.workspace_id = workspace_b.to_owned();
+        connection.insert_session(&session_b, &input_b)?;
+
+        let page = super::EVIDENCE_SOURCE_READ_PAGE_SIZE;
+        let table_rows = 2 * page;
+        let mut expected = [0_u32; 2];
+        for row in 0..table_rows {
+            let side = usize::try_from(row % 2).unwrap_or(0);
+            let (session, workspace) = if side == 0 {
+                (&session_a, workspace_a)
+            } else {
+                (&session_b, workspace_b)
+            };
+            // Every seventh row of each workspace is a non-candidate.
+            let candidate = (row / 2) % 7 != 3;
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x781_c000 + u128::from(row),
+            ))
+            .to_string();
+            let mut input =
+                evidence_span_input(session, &format!("gh78-alt-span-{row}"), (row / 2) * 10 + 1);
+            input.workspace_id = workspace.to_owned();
+            if candidate {
+                expected[side] += 1;
+            } else {
+                input.producer_kind = super::EvidenceProducerKind::DocsBootstrap;
+                input.role = Some("docs_bootstrap".to_owned());
+                input.span_kind = "file".to_owned();
+            }
+            connection.insert_evidence_span(&id, &input)?;
+        }
+
+        for (workspace, candidates) in [(workspace_a, expected[0]), (workspace_b, expected[1])] {
+            let mut visited = Vec::new();
+            let index_scan = connection.visit_index_evidence_for_workspace(workspace, |span| {
+                visited.push(span);
+                Ok(())
+            })?;
+            let mut ids = visited
+                .iter()
+                .map(|span| span.id.clone())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids.dedup();
+            ensure_equal(
+                &ids.len(),
+                &visited.len(),
+                "no row is visited twice across page boundaries",
+            )?;
+            ensure(
+                visited.iter().all(|span| span.workspace_id == workspace),
+                "no other workspace's evidence leaks into an index-order scan",
+            )?;
+            ensure_equal(
+                &u32::try_from(visited.len()).unwrap_or(u32::MAX),
+                &candidates,
+                "every candidate is visited once",
+            )?;
+            let (mut transcript, report) =
+                connection.list_search_admitted_evidence_spans_for_workspace(workspace)?;
+            let key = |span: &super::StoredEvidenceSpan| span.id.clone();
+            visited.sort_by_key(key);
+            transcript.sort_by_key(key);
+            ensure_equal(
+                &visited,
+                &transcript,
+                "index order admits the transcript set",
+            )?;
+            ensure_equal(
+                &index_scan.admission,
+                &report,
+                "index order preserves every admission bucket",
+            )?;
+            ensure_equal(
+                &index_scan.pages_read,
+                &2,
+                "an exact multiple reads two full pages and stops on the empty read",
+            )?;
+        }
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn evidence_candidate_row_filter_matches_the_sql_predicate() -> TestResult {
         ensure_equal(
             &super::EVIDENCE_SEARCH_CANDIDATE_PREDICATE.to_owned(),
