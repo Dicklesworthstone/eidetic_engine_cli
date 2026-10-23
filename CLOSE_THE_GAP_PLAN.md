@@ -2891,3 +2891,79 @@ franken-stack came back version-identical to the lock, but `rch exec` does not
 materialise siblings at lock *revisions*, so the revisions stay unattested.
 Saying so beats closing on partial acceptance, which is the pattern the
 honesty-only / implements-surface taxonomy exists to prevent.
+
+### 18.12 Correction to §18.11: the oracle had fired before, and the test written to catch it samples the wrong side of the split
+
+§18.11 says the oracle had never been pointed at a candidate. That is wrong, and
+the refutation was inside the bead §18.11 is about. `bd-reality-core-convergence-1azkt.10`'s
+own description, bullet B4, records it:
+
+> The live oracle HAS gone red before, organically: RACE_REPRODUCED at 294d9ca95
+> on 1azkt.2 (pack.hash, serial vs concurrent, stable across rounds 1/3/5).
+> Today packs agreed.
+
+There are at least four live runs on the record — 294d9ca95 RED, b0b011c8 GREEN,
+f1cbd63 GREEN, cf0df2719 RED — so yesterday's was the second red on this leaf,
+not the first run of the instrument. Every measurement in §18.11 stands; its
+framing as a first observation does not. Corrections are on `.10`, `bd-wubqf`
+and `bd-ve7c6`.
+
+**The September cause is ruled out for the October run, which matters because
+"it regressed" is the obvious wrong first guess.** The 2026-09-17 sequence on
+`bd-...1azkt.2` is a complete closed loop inside three hours: `RACE_REPRODUCED`
+at 18:51, an always-on sequential probe written at 19:02, a *vacuous miss* at
+19:49 (`cargo TESTNAME --exact` matched nothing, 649 filtered, zero tests ran —
+CLAUDE.md's trap 2, caught by its own author), the real signal at 20:06 (green
+on hash, **red on mutation**: the first `--read-only` pack created
+`.ee/pack-slots/standard-00.lock`), the fix at 897250ccd, and the concurrent
+oracle re-run `RACE_ABSENT` at 20:49. Yesterday's evidence records
+`workspaceFiles` 152 → 152 with `rowFindings: []`, so no lockfile was written by
+any of its 25 packs. Different mechanism, same leaf, five weeks later.
+
+**And the comparison refutes §18.11's "early vs late" reading.** September split
+at flat windows 1/3/5 — every concurrent round disagreed with the serial
+baseline, which is serial-vs-concurrent. October had flat window 1 *agree* and
+only 3 and 5 diverge, which is early-vs-late. One run each, pointing opposite
+ways, so neither concurrency nor accumulation is established and the
+discriminator is more necessary than when it was pre-registered. (Both runs
+print flat (round, kind) indices as round numbers, which is why September reads
+as "rounds 1/3/5" when only rounds 0–2 ran. That instrument defect has been
+misleading readers since September, not since yesterday.)
+
+#### The part worth more than either run
+
+`sequential_read_only_packs_are_byte_identical_and_do_not_mutate_the_workspace`
+is **not** `#[ignore]`d — it runs in the ordinary `integration_n_r` suite. It was
+written within the hour of the September red, explicitly to isolate this leaf.
+It takes **exactly two packs**.
+
+October's run locates the fork: packs 1–9 share one hash, packs 10–25 share the
+other, exactly two distinct values in 25 packs. A two-pack probe samples only the
+agreeing side, so it reports `ok.` whether or not the defect is present — and it
+did, staying green for the five weeks between the two red runs, on the one
+always-on target that would have caught this. That is bd-2phcw's constant-green
+case: the verdict does not vary with the property.
+
+It is also the cheapest repair in this document, because nothing had to be
+built. The harness, the tree digest, the mutation diff and the assertion all
+existed; only the call count was wrong. `SEQUENTIAL_PACK_CALLS = 12` crosses the
+measured boundary, the loop now reports every hash and the 1-based index of the
+first fork (which call diverges *is* the discriminator, and a message that omits
+it costs another dispatch), the per-call mutation diff is retained so the
+September lockfile symptom would still be caught and attributed, and a **negative
+control** is added that the two-pack version never had: after the twelve agreeing
+packs a second relevant rule enters the corpus, the index is rebuilt, and the hash
+is required to move. Without that arm, deleting inputs from the hash would satisfy
+every other assertion in the test.
+
+This runs with **no concurrency at all**, so it is a cleaner discriminator than
+the one pre-registered on `bd-wubqf` (re-baseline serially after the concurrent
+rounds), and that substitution is stated on the bead rather than made quietly.
+Both branches keep their pre-registered readings: a fork means accumulated state
+and "race" is the wrong frame; agreement means the concurrent context is the
+variable and round 0's September/October disagreement becomes the thing to
+explain.
+
+Unverified as of this entry: `cargo fmt --check` passes, so it parses, but cargo
+does not run locally and the in-flight 14-target `bd-z368i` dispatch froze its
+snapshot before the edit. No verdict on this change can be read off that run.
