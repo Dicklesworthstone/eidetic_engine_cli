@@ -3638,7 +3638,10 @@ fn check_search_index(workspace_path: Option<&Path>) -> CheckResult {
             ),
             IndexHealth::Stale => CheckResult::warning(
                 "search_index",
-                "Search index exists but is stale.",
+                report.last_check_error.as_deref().map_or_else(
+                    || "Search index exists but is stale.".to_owned(),
+                    |reason| format!("Search index exists but is stale: {reason}"),
+                ),
                 error_codes::INDEX_STALE,
             ),
             IndexHealth::Missing => CheckResult::warning(
@@ -5910,6 +5913,113 @@ mod tests {
             true,
             "workspace message includes selected path",
         )
+    }
+
+    #[test]
+    fn doctor_search_index_reports_same_dimension_producer_drift() -> TestResult {
+        use crate::core::index::{
+            IndexRebuildOptions, install_test_workspace_embedder, rebuild_index,
+        };
+        use crate::search::{Embedder, EmbedderStack, HashEmbedder};
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path();
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let database_path = ee_dir.join("ee.db");
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("doctor producer identity".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            insert_canary_memory(&connection, &workspace_id).status,
+            IntegrityCanaryStatus::Created,
+            "the real index must contain a memory",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        // Native JL producers can share their display id and width while
+        // their immutable seed changes the vector space. This must not be
+        // hidden by hash metadata's deliberate omission of a semantic tuple.
+        let producer = HashEmbedder::jl_384(11);
+        let replacement = HashEmbedder::jl_384(29);
+        ensure(
+            (producer.id(), producer.dimension()),
+            (replacement.id(), replacement.dimension()),
+            "the regression must bypass model-label and dimension checks",
+        )?;
+        let original_guard = install_test_workspace_embedder(
+            &workspace_id,
+            EmbedderStack::from_parts(Arc::new(producer), None),
+        );
+        let built = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: None,
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(built.documents_total, 1, "one memory was indexed")?;
+        ensure(
+            check_search_index(Some(workspace)).severity,
+            CheckSeverity::Ok,
+            "doctor must accept the actual producer before selection changes",
+        )?;
+
+        let replacement_guard = install_test_workspace_embedder(
+            &workspace_id,
+            EmbedderStack::from_parts(Arc::new(replacement), None),
+        );
+        let status = get_index_status(&IndexStatusOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: None,
+            index_dir: None,
+        })
+        .map_err(|error| error.to_string())?;
+        let reason = status.last_check_error.as_deref().ok_or_else(|| {
+            "a different native producer must expose its incompatibility".to_owned()
+        })?;
+        ensure(
+            reason.contains("producer identity"),
+            true,
+            "the stale cause must identify producer incompatibility",
+        )?;
+        let check = check_search_index(Some(workspace));
+        ensure(check.severity, CheckSeverity::Warning, "doctor severity")?;
+        ensure(
+            check.error_code.map(|code| code.id),
+            Some(error_codes::INDEX_STALE.id),
+            "producer drift must retain the existing INDEX_STALE contract",
+        )?;
+        ensure(
+            check.message.contains(reason),
+            true,
+            "doctor must preserve the actionable index status cause",
+        )?;
+        ensure(
+            check.repair,
+            error_codes::INDEX_STALE.default_repair,
+            "producer drift must retain the rebuild repair",
+        )?;
+
+        drop(replacement_guard);
+        ensure(
+            check_search_index(Some(workspace)).severity,
+            CheckSeverity::Ok,
+            "restoring the original producer must restore readiness without a rebuild",
+        )?;
+        drop(original_guard);
+        Ok(())
     }
 
     #[cfg(unix)]

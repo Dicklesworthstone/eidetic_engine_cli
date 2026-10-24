@@ -8452,7 +8452,7 @@ ee index rebuild --workspace . --json
 
 **Introduced by:** bd-17c65.2.1 (epic B)
 
-**Trigger.** Memory database advanced beyond the search index generation. Reads can still return data but may miss recently-added memories until the index is rebuilt.
+**Trigger.** The memory database advanced beyond the search index generation, or the persisted vector producer differs from the selected embedder. Producer changes require a rebuild even when the model label and vector dimension are unchanged. Reads can still return data through fallback retrieval until the index is rebuilt.
 
 **Setup.**
 

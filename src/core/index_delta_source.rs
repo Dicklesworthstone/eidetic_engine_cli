@@ -18,11 +18,13 @@ use super::{
     RunningIndexJobFinalizer, SearchIndexJobStatus, SearchIndexJobType, StoredSearchIndexJob,
     UnpublishedIndexStage, append_failed_index_job_transition, artifact_to_document,
     checked_document_counts, delta, embedder_fingerprint_for_index_metadata,
-    evidence_span_to_document, finalize_coalesced_claimed_jobs, index_checkpoint,
-    memory_documents_with_anchors_with_cx, path_exists_no_follow, publish_staged_generation,
+    embedder_reports_pending_model2vec_download, evidence_span_to_document,
+    finalize_coalesced_claimed_jobs, index_checkpoint, memory_documents_with_anchors_with_cx,
+    path_exists_no_follow, prepare_index_embedder_stack, publish_staged_generation,
     recover_interrupted_publish_for_snapshot, require_index_job_transition, rule_to_document,
     session_to_document, source_snapshot, stage_planned_index_delta,
     update_running_index_job_total, validate_incremental_index_metadata, workspace_embedder_stack,
+    workspace_index_source_rows_fit,
 };
 
 #[cfg(test)]
@@ -77,6 +79,14 @@ pub(super) async fn prepare(
     let stack = workspace_embedder_stack(db, workspace_id);
     index_checkpoint(cx)?;
     let (stack, _) = stack?;
+    if embedder_reports_pending_model2vec_download(stack.fast())
+        && workspace_index_source_rows_fit(db, workspace_id, 0)?
+    {
+        // Let the complete empty-source path clear the generation without
+        // acquiring a model for a corpus that has no possible documents.
+        return Ok(None);
+    }
+    let stack = prepare_index_embedder_stack(cx, stack).await?;
     let reconciler = delta::SourceReconciler::read(index_dir, &stack);
     index_checkpoint(cx)?;
     let reconciler = match reconciler {

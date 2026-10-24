@@ -47,6 +47,8 @@ use crate::search::{
 #[cfg(feature = "lexical-bm25")]
 use crate::search::{LexicalWrite, TantivyIndex};
 use asupersync::sync::OnceCell as AsyncOnceCell;
+use frankensearch::core::generation::{EmbeddingIdentityBundleV1, QuantizationFormat};
+use frankensearch::core::traits::IdentityBoundEmbedding;
 use frankensearch::embed::{
     ConsentSource, DownloadConsent, DownloadProgress, ModelArtifactManifestV1, ModelDownloader,
     ModelLifecycle, ModelManifest, RegisteredModel2Vec, is_verification_cached,
@@ -181,11 +183,20 @@ impl Drop for TestWorkspaceEmbedderStackGuard {
 pub(crate) fn install_test_hash_workspace_embedder(
     workspace_id: &str,
 ) -> TestWorkspaceEmbedderStackGuard {
+    install_test_workspace_embedder(workspace_id, hash_fallback_embedder_stack())
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_workspace_embedder(
+    workspace_id: &str,
+    stack: EmbedderStack,
+) -> TestWorkspaceEmbedderStackGuard {
     let overrides =
         TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()));
-    let previous = overrides.lock().ok().and_then(|mut overrides| {
-        overrides.insert(workspace_id.to_owned(), hash_fallback_embedder_stack())
-    });
+    let previous = overrides
+        .lock()
+        .ok()
+        .and_then(|mut overrides| overrides.insert(workspace_id.to_owned(), stack));
     TestWorkspaceEmbedderStackGuard {
         workspace_id: workspace_id.to_owned(),
         previous,
@@ -1836,8 +1847,9 @@ pub async fn rebuild_index_with_cx(
     // already exists, and the proof stays where someone needs it: the first
     // rebuild that has something to embed.
     //
-    // Only the zero-document case changes. Any rebuild with documents resolves
-    // exactly as before, so the embedding path is untouched.
+    // Populated rebuilds resolve lazy acquisition before registry proof and
+    // generation identity capture, so their declared producer is the one that
+    // actually supplies the vectors.
     //
     // bd-71a77: the zero-document stack is ALWAYS the hash tier, as in
     // requested index repair. Reusing a model the process already loaded
@@ -1847,7 +1859,7 @@ pub async fn rebuild_index_with_cx(
     let registry_stack = if documents_total == 0 {
         hash_fallback_embedder_stack()
     } else {
-        workspace_embedder_stack(&db, &workspace_id)?.0
+        prepare_index_embedder_stack(cx, workspace_embedder_stack(&db, &workspace_id)?.0).await?
     };
     ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
     let build_result = publish_full_index_generation_with_stack(
@@ -1969,6 +1981,19 @@ async fn reembed_index_with_cx_and_stack(
         open_job_ids: _,
     } = collect_workspace_index_source_snapshot(&db, &workspace_id)?;
     index_checkpoint(cx)?;
+    let (stack, stack_provenance) = if !options.dry_run && documents_total > 0 {
+        let default_selection = DEFAULT_SEARCH_EMBEDDER
+            .get()
+            .filter(|selection| Arc::ptr_eq(&stack.fast_arc(), &selection.stack.fast_arc()));
+        let stack = prepare_index_embedder_stack(cx, stack).await?;
+        let provenance =
+            default_selection.map_or(stack_provenance, |selection| EmbedderStackProvenance {
+                local_load_failed: selection.local_model_load_failed(),
+            });
+        (stack, provenance)
+    } else {
+        (stack, stack_provenance)
+    };
     let current_vector_coverage =
         embedding_vector_coverage(&index_dir, documents_total, read_fast_vector_record_count);
     let embedding = reembed_embedding_summary(
@@ -3310,6 +3335,11 @@ where
 {
     let cx = publish_lock.cx;
     index_checkpoint(cx)?;
+    let stack = if indexable_docs.is_empty() {
+        stack
+    } else {
+        prepare_index_embedder_stack(cx, stack).await?
+    };
     let staging = UnpublishedIndexStage::create(index_dir)?;
     let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
     // Record what this generation indexes so the next write can publish only
@@ -3414,6 +3444,11 @@ where
 {
     let cx = publish_lock.cx;
     index_checkpoint(cx)?;
+    let stack = if indexable_docs.is_empty() {
+        stack
+    } else {
+        prepare_index_embedder_stack(cx, stack).await?
+    };
     match stage_delta_generation(
         cx,
         index_dir,
@@ -6898,6 +6933,11 @@ pub(crate) async fn build_index(
 ) -> Result<BuildStats, IndexRebuildError> {
     index_checkpoint(cx)?;
     let source_count = documents.len();
+    let stack = if documents.is_empty() {
+        stack
+    } else {
+        prepare_index_embedder_stack(cx, stack).await?
+    };
     // frankensearch d117ce1f made Quill the backend of its `lexical`
     // feature, so `IndexBuilder` no longer compiles a Tantivy write arm under
     // ee's `lexical-tantivy` lane. Stage the same corpus for ee's Tantivy tier.
@@ -7310,6 +7350,38 @@ impl DefaultSearchEmbedder {
                 .as_ref()
                 .is_some_and(|lazy| lazy.failed())
     }
+
+    async fn prepare_index_stack(
+        &self,
+        cx: &asupersync::Cx,
+        stack: EmbedderStack,
+    ) -> Result<EmbedderStack, SearchError> {
+        let Some(lazy) = self.lazy_model2vec.as_ref() else {
+            return Ok(stack);
+        };
+        if !Arc::ptr_eq(&stack.fast_arc(), &self.stack.fast_arc()) {
+            return Ok(stack);
+        }
+        let fast = lazy.try_load(cx).await?;
+        Ok(EmbedderStack::from_parts(fast, stack.quality_arc()))
+    }
+}
+
+/// Resolve a default lazy acquisition before any generation identity, document
+/// digest, or native vector writer captures its producer. Keep the resolved
+/// producer itself in the build stack so a download failure cannot publish
+/// hash vectors under the planned Model2Vec identity.
+async fn prepare_index_embedder_stack(
+    cx: &asupersync::Cx,
+    stack: EmbedderStack,
+) -> Result<EmbedderStack, IndexRebuildError> {
+    let Some(selection) = DEFAULT_SEARCH_EMBEDDER.get() else {
+        return Ok(stack);
+    };
+    selection
+        .prepare_index_stack(cx, stack)
+        .await
+        .map_err(|error| map_index_search_error(cx, "index model preparation failed", error))
 }
 
 pub(crate) struct EmbedderPreparation {
@@ -8437,6 +8509,7 @@ struct EeLazyModel2VecEmbedder {
     fallback: Arc<dyn crate::search::Embedder>,
     state: AtomicU8,
     inner: AsyncOnceCell<Arc<dyn crate::search::Embedder>>,
+    declared_identity: OnceLock<Result<EmbeddingIdentityBundleV1, String>>,
 }
 
 fn model_initialization_checkpoint(cx: &asupersync::Cx, phase: &str) -> Result<(), SearchError> {
@@ -8456,6 +8529,7 @@ impl EeLazyModel2VecEmbedder {
             fallback: Arc::new(HashEmbedder::default_256()) as Arc<dyn crate::search::Embedder>,
             state: AtomicU8::new(EE_DOWNLOAD_STATE_PENDING),
             inner: AsyncOnceCell::new(),
+            declared_identity: OnceLock::new(),
         }
     }
 
@@ -8463,12 +8537,52 @@ impl EeLazyModel2VecEmbedder {
         &self,
         cx: &asupersync::Cx,
     ) -> Result<Arc<dyn crate::search::Embedder>, SearchError> {
+        model_initialization_checkpoint(cx, "before lazy model preparation")?;
         let embedder = self
             .inner
-            .get_or_try_init(|| async { self.initialize(cx).await })
+            .get_or_try_init(|| async {
+                if self.failed() {
+                    return Ok(Arc::clone(&self.fallback));
+                }
+                match self.initialize(cx).await {
+                    Ok(embedder) => Ok(embedder),
+                    Err(error) => {
+                        if !self.record_load_failure(&error) {
+                            return Err(error);
+                        }
+                        tracing::warn!(
+                            target: "ee::index::embedder",
+                            error = %error,
+                            model = POTION_MODEL_NAME,
+                            "ee-managed embedding model preparation failed; using deterministic hash fallback for this process"
+                        );
+                        // Freeze the actual producer even when acquisition
+                        // fails. Retrying a failed download after an index has
+                        // captured its identity would change the vector space
+                        // within the same process. Cancellation remains an
+                        // uncached error so another caller can try again.
+                        Ok(Arc::clone(&self.fallback))
+                    }
+                }
+            })
             .await?;
-        self.state.store(EE_DOWNLOAD_STATE_READY, Ordering::Release);
+        self.state.store(
+            if Arc::ptr_eq(embedder, &self.fallback) {
+                EE_DOWNLOAD_STATE_FAILED
+            } else {
+                EE_DOWNLOAD_STATE_READY
+            },
+            Ordering::Release,
+        );
+        model_initialization_checkpoint(cx, "after lazy model preparation")?;
         Ok(Arc::clone(embedder))
+    }
+
+    fn resolved_embedder(&self) -> Option<&dyn crate::search::Embedder> {
+        self.inner
+            .get()
+            .map(AsRef::as_ref)
+            .or_else(|| self.failed().then_some(self.fallback.as_ref()))
     }
 
     async fn initialize(
@@ -8579,7 +8693,10 @@ impl EeLazyModel2VecEmbedder {
     }
 
     fn failed(&self) -> bool {
-        self.state.load(Ordering::Acquire) == EE_DOWNLOAD_STATE_FAILED
+        self.inner.get().map_or_else(
+            || self.state.load(Ordering::Acquire) == EE_DOWNLOAD_STATE_FAILED,
+            |embedder| Arc::ptr_eq(embedder, &self.fallback),
+        )
     }
 }
 
@@ -8620,21 +8737,10 @@ pub(crate) async fn prepare_default_search_embedder(
     let selection = DEFAULT_SEARCH_EMBEDDER.get_or_init(detect_default_search_embedder);
     model_initialization_checkpoint(cx, "after default embedder selection")?;
 
-    if let Some(lazy_model2vec) = selection.lazy_model2vec.as_ref()
-        && !lazy_model2vec.failed()
-        && !lazy_model2vec.is_ready()
-        && let Err(error) = lazy_model2vec.try_load(cx).await
-    {
-        if !lazy_model2vec.record_load_failure(&error) {
-            return Err(error);
-        }
-        tracing::warn!(
-            target: "ee::index::embedder",
-            error = %error,
-            model = POTION_MODEL_NAME,
-            "ee-managed embedding model preparation failed; using deterministic hash fallback for this process"
-        );
-    }
+    let fast_embedder = match selection.lazy_model2vec.as_ref() {
+        Some(lazy_model2vec) => lazy_model2vec.try_load(cx).await?,
+        None => selection.stack.fast_arc(),
+    };
 
     model_initialization_checkpoint(cx, "after default embedder preparation")?;
     // bd-p1b4e. Reads the same DEFAULT_SEARCH_EMBEDDER that `active_embed_backend`
@@ -8642,14 +8748,14 @@ pub(crate) async fn prepare_default_search_embedder(
     // the twin of a guard that already existed one screen up.
     let backend = executed_embed_backend(
         selection.model_resolution.source,
-        selection.stack.fast().is_semantic(),
+        fast_embedder.is_semantic(),
     );
     let model_resolution = executed_model_resolution(&selection.model_resolution, backend);
     Ok(EmbedderPreparation::new(
         backend,
         model_resolution,
         started.elapsed(),
-        selection.stack.fast_arc(),
+        fast_embedder,
     ))
 }
 
@@ -8733,24 +8839,8 @@ impl crate::search::Embedder for EeLazyModel2VecEmbedder {
         text: &'a str,
     ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
         Box::pin(async move {
-            if self.failed() {
-                return self.fallback.embed(cx, text).await;
-            }
-            match self.try_load(cx).await {
-                Ok(embedder) => embedder.embed(cx, text).await,
-                Err(error) => {
-                    if !self.record_load_failure(&error) {
-                        return Err(error);
-                    }
-                    tracing::warn!(
-                        target: "ee::index::embedder",
-                        error = %error,
-                        model = POTION_MODEL_NAME,
-                        "ee-managed embedding model download failed; using deterministic hash fallback for this process"
-                    );
-                    self.fallback.embed(cx, text).await
-                }
-            }
+            let embedder = self.try_load(cx).await?;
+            embedder.embed(cx, text).await
         })
     }
 
@@ -8760,66 +8850,105 @@ impl crate::search::Embedder for EeLazyModel2VecEmbedder {
         texts: &'a [&'a str],
     ) -> frankensearch::SearchFuture<'a, Vec<Vec<f32>>> {
         Box::pin(async move {
-            if self.failed() {
-                return self.fallback.embed_batch(cx, texts).await;
-            }
-            match self.try_load(cx).await {
-                Ok(embedder) => embedder.embed_batch(cx, texts).await,
-                Err(error) => {
-                    if !self.record_load_failure(&error) {
-                        return Err(error);
-                    }
-                    tracing::warn!(
-                        target: "ee::index::embedder",
-                        error = %error,
-                        model = POTION_MODEL_NAME,
-                        "ee-managed embedding model download failed; using deterministic hash fallback for this process"
-                    );
-                    self.fallback.embed_batch(cx, texts).await
-                }
-            }
+            let embedder = self.try_load(cx).await?;
+            embedder.embed_batch(cx, texts).await
         })
     }
 
+    fn embed_bound<'a>(
+        &'a self,
+        cx: &'a asupersync::Cx,
+        text: &'a str,
+    ) -> frankensearch::SearchFuture<'a, IdentityBoundEmbedding> {
+        Box::pin(async move {
+            let embedder = self.try_load(cx).await?;
+            embedder.embed_bound(cx, text).await
+        })
+    }
+
+    fn embed_batch_bound<'a>(
+        &'a self,
+        cx: &'a asupersync::Cx,
+        texts: &'a [&'a str],
+    ) -> frankensearch::SearchFuture<'a, Vec<IdentityBoundEmbedding>> {
+        Box::pin(async move {
+            let embedder = self.try_load(cx).await?;
+            embedder.embed_batch_bound(cx, texts).await
+        })
+    }
+
+    fn bound_batch_is_native(&self) -> bool {
+        self.resolved_embedder()
+            .is_some_and(crate::search::Embedder::bound_batch_is_native)
+    }
+
+    fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+        if let Some(embedder) = self.resolved_embedder() {
+            return embedder.identity();
+        }
+        // Inspection of a pending selection must remain free of model I/O.
+        // The registered artifact manifest declares the exact native identity
+        // used by Model2Vec's loader, including its runtime representation.
+        // Index publication resolves the producer before capturing this value,
+        // because acquisition may still select the hash fallback instead.
+        self.declared_identity
+            .get_or_init(|| {
+                RegisteredModel2Vec::potion_128m()
+                    .and_then(|model| {
+                        model
+                            .artifact_manifest()
+                            .declared_identity_bundle(QuantizationFormat::F32, "in-memory-f32-v1")
+                    })
+                    .map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map_err(|reason| SearchError::InvalidConfig {
+                field: "ee.model2vec.identity".to_owned(),
+                value: POTION_MODEL_NAME.to_owned(),
+                reason: reason.clone(),
+            })
+    }
+
     fn dimension(&self) -> usize {
-        256
+        self.resolved_embedder()
+            .map_or(256, crate::search::Embedder::dimension)
     }
 
     fn id(&self) -> &str {
-        if self.failed() {
-            return self.fallback.id();
-        }
-        POTION_MODEL_NAME
+        self.resolved_embedder()
+            .map_or(POTION_MODEL_NAME, crate::search::Embedder::id)
     }
 
     fn model_name(&self) -> &str {
-        if self.failed() {
-            return self.fallback.model_name();
-        }
-        POTION_MODEL_NAME
+        self.resolved_embedder()
+            .map_or(POTION_MODEL_NAME, crate::search::Embedder::model_name)
     }
 
     fn is_ready(&self) -> bool {
-        self.state.load(Ordering::Acquire) == EE_DOWNLOAD_STATE_READY
+        self.resolved_embedder()
+            .is_some_and(crate::search::Embedder::is_ready)
     }
 
     fn is_semantic(&self) -> bool {
-        self.is_ready()
+        self.resolved_embedder()
+            .is_some_and(crate::search::Embedder::is_semantic)
     }
 
     fn category(&self) -> ModelCategory {
-        if self.failed() {
-            return self.fallback.category();
-        }
-        ModelCategory::StaticEmbedder
+        self.resolved_embedder().map_or(
+            ModelCategory::StaticEmbedder,
+            crate::search::Embedder::category,
+        )
     }
 
     fn tier(&self) -> ModelTier {
-        ModelTier::Fast
+        self.resolved_embedder()
+            .map_or(ModelTier::Fast, crate::search::Embedder::tier)
     }
 
     fn supports_mrl(&self) -> bool {
-        self.is_ready()
+        self.resolved_embedder()
+            .is_some_and(crate::search::Embedder::supports_mrl)
     }
 }
 
@@ -9150,6 +9279,9 @@ struct EmbedderDescriptor {
     id: String,
     model_name: String,
     dimension: usize,
+    /// Complete runtime producer identity, including hash seed and model revision.
+    /// Labels and dimensions alone cannot authorize reuse of stored vectors.
+    producer_revision: Option<String>,
     category: ModelCategory,
     semantic: bool,
     ready: bool,
@@ -9177,6 +9309,7 @@ impl EmbedderDescriptor {
             id: embedder.id().to_owned(),
             model_name: embedder.model_name().to_owned(),
             dimension: embedder.dimension(),
+            producer_revision: delta::verified_embedder_identity(embedder),
             category: embedder.category(),
             semantic: embedder.is_semantic(),
             ready: embedder.is_ready(),
@@ -9192,6 +9325,9 @@ impl EmbedderDescriptor {
             id: POTION_MODEL_NAME.to_owned(),
             model_name: POTION_MODEL_NAME.to_owned(),
             dimension: crate::core::model::BUNDLED_EMBEDDING_DIMENSION as usize,
+            producer_revision: RegisteredModel2Vec::potion_128m()
+                .ok()
+                .and_then(|model| Self::model2vec_producer_revision(&model)),
             category: ModelCategory::StaticEmbedder,
             semantic: true,
             ready: true,
@@ -9207,8 +9343,21 @@ impl EmbedderDescriptor {
             id: model2vec_model_name(model).to_owned(),
             model_name: model2vec_model_name(model).to_owned(),
             dimension: model.dimension() as usize,
+            producer_revision: Self::model2vec_producer_revision(model),
             ..Self::potion()
         }
+    }
+
+    fn model2vec_producer_revision(model: &RegisteredModel2Vec) -> Option<String> {
+        let identity = model
+            .artifact_manifest()
+            .declared_identity_bundle(
+                frankensearch::core::generation::QuantizationFormat::F32,
+                "in-memory-f32-v1",
+            )
+            .ok()?;
+        identity.validate().ok()?;
+        (identity.space.dimension == model.dimension()).then(|| identity.fingerprint())
     }
 
     fn remote(settings: &RemoteEmbedSettings, dimension: usize) -> Self {
@@ -9216,6 +9365,8 @@ impl EmbedderDescriptor {
             id: settings.embedder_id(),
             model_name: settings.model.clone(),
             dimension,
+            // Endpoint and model labels do not attest immutable remote weights.
+            producer_revision: None,
             category: ModelCategory::ApiEmbedder,
             semantic: true,
             ready: true,
@@ -9290,9 +9441,14 @@ fn workspace_local_embedder_descriptors(
     // Preserve execution's configured-root precedence even before that first
     // load: registry availability cannot override missing configured assets.
     let Some(selection) = resolved.get() else {
-        if configured_settings
-            .is_some_and(|settings| verified_default_model_dir(settings).is_some())
-        {
+        let default_settings;
+        let settings = if let Some(settings) = configured_settings {
+            settings
+        } else {
+            default_settings = default_embedder_settings();
+            &default_settings
+        };
+        if verified_default_model_dir(settings).is_some() {
             return Ok((EmbedderDescriptor::potion(), None));
         }
         return Ok(stack_descriptors(&hash_fallback_embedder_stack()));
@@ -10657,6 +10813,7 @@ fn get_index_status_with_connection_mode(
     // Check index directory
     let (index_exists, index_file_count, index_size_bytes) = inspect_index_dir(&index_dir)?;
 
+    let mut selected_embedders = None;
     let (db_document_counts, evidence_admission, db_generation, embedding) = if database_path
         .exists()
     {
@@ -10693,12 +10850,23 @@ fn get_index_status_with_connection_mode(
                 Some(stats) => stats,
                 None => get_db_stats(db, &workspace_id, caller_holds_snapshot)?,
             };
-            let embedding = Some(embedding_posture_for_document_count(
-                db,
-                &workspace_id,
+            let descriptors = match fast_embedder {
+                Some(embedder) => (EmbedderDescriptor::from_embedder(embedder), None),
+                None => workspace_embedder_descriptors(db, &workspace_id)?,
+            };
+            let vector_coverage = embedding_vector_coverage(
                 &index_dir,
                 counts.total(),
-            )?);
+                read_fast_vector_record_count,
+            );
+            let records = db.list_embedding_metadata_records(&workspace_id)?;
+            let embedding = Some(embedding_posture_from_records(
+                &descriptors.0,
+                descriptors.1.as_ref(),
+                &records,
+                vector_coverage,
+            ));
+            selected_embedders = Some(descriptors);
             (counts, admission, generation, embedding)
         } else {
             (
@@ -10720,7 +10888,7 @@ fn get_index_status_with_connection_mode(
 
     // Read index metadata if available.
     let metadata_status =
-        read_index_metadata_for_selection(&index_dir, fast_embedder, embedding.as_ref());
+        read_index_metadata_for_selection(&index_dir, fast_embedder, selected_embedders.as_ref());
     let last_check_error = metadata_status
         .corruption_error
         .clone()
@@ -11227,12 +11395,18 @@ fn read_index_metadata_with_embedder(
     fast_embedder: Option<&dyn crate::search::Embedder>,
 ) -> IndexMetadataStatus {
     if let Some(embedder) = fast_embedder {
-        return read_index_metadata_with_identity(
+        let mut status = read_index_metadata_with_identity(
             index_dir,
             u32::try_from(embedder.dimension())
                 .map(|dimension| Some((embedder.id(), dimension)))
                 .map_err(|error| error.to_string()),
         );
+        verify_selected_index_producers(
+            index_dir,
+            Some(&(EmbedderDescriptor::from_embedder(embedder), None)),
+            &mut status,
+        );
+        return status;
     }
     let active_identity = active_semantic_identity();
     read_index_metadata_with_identity(
@@ -11246,7 +11420,7 @@ fn read_index_metadata_with_embedder(
 fn read_index_metadata_for_selection(
     index_dir: &Path,
     fast_embedder: Option<&dyn crate::search::Embedder>,
-    embedding: Option<&EmbeddingPosture>,
+    embedders: Option<&(EmbedderDescriptor, Option<EmbedderDescriptor>)>,
 ) -> IndexMetadataStatus {
     if let Some(embedder) = fast_embedder {
         return read_index_metadata_with_embedder(index_dir, Some(embedder));
@@ -11254,15 +11428,77 @@ fn read_index_metadata_for_selection(
     // Passive status has already resolved the workspace's selected model.
     // A separately warmed process default cannot describe that workspace
     // after an explicit model switch, nor should a cold cache skip the check.
-    let identity = embedding
-        .filter(|posture| posture.semantic)
-        .map(|posture| {
-            u32::try_from(posture.fast_dimension)
-                .map(|dimension| (posture.fast_model_id.as_str(), dimension))
+    let identity = embedders
+        .map(|(fast, _)| {
+            u32::try_from(fast.dimension)
+                .map(|dimension| (fast.id.as_str(), dimension))
                 .map_err(|error| error.to_string())
         })
         .transpose();
-    read_index_metadata_with_identity(index_dir, identity)
+    let mut status = read_index_metadata_with_identity(index_dir, identity);
+    verify_selected_index_producers(index_dir, embedders, &mut status);
+    status
+}
+
+/// Metadata labels are useful diagnostics, but only the vector header's full
+/// runtime producer identity proves that the selected embedder can read these
+/// vectors. Hash indexes need this check too: different projection seeds can
+/// share the same model id and dimension, and omit the semantic metadata tuple.
+fn verify_selected_index_producers(
+    index_dir: &Path,
+    embedders: Option<&(EmbedderDescriptor, Option<EmbedderDescriptor>)>,
+    status: &mut IndexMetadataStatus,
+) {
+    if !status.present || status.corruption_error.is_some() || status.compatibility_error.is_some()
+    {
+        return;
+    }
+    let verification = (|| -> Result<(), String> {
+        // Empty initialization deliberately uses cheap placeholder vectors.
+        // Prove emptiness across metadata, all tiers and WAL before exempting
+        // it; an empty immutable header alone does not prove an empty index.
+        if index_generation_is_verified_empty(index_dir)? {
+            return Ok(());
+        }
+        let (fast, quality) = embedders.ok_or_else(|| {
+            "selected embedding producer is unavailable; a full index rebuild is required"
+                .to_owned()
+        })?;
+        let fast_index =
+            open_fast_vector_index_read_only(index_dir).map_err(|error| error.detail)?;
+        verify_vector_producer(&fast_index, fast, "fast")?;
+        if let Some(quality) = quality {
+            let quality_index = open_quality_vector_index_read_only(index_dir)
+                .map_err(|error| error.detail)?
+                .ok_or_else(|| {
+                    "selected quality embedding producer has no vector tier; a full index rebuild is required"
+                        .to_owned()
+                })?;
+            verify_vector_producer(&quality_index, quality, "quality")?;
+        }
+        Ok(())
+    })();
+    status.compatibility_error = verification.err();
+}
+
+fn verify_vector_producer(
+    index: &VectorIndex,
+    selected: &EmbedderDescriptor,
+    tier: &str,
+) -> Result<(), String> {
+    let expected = selected.producer_revision.as_deref().ok_or_else(|| {
+        format!(
+            "selected {tier} embedding producer has no verified identity; a full index rebuild is required"
+        )
+    })?;
+    if index.dimension() != selected.dimension || index.embedder_revision() != expected {
+        // Stored header strings are untrusted diagnostics. Report the failed
+        // contract without quoting arbitrary producer text into status/pack.
+        return Err(format!(
+            "{tier} vector producer identity differs from the selected embedder (producer_revision or dimension); a full index rebuild is required"
+        ));
+    }
+    Ok(())
 }
 
 fn read_index_metadata_with_identity(
@@ -14983,6 +15219,10 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .clone();
             ensure(
+                descriptor.producer_revision.as_deref() == Some(native.fingerprint().as_str()),
+                "passive manifest inspection must declare the exact loaded runtime producer",
+            )?;
+            ensure(
                 !native_identities.contains(&native),
                 "different registered models must carry distinct full native producer identities",
             )?;
@@ -15331,8 +15571,139 @@ mod tests {
     }
 
     #[test]
-    fn registered_model2vec_passive_status_uses_workspace_identity_and_explicit_overrides()
-    -> TestResult {
+    fn index_readiness_rejects_producer_drift_at_equal_generation_and_dimensions() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let original = EmbedderStack::from_parts(Arc::new(HashEmbedder::jl_384(11)), None);
+        let changed = EmbedderStack::from_parts(Arc::new(HashEmbedder::jl_384(29)), None);
+        assert_eq!(original.fast().id(), changed.fast().id());
+        assert_eq!(original.fast().dimension(), changed.fast().dimension());
+        let snapshot = collect_workspace_index_source_snapshot(&fixture.db, &fixture.workspace_id)
+            .map_err(|error| error.to_string())?;
+        let index_dir = fixture.options.resolve_index_dir();
+        let stats = build_index_generation_sync(&index_dir, original.clone(), snapshot.documents)?;
+        validate_built_generation(&index_dir, stats, snapshot.document_counts)?;
+        write_index_metadata(
+            &index_dir,
+            snapshot.generation,
+            snapshot.document_counts,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(
+            parse_index_metadata(&index_dir)?
+                .is_some_and(|metadata| stored_semantic_identity(&metadata).is_none()),
+            "hash generations must exercise the path without semantic metadata labels"
+        );
+        let options = IndexStatusOptions {
+            workspace_path: fixture.options.workspace_path.clone(),
+            database_path: fixture.options.database_path.clone(),
+            index_dir: Some(index_dir.clone()),
+        };
+        let before = index_regular_file_snapshot(&index_dir)?;
+        {
+            let _selection =
+                install_test_workspace_embedder(&fixture.workspace_id, original.clone());
+            let ready = get_index_status_with_connection(&options, Some(&fixture.db))
+                .map_err(|error| error.to_string())?;
+            assert_eq!(ready.health, IndexHealth::Ready, "{ready:?}");
+            assert!(ready.last_check_error.is_none());
+            assert_eq!(ready.db_generation, ready.index_generation);
+        }
+        let _selection = install_test_workspace_embedder(&fixture.workspace_id, changed);
+        let stale = get_index_status_with_connection(&options, Some(&fixture.db))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(stale.health, IndexHealth::Stale, "{stale:?}");
+        assert_eq!(stale.db_generation, stale.index_generation);
+        assert!(stale.last_check_error.as_deref().is_some_and(|error| {
+            error.contains("producer_revision") && error.contains("rebuild")
+        }));
+        assert_eq!(stale.repair_hint, Some("ee index rebuild --workspace ."));
+        assert_eq!(stale.data_json()["degradationCode"], "index_stale");
+        let asset = crate::core::status::DerivedAssetReport::from_index_status(&stale);
+        assert_eq!(asset.status, crate::core::status::DerivedAssetStatus::Stale);
+
+        let explicit =
+            get_index_status_with_embedder(&options, Some(&fixture.db), false, original.fast())
+                .map_err(|error| error.to_string())?;
+        assert_eq!(explicit.health, IndexHealth::Ready, "{explicit:?}");
+        assert_eq!(
+            index_regular_file_snapshot(&index_dir)?,
+            before,
+            "inspection must not repair, restamp, or mutate persisted vectors"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn index_readiness_checks_quality_and_requires_verified_producer_identity() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let index_dir = root.path().join("index");
+        let stack = |seed: u64| {
+            EmbedderStack::from_parts(
+                Arc::new(HashEmbedder::default_256()),
+                Some(Arc::new(HashEmbedder::jl_384(seed))),
+            )
+        };
+        let original = stack(11);
+        let stats = build_index_generation_sync(
+            &index_dir,
+            original.clone(),
+            vec![test_indexable_doc(
+                "producer-proof",
+                "durable producer identity",
+            )],
+        )?;
+        validate_built_generation(&index_dir, stats, IndexDocumentCounts::memory_only(1))?;
+        write_index_metadata(&index_dir, 7, 1, None).map_err(|error| error.to_string())?;
+        let matching = stack_descriptors(&original);
+        let ready = read_index_metadata_for_selection(&index_dir, None, Some(&matching));
+        assert!(ready.compatibility_error.is_none(), "{ready:?}");
+
+        let changed = stack_descriptors(&stack(29));
+        let mismatch = read_index_metadata_for_selection(&index_dir, None, Some(&changed));
+        assert!(
+            mismatch
+                .compatibility_error
+                .as_deref()
+                .is_some_and(|error| {
+                    error.contains("quality") && error.contains("producer_revision")
+                }),
+            "{mismatch:?}"
+        );
+
+        let mut unverified = stack_descriptors(&original);
+        unverified.0.producer_revision = None;
+        let missing = read_index_metadata_for_selection(&index_dir, None, Some(&unverified));
+        assert!(
+            missing.compatibility_error.as_deref().is_some_and(|error| {
+                error.contains("fast") && error.contains("no verified identity")
+            }),
+            "{missing:?}"
+        );
+        let unknown = read_index_metadata_for_selection(&index_dir, None, None);
+        assert!(unknown.compatibility_error.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn empty_index_readiness_does_not_require_loading_an_embedding_producer() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let index_dir = root.path().join("index");
+        let stats =
+            build_index_generation_sync(&index_dir, hash_fallback_embedder_stack(), Vec::new())?;
+        validate_built_generation(&index_dir, stats, IndexDocumentCounts::default())?;
+        write_index_metadata(&index_dir, 7, 0, None).map_err(|error| error.to_string())?;
+        assert!(index_generation_is_verified_empty(&index_dir)?);
+        let selected = (EmbedderDescriptor::potion(), None);
+        let ready = read_index_metadata_for_selection(&index_dir, None, Some(&selected));
+        assert!(ready.compatibility_error.is_none(), "{ready:?}");
+        let unknown = read_index_metadata_for_selection(&index_dir, None, None);
+        assert!(unknown.compatibility_error.is_none(), "{unknown:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn registered_model2vec_passive_status_checks_declared_producer_headers() -> TestResult {
         let models = [
             RegisteredModel2Vec::potion_128m().map_err(|error| error.to_string())?,
             RegisteredModel2Vec::potion_base_8m().map_err(|error| error.to_string())?,
@@ -15341,33 +15712,54 @@ mod tests {
         for stored in &models {
             let root = tempfile::tempdir().map_err(|error| error.to_string())?;
             let index_dir = root.path().join("index");
-            let stored_embedder = Arc::new(TestSemanticEmbedder::new(
-                model2vec_model_name(stored),
-                stored.dimension() as usize,
-            ));
-            let stack = EmbedderStack::from_parts(stored_embedder.clone(), None);
-            let fingerprint = embedder_fingerprint_for_index_metadata(&stack)
-                .ok_or_else(|| "selected semantic model must yield index identity".to_owned())?;
+            let descriptor = EmbedderDescriptor::model2vec(stored);
+            let fingerprint = IndexEmbedderFingerprint {
+                model_id: descriptor.id.clone(),
+                model_revision: stored.download_manifest().revision.clone(),
+                model_hash: descriptor_content_hash(
+                    &descriptor,
+                    ModelProvider::Model2Vec,
+                    Some(stored.download_manifest()),
+                ),
+                dimension: stored.dimension(),
+                distance_metric: "cosine",
+                vector_dtype: "float32",
+            };
             let counts = IndexDocumentCounts::memory_only(1);
             let stats = build_index_generation_sync(
                 &index_dir,
-                stack,
+                EmbedderStack::from_parts(Arc::new(HashEmbedder::default_256()), None),
                 vec![test_indexable_doc(
                     "model-selection",
                     "durable agent memory",
                 )],
             )?;
+            // This is a persisted-header fixture, not simulated neural
+            // inference. Use the native writer to declare the exact manifest
+            // producer; real model inference is covered by the opt-in model
+            // fixture test, and actual hash inference by the readiness tests.
+            let mut writer = VectorIndex::create_with_revision(
+                &index_dir.join(VECTOR_INDEX_FAST_FILE),
+                &descriptor.id,
+                descriptor.producer_revision.as_deref().ok_or_else(|| {
+                    "registered model manifest must declare a complete producer".to_owned()
+                })?,
+                descriptor.dimension,
+                frankensearch::index::Quantization::F16,
+            )
+            .map_err(|error| error.to_string())?;
+            let mut vector = vec![0.0; descriptor.dimension];
+            vector[0] = 1.0;
+            writer
+                .write_record("model-selection", &vector)
+                .map_err(|error| error.to_string())?;
+            writer.finish().map_err(|error| error.to_string())?;
             validate_built_generation(&index_dir, stats, counts)?;
             write_index_metadata(&index_dir, 7, counts, Some(&fingerprint))
                 .map_err(|error| error.to_string())?;
             for selected in &models {
-                let posture = embedding_posture_from_records(
-                    &EmbedderDescriptor::model2vec(selected),
-                    None,
-                    &[],
-                    EmbeddingVectorCoverage::new(1, 1),
-                );
-                let passive = read_index_metadata_for_selection(&index_dir, None, Some(&posture));
+                let selection = (EmbedderDescriptor::model2vec(selected), None);
+                let passive = read_index_metadata_for_selection(&index_dir, None, Some(&selection));
                 ensure(
                     passive.present
                         && passive.generation == Some(7)
@@ -15396,15 +15788,6 @@ mod tests {
                         )?;
                     }
                 }
-                let explicit = read_index_metadata_for_selection(
-                    &index_dir,
-                    Some(stored_embedder.as_ref()),
-                    Some(&posture),
-                );
-                ensure(
-                    explicit.compatibility_error.is_none(),
-                    "an explicit fixture or execution embedder must outrank passive selection",
-                )?;
             }
         }
         Ok(())
@@ -15701,10 +16084,29 @@ mod tests {
     #[test]
     fn lazy_model2vec_embedder_reports_hash_posture_after_failure() -> TestResult {
         let embedder = EeLazyModel2VecEmbedder::new(unique_test_dir("lazy-model-failure"));
+        let declared = RegisteredModel2Vec::potion_128m()
+            .and_then(|model| {
+                model
+                    .artifact_manifest()
+                    .declared_identity_bundle(QuantizationFormat::F32, "in-memory-f32-v1")
+            })
+            .map_err(|error| error.to_string())?;
 
         ensure(
             !embedder.is_semantic(),
             "pending lazy model must be download-capable but not semantic-ready",
+        )?;
+        ensure(
+            embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint()
+                == declared.fingerprint(),
+            "pending identity must match the pinned native model declaration",
+        )?;
+        ensure(
+            !embedder.model_root.exists() && embedder.inner.get().is_none(),
+            "pending identity inspection must not acquire or load model files",
         )?;
         ensure(
             embedder.id() == POTION_MODEL_NAME,
@@ -15724,7 +16126,253 @@ mod tests {
         ensure(
             embedder.category() == ModelCategory::HashEmbedder,
             "failed lazy model should disclose hash fallback category",
+        )?;
+        ensure(
+            embedder
+                .identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint()
+                == fallback
+                    .identity()
+                    .map_err(|error| error.to_string())?
+                    .fingerprint(),
+            "failed lazy identity must be the actual native hash producer",
         )
+    }
+
+    #[test]
+    fn lazy_model2vec_loaded_producer_keeps_native_identity_through_index_build() -> TestResult {
+        // Seed the production wrapper's completed acquisition with a real
+        // deterministic native producer. A different dimension catches any
+        // remaining wrapper constants without downloading a model fixture.
+        let producer = Arc::new(HashEmbedder::new(
+            128,
+            frankensearch::HashAlgorithm::JLProjection { seed: 71 },
+        )) as Arc<dyn crate::search::Embedder>;
+        let lazy = Arc::new(EeLazyModel2VecEmbedder::new(unique_test_dir(
+            "lazy-loaded-native-producer",
+        )));
+        lazy.inner
+            .set(Arc::clone(&producer))
+            .map_err(|_| "lazy fixture already acquired its producer".to_owned())?;
+        ensure(
+            lazy.is_ready()
+                && !lazy.failed()
+                && lazy.dimension() == producer.dimension()
+                && lazy.id() == producer.id()
+                && lazy.model_name() == producer.model_name()
+                && lazy.is_semantic() == producer.is_semantic()
+                && lazy.supports_mrl() == producer.supports_mrl()
+                && lazy.bound_batch_is_native(),
+            "a completed acquisition must delegate readiness and native producer metadata",
+        )?;
+        let expected = producer
+            .identity()
+            .map_err(|error| error.to_string())?
+            .fingerprint();
+        ensure(
+            lazy.identity()
+                .map_err(|error| error.to_string())?
+                .fingerprint()
+                == expected,
+            "the lazy wrapper must retain the acquired producer's complete identity",
+        )?;
+        let index_dir = unique_test_dir("lazy-loaded-native-index");
+        let stats = build_index_generation_sync(
+            &index_dir,
+            EmbedderStack::from_parts(lazy as Arc<dyn crate::search::Embedder>, None),
+            vec![test_indexable_doc(
+                "native-lazy-document",
+                "native producer identity",
+            )],
+        )?;
+        ensure(
+            stats.doc_count == 1 && stats.error_count == 0,
+            "a resolved lazy wrapper must support native bound index ingestion",
+        )?;
+        let index = VectorIndex::open_read_only(&index_dir.join(VECTOR_INDEX_FAST_FILE))
+            .map_err(|error| error.to_string())?;
+        let fresh = HashEmbedder::new(128, frankensearch::HashAlgorithm::JLProjection { seed: 71 });
+        ensure(
+            index.dimension() == fresh.dimension()
+                && index.embedder_revision()
+                    == fresh
+                        .identity()
+                        .map_err(|error| error.to_string())?
+                        .fingerprint(),
+            "a fresh native producer must match the lazy-built persisted generation",
+        )?;
+        let query = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            fresh.embed_bound(&cx, "native producer identity").await
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        let query = frankensearch::BoundQueryEmbedding::new(query.values, query.identity)
+            .map_err(|error| error.to_string())?;
+        query
+            .verify_space(index.embedder_revision(), "fast")
+            .map_err(|error| error.to_string())?;
+        let hits = index
+            .search_top_k(query.vector(), 1, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            hits.first()
+                .is_some_and(|hit| hit.doc_id == "native-lazy-document"),
+            "a fresh producer's bound query must retrieve the lazy-built document",
+        )
+    }
+
+    #[test]
+    fn lazy_model2vec_first_failure_publishes_reusable_generation() -> TestResult {
+        const CHILD_WORKSPACE: &str = "EE_TEST_LAZY_PRODUCER_WORKSPACE";
+        const CHILD_PHASE: &str = "EE_TEST_LAZY_PRODUCER_PHASE";
+        const CHILD_SENTINEL: &str = "EE_LAZY_PRODUCER_GENERATION_VERIFIED";
+        if let Some(workspace) = std::env::var_os(CHILD_WORKSPACE) {
+            let workspace = PathBuf::from(workspace);
+            let database = workspace.join("ee.db");
+            let index_dir = workspace.join("index");
+            let phase = std::env::var(CHILD_PHASE).map_err(|error| error.to_string())?;
+            if matches!(phase.as_str(), "publish" | "stream") {
+                let model_root = workspace.join("models");
+                let destination = potion_model_destination_dir(&model_root);
+                let staging_root = destination.parent().ok_or("model staging root missing")?;
+                // Exercise the real automatic acquisition failure path without
+                // making a network request or requiring any model weights.
+                download_backoff::record_failure(
+                    staging_root,
+                    POTION_MODEL_NAME,
+                    "deliberately unavailable test model",
+                );
+                ensure(
+                    download_backoff::active_marker(staging_root, POTION_MODEL_NAME).is_some(),
+                    "the acquisition fixture must fail before any network request",
+                )?;
+                let selection = ee_auto_download_embedder(model_root);
+                let lazy = selection
+                    .lazy_model2vec
+                    .clone()
+                    .ok_or("lazy selection missing")?;
+                ensure(
+                    DEFAULT_SEARCH_EMBEDDER.set(selection).is_ok(),
+                    "isolated publication child must start with no selected producer",
+                )?;
+                if phase == "publish" {
+                    let report = rebuild_index(&IndexRebuildOptions {
+                        workspace_path: workspace.clone(),
+                        database_path: Some(database.clone()),
+                        index_dir: Some(index_dir.clone()),
+                        dry_run: false,
+                    })
+                    .map_err(|error| error.to_string())?;
+                    ensure(
+                        report.status == IndexRebuildStatus::Success && report.documents_total > 0,
+                        format!("first-use fallback rebuild failed: {:?}", report.errors),
+                    )?;
+                } else {
+                    queue_pending_index_job(&database, "sidx_71600000000000000000000000")?;
+                    let report = process_index_jobs(&IndexProcessingOptions {
+                        workspace_path: workspace.clone(),
+                        database_path: Some(database.clone()),
+                        index_dir: Some(index_dir.clone()),
+                        dry_run: false,
+                        job_limit: None,
+                    })
+                    .map_err(|error| error.to_string())?;
+                    ensure(
+                        report.status == IndexProcessingStatus::Success
+                            && report.completed_jobs == 1
+                            && report.jobs.len() == 1
+                            && report.jobs.iter().all(|job| {
+                                job.processing_mode.ends_with("_staged_delta")
+                                    && job.fallback_to_full.is_none()
+                            }),
+                        format!("cold lazy selection lost streamed producer reuse: {report:?}"),
+                    )?;
+                }
+                ensure(
+                    lazy.failed()
+                        && lazy
+                            .inner
+                            .get()
+                            .is_some_and(|actual| Arc::ptr_eq(actual, &lazy.fallback))
+                        && !destination.exists(),
+                    "an ordinary acquisition failure must freeze the native hash producer",
+                )?;
+            }
+
+            // The reopen child has independent process globals and selects a
+            // fresh hash producer, proving the generation is not usable only
+            // through the wrapper instance that built it.
+            let stack = hash_fallback_embedder_stack();
+            let index = VectorIndex::open_read_only(&index_dir.join(VECTOR_INDEX_FAST_FILE))
+                .map_err(|error| error.to_string())?;
+            ensure(
+                index.embedder_revision()
+                    == stack
+                        .fast()
+                        .identity()
+                        .map_err(|error| error.to_string())?
+                        .fingerprint(),
+                "first-use fallback vectors must be stamped with the native hash identity",
+            )?;
+            let db = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let snapshot =
+                collect_workspace_index_source_snapshot(&db, "wsp_01234567890123456789012345")
+                    .map_err(|error| error.to_string())?;
+            let delta = delta::plan(&index_dir, &stack, &snapshot.documents)
+                .map_err(|error| error.detail)?;
+            ensure(
+                delta.upserts.is_empty() && delta.removals.is_empty(),
+                "published document digests must bind the same producer as the vector tier",
+            )?;
+            let status = get_index_status(&IndexStatusOptions {
+                workspace_path: workspace,
+                database_path: Some(database),
+                index_dir: Some(index_dir),
+            })
+            .map_err(|error| error.to_string())?;
+            ensure(
+                status.health == IndexHealth::Ready,
+                format!(
+                    "native fallback generation was not reusable: {:?}",
+                    status.last_check_error
+                ),
+            )?;
+            println!("{CHILD_SENTINEL}");
+            return Ok(());
+        }
+
+        let workspace = unique_test_dir("lazy-producer-generation");
+        seed_reembed_database(&workspace, &workspace.join("ee.db"))?;
+        for phase in ["publish", "stream", "reopen"] {
+            let output = std::process::Command::new(
+                std::env::current_exe().map_err(|error| error.to_string())?,
+            )
+            .args([
+                "--exact",
+                "core::index::tests::lazy_model2vec_first_failure_publishes_reusable_generation",
+                "--nocapture",
+            ])
+            .env(CHILD_WORKSPACE, &workspace)
+            .env(CHILD_PHASE, phase)
+            .env("EE_EMBED_BACKEND", "local")
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env("EE_EMBED_MODEL_DIR", workspace.join("models"))
+            .output()
+            .map_err(|error| error.to_string())?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            ensure(
+                output.status.success()
+                    && stdout.contains(CHILD_SENTINEL)
+                    && stdout.contains("1 passed"),
+                format!(
+                    "isolated {phase} generation check failed or never ran:\n{stdout}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -15732,6 +16380,10 @@ mod tests {
         let embedder = Arc::new(EeLazyModel2VecEmbedder::new(unique_test_dir(
             "lazy-model-cancelled",
         )));
+        let pending_identity = embedder
+            .identity()
+            .map_err(|error| error.to_string())?
+            .fingerprint();
         let first_embedder = Arc::clone(&embedder);
         let first = crate::core::run_cli_future(async move {
             let cx = asupersync::Cx::for_testing();
@@ -15792,7 +16444,13 @@ mod tests {
         )?;
         ensure(
             !embedder.failed()
-                && embedder.state.load(Ordering::Acquire) == EE_DOWNLOAD_STATE_PENDING,
+                && embedder.state.load(Ordering::Acquire) == EE_DOWNLOAD_STATE_PENDING
+                && embedder.inner.get().is_none()
+                && embedder
+                    .identity()
+                    .map_err(|error| error.to_string())?
+                    .fingerprint()
+                    == pending_identity,
             "repeated cancellation must leave lazy model initialization retryable",
         )
     }

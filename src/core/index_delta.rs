@@ -187,7 +187,7 @@ pub(super) fn embedder_identity(stack: &EmbedderStack) -> Option<String> {
     Some(format!("fast={fast};quality={quality}"))
 }
 
-fn verified_embedder_identity(embedder: &dyn crate::search::Embedder) -> Option<String> {
+pub(super) fn verified_embedder_identity(embedder: &dyn crate::search::Embedder) -> Option<String> {
     let identity = embedder.identity().ok()?;
     identity.validate().ok()?;
     if usize::try_from(identity.space.dimension).ok() != Some(embedder.dimension()) {
