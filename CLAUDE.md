@@ -258,6 +258,38 @@ Two consequences, both of which cost real time before being understood:
   `-j 2` and read the first lines of the log rather than paying for a separate
   round trip.
 
+**The general consequence, measured 2026-10-24: NO NON-CARGO `--job` IS
+ADMISSIBLE ON THIS FLEET.** The 4-core estimate is not overridable — `rch exec
+--help` has no flag to declare one, and the `-j` in the refusal text belongs to
+a dispatched *cargo* command, so a `python3 …` or `bash script.sh` job has
+nothing to lower. Against that, the fleet census:
+
+| | |
+|---|---|
+| workers | 12 |
+| max `total_slots` among `closed` + `healthy` | **3** |
+| admissible workers with `total_slots >= 4` | **0** |
+| the only 4-slot box | `circuit=open`, `status=unreachable`, and tagged `os:windows` |
+
+So the estimate exceeds the entire capacity of every worker that would take the
+job. This is the arithmetic behind "shell e2e scripts are unrunnable on the
+lane" (bd-unreachable-e2e-scripts-u14sr): they are not blocked by their
+contents, they are blocked before selection. Do not spend dispatches
+rediscovering it — if a job's command is not `cargo`, it will be refused until
+rch gains an estimate flag or a worker gains a 4th slot.
+
+Two further readings from that census, both of which bite the obvious
+selection heuristic:
+
+- **`closed` + `healthy` is not capacity.** Six of the twelve report
+  `total_slots = 0` while `closed` and `healthy`, so a predicate that stops at
+  those two fields calls them admissible. The `(total_slots - used_slots) >= 2`
+  arm above is what excludes them; keep it.
+- **Ranking on free slots picks the WINDOWS box first**, because it advertises
+  4 free slots for the same reason it advertises a healthy disk — nothing runs
+  on it. It could not build this project even if it were reachable. Platform is
+  not a field the slot numbers expose; check `tags` before pinning.
+
 Measured 2026-10-14: a `-j 2` job pinned to a worker that had since shrunk from
 3 slots to 1 was refused five times by a retry loop, roughly six minutes spent
 on a request that could never be admitted. The refusal named its own fix every
