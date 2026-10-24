@@ -441,13 +441,19 @@ fn the_generator_is_deterministic_for_the_committed_parameters() -> TestResult {
         }
     };
     if !output.status.success() {
+        // All three channels, because any one of them alone misreads the
+        // failure. This generator writes its JSON summary to STDOUT, so a run
+        // that dies after emitting a partial summary says why there and leaves
+        // stderr empty -- and the previous message carried only the exit code
+        // and the LAST line of stderr, which also discards the informative
+        // frames of a Python traceback in favour of its final one. bd-w5bza
+        // counts this site; five rows in bd-hwye2 cost a fleet dispatch each
+        // for exactly this.
         return Err(format!(
-            "generate.py exited {:?}: {}",
+            "generate.py exited {:?}\nstdout: {}\nstderr: {}",
             output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-                .lines()
-                .last()
-                .unwrap_or_default()
         ));
     }
 
