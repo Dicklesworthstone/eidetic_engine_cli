@@ -545,6 +545,26 @@ expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]
+name = "Real-Shape Probe Fail-Closed Contract (1azkt.67)"
+# Measured 2026-10-24, seven consecutive runs of
+# `python3 -I scripts/real_shape_corpus/probe.py --self-test`:
+#   MEDIAN 0.260   min 0.260   max 0.340   spread 0.080   p90 0.320
+#   host: this Mac, 10 cores -- the same host verify.sh runs on.
+#   load: 2.05 one-minute, about 0.2 per core, with an rch dispatch in flight,
+#         so these are an upper bound rather than an idle-host best case.
+# Declares 1s per the convention of the sub-second Python contract block in
+# verify.sh, which states it directly: "each sub-second check declares 1s".
+#
+# No ceiling raise was needed and none was taken. bd-2di61 moved the
+# readiness-total exclusion from the literal name "Performance Benchmarks" to
+# the property "verify.sh gates it behind an opt-in flag", which freed 162s
+# across four stages; the non-benchmark total was 577/608 before this stage and
+# is 578/608 after it. `total_expected_seconds` stays at 608 and no neighbour's
+# p50 was retuned to make room.
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
 name = "Shard Coverage Contract"
 expected_seconds_p50 = 1
 regression_factor = 1.5

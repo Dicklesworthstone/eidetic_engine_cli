@@ -183,13 +183,58 @@ refused whole — `[RCH-I001] requested worker set [...] refused (selection erro
 queue_timeout)`, exit 103 — because `--worker` declines to fall back. So pin to a
 worker you have just seen idle in `rch status`.
 
-**TWO DIFFERENT 103s, and only one is worth retrying.** Read the failure class
-before the retry loop runs, because they are indistinguishable by exit code:
+**FOUR DIFFERENT 103s, and only one is worth retrying.** Read the failure class
+before the retry loop runs, because they are indistinguishable by exit code —
+and three of the four are labelled `— retryable` by rch itself:
 
 | refusal | meaning | action |
 |---|---|---|
 | `(selection error: queue_timeout)` | transient: nothing free right now | retry is appropriate |
 | `(no_free_slots)` naming a core estimate | ARITHMETIC: the request cannot fit that worker | retrying is useless; change `-j` or drop the pin |
+| `(unavailable); '<w>' is draining/unreachable` | that worker is GONE; its circuit is open | retrying the pin is useless; pin elsewhere |
+| `RCH_SYNC_LIVE_CHECKOUT_REFUSED ... (status Some(73))` | that worker's `/data/projects/<project>` is a live git checkout, so syncing your tree over it is refused | permanent for that box; pin elsewhere |
+
+**Do not choose a worker from `rch workers list`, because it cannot answer
+admissibility — and its errors are biased toward the unusable.** Its records
+carry `total_slots`, `priority`, `tags` and five disk fields, and *no*
+reachability, circuit or drain field at all. `rch status --json` carries the
+missing ones, at `.data.daemon.workers[]`: `circuit_state`, `status`,
+`used_slots`. Measured 2026-10-24, the whole fleet:
+
+```text
+rch workers list    best candidate: 4 slots, disk_pressure_state=healthy
+rch status          that same box:  circuit=open  status=unreachable
+```
+
+It advertised the most slots and the only `healthy` disk **because** it was
+unreachable: nothing was running on it, so nothing was consuming its slots or
+its disk. Ranking on "most free slots, healthiest disk" therefore selects FOR
+dead workers. That cost one dispatch, refused in under a second.
+
+The same reading corrected a worse error in the other direction. Every other
+worker reported `warning` disk pressure, which read as a fleet with no
+headroom and stopped this lane for a day; the reason code is
+`disk_ratio_below_warning`, a PERCENTAGE threshold, and those boxes held
+41–67 GB free with `used_slots=0` — all of them idle and admissible. Read
+`disk_pressure_reason` before believing `disk_pressure_state`, and read
+`used_slots`/`total_slots` rather than inferring free capacity from disk.
+
+The admissibility predicate that works:
+
+```bash
+rch status --json | jq -r '.data.daemon.workers[]
+  | select(.circuit_state=="closed" and .status=="healthy"
+           and ((.total_slots//0) - (.used_slots//0)) >= 2) | .id'
+```
+
+That still does not prove the lane is open, because the live-checkout refusal
+above is invisible to every field in both commands. Probe it in ~2s before
+spending a build — an admitted no-build `--job` round-trips in ~4.5s and a
+refused one fails in ~2s:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec --job --worker <id> -- echo EE_PROBE_OK
+```
 
 Measured 2026-10-14: a `-j 2` job pinned to a worker that had since shrunk from
 3 slots to 1 was refused five times by a retry loop, roughly six minutes spent

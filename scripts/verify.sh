@@ -2093,6 +2093,17 @@ run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation
 run_stage "Graph Metric FNX Routing Contract" "python3 scripts/check-graph-metric-fnx-routing.py"
 run_stage "Production Reachability Contract" "python3 scripts/check-production-reachability.py"
 run_stage "RCH Remediation Guidance Contract" "python3 scripts/check-rch-remediation-guidance.py"
+# The probe is the measuring instrument for every §16.5 outcome metric (UTR,
+# TTFUC, PAP, FAR, WCS) and for the report-mode half of the .50 real-corpus
+# gate, so a silent regression in it publishes zeros that read exactly like
+# product failure. Its 24 self-test arms are binary-free -- they carry both
+# directions of the platform, stdout-envelope, registry and fail-closed
+# controls -- so this stage needs no `ee` build and no corpus. 1azkt.67 closed
+# on an EXECUTION of them and recorded this wiring as the one remaining step
+# ("verify.sh wiring needs a budget stage ... and was not shipped unverified").
+# Until this stage existed nothing ran them, so the instrument that grades every
+# outcome metric was itself ungraded.
+run_stage "Real-Shape Probe Fail-Closed Contract (1azkt.67)" "python3 scripts/real_shape_corpus/probe.py --self-test"
 run_stage "Shard Coverage Contract" "python3 scripts/check-shard-coverage.py"
 run_stage "Step Assertion Isolation Contract" "python3 scripts/check-step-assertion-isolation.py"
 
