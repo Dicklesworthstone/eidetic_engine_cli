@@ -637,7 +637,7 @@ fn validate_code_anchor_records(record: &ExportMemoryRecord) -> io::Result<()> {
     }
     for anchor in &record.code_anchors {
         let surface = anchor.to_surface(&record.memory_id);
-        if crate::policy::redact_public_replay_text(&anchor.value).redacted
+        if !crate::models::memory_anchor::code_anchor_locator_is_public(&anchor.value)
             || crate::policy::redact_public_replay_text(&anchor.provenance).redacted
             || surface.as_ref().is_none_or(|surface| {
                 !identities.insert((
@@ -2157,6 +2157,8 @@ mod tests {
         let secret = format!("src/ghp_{}.rs", "a".repeat(36));
         for value in [
             "../outside.rs",
+            "src/app/page.tsx",
+            "src/home/a.rs",
             "/tmp/outside.rs",
             "src/*.rs",
             secret.as_str(),

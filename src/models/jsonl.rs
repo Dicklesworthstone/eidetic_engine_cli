@@ -979,8 +979,8 @@ pub struct ExportCodeAnchorRecord {
 }
 
 impl ExportCodeAnchorRecord {
-    /// Validate the portable source grammar without consulting the receiving
-    /// filesystem. Import/export callers additionally apply secret policy.
+    /// Validate portable source grammar and public-locator policy without
+    /// consulting the receiving filesystem. Callers also screen provenance.
     pub(crate) fn to_surface(
         &self,
         memory_id: &str,
@@ -994,6 +994,7 @@ impl ExportCodeAnchorRecord {
         ) || self.provenance.trim().is_empty()
             || self.provenance.len() > 512
             || self.provenance.chars().any(char::is_control)
+            || !crate::models::memory_anchor::code_anchor_locator_is_public(&self.value)
         {
             return None;
         }

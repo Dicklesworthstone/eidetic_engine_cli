@@ -967,9 +967,14 @@ pub const ANCHOR_BACKFILL_RECIPE_FAILURES: &[FailureBranchEntry] = &[
         next_action: "Review and apply this page with the same --after boundary, then continue using --after <nextAfter>. --limit bounds scanned memories rather than just proposed changes.",
     },
     FailureBranchEntry {
-        condition: "the complete scan found no eligible source code references",
-        jq: r#".data | select(.nextAfter == null and .proposedAnchorCount == 0)"#,
-        next_action: "Attach known anchors explicitly with `ee memory anchors <memory-id> --path <path> --workspace . --json`; a rebuild cannot infer missing source references.",
+        condition: "a memory exceeds the per-memory candidate limit",
+        jq: r#".data.skippedMemories[]? | select(.reason == "anchor_limit_exceeded")"#,
+        next_action: "The memory was skipped in full. Review its content and attach selected locators with `ee memory anchors <memory-id> --path <path> --workspace . --json`; continue scanning using nextAfter.",
+    },
+    FailureBranchEntry {
+        condition: "the final page proposes no new anchors and has no oversized memories",
+        jq: r#".data | select(.nextAfter == null and .proposedAnchorCount == 0 and ((.skippedMemories // []) | length) == 0)"#,
+        next_action: "Existing anchors may already be complete. If recall is still empty, check the workspace and selectors, then attach a known missing relationship with `ee memory anchors <memory-id> --path <path> --workspace . --json`. Rebuild only when recall reports a stale projection.",
     },
 ];
 
@@ -1235,7 +1240,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         description: "Preview eligible stored references without writing; use --apply to attach anchors and --after <nextAfter> to continue bounded pages in the same workspace.",
         category: "memory",
         command: "ee index backfill-anchors --workspace . --dry-run --limit 100 --json",
-        jq: r#".data | {dryRun, scannedMemoryCount, proposedMemoryCount, proposedAnchorCount, appliedAnchorCount, nextAfter, proposals}"#,
+        jq: r#".data | {dryRun, scannedMemoryCount, proposedMemoryCount, proposedAnchorCount, appliedAnchorCount, skippedMemories, nextAfter, proposals}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.index.backfill_anchors.v1""#,
         failure_branches: ANCHOR_BACKFILL_RECIPE_FAILURES,
     },

@@ -20,6 +20,21 @@
     "appliedMemoryCount": { "type": "integer", "minimum": 0 },
     "appliedAnchorCount": { "type": "integer", "minimum": 0 },
     "skippedMemoryCount": { "type": "integer", "minimum": 0 },
+    "skippedMemories": {
+      "type": "array",
+      "description": "Present when memories are skipped by the per-memory candidate safety limit. Each memory is skipped in full before planning or attachment; other memories and pagination continue normally. These entries are included in skippedMemoryCount and are not proposals.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["memoryId", "reason", "candidateAnchorCount", "anchorLimit"],
+        "properties": {
+          "memoryId": { "type": "string" },
+          "reason": { "type": "string", "const": "anchor_limit_exceeded" },
+          "candidateAnchorCount": { "type": "integer", "minimum": 257 },
+          "anchorLimit": { "type": "integer", "const": 256 }
+        }
+      }
+    },
     "nextAfter": {
       "type": ["string", "null"],
       "description": "Pass this memory ID to --after to scan the next bounded page; null means the scan is complete. Continue even when the current page proposes no anchors."
@@ -27,7 +42,7 @@
     "proposals": {
       "type": "array",
       "items": { "$ref": "ee.memory.anchors.v1.json" },
-      "description": "Redaction-safe per-memory attachment reports; no raw memory content or source provenance."
+      "description": "Redaction-safe per-memory attachment reports. Each anchor retains its hash and may include a screened normalized locator for reviewing the proposed relationship. No raw memory content or source provenance is returned."
     }
   },
   "field_presets": {

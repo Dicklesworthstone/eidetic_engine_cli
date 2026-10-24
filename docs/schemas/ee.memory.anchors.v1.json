@@ -24,7 +24,7 @@
     "anchors": {
       "type": "array",
       "items": { "$ref": "#/$defs/anchor" },
-      "description": "Deterministically ordered code-anchor descriptors. Values use the redacted display representation; raw memory bodies and provenance are not returned."
+      "description": "Deterministically ordered code-anchor descriptors. Hash identities are always included; an exact normalized locator is included only after the public recall redaction screen. Raw memory bodies and provenance are not returned."
     },
     "addedAnchorCount": { "type": "integer", "minimum": 0 },
     "auditId": { "type": ["string", "null"] },
@@ -39,7 +39,13 @@
         "anchorKind": { "type": "string", "enum": ["path", "symbol"] },
         "anchorValueHash": { "type": "string" },
         "redactedAnchorValue": { "type": "string" },
-        "source": { "type": "string" }
+        "source": { "type": "string" },
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Exact normalized path or symbol admitted by the same public-locator screen as recall. Omitted when unsafe or unavailable; a redaction placeholder is never a locator."
+        }
       }
     }
   },

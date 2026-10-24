@@ -26352,6 +26352,19 @@ impl DbConnection {
         memory_id: &str,
         surfaces: &[ExtractedAnchorSurface],
     ) -> Result<usize> {
+        self.attach_memory_code_anchor_sources_internal(workspace_id, memory_id, surfaces, false)
+    }
+
+    // Only immutable revision carry may preserve private-path bindings already
+    // stored on its validated original. Public attachment and transport never
+    // use that exception; secret, syntax and identity checks still apply here.
+    fn attach_memory_code_anchor_sources_internal(
+        &self,
+        workspace_id: &str,
+        memory_id: &str,
+        surfaces: &[ExtractedAnchorSurface],
+        allow_legacy_private_locators: bool,
+    ) -> Result<usize> {
         if self
             .get_memory(memory_id)?
             .is_none_or(|memory| memory.workspace_id != workspace_id)
@@ -26381,6 +26394,10 @@ impl DbConnection {
                 )
                 || anchor.provenance.trim().is_empty()
                 || anchor.provenance.len() > 512
+                || (!allow_legacy_private_locators
+                    && !crate::models::memory_anchor::code_anchor_locator_is_public(
+                        &surface.normalized_value,
+                    ))
                 || crate::policy::redact_public_replay_text(&surface.normalized_value).redacted
                 || crate::policy::redact_public_replay_text(&anchor.provenance).redacted
                 || rebuilt.as_ref().is_none_or(|value| {
@@ -26465,6 +26482,18 @@ impl DbConnection {
         new_id: &str,
         workspace_id: &str,
     ) -> Result<()> {
+        for id in [original_id, new_id] {
+            if self
+                .get_memory(id)?
+                .is_none_or(|memory| memory.workspace_id != workspace_id)
+            {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "Code-anchor revision endpoints must belong to the same workspace."
+                        .to_owned(),
+                });
+            }
+        }
         let mut surfaces = self.list_memory_code_anchor_sources(original_id)?;
         if surfaces.is_empty() {
             return Ok(());
@@ -26472,7 +26501,7 @@ impl DbConnection {
         for surface in &mut surfaces {
             surface.anchor.memory_id = new_id.to_owned();
         }
-        self.attach_memory_code_anchor_sources(workspace_id, new_id, &surfaces)?;
+        self.attach_memory_code_anchor_sources_internal(workspace_id, new_id, &surfaces, true)?;
         Ok(())
     }
 
@@ -43346,6 +43375,148 @@ mod code_anchor_recovery_tests {
         .unwrap();
         assert_eq!(report.items.len(), 1);
         assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
+
+    #[test]
+    fn private_relative_code_anchors_are_rejected_before_any_storage_write() {
+        let (db, memory) = fixture();
+        let before = db.list_memory_anchors(MEMORY).unwrap();
+        let sources = db.list_memory_code_anchor_sources(MEMORY).unwrap();
+        let generation = db.get_workspace_generation(WORKSPACE).unwrap();
+        for private in ["src/app/page.tsx", "src/home/a.rs"] {
+            let inputs = ["src/new.rs", private]
+                .into_iter()
+                .map(|value| {
+                    CreateMemoryAnchorInput::from_stored_code_surface(
+                        MEMORY,
+                        MemoryAnchorKind::Path,
+                        value,
+                        MemoryAnchorSource::Explicit,
+                        "memory.anchors",
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let error = db
+                .attach_memory_code_anchor_sources(WORKSPACE, MEMORY, &inputs)
+                .unwrap_err();
+            assert!(!error.to_string().contains(private));
+            assert_eq!(db.list_memory_anchors(MEMORY).unwrap(), before);
+            assert_eq!(db.list_memory_code_anchor_sources(MEMORY).unwrap(), sources);
+            assert_eq!(db.get_workspace_generation(WORKSPACE).unwrap(), generation);
+            assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+        }
+    }
+
+    #[test]
+    fn revision_carry_preserves_legacy_private_binding_without_publishing_it() {
+        let (db, memory) = fixture();
+        let private = "src/home/a.rs";
+        let legacy = CreateMemoryAnchorInput::from_stored_code_surface(
+            MEMORY,
+            MemoryAnchorKind::Path,
+            private,
+            MemoryAnchorSource::Explicit,
+            "memory.anchors",
+        )
+        .unwrap();
+        // Simulate a source binding accepted before the stricter public ingress
+        // rule. The compatibility path must require a genuinely stored source.
+        db.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO memory_code_anchor_sources (memory_id, anchor_kind, anchor_value_hash, normalized_value, source, provenance, created_at) VALUES (?1, 'path', ?2, ?3, 'explicit', 'memory.anchors', ?4)",
+            &[Value::Text(MEMORY.to_owned()), Value::Text(legacy.anchor.anchor_value_hash.clone()), Value::Text(private.to_owned()), Value::Text(memory.created_at.clone())],
+        ).unwrap();
+        assert!(
+            db.attach_memory_code_anchor_sources(WORKSPACE, MEMORY, &[legacy])
+                .is_err()
+        );
+        let original_sources = db.list_memory_code_anchor_sources(MEMORY).unwrap();
+        let original_anchors = db.list_memory_anchors(MEMORY).unwrap();
+
+        let target = "mem_00000000000000000000000853";
+        let foreign = "mem_00000000000000000000000854";
+        let other_workspace = "wsp_00000000000000000000000854";
+        db.insert_workspace(
+            other_workspace,
+            &CreateWorkspaceInput {
+                path: "/other-code-anchor-revision".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        for (id, workspace) in [(target, WORKSPACE), (foreign, other_workspace)] {
+            db.insert_memory(
+                id,
+                &CreateMemoryInput {
+                    workspace_id: workspace.to_owned(),
+                    level: memory.level.clone(),
+                    kind: memory.kind.clone(),
+                    content: memory.content.clone(),
+                    workflow_id: memory.workflow_id.clone(),
+                    confidence: memory.confidence,
+                    utility: memory.utility,
+                    importance: memory.importance,
+                    provenance_uri: memory.provenance_uri.clone(),
+                    trust_class: memory.trust_class.clone(),
+                    trust_subclass: memory.trust_subclass.clone(),
+                    tags: Vec::new(),
+                    valid_from: memory.valid_from.clone(),
+                    valid_to: memory.valid_to.clone(),
+                },
+            )
+            .unwrap();
+        }
+        let target_before = db.get_memory(target).unwrap();
+        let local_generation = db.get_workspace_generation(WORKSPACE).unwrap();
+        let foreign_generation = db.get_workspace_generation(other_workspace).unwrap();
+        for (destination, claimed_workspace) in [(foreign, WORKSPACE), (target, other_workspace)] {
+            assert!(
+                db.carry_memory_code_anchor_sources(MEMORY, destination, claimed_workspace)
+                    .is_err()
+            );
+            assert!(
+                db.list_memory_code_anchor_sources(destination)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                db.get_workspace_generation(WORKSPACE).unwrap(),
+                local_generation
+            );
+            assert_eq!(
+                db.get_workspace_generation(other_workspace).unwrap(),
+                foreign_generation
+            );
+        }
+
+        db.with_transaction(|| db.carry_memory_code_anchor_sources(MEMORY, target, WORKSPACE))
+            .unwrap();
+        let copied = db.list_memory_code_anchor_sources(target).unwrap();
+        assert_eq!(copied.len(), original_sources.len());
+        assert!(
+            copied
+                .iter()
+                .any(|surface| surface.normalized_value == private
+                    && surface.anchor.source == MemoryAnchorSource::Explicit
+                    && surface.anchor.provenance == "memory.anchors")
+        );
+        assert_eq!(
+            db.list_memory_code_anchor_sources(MEMORY).unwrap(),
+            original_sources
+        );
+        assert_eq!(db.list_memory_anchors(MEMORY).unwrap(), original_anchors);
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+        assert_eq!(db.get_memory(target).unwrap(), target_before);
+        let report = run_recall(&db, WORKSPACE, &path_query(private)).unwrap();
+        assert!(report.items.is_empty());
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "recall_source_filtered"
+                    && entry.message.contains("private_anchor"))
+        );
     }
 
     #[test]

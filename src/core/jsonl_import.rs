@@ -2356,7 +2356,7 @@ fn validate_memory(
     }
     let mut code_anchors = BTreeMap::new();
     for anchor in &memory.code_anchors {
-        if crate::policy::redact_public_replay_text(&anchor.value).redacted
+        if !crate::models::memory_anchor::code_anchor_locator_is_public(&anchor.value)
             || crate::policy::redact_public_replay_text(&anchor.provenance).redacted
         {
             return Err(JsonlImportIssue::error(
@@ -3293,6 +3293,8 @@ mod tests {
     fn code_anchor_jsonl_import_validates_before_creating_a_destination() -> TestResult {
         for invalid in [
             json!([{"kind":"path","value":"../escape.rs","source":"explicit","provenance":"memory.anchors"}]),
+            json!([{"kind":"path","value":"src/app/page.tsx","source":"explicit","provenance":"memory.anchors"}]),
+            json!([{"kind":"path","value":"src/home/a.rs","source":"explicit","provenance":"memory.anchors"}]),
             json!([{"kind":"path","value":"./src/noncanonical.rs","source":"explicit","provenance":"memory.anchors"}]),
             json!([{"kind":"command","value":"cargo build","source":"explicit","provenance":"memory.anchors"}]),
             json!([{"kind":"symbol","value":"not a symbol","source":"explicit","provenance":"memory.anchors"}]),

@@ -15,7 +15,8 @@ use crate::db::{
     SearchIndexJobType, StoredMemory, generate_audit_id,
 };
 use crate::models::memory_anchor::{
-    extract_backfill_code_anchor_surfaces, normalize_code_anchor_value,
+    code_anchor_locator_is_public, extract_backfill_code_anchor_surfaces, memory_anchor_value_hash,
+    normalize_code_anchor_value,
 };
 use crate::models::{
     CreateMemoryAnchorInput, DomainError, ExtractedAnchorSurface, MemoryAnchorKind, MemoryId,
@@ -24,6 +25,9 @@ use crate::models::{
 
 pub const MEMORY_ANCHORS_SCHEMA_V1: &str = "ee.memory.anchors.v1";
 pub const ANCHOR_BACKFILL_SCHEMA_V1: &str = "ee.index.backfill_anchors.v1";
+/// A dense source memory cannot turn a bounded repair page into an unbounded
+/// number of anchor writes. Oversized candidate sets are skipped in full.
+pub const MAX_BACKFILL_ANCHORS_PER_MEMORY: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct AttachAnchorsOptions<'a> {
@@ -54,15 +58,27 @@ pub struct AnchorDescriptor {
     pub anchor_value_hash: String,
     pub redacted_anchor_value: String,
     pub source: String,
+    /// Exact normalized locator only when it passes recall's public screen.
+    /// Canonical hashes remain available when the locator cannot be shown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
 }
 
 impl AnchorDescriptor {
-    fn from_input(anchor: &CreateMemoryAnchorInput) -> Self {
+    fn from_surface(surface: &ExtractedAnchorSurface) -> Self {
+        let anchor = &surface.anchor;
+        let value = &surface.normalized_value;
+        // Share recall's public-locator boundary and verify its hash identity.
+        // A redacted placeholder must never masquerade as a proposed locator.
+        let public = memory_anchor_value_hash(anchor.anchor_kind, value)
+            == anchor.anchor_value_hash
+            && code_anchor_locator_is_public(value);
         Self {
             anchor_kind: anchor.anchor_kind.as_str().to_owned(),
             anchor_value_hash: anchor.anchor_value_hash.clone(),
             redacted_anchor_value: anchor.redacted_anchor_value.clone(),
             source: anchor.source.as_str().to_owned(),
+            locator: public.then(|| value.clone()),
         }
     }
     fn from_stored(anchor: &StoredMemoryAnchor) -> Result<Self, DomainError> {
@@ -89,6 +105,7 @@ impl AnchorDescriptor {
                 &digest[..12]
             ),
             source: anchor.source.as_str().to_owned(),
+            locator: None,
         })
     }
 }
@@ -112,6 +129,15 @@ pub struct AnchorAttachReport {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AnchorBackfillSkippedMemory {
+    pub memory_id: String,
+    pub reason: &'static str,
+    pub candidate_anchor_count: usize,
+    pub anchor_limit: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AnchorBackfillReport {
     pub schema: &'static str,
     pub version: &'static str,
@@ -122,13 +148,15 @@ pub struct AnchorBackfillReport {
     pub applied_memory_count: usize,
     pub applied_anchor_count: usize,
     pub skipped_memory_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_memories: Vec<AnchorBackfillSkippedMemory>,
     pub next_after: Option<String>,
     pub proposals: Vec<AnchorAttachReport>,
 }
 
 fn storage(_: DbError) -> DomainError {
-    // SQL errors can carry values. Anchor reports never echo raw locators,
-    // source contents or host-specific database paths, including on failure.
+    // SQL errors can carry values. Storage diagnostics never echo locators,
+    // source contents or host-specific database paths.
     DomainError::Storage {
         message: "Code-anchor storage operation failed.".to_owned(),
         repair: Some("ee doctor --json".to_owned()),
@@ -298,19 +326,20 @@ fn validate_surfaces(
     options: &AttachAnchorsOptions<'_>,
 ) -> Result<Vec<ExtractedAnchorSurface>, DomainError> {
     let mut unique = BTreeMap::new();
+    let private_locator = || DomainError::PolicyDenied {
+        message: "Code anchors cannot contain private paths or secret material.".to_owned(),
+        repair: Some(
+            "Use a public workspace-relative code path or identifier without credentials."
+                .to_owned(),
+        ),
+    };
     for (kind, values) in [
         (MemoryAnchorKind::Path, options.paths),
         (MemoryAnchorKind::Symbol, options.symbols),
     ] {
         for raw in values {
             if crate::policy::redact_public_replay_text(raw).redacted {
-                return Err(DomainError::PolicyDenied {
-                    message: "Code anchors cannot contain secret material.".to_owned(),
-                    repair: Some(
-                        "Use a workspace-relative code path or identifier without credentials."
-                            .to_owned(),
-                    ),
-                });
+                return Err(private_locator());
             }
             let Some(surface) = CreateMemoryAnchorInput::from_code_surface(
                 options.memory_id,
@@ -323,6 +352,11 @@ fn validate_surfaces(
                     "Invalid code anchor: use a workspace-relative path without traversal or glob syntax, or an identifier such as Store::open.",
                 ));
             };
+            // Screen the normalized identity: a leading ./ must not make a
+            // relative app/file path look like an absolute /app/ private path.
+            if !code_anchor_locator_is_public(&surface.normalized_value) {
+                return Err(private_locator());
+            }
             unique.insert((kind, surface.anchor.anchor_value_hash.clone()), surface);
         }
     }
@@ -368,7 +402,7 @@ fn plan(
         changed,
         anchors: surfaces
             .iter()
-            .map(|surface| AnchorDescriptor::from_input(&surface.anchor))
+            .map(AnchorDescriptor::from_surface)
             .collect(),
         added_anchor_count: added,
         audit_id: None,
@@ -422,10 +456,22 @@ fn apply_in_transaction(
     let audit_id = generate_audit_id();
     let id = MemoryId::now().to_string();
     let index_job_id = format!("sidx_{}", id.trim_start_matches("mem_"));
+    let audit_anchors = report
+        .anchors
+        .iter()
+        .map(|anchor| {
+            serde_json::json!({
+                "anchorKind": anchor.anchor_kind,
+                "anchorValueHash": anchor.anchor_value_hash,
+                "redactedAnchorValue": anchor.redacted_anchor_value,
+                "source": anchor.source,
+            })
+        })
+        .collect::<Vec<_>>();
     db.insert_audit(&audit_id, &CreateAuditInput {
         workspace_id: Some(live.workspace_id.clone()), actor: Some(actor.unwrap_or(operation).to_owned()),
         action: "memory.anchors.attach".to_owned(), target_type: Some("memory".to_owned()), target_id: Some(live.id.clone()),
-        details: Some(serde_json::json!({"operation": operation, "anchors": report.anchors,
+        details: Some(serde_json::json!({"operation": operation, "anchors": audit_anchors,
             "addedAnchorCount": report.added_anchor_count, "contentChanged": false, "provenanceChanged": false}).to_string()),
     })?;
     db.insert_search_index_job(
@@ -474,16 +520,35 @@ pub fn attach_anchors(
                     );
                 }
             }
+            // A canonical row stores only the identity. Recover a display
+            // locator from screened current content only when its exact hash
+            // matches an anchor that is already attached, never list an
+            // uncreated backfill candidate as a stored anchor.
+            for surface in backfill_surfaces(&memory, options.workspace_path) {
+                if let Some(anchor) = anchors.get_mut(&(
+                    surface.anchor.anchor_kind,
+                    surface.anchor.anchor_value_hash.clone(),
+                )) {
+                    anchor.locator = AnchorDescriptor::from_surface(&surface).locator;
+                }
+            }
             for source in db
                 .list_memory_code_anchor_sources(options.memory_id)
                 .map_err(storage)?
             {
+                let descriptor = AnchorDescriptor::from_surface(&source);
                 anchors
                     .entry((
                         source.anchor.anchor_kind,
                         source.anchor.anchor_value_hash.clone(),
                     ))
-                    .or_insert_with(|| AnchorDescriptor::from_input(&source.anchor));
+                    .and_modify(|anchor| {
+                        // Preserve canonical capture provenance while making
+                        // the durable locator reviewable, including after the
+                        // body or its derived projection no longer contains it.
+                        anchor.locator = descriptor.locator.clone();
+                    })
+                    .or_insert(descriptor);
             }
             let report = AnchorAttachReport {
                 schema: MEMORY_ANCHORS_SCHEMA_V1,
@@ -531,10 +596,10 @@ fn backfill_surfaces(memory: &StoredMemory, workspace_path: &Path) -> Vec<Extrac
     // Contextual detection must happen before extraction: a string that looks
     // like a path may actually be a password value in the original sentence.
     let screened = crate::policy::redact_public_replay_body(&memory.content);
-    extract_backfill_code_anchor_surfaces(&memory.id, &screened.content)
+    extract_backfill_code_anchor_surfaces(&memory.id, &screened.content, Some(workspace_path))
         .into_iter()
         .filter(|surface| {
-            !crate::policy::redact_public_replay_text(&surface.normalized_value).redacted
+            code_anchor_locator_is_public(&surface.normalized_value)
                 && normalize_code_anchor_value(
                     surface.anchor.anchor_kind,
                     &surface.normalized_value,
@@ -587,11 +652,21 @@ pub fn backfill_anchors(
             .flatten();
         let scanned = memories.len();
         let mut proposals = Vec::new();
+        let mut skipped_memories = Vec::new();
         for memory in &memories {
             if !eligible(&db, memory)? {
                 continue;
             }
             let surfaces = backfill_surfaces(memory, options.workspace_path);
+            if surfaces.len() > MAX_BACKFILL_ANCHORS_PER_MEMORY {
+                skipped_memories.push(AnchorBackfillSkippedMemory {
+                    memory_id: memory.id.clone(),
+                    reason: "anchor_limit_exceeded",
+                    candidate_anchor_count: surfaces.len(),
+                    anchor_limit: MAX_BACKFILL_ANCHORS_PER_MEMORY,
+                });
+                continue;
+            }
             if surfaces.is_empty() {
                 continue;
             }
@@ -626,6 +701,7 @@ pub fn backfill_anchors(
             applied_memory_count: if options.apply { proposals.len() } else { 0 },
             applied_anchor_count: if options.apply { count } else { 0 },
             skipped_memory_count: scanned - proposals.len(),
+            skipped_memories,
             next_after,
             proposals,
         })
@@ -691,6 +767,158 @@ mod tests {
             "memory.anchors",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn preview_identifies_public_locators_without_exposing_memory_source() {
+        let root = tempfile::tempdir().unwrap();
+        let (db, memory) = fixture(root.path());
+        let path = surface(root.path());
+        let symbol = CreateMemoryAnchorInput::from_code_surface(
+            MEMORY,
+            MemoryAnchorKind::Symbol,
+            "Store::commit()",
+            root.path(),
+            "memory.anchors",
+        )
+        .unwrap();
+        let preview = plan(&db, &memory, &[path.clone(), symbol], true).unwrap();
+        let json = serde_json::to_value(&preview).unwrap();
+        assert_eq!(json["status"], "would_attach");
+        assert_eq!(json["anchors"][0]["locator"], "src/transaction.rs");
+        assert_eq!(json["anchors"][1]["locator"], "Store::commit");
+        assert_eq!(
+            json["anchors"][0]["anchorValueHash"],
+            path.anchor.anchor_value_hash
+        );
+        assert!(
+            json["anchors"][0]["redactedAnchorValue"]
+                .as_str()
+                .unwrap()
+                .starts_with("path:blake3:")
+        );
+        let rendered = json.to_string();
+        assert!(!rendered.contains(&memory.content));
+        assert!(!rendered.contains(memory.provenance_uri.as_deref().unwrap()));
+        assert!(db.list_memory_anchors(MEMORY).unwrap().is_empty());
+        assert!(
+            db.list_memory_code_anchor_sources(MEMORY)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
+
+    #[test]
+    fn attachment_audit_retains_hashes_without_copying_readable_locators() {
+        let root = tempfile::tempdir().unwrap();
+        let (db, memory) = fixture(root.path());
+        let surface = surface(root.path());
+        let report = db
+            .with_transaction(|| {
+                apply_in_transaction(
+                    &db,
+                    &memory,
+                    std::slice::from_ref(&surface),
+                    root.path(),
+                    None,
+                    "ee memory anchors",
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            report.anchors[0].locator.as_deref(),
+            Some("src/transaction.rs")
+        );
+        let audit = db
+            .get_audit(report.audit_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        let details = audit.details.as_deref().unwrap();
+        assert!(!details.contains("src/transaction.rs"));
+        assert!(!details.contains("locator"));
+        let identity: serde_json::Value = serde_json::from_str(details).unwrap();
+        assert_eq!(
+            identity["anchors"][0]["anchorValueHash"],
+            surface.anchor.anchor_value_hash
+        );
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
+
+    #[test]
+    fn descriptor_omits_private_locators_and_preserves_hash_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let mut surface = surface(root.path());
+        for private in [
+            format!("src/ghp_{}.rs", "a".repeat(36)),
+            "/home/operator/private.rs".to_owned(),
+            "src/home/operator/private.rs".to_owned(),
+        ] {
+            // Exercise the display boundary independently of ingress: even a
+            // hash-consistent reconstructed surface must not publish a private
+            // value. A mismatched hash must not mask a broken redaction check.
+            surface.normalized_value = private.clone();
+            let hash = memory_anchor_value_hash(surface.anchor.anchor_kind, &private);
+            surface.anchor.anchor_value_hash = hash.clone();
+            surface.anchor.redacted_anchor_value = format!(
+                "path:blake3:{}",
+                &hash.strip_prefix("blake3:").unwrap()[..12]
+            );
+            let descriptor = AnchorDescriptor::from_surface(&surface);
+            assert_eq!(descriptor.anchor_value_hash, hash);
+            assert!(descriptor.locator.is_none());
+            let json = serde_json::to_value(descriptor).unwrap();
+            assert!(json.get("locator").is_none());
+            assert!(!json.to_string().contains(&private));
+        }
+    }
+
+    #[test]
+    fn descriptor_omits_unbound_public_locator_when_surface_hash_mismatches() {
+        let root = tempfile::tempdir().unwrap();
+        let mut surface = surface(root.path());
+        let hash = surface.anchor.anchor_value_hash.clone();
+        surface.normalized_value = "src/substituted.rs".to_owned();
+        let descriptor = AnchorDescriptor::from_surface(&surface);
+        assert_eq!(descriptor.anchor_value_hash, hash);
+        assert!(descriptor.locator.is_none());
+        assert!(
+            !serde_json::to_string(&descriptor)
+                .unwrap()
+                .contains("src/substituted.rs")
+        );
+    }
+
+    #[test]
+    fn private_code_locators_are_rejected_before_database_access() {
+        let root = tempfile::tempdir().unwrap();
+        let database_path = root.path().join("absent.db");
+        for path in ["src/app/page.tsx", "src/home/a.rs"] {
+            let paths = vec![path.to_owned()];
+            let result = attach_anchors(&AttachAnchorsOptions {
+                workspace_path: root.path(),
+                database_path: &database_path,
+                memory_id: MEMORY,
+                paths: &paths,
+                symbols: &[],
+                dry_run: false,
+                actor: None,
+            });
+            assert!(matches!(result, Err(DomainError::PolicyDenied { .. })));
+            assert!(!database_path.exists());
+        }
+        let paths = vec!["./app/page.tsx".to_owned()];
+        let normalized = validate_surfaces(&AttachAnchorsOptions {
+            workspace_path: root.path(),
+            database_path: &database_path,
+            memory_id: MEMORY,
+            paths: &paths,
+            symbols: &[],
+            dry_run: true,
+            actor: None,
+        })
+        .unwrap();
+        assert_eq!(normalized[0].normalized_value, "app/page.tsx");
     }
 
     #[test]

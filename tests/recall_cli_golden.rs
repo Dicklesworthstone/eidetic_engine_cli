@@ -46,14 +46,76 @@ fn seed_workspace(
     workspace_id: &str,
     seeds: &[(&str, &str, &str, &str, f32)],
 ) -> Result<tempfile::TempDir, String> {
+    seed_workspace_at_schema(workspace_id, seeds, None)
+}
+
+fn seed_workspace_at_schema(
+    workspace_id: &str,
+    seeds: &[(&str, &str, &str, &str, f32)],
+    schema_version: Option<u32>,
+) -> Result<tempfile::TempDir, String> {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let db_dir = temp.path().join(".ee");
     std::fs::create_dir_all(&db_dir).map_err(|error| format!("mkdir .ee: {error}"))?;
-    let connection = ee::db::DbConnection::open_file(&db_dir.join("ee.db"))
-        .map_err(|error| format!("open db: {error}"))?;
-    connection
-        .migrate()
-        .map_err(|error| format!("migrate: {error}"))?;
+    let database = db_dir.join("ee.db");
+    if let Some(version) = schema_version {
+        // Build the historical schema itself, not a current database with its
+        // version marker rewritten. These are the published migration bodies
+        // and computed checksums, stopped before the new source table exists.
+        // Fresh connections avoid retaining roots retired by table rebuilds.
+        for migration in ee::db::MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version() <= version)
+        {
+            let connection =
+                ee::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            connection
+                .ensure_migration_table()
+                .map_err(|error| error.to_string())?;
+            // The fixture is still empty. Official table replacements need
+            // the same foreign-key relaxation as the migration runner.
+            connection
+                .execute_raw("PRAGMA foreign_keys = OFF")
+                .map_err(|error| error.to_string())?;
+            let record = ee::db::MigrationRecord::new(
+                migration.version(),
+                migration.name(),
+                migration.checksum(),
+                "2026-10-22T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+            connection
+                .with_transaction(|| {
+                    connection.execute_raw(migration.sql())?;
+                    connection.record_migration(&record)
+                })
+                .map_err(|error| format!("legacy migration V{}: {error}", migration.version()))?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+    }
+    let connection =
+        ee::db::DbConnection::open_file(&database).map_err(|error| format!("open db: {error}"))?;
+    if let Some(version) = schema_version {
+        assert_eq!(
+            connection
+                .schema_version()
+                .map_err(|error| error.to_string())?,
+            Some(version)
+        );
+        connection
+            .validate_applied_migrations()
+            .map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .check_foreign_keys()
+                .map_err(|error| error.to_string())?
+                .passed
+        );
+    } else {
+        connection
+            .migrate()
+            .map_err(|error| format!("migrate: {error}"))?;
+    }
     connection
         .insert_workspace(
             workspace_id,
@@ -435,7 +497,8 @@ fn assert_path_recalls(
 fn code_anchor_creation_through_documented_inline_tokens_has_positive_recall() -> TestResult {
     let workspace = seed_workspace(FIXTURE_WORKSPACE_ID, &[])?;
     let content = "Storage changes require bounded transactions. \
-        ee-anchor:path:src/db/mod.rs ee-anchor:symbol:crate::DbConnection";
+        ee-anchor:path:src/db/mod.rs ee-anchor:symbol:crate::DbConnection \
+        ee-anchor:path:.github/workflows/test.yml anchor:path:app/controller.py";
     let remembered = anchor_cli(
         workspace.path(),
         &[
@@ -459,12 +522,409 @@ fn code_anchor_creation_through_documented_inline_tokens_has_positive_recall() -
         source.memory.provenance_uri.as_deref(),
         Some("manual://code-anchor-test")
     );
-    assert_path_recalls(workspace.path(), "src/db/mod.rs", &[memory_id])?;
-    let symbols = anchor_cli(
-        workspace.path(),
-        &["recall", "--symbol", "crate::DbConnection"],
+    for rebuild in [false, true] {
+        if rebuild {
+            anchor_cli(workspace.path(), &["index", "rebuild"])?;
+        }
+        for path in [
+            "src/db/mod.rs",
+            ".github/workflows/test.yml",
+            "app/controller.py",
+        ] {
+            assert_path_recalls(workspace.path(), path, &[memory_id])?;
+        }
+        let symbols = anchor_cli(
+            workspace.path(),
+            &["recall", "--symbol", "crate::DbConnection"],
+        )?;
+        assert_eq!(item_memory_ids(&symbols), vec![memory_id.to_owned()]);
+    }
+    assert_eq!(anchor_source_snapshot(workspace.path(), memory_id)?, source);
+    Ok(())
+}
+
+#[test]
+fn code_anchor_schema131_previews_do_not_migrate_and_both_apply_routes_upgrade() -> TestResult {
+    for backfill_first in [false, true] {
+        let workspace = seed_workspace_at_schema(
+            FIXTURE_WORKSPACE_ID,
+            &[
+                (
+                    MEM_RULE,
+                    "semantic",
+                    "fact",
+                    "Connection tuning uses `db.cache_size`.",
+                    0.9,
+                ),
+                (
+                    MEM_FAILURE,
+                    "episodic",
+                    "failure",
+                    "Review src/legacy.rs before retrying the failed transaction.",
+                    0.8,
+                ),
+            ],
+            Some(131),
+        )?;
+        let database = workspace.path().join(".ee/ee.db");
+        let db = ee::db::DbConnection::open_file_read_only(&database)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            db.schema_version().map_err(|error| error.to_string())?,
+            Some(131)
+        );
+        assert!(
+            !db.list_user_tables()
+                .map_err(|error| error.to_string())?
+                .iter()
+                .any(|table| table == "memory_code_anchor_sources")
+        );
+        let migrations = db.applied_migrations().map_err(|error| error.to_string())?;
+        db.close().map_err(|error| error.to_string())?;
+        let originals = [
+            anchor_source_snapshot(workspace.path(), MEM_RULE)?,
+            anchor_source_snapshot(workspace.path(), MEM_FAILURE)?,
+        ];
+        let files_before = durable_recall_files(workspace.path())?;
+
+        let listing = anchor_cli(workspace.path(), &["memory", "anchors", MEM_RULE])?;
+        assert_eq!(listing["data"]["status"], "listed");
+        assert_eq!(listing["data"]["persisted"], false);
+        let attachment = anchor_cli(
+            workspace.path(),
+            &[
+                "memory",
+                "anchors",
+                MEM_RULE,
+                "--path",
+                "src/upgraded.rs",
+                "--symbol",
+                "Legacy::upgrade",
+                "--dry-run",
+            ],
+        )?;
+        assert_eq!(attachment["data"]["status"], "would_attach");
+        assert_eq!(attachment["data"]["addedAnchorCount"], 2);
+        let preview = anchor_cli(workspace.path(), &["index", "backfill-anchors"])?;
+        assert_eq!(preview["data"]["dryRun"], true);
+        assert_eq!(preview["data"]["proposedMemoryCount"], 1);
+        assert_eq!(preview["data"]["proposedAnchorCount"], 1);
+        assert_eq!(durable_recall_files(workspace.path())?, files_before);
+        let db = ee::db::DbConnection::open_file_read_only(&database)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            db.schema_version().map_err(|error| error.to_string())?,
+            Some(131)
+        );
+        assert_eq!(
+            db.applied_migrations().map_err(|error| error.to_string())?,
+            migrations
+        );
+        assert!(
+            !db.list_user_tables()
+                .map_err(|error| error.to_string())?
+                .iter()
+                .any(|table| table == "memory_code_anchor_sources")
+        );
+        db.close().map_err(|error| error.to_string())?;
+
+        // Exercise each independent migration entry point against an actual
+        // V131 store, then ensure the other operation remains usable afterward.
+        for backfill in [backfill_first, !backfill_first] {
+            if backfill {
+                let applied =
+                    anchor_cli(workspace.path(), &["index", "backfill-anchors", "--apply"])?;
+                assert_eq!(applied["data"]["appliedMemoryCount"], 1);
+                assert_eq!(applied["data"]["appliedAnchorCount"], 1);
+                assert_path_recalls(workspace.path(), "src/legacy.rs", &[MEM_FAILURE])?;
+            } else {
+                let attached = anchor_cli(
+                    workspace.path(),
+                    &[
+                        "memory",
+                        "anchors",
+                        MEM_RULE,
+                        "--path",
+                        "src/upgraded.rs",
+                        "--symbol",
+                        "Legacy::upgrade",
+                    ],
+                )?;
+                assert_eq!(attached["data"]["status"], "attached");
+                assert_eq!(attached["data"]["addedAnchorCount"], 2);
+                assert_path_recalls(workspace.path(), "src/upgraded.rs", &[MEM_RULE])?;
+            }
+            let db = ee::db::DbConnection::open_file_read_only(&database)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(
+                db.schema_version().map_err(|error| error.to_string())?,
+                ee::db::MIGRATIONS
+                    .last()
+                    .map(|migration| migration.version())
+            );
+            assert!(
+                db.list_user_tables()
+                    .map_err(|error| error.to_string())?
+                    .iter()
+                    .any(|table| table == "memory_code_anchor_sources")
+            );
+            db.close().map_err(|error| error.to_string())?;
+        }
+        anchor_cli(workspace.path(), &["index", "rebuild"])?;
+        assert_path_recalls(workspace.path(), "src/upgraded.rs", &[MEM_RULE])?;
+        assert_path_recalls(workspace.path(), "src/legacy.rs", &[MEM_FAILURE])?;
+        for (id, original) in [MEM_RULE, MEM_FAILURE].into_iter().zip(originals) {
+            assert_eq!(anchor_source_snapshot(workspace.path(), id)?, original);
+        }
+    }
+    Ok(())
+}
+
+fn write_anchor_source_files(workspace: &std::path::Path) -> TestResult {
+    for relative in [
+        "app/controller.py",
+        "lib/widget.ts",
+        ".github/workflows/test.yml",
+        "package.json",
+    ] {
+        let file = workspace.join(relative);
+        std::fs::create_dir_all(file.parent().ok_or("source file parent")?)
+            .map_err(|error| error.to_string())?;
+        std::fs::write(file, "fixture source\n").map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn code_anchor_explicit_paths_cover_repo_layouts_and_missing_historical_files() -> TestResult {
+    let workspace = seed_workspace(
+        FIXTURE_WORKSPACE_ID,
+        &[(
+            MEM_RULE,
+            "semantic",
+            "fact",
+            "Keep the original source observation intact.",
+            0.9,
+        )],
     )?;
-    assert_eq!(item_memory_ids(&symbols), vec![memory_id.to_owned()]);
+    write_anchor_source_files(workspace.path())?;
+    assert!(!workspace.path().join("app/deleted.py").exists());
+    let original = anchor_source_snapshot(workspace.path(), MEM_RULE)?;
+    let attached = anchor_cli(
+        workspace.path(),
+        &[
+            "memory",
+            "anchors",
+            MEM_RULE,
+            "--path",
+            "./app/controller.py",
+            "--path",
+            "lib/widget.ts",
+            "--path",
+            ".github/workflows/test.yml",
+            "--path",
+            "package.json",
+            "--path",
+            "app/deleted.py",
+        ],
+    )?;
+    assert_eq!(attached["data"]["addedAnchorCount"], 5);
+    for rebuild in [false, true] {
+        if rebuild {
+            anchor_cli(workspace.path(), &["index", "rebuild"])?;
+        }
+        for path in [
+            "app/controller.py",
+            "lib/widget.ts",
+            ".github/workflows/test.yml",
+            "package.json",
+            "app/deleted.py",
+        ] {
+            assert_path_recalls(workspace.path(), path, &[MEM_RULE])?;
+        }
+        assert_eq!(
+            anchor_source_snapshot(workspace.path(), MEM_RULE)?,
+            original
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn code_anchor_backfill_resolves_real_workspace_files_without_inventing_prose_locators()
+-> TestResult {
+    let workspace = seed_workspace(
+        FIXTURE_WORKSPACE_ID,
+        &[(
+            MEM_RULE,
+            "semantic",
+            "fact",
+            "Review app/controller.py, lib/widget.ts, .github/workflows/test.yml and package.json before the release. Ignore app/unknown.py, imaginary.txt and public.py until verified.",
+            0.9,
+        )],
+    )?;
+    write_anchor_source_files(workspace.path())?;
+    // An ordinary prose word remains prose even if a same-named file exists.
+    std::fs::write(workspace.path().join("release"), "not a code locator\n")
+        .map_err(|error| error.to_string())?;
+    let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+    std::fs::write(outside.path().join("private.py"), "outside source\n")
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        outside.path().join("private.py"),
+        workspace.path().join("public.py"),
+    )
+    .map_err(|error| error.to_string())?;
+    let original = anchor_source_snapshot(workspace.path(), MEM_RULE)?;
+    let files_before = durable_recall_files(workspace.path())?;
+    let preview = anchor_cli(workspace.path(), &["index", "backfill-anchors"])?;
+    assert_eq!(preview["data"]["proposedMemoryCount"], 1);
+    assert_eq!(preview["data"]["proposedAnchorCount"], 4);
+    assert_eq!(durable_recall_files(workspace.path())?, files_before);
+    let applied = anchor_cli(workspace.path(), &["index", "backfill-anchors", "--apply"])?;
+    assert_eq!(applied["data"]["appliedAnchorCount"], 4);
+    let db = ee::db::DbConnection::open_file_read_only(workspace.path().join(".ee/ee.db"))
+        .map_err(|error| error.to_string())?;
+    let locators = db
+        .list_memory_code_anchor_sources(MEM_RULE)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|surface| surface.normalized_value)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = [
+        "app/controller.py",
+        "lib/widget.ts",
+        ".github/workflows/test.yml",
+        "package.json",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        locators, expected,
+        "backfill must not follow escaping links or infer words and missing files"
+    );
+    db.close().map_err(|error| error.to_string())?;
+    for path in &expected {
+        assert_path_recalls(workspace.path(), path, &[MEM_RULE])?;
+    }
+    anchor_cli(workspace.path(), &["index", "rebuild"])?;
+    for path in &expected {
+        assert_path_recalls(workspace.path(), path, &[MEM_RULE])?;
+    }
+    assert_eq!(
+        anchor_source_snapshot(workspace.path(), MEM_RULE)?,
+        original
+    );
+    let repeated = anchor_cli(workspace.path(), &["index", "backfill-anchors", "--apply"])?;
+    assert_eq!(repeated["data"]["appliedAnchorCount"], 0);
+    Ok(())
+}
+
+#[test]
+fn code_anchor_backfill_limit_skips_the_whole_memory_and_preserves_pagination() -> TestResult {
+    let body = |count| {
+        (0..count)
+            .map(|index| format!("src/cap_{index:03}.rs"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let oversized = body(257);
+    let at_limit = body(256);
+    let workspace = seed_workspace(
+        FIXTURE_WORKSPACE_ID,
+        &[
+            (MEM_RULE, "semantic", "fact", &oversized, 0.9),
+            (MEM_FAILURE, "semantic", "fact", &at_limit, 0.9),
+        ],
+    )?;
+    let database = workspace.path().join(".ee/ee.db");
+    let state = || -> Result<(i64, i64, i64, Option<u64>), String> {
+        let db = ee::db::DbConnection::open_file_read_only(&database)
+            .map_err(|error| error.to_string())?;
+        let result = (
+            db.count_table_rows("memory_code_anchor_sources")
+                .map_err(|error| error.to_string())?,
+            db.count_table_rows("audit_log")
+                .map_err(|error| error.to_string())?,
+            db.count_table_rows("search_index_jobs")
+                .map_err(|error| error.to_string())?,
+            db.get_workspace_generation(FIXTURE_WORKSPACE_ID)
+                .map_err(|error| error.to_string())?,
+        );
+        db.close().map_err(|error| error.to_string())?;
+        Ok(result)
+    };
+    let originals = [
+        anchor_source_snapshot(workspace.path(), MEM_RULE)?,
+        anchor_source_snapshot(workspace.path(), MEM_FAILURE)?,
+    ];
+    let state_before = state()?;
+    let files_before = durable_recall_files(workspace.path())?;
+    for apply in [false, true] {
+        let mut args = vec!["index", "backfill-anchors", "--limit", "1"];
+        if apply {
+            args.push("--apply");
+        }
+        let skipped = anchor_cli(workspace.path(), &args)?;
+        assert_eq!(skipped["data"]["scannedMemoryCount"], 1);
+        assert_eq!(skipped["data"]["proposedMemoryCount"], 0);
+        assert_eq!(skipped["data"]["appliedAnchorCount"], 0);
+        assert_eq!(skipped["data"]["skippedMemoryCount"], 1);
+        assert_eq!(skipped["data"]["nextAfter"], MEM_RULE);
+        assert_eq!(
+            skipped["data"]["skippedMemories"],
+            serde_json::json!([
+                {"memoryId": MEM_RULE, "reason": "anchor_limit_exceeded", "candidateAnchorCount": 257, "anchorLimit": 256}
+            ])
+        );
+        if !apply {
+            assert_eq!(durable_recall_files(workspace.path())?, files_before);
+        }
+        assert_eq!(
+            state()?,
+            state_before,
+            "skipping must not attach a partial prefix or enqueue writes"
+        );
+    }
+    let preview = anchor_cli(
+        workspace.path(),
+        &[
+            "index",
+            "backfill-anchors",
+            "--limit",
+            "1",
+            "--after",
+            MEM_RULE,
+        ],
+    )?;
+    assert_eq!(preview["data"]["proposedMemoryCount"], 1);
+    assert_eq!(preview["data"]["proposedAnchorCount"], 256);
+    assert_eq!(preview["data"]["appliedAnchorCount"], 0);
+    assert!(preview["data"]["nextAfter"].is_null());
+    assert_eq!(state()?, state_before);
+    let applied = anchor_cli(
+        workspace.path(),
+        &[
+            "index",
+            "backfill-anchors",
+            "--limit",
+            "1",
+            "--after",
+            MEM_RULE,
+            "--apply",
+        ],
+    )?;
+    assert_eq!(applied["data"]["appliedMemoryCount"], 1);
+    assert_eq!(applied["data"]["appliedAnchorCount"], 256);
+    assert_eq!(applied["data"]["skippedMemoryCount"], 0);
+    assert_eq!(state()?.0, 256);
+    assert_path_recalls(workspace.path(), "src/cap_255.rs", &[MEM_FAILURE])?;
+    assert_path_recalls(workspace.path(), "src/cap_256.rs", &[])?;
+    for (id, original) in [MEM_RULE, MEM_FAILURE].into_iter().zip(originals) {
+        assert_eq!(anchor_source_snapshot(workspace.path(), id)?, original);
+    }
     Ok(())
 }
 
@@ -609,12 +1069,26 @@ fn code_anchor_attachment_preserves_source_and_recovers_a_config_only_workspace(
     assert_eq!(applied["data"]["persisted"], true);
     assert!(applied["data"]["auditId"].is_string());
     assert!(applied["data"]["indexJobId"].is_string());
-    let data = serde_json::to_string(&applied["data"]).map_err(|error| error.to_string())?;
-    assert!(
-        !data.contains("src/db/mod.rs"),
-        "anchor reports expose redacted tokens, not raw locators"
+    let descriptors = applied["data"]["anchors"]
+        .as_array()
+        .ok_or("anchor descriptors")?;
+    let locators = descriptors
+        .iter()
+        .filter_map(|anchor| anchor["locator"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        locators,
+        std::collections::BTreeSet::from(["src/db/mod.rs", "crate::DbConnection"])
     );
-    assert!(!data.contains("crate::DbConnection"));
+    for descriptor in descriptors {
+        let redacted = descriptor["redactedAnchorValue"]
+            .as_str()
+            .ok_or("redacted anchor identity")?;
+        assert!(!redacted.contains("src/db/mod.rs") && !redacted.contains("crate::DbConnection"));
+    }
+    let data = serde_json::to_string(&applied["data"]).map_err(|error| error.to_string())?;
+    assert!(!data.contains(&before.memory.content));
+    assert!(!data.contains("test://recall-golden"));
     assert_eq!(anchor_source_snapshot(workspace.path(), MEM_RULE)?, before);
     assert_path_recalls(workspace.path(), "src/db/mod.rs", &[MEM_RULE])?;
     let by_symbol = anchor_cli(
@@ -740,6 +1214,20 @@ fn code_anchor_bindings_survive_rebuild_and_recover_an_empty_projection() -> Tes
         2
     );
     db.close().map_err(|error| error.to_string())?;
+    let listing = anchor_cli(workspace.path(), &["memory", "anchors", MEM_RULE])?;
+    let locators = listing["data"]["anchors"]
+        .as_array()
+        .ok_or("source-only anchor listing")?
+        .iter()
+        .filter_map(|anchor| anchor["locator"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        locators,
+        std::collections::BTreeSet::from(["src/rebuild.rs", "Rebuild::publish"])
+    );
+    let listing_json = listing["data"].to_string();
+    assert!(!listing_json.contains(&before.memory.content));
+    assert!(!listing_json.contains("test://recall-golden"));
     let stale = anchor_cli(workspace.path(), &["recall", "--path", "src/rebuild.rs"])?;
     let codes = degraded_codes(&stale);
     assert!(

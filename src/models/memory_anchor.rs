@@ -258,9 +258,10 @@ impl CreateMemoryAnchorInput {
         )
     }
 
-    /// Validate an explicitly attached code locator. Unlike content extraction,
-    /// an explicit path can name an existing workspace file outside the lexical
-    /// allowlist; it must still remain inside that workspace, including symlinks.
+    /// Validate an explicitly attached code locator. The caller supplies the
+    /// relationship, so extraction heuristics do not restrict repository layout
+    /// or historical missing files. Paths must remain inside the workspace,
+    /// including through existing symlinks.
     #[must_use]
     pub fn from_code_surface(
         memory_id: &str,
@@ -404,11 +405,6 @@ pub fn normalize_code_anchor_value(
                 if !ancestor.canonicalize().ok()?.starts_with(&canonical_root) {
                     return None;
                 }
-                if !looks_like_repo_path(value) && !joined.is_file() {
-                    return None;
-                }
-            } else if !looks_like_repo_path(value) {
-                return None;
             }
             Some(value.to_owned())
         }
@@ -431,6 +427,17 @@ pub fn normalize_code_anchor_value(
         }
         _ => None,
     }
+}
+
+/// A locator must pass the same public screen at ingress and recall egress.
+/// Keep legacy source reconstruction separate: private stored bindings remain
+/// readable as hashed identities, but cannot be newly attached or transported.
+#[must_use]
+pub(crate) fn code_anchor_locator_is_public(value: &str) -> bool {
+    !value
+        .char_indices()
+        .any(|(index, _)| crate::util::sensitive_path_starts_at(value, index))
+        && !crate::policy::redact_public_replay_text(value).redacted
 }
 
 fn safe_code_path(value: &str) -> bool {
@@ -644,12 +651,14 @@ pub fn extract_precision_memory_anchors(
 }
 
 /// Conservative historical backfill: reuse explicit/code-fragment extraction,
-/// then recognize bare lexical repo paths. Bare prose identifiers are never
-/// inferred as symbols. Callers still screen secrets and workspace boundaries.
+/// then recognize bare lexical repo paths or path-shaped references to real
+/// workspace files. Ordinary prose words are not inferred as paths or symbols.
+/// Callers still screen secrets and validate every candidate's workspace scope.
 #[must_use]
 pub fn extract_backfill_code_anchor_surfaces(
     memory_id: &str,
     content: &str,
+    workspace_root: Option<&std::path::Path>,
 ) -> Vec<ExtractedAnchorSurface> {
     let mut surfaces: BTreeMap<_, _> = extract_memory_anchor_surfaces(
         memory_id,
@@ -675,20 +684,39 @@ pub fn extract_backfill_code_anchor_surfaces(
     })
     .collect();
     for token in content.split_whitespace() {
-        let token = token.trim_matches('`');
-        let cleaned = trim_token(token);
-        if normalize_code_anchor_value(MemoryAnchorKind::Path, cleaned, None).is_some() {
-            push_raw_anchor(
-                &mut surfaces,
-                memory_id,
-                MemoryAnchorKind::Path,
-                cleaned,
-                0.92,
-                MemoryAnchorSource::IndexRebuild,
-                "index.backfill_anchors",
-                0,
-            );
+        let cleaned = trim_code_path_token(token);
+        let path_shaped = cleaned.contains('/')
+            || cleaned
+                .rsplit_once('.')
+                .is_some_and(|(_, extension)| !extension.is_empty());
+        if !path_shaped && !looks_like_repo_path(cleaned) {
+            continue;
         }
+        let Some(normalized) =
+            normalize_code_anchor_value(MemoryAnchorKind::Path, cleaned, workspace_root)
+        else {
+            continue;
+        };
+        let existing_file =
+            path_shaped && workspace_root.is_some_and(|root| root.join(&normalized).is_file());
+        if !looks_like_repo_path(&normalized) && !existing_file {
+            continue;
+        }
+        let (anchor, normalized_value) = CreateMemoryAnchorInput::finish_from_normalized(
+            memory_id,
+            MemoryAnchorKind::Path,
+            normalized,
+            0.92,
+            MemoryAnchorSource::IndexRebuild,
+            "index.backfill_anchors",
+            0,
+        );
+        surfaces
+            .entry((anchor.anchor_kind, anchor.anchor_value_hash.clone()))
+            .or_insert(ExtractedAnchorSurface {
+                anchor,
+                normalized_value,
+            });
     }
     surfaces.into_values().collect()
 }
@@ -713,6 +741,32 @@ fn extract_explicit_anchors(
         let Some(anchor_kind) = MemoryAnchorKind::parse(kind) else {
             continue;
         };
+        if anchor_kind == MemoryAnchorKind::Path {
+            // The explicit marker supplies intent. Preserve leading dots and
+            // accept safe relative locators across repository layouts, without
+            // making rebuilds depend on whether a historical file still exists.
+            let Some(normalized) =
+                normalize_code_anchor_value(anchor_kind, trim_code_path_token(value), None)
+            else {
+                continue;
+            };
+            let (anchor, normalized_value) = CreateMemoryAnchorInput::finish_from_normalized(
+                memory_id,
+                anchor_kind,
+                normalized,
+                1.0,
+                MemoryAnchorSource::Explicit,
+                provenance,
+                0,
+            );
+            anchors
+                .entry((anchor_kind, anchor.anchor_value_hash.clone()))
+                .or_insert(ExtractedAnchorSurface {
+                    anchor,
+                    normalized_value,
+                });
+            continue;
+        }
         push_raw_anchor(
             anchors,
             memory_id,
@@ -1015,6 +1069,19 @@ fn trim_token(token: &str) -> &str {
     })
 }
 
+/// Strip prose delimiters without destroying `./`, dotfiles, or a leading
+/// traversal attempt that the strict path validator must reject intact.
+fn trim_code_path_token(token: &str) -> &str {
+    token
+        .trim_matches(|character: char| {
+            matches!(
+                character,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
+            )
+        })
+        .trim_end_matches('.')
+}
+
 fn looks_like_repo_path(token: &str) -> bool {
     let token = token.strip_prefix("./").unwrap_or(token);
     if token.contains("://") || token.contains("..") || token.starts_with('/') {
@@ -1308,36 +1375,66 @@ mod tests {
     }
 
     #[test]
-    fn explicit_non_allowlisted_path_requires_file_but_binding_survives_offline_rebuild() {
+    fn explicit_historical_paths_work_across_repository_layouts_without_files() {
         let root = tempfile::tempdir().unwrap();
-        assert!(
-            CreateMemoryAnchorInput::from_code_surface(
+        for value in [
+            "CLAUDE.md",
+            "package.json",
+            "app/deleted.py",
+            "lib/widget.ts",
+            ".github/workflows/test.yml",
+        ] {
+            let attached = CreateMemoryAnchorInput::from_code_surface(
                 "mem_fixture",
                 MemoryAnchorKind::Path,
-                "CLAUDE.md",
+                value,
                 root.path(),
-                "memory.anchors"
+                "memory.anchors",
             )
-            .is_none()
+            .unwrap();
+            let stored = CreateMemoryAnchorInput::from_stored_code_surface(
+                "mem_fixture",
+                MemoryAnchorKind::Path,
+                &attached.normalized_value,
+                MemoryAnchorSource::Explicit,
+                "memory.anchors",
+            )
+            .unwrap();
+            assert_eq!(stored, attached);
+            assert!(!root.path().join(value).exists());
+        }
+    }
+
+    #[test]
+    fn explicit_path_tokens_preserve_layout_dots_and_reject_unsafe_locators() {
+        let content = "ee-anchor:path:./app/controller.py anchor:path:lib/widget.ts \
+            ee-anchor:path:.github/workflows/test.yml anchor:path:package.json \
+            ee-anchor:path:../escape.py anchor:path:/outside.py \
+            anchor:path:https://example.invalid/file.py anchor:path:app/*.py";
+        let surfaces = extract_memory_anchor_surfaces(
+            "mem_fixture",
+            content,
+            MemoryAnchorSource::Remember,
+            None,
         );
-        std::fs::write(root.path().join("CLAUDE.md"), "# guidance").unwrap();
-        let attached = CreateMemoryAnchorInput::from_code_surface(
-            "mem_fixture",
-            MemoryAnchorKind::Path,
-            "CLAUDE.md",
-            root.path(),
-            "memory.anchors",
-        )
-        .unwrap();
-        let stored = CreateMemoryAnchorInput::from_stored_code_surface(
-            "mem_fixture",
-            MemoryAnchorKind::Path,
-            &attached.normalized_value,
-            MemoryAnchorSource::Explicit,
-            "memory.anchors",
-        )
-        .unwrap();
-        assert_eq!(stored, attached);
+        let mut values = surfaces
+            .iter()
+            .map(|surface| surface.normalized_value.as_str())
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            [
+                ".github/workflows/test.yml",
+                "app/controller.py",
+                "lib/widget.ts",
+                "package.json",
+            ]
+        );
+        assert!(surfaces.iter().all(|surface| {
+            surface.anchor.anchor_kind == MemoryAnchorKind::Path
+                && surface.anchor.source == MemoryAnchorSource::Explicit
+        }));
     }
 
     #[cfg(unix)]
@@ -1359,7 +1456,7 @@ mod tests {
     fn backfill_uses_explicit_code_and_bare_paths_without_guessing_prose_symbols() {
         let content = "Review src/db/mod.rs. Then `src/db/mod.rs` and `Store::open()`; \
             anchor:path:src/legacy.rs anchor:symbol:Legacy::restore. OrdinaryName is prose.";
-        let surfaces = extract_backfill_code_anchor_surfaces("mem_fixture", content);
+        let surfaces = extract_backfill_code_anchor_surfaces("mem_fixture", content, None);
         let mut values = surfaces
             .iter()
             .map(|surface| {
@@ -1381,7 +1478,7 @@ mod tests {
         );
         assert_eq!(
             surfaces,
-            extract_backfill_code_anchor_surfaces("mem_fixture", content)
+            extract_backfill_code_anchor_surfaces("mem_fixture", content, None)
         );
     }
 

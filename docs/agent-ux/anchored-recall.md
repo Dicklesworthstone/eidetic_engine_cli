@@ -43,6 +43,10 @@ During capture, the supported explicit inline forms are
 and `anchor:symbol:<symbol>` are accepted aliases. Tokens are separated by
 whitespace. Code fragments can also supply paths and qualified symbols, but
 explicit tokens make the intended relationship unambiguous.
+Explicit paths support any project layout: `ee-anchor:path:app/routes.py`,
+`anchor:path:lib/parser.ts`, and
+`ee-anchor:path:.github/workflows/check.yml` all retain their relative path
+identity. They can name historical files that no longer exist.
 
 This example creates both anchors and verifies a positive path recall in an
 initialized workspace:
@@ -98,15 +102,21 @@ Paths use the same case-sensitive workspace-relative identity as recall:
 `./src/db/mod.rs` normalizes to `src/db/mod.rs`. Attachment accepts concrete
 paths, not recall globs. Absolute paths, parent traversal, symlink escapes
 outside that workspace, malformed symbols, and secret-bearing values are
-rejected. Symbols are exact, case-sensitive
-names; a trailing `()` is normalized away. File existence is not proof of an
-anchor's meaning: the caller supplies the relationship, and attachment does
-not read or index source-file contents.
+rejected. Any project layout is accepted, including `app/`, `lib/`, and
+`.github/`; a historical path may name a file that no longer exists. Symbols
+are exact, case-sensitive names; a trailing `()` is normalized away. File
+existence is not proof of an anchor's meaning: the caller supplies the
+relationship, and attachment does not read or index source-file contents.
 
 Reports use `ee.memory.anchors.v1` under `data`. `status` is `listed`,
 `would_attach`, `attached`, or `unchanged`; `dryRun`, `persisted`, `changed`,
-and `addedAnchorCount` describe the result. `anchors[]` contains typed hashes
-and redacted display values, not raw memory bodies or source provenance.
+and `addedAnchorCount` describe the result. `anchors[]` always contains typed
+hashes and redacted display values. Its optional `locator` field shows the
+exact normalized path or symbol when the same public redaction screen used
+by recall admits it, so a preview identifies the relationship being added.
+The human renderer shows this locator too. Unsafe or unavailable locators
+are omitted rather than replaced with a misleading path; their hashes remain
+available. Raw memory bodies and source provenance are not included.
 `auditId` and `indexJobId` identify the durable operation when one was needed.
 
 ## Preview and Backfill Existing Memories
@@ -122,11 +132,16 @@ ee recall --path src/db/mod.rs --workspace . --json
 ```
 
 Backfill reuses explicit inline tokens and code-fragment extraction, and can
-recognize ordinary repository paths mentioned in prose. It does not infer
-symbols from arbitrary prose, reinterpret a provenance URI as a code path, or
-scan source files. Existing anchors remain intact. Retired or non-visible
-memories are skipped. Stored text is screened before extraction, and candidate
-locators outside the workspace or unsafe under redaction policy are excluded.
+recognize ordinary repository paths mentioned in prose. Explicit path tokens
+support any project layout. Unmarked paths use conservative repository-path
+patterns or must name an existing file inside the addressed workspace: an
+unmarked `app/routes.py` is eligible when that file exists, while an explicit
+`ee-anchor:path:app/retired.py` can recover a historical locator. Backfill
+does not infer symbols from arbitrary prose, reinterpret a provenance URI as
+a code path, or scan source files. Existing anchors remain intact. Retired or
+non-visible memories are skipped. Stored text is screened before extraction,
+and candidate locators outside the workspace or unsafe under redaction policy
+are excluded.
 Each accepted attachment follows the same atomic,
 audited, idempotent path as explicit attachment and preserves the memory's
 content and source provenance.
@@ -140,6 +155,27 @@ per-memory `proposals[]`. If `nextAfter` is not null, continue with
 apply a page with the same `--after` boundary before advancing to the next
 page. Apply rechecks the current stored memories; preview again if the store
 changed substantially between review and application.
+
+Backfill accepts at most **256 distinct screened code-anchor candidates per
+memory**. A memory above that limit is skipped in full in both preview and
+apply; no subset is attached automatically. The optional `skippedMemories[]`
+report identifies it with `reason: "anchor_limit_exceeded"`,
+`candidateAnchorCount`, and `anchorLimit`. It contributes to scanned/skipped
+counts, and `nextAfter` still advances normally. Other eligible memories in
+the page can proceed. Attach selected, reviewed locators from an oversized
+memory explicitly with `ee memory anchors`.
+
+Review each proposed locator alongside its memory ID before applying a page:
+
+```bash
+ee index backfill-anchors --workspace . --limit 100 --dry-run --json \
+  | jq '.data.proposals[] | {memoryId, anchors: [.anchors[] | {anchorKind, locator, anchorValueHash}]}'
+```
+
+Use `ee memory show <memory-id> --workspace . --json` to inspect a proposed
+memory through the normal public reader. If only some relationships are
+appropriate, attach those exact locators with `ee memory anchors` instead
+of applying the entire backfill page.
 
 If no eligible references exist, supply known anchors with `ee memory
 anchors`. A rebuild can restore an anchor projection from durable source

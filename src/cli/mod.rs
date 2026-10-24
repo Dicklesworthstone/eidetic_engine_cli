@@ -25530,9 +25530,27 @@ where
                 for anchor in &proposal.anchors {
                     text.push_str(&format!(
                         "    {} {}\n",
-                        anchor.anchor_kind, anchor.redacted_anchor_value,
+                        anchor.anchor_kind,
+                        anchor
+                            .locator
+                            .as_deref()
+                            .unwrap_or(&anchor.redacted_anchor_value),
                     ));
                 }
+            }
+            for skipped in &report.skipped_memories {
+                text.push_str(&format!(
+                    "  skipped {}: {} ({} candidate anchors; limit {})\n",
+                    skipped.memory_id,
+                    skipped.reason,
+                    skipped.candidate_anchor_count,
+                    skipped.anchor_limit,
+                ));
+            }
+            if !report.skipped_memories.is_empty() {
+                text.push_str(
+                    "Use ee memory anchors to attach selected, reviewed locators from skipped memories.\n",
+                );
             }
             if let Some(after) = &report.next_after {
                 text.push_str(&format!("next page: --after {after}\n"));
@@ -40453,7 +40471,12 @@ where
             for anchor in &report.anchors {
                 text.push_str(&format!(
                     "  {} {} ({})\n",
-                    anchor.anchor_kind, anchor.redacted_anchor_value, anchor.source,
+                    anchor.anchor_kind,
+                    anchor
+                        .locator
+                        .as_deref()
+                        .unwrap_or(&anchor.redacted_anchor_value),
+                    anchor.source,
                 ));
             }
             write_stdout(stdout, &text)
