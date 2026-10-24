@@ -1290,18 +1290,7 @@ mod tests {
                 changed.is_some(),
                 "real memory mutation makes the index stale"
             );
-            connection
-                .insert_search_index_job(
-                    "sidx_00000000000000000000000001",
-                    &crate::db::CreateSearchIndexJobInput {
-                        workspace_id: workspace_id.clone(),
-                        job_type: crate::db::SearchIndexJobType::SingleDocument,
-                        document_source: Some("memory".to_owned()),
-                        document_id: Some(memory_id.clone()),
-                        documents_total: 1,
-                    },
-                )
-                .map_err(|error| error.to_string())?;
+            // The score update queues its own single-document reindex (#83).
         }
         let status =
             crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
@@ -1343,11 +1332,9 @@ mod tests {
             ))
         };
         let before = snapshot()?;
-        assert!(
-            before.0.iter().any(|job| {
-                job.id == "sidx_00000000000000000000000001" && job.status == "pending"
-            })
-        );
+        assert!(before.0.iter().any(|job| {
+            job.document_id.as_deref() == Some(memory_id.as_str()) && job.status == "pending"
+        }));
         let search_options = SearchOptions {
             workspace_path: options.workspace_path.clone(),
             database_path: options.database_path.clone(),
@@ -1452,10 +1439,15 @@ mod tests {
         let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
         let database = options.database_path.clone().ok_or("fixture database")?;
         let index_dir = options.workspace_path.join(".ee").join("index");
-        let job_id = "sidx_00000000000000000000000002";
-        {
+        let job_id = {
             let connection =
                 DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let pending_before = connection
+                .list_pending_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|job| job.id)
+                .collect::<std::collections::BTreeSet<_>>();
             assert!(
                 connection
                     .apply_memory_score_update_audited(
@@ -1475,19 +1467,17 @@ mod tests {
                     .is_some(),
                 "a real memory update must invalidate the existing index generation"
             );
-            connection
-                .insert_search_index_job(
-                    job_id,
-                    &crate::db::CreateSearchIndexJobInput {
-                        workspace_id: workspace_id.clone(),
-                        job_type: crate::db::SearchIndexJobType::SingleDocument,
-                        document_source: Some("memory".to_owned()),
-                        document_id: Some(memory_id.clone()),
-                        documents_total: 1,
-                    },
-                )
-                .map_err(|error| error.to_string())?;
-        }
+            // The score update queues its own single-document reindex (#83).
+            let queued = connection
+                .list_pending_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|job| !pending_before.contains(&job.id))
+                .collect::<Vec<_>>();
+            assert_eq!(queued.len(), 1, "the score update queues exactly one job");
+            assert_eq!(queued[0].document_id.as_deref(), Some(memory_id.as_str()));
+            queued[0].id.clone()
+        };
         let status_options = crate::core::index::IndexStatusOptions {
             workspace_path: options.workspace_path.clone(),
             database_path: Some(database.clone()),

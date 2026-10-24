@@ -8679,6 +8679,127 @@ mod tests {
         Ok(())
     }
 
+    /// #83: a background decay sweep used to bump the workspace generation
+    /// for every decayed memory without queuing index work, so the next ticks
+    /// never scheduled `index_coalesce`, the index stayed stale indefinitely,
+    /// and every search fell back to lexical-only until a manual rebuild.
+    /// The sweep tick must leave queued work that the following tick drains,
+    /// bringing the index back to `ready` with no operator action.
+    #[test]
+    fn background_decay_sweep_queues_index_work_that_the_next_tick_publishes() -> TestResult {
+        let fixture = BackgroundIndexFixture::new()?;
+        let _embedder =
+            crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace_id);
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+        let connection = DbConnection::open_file(&fixture.database).map_err(|e| e.to_string())?;
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "obsidianrelay daemon upgrades restart the relay first".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("manual://background-decay-test".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection.close().map_err(|e| e.to_string())?;
+
+        let status_options = crate::core::index::IndexStatusOptions {
+            workspace_path: fixture.workspace.clone(),
+            database_path: Some(fixture.database.clone()),
+            index_dir: None,
+        };
+        let index_status =
+            || crate::core::index::get_index_status(&status_options).map_err(|e| e.to_string());
+        let rebuilt = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: fixture.workspace.clone(),
+            database_path: Some(fixture.database.clone()),
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+        assert_eq!(
+            rebuilt.status,
+            crate::core::index::IndexRebuildStatus::Success,
+            "{rebuilt:?}"
+        );
+        let built = index_status()?;
+        assert_eq!(built.health, crate::core::index::IndexHealth::Ready);
+        assert_eq!(fixture.scheduled(), BACKGROUND_SCHEDULER_JOB_TYPES);
+
+        let tick = |expect_coalesce: bool| -> Result<DaemonForegroundReport, String> {
+            let mut options = background_scheduler_tick_options(
+                &fixture.workspace.to_string_lossy(),
+                Arc::new(AtomicBool::new(false)),
+            );
+            assert_eq!(
+                options.job_types.contains(&JobType::IndexCoalesce),
+                expect_coalesce,
+                "{:?}",
+                options.job_types
+            );
+            // A memory written now is decades stale at this reference time.
+            options.runner_options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+            run_daemon_foreground(&options)
+        };
+
+        let sweep = tick(false)?;
+        let decay = sweep.ticks[0]
+            .report
+            .results
+            .iter()
+            .find(|result| result.job_type == JobType::DecaySweep)
+            .ok_or_else(|| "the first tick did not run the decay sweep".to_owned())?;
+        assert_eq!(decay.outcome, RunOutcome::Success, "{decay:?}");
+        let applied = decay
+            .details
+            .as_ref()
+            .and_then(|details| details["summary"]["appliedCount"].as_u64());
+        assert_eq!(applied, Some(1), "{decay:?}");
+        let swept = index_status()?;
+        assert_eq!(swept.health, crate::core::index::IndexHealth::Stale);
+        assert!(swept.db_generation > swept.index_generation);
+        let connection =
+            DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
+        let queued = connection
+            .list_pending_search_index_jobs(&fixture.workspace_id, None)
+            .map_err(|e| e.to_string())?;
+        connection.close().map_err(|e| e.to_string())?;
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        assert_eq!(queued[0].document_id.as_deref(), Some(memory_id.as_str()));
+
+        let catch_up = tick(true)?;
+        let coalesce = catch_up.ticks[0]
+            .report
+            .results
+            .iter()
+            .find(|result| result.job_type == JobType::IndexCoalesce)
+            .ok_or_else(|| "the next tick did not drain the queued index work".to_owned())?;
+        assert_eq!(coalesce.outcome, RunOutcome::Success, "{coalesce:?}");
+        let ready = index_status()?;
+        assert_eq!(ready.health, crate::core::index::IndexHealth::Ready);
+        assert_eq!(ready.index_generation, ready.db_generation);
+        let connection =
+            DbConnection::open_file_read_only(&fixture.database).map_err(|e| e.to_string())?;
+        let remaining = connection
+            .list_pending_search_index_jobs(&fixture.workspace_id, None)
+            .map_err(|e| e.to_string())?;
+        assert!(remaining.is_empty(), "{remaining:?}");
+        assert_eq!(fixture.scheduled(), BACKGROUND_SCHEDULER_JOB_TYPES);
+        Ok(())
+    }
+
     #[test]
     fn background_index_coalesce_recovers_sole_interrupted_job_without_changing_its_id()
     -> TestResult {
@@ -10916,7 +11037,70 @@ mod tests {
                 .any(|entry| entry.action == audit_actions::MEMORY_DECAY_TOMBSTONE),
             true,
             "decay tombstone audit row",
+        )?;
+        // Each applied decay write (score update and tombstone) queues its own
+        // reindex, so the tombstoned document leaves the persisted index (#83).
+        let expected_jobs = usize::from(report.changes[0].audit_id.is_some())
+            + usize::from(report.changes[0].lifecycle_audit_id.is_some());
+        let jobs = connection
+            .list_pending_search_index_jobs(SCORE_WORKSPACE_ID, None)
+            .map_err(|error| error.to_string())?;
+        ensure(jobs.len(), expected_jobs, "one reindex job per decay write")?;
+        ensure(
+            jobs.iter()
+                .all(|job| job.document_id.as_deref() == Some(SCORE_MEMORY_A)),
+            true,
+            "reindex jobs target the decayed memory",
         )
+    }
+
+    /// A decay sweep that changes memories must leave index work queued for
+    /// each of them; a dry run or an idempotent rerun must queue none (#83).
+    #[test]
+    fn score_decay_job_queues_one_reindex_job_per_applied_memory() -> TestResult {
+        let connection = open_score_decay_db()?;
+        insert_score_memory(&connection, SCORE_MEMORY_A, 0.8)?;
+        insert_score_memory(&connection, SCORE_MEMORY_B, 0.6)?;
+        let pending_jobs = || {
+            connection
+                .list_pending_search_index_jobs(SCORE_WORKSPACE_ID, None)
+                .map_err(|error| error.to_string())
+        };
+
+        let mut options = ScoreDecayJobOptions::new(SCORE_WORKSPACE_ID);
+        options.as_of = Some("2099-01-01T00:00:00Z".to_owned());
+        options.dry_run = true;
+        let preview = run_score_decay_job(&connection, &options)?;
+        ensure(preview.changed_count, 2, "dry run plans both decays")?;
+        ensure(pending_jobs()?.len(), 0, "dry run queues no index work")?;
+
+        options.dry_run = false;
+        let applied = run_score_decay_job(&connection, &options)?;
+        ensure(applied.applied_count, 2, "both decays applied")?;
+        let jobs = pending_jobs()?;
+        ensure(
+            jobs.iter().all(|job| {
+                job.job_type_enum() == Some(crate::db::SearchIndexJobType::SingleDocument)
+                    && job.document_source.as_deref() == Some("memory")
+                    && job.documents_total == 1
+            }),
+            true,
+            "decay queues single-document memory jobs",
+        )?;
+        let mut targets = jobs
+            .iter()
+            .filter_map(|job| job.document_id.clone())
+            .collect::<Vec<_>>();
+        targets.sort();
+        ensure(
+            targets,
+            vec![SCORE_MEMORY_A.to_owned(), SCORE_MEMORY_B.to_owned()],
+            "one job per decayed memory",
+        )?;
+
+        let rerun = run_score_decay_job(&connection, &options)?;
+        ensure(rerun.applied_count, 0, "rerun applies nothing")?;
+        ensure(pending_jobs()?.len(), 2, "rerun queues no new index work")
     }
 
     #[test]

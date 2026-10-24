@@ -31493,6 +31493,11 @@ impl DbConnection {
                 details: Some(input.details.clone()),
             },
         )?;
+        // The UPDATE above bumped the workspace generation and rewrote the
+        // provenance hash and verification status that the indexed document
+        // carries. Without queued work the persisted index stays stale until
+        // a manual rebuild, and every search falls back to lexical-only (#83).
+        self.enqueue_memory_reindex_job(&input.workspace_id, memory_id)?;
 
         Ok(Some(audit_id))
     }
@@ -31575,6 +31580,9 @@ impl DbConnection {
             previous_trust_class: None,
             new_trust_class: None,
         })?;
+        // `level` is indexed document metadata; reindex like every other
+        // level transition does.
+        self.enqueue_memory_reindex_job(&input.workspace_id, memory_id)?;
 
         Ok(Some(audit_id))
     }
@@ -31629,6 +31637,8 @@ impl DbConnection {
                     previous_trust_class: None,
                     new_trust_class: None,
                 })?;
+            // Drop the tombstoned document from the persisted index.
+            self.enqueue_memory_reindex_job(workspace_id, memory_id)?;
 
             Ok(Some(audit_id))
         })
@@ -31729,28 +31739,7 @@ impl DbConnection {
             // `with_transaction`, which makes the enqueue part of the promotion's
             // all-or-nothing unit: if this insert fails, the UPDATE and the audit roll back
             // with it rather than leaving a promoted memory that is never reindexed.
-            //
-            // The id mirrors generate_search_index_job_id (src/core/memory.rs:5410) rather
-            // than calling it, because that helper is private to core and db must not
-            // depend upward on core. The schema requires `id GLOB 'sidx_*' AND
-            // length(id) = 31`, which `sidx_` plus the 26-character Crockford payload of a
-            // fresh id satisfies exactly (src/models/id.rs: ENCODED_LEN = 26).
-            let index_job_id = format!(
-                "sidx_{}",
-                crate::models::MemoryId::now()
-                    .to_string()
-                    .trim_start_matches("mem_")
-            );
-            self.insert_search_index_job(
-                &index_job_id,
-                &CreateSearchIndexJobInput {
-                    workspace_id: workspace_id.to_string(),
-                    job_type: SearchIndexJobType::SingleDocument,
-                    document_source: Some("memory".to_string()),
-                    document_id: Some(memory.id.clone()),
-                    documents_total: 1,
-                },
-            )?;
+            self.enqueue_memory_reindex_job(workspace_id, &memory.id)?;
 
             promotions.push(WorkflowMemoryPromotion {
                 memory_id: memory.id,
@@ -31759,6 +31748,42 @@ impl DbConnection {
         }
 
         Ok(promotions)
+    }
+
+    /// Queue a single-document reindex for one memory inside the caller's
+    /// transaction.
+    ///
+    /// Every `UPDATE memories` bumps the workspace generation, so a write path
+    /// that changes a memory without queuing index work leaves the persisted
+    /// index permanently stale: nothing schedules `index_coalesce`, and search
+    /// degrades to the lexical live snapshot until a manual rebuild. Callers
+    /// invoke this only after a row actually changed, so a no-op enqueues
+    /// nothing, and inside their transaction, so a failed insert rolls the
+    /// mutation back instead of leaving it unindexed.
+    ///
+    /// The id mirrors `generate_search_index_job_id` in `src/core/memory.rs`
+    /// rather than calling it, because that helper is private to core and db
+    /// must not depend upward on core. The schema requires `id GLOB 'sidx_*'
+    /// AND length(id) = 31`, which `sidx_` plus the 26-character Crockford
+    /// payload of a fresh id satisfies exactly (`src/models/id.rs`:
+    /// `ENCODED_LEN = 26`).
+    fn enqueue_memory_reindex_job(&self, workspace_id: &str, memory_id: &str) -> Result<()> {
+        let index_job_id = format!(
+            "sidx_{}",
+            crate::models::MemoryId::now()
+                .to_string()
+                .trim_start_matches("mem_")
+        );
+        self.insert_search_index_job(
+            &index_job_id,
+            &CreateSearchIndexJobInput {
+                workspace_id: workspace_id.to_string(),
+                job_type: SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_string()),
+                document_id: Some(memory_id.to_string()),
+                documents_total: 1,
+            },
+        )
     }
 
     /// Insert a procedural rule and its evidence/tag junction rows.
@@ -60290,6 +60315,140 @@ UPDATE memories
                 "same-connection get_memory must return updated confidence, got {:.6}",
                 after.confidence
             ),
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    /// Decay-sweep writes rewrite indexed memory metadata and bump the
+    /// workspace generation. Each must queue a single-document reindex in its
+    /// own transaction, or the persisted index stays stale until a manual
+    /// rebuild (#83). A write that changes nothing must queue nothing.
+    #[test]
+    fn decay_writes_queue_single_document_reindex_jobs() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let workspace_id = "wsp_01234567890123456789012345";
+        let memory_id = "mem_decayreindex00000000000001";
+        connection.insert_memory(
+            memory_id,
+            &super::CreateMemoryInput {
+                workspace_id: workspace_id.to_string(),
+                level: "semantic".to_string(),
+                kind: "fact".to_string(),
+                content: "Decay writes must keep the search index current.".to_string(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.7,
+                importance: 0.8,
+                provenance_uri: Some("test://decay-reindex".to_string()),
+                trust_class: "agent_validated".to_string(),
+                trust_subclass: None,
+                tags: vec![],
+                valid_from: None,
+                valid_to: None,
+            },
+        )?;
+        let pending = |connection: &DbConnection| {
+            connection.list_pending_search_index_jobs(workspace_id, None)
+        };
+        ensure(
+            pending(&connection)?.is_empty(),
+            "a raw insert queues no index work",
+        )?;
+
+        let score_input = |confidence: f32| super::ApplyMemoryScoreUpdateInput {
+            workspace_id: workspace_id.to_string(),
+            confidence,
+            utility: 0.7,
+            importance: 0.8,
+            updated_at: "2026-10-29T23:00:00Z".to_string(),
+            actor: Some("db-test".to_string()),
+            details: "{\"schema\":\"ee.test.score_update.v1\"}".to_string(),
+            feedback_event_ids: vec![],
+        };
+        ensure(
+            connection
+                .apply_memory_score_update_audited(memory_id, &score_input(0.9))?
+                .is_none(),
+            "an unchanged score is a no-op",
+        )?;
+        ensure(
+            pending(&connection)?.is_empty(),
+            "a no-op score update queues nothing",
+        )?;
+
+        let generation_before = connection.get_workspace_generation(workspace_id)?;
+        ensure(
+            connection
+                .apply_memory_score_update_audited(memory_id, &score_input(0.76))?
+                .is_some(),
+            "a decayed score is applied",
+        )?;
+        ensure(
+            connection.get_workspace_generation(workspace_id)? > generation_before,
+            "the score update bumps the workspace generation",
+        )?;
+        let jobs = pending(&connection)?;
+        ensure(
+            jobs.len() == 1,
+            format!("one job after score decay: {jobs:?}"),
+        )?;
+        ensure(
+            jobs[0].job_type_enum() == Some(super::SearchIndexJobType::SingleDocument)
+                && jobs[0].document_source.as_deref() == Some("memory")
+                && jobs[0].document_id.as_deref() == Some(memory_id)
+                && jobs[0].documents_total == 1,
+            format!("score decay queues a single-document memory job: {jobs:?}"),
+        )?;
+
+        let demotion = super::ApplyMemoryDecayDemotionInput {
+            workspace_id: workspace_id.to_string(),
+            level: "episodic".to_string(),
+            importance: 0.3,
+            updated_at: "2026-10-29T23:00:01Z".to_string(),
+            actor: Some("db-test".to_string()),
+            details: "{\"schema\":\"ee.test.decay_demote.v1\"}".to_string(),
+        };
+        ensure(
+            connection
+                .apply_memory_decay_demotion_audited(memory_id, &demotion)?
+                .is_some(),
+            "the demotion is applied",
+        )?;
+        ensure(
+            connection
+                .apply_memory_decay_demotion_audited(memory_id, &demotion)?
+                .is_none(),
+            "a repeated demotion is a no-op",
+        )?;
+        ensure(
+            pending(&connection)?.len() == 2,
+            "the demotion queues exactly one more job",
+        )?;
+
+        ensure(
+            connection
+                .tombstone_memory_decay_audited(memory_id, workspace_id, Some("db-test"), "{}")?
+                .is_some(),
+            "the decay tombstone is applied",
+        )?;
+        ensure(
+            connection
+                .tombstone_memory_decay_audited(memory_id, workspace_id, Some("db-test"), "{}")?
+                .is_none(),
+            "a repeated tombstone is a no-op",
+        )?;
+        let jobs = pending(&connection)?;
+        ensure(
+            jobs.len() == 3
+                && jobs
+                    .iter()
+                    .all(|job| job.document_id.as_deref() == Some(memory_id)),
+            format!("the tombstone queues exactly one more memory job: {jobs:?}"),
         )?;
 
         connection.close()?;
