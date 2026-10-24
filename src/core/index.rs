@@ -4464,9 +4464,10 @@ fn memory_documents_with_anchors_with_cx(
                 mut anchors,
                 typed_fields_json,
             } = metadata.by_memory_id.remove(&memory.id).unwrap_or_default();
-            // Preserve every existing anchor's source/provenance. Only legacy
-            // rows with no anchors use the shared rebuild extractor; read-only
-            // fallback projects those anchors without writing source tables.
+            // Batched metadata merges missing content-derived anchors with
+            // durable bindings while preserving surviving capture metadata.
+            // Keep the empty fallback for older metadata providers; read-only
+            // fallback never writes source tables.
             if anchors.is_empty() {
                 if read_only {
                     anchors = source_snapshot::projected_anchors(&memory.id, &memory.content);

@@ -26177,6 +26177,52 @@ impl DbConnection {
         Ok(attempted)
     }
 
+    /// Restore only missing canonical identities. Rebuild must never reset a
+    /// surviving anchor's capture provenance, freshness, generation or clocks.
+    fn insert_missing_memory_anchor_batch(
+        &self,
+        anchors: &[CreateMemoryAnchorInput],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        for chunk in anchors.chunks(64) {
+            let slots = (0..chunk.len())
+                .map(|row| {
+                    let columns = (1..=12)
+                        .map(|column| format!("?{}", row * 12 + column))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("({columns})")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let parameters = chunk
+                .iter()
+                .flat_map(|anchor| {
+                    [
+                        Value::Text(anchor.memory_id.clone()),
+                        Value::Text(anchor.anchor_kind.as_str().to_owned()),
+                        Value::Text(anchor.anchor_value_hash.clone()),
+                        Value::Text(anchor.redacted_anchor_value.clone()),
+                        Value::Float(anchor.confidence),
+                        Value::Text(anchor.source.as_str().to_owned()),
+                        Value::Text(anchor.provenance.clone()),
+                        Value::Text(anchor.captured_span_hash.clone()),
+                        Value::Text(anchor.freshness_state.as_str().to_owned()),
+                        Value::BigInt(anchor.generation),
+                        Value::Text(now.clone()),
+                        Value::Text(now.clone()),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            self.execute_for(
+                DbOperation::Execute,
+                &format!("INSERT INTO memory_anchors (memory_id, anchor_kind, anchor_value_hash, redacted_anchor_value, confidence, source, provenance, captured_span_hash, freshness_state, generation, created_at, updated_at) VALUES {slots} ON CONFLICT(memory_id, anchor_kind, anchor_value_hash) DO NOTHING"),
+                &parameters,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Rebuild anchors for one memory from index-rebuild material.
     pub fn refresh_memory_anchors_for_memory(&self, memory_id: &str, content: &str) -> Result<u64> {
         let anchors = extract_precision_memory_anchors(
@@ -26499,16 +26545,62 @@ impl DbConnection {
                 .map(|index| format!("?{index}"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let parameters = chunk
+                .iter()
+                .map(|(_, memory_id, _)| Value::Text((*memory_id).to_owned()))
+                .collect::<Vec<_>>();
+            let live_rows = self.query_for(
+                DbOperation::Query,
+                &format!(
+                    "SELECT id, workspace_id, content FROM memories WHERE id IN ({placeholders})"
+                ),
+                &parameters,
+            )?;
+            let live_sources = live_rows
+                .iter()
+                .map(|row| {
+                    Ok((
+                        required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
+                        (
+                            required_text(row, 1, DbOperation::Query, "workspace_id")?.to_owned(),
+                            required_text(row, 2, DbOperation::Query, "content")?.to_owned(),
+                        ),
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            let canonical_rows = self.query_for(
+                DbOperation::Query,
+                &format!("SELECT memory_id, anchor_kind, anchor_value_hash, redacted_anchor_value, confidence, source, provenance, captured_span_hash, freshness_state, generation, created_at, updated_at FROM memory_anchors WHERE memory_id IN ({placeholders})"),
+                &parameters,
+            )?;
+            let canonical = canonical_rows
+                .iter()
+                .map(|row| {
+                    let anchor = stored_memory_anchor_from_row(row)?;
+                    Ok((
+                        (
+                            anchor.memory_id.clone(),
+                            anchor.anchor_kind,
+                            anchor.anchor_value_hash.clone(),
+                        ),
+                        anchor,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
             self.execute_for(
                 DbOperation::Execute,
                 &format!("DELETE FROM memory_anchor_index WHERE memory_id IN ({placeholders})"),
-                &chunk
-                    .iter()
-                    .map(|(_, memory_id, _)| Value::Text((*memory_id).to_owned()))
-                    .collect::<Vec<_>>(),
+                &parameters,
             )?;
             let mut rows = Vec::with_capacity(INSERT_BATCH_SIZE);
+            let mut missing_anchors = Vec::with_capacity(INSERT_BATCH_SIZE);
             for &(workspace_id, memory_id, content) in chunk {
+                // A low-level caller may refresh a historical derived view.
+                // Only the actual source in this workspace can authorize new
+                // canonical identities; caller-supplied text cannot do so.
+                let canonical_source = live_sources
+                    .get(memory_id)
+                    .is_some_and(|(owner, body)| owner == workspace_id && body == content);
                 let generation = if let Some(generation) = generations.get(workspace_id) {
                     *generation
                 } else {
@@ -26523,17 +26615,46 @@ impl DbConnection {
                     content,
                     MemoryAnchorSource::IndexRebuild,
                     Some("index_rebuild"),
-                );
+                )
+                .into_iter()
+                .map(|surface| {
+                    (
+                        (
+                            surface.anchor.anchor_kind,
+                            surface.anchor.anchor_value_hash.clone(),
+                        ),
+                        surface,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
                 let durable = bindings.remove(memory_id).unwrap_or_default();
-                // Rehydrate canonical hashes too if only the durable binding
-                // survived recovery. Never overwrite existing freshness.
-                for (source, _, canonical) in &durable {
-                    if !canonical {
-                        self.upsert_memory_anchors(&[source.anchor.clone()])?;
-                    }
+                // A durable capture takes precedence when it names the same
+                // identity as text extraction. Existing canonical metadata is
+                // still authoritative for every surviving anchor.
+                for (surface, _, _) in durable {
+                    surfaces.insert(
+                        (
+                            surface.anchor.anchor_kind,
+                            surface.anchor.anchor_value_hash.clone(),
+                        ),
+                        surface,
+                    );
                 }
-                surfaces.extend(durable.into_iter().map(|(surface, _, _)| surface));
-                for surface in surfaces {
+                for mut surface in surfaces.into_values() {
+                    let key = (
+                        memory_id.to_owned(),
+                        surface.anchor.anchor_kind,
+                        surface.anchor.anchor_value_hash.clone(),
+                    );
+                    if let Some(existing) = canonical.get(&key) {
+                        surface.anchor.freshness_state = existing.freshness_state;
+                    } else if canonical_source {
+                        missing_anchors.push(surface.anchor.clone());
+                        if missing_anchors.len() == INSERT_BATCH_SIZE {
+                            self.insert_missing_memory_anchor_batch(&missing_anchors)?;
+                            missing_anchors.clear();
+                        }
+                    }
                     let (normalized_path, symbol) = match surface.anchor.anchor_kind {
                         MemoryAnchorKind::Path => (Some(surface.normalized_value), None),
                         MemoryAnchorKind::Symbol => (None, Some(surface.normalized_value)),
@@ -26552,12 +26673,15 @@ impl DbConnection {
                         Value::Text(now.clone()),
                     ]);
                     if rows.len() == INSERT_BATCH_SIZE {
+                        self.insert_missing_memory_anchor_batch(&missing_anchors)?;
+                        missing_anchors.clear();
                         self.insert_memory_anchor_index_batch(&rows)?;
                         written = written.saturating_add(rows.len() as u64);
                         rows.clear();
                     }
                 }
             }
+            self.insert_missing_memory_anchor_batch(&missing_anchors)?;
             if !rows.is_empty() {
                 self.insert_memory_anchor_index_batch(&rows)?;
                 written = written.saturating_add(rows.len() as u64);
@@ -26938,13 +27062,23 @@ impl DbConnection {
             let rows = self.query_for(
                 DbOperation::Query,
                 &format!(
-                    "SELECT id, typed_fields_json FROM memories WHERE id IN ({placeholders}) ORDER BY id ASC"
+                    "SELECT id, typed_fields_json, content FROM memories WHERE id IN ({placeholders}) ORDER BY id ASC"
                 ),
                 &parameters,
             )?;
             batch.query_count += 1;
+            let mut extracted = BTreeMap::new();
             for row in &rows {
                 let memory_id = required_text(row, 0, DbOperation::Query, "id")?.to_owned();
+                extracted.insert(
+                    memory_id.clone(),
+                    extract_precision_memory_anchors(
+                        &memory_id,
+                        required_text(row, 2, DbOperation::Query, "content")?,
+                        MemoryAnchorSource::IndexRebuild,
+                        Some("index_rebuild"),
+                    ),
+                );
                 batch.by_memory_id.insert(
                     memory_id,
                     MemoryIndexMetadata {
@@ -26995,12 +27129,45 @@ impl DbConnection {
                             updated_at: created_at,
                         });
                     }
-                    metadata.anchors.sort_by(|left, right| {
-                        left.anchor_kind
-                            .cmp(&right.anchor_kind)
-                            .then_with(|| left.anchor_value_hash.cmp(&right.anchor_value_hash))
+                }
+            }
+            // A surviving config anchor or manual binding must not suppress
+            // missing text-derived anchors. Search documents are built before
+            // the reverse-index refresh; project the same union here so the
+            // first rebuild (and read-only fallback) already sees every source.
+            for (memory_id, anchors) in extracted {
+                let metadata = batch.by_memory_id.entry(memory_id).or_default();
+                let mut identities = metadata
+                    .anchors
+                    .iter()
+                    .map(|anchor| (anchor.anchor_kind, anchor.anchor_value_hash.clone()))
+                    .collect::<BTreeSet<_>>();
+                for anchor in anchors {
+                    if !identities.insert((anchor.anchor_kind, anchor.anchor_value_hash.clone())) {
+                        continue;
+                    }
+                    metadata.anchors.push(StoredMemoryAnchor {
+                        memory_id: anchor.memory_id,
+                        anchor_kind: anchor.anchor_kind,
+                        anchor_value_hash: anchor.anchor_value_hash,
+                        redacted_anchor_value: anchor.redacted_anchor_value,
+                        confidence: anchor.confidence,
+                        source: anchor.source,
+                        provenance: anchor.provenance,
+                        captured_span_hash: anchor.captured_span_hash,
+                        freshness_state: anchor.freshness_state,
+                        generation: anchor.generation,
+                        // Inferred metadata is not a new capture timestamp.
+                        created_at: String::new(),
+                        updated_at: String::new(),
                     });
                 }
+                metadata.anchors.sort_by(|left, right| {
+                    left.anchor_kind
+                        .as_str()
+                        .cmp(right.anchor_kind.as_str())
+                        .then_with(|| left.anchor_value_hash.cmp(&right.anchor_value_hash))
+                });
             }
         }
         Ok(batch)
@@ -42975,6 +43142,266 @@ pub fn rch_verify_run_id(
     let hex = blake3::hash(payload.as_bytes()).to_hex().to_string();
     let suffix: String = hex.chars().take(23).collect();
     format!("rchverify_{suffix}")
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod code_anchor_recovery_tests {
+    use super::*;
+    use crate::core::recall::{RecallQuery, run_recall};
+
+    const WORKSPACE: &str = "wsp_00000000000000000000000851";
+    const MEMORY: &str = "mem_00000000000000000000000851";
+    const BODY: &str = "Original guidance. ee-anchor:path:src/inline.rs ee-anchor:symbol:Inline::run ee-anchor:config_key:search.limit";
+
+    fn fixture() -> (DbConnection, StoredMemory) {
+        let db = DbConnection::open_memory().unwrap();
+        db.migrate().unwrap();
+        db.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: "/code-anchor-recovery".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        db.insert_memory(
+            MEMORY,
+            &CreateMemoryInput {
+                workspace_id: WORKSPACE.to_owned(),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                content: BODY.to_owned(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                provenance_uri: Some("manual://source-observation".to_owned()),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .unwrap();
+        let sources = [
+            (MemoryAnchorKind::Path, "src/manual.rs"),
+            (MemoryAnchorKind::Symbol, "Manual::run"),
+        ]
+        .into_iter()
+        .map(|(kind, value)| {
+            CreateMemoryAnchorInput::from_stored_code_surface(
+                MEMORY,
+                kind,
+                value,
+                MemoryAnchorSource::Explicit,
+                "memory.anchors",
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+        db.with_transaction(|| db.attach_memory_code_anchor_sources(WORKSPACE, MEMORY, &sources))
+            .unwrap();
+        let memory = db.get_memory(MEMORY).unwrap().unwrap();
+        (db, memory)
+    }
+
+    fn path_query(path: &str) -> RecallQuery {
+        RecallQuery {
+            paths: vec![path.to_owned()],
+            ..Default::default()
+        }
+    }
+
+    fn restore(db: &DbConnection, memory: &StoredMemory) {
+        db.with_transaction(|| db.refresh_memory_anchor_index_for_memories(&[memory]))
+            .unwrap();
+    }
+
+    #[test]
+    fn mixed_sources_restore_all_canonical_anchors_before_first_recall() {
+        let (db, memory) = fixture();
+        db.execute_raw("DELETE FROM memory_anchors; DELETE FROM memory_anchor_index;")
+            .unwrap();
+        let query = path_query("src/inline.rs");
+        let missing = run_recall(&db, WORKSPACE, &query).unwrap();
+        assert!(missing.items.is_empty());
+        assert!(
+            missing
+                .degraded
+                .iter()
+                .any(|entry| entry.code == crate::core::recall::ANCHOR_INDEX_STALE_CODE)
+        );
+
+        db.begin_read_snapshot().unwrap();
+        let metadata = db
+            .memory_index_metadata_in_current_snapshot(&[MEMORY])
+            .unwrap();
+        db.commit_read_snapshot().unwrap();
+        let projected = &metadata.by_memory_id[MEMORY].anchors;
+        assert_eq!(
+            projected.len(),
+            5,
+            "manual bindings cannot suppress inline/config sources"
+        );
+        assert!(
+            db.list_memory_anchors(MEMORY).unwrap().is_empty(),
+            "metadata projection stays read-only"
+        );
+
+        restore(&db, &memory);
+        let restored = db.list_memory_anchors(MEMORY).unwrap();
+        assert_eq!(restored.len(), 5);
+        for anchor in projected {
+            let actual = restored
+                .iter()
+                .find(|actual| {
+                    actual.anchor_kind == anchor.anchor_kind
+                        && actual.anchor_value_hash == anchor.anchor_value_hash
+                })
+                .unwrap();
+            assert_eq!(actual.source, anchor.source);
+            assert_eq!(actual.provenance, anchor.provenance);
+            assert_eq!(actual.freshness_state, anchor.freshness_state);
+        }
+        for query in [
+            path_query("src/inline.rs"),
+            path_query("src/manual.rs"),
+            RecallQuery {
+                symbols: vec!["Inline::run".to_owned()],
+                ..Default::default()
+            },
+            RecallQuery {
+                symbols: vec!["Manual::run()".to_owned()],
+                ..Default::default()
+            },
+        ] {
+            let report = run_recall(&db, WORKSPACE, &query).unwrap();
+            assert_eq!(report.items.len(), 1, "{query:?}");
+            assert_eq!(report.items[0].memory_id, MEMORY);
+            assert!(report.degraded.is_empty(), "{:?}", report.degraded);
+        }
+        let sources = db.list_memory_code_anchor_sources(MEMORY).unwrap();
+        assert_eq!(sources.len(), 2);
+        assert!(sources.iter().all(
+            |source| source.anchor.source == MemoryAnchorSource::Explicit
+                && source.anchor.provenance == "memory.anchors"
+        ));
+        restore(&db, &memory);
+        assert_eq!(
+            db.list_memory_anchors(MEMORY).unwrap(),
+            restored,
+            "repeated rebuild preserves capture metadata"
+        );
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
+
+    #[test]
+    fn partial_recovery_preserves_existing_capture_metadata_and_freshness() {
+        let (db, memory) = fixture();
+        let mut stale = CreateMemoryAnchorInput::from_raw(
+            MEMORY,
+            MemoryAnchorKind::Path,
+            "src/inline.rs",
+            0.73,
+            MemoryAnchorSource::Remember,
+            "manual://original-capture",
+            999,
+        )
+        .unwrap();
+        stale.freshness_state = MemoryAnchorFreshnessState::Stale;
+        db.upsert_memory_anchors(&[stale]).unwrap();
+        db.execute_raw("DELETE FROM memory_anchors WHERE anchor_kind = 'symbol'; DELETE FROM memory_anchor_index;").unwrap();
+        let surviving = db.list_memory_anchors(MEMORY).unwrap();
+        let before = db
+            .memory_index_metadata_in_current_snapshot(&[MEMORY])
+            .unwrap();
+        assert_eq!(before.by_memory_id[MEMORY].anchors.len(), 5);
+        restore(&db, &memory);
+        let restored = db.list_memory_anchors(MEMORY).unwrap();
+        assert_eq!(restored.len(), 5);
+        for anchor in surviving {
+            assert!(
+                restored.contains(&anchor),
+                "existing canonical capture must remain byte-identical"
+            );
+        }
+        let projected = db
+            .query_anchor_index_path_candidates(WORKSPACE, Some(&["src/inline.rs".to_owned()]), 10)
+            .unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(
+            projected[0].freshness_state,
+            MemoryAnchorFreshnessState::Stale
+        );
+        let report = run_recall(
+            &db,
+            WORKSPACE,
+            &RecallQuery {
+                stale_only: true,
+                ..path_query("src/inline.rs")
+            },
+        )
+        .unwrap();
+        assert_eq!(report.items.len(), 1);
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
+
+    #[test]
+    fn historical_or_misbound_refresh_cannot_create_canonical_authority() {
+        let (db, memory) = fixture();
+        db.execute_raw("DELETE FROM memory_anchors; DELETE FROM memory_anchor_index;")
+            .unwrap();
+        db.refresh_memory_anchor_index_for_memory(
+            WORKSPACE,
+            MEMORY,
+            "ee-anchor:path:src/forged.rs",
+        )
+        .unwrap();
+        assert!(db.list_memory_anchors(MEMORY).unwrap().is_empty());
+        assert!(
+            run_recall(&db, WORKSPACE, &path_query("src/forged.rs"))
+                .unwrap()
+                .items
+                .is_empty()
+        );
+
+        let other = "wsp_00000000000000000000000852";
+        db.insert_workspace(
+            other,
+            &CreateWorkspaceInput {
+                path: "/other-code-anchor-recovery".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        db.refresh_memory_anchor_index_for_memory(other, MEMORY, BODY)
+            .unwrap();
+        assert!(db.list_memory_anchors(MEMORY).unwrap().is_empty());
+        assert!(
+            run_recall(&db, other, &path_query("src/inline.rs"))
+                .unwrap()
+                .items
+                .is_empty()
+        );
+
+        restore(&db, &memory);
+        assert_eq!(
+            run_recall(&db, WORKSPACE, &path_query("src/inline.rs"))
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        assert!(
+            run_recall(&db, WORKSPACE, &path_query("src/forged.rs"))
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
 }
 
 #[cfg(test)]
