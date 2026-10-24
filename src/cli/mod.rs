@@ -74658,6 +74658,14 @@ mod tests {
     }
 
     #[test]
+    fn index_coalesce_failure_repair_hint_uses_current_public_surface() -> TestResult {
+        ensure_repair_command_parses(
+            crate::steward::INDEX_COALESCE_REPAIR_COMMAND,
+            "index_coalesce_failed repair command",
+        )
+    }
+
+    #[test]
     fn parser_accepts_global_json_before_or_after_command() -> TestResult {
         let before = Cli::try_parse_from(["ee", "--json", "status"])
             .map(|cli| (cli.json, cli.command))

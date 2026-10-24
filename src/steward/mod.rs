@@ -87,6 +87,12 @@ const GRAPH_SNAPSHOT_PRUNE_RETENTION_DAYS: i64 = 7;
 const GRAPH_SNAPSHOT_PRUNE_LOCK_TTL_SECS: u64 = 300;
 const GRAPH_SNAPSHOT_PRUNE_LOCK_REASON: &str = "graph snapshot prune";
 
+/// Repair hint of a failed `index_coalesce` run: run the job again. There is
+/// no `ee index process` subcommand; `ee job run index_coalesce` is the
+/// command that drains the durable index queue.
+pub(crate) const INDEX_COALESCE_REPAIR_COMMAND: &str =
+    "ee job run index_coalesce --workspace . --json";
+
 static MAINTENANCE_JOB_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
 
 fn normalized_job_type_token(input: &str) -> String {
@@ -3754,7 +3760,7 @@ impl ManualRunner {
                     message,
                     false,
                     Some(&database_path),
-                    "ee index process --workspace . --json",
+                    INDEX_COALESCE_REPAIR_COMMAND,
                 );
             }
         };
