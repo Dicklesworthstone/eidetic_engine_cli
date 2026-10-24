@@ -690,8 +690,8 @@ that helper is the thing to change.
 #### Code-anchored recall (4)
 | Code | Severity | Bead |
 |------|----------|------|
-| `anchor_index_empty` | info | bd-u875s.2 — ADR 0064 §5: the anchor reverse index has no rows for this workspace (nothing anchored yet); never a hard error |
-| `anchor_index_stale` | low | bd-u875s.2 — ADR 0064 §5: reverse-index generation < DB generation; repair `ee index rebuild --workspace .` |
+| `anchor_index_empty` | info | bd-u875s.2 / issue #84 — ADR 0064 §5: no indexed or stored code anchors on non-tombstoned memories in this workspace; preview `ee index backfill-anchors --workspace . --dry-run --json` or attach known anchors |
+| `anchor_index_stale` | low | bd-u875s.2 / issue #84 — ADR 0064 §5: reverse-index generation < DB generation, or source code anchors exist but their projection is empty; repair `ee index rebuild --workspace .` |
 | `recall_filtered_empty` | info | bd-u875s.2 — ADR 0064 §5: anchored rows matched the surface but `--kind`/`--level`/`--stale` filters removed them all (distinct from empty-index so hook authors can tell the difference) |
 | `recall_git_unavailable` | warning | bd-u875s.3 — ADR 0064 §2 `git_unavailable`-family: the read-only `git diff` shell-out behind `--diff`/`--diff-staged` failed; the diff selector degrades to an empty path set and recall continues (never blocks an edit) |
 

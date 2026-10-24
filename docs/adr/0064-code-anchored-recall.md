@@ -30,8 +30,9 @@ of truth:
   `memory_id`, `freshness_state` (`current | suspect | stale`, mirroring
   ADR 0056), `generation`.
 - Populated from the **same anchor extraction** the search-document builder
-  uses (single extractor, two consumers — drift between them is impossible
-  by construction).
+  uses, plus validated durable code-anchor sources attached explicitly or by
+  backfill. A rebuild must retain those sources even when the memory body
+  contains no code reference.
 - Maintenance rides the existing `search_index_jobs` pathway: rows are
   rewritten on memory create/revise/tombstone, and the whole index advances
   with the search generation. `ee index rebuild` rebuilds it from scratch;
@@ -44,6 +45,25 @@ of truth:
   open path, the recorded fallback design is a small mmap'd sidecar
   materialized at index time — but the table is tried first; the sidecar is
   a follow-up bead, not v1 scope.
+
+### 1a. Additive capture and historical backfill (issue #84)
+
+`ee memory anchors <memory-id> --path <path> --symbol <symbol>` attaches
+validated, normalized code anchors without replacing the memory content or
+source provenance. `--dry-run` previews the addition; no selectors lists the
+memory's code anchors. The operation is workspace-scoped, additive,
+idempotent, and audited. Durable safe code-anchor sources and the reverse
+projection are updated transactionally and the existing search-index job
+path publishes metadata changes. Rebuild reprojects these sources alongside
+content-derived anchors.
+
+`ee index backfill-anchors` is a bounded read-only preview by default, with
+explicit `--apply` for mutation and `--after` pagination. It extracts eligible
+stored code references without editing bodies, changing provenance URIs, or
+reading source files. Both operations preserve normalization and redaction
+rules. Source absence is not an index-health problem: rebuilding cannot
+invent a path/symbol relationship. See the runnable creation, attachment,
+backfill, and recall examples in [the agent guide](../agent-ux/anchored-recall.md).
 
 ### 2. Lookup semantics
 
@@ -91,8 +111,8 @@ agent-facing view of what ADR 0056 today penalizes silently.
 
 | Code | Severity | Class | Trigger |
 |---|---|---|---|
-| `anchor_index_empty` | info | response_time | the reverse index has no rows for this workspace (nothing anchored yet) — never a hard error |
-| `anchor_index_stale` | low | response_time | reverse-index generation < DB generation; repair: `ee index rebuild --workspace .` |
+| `anchor_index_empty` | info | response_time | the reverse index has no rows and no canonical path/symbol anchors exist on non-tombstoned memories in this workspace; preview `ee index backfill-anchors --workspace . --dry-run --json` or attach known anchors — never a hard error |
+| `anchor_index_stale` | low | response_time | reverse-index generation < DB generation, or canonical code anchors exist but their projection is empty; repair: `ee index rebuild --workspace .` |
 | `recall_filtered_empty` | info | response_time | the index HAD anchored rows but `--kind/--level` filters removed them all (distinct from empty-index so hook authors can tell the difference) |
 
 Budget truncation is **not** a recall-specific code: it is the governor's

@@ -1245,6 +1245,7 @@ struct BackupExportData {
     workspace_row: crate::db::StoredWorkspace,
     memories: Vec<StoredMemory>,
     typed_fields_by_memory: BTreeMap<String, JsonValue>,
+    code_anchors_by_memory: BTreeMap<String, Vec<crate::models::jsonl::ExportCodeAnchorRecord>>,
     logical_ids_by_memory: BTreeMap<String, String>,
     /// bd-tmv70: see `superseded_by_within_export`.
     superseded_by_by_memory: BTreeMap<String, String>,
@@ -5672,7 +5673,25 @@ fn load_export_data_in_current_snapshot(
             repair: Some("ee db check --workspace .".to_owned()),
         })?;
     let mut typed_fields_by_memory = BTreeMap::new();
+    let mut code_anchors_by_memory = BTreeMap::new();
     for memory in &memories {
+        let anchors = connection
+            .list_memory_code_anchor_sources(&memory.id)
+            .map_err(work_history_error)?;
+        if !anchors.is_empty() {
+            code_anchors_by_memory.insert(
+                memory.id.clone(),
+                anchors
+                    .into_iter()
+                    .map(|surface| crate::models::jsonl::ExportCodeAnchorRecord {
+                        kind: surface.anchor.anchor_kind.as_str().to_owned(),
+                        value: surface.normalized_value,
+                        source: surface.anchor.source.as_str().to_owned(),
+                        provenance: surface.anchor.provenance,
+                    })
+                    .collect(),
+            );
+        }
         if let Some(raw) = connection
             .get_memory_typed_fields_json(&memory.id)
             .map_err(work_history_error)?
@@ -5811,6 +5830,7 @@ fn load_export_data_in_current_snapshot(
             .map_err(export_build_error("build backup workspace record"))?,
         memories,
         typed_fields_by_memory,
+        code_anchors_by_memory,
         logical_ids_by_memory,
         superseded_by_by_memory,
         superseded_at_by_memory,
@@ -5863,6 +5883,11 @@ fn render_records(
             )
             .map_err(export_build_error("build backup memory record"))?;
             record.typed_fields = data.typed_fields_by_memory.get(&memory.id).cloned();
+            record.code_anchors = data
+                .code_anchors_by_memory
+                .get(&memory.id)
+                .cloned()
+                .unwrap_or_default();
             record.logical_id = data.logical_ids_by_memory.get(&memory.id).cloned();
             // bd-tmv70: write the supersession fact the exporter already knows.
             // Without this the archive records no headship at all post-V123,
@@ -13348,6 +13373,112 @@ mod tests {
                 repair: None,
             })?;
         Ok((tempdir, workspace, database))
+    }
+
+    #[test]
+    fn code_anchor_backup_roundtrip_restores_positive_path_and_symbol_recall() -> TestResult {
+        for redaction_level in [RedactionLevel::None, RedactionLevel::Standard] {
+            let (root, workspace, database) =
+                fixture_with_memory_content("Original observation without inline locators.")
+                    .map_err(|error| error.message())?;
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            crate::core::anchors::attach_anchors(&crate::core::anchors::AttachAnchorsOptions {
+                workspace_path: &workspace,
+                database_path: &database,
+                memory_id: &memory_id,
+                paths: &["src/portable.rs".to_owned()],
+                symbols: &["Portable::restore".to_owned()],
+                dry_run: false,
+                actor: Some("backup-anchor-fixture"),
+            })
+            .map_err(|error| error.message())?;
+            let created = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+            let records_text =
+                fs::read_to_string(Path::new(&created.backup_path).join(RECORDS_FILE))
+                    .map_err(|error| error.to_string())?;
+            let exported = records_text
+                .lines()
+                .filter_map(|line| {
+                    let value: JsonValue = serde_json::from_str(line).ok()?;
+                    (value["schema"] == crate::models::EXPORT_MEMORY_SCHEMA_V1).then_some(value)
+                })
+                .next()
+                .ok_or("exported memory missing")?;
+            let exported: ExportMemoryRecord =
+                serde_json::from_value(exported).map_err(|error| error.to_string())?;
+            assert_eq!(exported.code_anchors.len(), 2);
+            assert_eq!(
+                exported.content,
+                "Original observation without inline locators."
+            );
+            let restored_id =
+                import_memory_id(&exported, redaction_level).map_err(|issue| issue.message)?;
+            let side_path = root
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?
+                .join("restored-anchor-workspace");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace,
+                backup_path: PathBuf::from(&created.backup_path),
+                side_path,
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+            let db = DbConnection::open_file_read_only(&restored.restored_database_path)
+                .map_err(|error| error.to_string())?;
+            let sources = db
+                .list_memory_code_anchor_sources(&restored_id)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(sources.len(), 2);
+            for expected in &exported.code_anchors {
+                assert!(
+                    sources
+                        .iter()
+                        .any(|source| source.normalized_value == expected.value
+                            && source.anchor.source.as_str() == expected.source
+                            && source.anchor.provenance == expected.provenance)
+                );
+            }
+            for query in [
+                crate::core::recall::RecallQuery {
+                    paths: vec!["src/portable.rs".to_owned()],
+                    ..Default::default()
+                },
+                crate::core::recall::RecallQuery {
+                    symbols: vec!["Portable::restore".to_owned()],
+                    ..Default::default()
+                },
+            ] {
+                let recalled = crate::core::recall::run_recall(&db, &workspace_id, &query)
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(recalled.items.len(), 1);
+                assert_eq!(recalled.items[0].memory_id, restored_id);
+            }
+            let memory = db
+                .get_memory(&restored_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("restored memory")?;
+            assert_eq!(
+                memory.content,
+                "Original observation without inline locators."
+            );
+            assert_eq!(memory.provenance_uri.as_deref(), Some("ee-test://backup"));
+            db.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     fn backup_denied_mesh_link_metadata() -> String {

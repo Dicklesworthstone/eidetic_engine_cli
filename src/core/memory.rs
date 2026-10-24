@@ -12096,6 +12096,11 @@ where
             // the attempt-family pointer; the slot ledger inherits by
             // logical_id and is never copied.
             conn.carry_memory_attempt_family_pointer(options.original_memory_id, &new_id)?;
+            conn.carry_memory_code_anchor_sources(
+                options.original_memory_id,
+                &new_id,
+                &original.workspace_id,
+            )?;
             // bd-tmv70: mark the original as history in `superseded_at`, NOT by
             // overwriting `valid_to`. `valid_to` is the author's temporal bound
             // and supersession has no business editing it. The previous write

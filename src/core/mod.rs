@@ -14,6 +14,7 @@ pub mod adaptive_scheduler;
 pub mod agent_detect;
 pub mod agent_docs;
 pub mod agentsmd;
+pub mod anchors;
 pub mod artifact;
 pub mod artifact_relocation;
 pub mod ask;

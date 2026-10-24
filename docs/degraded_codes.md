@@ -531,7 +531,7 @@ ee symbol link --workspace . --evidence ambiguous-span.json --json
 
 **Introduced by:** bd-u875s.3 (epic RECALL)
 
-**Trigger.** The memory_anchor_index reverse index has no rows for the workspace (nothing anchored yet) when ee recall runs. Never a hard error (ADR 0064 §5): the response succeeds with empty items and this info entry, so a pre-edit hook can distinguish 'no anchored knowledge' from a failure.
+**Trigger.** The workspace has no reverse-index rows and no stored path or symbol anchors on non-tombstoned memories. Non-code anchors such as config_key do not count. Recall succeeds with empty items; preview code-anchor backfill or attach a known anchor, because rebuilding cannot create missing source anchors.
 
 **Setup.**
 
@@ -545,9 +545,9 @@ ee init --workspace .
 ee recall --path 'src/**' --workspace . --json
 ```
 
-**Expected emission.** Message contains: `anchor reverse index has no rows ... nothing is anchored yet`
+**Expected emission.** Message contains: `anchor reverse index has no rows ... no stored path or symbol anchors ... cannot create missing source anchors`
 
-**Repair hint.** `ee index rebuild`
+**Repair hint.** `ee index backfill-anchors`
 
 **Fixture.** [`tests/fixtures/failure_modes/anchor_index_empty.json`](../tests/fixtures/failure_modes/anchor_index_empty.json)
 
@@ -561,13 +561,13 @@ ee recall --path 'src/**' --workspace . --json
 
 **Introduced by:** bd-u875s.3 (epic RECALL)
 
-**Trigger.** The memory_anchor_index reverse-index generation is behind the workspace DB generation when ee recall runs (memories changed since the derived index was last maintained), so results may miss recent memories. Repair: ee index rebuild --workspace . (ADR 0064 §5).
+**Trigger.** The memory_anchor_index reverse-index generation is behind the workspace DB generation, or the projection is empty while stored path or symbol anchors exist on non-tombstoned memories in this workspace. Results may miss recent memories. Repair the derived projection with ee index rebuild --workspace . (ADR 0064 §5).
 
 **Setup.**
 
 ```bash
 ee init --workspace .
-ee remember "Anchored rule about src/db/mod.rs" --workspace . --level procedural --kind rule --json
+ee remember "Anchored rule. ee-anchor:path:src/db/mod.rs" --workspace . --level procedural --kind rule --json
 # advance the DB generation without refreshing the derived anchor index
 ```
 

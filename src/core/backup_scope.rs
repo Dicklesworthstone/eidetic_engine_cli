@@ -43,7 +43,7 @@ fn scope(table: &str) -> Option<Scope> {
         "situation_records" => Scope::Column("workspace_scope"),
         "audit_log" | "recorder_runs" | "task_episodes" => Scope::WithUnscoped,
         "curation_ttl_policies" => Scope::Shared,
-        "memory_tags" | "memory_seals" | "memory_sentinel_specs" => {
+        "memory_tags" | "memory_seals" | "memory_sentinel_specs" | "memory_code_anchor_sources" => {
             child("memory_id", "memories", "id")
         }
         "memory_links" => Scope::MemoryLinks,
@@ -236,6 +236,10 @@ pub(in crate::core::backup) fn reconcile_primary(
             data.tags_by_memory.values().map(Vec::len).sum(),
         ),
         ("memory_links", data.links.len()),
+        (
+            "memory_code_anchor_sources",
+            data.code_anchors_by_memory.values().map(Vec::len).sum(),
+        ),
         ("attempt_families", families.len()),
         (
             "attempt_family_members",

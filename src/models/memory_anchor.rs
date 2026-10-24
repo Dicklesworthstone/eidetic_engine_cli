@@ -1241,7 +1241,7 @@ mod tests {
             let legacy = CreateMemoryAnchorInput::from_raw(
                 "mem_fixture",
                 kind,
-                raw,
+                normalized,
                 1.0,
                 MemoryAnchorSource::Explicit,
                 "memory.anchors",

@@ -376,7 +376,7 @@ const HELP_PRELUDE_SUFFIX: &str = concat!(
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
     "  Inspect:        doctor, capabilities, insights, impact, why-not, recall, similar, primer, trust report, memory show, memory history\n",
-    "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome, journal\n",
+    "  Memory ops:     link, tag, memory anchors, memory level, memory expire, memory revise, outcome, journal\n",
     "  Assert:         claim, certificate, attest, demo, tripwire\n",
     "  Coordinate:     swarm, handoff, preflight, situation, plan, workflow\n",
     "  Mesh consent:   mesh preview-grant <peer-id> --lane <lane> [--issue-approval-token]; mesh grant <peer-id> --lane <lane> --preview-token-stdin; mesh revoke-lane <peer-id> --lane <lane>\n",
@@ -5991,6 +5991,36 @@ pub enum IndexCommand {
     Vacuum(IndexVacuumArgs),
     /// Derive tags for historical tag-less memories so `--tag` recall can reach them.
     BackfillTags(IndexBackfillTagsArgs),
+    /// Preview or attach code anchors derived from existing memories.
+    BackfillAnchors(IndexBackfillAnchorsArgs),
+}
+
+/// Arguments for `ee index backfill-anchors`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct IndexBackfillAnchorsArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Attach the proposed anchors. Without this flag, only preview the page.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub apply: bool,
+
+    /// Preview without writing (the default). Conflicts with --apply.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "apply")]
+    pub dry_run: bool,
+
+    /// Maximum live memories to examine in this page; use nextAfter to continue.
+    #[arg(long, value_name = "N", default_value_t = 100)]
+    pub limit: usize,
+
+    /// Continue after this memory ID, returned as nextAfter by the previous page.
+    #[arg(long, value_name = "MEMORY_ID")]
+    pub after: Option<String>,
+
+    /// Actor recorded in the audit trail.
+    #[arg(long, value_name = "NAME")]
+    pub actor: Option<String>,
 }
 
 /// Arguments for `ee index backfill-tags`.
@@ -10142,6 +10172,10 @@ pub struct WorkflowCreateArgs {
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct RememberArgs {
     /// Memory content to store. Required unless --batch --stdin or a git capture source is given.
+    ///
+    /// Explicit inline code anchors use ee-anchor:path:src/lib.rs and
+    /// ee-anchor:symbol:Store::open. To annotate an existing memory while
+    /// preserving its content and provenance, use `ee memory anchors <id>`.
     #[arg(value_name = "CONTENT")]
     pub content: Option<String>,
 
@@ -12400,6 +12434,8 @@ pub struct ReviewWorkspaceArgs {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum MemoryCommand {
+    /// List or attach path/symbol anchors without revising the memory.
+    Anchors(MemoryAnchorsArgs),
     /// Expire a memory by writing an audited tombstone.
     Expire(MemoryExpireArgs),
     /// Report read-only provenance drift for memories.
@@ -12427,6 +12463,34 @@ pub enum MemoryCommand {
     /// Record helpful/harmful feedback on a user-global memory with origin
     /// backflow (bd-1bfwa.2 engine, wired per the epic's feedback story).
     OutcomeGlobal(MemoryOutcomeGlobalArgs),
+}
+
+/// Arguments for `ee memory anchors`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryAnchorsArgs {
+    /// Existing memory to annotate. With no --path or --symbol, list its anchors.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Attach a workspace-relative code path. Repeat to attach multiple paths.
+    #[arg(long, value_name = "PATH", action = ArgAction::Append)]
+    pub path: Vec<String>,
+
+    /// Attach an exact code identifier. Repeat to attach multiple symbols.
+    #[arg(long, value_name = "SYMBOL", action = ArgAction::Append)]
+    pub symbol: Vec<String>,
+
+    /// Validate and preview the attachment without changing durable state.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Actor recorded in the audit trail.
+    #[arg(long, value_name = "NAME")]
+    pub actor: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee memory promote-global` (bd-1bfwa.3).
@@ -12931,7 +12995,8 @@ pub struct MemoryReviseArgs {
     #[arg(value_name = "MEMORY_ID")]
     pub memory_id: String,
 
-    /// Replacement memory content.
+    /// Replacement memory content. To attach code anchors without replacing
+    /// content or creating a revision, use `ee memory anchors <id>` instead.
     #[arg(long, value_name = "TEXT")]
     pub content: Option<String>,
 
@@ -14887,6 +14952,9 @@ where
                 }
             }
         }
+        Some(Command::Memory(MemoryCommand::Anchors(ref args))) => {
+            handle_memory_anchors(&cli, args, stdout, stderr)
+        }
         Some(Command::Memory(MemoryCommand::Expire(ref args))) => {
             handle_memory_expire(&cli, args, stdout, stderr)
         }
@@ -14951,6 +15019,9 @@ where
         }
         Some(Command::Index(IndexCommand::BackfillTags(ref args))) => {
             handle_index_backfill_tags(&cli, args, stdout, stderr)
+        }
+        Some(Command::Index(IndexCommand::BackfillAnchors(ref args))) => {
+            handle_index_backfill_anchors(&cli, args, stdout, stderr)
         }
         Some(Command::Journal(JournalCommand::Append(ref args))) => {
             handle_journal_append(&cli, args, stdout, stderr)
@@ -25405,6 +25476,100 @@ where
             };
             write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
+    }
+}
+
+fn handle_index_backfill_anchors<W, E>(
+    cli: &Cli,
+    args: &IndexBackfillAnchorsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::anchors::{BackfillAnchorsOptions, backfill_anchors};
+
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+    let report = match backfill_anchors(&BackfillAnchorsOptions {
+        workspace_path: &workspace,
+        database_path: &database_path,
+        apply: args.apply,
+        limit: args.limit,
+        after: args.after.as_deref(),
+        actor: args.actor.as_deref(),
+    }) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut text = format!(
+                "anchor backfill: {} ({} memories examined)\nproposed: {} memories, {} anchors\napplied: {} memories, {} anchors\nskipped: {} memories\n",
+                if report.dry_run { "preview" } else { "applied" },
+                report.scanned_memory_count,
+                report.proposed_memory_count,
+                report.proposed_anchor_count,
+                report.applied_memory_count,
+                report.applied_anchor_count,
+                report.skipped_memory_count,
+            );
+            for proposal in &report.proposals {
+                text.push_str(&format!(
+                    "  {}: {} ({} anchors)\n",
+                    proposal.memory_id, proposal.status, proposal.added_anchor_count,
+                ));
+                for anchor in &proposal.anchors {
+                    text.push_str(&format!(
+                        "    {} {}\n",
+                        anchor.anchor_kind, anchor.redacted_anchor_value,
+                    ));
+                }
+            }
+            if let Some(after) = &report.next_after {
+                text.push_str(&format!("next page: --after {after}\n"));
+            }
+            if report.dry_run {
+                text.push_str(
+                    "Review this page, then repeat with --apply to attach its anchors.\n",
+                );
+            }
+            write_stdout(stdout, &text)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "INDEX_BACKFILL_ANCHORS|{}|{}|{}|{}|{}\n",
+                report.dry_run,
+                report.scanned_memory_count,
+                report.proposed_anchor_count,
+                report.applied_anchor_count,
+                report.next_after.as_deref().unwrap_or_default(),
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "command": "index backfill-anchors",
+                "degraded": [],
+                "data": report,
+            })
+            .to_string()
+                + "\n"),
+        ),
     }
 }
 
@@ -40244,6 +40409,77 @@ where
                 &(output::render_memory_history_json(&report) + "\n"),
             ),
         }
+    }
+}
+
+fn handle_memory_anchors<W, E>(
+    cli: &Cli,
+    args: &MemoryAnchorsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::anchors::{AttachAnchorsOptions, attach_anchors};
+
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+    let report = match attach_anchors(&AttachAnchorsOptions {
+        workspace_path: &workspace,
+        database_path: &database_path,
+        memory_id: &args.memory_id,
+        paths: &args.path,
+        symbols: &args.symbol,
+        dry_run: args.dry_run,
+        actor: args.actor.as_deref(),
+    }) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut text = format!(
+                "memory anchors: {}\nmemory: {}\nnew anchors: {}\n",
+                report.status, report.memory_id, report.added_anchor_count,
+            );
+            for anchor in &report.anchors {
+                text.push_str(&format!(
+                    "  {} {} ({})\n",
+                    anchor.anchor_kind, anchor.redacted_anchor_value, anchor.source,
+                ));
+            }
+            write_stdout(stdout, &text)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "MEMORY_ANCHORS|{}|{}|{}|{}\n",
+                report.memory_id, report.status, report.dry_run, report.added_anchor_count,
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "command": "memory anchors",
+                "degraded": [],
+                "data": report,
+            })
+            .to_string()
+                + "\n"),
+        ),
     }
 }
 
@@ -69974,7 +70210,14 @@ const HANDOFF_SUBCOMMANDS: &[&str] = &[
     "rotate-key",
 ];
 const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "jsonl", "eidetic-legacy"];
-const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "reembed", "status"];
+const INDEX_SUBCOMMANDS: &[&str] = &[
+    "rebuild",
+    "reembed",
+    "status",
+    "vacuum",
+    "backfill-tags",
+    "backfill-anchors",
+];
 const INSTALL_SUBCOMMANDS: &[&str] = &["check", "plan"];
 const LAB_SUBCOMMANDS: &[&str] = &["capture", "replay", "counterfactual"];
 const LEARN_SUBCOMMANDS: &[&str] = &[
@@ -69999,6 +70242,7 @@ const MAINTENANCE_SUBCOMMANDS: &[&str] = &[
 // `ee memory link list <id>` doubly opaque: the word `list` was swallowed as
 // a positional MEMORY_ID and did-you-mean had nothing to suggest.
 const MEMORY_SUBCOMMANDS: &[&str] = &[
+    "anchors",
     "expire",
     "drift",
     "level",
@@ -70389,6 +70633,7 @@ impl NormalizedInvocation {
                     IndexCommand::Status(_) => "index status".to_string(),
                     IndexCommand::Vacuum(_) => "index vacuum".to_string(),
                     IndexCommand::BackfillTags(_) => "index backfill-tags".to_string(),
+                    IndexCommand::BackfillAnchors(_) => "index backfill-anchors".to_string(),
                 },
                 Command::Introspect => "introspect".to_string(),
                 Command::Primer(_) => "primer".to_string(),
@@ -70428,6 +70673,7 @@ impl NormalizedInvocation {
                     LensCommand::Explain(_) => "lens explain".to_string(),
                 },
                 Command::Memory(mem) => match mem {
+                    MemoryCommand::Anchors(_) => "memory anchors".to_string(),
                     MemoryCommand::Expire(_) => "memory expire".to_string(),
                     MemoryCommand::Drift(_) => "memory drift".to_string(),
                     MemoryCommand::Level(_) => "memory level".to_string(),

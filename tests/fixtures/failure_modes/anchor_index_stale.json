@@ -9,10 +9,10 @@
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "The memory_anchor_index reverse-index generation is behind the workspace DB generation when ee recall runs (memories changed since the derived index was last maintained), so results may miss recent memories. Repair: ee index rebuild --workspace . (ADR 0064 §5).",
+    "description": "The memory_anchor_index reverse-index generation is behind the workspace DB generation, or the projection is empty while stored path or symbol anchors exist on non-tombstoned memories in this workspace. Results may miss recent memories. Repair the derived projection with ee index rebuild --workspace . (ADR 0064 §5).",
     "setup_commands": [
       "ee init --workspace .",
-      "ee remember \"Anchored rule about src/db/mod.rs\" --workspace . --level procedural --kind rule --json",
+      "ee remember \"Anchored rule. ee-anchor:path:src/db/mod.rs\" --workspace . --level procedural --kind rule --json",
       "# advance the DB generation without refreshing the derived anchor index"
     ],
     "invocation": "ee recall --path 'src/**' --workspace . --json"

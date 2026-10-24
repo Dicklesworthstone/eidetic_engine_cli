@@ -9,14 +9,14 @@
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "The memory_anchor_index reverse index has no rows for the workspace (nothing anchored yet) when ee recall runs. Never a hard error (ADR 0064 §5): the response succeeds with empty items and this info entry, so a pre-edit hook can distinguish 'no anchored knowledge' from a failure.",
+    "description": "The workspace has no reverse-index rows and no stored path or symbol anchors on non-tombstoned memories. Non-code anchors such as config_key do not count. Recall succeeds with empty items; preview code-anchor backfill or attach a known anchor, because rebuilding cannot create missing source anchors.",
     "setup_commands": ["ee init --workspace ."],
     "invocation": "ee recall --path 'src/**' --workspace . --json"
   },
   "expected_emission": {
     "code": "anchor_index_empty",
     "severity": "info",
-    "message_contains": ["anchor reverse index has no rows", "nothing is anchored yet"],
-    "repair_contains": "ee index rebuild"
+    "message_contains": ["anchor reverse index has no rows", "no stored path or symbol anchors", "cannot create missing source anchors"],
+    "repair_contains": "ee index backfill-anchors"
   }
 }

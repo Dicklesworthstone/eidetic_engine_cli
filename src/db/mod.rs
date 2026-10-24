@@ -12052,6 +12052,44 @@ END;
     "blake3:v132_pack_rule_failure_sections_2026_10_17",
 );
 
+/// Durable validated path/symbol bindings for additive anchor management.
+/// These source rows are independent of memory bodies and derived indexes.
+pub const V133_MEMORY_CODE_ANCHOR_SOURCES: Migration = Migration::new(
+    133,
+    "memory_code_anchor_sources",
+    r#"
+CREATE TABLE memory_code_anchor_sources (
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    anchor_kind TEXT NOT NULL CHECK (anchor_kind IN ('path', 'symbol')),
+    anchor_value_hash TEXT NOT NULL CHECK (
+        length(anchor_value_hash) = 71 AND substr(anchor_value_hash, 1, 7) = 'blake3:'
+    ),
+    normalized_value TEXT NOT NULL CHECK (length(normalized_value) BETWEEN 1 AND 1024),
+    source TEXT NOT NULL CHECK (source IN ('explicit', 'index_rebuild')),
+    provenance TEXT NOT NULL CHECK (length(trim(provenance)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (memory_id, anchor_kind, anchor_value_hash)
+);
+CREATE TRIGGER trg_workspace_generations_code_anchor_insert
+AFTER INSERT ON memory_code_anchor_sources
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.created_at
+     WHERE workspace_id = (SELECT workspace_id FROM memories WHERE id = NEW.memory_id);
+END;
+CREATE TRIGGER trg_workspace_generations_code_anchor_delete
+AFTER DELETE ON memory_code_anchor_sources
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = (SELECT workspace_id FROM memories WHERE id = OLD.memory_id);
+END;
+"#,
+    "blake3:v133_memory_code_anchor_sources_2026_10_23",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -12186,6 +12224,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V130_EVIDENCE_READER_PROJECTIONS,
     V131_EVIDENCE_ADMISSION_COUNTS,
     V132_PACK_RULE_FAILURE_SECTIONS,
+    V133_MEMORY_CODE_ANCHOR_SOURCES,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -26149,6 +26188,263 @@ impl DbConnection {
         self.upsert_memory_anchors(&anchors)
     }
 
+    /// Load durable, validated code locators, preserving canonical freshness
+    /// metadata when present. Source bindings survive deletion/rebuild of both
+    /// derived anchor tables. This reader does not mutate an older schema.
+    pub fn list_memory_code_anchor_sources(
+        &self,
+        memory_id: &str,
+    ) -> Result<Vec<ExtractedAnchorSurface>> {
+        if self.schema_version()?.unwrap_or(0) < V133_MEMORY_CODE_ANCHOR_SOURCES.version() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .code_anchor_sources_for_memories(&[memory_id])?
+            .remove(memory_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(surface, _, _)| surface)
+            .collect())
+    }
+
+    /// One bounded source query also loads canonical freshness, without turning
+    /// index rebuild into one metadata lookup per memory. The boolean records
+    /// whether the canonical row exists; source provenance stays independent.
+    fn code_anchor_sources_for_memories(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<BTreeMap<String, Vec<(ExtractedAnchorSurface, String, bool)>>> {
+        if memory_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = (1..=memory_ids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rows = self.query_for(DbOperation::Query,
+            &format!("SELECT s.memory_id, s.anchor_kind, s.anchor_value_hash, s.normalized_value, s.source, s.provenance, s.created_at, a.confidence, a.captured_span_hash, a.freshness_state, a.generation FROM memory_code_anchor_sources s LEFT JOIN memory_anchors a ON a.memory_id = s.memory_id AND a.anchor_kind = s.anchor_kind AND a.anchor_value_hash = s.anchor_value_hash WHERE s.memory_id IN ({placeholders}) ORDER BY s.memory_id, s.anchor_kind, s.anchor_value_hash"),
+            &memory_ids.iter().map(|id| Value::Text((*id).to_owned())).collect::<Vec<_>>(),
+        )?;
+        let mut by_memory = BTreeMap::<String, Vec<(ExtractedAnchorSurface, String, bool)>>::new();
+        for row in &rows {
+            let memory_id = required_text(row, 0, DbOperation::Query, "memory_id")?;
+            let kind = parse_memory_anchor_kind(required_text(
+                row,
+                1,
+                DbOperation::Query,
+                "anchor_kind",
+            )?)?;
+            let hash = required_text(row, 2, DbOperation::Query, "anchor_value_hash")?;
+            let normalized = required_text(row, 3, DbOperation::Query, "normalized_value")?;
+            let source =
+                parse_memory_anchor_source(required_text(row, 4, DbOperation::Query, "source")?)?;
+            let provenance = required_text(row, 5, DbOperation::Query, "provenance")?;
+            let created_at = required_text(row, 6, DbOperation::Query, "created_at")?.to_owned();
+            let Some(mut surface) = CreateMemoryAnchorInput::from_stored_code_surface(
+                memory_id, kind, normalized, source, provenance,
+            ) else {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "Invalid stored code-anchor source.".to_owned(),
+                });
+            };
+            if surface.anchor.anchor_value_hash != hash
+                || crate::policy::redact_public_replay_text(normalized).redacted
+                || crate::policy::redact_public_replay_text(provenance).redacted
+            {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "Stored code-anchor source hash does not match its value.".to_owned(),
+                });
+            }
+            let canonical = !matches!(row.get(7), Some(Value::Null));
+            if canonical {
+                surface.anchor.confidence = required_f32(row, 7, DbOperation::Query, "confidence")?;
+                surface.anchor.captured_span_hash =
+                    required_text(row, 8, DbOperation::Query, "captured_span_hash")?.to_owned();
+                surface.anchor.freshness_state = parse_memory_anchor_freshness(required_text(
+                    row,
+                    9,
+                    DbOperation::Query,
+                    "freshness_state",
+                )?)?;
+                surface.anchor.generation =
+                    required_i64(row, 10, DbOperation::Query, "generation")?;
+            }
+            by_memory
+                .entry(memory_id.to_owned())
+                .or_default()
+                .push((surface, created_at, canonical));
+        }
+        Ok(by_memory)
+    }
+
+    /// Whether this exact canonical anchor is represented in the reverse index.
+    pub(crate) fn has_memory_code_anchor_projection(
+        &self,
+        workspace_id: &str,
+        surface: &ExtractedAnchorSurface,
+    ) -> Result<bool> {
+        let anchor = &surface.anchor;
+        let (path, symbol) = match anchor.anchor_kind {
+            MemoryAnchorKind::Path => (Some(surface.normalized_value.as_str()), None),
+            MemoryAnchorKind::Symbol => (None, Some(surface.normalized_value.as_str())),
+            _ => return Ok(false),
+        };
+        Ok(!self.query_for(DbOperation::Query,
+            "SELECT memory_id FROM memory_anchor_index WHERE workspace_id = ?1 AND memory_id = ?2 AND anchor_kind = ?3 AND anchor_value_hash = ?4 AND normalized_path IS ?5 AND symbol IS ?6 LIMIT 1",
+            &[Value::Text(workspace_id.to_owned()), Value::Text(anchor.memory_id.clone()), Value::Text(anchor.anchor_kind.as_str().to_owned()), Value::Text(anchor.anchor_value_hash.clone()), optional_text_value(path), optional_text_value(symbol)],
+        )?.is_empty())
+    }
+
+    /// Add validated durable code-locator bindings and their projections.
+    /// The caller owns the transaction and audit/search-job scheduling. Existing
+    /// canonical anchor provenance, freshness and timestamps are never reset.
+    pub fn attach_memory_code_anchor_sources(
+        &self,
+        workspace_id: &str,
+        memory_id: &str,
+        surfaces: &[ExtractedAnchorSurface],
+    ) -> Result<usize> {
+        if self
+            .get_memory(memory_id)?
+            .is_none_or(|memory| memory.workspace_id != workspace_id)
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "Code-anchor memory does not belong to this workspace.".to_owned(),
+            });
+        }
+        // Public storage callers cannot supply raw text in fields whose names
+        // promise hashes/redaction. Validate the whole batch before any write
+        // and derive those fields again from the validated locator.
+        let mut validated_surfaces = Vec::with_capacity(surfaces.len());
+        for surface in surfaces {
+            let anchor = &surface.anchor;
+            let rebuilt = CreateMemoryAnchorInput::from_stored_code_surface(
+                memory_id,
+                anchor.anchor_kind,
+                &surface.normalized_value,
+                anchor.source,
+                &anchor.provenance,
+            );
+            if anchor.memory_id != memory_id
+                || !matches!(
+                    anchor.source,
+                    MemoryAnchorSource::Explicit | MemoryAnchorSource::IndexRebuild
+                )
+                || anchor.provenance.trim().is_empty()
+                || anchor.provenance.len() > 512
+                || crate::policy::redact_public_replay_text(&surface.normalized_value).redacted
+                || crate::policy::redact_public_replay_text(&anchor.provenance).redacted
+                || rebuilt.as_ref().is_none_or(|value| {
+                    value.anchor.anchor_value_hash != anchor.anchor_value_hash
+                        || value.anchor.redacted_anchor_value != anchor.redacted_anchor_value
+                })
+            {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "Invalid code-anchor binding.".to_owned(),
+                });
+            }
+            let mut validated = surface.clone();
+            if let Some(rebuilt) = rebuilt {
+                validated.anchor.redacted_anchor_value = rebuilt.anchor.redacted_anchor_value;
+                validated.anchor.captured_span_hash = rebuilt.anchor.captured_span_hash;
+            }
+            validated_surfaces.push(validated);
+        }
+        let existing_sources = self.list_memory_code_anchor_sources(memory_id)?;
+        let mut source_keys = existing_sources
+            .iter()
+            .map(|source| {
+                (
+                    source.anchor.anchor_kind,
+                    source.anchor.anchor_value_hash.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let existing_anchors = self.list_memory_anchors(memory_id)?;
+        let mut added = 0;
+        let now = Utc::now().to_rfc3339();
+        for surface in &validated_surfaces {
+            let anchor = &surface.anchor;
+            if !source_keys.insert((anchor.anchor_kind, anchor.anchor_value_hash.clone())) {
+                continue;
+            }
+            self.execute_for(DbOperation::Execute,
+                "INSERT INTO memory_code_anchor_sources (memory_id, anchor_kind, anchor_value_hash, normalized_value, source, provenance, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(memory_id, anchor_kind, anchor_value_hash) DO NOTHING",
+                &[Value::Text(memory_id.to_owned()), Value::Text(anchor.anchor_kind.as_str().to_owned()), Value::Text(anchor.anchor_value_hash.clone()), Value::Text(surface.normalized_value.clone()), Value::Text(anchor.source.as_str().to_owned()), Value::Text(anchor.provenance.clone()), Value::Text(now.clone())],
+            )?;
+            added += 1;
+        }
+        let generation = i64::try_from(self.get_workspace_generation(workspace_id)?.unwrap_or(0))
+            .unwrap_or(i64::MAX);
+        let mut projected_keys = BTreeSet::new();
+        for surface in &validated_surfaces {
+            if !projected_keys.insert((
+                surface.anchor.anchor_kind,
+                surface.anchor.anchor_value_hash.clone(),
+            )) {
+                continue;
+            }
+            let mut projected = surface.clone();
+            if let Some(existing) = existing_anchors.iter().find(|anchor| {
+                anchor.anchor_kind == projected.anchor.anchor_kind
+                    && anchor.anchor_value_hash == projected.anchor.anchor_value_hash
+            }) {
+                projected.anchor.freshness_state = existing.freshness_state;
+                projected.anchor.generation = existing.generation;
+            } else {
+                projected.anchor.generation = generation;
+                self.upsert_memory_anchors(&[projected.anchor.clone()])?;
+            }
+            if !self.has_memory_code_anchor_projection(workspace_id, &projected)? {
+                // A malformed derived row must not defeat repair by claiming
+                // a future generation. Only this validated identity is replaced.
+                self.execute_for(DbOperation::Execute,
+                    "DELETE FROM memory_anchor_index WHERE memory_id = ?1 AND anchor_kind = ?2 AND anchor_value_hash = ?3",
+                    &[Value::Text(memory_id.to_owned()), Value::Text(projected.anchor.anchor_kind.as_str().to_owned()), Value::Text(projected.anchor.anchor_value_hash.clone())],
+                )?;
+            }
+            self.upsert_memory_anchor_index_surfaces(workspace_id, &[projected])?;
+        }
+        Ok(added)
+    }
+
+    /// Carry additive bindings across the canonical immutable revision path.
+    pub(crate) fn carry_memory_code_anchor_sources(
+        &self,
+        original_id: &str,
+        new_id: &str,
+        workspace_id: &str,
+    ) -> Result<()> {
+        let mut surfaces = self.list_memory_code_anchor_sources(original_id)?;
+        if surfaces.is_empty() {
+            return Ok(());
+        }
+        for surface in &mut surfaces {
+            surface.anchor.memory_id = new_id.to_owned();
+        }
+        self.attach_memory_code_anchor_sources(workspace_id, new_id, &surfaces)?;
+        Ok(())
+    }
+
+    /// Bounded stable page for code-anchor backfill; includes only current,
+    /// untombstoned revision heads belonging to the addressed workspace.
+    pub(crate) fn memory_code_anchor_backfill_page(
+        &self,
+        workspace_id: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<StoredMemory>> {
+        let rows = self.query_for(DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND superseded_at IS NULL AND id > ?2 ORDER BY id ASC LIMIT ?3",
+            &[Value::Text(workspace_id.to_owned()), Value::Text(after.unwrap_or("").to_owned()), Value::BigInt(i64::try_from(limit).unwrap_or(i64::MAX))],
+        )?;
+        rows.iter().map(stored_memory_from_row).collect()
+    }
+
     /// Rebuild the ADR 0064 reverse-index rows for one memory from the shared
     /// extraction walk (bd-u875s.2). Rows are replaced wholesale so anchors
     /// that disappeared from the content do not linger. Only `path`/`symbol`
@@ -26189,7 +26485,16 @@ impl DbConnection {
         let mut generations = BTreeMap::new();
         let mut written = 0_u64;
         let now = Utc::now().to_rfc3339();
+        let has_sources =
+            self.schema_version()?.unwrap_or(0) >= V133_MEMORY_CODE_ANCHOR_SOURCES.version();
         for chunk in sources.chunks(MEMORY_INDEX_METADATA_BATCH_SIZE) {
+            let mut bindings = if has_sources {
+                self.code_anchor_sources_for_memories(
+                    &chunk.iter().map(|(_, id, _)| *id).collect::<Vec<_>>(),
+                )?
+            } else {
+                BTreeMap::new()
+            };
             let placeholders = (1..=chunk.len())
                 .map(|index| format!("?{index}"))
                 .collect::<Vec<_>>()
@@ -26213,12 +26518,22 @@ impl DbConnection {
                     generations.insert(workspace_id, generation);
                     generation
                 };
-                for surface in extract_memory_anchor_surfaces(
+                let mut surfaces = extract_memory_anchor_surfaces(
                     memory_id,
                     content,
                     MemoryAnchorSource::IndexRebuild,
                     Some("index_rebuild"),
-                ) {
+                );
+                let durable = bindings.remove(memory_id).unwrap_or_default();
+                // Rehydrate canonical hashes too if only the durable binding
+                // survived recovery. Never overwrite existing freshness.
+                for (source, _, canonical) in &durable {
+                    if !canonical {
+                        self.upsert_memory_anchors(&[source.anchor.clone()])?;
+                    }
+                }
+                surfaces.extend(durable.into_iter().map(|(surface, _, _)| surface));
+                for surface in surfaces {
                     let (normalized_path, symbol) = match surface.anchor.anchor_kind {
                         MemoryAnchorKind::Path => (Some(surface.normalized_value), None),
                         MemoryAnchorKind::Symbol => (None, Some(surface.normalized_value)),
@@ -26312,7 +26627,8 @@ impl DbConnection {
     }
 
     /// `MAX(generation)` over a workspace's reverse-index rows; `None` when
-    /// the index has no rows (the `anchor_index_empty` case).
+    /// the projection has no rows. Inspect canonical code anchors separately
+    /// to distinguish missing source anchors from a lost projection.
     pub fn memory_anchor_index_generation(&self, workspace_id: &str) -> Result<Option<i64>> {
         let rows = self.query_for(
             DbOperation::Query,
@@ -26327,6 +26643,34 @@ impl DbConnection {
                 _ => Ok(None),
             },
         }
+    }
+
+    /// Whether this workspace has canonical path or symbol anchors or durable
+    /// code bindings belonging to non-tombstoned memories. This is a
+    /// projection-health check only:
+    /// recall still applies live source, seal and validity admission before
+    /// returning any memory. Configuration and other non-code anchors do not
+    /// make an empty path/symbol projection repairable by an index rebuild.
+    pub fn has_workspace_code_anchors(&self, workspace_id: &str) -> Result<bool> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT a.memory_id FROM memory_anchors a JOIN memories m ON m.id = a.memory_id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND a.anchor_kind IN ('path', 'symbol') LIMIT 1",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        if !rows.is_empty() {
+            return Ok(true);
+        }
+        if self.schema_version()?.unwrap_or(0) < V133_MEMORY_CODE_ANCHOR_SOURCES.version() {
+            return Ok(false);
+        }
+        // Explicit/backfilled bindings can restore both projections after
+        // their rows are lost. Do not misclassify that repair as capture.
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT a.memory_id FROM memory_code_anchor_sources a JOIN memories m ON m.id = a.memory_id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND a.anchor_kind IN ('path', 'symbol') LIMIT 1",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        Ok(!rows.is_empty())
     }
 
     /// Reverse-index path candidates for recall (ADR 0064), joined with the
@@ -26576,6 +26920,12 @@ impl DbConnection {
             .into_iter()
             .collect::<Vec<_>>();
         let mut batch = MemoryIndexMetadataBatch::default();
+        if memory_ids.is_empty() {
+            return Ok(batch);
+        }
+        let has_sources =
+            self.schema_version()?.unwrap_or(0) >= V133_MEMORY_CODE_ANCHOR_SOURCES.version();
+        batch.query_count += 1;
         for chunk in memory_ids.chunks(MEMORY_INDEX_METADATA_BATCH_SIZE) {
             let placeholders = (1..=chunk.len())
                 .map(|index| format!("?{index}"))
@@ -26619,6 +26969,38 @@ impl DbConnection {
                     .or_default()
                     .anchors
                     .push(anchor);
+            }
+            if has_sources {
+                let bindings = self.code_anchor_sources_for_memories(chunk)?;
+                batch.query_count += 1;
+                for (memory_id, sources) in bindings {
+                    let metadata = batch.by_memory_id.entry(memory_id).or_default();
+                    for (surface, created_at, canonical) in sources {
+                        if canonical {
+                            continue;
+                        }
+                        let anchor = surface.anchor;
+                        metadata.anchors.push(StoredMemoryAnchor {
+                            memory_id: anchor.memory_id,
+                            anchor_kind: anchor.anchor_kind,
+                            anchor_value_hash: anchor.anchor_value_hash,
+                            redacted_anchor_value: anchor.redacted_anchor_value,
+                            confidence: anchor.confidence,
+                            source: anchor.source,
+                            provenance: anchor.provenance,
+                            captured_span_hash: anchor.captured_span_hash,
+                            freshness_state: anchor.freshness_state,
+                            generation: anchor.generation,
+                            created_at: created_at.clone(),
+                            updated_at: created_at,
+                        });
+                    }
+                    metadata.anchors.sort_by(|left, right| {
+                        left.anchor_kind
+                            .cmp(&right.anchor_kind)
+                            .then_with(|| left.anchor_value_hash.cmp(&right.anchor_value_hash))
+                    });
+                }
             }
         }
         Ok(batch)

@@ -33,6 +33,7 @@ const REQUIRED_TABLES: &[(&str, &str, &str)] = &[
     ("workspaces", "maintain", "authenticated_manifest"),
     ("memories", "retrieve", "records_jsonl"),
     ("memory_tags", "retrieve", "records_jsonl"),
+    ("memory_code_anchor_sources", "retrieve", "records_jsonl"),
     ("memory_links", "retrieve", "records_jsonl"),
     ("attempt_families", "learn", "records_jsonl"),
     ("attempt_family_members", "learn", "records_jsonl"),
@@ -165,6 +166,8 @@ fn absent_from_source_schema(table: &str, source_version: Option<u32>) -> bool {
     match table {
         "pack_rule_items" => source_version
             .is_some_and(|version| version < crate::db::V128_PACK_RULE_ITEMS.version()),
+        "memory_code_anchor_sources" => source_version
+            .is_some_and(|version| version < crate::db::V133_MEMORY_CODE_ANCHOR_SOURCES.version()),
         _ => false,
     }
 }
@@ -508,7 +511,7 @@ mod tests {
     #[test]
     fn schema_upgrade_cannot_excuse_any_other_missing_durable_family() {
         for &(table, _, _) in REQUIRED_TABLES {
-            if table == "pack_rule_items" {
+            if matches!(table, "pack_rule_items" | "memory_code_anchor_sources") {
                 continue;
             }
             let mut value = manifest();
@@ -517,6 +520,19 @@ mod tests {
             omit_table(&mut value, table);
             assert!(RestoreInventory::from_manifest(&value).is_err(), "{table}");
         }
+    }
+
+    #[test]
+    fn code_anchor_inventory_allows_only_a_proven_pre_v133_empty_source() {
+        let mut value = manifest();
+        omit_table(&mut value, "memory_code_anchor_sources");
+        assert!(RestoreInventory::from_manifest(&value).is_err());
+        value["graphCache"] = json!({"schemaVersion": 132});
+        let plan = RestoreInventory::from_manifest(&value).unwrap();
+        assert_eq!(plan.expected.get("memory_code_anchor_sources"), Some(&0));
+        value["graphCache"]["schemaVersion"] =
+            json!(crate::db::V133_MEMORY_CODE_ANCHOR_SOURCES.version());
+        assert!(RestoreInventory::from_manifest(&value).is_err());
     }
 
     #[test]

@@ -1660,6 +1660,8 @@ fn command_name_from_schema(schema: &str) -> String {
         "ee.toolchain_provenance.v1" => "diag toolchain-provenance".to_string(),
         "ee.ask.v1" => "ask".to_string(),
         "ee.recall.v1" => "recall".to_string(),
+        "ee.memory.anchors.v1" => "memory anchors".to_string(),
+        "ee.index.backfill_anchors.v1" => "index backfill-anchors".to_string(),
         "ee.swarm.brief.v1" | "ee.swarm_brief.v1" => "swarm brief".to_string(),
         "ee.swarm.next_action.v1" | "ee.swarm.next-action.v1" | "ee.swarm_next_action.v1" => {
             "swarm next-action".to_string()
@@ -1981,6 +1983,53 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "queryAssist",
             ],
             FieldProfile::Full => &["*"],
+        },
+        "memory anchors" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "memoryId",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "addedAnchorCount",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "version",
+                "memoryId",
+                "workspaceId",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "addedAnchorCount",
+                "auditId",
+                "indexJobId",
+            ],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
+        },
+        "index backfill-anchors" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "dryRun",
+                "proposedAnchorCount",
+                "appliedAnchorCount",
+                "nextAfter",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "version",
+                "dryRun",
+                "scannedMemoryCount",
+                "proposedMemoryCount",
+                "proposedAnchorCount",
+                "appliedMemoryCount",
+                "appliedAnchorCount",
+                "skippedMemoryCount",
+                "nextAfter",
+            ],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
         },
         "recall" => match preset {
             FieldProfile::Minimal => &["schema", "query", "memoryId", "score"],
@@ -12077,6 +12126,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: recall_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::anchors::MEMORY_ANCHORS_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe listing, preview, and additive attachment of validated code anchors without changing memory content or source provenance.",
+            category: "memory",
+            definition: memory_anchors_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::anchors::ANCHOR_BACKFILL_SCHEMA_V1,
+            version: "1",
+            description: "Bounded code-anchor backfill preview and explicit application for eligible memories in one workspace.",
+            category: "search",
+            definition: anchor_backfill_schema_definition,
+        },
+        SchemaEntry {
             id: crate::models::schema::TIMELINE_SCHEMA_V1,
             version: "1",
             description: "Read-only time-travel memory audit report emitted by ee timeline for as-of postmortem and handoff reconstruction.",
@@ -12263,6 +12326,14 @@ fn toolchain_provenance_schema_definition() -> String {
 
 fn recall_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.recall.v1.json").to_string()
+}
+
+fn memory_anchors_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory.anchors.v1.json").to_string()
+}
+
+fn anchor_backfill_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.index.backfill_anchors.v1.json").to_string()
 }
 
 fn timeline_schema_definition() -> String {
