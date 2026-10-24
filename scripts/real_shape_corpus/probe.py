@@ -78,7 +78,22 @@ def event(step, **fields):
 
 
 class Harness(Exception):
-    pass
+    """A harness failure, optionally carrying a stable machine-readable code.
+
+    `.63` names a code for one specific provisioning failure, so the code
+    travels on the exception and lands in the summary as `harness_error_code`.
+    It is a SEPARATE field from the prose in `harness_error`: a consumer that
+    substring-matches a message is reading a channel that changes whenever the
+    wording is improved.
+    """
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
+# `.63` acceptance: "a missing cass binary yields real_corpus_cass_unavailable".
+CASS_UNAVAILABLE = "real_corpus_cass_unavailable"
 
 
 def assert_no_symlink_component(path, label):
@@ -242,16 +257,36 @@ def run_ee(ee, args, env, cwd, timeout=900):
 
 def install_cass_fixture(root):
     """ee only runs an import binary literally named `cass` from a directory
-    nobody else can write, so the emulator is installed as one."""
+    nobody else can write, so the emulator is installed as one.
+
+    A missing emulator source is a PROVISIONING failure, not a defect in this
+    file, and it gets the code `.63` names for it. Without the pre-check,
+    `shutil.copyfile` raises a bare FileNotFoundError traceback, which reads as
+    a probe bug and sends the reader to the wrong place entirely.
+    """
+    source = os.path.join(HERE, "cass_fixture.py")
+    if not os.path.isfile(source):
+        raise Harness(
+            f"cass emulator source {source!r} is missing, so no import binary can be "
+            "provisioned and nothing that needs cass is measurable. This is a "
+            "provisioning gap, not a product result.",
+            code=CASS_UNAVAILABLE,
+        )
     bin_dir = os.path.join(root, "bin")
     os.makedirs(bin_dir, exist_ok=True)
     os.chmod(bin_dir, 0o755)
     target = os.path.join(bin_dir, "cass")
-    shutil.copyfile(os.path.join(HERE, "cass_fixture.py"), target)
+    shutil.copyfile(source, target)
     os.chmod(target, 0o555)
     # The exact path ee's trust check inspects, so assert the policy here too
     # rather than trusting that the root was allocated correctly upstream.
     assert_no_symlink_component(target, "cass emulator path")
+    if not os.access(target, os.X_OK):
+        raise Harness(
+            f"cass emulator {target!r} installed but is not executable, so ee's import "
+            "would fail later with an error that names ee rather than this harness.",
+            code=CASS_UNAVAILABLE,
+        )
     return target
 
 
@@ -574,7 +609,9 @@ def main():
             raise Harness(problem)
     except Harness as error:
         summary["harness_error"] = str(error)
-        event("harness_error", error=str(error))
+        if error.code:
+            summary["harness_error_code"] = error.code
+        event("harness_error", error=str(error), code=error.code)
         print(json.dumps(summary, indent=2))
         return 2
     finally:
@@ -655,8 +692,9 @@ def self_test(ee=None):
     Every arm has a twin that must FAIL, because a control nobody saw fail is
     decoration: the symlink assertion is checked against a planted symlink, the
     diagnostic against a binary that prints nothing, and the fail-closed guard
-    against healthy metrics. Arms 1-14 need no `ee`; pass --ee to add the
-    end-to-end positive and negative controls.
+    against healthy metrics. Every arm above the END-TO-END block needs no `ee`
+    (no count is named here: one went stale the first time an arm was added);
+    pass --ee to add the end-to-end positive and negative controls.
     """
     failures = []
     checked = 0
@@ -753,6 +791,58 @@ def self_test(ee=None):
         arm(f"an EMPTY corpus is refused distinctly, not as a product zero: {str(empty)[:50]}",
             empty is not None and "empty world" in empty)
         arm("zero judged queries is refused too", zero_guard(healthy, [], 4009, 0) is not None)
+
+        print("PROVISIONING arms -- a missing cass emulator must name itself:")
+        try:
+            install_cass_fixture(os.path.join(scratch, "provision-present"))
+            arm("TWIN THAT MUST NOT FIRE: a present emulator source installs cleanly", True)
+        except Harness as error:
+            arm(f"TWIN THAT MUST NOT FIRE: a present emulator source installs cleanly "
+                f"(got {error})", False)
+        # Simulated by rebinding HERE, not by deleting the fixture: HERE is read
+        # only by install_cass_fixture after import, so the swap is exactly this
+        # scoped, and no arm of this self-test may remove a file from the repo.
+        previous_here = globals()["HERE"]
+        globals()["HERE"] = os.path.join(scratch, "no-fixture-here")
+        os.makedirs(globals()["HERE"], exist_ok=True)
+        try:
+            install_cass_fixture(os.path.join(scratch, "provision-missing"))
+            arm(f"a missing cass emulator raises {CASS_UNAVAILABLE}", False)
+        except Harness as error:
+            arm(f"a missing cass emulator raises {CASS_UNAVAILABLE} (got {error.code!r})",
+                error.code == CASS_UNAVAILABLE)
+            arm("the refusal names the absent source instead of reporting a metric zero",
+                "cass_fixture.py" in str(error))
+        finally:
+            globals()["HERE"] = previous_here
+
+        print("SHAPE-PRECHECK arms -- an envelope-stripped corpus must be refused:")
+        shape_root = os.path.join(scratch, "shape")
+        shape_corpus = os.path.join(shape_root, "corpus")
+        shape_workspace = os.path.join(shape_root, "ws")
+        os.makedirs(shape_workspace)
+        shape_manifest = generate.generate(shape_corpus, shape_workspace, 43, 0)
+        arm(f"TWIN THAT MUST NOT FIRE: the generated corpus passes its own precheck "
+            f"({len(shape_manifest['sessions'])} sessions, "
+            f"{shape_manifest['total_records']} records)",
+            generate.validate(shape_corpus) == [])
+        victim = os.path.join(shape_corpus, shape_manifest["sessions"][0]["path"])
+        with open(victim, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+        stripped = json.loads(lines[0])
+        # Envelope fields, not body content: the precheck's job is to refuse a
+        # corpus whose records no longer carry the shape ee's importer reads.
+        removed = sorted(k for k in ("sessionId", "uuid", "timestamp") if k in stripped)
+        for key in removed:
+            del stripped[key]
+        lines[0] = json.dumps(stripped)
+        with open(victim, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        problems = generate.validate(shape_corpus)
+        arm(f"an envelope-stripped record is refused by the shape precheck "
+            f"({len(problems)} problem(s) after removing {removed})", bool(problems))
+        arm("the refusal names the missing envelope fields, not a metric value",
+            any("missing envelope fields" in problem for problem in problems))
 
         if ee:
             print(f"END-TO-END controls against {ee}:")
