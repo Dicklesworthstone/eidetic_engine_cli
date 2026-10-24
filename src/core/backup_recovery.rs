@@ -182,12 +182,13 @@ impl RestoreInventory {
             .get("recoveryInventory")
             .filter(|value| value.is_object())
             .ok_or_else(|| recovery_error("Backup is missing its durable recovery inventory"))?;
-        if inventory.get("schema").and_then(Value::as_str)
-            != Some("ee.backup.recovery_inventory.v1")
-            || inventory
-                .get("schemaCoverageComplete")
-                .and_then(Value::as_bool)
-                != Some(true)
+        if !matches!(
+            inventory.get("schema").and_then(Value::as_str),
+            Some("ee.backup.recovery_inventory.v1" | "ee.backup.recovery_inventory.v2")
+        ) || inventory
+            .get("schemaCoverageComplete")
+            .and_then(Value::as_bool)
+            != Some(true)
             || inventory
                 .get("snapshotCoverageComplete")
                 .and_then(Value::as_bool)
@@ -204,6 +205,7 @@ impl RestoreInventory {
                 "Backup does not declare a complete, supported durable recovery inventory",
             ));
         }
+        let _ = super::evidence_export::summary_from_manifest(manifest).map_err(recovery_error)?;
         let source_version = source_schema_version(manifest)?;
         let rows = inventory
             .get("tables")
@@ -611,6 +613,21 @@ mod tests {
             assert_eq!(policy.coverage, coverage);
         }
         assert!(RestoreInventory::from_manifest(&manifest()).is_ok());
+    }
+
+    #[test]
+    fn v2_restore_requires_measured_evidence_while_legacy_inventory_stays_readable() {
+        let legacy = manifest();
+        assert!(RestoreInventory::from_manifest(&legacy).is_ok());
+        let mut current = legacy.clone();
+        current["recoveryInventory"]["schema"] = json!("ee.backup.recovery_inventory.v2");
+        current["recoveryInventory"]["rowCountBasis"] = json!("source_snapshot");
+        current["recoveryInventory"]["evidenceAdmission"] =
+            json!(super::super::BackupEvidenceAdmissionSummary::default());
+        assert!(RestoreInventory::from_manifest(&current).is_ok());
+        current["recoveryInventory"]["evidenceAdmission"] = Value::Null;
+        assert!(RestoreInventory::from_manifest(&current).is_err());
+        assert!(RestoreInventory::from_manifest(&legacy).is_ok());
     }
 
     #[test]

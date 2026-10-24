@@ -1,0 +1,23 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "backup_evidence_admission_reduced",
+  "introduced_by": {
+    "bead": "bd-reality-core-convergence-1azkt.13",
+    "epic_letter": "C"
+  },
+  "surfaces": ["backup create", "backup inspect", "backup verify", "backup restore"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Export redaction changes persisted evidence eligibility from admitted or quarantined to denied. The source and exported histograms are measured in the same read snapshot; artifact verification checks the exported counts against the actual evidence rows.",
+    "setup_commands": ["ee init --workspace .", "ee import cass --workspace . --limit 1"],
+    "invocation": "ee backup create --workspace . --redaction minimal --json"
+  },
+  "expected_emission": {
+    "code": "backup_evidence_admission_reduced",
+    "severity": "warning",
+    "message_contains": ["pack-denied", "rebuilding an index cannot recover the original evidence eligibility"],
+    "repair_contains": "--redaction none",
+    "repair_string": "For a private recovery copy without export redaction, run ee backup create --workspace . --redaction none; source provenance and policy checks still apply. Protect that unredacted artifact as source data."
+  }
+}

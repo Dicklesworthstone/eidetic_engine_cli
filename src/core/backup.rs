@@ -6,6 +6,7 @@
 
 #[path = "backup_evidence_export.rs"]
 mod evidence_export;
+pub use evidence_export::{BackupEvidenceAdmissionSummary, BackupEvidenceEligibilityCounts};
 #[cfg(test)]
 #[path = "backup_history_recovery_tests.rs"]
 mod history_recovery_tests;
@@ -403,6 +404,7 @@ impl BackupRecoveryInventoryEntry {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BackupRecoveryInventory {
     pub entries: Vec<BackupRecoveryInventoryEntry>,
+    pub evidence_admission: Option<BackupEvidenceAdmissionSummary>,
     pub schema_coverage_complete: bool,
     pub snapshot_coverage_complete: bool,
     pub uncovered_required_table_count: u32,
@@ -414,8 +416,10 @@ impl BackupRecoveryInventory {
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
         json!({
-            "schema": "ee.backup.recovery_inventory.v1",
+            "schema": "ee.backup.recovery_inventory.v2",
             "requiredRowScope": "selected_workspace_and_shared_history",
+            "rowCountBasis": "source_snapshot",
+            "evidenceAdmission": self.evidence_admission,
             "schemaCoverageComplete": self.schema_coverage_complete,
             "snapshotCoverageComplete": self.snapshot_coverage_complete,
             "uncoveredRequiredTableCount": self.uncovered_required_table_count,
@@ -2070,6 +2074,7 @@ fn build_recovery_inventory(
         .count();
 
     Ok(BackupRecoveryInventory {
+        evidence_admission: None,
         schema_coverage_complete: uncovered_required_table_count == 0
             && unclassified_table_count == 0,
         snapshot_coverage_complete: entries.iter().all(|entry| entry.snapshot_covered),
@@ -2406,7 +2411,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
             let workspace = load_workspace(&connection, &workspace_path)?;
             let export_data = load_export_data_in_current_snapshot(&connection, workspace)?;
             let workspace_id = &export_data.workspace.workspace_id;
-            let inventory = build_recovery_inventory(&connection, workspace_id)?;
+            let mut inventory = build_recovery_inventory(&connection, workspace_id)?;
             let memory_ids =
                 backup_memory_id_mapping(&export_data.memories, options.redaction_level)?;
             let mut payloads = Vec::new();
@@ -2419,7 +2424,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &mut degraded,
                 &mut payloads,
             );
-            collect_cass_payloads(
+            inventory.evidence_admission = collect_cass_payloads(
                 &connection,
                 workspace_id,
                 &created_at,
@@ -2577,7 +2582,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     ));
     recovery::reconcile_primary(&mut recovery_inventory, &export_data);
     reconcile_derived_recovery_inventory(&mut recovery_inventory, &derived_payloads);
+    if recovery_inventory.evidence_admission.is_none() {
+        recovery_inventory.snapshot_coverage_complete = false;
+    }
     degraded.extend(recovery_inventory_degradations(&recovery_inventory));
+    if let Some(summary) = &recovery_inventory.evidence_admission
+        && let Some(loss) = summary.degradation()
+    {
+        degraded.push(loss);
+    }
 
     // TC-D14: a store-auth fault must not block the backup — the artifact
     // ships unauthenticated with a high degraded entry, and import then
@@ -3300,6 +3313,16 @@ fn verify_backup_manifest(
             error.message(),
         ));
     }
+    let evidence_admission = match evidence_export::summary_from_manifest(manifest) {
+        Ok(summary) => summary,
+        Err(message) => {
+            issues.push(BackupVerificationIssue::error(
+                "manifest_evidence_admission_invalid",
+                message,
+            ));
+            None
+        }
+    };
     if !inspect
         .derived
         .iter()
@@ -3561,6 +3584,30 @@ fn verify_backup_manifest(
         });
     }
 
+    if !issues.iter().any(backup_verification_issue_is_blocking)
+        && let Some(summary) = evidence_admission
+    {
+        let workspace_id = manifest
+            .pointer("/workspace/id")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        match evidence_export::verify_summary_assets(
+            backup_path,
+            workspace_id,
+            &inspect.derived,
+            &summary,
+        ) {
+            Ok(()) => {
+                if let Some(loss) = summary.degradation() {
+                    issues.push(BackupVerificationIssue::warning(loss.code, loss.message));
+                }
+            }
+            Err(message) => issues.push(BackupVerificationIssue::error(
+                "manifest_evidence_admission_invalid",
+                message,
+            )),
+        }
+    }
     let status = if issues.iter().any(backup_verification_issue_is_blocking) {
         "failed"
     } else if issues.is_empty() {
@@ -4257,7 +4304,9 @@ fn restore_manifest_degradations(manifest_bytes: &[u8]) -> Vec<BackupDegradation
         .filter(|entry| {
             matches!(
                 entry.code.as_str(),
-                "backup_source_rows_not_covered" | "backup_table_inventory_unclassified"
+                "backup_source_rows_not_covered"
+                    | "backup_table_inventory_unclassified"
+                    | "backup_evidence_admission_reduced"
             )
         })
         .collect::<Vec<_>>();
@@ -5421,7 +5470,7 @@ fn derived_asset_reports(
 }
 
 fn degradation_reports(manifest: &JsonValue) -> Vec<BackupDegradation> {
-    manifest
+    let mut degraded = manifest
         .get("degraded")
         .and_then(JsonValue::as_array)
         .into_iter()
@@ -5432,7 +5481,16 @@ fn degradation_reports(manifest: &JsonValue) -> Vec<BackupDegradation> {
             message: json_string(item, "message").unwrap_or_default(),
             next_action: json_string(item, "nextAction").unwrap_or_default(),
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if let Ok(Some(summary)) = evidence_export::summary_from_manifest(manifest) {
+        // Derive this warning from the measured counts, including when a
+        // producer omitted or copied a stale presentation-only warning.
+        degraded.retain(|entry| entry.code != "backup_evidence_admission_reduced");
+        if let Some(loss) = summary.degradation() {
+            degraded.push(loss);
+        }
+    }
+    degraded
 }
 
 fn safe_artifact_path(
@@ -11953,12 +12011,12 @@ fn collect_cass_payloads(
     memory_ids: &BTreeMap<String, String>,
     degraded: &mut Vec<BackupDegradation>,
     payloads: &mut Vec<BackupDerivedPayload>,
-) {
+) -> Option<BackupEvidenceAdmissionSummary> {
     let sessions = match connection.list_sessions(workspace_id) {
         Ok(sessions) => sessions,
         Err(error) => {
             degraded.push(required_backup_rows_unreadable("sessions", error));
-            return;
+            return None;
         }
     };
     for (index, chunk) in sessions.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
@@ -11993,7 +12051,7 @@ fn collect_cass_payloads(
             )),
             Err(error) => {
                 degraded.push(required_backup_rows_unreadable("sessions", error));
-                return;
+                return None;
             }
         }
     }
@@ -12002,36 +12060,41 @@ fn collect_cass_payloads(
         Ok(evidence) => evidence,
         Err(error) => {
             degraded.push(required_backup_rows_unreadable("evidence_spans", error));
-            return;
+            return None;
         }
     };
     let sessions_by_id = sessions
         .iter()
         .map(|session| (session.id.as_str(), session))
         .collect::<BTreeMap<_, _>>();
+    let mut admission = BackupEvidenceAdmissionSummary::default();
     for (index, chunk) in evidence.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
+        let mut evidence_spans = Vec::with_capacity(chunk.len());
+        for span in chunk {
+            let mut record = BackupCassEvidenceRecord::from_stored(span);
+            if let Some(id) = record.memory_id.as_mut()
+                && let Some(restored_id) = memory_ids.get(id)
+            {
+                id.clone_from(restored_id);
+            }
+            let provenance_admitted =
+                sessions_by_id
+                    .get(span.session_id.as_str())
+                    .is_some_and(|session| {
+                        span.is_derivation_admitted_for_session(workspace_id, session)
+                    });
+            record.redact_for_export(redaction_level, provenance_admitted);
+            if let Err(error) = admission.observe(span, &record) {
+                degraded.push(required_backup_rows_unreadable("evidence_spans", error));
+                return None;
+            }
+            evidence_spans.push(record);
+        }
         let chunk = BackupCassEvidenceChunk {
             schema: "ee.backup.derived.cass_evidence_spans.v1".to_owned(),
             captured_at: captured_at.to_owned(),
             chunk_index: u32::try_from(index).unwrap_or(u32::MAX),
-            evidence_spans: chunk
-                .iter()
-                .map(|span| {
-                    let mut record = BackupCassEvidenceRecord::from_stored(span);
-                    if let Some(id) = record.memory_id.as_mut()
-                        && let Some(restored_id) = memory_ids.get(id)
-                    {
-                        id.clone_from(restored_id);
-                    }
-                    let provenance_admitted = sessions_by_id
-                        .get(span.session_id.as_str())
-                        .is_some_and(|session| {
-                            span.is_derivation_admitted_for_session(workspace_id, session)
-                        });
-                    record.redact_for_export(redaction_level, provenance_admitted);
-                    record
-                })
-                .collect(),
+            evidence_spans,
         };
         match serialized_payload_bytes(&chunk) {
             Ok(bytes) => payloads.push(derived_payload(
@@ -12043,10 +12106,11 @@ fn collect_cass_payloads(
             )),
             Err(error) => {
                 degraded.push(required_backup_rows_unreadable("evidence_spans", error));
-                return;
+                return None;
             }
         }
     }
+    Some(admission)
 }
 
 fn required_backup_rows_unreadable(
@@ -13793,6 +13857,7 @@ mod tests {
     #[test]
     fn cass_recovery_coverage_requires_exact_aggregate_counts() -> TestResult {
         let mut inventory = BackupRecoveryInventory {
+            evidence_admission: None,
             entries: vec![
                 BackupRecoveryInventoryEntry {
                     table: "sessions".to_owned(),
