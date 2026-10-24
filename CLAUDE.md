@@ -228,13 +228,35 @@ rch status --json | jq -r '.data.daemon.workers[]
 ```
 
 That still does not prove the lane is open, because the live-checkout refusal
-above is invisible to every field in both commands. Probe it in ~2s before
-spending a build — an admitted no-build `--job` round-trips in ~4.5s and a
-refused one fails in ~2s:
+above is invisible to every field in both commands.
 
-```bash
-RCH_REQUIRE_REMOTE=1 rch exec --job --worker <id> -- echo EE_PROBE_OK
+**Do NOT try to probe it with a no-build `--job`, and this corrects a recipe
+that was in this file for part of 2026-10-24.** A dispatched command with no
+`-j` is estimated at **4 cores whatever the command is** — measured on a bare
+`echo`:
+
+```text
+[RCH-I003] requested worker set [worker-01] refused (no_free_slots);
+'worker-01' has 3 total slot(s) but the request is estimated at 4 core(s);
+pass -j 3 (or fewer), or request a larger worker
 ```
+
+No worker in this fleet has 4 slots, so the probe is unadmissible on every one
+of them, and `echo` has no `-j` to lower. **`-j` on `rch exec` itself is
+`--json`** — the refusal's advice means the `-j` of the *dispatched cargo
+command*, so it only exists when you are dispatching cargo.
+
+Two consequences, both of which cost real time before being understood:
+
+- A sweep of "probe each idle worker" returns `no_free_slots` on ALL of them
+  and looks exactly like a saturated fleet. It is not; it is one arithmetic
+  default. Do not conclude "a same-project build is holding the slot" from it —
+  that inference was drawn here and was wrong, with `rch jobs` showing this
+  project's only lease already `state=finished phase=finished`.
+- The real dispatch is its own probe. A live-checkout refusal arrives in about
+  two seconds, long before any compilation, so dispatch the actual target with
+  `-j 2` and read the first lines of the log rather than paying for a separate
+  round trip.
 
 Measured 2026-10-14: a `-j 2` job pinned to a worker that had since shrunk from
 3 slots to 1 was refused five times by a retry loop, roughly six minutes spent
