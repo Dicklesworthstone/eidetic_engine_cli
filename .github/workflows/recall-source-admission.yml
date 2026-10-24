@@ -65,13 +65,22 @@ jobs:
       - name: Exercise anchor attachment, backfill, and validation
         if: ${{ !cancelled() }}
         run: |
-          set -euo pipefail
-          cargo test --locked --lib core::anchors:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-anchors.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-anchors.log"
-          cargo test --locked --lib models::memory_anchor:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-anchor-model.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-anchor-model.log"
-          cargo test --locked --lib code_anchor_ -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-anchor-recovery.log"
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-anchor-recovery.log"
+          # NO `-e`, DELIBERATELY: this step carries three independent
+          # test-result assertions, and under errexit the FIRST failing grep
+          # aborted the step so the other two never ran. One stale assertion
+          # could therefore disable the rest, and the report would name a
+          # single failure when three filters were never evaluated. Failures
+          # accumulate into a flag instead, which is the remedy
+          # scripts/check-step-assertion-isolation.py names in its own output.
+          set -uo pipefail
+          failed=0
+          cargo test --locked --lib core::anchors:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-anchors.log" || failed=1
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-anchors.log" || { echo "FAIL: core::anchors:: produced no all-passed summary"; failed=1; }
+          cargo test --locked --lib models::memory_anchor:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-anchor-model.log" || failed=1
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-anchor-model.log" || { echo "FAIL: models::memory_anchor:: produced no all-passed summary"; failed=1; }
+          cargo test --locked --lib code_anchor_ -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-anchor-recovery.log" || failed=1
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-anchor-recovery.log" || { echo "FAIL: code_anchor_ produced no all-passed summary"; failed=1; }
+          exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
