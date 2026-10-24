@@ -249,14 +249,15 @@ fn eligible(db: &DbConnection, memory: &StoredMemory) -> Result<bool, DbError> {
         Some(memory.created_at.as_str()),
         Some(memory.updated_at.as_str()),
         memory.valid_from.as_deref(),
-    ] {
-        if let Some(raw) = raw {
-            let Ok(at) = chrono::DateTime::parse_from_rfc3339(raw) else {
-                return Ok(false);
-            };
-            if at > now {
-                return Ok(false);
-            }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let Ok(at) = chrono::DateTime::parse_from_rfc3339(raw) else {
+            return Ok(false);
+        };
+        if at > now {
+            return Ok(false);
         }
     }
     if let Some(raw) = memory.valid_to.as_deref() {

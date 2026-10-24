@@ -3298,6 +3298,7 @@ mod tests {
             json!([{"kind":"symbol","value":"not a symbol","source":"explicit","provenance":"memory.anchors"}]),
             json!([{"kind":"path","value":format!("src/ghp_{}.rs", "a".repeat(36)),"source":"explicit","provenance":"memory.anchors"}]),
             json!([{"kind":"path","value":"src/safe.rs","source":"explicit","provenance":"api_key=ANCHOR_PRIVATE_CANARY"}]),
+            json!([{"kind":"path","value":"src/safe.rs","source":"explicit","provenance":"a".repeat(513)}]),
             json!([
                 {"kind":"path","value":"src/safe.rs","source":"explicit","provenance":"memory.anchors"},
                 {"kind":"path","value":"src/safe.rs","source":"explicit","provenance":"memory.anchors"}

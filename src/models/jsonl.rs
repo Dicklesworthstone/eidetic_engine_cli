@@ -992,7 +992,7 @@ impl ExportCodeAnchorRecord {
             source,
             MemoryAnchorSource::Explicit | MemoryAnchorSource::IndexRebuild
         ) || self.provenance.trim().is_empty()
-            || self.provenance.len() > 1024
+            || self.provenance.len() > 512
             || self.provenance.chars().any(char::is_control)
         {
             return None;
