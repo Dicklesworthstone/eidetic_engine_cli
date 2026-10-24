@@ -553,13 +553,13 @@ name = "Real-Shape Probe Fail-Closed Contract (1azkt.67)"
 #   load: 2.05 one-minute, about 0.2 per core, with an rch dispatch in flight,
 #         so these are an upper bound rather than an idle-host best case.
 #
-# RE-MEASURED the same day after six arms were added for `.63` acceptance 4
-# (the cass-provisioning code and the envelope-stripped shape precheck, each
-# with its twin), five consecutive runs:
-#   MEDIAN 0.282   min 0.281   max 0.308   spread 0.027
+# RE-MEASURED the same day after ten arms were added for `.63` acceptance 3 and
+# 4 (the cass-provisioning code, the envelope-stripped shape precheck, and the
+# absent-surface record, each with its twin), eight consecutive runs:
+#   MEDIAN 0.288   min 0.281   max 0.308   spread 0.027
 # The added arms generate a 14-session / 123-record corpus and validate it
 # twice, which costs 5 ms; the declared p50 and the 1.5x ceiling are unchanged
-# and no neighbour was retuned. 24 -> 30 arms binary-free, 29 -> 35 with --ee.
+# and no neighbour was retuned. 24 -> 34 arms binary-free, 29 -> 39 with --ee.
 # Declares 1s per the convention of the sub-second Python contract block in
 # verify.sh, which states it directly: "each sub-second check declares 1s".
 #

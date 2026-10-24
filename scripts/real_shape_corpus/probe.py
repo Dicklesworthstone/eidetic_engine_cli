@@ -214,6 +214,34 @@ def zero_guard(metrics, per_query, total_records, query_count):
     return None
 
 
+def surface_or_unavailable(payload, *names, surface):
+    """First present value, or an `unavailable` record that says why.
+
+    `.63` acceptance: "a metric whose prerequisite surface does not exist yet
+    reports `unavailable` with a reason; it never reports zero." A bare `null`
+    satisfies the never-zero half and fails the other one -- it cannot be told
+    apart from "the surface answered and the answer was empty". The baseline
+    recorded on that bead published `admission: null` for v0.16.0, a release
+    where the surface genuinely did not exist, and nothing in the output said so.
+
+    `zero_guard` cannot cover these: it walks `metrics`, and these fields live in
+    `summary["import"]`.
+
+    The presence test is `is not None`, not truthiness. The chain this replaced
+    used `or`, so a genuine zero -- zero spans imported, zero admitted -- fell
+    through to the next spelling and then to None, turning a real measurement
+    into an absent surface. That is the inverse of the defect this file exists
+    to prevent, so --self-test asserts a zero survives.
+    """
+    for name in names:
+        value = find_key(payload, name)
+        if value is not None:
+            return value
+    return {"status": "unavailable",
+            "reason": f"{surface} absent from this ee's import response; looked for "
+                      + ", ".join(names)}
+
+
 def model_env(model_cache, download=None):
     """The embedding passthrough, as a dict so --self-test can assert the exported
     NAMES behaviourally instead of grepping this file for a string.
@@ -475,10 +503,13 @@ def main():
                         path_by_session[sid] = source["path"]
             if len(path_by_session) != len(discovered):
                 raise Harness(f"could not map imported sessions to corpus files ({len(path_by_session)}/{len(discovered)})")
-            spans = find_key(payload, "spans_imported") or find_key(payload, "spansImported")
+            spans = surface_or_unavailable(payload, "spans_imported", "spansImported",
+                                           surface="imported-span count")
             summary["import"] = {"seconds": round(elapsed, 3), "sessions": len(sessions_out),
                                  "spans": spans, "per_session_seconds": round(elapsed / max(1, len(sessions_out)), 3),
-                                 "admission": find_key(payload, "evidence_admission") or find_key(payload, "evidenceAdmission")}
+                                 "admission": surface_or_unavailable(
+                                     payload, "evidence_admission", "evidenceAdmission",
+                                     surface="evidence admission")}
 
         queries = [q for q in judgments["retrieval"] if args.queries == "all" or q["split"] == "evaluation"]
         recall5, distractor_hits, search_times = [], 0, []
@@ -791,6 +822,27 @@ def self_test(ee=None):
         arm(f"an EMPTY corpus is refused distinctly, not as a product zero: {str(empty)[:50]}",
             empty is not None and "empty world" in empty)
         arm("zero judged queries is refused too", zero_guard(healthy, [], 4009, 0) is not None)
+
+        print("ABSENT-SURFACE arms -- an absent surface says so; it is not a null:")
+        present = {"data": {"evidenceAdmission": {"admitted": 988, "quarantined": 3021}}}
+        arm("TWIN THAT MUST NOT FIRE: a present surface returns its own value",
+            surface_or_unavailable(present, "evidence_admission", "evidenceAdmission",
+                                   surface="evidence admission")
+            == {"admitted": 988, "quarantined": 3021})
+        absent = surface_or_unavailable({"data": {"spansImported": 7}},
+                                        "evidence_admission", "evidenceAdmission",
+                                        surface="evidence admission")
+        arm(f"an absent surface reports status=unavailable, not null "
+            f"({absent.get('status')!r})", absent.get("status") == "unavailable")
+        arm("the unavailable record carries a reason naming the surface and the spellings "
+            "it looked for",
+            "evidence admission" in absent.get("reason", "")
+            and "evidenceAdmission" in absent.get("reason", ""))
+        # The inverse defect: the `or` chain this replaced dropped a genuine zero,
+        # which would publish an absent surface for a real measurement of none.
+        arm("TWIN: a genuine zero survives and is NOT reported as unavailable",
+            surface_or_unavailable({"data": {"spansImported": 0}}, "spans_imported",
+                                   "spansImported", surface="imported-span count") == 0)
 
         print("PROVISIONING arms -- a missing cass emulator must name itself:")
         try:
