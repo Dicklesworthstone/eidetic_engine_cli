@@ -168,7 +168,18 @@ fn workspace_daemon_serves_real_hook_reads_and_falls_back_without_crossing_store
             let warm = read(root, args, None)?;
             assert!(
                 !has_fallback(&warm),
-                "same-workspace RPC must execute successfully: {warm}"
+                "same-workspace read must be SERVED BY THE DAEMON, not by the \
+                 in-process fallback. The predicate here is the absence of \
+                 `daemon_memory_read_fallback` from degraded[] -- it is NOT \
+                 whether the call succeeded, and the envelope below will \
+                 normally carry success:true either way, because falling back \
+                 still answers the question. Read degraded[] first: a \
+                 `Daemon attempt deadline exceeded` message means the daemon \
+                 did not answer in time rather than that it answered wrongly, \
+                 which is a timing condition and is graded differently from a \
+                 store-crossing bug. Saying \"must execute successfully\" here \
+                 sent one reader looking for an execution failure that had not \
+                 happened: {warm}"
             );
             let text = warm["data"]["ambientContext"]["text"]
                 .as_str()

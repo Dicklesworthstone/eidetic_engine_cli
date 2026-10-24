@@ -111,6 +111,36 @@ The failure surfaces as exit 101 with NO `test result:` line — 101 is cargo's
 tests-failed code, so reading the exit code alone reports a compile-space
 failure as a failing test. See bd-to1fr.
 
+**"Never writes artifacts to this machine" is not "survives this machine
+running out of disk," and the difference cost 4h17m on 2026-10-23.** A `--job`
+writes no build artifacts locally, but it still writes its own lease state
+under `~/.local/state/rch/`, and `--result-dir` must land in the repo — both on
+the volume that fills. A 14-target `--job` ran to completion on the worker and
+then died on the client:
+
+```text
+WARN Failed to persist durable lease finalize heartbeat:
+     No space left on device (os error 28)
+WARN Remote completion unconfirmed; retaining build <id> ownership
+WARN refusing local fallback: automatic replay is unsafe
+exit 1
+```
+
+Three things to read off that, because every one of them is easy to get wrong:
+
+- **Exit 1 is the infra-refusal class, not a verdict.** Same signature as the
+  "completion unconfirmed" failures above. Nothing about the tests is known.
+- **The phase matters.** `finalize` is artifact retrieval, not execution — the
+  body had already written its completion marker. So a client-side ENOSPC at
+  finalize destroys the BOOKKEEPING, not the work.
+- **The outputs may still arrive.** That result dir landed 99 minutes later
+  once space was freed, complete and gradeable. So before paying for a
+  re-dispatch, look in the `--result-dir`: check `rch jobs` for a lease that
+  has reached `state=finished`, which also means no retained ownership is left
+  to poison the next dispatch to that worker.
+
+Free space on the client BEFORE a long dispatch, not after it fails.
+
 **Which worker** — and this dominates the clock. Rows 2 and 3 are the same
 lane, the same directory path and the same 475 crates, 6.8x apart, on workers
 whose rated speeds differ by 9%. Do not attribute a slow build to a cold
