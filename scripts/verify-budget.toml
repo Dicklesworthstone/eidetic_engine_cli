@@ -684,6 +684,38 @@ expected_seconds_p50 = 30
 regression_factor = 1.5
 
 [[stage]]
+name = "Real-Shape Corpus Fixture E2E (1azkt.43)"
+# Wired 2026-10-24. The script existed since 2026-10-22 and was invoked by
+# NOTHING: it was the single new orphan failing the E2E Invocation Audit, at 53
+# against a baseline of 52.
+#
+# It was unwired deliberately, and its own header says why: the import alone
+# takes minutes and "a stage this size has to be an opt-in gate or a separate
+# job, which is a budget decision for the operator, not something to smuggle in
+# with a script." That header also names the route out -- "bd-2di61 made
+# opt-in-flag gating a general budget exclusion if that is the chosen route" --
+# and bd-2di61 has since landed. This is that route taken.
+#
+# THE 555 IS INHERITED, NOT MEASURED HERE. It comes from
+# tests/real_shape_corpus_shapes.rs, which records the script at 555s while
+# explaining why it reimplemented the cheap judgment checks as a unit test.
+# This host cannot reproduce it: the workspace path must EQUAL the `cwd`
+# recorded in every transcript (/work/ledger) or discovery returns 0 sessions,
+# and /work/ledger does not exist here. So the number is honestly second-hand,
+# and it is marked as such rather than dressed up as a median of this lane.
+#
+# It does NOT consume the readiness ceiling. bd-2di61 excludes a stage gated
+# behind an opt-in flag, and verify.sh's `record_gated_off` for this stage
+# reads "--include-real-shape-fixture not set", which satisfies that predicate
+# (`reason.contains("not set") && reason.contains("--")`). The non-benchmark
+# p50 total therefore stays 578/608 and no neighbour was retuned -- which
+# matters, because 555 against 30s of headroom could not have been absorbed
+# any other way.
+# P50_PROVENANCE inherited_unverified_reason=recorded-in-real_shape_corpus_shapes-rs declared_p50_s=555
+expected_seconds_p50 = 555
+regression_factor = 1.5
+
+[[stage]]
 name = "Vision Coverage"
 # Measured 2026-09-17, 5 samples, local load average 22.97: 4 5 6 5 5.
 # Lowered 10 -> 6, which TIGHTENS this stage's own lines (advisory 15s -> 9s,

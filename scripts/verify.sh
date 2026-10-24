@@ -34,6 +34,9 @@ set -euo pipefail
 #   ./scripts/verify.sh --fuzz-smoke   # Include 30s cargo-fuzz query parser smoke
 #   ./scripts/verify.sh --include-bench # Include performance benchmarks
 #   ./scripts/verify.sh --eval          # Include pack-quality eval regression sweep
+#   ./scripts/verify.sh --include-real-shape-fixture # Include the ~555s real-cass
+#                                       # corpus import (needs a real `cass` on
+#                                       # PATH and the committed corpus fixture)
 #   ./scripts/verify.sh --help         # Show this help
 #
 # Exit status:
@@ -123,6 +126,7 @@ set -euo pipefail
 INCLUDE_BENCH=false
 INCLUDE_EVAL=false
 INCLUDE_FUZZ_SMOKE=false
+INCLUDE_REAL_SHAPE_FIXTURE=false
 FUZZ_TARGET_AUDIT_SELF_TEST=false
 PLAN_DOC_SMOKE=false
 CI_SMOKE=false
@@ -173,6 +177,9 @@ for arg in "$@"; do
             ;;
         --fuzz-smoke)
             INCLUDE_FUZZ_SMOKE=true
+            ;;
+        --include-real-shape-fixture)
+            INCLUDE_REAL_SHAPE_FIXTURE=true
             ;;
         --include-bench)
             INCLUDE_BENCH=true
@@ -2163,6 +2170,38 @@ if [ "$INCLUDE_FUZZ_SMOKE" = "true" ]; then
     run_stage "Fuzz Smoke: search query parser (bd-2j2h0)" "fuzz_smoke"
 else
     record_gated_off "Fuzz Smoke: search query parser (bd-2j2h0)" "--include-fuzz-smoke not set"
+fi
+
+# Gate 4.82: real-shape CASS corpus end to end on a REAL cass binary
+# (bd-reality-core-convergence-1azkt.43).
+#
+# WHY IT IS OPT-IN. The script's own header says it is deliberately unwired:
+# the import alone takes minutes (308 sessions, each span through a `cass view`
+# subprocess) and the non-benchmark p50 total had ~31s of headroom at 608s, so
+# "a stage this size has to be an opt-in gate, which is a budget decision for
+# the operator, not something to smuggle in with a script." bd-2di61 then made
+# opt-in-flag gating a general budget exclusion, which is the route that header
+# names, so this stage declares its real 555s p50 and is excluded from the
+# readiness ceiling while the flag is unset.
+#
+# WHY EVERY PRECONDITION IS CHECKED HERE RATHER THAN LEFT TO THE SCRIPT.
+# Measured: the script's missing-prerequisite paths call `log_drop` and then
+# `harness_summary`, which returns nonzero only when HARNESS_FAIL is nonzero. A
+# drop increments HARNESS_DROPS, so the verdict is "PASS" and the exit is 0 --
+# the script reports success having imported nothing. That is correct for an
+# ad-hoc run (a host without cass genuinely cannot answer this question, and
+# the script refuses to substitute the emulator) and it is exactly the
+# constant-green shape a verify.sh stage must never have. So the gate declines
+# to run rather than collecting a pass it did not earn: each branch below
+# either RUNS the script or says plainly that it did not.
+if [ "$INCLUDE_REAL_SHAPE_FIXTURE" != "true" ]; then
+    record_gated_off "Real-Shape Corpus Fixture E2E (1azkt.43)" "--include-real-shape-fixture not set"
+elif ! command -v cass >/dev/null 2>&1; then
+    record_gated_off "Real-Shape Corpus Fixture E2E (1azkt.43)" "cass unavailable on this host"
+elif [ ! -f "${REPO_ROOT}/tests/fixtures/real_shape_cass/manifest.json" ]; then
+    record_gated_off "Real-Shape Corpus Fixture E2E (1azkt.43)" "real-shape corpus fixture absent"
+else
+    run_stage "Real-Shape Corpus Fixture E2E (1azkt.43)" "./scripts/e2e_real_shape_fixture.sh"
 fi
 
 # Gate 4: Strategic Vision Coverage
