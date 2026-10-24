@@ -13146,6 +13146,7 @@ fn maintenance_job_row_schema_definition() -> String {
             "requestedJob": { "type": "string" },
             "command": { "type": "string" },
             "workspace": { "type": "string" },
+            "databasePath": { "type": ["string", "null"] },
             "recordedAt": { "type": "string" },
             "completedAt": { "type": "string" },
             "outcome": { "type": "string" },

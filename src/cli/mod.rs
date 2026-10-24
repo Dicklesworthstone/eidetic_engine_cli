@@ -3060,6 +3060,11 @@ pub struct JobListArgs {
     /// Maximum rows to return.
     #[arg(long, short = 'n', default_value_t = 20)]
     pub limit: usize,
+
+    /// Read the job history of this database's store, as written by
+    /// `ee job run --database`. Defaults to the workspace history.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee job show <id>`.
@@ -3068,6 +3073,11 @@ pub struct JobShowArgs {
     /// Job history row ID, or the steward runner job ID for the latest match.
     #[arg(value_name = "JOB_ID")]
     pub id: String,
+
+    /// Read the job history of this database's store, as written by
+    /// `ee job run --database`. Defaults to the workspace history.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee maintenance run`.
@@ -66879,6 +66889,13 @@ where
         workspace_source,
         request.database.is_some(),
     );
+    let explicit_database = request
+        .database
+        .map(PathBuf::as_path)
+        .map(absolute_path_or_lexical);
+    let history_path = selected_workspace.as_deref().map(|workspace_path| {
+        maintenance_job_history_path(workspace_path, explicit_database.as_deref())
+    });
     let lock_holder = format!(
         "ee-{}-{}",
         request.command.replace(' ', "_"),
@@ -66907,7 +66924,9 @@ where
                         "job": null,
                         "history": {
                             "persisted": false,
-                            "path": maintenance_job_history_path(workspace_path).display().to_string(),
+                            "path": history_path
+                                .as_deref()
+                                .map(|path| path.display().to_string()),
                         },
                         "results": [],
                         "degraded": [error.data_json()],
@@ -66974,31 +66993,42 @@ where
 
     let mut runner = crate::steward::ManualRunner::new(runner_options);
     let mut degraded = Vec::new();
-    let result = runner.run_job_type(
+    // A fresh runner numbers its jobs from `job-000001`, so the job gets an ID
+    // that stays unique across runs; the history row reuses it.
+    let result = runner.run_job_type_with_id(
+        format!("job_{}", uuid::Uuid::now_v7().simple()),
         request.job_type,
         Some(format!("{} {}", request.command, request.job_type.as_str())),
     );
     let result_json = result.data_json();
+    let database_path = runner
+        .database_path()
+        .map(|path| absolute_path_or_lexical(&path));
     let row = maintenance_job_history_row(
         request.command,
         request.job_type,
         selected_workspace.as_deref(),
+        database_path.as_deref(),
         &result,
     );
     let mut history = serde_json::json!({
         "persisted": false,
-        "path": selected_workspace
-            .as_deref()
-            .map(|workspace_path| maintenance_job_history_path(workspace_path).display().to_string()),
+        "path": history_path.as_deref().map(|path| path.display().to_string()),
     });
 
     if !request.dry_run
-        && let Some(workspace_path) = selected_workspace.as_ref()
+        && let Some(history_path) = history_path.as_deref()
     {
-        match append_maintenance_job_history(workspace_path, &row) {
-            Ok(path) => {
+        // Only the workspace's own `.ee` may be created here. An explicitly
+        // selected store directory that does not exist means the database
+        // path was wrong, and the job has already failed on it.
+        let create_store_dir = explicit_database
+            .as_deref()
+            .and_then(crate::config::workspace::standard_store_dir)
+            .is_none();
+        match append_maintenance_job_history(history_path, &row, create_store_dir) {
+            Ok(()) => {
                 history["persisted"] = serde_json::json!(true);
-                history["path"] = serde_json::json!(path.display().to_string());
                 history["rowId"] = row["id"].clone();
             }
             Err(message) => degraded.push(serde_json::json!({
@@ -67353,7 +67383,8 @@ where
             })))
             .collect::<Vec<_>>(),
         "historyPath": maintenance_job_history_path(
-            &cli.resolve_workspace()
+            &cli.resolve_workspace(),
+            None,
         ).display().to_string(),
         "next": "ee job run decay_sweep --json"
     });
@@ -67365,6 +67396,13 @@ where
     W: Write,
 {
     let workspace_path = cli.resolve_workspace();
+    let history_path = maintenance_job_history_path(
+        &workspace_path,
+        args.database
+            .as_deref()
+            .map(absolute_path_or_lexical)
+            .as_deref(),
+    );
     let since = match parse_job_history_since(args.since.as_deref()) {
         Ok(since) => since,
         Err(message) => {
@@ -67383,7 +67421,7 @@ where
             );
         }
     };
-    let mut rows = match load_maintenance_job_history(&workspace_path) {
+    let mut rows = match load_maintenance_job_history(&history_path) {
         Ok(rows) => rows,
         Err(message) => {
             return write_maintenance_response(
@@ -67423,7 +67461,7 @@ where
         "schema": MAINTENANCE_JOB_LIST_SCHEMA_V1,
         "command": "job list",
         "workspace": workspace_path.display().to_string(),
-        "historyPath": maintenance_job_history_path(&workspace_path).display().to_string(),
+        "historyPath": history_path.display().to_string(),
         "filters": {
             "kind": args.kind.map(JobType::as_str),
             "since": args.since,
@@ -67440,7 +67478,14 @@ where
     W: Write,
 {
     let workspace_path = cli.resolve_workspace();
-    let mut rows = match load_maintenance_job_history(&workspace_path) {
+    let history_path = maintenance_job_history_path(
+        &workspace_path,
+        args.database
+            .as_deref()
+            .map(absolute_path_or_lexical)
+            .as_deref(),
+    );
+    let mut rows = match load_maintenance_job_history(&history_path) {
         Ok(rows) => rows,
         Err(message) => {
             return write_maintenance_response(
@@ -67471,7 +67516,7 @@ where
             "schema": MAINTENANCE_JOB_SHOW_SCHEMA_V1,
             "command": "job show",
             "workspace": workspace_path.display().to_string(),
-            "historyPath": maintenance_job_history_path(&workspace_path).display().to_string(),
+            "historyPath": history_path.display().to_string(),
             "job": row,
             "linkedAuditEntries": [],
         });
@@ -67498,19 +67543,21 @@ fn maintenance_job_history_row(
     command: &str,
     job_type: JobType,
     workspace_path: Option<&Path>,
+    database_path: Option<&Path>,
     result: &crate::steward::JobRunResult,
 ) -> serde_json::Value {
     let result_json = result.data_json();
     let now = chrono::Utc::now().to_rfc3339();
     serde_json::json!({
         "schema": MAINTENANCE_JOB_ROW_SCHEMA_V1,
-        "id": format!("job_{}", uuid::Uuid::now_v7().simple()),
+        "id": result.job_id.as_str(),
         "runnerJobId": result.job_id.as_str(),
         "jobId": result.job_id.as_str(),
         "jobType": job_type.as_str(),
         "requestedJob": job_type.as_str(),
         "command": command,
         "workspace": workspace_path.map(|path| path.display().to_string()),
+        "databasePath": database_path.map(|path| path.display().to_string()),
         "recordedAt": now,
         "completedAt": now,
         "outcome": result.outcome.as_str(),
@@ -67526,8 +67573,21 @@ fn maintenance_job_history_row(
     })
 }
 
-fn maintenance_job_history_path(workspace_path: &Path) -> PathBuf {
-    workspace_path.join(".ee").join("maintenance-jobs.jsonl")
+/// The maintenance job history of the store a job runs against. A database
+/// in a standard store layout (`.ee/ee.db` or `.ee-campaign/ee.db`, the rule
+/// that also places its index) keeps its history next to it; any other
+/// database, or none, uses the workspace's `.ee/maintenance-jobs.jsonl`.
+fn maintenance_job_history_path(workspace_path: &Path, database_path: Option<&Path>) -> PathBuf {
+    database_path
+        .and_then(crate::config::workspace::standard_store_dir)
+        .map_or_else(|| workspace_path.join(".ee"), Path::to_path_buf)
+        .join("maintenance-jobs.jsonl")
+}
+
+/// `path` made absolute against the current directory without touching the
+/// filesystem, so a relative `--database` names the file the job opens.
+fn absolute_path_or_lexical(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Hard cap on `.ee/maintenance-jobs.jsonl` reads in
@@ -67552,29 +67612,34 @@ fn maintenance_job_history_path(workspace_path: &Path) -> PathBuf {
 const MAINTENANCE_JOB_HISTORY_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 fn append_maintenance_job_history(
-    workspace_path: &Path,
+    path: &Path,
     row: &serde_json::Value,
-) -> Result<PathBuf, String> {
-    let path = maintenance_job_history_path(workspace_path);
+    create_store_dir: bool,
+) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Could not resolve parent directory for {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    if create_store_dir {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    } else if !parent.is_dir() {
+        return Err(format!(
+            "Cannot write job history: store directory {} does not exist",
+            parent.display()
+        ));
+    }
     let encoded = serde_json::to_string(row)
         .map_err(|error| format!("Failed to encode maintenance job row: {error}"))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
     writeln!(file, "{encoded}")
-        .map_err(|error| format!("Failed to append {}: {error}", path.display()))?;
-    Ok(path)
+        .map_err(|error| format!("Failed to append {}: {error}", path.display()))
 }
 
-fn load_maintenance_job_history(workspace_path: &Path) -> Result<Vec<serde_json::Value>, String> {
-    let path = maintenance_job_history_path(workspace_path);
+fn load_maintenance_job_history(path: &Path) -> Result<Vec<serde_json::Value>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }

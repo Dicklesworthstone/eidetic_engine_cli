@@ -3279,6 +3279,13 @@ impl ManualRunner {
         &self.options
     }
 
+    /// The database path jobs on this runner open: the explicit database
+    /// path, else `<workspace>/.ee/ee.db`, else `None` when neither is set.
+    #[must_use]
+    pub fn database_path(&self) -> Option<PathBuf> {
+        self.resolve_database_path()
+    }
+
     /// Get the job ledger.
     #[must_use]
     pub fn ledger(&self) -> &JobLedger {
@@ -6693,8 +6700,29 @@ impl ManualRunner {
 
     /// Run a specific job type.
     pub fn run_job_type(&mut self, job_type: JobType, context: Option<String>) -> JobRunResult {
+        let job_id = self.ledger.next_job_id();
+        self.run_job_type_with_id(job_id, job_type, context)
+    }
+
+    /// Run a specific job type under a caller-chosen job ID.
+    ///
+    /// [`Self::run_job_type`] numbers jobs from this runner's ledger, so every
+    /// new runner starts again at `job-000001`. Callers that keep results
+    /// beyond one runner, such as the CLI job history, pass an ID that is
+    /// unique across runs instead.
+    pub fn run_job_type_with_id(
+        &mut self,
+        job_id: impl Into<String>,
+        job_type: JobType,
+        context: Option<String>,
+    ) -> JobRunResult {
+        let job_id = job_id.into();
         let timestamp = chrono::Utc::now().to_rfc3339();
-        let job_id = self.schedule(job_type, JobPriority::Normal, context);
+        let mut job = Job::new(&job_id, job_type, &timestamp).with_priority(JobPriority::Normal);
+        if let Some(context) = context {
+            job = job.with_context(context);
+        }
+        self.ledger.add_job(job);
         self.run_job(&job_id, &timestamp).unwrap_or(JobRunResult {
             job_id,
             job_type,
@@ -12010,6 +12038,65 @@ mod tests {
             details["durableMutation"].as_bool(),
             Some(false),
             "durable mutation detail",
+        )
+    }
+
+    #[test]
+    fn manual_runner_runs_a_job_under_a_caller_chosen_id() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("missing-ee.db");
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_dry_run(true);
+        let mut runner = ManualRunner::new(opts);
+        ensure(
+            runner.database_path(),
+            Some(database_path),
+            "explicit database path",
+        )?;
+
+        let chosen = runner.run_job_type_with_id(
+            "job_caller_chosen",
+            JobType::DecaySweep,
+            Some("chosen id".to_owned()),
+        );
+        ensure(chosen.job_id.as_str(), "job_caller_chosen", "chosen job id")?;
+        ensure(chosen.job_type, JobType::DecaySweep, "chosen job type")?;
+        let job = runner
+            .ledger()
+            .get_job("job_caller_chosen")
+            .ok_or_else(|| "chosen job missing from the ledger".to_owned())?;
+        ensure(
+            job.context.as_deref(),
+            Some("chosen id"),
+            "chosen job context",
+        )?;
+
+        // The ledger's own numbering is unaffected by caller-chosen IDs.
+        let numbered = runner.run_job_type(JobType::DecaySweep, None);
+        ensure(numbered.job_id.as_str(), "job-000001", "ledger job id")?;
+        ensure(runner.ledger().len(), 2, "both jobs recorded")
+    }
+
+    #[test]
+    fn manual_runner_default_database_path_is_inside_the_workspace() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let runner =
+            ManualRunner::new(RunnerOptions::new().with_workspace_path(temp.path().to_path_buf()));
+        let workspace = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        ensure(
+            runner.database_path(),
+            Some(workspace.join(".ee").join("ee.db")),
+            "default database path",
+        )?;
+        ensure(
+            ManualRunner::new(RunnerOptions::new()).database_path(),
+            None,
+            "no workspace and no database",
         )
     }
 

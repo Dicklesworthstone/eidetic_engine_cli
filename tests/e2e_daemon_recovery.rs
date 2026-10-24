@@ -473,6 +473,202 @@ fn maintenance_job_decay_sweep_persists_history_and_mutates_db() -> TestResult {
     connection.close().map_err(|error| error.to_string())
 }
 
+/// A job run with `--database` on a copy of the store keeps its history row
+/// in that copy, records the database it ran on, and gets its own job ID.
+#[test]
+fn maintenance_job_run_on_a_store_copy_keeps_its_history_in_that_store() -> TestResult {
+    let artifact_dir = unique_artifact_dir("maintenance-store-copy")?;
+    let workspace = artifact_dir.join("workspace");
+    fs::create_dir_all(&workspace).map_err(|error| {
+        format!(
+            "failed to create workspace {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let init = run_ee_json(&workspace, ["init"], "init")?;
+    assert_success(&init, "init")?;
+    let live_database = PathBuf::from(json_string(&init.json, "/data/databasePath", "init")?);
+    let remembered = run_ee_json(
+        &workspace,
+        [
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "Store copy fixture: job history belongs to the store the job ran on.",
+        ],
+        "remember store copy fixture",
+    )?;
+    assert_success(&remembered, "remember store copy fixture")?;
+
+    let copy_store = artifact_dir.join("copy").join(".ee");
+    copy_dir_recursive(&workspace.join(".ee"), &copy_store)?;
+    let copy_database = copy_store.join("ee.db");
+    let copy_database_arg = copy_database.to_string_lossy().into_owned();
+    let copy_history = copy_store.join("maintenance-jobs.jsonl");
+    let live_history = workspace.join(".ee").join("maintenance-jobs.jsonl");
+
+    let mut job_ids = Vec::new();
+    for attempt in ["first", "second"] {
+        let context = format!("{attempt} job run on the store copy");
+        let run = run_ee_json(
+            &workspace,
+            [
+                "job",
+                "run",
+                "decay_sweep",
+                "--database",
+                copy_database_arg.as_str(),
+            ],
+            &context,
+        )?;
+        assert_success(&run, &context)?;
+        ensure_equal(
+            &run.json.pointer("/data/history/persisted"),
+            &Some(&Value::Bool(true)),
+            &context,
+        )?;
+        ensure_equal(
+            &PathBuf::from(json_string(&run.json, "/data/history/path", &context)?),
+            &copy_history,
+            "history path follows the selected store",
+        )?;
+        let row_id = json_string(&run.json, "/data/history/rowId", &context)?;
+        for pointer in [
+            "/data/job/jobId",
+            "/data/job/runnerJobId",
+            "/data/results/0/jobId",
+        ] {
+            ensure_equal(
+                &json_string(&run.json, pointer, &context)?,
+                &row_id,
+                pointer,
+            )?;
+        }
+        ensure_equal(
+            &PathBuf::from(json_string(&run.json, "/data/job/databasePath", &context)?),
+            &copy_database,
+            "history row records the database the job ran on",
+        )?;
+        job_ids.push(row_id);
+    }
+    ensure(
+        job_ids[0] != job_ids[1],
+        format!("each run needs its own job ID: {job_ids:?}"),
+    )?;
+    ensure(
+        copy_history.exists(),
+        format!("store copy history missing: {}", copy_history.display()),
+    )?;
+    ensure(
+        !live_history.exists(),
+        format!(
+            "runs on the copy must not write the workspace history {}",
+            live_history.display()
+        ),
+    )?;
+
+    let copy_list = run_ee_json(
+        &workspace,
+        ["job", "list", "--database", copy_database_arg.as_str()],
+        "job list on the store copy",
+    )?;
+    assert_success(&copy_list, "job list on the store copy")?;
+    ensure_equal(
+        &copy_list.json.pointer("/data/jobCount"),
+        &Some(&Value::from(2_u64)),
+        "store copy job count",
+    )?;
+    let live_list = run_ee_json(&workspace, ["job", "list"], "job list on the workspace")?;
+    assert_success(&live_list, "job list on the workspace")?;
+    ensure_equal(
+        &live_list.json.pointer("/data/jobCount"),
+        &Some(&Value::from(0_u64)),
+        "workspace job count",
+    )?;
+    let shown = run_ee_json(
+        &workspace,
+        [
+            "job",
+            "show",
+            job_ids[0].as_str(),
+            "--database",
+            copy_database_arg.as_str(),
+        ],
+        "job show on the store copy",
+    )?;
+    assert_success(&shown, "job show on the store copy")?;
+    ensure_equal(
+        &json_string(&shown.json, "/data/job/id", "job show")?,
+        &job_ids[0],
+        "job show finds the first run by its job ID",
+    )?;
+
+    // A run on the workspace store still keeps its history in the workspace
+    // and now records that database too.
+    let live_run = run_ee_json(
+        &workspace,
+        ["job", "run", "decay_sweep"],
+        "job run on the workspace",
+    )?;
+    assert_success(&live_run, "job run on the workspace")?;
+    ensure_equal(
+        &canonical(&json_string(
+            &live_run.json,
+            "/data/history/path",
+            "workspace run",
+        )?)?,
+        &canonical(&live_history.to_string_lossy())?,
+        "workspace run history path",
+    )?;
+    ensure_equal(
+        &canonical(&json_string(
+            &live_run.json,
+            "/data/job/databasePath",
+            "workspace run",
+        )?)?,
+        &canonical(&live_database.to_string_lossy())?,
+        "workspace run database path",
+    )?;
+    let live_job_id = json_string(&live_run.json, "/data/history/rowId", "workspace run")?;
+    ensure(
+        !job_ids.contains(&live_job_id),
+        format!("workspace run reused a job ID: {live_job_id} in {job_ids:?}"),
+    )
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> TestResult {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
+    let entries = fs::read_dir(source)
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("failed to read {}: {error}", source.display()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to stat {}: {error}", entry.path().display()))?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target).map_err(|error| {
+                format!(
+                    "failed to copy {} to {}: {error}",
+                    entry.path().display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn canonical(path: &str) -> Result<PathBuf, String> {
+    fs::canonicalize(path).map_err(|error| format!("failed to canonicalize {path}: {error}"))
+}
+
 fn unique_artifact_dir(name: &str) -> Result<PathBuf, String> {
     let mut target_roots = Vec::new();
     for candidate in [

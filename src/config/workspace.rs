@@ -1240,20 +1240,30 @@ pub fn resolve_store_index_dir(
     if let Some(index_dir) = index_dir {
         return index_dir.to_path_buf();
     }
-    if let Some(database_path) = database_path
-        && database_path
-            .file_name()
-            .is_some_and(|name| name == "ee.db")
-        && let Some(store_dir) = database_path.parent()
-        && store_dir
-            .file_name()
-            .is_some_and(|name| name == WORKSPACE_MARKER || name == ".ee-campaign")
-    {
+    if let Some(store_dir) = database_path.and_then(standard_store_dir) {
         return store_dir.join("index");
     }
     canonical_workspace_root_or_lexical(workspace_path)
         .join(WORKSPACE_MARKER)
         .join("index")
+}
+
+/// The store directory of a database in a standard store layout: `ee.db`
+/// directly inside a `.ee` or `.ee-campaign` directory. Other layouts have
+/// no store directory of their own and return `None`.
+///
+/// The result stays lexical, like [`resolve_store_index_dir`], which uses
+/// the same rule to place an explicitly selected store's index.
+#[must_use]
+pub fn standard_store_dir(database_path: &Path) -> Option<&Path> {
+    let store_dir = database_path.parent()?;
+    let standard = database_path
+        .file_name()
+        .is_some_and(|name| name == "ee.db")
+        && store_dir
+            .file_name()
+            .is_some_and(|name| name == WORKSPACE_MARKER || name == ".ee-campaign");
+    standard.then_some(store_dir)
 }
 
 /// Compute a stable workspace fingerprint from a canonical root path.
@@ -1435,7 +1445,21 @@ mod tests {
                 default_index,
                 "unrecognized database layout {database} must retain the workspace default"
             );
+            assert_eq!(super::standard_store_dir(Path::new(database)), None);
         }
+    }
+
+    #[test]
+    fn standard_store_dir_is_the_parent_of_a_standard_store_database() {
+        for store in [".ee", ".ee-campaign"] {
+            let database = Path::new("selected-root").join(store).join("ee.db");
+            assert_eq!(
+                super::standard_store_dir(&database),
+                Some(Path::new("selected-root").join(store).as_path())
+            );
+        }
+        assert_eq!(super::standard_store_dir(Path::new("ee.db")), None);
+        assert_eq!(super::standard_store_dir(Path::new(".ee")), None);
     }
 
     #[cfg(unix)]
