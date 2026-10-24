@@ -4,6 +4,9 @@ on:
     branches: [main]
     paths:
       - 'src/core/recall*.rs'
+      - 'src/core/anchors.rs'
+      - 'src/models/memory_anchor.rs'
+      - 'tests/recall_cli_golden.rs'
       - 'tests/recall_source_lifecycle_cli.py'
       - '.github/workflows/recall-source-admission.yml'
   workflow_dispatch:
@@ -30,7 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           git rev-parse HEAD > "$RUNNER_TEMP/recall-identity.log"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/recall-source.tar.gz" HEAD src/core/recall*.rs tests/recall_source_lifecycle_cli.py
+          git archive --format=tar.gz --output="$RUNNER_TEMP/recall-source.tar.gz" HEAD src/core/recall*.rs src/core/anchors.rs src/models/memory_anchor.rs tests/recall_cli_golden.rs tests/recall_source_lifecycle_cli.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: recall-source-${{ github.run_attempt }}
@@ -59,6 +62,16 @@ jobs:
           set -euo pipefail
           cargo test --locked --lib core::recall:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-engine.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-engine.log"
+      - name: Exercise anchor attachment, backfill, and validation
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib core::anchors:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-anchors.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-anchors.log"
+          cargo test --locked --lib models::memory_anchor:: -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-anchor-model.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-anchor-model.log"
+          cargo test --locked --lib code_anchor_ -- --test-threads=2 2>&1 | tee "$RUNNER_TEMP/recall-anchor-recovery.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/recall-anchor-recovery.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
@@ -89,7 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/recall-check.log"
-          rustfmt --edition 2024 --config skip_children=true --check src/core/recall.rs src/core/recall_admission.rs src/core/recall_scan.rs src/core/recall_projection.rs
+          rustfmt --edition 2024 --config skip_children=true --check src/core/recall.rs src/core/recall_admission.rs src/core/recall_scan.rs src/core/recall_projection.rs src/core/anchors.rs src/models/memory_anchor.rs tests/recall_cli_golden.rs
           python3 -m py_compile tests/recall_source_lifecycle_cli.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
