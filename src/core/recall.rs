@@ -318,13 +318,28 @@ fn match_char_class(pattern: &[char], open: usize, ch: char) -> Option<(bool, us
 }
 
 /// Normalize a caller-supplied path selector to the reverse index's
-/// normalized form: strip a leading `./`. Absolute selectors are returned
+/// normalized form: trim surrounding whitespace and strip a leading `./`.
+/// This matches additive code-anchor attachment. Absolute selectors are returned
 /// as-is and simply never match (normalized paths are workspace-relative by
 /// construction); rejecting them here would turn a no-op into an error on
 /// the hook path.
 #[must_use]
 pub fn normalize_recall_path_selector(selector: &str) -> String {
+    let selector = selector.trim();
     selector.strip_prefix("./").unwrap_or(selector).to_owned()
+}
+
+/// Match the accepted spelling of attached symbols to their stored identity.
+/// Legacy extracted symbols outside the attachment grammar retain their exact
+/// spelling; changing their interpretation would invalidate existing anchors.
+#[must_use]
+pub fn normalize_recall_symbol_selector(selector: &str) -> String {
+    crate::models::memory_anchor::normalize_code_anchor_value(
+        MemoryAnchorKind::Symbol,
+        selector,
+        None,
+    )
+    .unwrap_or_else(|| selector.to_owned())
 }
 
 fn diff_name_only_changed_paths(name_only_text: &str) -> Vec<String> {
@@ -562,8 +577,11 @@ pub fn evaluate_recall(
         .iter()
         .map(|selector| normalize_recall_path_selector(selector))
         .collect();
-    let symbol_set: std::collections::BTreeSet<&str> =
-        query.symbols.iter().map(String::as_str).collect();
+    let symbol_set: std::collections::BTreeSet<String> = query
+        .symbols
+        .iter()
+        .map(|selector| normalize_recall_symbol_selector(selector))
+        .collect();
 
     // Surface matching (OR across selector families), tombstone exclusion,
     // bounded scan, dedup by memory id keeping the freshest anchor.
@@ -1728,11 +1746,43 @@ mod tests {
             normalize_recall_path_selector("src/db/mod.rs"),
             "src/db/mod.rs"
         );
+        assert_eq!(
+            normalize_recall_path_selector("  ./src/db/mod.rs  "),
+            "src/db/mod.rs"
+        );
         // Absolute selectors stay as-is and simply never match the
         // workspace-relative index.
         assert_eq!(normalize_recall_path_selector("/etc/passwd"), "/etc/passwd");
         let rows = vec![row("mem_a", Some("src/db/mod.rs"), None)];
         let report = evaluate_recall(&path_query(&["/src/db/mod.rs"]), &rows, Some(7), 7);
+        assert!(report.items.is_empty());
+    }
+
+    #[test]
+    fn symbol_selector_normalization_preserves_legacy_names_and_case() {
+        assert_eq!(
+            normalize_recall_symbol_selector(" Store::open() "),
+            "Store::open"
+        );
+        assert_eq!(
+            normalize_recall_symbol_selector("store.open()"),
+            "store.open"
+        );
+        assert_eq!(
+            normalize_recall_symbol_selector("Store<Widget>::open"),
+            "Store<Widget>::open"
+        );
+        assert_eq!(normalize_recall_symbol_selector("operator+"), "operator+");
+        let rows = vec![row("mem_a", None, Some("Store::open"))];
+        let report = evaluate_recall(
+            &RecallQuery {
+                symbols: vec![" store::open() ".to_owned()],
+                ..RecallQuery::default()
+            },
+            &rows,
+            Some(7),
+            7,
+        );
         assert!(report.items.is_empty());
     }
 
@@ -2386,6 +2436,86 @@ mod tests {
             );
             assert_eq!(report.index_generation, Some(report.db_generation));
         }
+    }
+
+    #[test]
+    fn attached_locator_spellings_recall_through_sql_and_scan_matching() {
+        let (root, connection, workspace_id) = wrapper_test_file_db();
+        let memory_id = format!("mem_{:026}", 23);
+        wrapper_insert_memory(
+            &connection,
+            &workspace_id,
+            &memory_id,
+            "Unchanged release guidance.",
+        );
+        let original = connection.get_memory(&memory_id).expect("read source");
+        let surfaces = [
+            (MemoryAnchorKind::Path, " ./src/Indexed.rs "),
+            (MemoryAnchorKind::Symbol, " Store::open() "),
+        ]
+        .into_iter()
+        .map(|(kind, value)| {
+            crate::models::CreateMemoryAnchorInput::from_code_surface(
+                &memory_id,
+                kind,
+                value,
+                root.path(),
+                "memory.anchors",
+            )
+            .expect("validated attachment")
+        })
+        .collect::<Vec<_>>();
+        connection
+            .with_transaction(|| {
+                connection.attach_memory_code_anchor_sources(&workspace_id, &memory_id, &surfaces)
+            })
+            .expect("attach source bindings");
+
+        let mut broad_symbols = (0..130)
+            .map(|index| format!("Other{index}::open()"))
+            .collect::<Vec<_>>();
+        broad_symbols.push(" Store::open() ".to_owned());
+        for query in [
+            path_query(&[" ./src/Indexed.rs "]),
+            path_query(&["src/Indexed.rs"]),
+            RecallQuery {
+                symbols: vec![" Store::open() ".to_owned()],
+                ..RecallQuery::default()
+            },
+            RecallQuery {
+                symbols: vec!["Store::open".to_owned()],
+                ..RecallQuery::default()
+            },
+            RecallQuery {
+                symbols: broad_symbols,
+                ..RecallQuery::default()
+            },
+        ] {
+            let report = run_recall(&connection, &workspace_id, &query).expect("recall attachment");
+            assert_eq!(report.items.len(), 1, "accepted spelling {query:?}");
+            assert_eq!(report.items[0].memory_id, memory_id);
+            assert!(report.degraded.is_empty(), "{:?}", report.degraded);
+        }
+        for query in [
+            path_query(&["src/indexed.rs"]),
+            RecallQuery {
+                symbols: vec!["store::open()".to_owned()],
+                ..RecallQuery::default()
+            },
+        ] {
+            assert!(
+                run_recall(&connection, &workspace_id, &query)
+                    .expect("case-sensitive recall")
+                    .items
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            connection
+                .get_memory(&memory_id)
+                .expect("read unchanged source"),
+            original
+        );
     }
 
     #[test]

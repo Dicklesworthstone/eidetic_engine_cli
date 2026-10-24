@@ -12,7 +12,8 @@ use sqlmodel_core::{Row, Value};
 
 use super::{
     RECALL_CANDIDATE_SCAN_CAP, RecallCandidateRow, RecallDegradation, RecallQuery,
-    anchor_row_preference, normalize_recall_path_selector, recall_glob_match, score_row,
+    anchor_row_preference, normalize_recall_path_selector, normalize_recall_symbol_selector,
+    recall_glob_match, score_row,
 };
 use crate::db::{DbConnection, DbError, DbOperation};
 use crate::models::memory_anchor::memory_anchor_value_hash;
@@ -149,7 +150,11 @@ fn streams(query: &RecallQuery) -> Vec<Stream> {
     if !path_selectors.is_empty() {
         streams.push(Stream::new("path", path_selectors.into_iter().collect()));
     }
-    let symbols = query.symbols.iter().cloned().collect::<BTreeSet<_>>();
+    let symbols = query
+        .symbols
+        .iter()
+        .map(|selector| normalize_recall_symbol_selector(selector))
+        .collect::<BTreeSet<_>>();
     if !symbols.is_empty() {
         streams.push(Stream::new(
             "symbol",
@@ -196,7 +201,7 @@ fn load_bounded(
     let symbols = query
         .symbols
         .iter()
-        .map(String::as_str)
+        .map(|selector| normalize_recall_symbol_selector(selector))
         .collect::<BTreeSet<_>>();
     let mut streams = streams(query);
     let mut scanned = 0;
