@@ -16209,7 +16209,7 @@ mod tests {
         })
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-        let query = frankensearch::BoundQueryEmbedding::new(query.values, query.identity)
+        let query = frankensearch::core::BoundQueryEmbedding::new(query.values, query.identity)
             .map_err(|error| error.to_string())?;
         query
             .verify_space(index.embedder_revision(), "fast")
