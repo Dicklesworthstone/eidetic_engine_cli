@@ -433,11 +433,24 @@ fn fold_rounds(rounds: &[Verdict]) -> Verdict {
             return verdict.clone();
         }
     }
+    // "observation", NOT "round", and the distinction is not pedantry: this
+    // slice is a FLAT accumulation from three different sources, so the
+    // positional index is not a round number.
+    //
+    //   `for (kind, outcomes) in cold_rounds`  pushes one entry per KIND
+    //   `for round in 0..rounds`               pushes one entry per ROUND
+    //   the post-window durable/infra checks   push entries belonging to NO round
+    //
+    // Labelling entry 7 "round 7" therefore names a round that may not exist,
+    // and for the cold-kind entries it reports a kind as a round. A reader
+    // chasing "round 7" in a 3-round run looks for a round that was never
+    // executed and concludes the log is corrupt. Index the observation, which
+    // is a fact, instead of inferring a round, which is not.
     let mut divergences = Vec::new();
-    for (round, verdict) in rounds.iter().enumerate() {
+    for (index, verdict) in rounds.iter().enumerate() {
         if let Verdict::RaceReproduced(round_divergences) = verdict {
             for divergence in round_divergences {
-                divergences.push(format!("round {round}: {divergence}"));
+                divergences.push(format!("observation #{index}: {divergence}"));
             }
         }
     }
@@ -447,8 +460,8 @@ fn fold_rounds(rounds: &[Verdict]) -> Verdict {
     let inconclusive: Vec<String> = rounds
         .iter()
         .enumerate()
-        .filter_map(|(round, verdict)| match verdict {
-            Verdict::Inconclusive(reason) => Some(format!("round {round}: {reason}")),
+        .filter_map(|(index, verdict)| match verdict {
+            Verdict::Inconclusive(reason) => Some(format!("observation #{index}: {reason}")),
             _ => None,
         })
         .collect();
@@ -4032,6 +4045,42 @@ mod classifier {
             "INFRA_ERROR"
         );
         assert_eq!(fold_rounds(&[]).class(), "INFRA_ERROR");
+    }
+
+    /// The fold labels a POSITION, not a round, and nothing may quietly put
+    /// "round" back. `round_verdicts` is filled by a per-kind loop, a
+    /// per-round loop and post-window durable checks that belong to no round,
+    /// so the positional index is not a round number and claiming otherwise
+    /// sends a reader looking for a round that was never executed.
+    #[test]
+    fn folded_labels_index_the_observation_and_never_claim_a_round() {
+        let folded = fold_rounds(&[
+            Verdict::RaceAbsent,
+            Verdict::RaceReproduced(vec!["order flipped".to_owned()]),
+        ]);
+        let Verdict::RaceReproduced(divergences) = &folded else {
+            panic!("expected RACE_REPRODUCED, got {folded:?}");
+        };
+        assert_eq!(
+            divergences,
+            &["observation #1: order flipped".to_owned()],
+            "the label must carry the flat position of the observation"
+        );
+        assert!(
+            !divergences.iter().any(|d| d.contains("round")),
+            "no folded label may say `round`: the index is not a round number. got {divergences:?}"
+        );
+
+        // Same for the inconclusive arm, which has its own format! site.
+        let folded = fold_rounds(&[
+            Verdict::RaceAbsent,
+            Verdict::RaceAbsent,
+            Verdict::Inconclusive("busy".to_owned()),
+        ]);
+        let Verdict::Inconclusive(reason) = &folded else {
+            panic!("expected INCONCLUSIVE, got {folded:?}");
+        };
+        assert_eq!(reason, "observation #2: busy");
     }
 
     #[test]
