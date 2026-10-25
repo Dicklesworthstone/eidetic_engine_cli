@@ -83314,6 +83314,99 @@ mod tests {
         )
     }
 
+    /// Set by `maintenance_job_history_cross_process_appends_keep_whole_rows`
+    /// on the child processes it starts: the history file to append to.
+    const JOB_HISTORY_CHILD_PATH: &str = "EE_TEST_JOB_HISTORY_APPEND_PATH";
+    /// The child's writer number, used in its row IDs.
+    const JOB_HISTORY_CHILD_WRITER: &str = "EE_TEST_JOB_HISTORY_APPEND_WRITER";
+    const JOB_HISTORY_CHILD_ROWS: usize = 48;
+
+    /// The runs that share a store's history are separate `ee` processes, so
+    /// nothing in-process (a mutex, a shared handle) can keep their rows
+    /// whole. Each child process here appends through
+    /// `append_maintenance_job_history` exactly as a run does.
+    #[test]
+    fn maintenance_job_history_cross_process_appends_keep_whole_rows() -> TestResult {
+        const WRITERS: usize = 6;
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let history = directory.path().join("maintenance-jobs.jsonl");
+        let start = directory.path().join("start");
+        let test_binary = std::env::current_exe().map_err(|error| error.to_string())?;
+        let mut children = Vec::with_capacity(WRITERS);
+        for writer in 0..WRITERS {
+            let child = std::process::Command::new(&test_binary)
+                .args([
+                    "--exact",
+                    "cli::tests::maintenance_job_history_append_child_process",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(JOB_HISTORY_CHILD_PATH, &history)
+                .env(JOB_HISTORY_CHILD_WRITER, writer.to_string())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|error| format!("start history writer {writer}: {error}"))?;
+            children.push(child);
+        }
+        // Release every writer at once.
+        fs::write(&start, b"go").map_err(|error| error.to_string())?;
+        let mut failures = Vec::new();
+        for (writer, child) in children.into_iter().enumerate() {
+            let output = child
+                .wait_with_output()
+                .map_err(|error| format!("wait for history writer {writer}: {error}"))?;
+            if !output.status.success() {
+                failures.push(format!(
+                    "writer {writer}: {}\n{}\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ));
+            }
+        }
+        if !failures.is_empty() {
+            return Err(failures.join("\n"));
+        }
+        let rows = super::load_maintenance_job_history(&history)?;
+        ensure_equal(
+            &rows.len(),
+            &(WRITERS * JOB_HISTORY_CHILD_ROWS),
+            "every history row appended by concurrent processes parses as its own line",
+        )
+    }
+
+    /// Child half of `maintenance_job_history_cross_process_appends_keep_whole_rows`;
+    /// does nothing unless that test started this process.
+    #[test]
+    fn maintenance_job_history_append_child_process() -> TestResult {
+        let Some(history) = std::env::var_os(JOB_HISTORY_CHILD_PATH) else {
+            return Ok(());
+        };
+        let history = PathBuf::from(history);
+        let writer = std::env::var_os(JOB_HISTORY_CHILD_WRITER)
+            .map(|writer| writer.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let start = history.with_file_name("start");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !start.exists() {
+            if std::time::Instant::now() > deadline {
+                return Err("history writer was never released".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let padding = "x".repeat(32 * 1024);
+        for index in 0..JOB_HISTORY_CHILD_ROWS {
+            let row = serde_json::json!({
+                "id": format!("job_process{writer}_row{index}"),
+                "details": { "padding": padding },
+            });
+            super::append_maintenance_job_history(&history, &row, false)?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn maintenance_wal_checkpoint_missing_database_is_a_storeless_miss() -> TestResult {
         let workspace_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
