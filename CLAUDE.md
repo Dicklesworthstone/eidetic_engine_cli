@@ -552,3 +552,19 @@ executed exactly one test and failed it legitimately — and the grader reported
 with `RAN=1 FAILED=1`. A grader that cannot see a `Running` line turns a genuine
 product failure into "no verdict", which is the worse error of the two: it looks
 like infrastructure noise and gets retried instead of reported.
+
+**`CARGO_TERM_COLOR=never` does NOT remove the need for it.** Measured
+2026-10-25: a `--job` dispatched with that variable set still returned a log
+holding **199** escape sequences, and they sit *before* `Running` as well as
+inside it, because the indent the lane applies is itself colored. Set the
+variable if you like; still strip.
+
+**And write the strip as ONE pattern.** This grader is BSD `sed` on the Mac
+client, where `\|` is a literal, not alternation — so "improving" the line to
+`s/\033\[[0-9;]*h\|\033\[[0-9;]*m//g` matches nothing and silently strips
+NOTHING. Measured on the same log: the two-alternative form left all 199
+escapes in place and `grep '^ *Running '` found zero lines; the single-pattern
+form above left 0 escapes and matched immediately. The failure mode is the
+worst available — a grader that reports "no verdict" for a run that passed,
+with no sign that its own sanitiser did nothing. Chain two `sed` calls, or use
+one bracket class, rather than an alternation.
