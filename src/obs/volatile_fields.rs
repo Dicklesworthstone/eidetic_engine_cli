@@ -43,6 +43,7 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "elapsedMsBucket",
     "durationMs",
     "wallClockMs",
+    "leaseHeldMs",
     "startedAt",
     "started_at",
     "endedAt",

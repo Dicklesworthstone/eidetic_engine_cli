@@ -82,6 +82,7 @@ VOLATILE_FIELD_NAMES=(
     elapsedMsBucket
     durationMs
     wallClockMs
+    leaseHeldMs
     startedAt
     started_at
     endedAt
