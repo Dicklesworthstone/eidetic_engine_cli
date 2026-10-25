@@ -6,7 +6,7 @@
     "epic_letter": "M"
   },
   "surfaces": ["handoff resume"],
-  "severity": "high",
+  "severity": "critical",
   "repair_present": true,
   "trigger": {
     "description": "A strict machine-bound handoff capsule is resumed on a machine where the local handoff machine salt file is absent.",
@@ -19,7 +19,7 @@
   },
   "expected_emission": {
     "code": "strict_mode_no_salt_file",
-    "severity": "high",
+    "severity": "critical",
     "message_contains": ["key material is missing", "capsule"],
     "repair_contains": "Resume on the machine/workspace",
     "repair_string": "Resume on the machine/workspace that created the capsule, or recreate the capsule."

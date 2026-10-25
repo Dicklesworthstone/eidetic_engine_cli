@@ -1182,3 +1182,202 @@ fn mesh_emitted_degraded_codes_have_fixtures_bd_31654() -> TestResult {
         ))
     }
 }
+
+/// bd-xqkoo: every other arm in this file compares a fixture to itself —
+/// `validate_fixture` asserts `expected_emission.severity` equals the
+/// top-level `severity` — so a declared severity can drift from the severity
+/// the product actually emits and no gate notices. `ee handoff resume` on a
+/// tampered capsule emitted `critical` against a catalog that declared
+/// `high`, and only an e2e script that had been dead for months caught it.
+///
+/// This arm closes the hole for the codes whose envelope severity is decided
+/// by the code string alone. It pins all four published declarations AND the
+/// severity a real error envelope carries, so the two cannot move apart: it
+/// fails when a code joins `CRITICAL_ERROR_CODES` without a catalog update,
+/// and equally when the catalog is edited away from the code.
+#[test]
+fn critical_error_codes_match_their_catalog_declaration_and_emission() -> TestResult {
+    use ee::models::DomainError;
+    use ee::output::{CRITICAL_ERROR_CODES, error_response_json};
+
+    ensure(
+        !CRITICAL_ERROR_CODES.is_empty(),
+        "CRITICAL_ERROR_CODES is empty, which would make every check below vacuous",
+    )?;
+
+    let taxonomy_path = docs_dir().join("degraded_code_taxonomy.md");
+    let generated_docs_path = docs_dir().join("degraded_codes.md");
+    let taxonomy = fs::read_to_string(&taxonomy_path)
+        .map_err(|error| format!("read {}: {error}", taxonomy_path.display()))?;
+    let generated_docs = fs::read_to_string(&generated_docs_path)
+        .map_err(|error| format!("read {}: {error}", generated_docs_path.display()))?;
+
+    let mut errors = Vec::new();
+    for &code in CRITICAL_ERROR_CODES {
+        // (1) What the product actually puts on the wire. The severity for
+        // these codes is keyed on `error.code()` ahead of any variant match,
+        // so any variant carrying the code reaches the same arm.
+        let envelope = error_response_json(&DomainError::UsageCodeWithDetails {
+            code,
+            message: "severity probe".to_owned(),
+            repair: Some("severity probe".to_owned()),
+            details_json: "{}".to_owned(),
+        });
+        match serde_json::from_str::<Value>(&envelope) {
+            Ok(parsed) => {
+                let emitted = parsed.pointer("/error/severity").and_then(Value::as_str);
+                if emitted != Some("critical") {
+                    errors.push(format!(
+                        "`{code}`: listed in CRITICAL_ERROR_CODES but the error envelope emitted {emitted:?}"
+                    ));
+                }
+            }
+            Err(error) => errors.push(format!("`{code}`: error envelope is not JSON: {error}")),
+        }
+
+        // (2) The fixture, both fields — this is what agents branch on.
+        let fixture_path = fixtures_dir().join(format!("{code}.json"));
+        if fixture_path.exists() {
+            match read_fixture(&fixture_path) {
+                Ok(fixture) => {
+                    for pointer in ["/severity", "/expected_emission/severity"] {
+                        let declared = fixture.pointer(pointer).and_then(Value::as_str);
+                        if declared != Some("critical") {
+                            errors.push(format!(
+                                "{}{pointer}: declares {declared:?} but the envelope emits `critical`",
+                                fixture_path.display()
+                            ));
+                        }
+                    }
+                }
+                Err(error) => errors.push(error),
+            }
+        } else {
+            errors.push(format!(
+                "{}: missing fixture for critical code `{code}`",
+                fixture_path.display()
+            ));
+        }
+
+        // (3) The two documents that publish the contract.
+        if !taxonomy_has_code_with_severity(&taxonomy, code, "critical") {
+            errors.push(format!(
+                "{}: `{code}` has no `critical` taxonomy row",
+                taxonomy_path.display()
+            ));
+        }
+        if !generated_docs.contains(&format!("## `{code}`\n\n**Severity:** critical")) {
+            errors.push(format!(
+                "{}: `{code}` section does not declare `**Severity:** critical`",
+                generated_docs_path.display()
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} critical-severity drift(s) across {} code(s):\n  - {}",
+            errors.len(),
+            CRITICAL_ERROR_CODES.len(),
+            errors.join("\n  - "),
+        ))
+    }
+}
+
+/// Codes in the `handoff_`/`strict_mode_` prefix family that are emitted ONLY
+/// as degradation entries, never as a `DomainError`, so `domain_error_severity`
+/// never decides their severity and the envelope rule below cannot apply.
+///
+/// `handoff_hmac_skipped` is pushed with a literal `.with_severity("high")` in
+/// src/core/handoff.rs, and scripts/e2e_overhaul/handoff_hmac.sh asserts
+/// exactly that value. `handoff_snapshot_stale` is pushed with
+/// `.with_severity(breach.severity)` — a value that varies per threshold
+/// breach, which one declared scalar cannot express at all.
+const PREFIX_FAMILY_DEGRADATION_ONLY_CODES: &[&str] =
+    &["handoff_hmac_skipped", "handoff_snapshot_stale"];
+
+/// The MIRROR of the arm above, and the reason it has to be a separate sweep:
+/// iterating `CRITICAL_ERROR_CODES` cannot notice a code LEAVING that list.
+/// Drop one and its envelope silently falls back to the `handoff_` prefix
+/// default of `high` while its fixture still declares `critical` — the same
+/// defect as bd-xqkoo, mirrored, and invisible to a list-driven check.
+///
+/// So this sweeps from the CATALOG side, over the one family whose severity
+/// `domain_error_severity` decides from the code string alone: a `handoff_` or
+/// `strict_mode_` code is `critical` when it is in `CRITICAL_ERROR_CODES` and
+/// `high` otherwise, with no dependence on the `DomainError` variant.
+#[test]
+fn handoff_prefix_family_fixtures_declare_the_severity_the_envelope_emits() -> TestResult {
+    use ee::output::CRITICAL_ERROR_CODES;
+
+    let excluded = PREFIX_FAMILY_DEGRADATION_ONLY_CODES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut errors = Vec::new();
+    let mut checked = 0usize;
+    let mut seen_excluded = BTreeSet::new();
+
+    for path in list_fixture_files(&fixtures_dir())? {
+        let fixture = match read_fixture(&path) {
+            Ok(fixture) => fixture,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        let Some(code) = fixture.pointer("/code").and_then(Value::as_str) else {
+            continue;
+        };
+        if !code.starts_with("handoff_") && !code.starts_with("strict_mode_") {
+            continue;
+        }
+        if excluded.contains(code) {
+            seen_excluded.insert(code.to_owned());
+            continue;
+        }
+        checked += 1;
+        let expected = if CRITICAL_ERROR_CODES.contains(&code) {
+            "critical"
+        } else {
+            "high"
+        };
+        for pointer in ["/severity", "/expected_emission/severity"] {
+            let declared = fixture.pointer(pointer).and_then(Value::as_str);
+            if declared != Some(expected) {
+                errors.push(format!(
+                    "{}{pointer}: declares {declared:?} but domain_error_severity emits `{expected}` for `{code}`",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    // An empty sweep would pass for the wrong reason, and the exclusion list
+    // must not outlive the codes it excuses.
+    if checked == 0 {
+        errors.push(
+            "no handoff_/strict_mode_ fixtures were checked; this sweep would pass vacuously"
+                .to_owned(),
+        );
+    }
+    for excused in &excluded {
+        if !seen_excluded.contains(*excused) {
+            errors.push(format!(
+                "PREFIX_FAMILY_DEGRADATION_ONLY_CODES excuses `{excused}`, but no fixture in the family carries that code; remove it"
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} prefix-family severity drift(s) over {checked} checked fixture(s):\n  - {}",
+            errors.len(),
+            errors.join("\n  - "),
+        ))
+    }
+}

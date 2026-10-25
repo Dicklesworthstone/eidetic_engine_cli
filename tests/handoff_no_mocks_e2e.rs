@@ -896,7 +896,7 @@ fn no_mocks_handoff_cli_cycle_verifies_hmac_and_rejects_tampering() -> TestResul
     )?;
     ensure_equal(
         &resume_tampered_json.pointer("/error/severity"),
-        &Some(&json!("high")),
+        &Some(&json!("critical")),
         "tampered resume error severity",
     )?;
     let tampered_repair = json_string(

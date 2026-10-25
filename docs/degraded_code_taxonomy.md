@@ -1080,9 +1080,9 @@ the closed daemon hot-mode surface.
 | Code | Severity | Bead |
 |------|----------|------|
 | `shard_fanout_apply_plan_blocked` | high | bd-nnheo (classified); src/db/migrate.rs refuses the shard fan-out migration when the planner reports blockers |
-| `handoff_capsule_machine_mismatch` | high | bd-17c65.13.6 (M5) |
-| `handoff_capsule_tampered` | high | bd-17c65.13.6 (M5) |
-| `handoff_hmac_missing` | high | bd-17c65.13.6 (M5) |
+| `handoff_capsule_machine_mismatch` | critical | bd-17c65.13.6 (M5) |
+| `handoff_capsule_tampered` | critical | bd-17c65.13.6 (M5) |
+| `handoff_hmac_missing` | critical | bd-17c65.13.6 (M5) |
 | `handoff_hmac_skipped` | high | bd-17c65.13.6 (M5) |
 | `handoff_snapshot_stale` | medium | bd-17c65.13.5 (M4) |
 | `integrity_database_missing` | high | bd-17c65.12.2 (L1) |
@@ -1093,7 +1093,7 @@ the closed daemon hot-mode surface.
 | `integrity_schema_check_unavailable` | medium | bd-17c65.12.2 (L1) |
 | `integrity_schema_migration_required` | high | bd-17c65.12.5 (L4) |
 | `stale_schema_version` | high | bd-17c65.12.5 (L4) |
-| `strict_mode_no_salt_file` | high | bd-17c65.13.6 (M5) |
+| `strict_mode_no_salt_file` | critical | bd-17c65.13.6 (M5) |
 | `tampered_hash` | critical | bd-17c65.13.6 (M5) |
 
 #### Maintenance jobs (5)

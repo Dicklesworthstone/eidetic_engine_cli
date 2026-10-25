@@ -6,7 +6,7 @@
     "epic_letter": "M"
   },
   "surfaces": ["handoff resume"],
-  "severity": "high",
+  "severity": "critical",
   "repair_present": true,
   "trigger": {
     "description": "A machine-bound handoff capsule is resumed from a workspace or machine that cannot derive the original HMAC key context.",
@@ -18,7 +18,7 @@
   },
   "expected_emission": {
     "code": "handoff_capsule_machine_mismatch",
-    "severity": "high",
+    "severity": "critical",
     "message_contains": ["key context", "workspace or machine"],
     "repair_contains": "Resume on the original workspace/machine",
     "repair_string": "Resume on the original workspace/machine, or recreate the capsule here."

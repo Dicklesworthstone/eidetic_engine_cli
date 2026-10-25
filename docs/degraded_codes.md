@@ -7190,7 +7190,7 @@ ee maintenance graph-witnesses-prune --workspace . --dry-run --json
 
 ## `handoff_capsule_machine_mismatch`
 
-**Severity:** high
+**Severity:** critical
 
 **Surfaces:** handoff resume
 
@@ -7221,7 +7221,7 @@ ee handoff resume capsule.json --workspace . --json
 
 ## `handoff_capsule_tampered`
 
-**Severity:** high
+**Severity:** critical
 
 **Surfaces:** handoff resume
 
@@ -7259,7 +7259,7 @@ ee handoff resume capsule.json --workspace . --json
 
 ## `handoff_hmac_missing`
 
-**Severity:** high
+**Severity:** critical
 
 **Surfaces:** handoff resume
 
@@ -16629,7 +16629,7 @@ EE_DIAG_FORCE_CAPABILITY_GAP=storage ee status --workspace . --json
 
 ## `strict_mode_no_salt_file`
 
-**Severity:** high
+**Severity:** critical
 
 **Surfaces:** handoff resume
 

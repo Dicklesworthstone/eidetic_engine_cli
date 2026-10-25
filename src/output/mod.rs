@@ -15862,6 +15862,23 @@ pub fn error_response_toon(error: &DomainError) -> String {
     render_toon_from_json(&error_response_json(error))
 }
 
+/// Error codes whose envelope severity is `critical` rather than the coarse
+/// `high` that the `handoff_`/`strict_mode_` prefixes otherwise carry.
+///
+/// Every one of these is an integrity or key-authentication failure: the
+/// capsule body did not verify, its HMAC is absent, or the key material
+/// needed to verify it cannot be derived here. The published catalog in
+/// `tests/fixtures/failure_modes/<code>.json` declares the same severity,
+/// and `failure_mode_fixtures.rs` reads this list to pin the two together —
+/// so adding a code here without updating its fixture fails that gate
+/// instead of diverging silently (bd-xqkoo).
+pub const CRITICAL_ERROR_CODES: &[&str] = &[
+    "handoff_hmac_missing",
+    "handoff_capsule_tampered",
+    "handoff_capsule_machine_mismatch",
+    "strict_mode_no_salt_file",
+];
+
 fn domain_error_severity(error: &DomainError) -> &'static str {
     if error.code().starts_with("level_transition_") {
         return "medium";
@@ -15878,13 +15895,7 @@ fn domain_error_severity(error: &DomainError) -> &'static str {
             _ => {}
         }
     }
-    if matches!(
-        error.code(),
-        "handoff_hmac_missing"
-            | "handoff_capsule_tampered"
-            | "handoff_capsule_machine_mismatch"
-            | "strict_mode_no_salt_file"
-    ) {
+    if CRITICAL_ERROR_CODES.contains(&error.code()) {
         return "critical";
     }
     if error.code().starts_with("handoff_") || error.code().starts_with("strict_mode_") {

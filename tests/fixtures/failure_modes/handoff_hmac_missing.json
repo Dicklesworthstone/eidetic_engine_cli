@@ -6,7 +6,7 @@
     "epic_letter": "M"
   },
   "surfaces": ["handoff resume"],
-  "severity": "high",
+  "severity": "critical",
   "repair_present": true,
   "trigger": {
     "description": "A legacy or manually edited handoff capsule has no top-level integrity block, so resume fails closed unless the caller explicitly opts into the insecure audited bypass.",
@@ -19,7 +19,7 @@
   },
   "expected_emission": {
     "code": "handoff_hmac_missing",
-    "severity": "high",
+    "severity": "critical",
     "message_contains": ["unsigned", "cannot be trusted"],
     "repair_contains": "--insecure-skip-hmac",
     "repair_string": "Recreate the capsule with this ee version, or pass --insecure-skip-hmac for audited emergency recovery."
