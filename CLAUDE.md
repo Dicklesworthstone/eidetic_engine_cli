@@ -525,6 +525,33 @@ with exit 0. Measured 2026-10-17: that cost a 56-minute release-profile dispatch
 and produced no verdict. Prefer a long unique substring and omit `--exact`, so a
 module rename degrades to a correct match instead of to silence.
 
+**And `--test <file_stem>` is usually NOT a target, because `Cargo.toml` sets
+`autotests = false`.** Census 2026-10-25, with a validated instrument:
+
+| | |
+|---|---|
+| top-level `tests/*.rs` files | 531 |
+| declared `[[test]]` targets | 46 |
+| reachable AS their own target | **36** |
+| reachable only via `#[path]` inclusion | **495** |
+| reachable by neither (dead files) | **0** |
+
+So for 495 of 531 files there is no `--test <file_stem>` to dispatch; you must
+filter the SUITE that includes the file. `tests/volatile_field_registry_consistency_test.rs`,
+for instance, is reached only through `tests/suites/integration_s_z.rs`, so the
+target is `--test integration_s_z` and the test id is prefixed
+`volatile_field_registry_consistency_test::`. Find the owner before dispatching:
+
+```bash
+grep -rn 'path = "../<file>.rs"' tests/suites/ tests/*.rs
+```
+
+The zero in that last row is a real negative, not an unmeasured one: the same
+predicate reports a synthetic unreferenced file as dead, and an earlier version
+of it over-matched `#[path]` inside comments — which is how it initially credited
+four includes pointing at files that do not exist (`tests/contracts/X.rs`,
+`tests/suites/...`). Strip comment lines before trusting any `#[path]` sweep.
+
 **3. A CHILD PROCESS PRINTS ITS OWN SUMMARY ONTO THE SAME STREAM (bd-6g6s2).**
 Several `ee` tests spawn a child that itself runs tests — the `ee` binary, a
 nested cargo invocation, an e2e harness. The child emits a complete, well-formed
