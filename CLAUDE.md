@@ -488,12 +488,14 @@ here, but nothing enforces it and it is **not** congruent with the hosted CI
 gates — several of those are disabled, so a green run is necessary, not
 sufficient. It does gate rustfmt (Rustfmt Conformance, added in `453291c25`).
 
-### Three ways a test run reports success having verified NOTHING
+### Four ways a test run reports success having verified NOTHING
 
-All three exit 0, all three print `ok.`, and all three have cost this project
+All four exit 0, all four print `ok.`, and all four have cost this project
 hours. None is detectable from the exit code, so **read the denominator, never
-the status.** The third is the worst, because its green is real — it just
-belongs to a different process.
+the status.** The third is the worst of the first three, because its green is
+real — it just belongs to a different process. The fourth is worse still,
+because it is the only one that survives the announcement-pairing defence
+below.
 
 **1. A multi-target run stops at the first failing target (bd-dwe8f).** Cargo
 runs targets in order and stops at the first failure. The lib target carries
@@ -539,7 +541,34 @@ closed a P0 fail-open security fix (bd-zjcx6) on a green belonging to another
 process, and the orchestrator had independently reported the job complete, so
 every pressure pointed at believing it.
 
-**The discriminator is the announcement, and it is cheap.** libtest prints
+**4. A REPEAT `--job` DISPATCH RUNS THE PREVIOUS DISPATCH'S SOURCE (bd-9z8ee).**
+Re-dispatching `rch exec --job` to the SAME pinned worker can execute the tree
+as it was at an earlier dispatch's sync. Measured 2026-10-25 across three
+consecutive dispatches: after adding one `#[test]` to a target, the worker
+produced the **same test binary hash** and the same total test count, and
+`-- --list` showed 8 of the file's 9 tests. Cargo never rebuilt, because as far
+as the worker was concerned nothing had changed.
+
+**This is the only one of the four that beats the announcement-pairing rule
+below.** Re-run an EXISTING test after editing the code it covers and you get
+exit 0, a `Running` line proving the target executed, and an announcement and
+summary that reconcile *perfectly* — because both are honest. They are simply
+about source that is no longer on disk. It was caught here only by luck: the
+filtered test did not exist in the stale binary, so it printed `running 0
+tests`, which is trap 2.
+
+**The tell is the TOTAL, not the summary.** `passed + failed + ignored +
+filtered out` is the target's whole test count, and it cannot stay the same
+across a commit that added a test. Record that number; when it does not move,
+the source did not arrive. And note that `--job` cannot be audited: it refuses
+both `--source-content-receipt` and `--clean-overlay`, so declaring or checking
+the transferred set is not available on that rail. Until bd-9z8ee is fixed,
+treat a repeat `--job` to the same pinned worker as UNVERIFIED — dispatch to a
+different worker, or verify a committed tree through `scripts/rch_verify.sh`,
+which materialises a source export rather than syncing the working tree.
+
+**The discriminator for the first three is the announcement, and it is cheap.**
+libtest prints
 `running N tests` *before* it runs them. A summary belongs to that announcement
 only when `passed + failed + ignored == N`. Pair each announcement with its
 summary; a run whose announced `N` is tiny relative to the target is somebody
