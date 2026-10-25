@@ -313,9 +313,9 @@ refused whole — `[RCH-I001] requested worker set [...] refused (selection erro
 queue_timeout)`, exit 103 — because `--worker` declines to fall back. So pin to a
 worker you have just seen idle in `rch status`.
 
-**FIVE DIFFERENT 103s, and only one is worth retrying.** Read the failure class
+**SIX DIFFERENT 103s, and only one is worth retrying.** Read the failure class
 before the retry loop runs, because they are indistinguishable by exit code —
-and four of the five are labelled `— retryable` by rch itself:
+and five of the six are labelled `— retryable` by rch itself:
 
 | refusal | meaning | action |
 |---|---|---|
@@ -324,6 +324,64 @@ and four of the five are labelled `— retryable` by rch itself:
 | `(unavailable); '<w>' is draining/unreachable` | that worker is GONE; its circuit is open | retrying the pin is useless; pin elsewhere |
 | `RCH_SYNC_LIVE_CHECKOUT_REFUSED ... (status Some(73))` | that worker's `/data/projects/<project>` is a live git checkout, so syncing your tree over it is refused | permanent for that box; pin elsewhere |
 | `[RCH-I002] ... refused (unavailable); failed admission under critical pressure (admission rejected: critical pressure (confidence=high, rule=memory_pressure>=critical_memory_pressure))` | that worker's MEMORY is exhausted; admission is rejected before any work | retrying the pin is useless, but this one is PREDICTABLE — see `pressure_state` below |
+| `[RCH-E410] ... missing source_entrypoint .../benches/._<name>.rs` | the export is on a filesystem that cannot store xattrs, so macOS wrote AppleDouble `._*` sidecars; rch's preflight REQUIRES them remotely and `.rchignore` deliberately EXCLUDES them | retrying is useless on any worker — put the export on APFS; see below |
+
+**That sixth one is the one that will eat a whole session, because it is
+deterministic and rch calls it retryable.** Measured 2026-10-25, exit 103,
+`status: rch_environment_failure`, `error_codes: ["RCH-E410"]`, ~29 s per
+attempt plus ~4 min of export:
+
+```text
+WARN rch::hook::dependency_closure: Remote dependency preflight blocked remote
+  execution [RCH-E410] evidence='missing source_entrypoint
+  <export>/eidetic_engine_cli/benches/._adaptive_budget.rs: required package
+  source entrypoint is missing on remote worker'
+```
+
+`._adaptive_budget.rs` is not a source file. The pinned export is materialized
+by `git archive | tar -x` into `/Volumes/USBNVME16TB/rch-committed-tree/...`,
+which is ExFAT; ExFAT cannot store extended attributes, so the AppleDouble shim
+writes a `._name` companion per entry — **6071** of them in one export root.
+Then two correct rules collide: `.rchignore:203-206` excludes `._*` from the
+transfer, deliberately, because vendored C crates such as `zstd-sys` will
+compile any `._foo.c` sibling and poison the build (bd-1h8ji.4); and rch's
+closure preflight enumerates required entrypoints from the LOCAL export and
+demands them REMOTELY. The requirement and the exclusion are both derived
+locally, so **no worker can satisfy it** — pinning elsewhere cannot help.
+
+Two things not to chase, both measured and both wrong:
+
+- **`autobenches = false` fixes nothing.** It looks right beside the existing
+  `autotests = false`, and it is safe (all 40 tracked `benches/*.rs` are
+  explicitly declared, both difference sets empty). But `cargo metadata
+  --no-deps --offline` on the export reports 40 bench targets and **zero**
+  whose `src_path` contains `/._`. Cargo never sees these files; rch's own
+  scanner does. (`metadata` is not a tripwired subcommand, so check this
+  locally before theorising.)
+- **`COPYFILE_DISABLE=1` does not suppress them.** Same archive, same ExFAT
+  directory: 50 sidecars with it set, 50 without, 40 real `.rs` both arms.
+
+**The filesystem is the only variable, and a sparse APFS image on the USB fixes
+it** without deleting anything and without touching the internal disk. Same
+archive: ExFAT 50 sidecars, APFS 0, 40 real `.rs` in both. `hdiutil info` shows
+this machine already uses sparse APFS images for release work.
+
+```bash
+hdiutil create -size 240g -type SPARSE -fs APFS -volname EERCHExport \
+    /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-rch-export
+hdiutil attach /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-rch-export.sparseimage
+RCH_VERIFY_COMMITTED_TREE_BASE=/Volumes/EERCHExport/rch-committed-tree \
+TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp scripts/rch_verify.sh \
+    --pinned-franken-stack --treeish <sha> \
+    --build-admission-ee-bin /Users/jemanuel/.local/bin/ee -- \
+    cargo test --locked -j 2 --test <target> <filter>
+```
+
+`RCH_VERIFY_COMMITTED_TREE_BASE` overrides the export base at
+`scripts/rch_verify.sh:3107-3108`, so this needs no code change. Do NOT point
+it at `/` instead: one export root is 27 GB against 29 GB free there, and a
+`.recovery-1` slot can double it — filling `/` already killed a 50-minute run
+(bd-to1fr). The image must be re-attached after a reboot. See bd-r4iwj.
 
 **Do not choose a worker from `rch workers list`, because it cannot answer
 admissibility — and its errors are biased toward the unusable.** Its records
