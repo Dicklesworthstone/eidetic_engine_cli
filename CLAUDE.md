@@ -383,6 +383,14 @@ it at `/` instead: one export root is 27 GB against 29 GB free there, and a
 `.recovery-1` slot can double it — filling `/` already killed a 50-minute run
 (bd-to1fr). The image must be re-attached after a reboot. See bd-r4iwj.
 
+**CONFIRMED on a real export, not just the probe.** The materialized bundle in
+the image held **0** AppleDouble files against 8745 real `.rs` — the second
+number is the control, because a zero-sidecar count on an export that failed to
+materialize reads identically — and the dispatch went past the preflight into
+compilation, 35+ minutes against refusals at 28.8 s and 29.2 s on ExFAT. One
+variable, both directions. Duration alone separates the two states: you cannot
+be 35 minutes into a run the closure refuses in 29 seconds.
+
 **Do not choose a worker from `rch workers list`, because it cannot answer
 admissibility — and its errors are biased toward the unusable.** Its records
 carry `total_slots`, `priority`, `tags` and five disk fields, and *no*
