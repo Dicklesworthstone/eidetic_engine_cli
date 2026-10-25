@@ -67628,14 +67628,20 @@ fn append_maintenance_job_history(
             parent.display()
         ));
     }
-    let encoded = serde_json::to_string(row)
+    let mut line = serde_json::to_string(row)
         .map_err(|error| format!("Failed to encode maintenance job row: {error}"))?;
+    line.push('\n');
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
-    writeln!(file, "{encoded}")
+    // Runs in other workspaces append to a store's history under their own
+    // workspace's maintenance lock, not this store's, so appends to one file
+    // can race. Write the row and its newline in one call: an append-mode
+    // write lands whole at the end of the file, whereas `writeln!` issues the
+    // row and the newline as two writes that another run can split.
+    file.write_all(line.as_bytes())
         .map_err(|error| format!("Failed to append {}: {error}", path.display()))
 }
 
@@ -83250,6 +83256,61 @@ mod tests {
                 },
             ))),
             "maintenance wal-checkpoint command",
+        )
+    }
+
+    /// A store's job history takes rows from runs in other workspaces
+    /// (`ee job run --database <store>/.ee/ee.db`), and each run holds only
+    /// its own workspace's maintenance lock. Concurrent appends must still
+    /// leave one whole row per line, or the next `ee job list` fails to parse
+    /// the file.
+    #[test]
+    fn maintenance_job_history_concurrent_appends_keep_whole_rows() -> TestResult {
+        // Large rows keep each write busy long enough for the other writers
+        // to queue behind it; the barrier makes them all start together.
+        // 8 x 48 rows of ~32 KiB stays under MAINTENANCE_JOB_HISTORY_MAX_BYTES.
+        const WRITERS: usize = 8;
+        const ROWS_PER_WRITER: usize = 48;
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let history = directory.path().join("maintenance-jobs.jsonl");
+        let padding = "x".repeat(32 * 1024);
+        let start = std::sync::Barrier::new(WRITERS);
+        let results = std::thread::scope(|scope| {
+            let handles = (0..WRITERS)
+                .map(|writer| {
+                    let history = &history;
+                    let padding = &padding;
+                    let start = &start;
+                    scope.spawn(move || -> TestResult {
+                        start.wait();
+                        for index in 0..ROWS_PER_WRITER {
+                            let row = serde_json::json!({
+                                "id": format!("job_writer{writer}_row{index}"),
+                                "details": { "padding": padding },
+                            });
+                            super::append_maintenance_job_history(history, &row, false)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err("history writer panicked".to_owned()))
+                })
+                .collect::<Vec<_>>()
+        });
+        for result in results {
+            result?;
+        }
+        let rows = super::load_maintenance_job_history(&history)?;
+        ensure_equal(
+            &rows.len(),
+            &(WRITERS * ROWS_PER_WRITER),
+            "every concurrently appended history row parses as its own line",
         )
     }
 
