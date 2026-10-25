@@ -2270,7 +2270,25 @@ unit_contract_golden_tests() {
     # diff; only by running both arms.
     cargo test --workspace --lib --bins --tests --examples -- --test-threads=1 2>&1 \
         | tee "$log" || rc=${PIPESTATUS[0]}
-    python3 "${REPO_ROOT}/scripts/lib/grade_test_log.py" --all-targets "$log" || grade=$?
+    # --require-targets (bd-mbupe). The cargo line above has no --no-fail-fast,
+    # so it STOPS at the first failing target and no `--tests` target is reached
+    # while the lib target is red. Every other rule in the grader judges the
+    # announcement/summary pairs that are PRESENT, so a target that never ran
+    # contributes no pair and cannot fail any check -- which is why the diagnostic
+    # below could claim the grader catches "a target that never reported" while it
+    # could not. Measured cost: docs/degraded_codes.md drifted for three days
+    # (607 of 609 codes) behind K3, a correct six-arm gate living in
+    # integration_a_d that simply never executed.
+    #
+    # These three are named because they are the gates that guard the gates:
+    # integration_a_d carries K3, contracts carries the contract fixtures, and
+    # verification_drift_guard guards this verification system itself. All 46
+    # declared [[test]] targets are unconditional (zero carry required-features,
+    # per cargo metadata), so this list can be widened without risking a false
+    # red on a feature-gated target; it is kept short to stay maintainable.
+    python3 "${REPO_ROOT}/scripts/lib/grade_test_log.py" --all-targets \
+        --require-targets contracts,integration_a_d,verification_drift_guard \
+        "$log" || grade=$?
     # Unconditional, and before any return: in the first version this sat on the
     # unreachable path, so every failing run leaked a temp file.
     rm -f "$log"

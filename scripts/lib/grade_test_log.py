@@ -50,6 +50,7 @@ USAGE
   grade_test_log.py <logfile>
   grade_test_log.py --expect-target lib <logfile>   # pick one target by substring
   grade_test_log.py --all-targets <logfile>         # grade EVERY target together
+  grade_test_log.py --require-targets a,b <logfile> # fail if a or b never reported
   grade_test_log.py --self-test
 """
 
@@ -170,7 +171,12 @@ def parse(lines: list[str]) -> tuple[list[dict], list[str]]:
     return pairs, problems
 
 
-def grade(path: pathlib.Path, expect_target: str | None, all_targets: bool = False) -> int:
+def grade(
+    path: pathlib.Path,
+    expect_target: str | None,
+    all_targets: bool = False,
+    require_targets: list[str] | None = None,
+) -> int:
     try:
         lines = path.read_text(errors="replace").splitlines()
     except OSError as error:
@@ -211,6 +217,52 @@ def grade(path: pathlib.Path, expect_target: str | None, all_targets: bool = Fal
             "disagree, so the summary belongs to something else."
         )
         return 1
+
+    # A TARGET THAT NEVER REPORTED CANNOT FAIL ANY CHECK ABOVE (bd-mbupe). Every
+    # rule in this file judges the announcement/summary pairs that are PRESENT, so
+    # a target cargo never reached contributes no pair and is indistinguishable
+    # from one that was never asked for. scripts/verify.sh's own stage diagnostic
+    # claims this grader catches "a target that never reported"; until this block
+    # it did not, and that clause was the only defence named against the gap.
+    #
+    # MEASURED COST: the K3 catalog gate sits in a `--tests` target behind the lib
+    # target in verify.sh's cargo line, which carries no --no-fail-fast. Cargo
+    # stops at the first failing target, so K3 never ran and
+    # docs/degraded_codes.md drifted for three days (607 of 609 codes) with a
+    # correct six-arm gate watching it.
+    #
+    # Checked against EVERY pair in the log rather than against `chosen`: the
+    # question is whether the target reported AT ALL, which is independent of
+    # --expect-target narrowing. Substring match, for the same reason
+    # --expect-target is a substring -- the binary name carries a build hash.
+    #
+    # ORDERED BEFORE the failing-target check deliberately. The target that stops
+    # a fail-fast run is usually one with CHRONIC failures, so reporting the
+    # failure first and returning would hide the missing targets behind a red
+    # that is already expected and already triaged -- permanently, since it is
+    # chronic. The per-pair lines above still print every verdict, so nothing is
+    # lost by reporting the structural omission first.
+    if require_targets:
+        reported = [pair["target"] for pair in pairs]
+        missing = [
+            want for want in require_targets
+            if not any(want in target for target in reported)
+        ]
+        if missing:
+            print(
+                f"[grade-test-log] NOT GREEN: {len(missing)} required target(s) "
+                f"produced no `Running` line: {', '.join(missing)}"
+            )
+            print(
+                "  targets that DID report: "
+                f"{', '.join(reported) if reported else '(none)'}"
+            )
+            print(
+                "  A target that never ran reports nothing, so no other rule here "
+                "can see it. Cargo stops at the first failing target unless "
+                "--no-fail-fast is passed."
+            )
+            return 1
 
     chosen = pairs
     if expect_target is not None:
@@ -516,6 +568,40 @@ def self_test() -> int:
             0,
         ),
     ]
+    # --require-targets (bd-mbupe). SEQUENTIAL reports exactly two targets,
+    # `ee-aaa` and `contracts-bbb`, and every arm below is graded in aggregate
+    # mode because that is how scripts/verify.sh invokes this grader.
+    #
+    # The POSITIVE CONTROL is the second arm. Without it the flag could be wired
+    # to nothing at all and the other arms would still pass, which is the exact
+    # shape of defect this flag was added to fix -- a defence nobody has seen
+    # fail. The first and last arms are its negative controls: the check must not
+    # fire when the target did report, or it is unusable.
+    require_cases = [
+        ("require: a target that DID report is green", SEQUENTIAL, ["contracts"], 0),
+        ("require: a target that never reported FAILS", SEQUENTIAL, ["integration_a_d"], 1),
+        (
+            "require: one present and one absent still FAILS",
+            SEQUENTIAL,
+            ["contracts", "integration_a_d"],
+            1,
+        ),
+        (
+            "require: several targets all present is green",
+            SEQUENTIAL,
+            ["contracts", "ee-aaa"],
+            0,
+        ),
+        # The flag must not rescue a log that is bad for another reason, and must
+        # not mask one either: SEQUENTIAL_ONE_FAILED has both its targets present,
+        # so the require check passes and the FAILURE still decides the verdict.
+        (
+            "require: a satisfied requirement does not mask a real failure",
+            SEQUENTIAL_ONE_FAILED,
+            ["contracts", "ee-aaa"],
+            1,
+        ),
+    ]
     failures = 0
     with tempfile.TemporaryDirectory() as directory:
         for name, body, expect_target, want in cases:
@@ -534,7 +620,15 @@ def self_test() -> int:
             if got != want:
                 failures += 1
             print(f"  [self-test] {status} {name}: want exit {want}, got {got}\n")
-    total = len(cases) + len(aggregate_cases)
+        for name, body, required, want in require_cases:
+            path = pathlib.Path(directory) / "log.txt"
+            path.write_text(body)
+            got = grade(path, None, all_targets=True, require_targets=required)
+            status = "OK  " if got == want else "FAIL"
+            if got != want:
+                failures += 1
+            print(f"  [self-test] {status} {name}: want exit {want}, got {got}\n")
+    total = len(cases) + len(aggregate_cases) + len(require_cases)
     if failures:
         print(f"[grade-test-log] SELF-TEST FAILED: {failures} of {total} arms")
         return 1
@@ -558,10 +652,28 @@ def main(argv: list[str]) -> int:
             print("[grade-test-log] --expect-target needs a value", file=sys.stderr)
             return 2
         del args[index : index + 2]
+    require_targets: list[str] = []
+    if "--require-targets" in args:
+        index = args.index("--require-targets")
+        try:
+            raw = args[index + 1]
+        except IndexError:
+            print("[grade-test-log] --require-targets needs a value", file=sys.stderr)
+            return 2
+        del args[index : index + 2]
+        require_targets = [item.strip() for item in raw.split(",") if item.strip()]
+        # An empty or all-whitespace list would silently assert nothing, which is
+        # the decoration this flag exists to remove. Refuse rather than pass.
+        if not require_targets:
+            print(
+                "[grade-test-log] --require-targets was given no non-empty names",
+                file=sys.stderr,
+            )
+            return 2
     if len(args) != 1:
         print(__doc__.split("USAGE")[-1].strip(), file=sys.stderr)
         return 2
-    return grade(pathlib.Path(args[0]), expect_target, all_targets)
+    return grade(pathlib.Path(args[0]), expect_target, all_targets, require_targets)
 
 
 if __name__ == "__main__":
