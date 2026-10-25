@@ -243,9 +243,9 @@ refused whole — `[RCH-I001] requested worker set [...] refused (selection erro
 queue_timeout)`, exit 103 — because `--worker` declines to fall back. So pin to a
 worker you have just seen idle in `rch status`.
 
-**FOUR DIFFERENT 103s, and only one is worth retrying.** Read the failure class
+**FIVE DIFFERENT 103s, and only one is worth retrying.** Read the failure class
 before the retry loop runs, because they are indistinguishable by exit code —
-and three of the four are labelled `— retryable` by rch itself:
+and four of the five are labelled `— retryable` by rch itself:
 
 | refusal | meaning | action |
 |---|---|---|
@@ -253,6 +253,7 @@ and three of the four are labelled `— retryable` by rch itself:
 | `(no_free_slots)` naming a core estimate | ARITHMETIC: the request cannot fit that worker | retrying is useless; change `-j` or drop the pin |
 | `(unavailable); '<w>' is draining/unreachable` | that worker is GONE; its circuit is open | retrying the pin is useless; pin elsewhere |
 | `RCH_SYNC_LIVE_CHECKOUT_REFUSED ... (status Some(73))` | that worker's `/data/projects/<project>` is a live git checkout, so syncing your tree over it is refused | permanent for that box; pin elsewhere |
+| `[RCH-I002] ... refused (unavailable); failed admission under critical pressure (admission rejected: critical pressure (confidence=high, rule=memory_pressure>=critical_memory_pressure))` | that worker's MEMORY is exhausted; admission is rejected before any work | retrying the pin is useless, but this one is PREDICTABLE — see `pressure_state` below |
 
 **Do not choose a worker from `rch workers list`, because it cannot answer
 admissibility — and its errors are biased toward the unusable.** Its records
@@ -279,16 +280,51 @@ headroom and stopped this lane for a day; the reason code is
 `disk_pressure_reason` before believing `disk_pressure_state`, and read
 `used_slots`/`total_slots` rather than inferring free capacity from disk.
 
+**`circuit_state` + `status` + slots is NOT enough: add `pressure_state`.** The
+worker records carry a whole pressure block that the predicate above ignored —
+`pressure_state`, `pressure_confidence`, `pressure_reason_code`,
+`pressure_policy_rule`, `pressure_memory_pressure`, `pressure_disk_free_gb`,
+`pressure_telemetry_fresh`. Measured 2026-10-25, a pinned `-j 2` job was
+refused 103 on a box that `rch status` called `circuit=closed status=healthy`
+with **3 free slots**, and the one field that saw it coming was in that block:
+
+```text
+pressure_state=critical  pressure_memory_pressure=93.8
+pressure_policy_rule=memory_pressure>=critical_memory_pressure
+```
+
 The admissibility predicate that works:
 
 ```bash
 rch status --json | jq -r '.data.daemon.workers[]
   | select(.circuit_state=="closed" and .status=="healthy"
-           and ((.total_slots//0) - (.used_slots//0)) >= 2) | .id'
+           and ((.total_slots//0) - (.used_slots//0)) >= 2
+           and .pressure_state != "critical") | .id'
 ```
 
-That still does not prove the lane is open, because the live-checkout refusal
-above is invisible to every field in both commands.
+**Exclude only `critical`, never `warning`.** Same trap as the disk reading
+above, and it is easy to over-correct into: on that same fleet census all 12
+workers reported `warning` or `critical` and **not one** reported healthy
+pressure, so a predicate demanding healthy pressure selects nothing at all.
+Read `pressure_policy_rule` to see which resource tripped — a `disk_free_ratio`
+warning on a box holding tens of GB free is noise, a `memory_pressure` critical
+is a refusal.
+
+That still does not prove the lane is open. Two refusals the pressure block
+does NOT predict, both measured the same day on boxes it rated `warning`:
+
+```text
+worker source namespace initialization refused (status Some(73)): Killed
+worker source namespace initialization refused (status Some(73)):
+  RCH: namespace control ended without settled group teardown
+```
+
+Same exit code and the same `status Some(73)` as the live-checkout refusal, but
+different causes, and nothing in `rch status` or `rch workers list` exposes
+either. Hitting it on two different workers in a row is the signal that it is
+not per-box: see bd-o7q3t (source-authority lock failures across multiple
+workers) and bd-s5v42 before spending more dispatches, because that bead
+already records this family blocking every verdict on this project.
 
 **Do NOT try to probe it with a no-build `--job`, and this corrects a recipe
 that was in this file for part of 2026-10-24.** A dispatched command with no
