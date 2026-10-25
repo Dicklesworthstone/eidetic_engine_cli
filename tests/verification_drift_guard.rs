@@ -1670,6 +1670,72 @@ fn drift_guard_recognizes_open_closure_lint_tracking_bead() {
     assert_eq!(parsed["count"], 0, "tracked closure-lint drift count");
 }
 
+/// An unrecognized `--gate` name must be REFUSED, never reported clean.
+///
+/// bd-ry56h, one keystroke further out than the three fail-opens that bead
+/// already closed. Every check in the guard is written as "return early unless
+/// `CHECK_GATE` is mine", so a name matching no check leaves `DRIFT_COUNT` at 0
+/// and exits 0 — and `closure_lint_or_tracked_drift` in verify.sh reads exactly
+/// that 0 as "the closure linter's violations are tracked, continue". So
+/// `--gate=closure_lint` with an underscore, or a gate renamed in one file and
+/// not the other, would have excused every closure violation forever, with no
+/// output to notice it by.
+///
+/// Measured before the fix: `--gate=this-gate-does-not-exist --json` exited 0
+/// having written zero bytes — byte-identical to the answer for a genuinely
+/// tracked gate. That indistinguishability IS the defect, which is why this
+/// test pins the exit code rather than only the presence of some output.
+///
+/// The known-name arm is the positive control. Without it a `case` pattern that
+/// accidentally rejected every name would satisfy all the refusal arms and look
+/// correct while breaking verify.sh outright. `forbidden-deps` is deliberately
+/// not in that arm: its probe shells out to `cargo tree`, which legitimately
+/// fails in a fixture root holding no manifest, and the guard correctly turns
+/// that into the same exit 2 — so it cannot distinguish the two conditions here.
+#[test]
+fn drift_guard_refuses_an_unknown_gate_name_and_still_admits_the_known_ones() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    for bogus in [
+        "this-gate-does-not-exist",
+        "closure_lint",
+        "cargo_test",
+        "forbidden_deps",
+        "CLOSURE-LINT",
+        "closure-lint-",
+    ] {
+        let flag = format!("--gate={bogus}");
+        let output = run_drift_guard_at(temp.path(), &[flag.as_str(), "--json"]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "--gate={bogus} must exit 2 (guard input error), not report a verdict\n{}",
+            output_excerpt(&output)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unknown --gate="),
+            "--gate={bogus} must name the rejected gate on stderr\n{}",
+            output_excerpt(&output)
+        );
+        assert!(
+            !temp.path().join(".verification-drift-report.json").exists(),
+            "--gate={bogus} must not leave a report that a caller could read as a verdict"
+        );
+    }
+
+    for known in ["closure-lint", "cargo-test"] {
+        let flag = format!("--gate={known}");
+        let output = run_drift_guard_at(temp.path(), &[flag.as_str(), "--json"]);
+        assert_ne!(
+            output.status.code(),
+            Some(2),
+            "--gate={known} is a real gate and must not be refused as unknown\n{}",
+            output_excerpt(&output)
+        );
+    }
+}
+
 #[test]
 fn verify_sh_routes_tracked_closure_lint_failures_through_drift_guard() {
     let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
