@@ -51,6 +51,10 @@ USAGE
   grade_test_log.py --expect-target lib <logfile>   # pick one target by substring
   grade_test_log.py --all-targets <logfile>         # grade EVERY target together
   grade_test_log.py --require-targets a,b <logfile> # fail if a or b never reported
+  grade_test_log.py --expect-total contracts=1510 <logfile>
+                                                    # fail unless that target
+                                                    # HOLDS 1510 tests; the only
+                                                    # tell for stale source
   grade_test_log.py --self-test
 """
 
@@ -66,6 +70,14 @@ SUMMARY = re.compile(
     r"^\s*test result:\s*(?P<verdict>\w+)\.\s*"
     r"(?P<passed>\d+) passed;\s*(?P<failed>\d+) failed;\s*"
     r"(?P<ignored>\d+) ignored"
+    # `measured` and `filtered out` are captured so the target's TOTAL test count
+    # can be checked (bd-9z8ee). Both groups are OPTIONAL on purpose: the prefix
+    # above is the part every libtest version prints, and a stricter regex would
+    # stop matching summaries entirely rather than fail loudly -- turning a
+    # grader into one that reports "nothing ran", which is the worst available
+    # failure mode for this file.
+    r"(?:;\s*(?P<measured>\d+) measured)?"
+    r"(?:;\s*(?P<filtered>\d+) filtered out)?"
 )
 RUNNING_TARGET = re.compile(r"^\s*Running (?:unittests )?(?P<what>\S+)\s*\((?P<bin>[^)]+)\)")
 DOCTEST_TARGET = re.compile(r"^\s*Doc-tests\s+(?P<what>\S+)")
@@ -156,6 +168,20 @@ def parse(lines: list[str]) -> tuple[list[dict], list[str]]:
                     # reader can tell announced-and-EXECUTED from announced-and-SKIPPED:
                     # an ignored test reconciles perfectly and proves nothing.
                     "ignored": int(summarised.group("ignored")),
+                    # THE TARGET'S WHOLE TEST COUNT (bd-9z8ee). `counted` is what
+                    # this run executed; `total` is how many tests the BINARY
+                    # holds, which is the one number a stale source tree cannot
+                    # fake. A repeat `rch exec --job` to the same pinned worker
+                    # can run an earlier dispatch's source: the announcement and
+                    # the summary then reconcile PERFECTLY, because both are
+                    # honest about code that is no longer on disk, and every
+                    # other rule in this file passes. The total cannot stay the
+                    # same across a commit that added a test.
+                    #
+                    # `filtered` defaults to 0 when libtest did not print it, so
+                    # `total` degrades to `counted` rather than to None.
+                    "filtered": int(summarised.group("filtered") or 0),
+                    "total": counted + int(summarised.group("filtered") or 0),
                     "line": number,
                     "announce_line": pending["line"],
                 }
@@ -176,6 +202,7 @@ def grade(
     expect_target: str | None,
     all_targets: bool = False,
     require_targets: list[str] | None = None,
+    expect_totals: dict[str, int] | None = None,
 ) -> int:
     try:
         lines = path.read_text(errors="replace").splitlines()
@@ -200,7 +227,8 @@ def grade(
         skipped = f" IGNORED={pair['ignored']}" if pair.get("ignored") else ""
         print(
             f"  {mark} target={pair['target']} announced={pair['announced']} "
-            f"counted={pair['counted']}{skipped} verdict={pair['verdict']} "
+            f"counted={pair['counted']}{skipped} total={pair['total']} "
+            f"verdict={pair['verdict']} "
             f"(announce line {pair['announce_line']}, summary line {pair['line']})"
         )
     for problem in problems:
@@ -263,6 +291,55 @@ def grade(
                 "--no-fail-fast is passed."
             )
             return 1
+
+    # THE TOTAL IS THE ONLY TELL FOR STALE SOURCE (bd-9z8ee), and it is the only
+    # false-green class in this repo that survives announcement pairing. A repeat
+    # `rch exec --job` to the same pinned worker can execute an EARLIER
+    # dispatch's tree: exit 0, a `Running` line proving the target executed, and
+    # an announcement and summary that reconcile exactly -- because both are
+    # honest about source that is no longer on disk. Measured 2026-10-25 across
+    # three consecutive dispatches: same test binary hash, same total, and
+    # `-- --list` showing 8 of the file's 9 tests.
+    #
+    # `--job` cannot be audited any other way: it refuses both
+    # --source-content-receipt and --clean-overlay, so the transferred set can
+    # be neither declared nor checked. What remains is arithmetic -- the target's
+    # whole test count cannot stay the same across a commit that added a test.
+    #
+    # FAILS CLOSED ON AN ABSENT TARGET. Naming a target that produced no summary
+    # must be a refusal, never a silent pass: "the total I demanded was never
+    # reported" and "the total matched" are opposite outcomes, and a flag whose
+    # typo'd target quietly asserts nothing is worse than no flag.
+    if expect_totals:
+        for want_target, want_total in expect_totals.items():
+            matched = [p for p in pairs if want_target in p["target"]]
+            if not matched:
+                print(
+                    f"[grade-test-log] NOT GREEN: --expect-total named "
+                    f"{want_target!r}, which reported no summary in this log. "
+                    f"Targets that did: "
+                    f"{', '.join(p['target'] for p in pairs) if pairs else '(none)'}"
+                )
+                return 1
+            for pair in matched:
+                if pair["total"] != want_total:
+                    print(
+                        f"[grade-test-log] NOT GREEN: target={pair['target']} holds "
+                        f"{pair['total']} test(s) "
+                        f"({pair['counted']} counted + {pair['filtered']} filtered), "
+                        f"expected {want_total}."
+                    )
+                    print(
+                        "  A target's total cannot change unless its SOURCE changed. "
+                        "If you added a test and the total did not move, the worker "
+                        "built an older tree (bd-9z8ee) and this run's green belongs "
+                        "to code that is no longer on disk."
+                    )
+                    return 1
+        print(
+            "[grade-test-log] totals confirmed: "
+            + ", ".join(f"{k}={v}" for k, v in expect_totals.items())
+        )
 
     chosen = pairs
     if expect_target is not None:
@@ -602,6 +679,43 @@ def self_test() -> int:
             1,
         ),
     ]
+    # --expect-total (bd-9z8ee). SEQUENTIAL's two targets hold 14 tests
+    # (4 counted + 10 filtered) and 7 (7 + 0). Graded in aggregate mode.
+    #
+    # The POSITIVE CONTROL is the second arm: a total that does NOT match must
+    # fail. The fourth is the one that matters most in practice -- a total
+    # demanded of a target that never reported must FAIL, because the stale-source
+    # class this flag defends against often shows up as a target whose filter
+    # matched nothing, and a flag that passes vacuously on a typo'd name would
+    # reproduce exactly the false green it exists to catch.
+    total_cases = [
+        ("expect-total: matching total is green", SEQUENTIAL, {"contracts": 7}, 0),
+        ("expect-total: a total that moved FAILS", SEQUENTIAL, {"contracts": 8}, 1),
+        (
+            "expect-total: counted+filtered is the total, not counted",
+            SEQUENTIAL,
+            {"ee-aaa": 14},
+            0,
+        ),
+        (
+            "expect-total: a target that never reported FAILS, not passes",
+            SEQUENTIAL,
+            {"integration_a_d": 99},
+            1,
+        ),
+        (
+            "expect-total: two targets pinned at once, both right, is green",
+            SEQUENTIAL,
+            {"contracts": 7, "ee-aaa": 14},
+            0,
+        ),
+        (
+            "expect-total: a correct total does not mask a real failure",
+            SEQUENTIAL_ONE_FAILED,
+            {"contracts": 7},
+            1,
+        ),
+    ]
     failures = 0
     with tempfile.TemporaryDirectory() as directory:
         for name, body, expect_target, want in cases:
@@ -628,7 +742,17 @@ def self_test() -> int:
             if got != want:
                 failures += 1
             print(f"  [self-test] {status} {name}: want exit {want}, got {got}\n")
-    total = len(cases) + len(aggregate_cases) + len(require_cases)
+        for name, body, totals, want in total_cases:
+            path = pathlib.Path(directory) / "log.txt"
+            path.write_text(body)
+            got = grade(path, None, all_targets=True, expect_totals=totals)
+            status = "OK  " if got == want else "FAIL"
+            if got != want:
+                failures += 1
+            print(f"  [self-test] {status} {name}: want exit {want}, got {got}\n")
+    total = (
+        len(cases) + len(aggregate_cases) + len(require_cases) + len(total_cases)
+    )
     if failures:
         print(f"[grade-test-log] SELF-TEST FAILED: {failures} of {total} arms")
         return 1
@@ -670,10 +794,39 @@ def main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 2
+    # Repeatable, so several targets can be pinned in one invocation:
+    #   --expect-total contracts=1510 --expect-total integration_s_z=812
+    expect_totals: dict[str, int] = {}
+    while "--expect-total" in args:
+        index = args.index("--expect-total")
+        try:
+            raw = args[index + 1]
+        except IndexError:
+            print(
+                "[grade-test-log] --expect-total needs <target>=<count>",
+                file=sys.stderr,
+            )
+            return 2
+        del args[index : index + 2]
+        name, _, count = raw.partition("=")
+        name = name.strip()
+        if not name or not count.strip().isdigit():
+            print(
+                f"[grade-test-log] --expect-total wants <target>=<count>, got {raw!r}",
+                file=sys.stderr,
+            )
+            return 2
+        expect_totals[name] = int(count.strip())
     if len(args) != 1:
         print(__doc__.split("USAGE")[-1].strip(), file=sys.stderr)
         return 2
-    return grade(pathlib.Path(args[0]), expect_target, all_targets, require_targets)
+    return grade(
+        pathlib.Path(args[0]),
+        expect_target,
+        all_targets,
+        require_targets,
+        expect_totals,
+    )
 
 
 if __name__ == "__main__":
