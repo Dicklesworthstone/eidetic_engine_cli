@@ -58,6 +58,76 @@ causal. They were not: the live checkouts are still drifted today and the lane
 is green. The repair text now names the offending `repo/package locked=
 expected=` rows, so read that rather than inferring.
 
+**But "almost always" is not always, and the LOCK IS THE WRONG SUSPECT when
+`status` is `build_admission_refused`.** Measured 2026-10-25: a pinned dispatch
+refused with `observed_codes` carrying `rch_verify_franken_stack_revision_mismatch`
+and `_version_mismatch`, and those codes repeated in the `codes` array of **7 of
+7** sibling repositories — which reads exactly like the stale-row failure above.
+It was not. In the same document `"blocking_codes": []` and every repository's
+`materialized.packages[].matches` was `true`. The cause was one line:
+
+```text
+stdout_tail: "build-admission preflight denied RCH execution"
+```
+
+**Read `status`, `blocking_codes` and `stdout_tail`/`stderr_tail` BEFORE the
+mismatch codes.** The live per-repo version readings are drift in your working
+checkouts and are present on a green lane too.
+
+**The pinned lane runs a LOCAL `ee diag build-admission` preflight first, and it
+refuses two different ways on this Mac.** Both are environment, neither is a
+test result, and both name themselves precisely:
+
+| `build_admission.status` | message / code | fix |
+|---|---|---|
+| `unavailable` | `no executable ee binary found for build-admission preflight`, with `degraded_codes: ["rch_verify_pinned_build_admission_verdict_required"]` | pass `--build-admission-ee-bin <path>` |
+| `denied` | a `checks[]` entry with `admitted: false`, plus `degraded_codes: ["build_admission_denied", "tmpdir_not_external"]` | set `TMPDIR` for the invocation |
+
+The first is near-circular: the lane that verifies the code wants a built binary
+to start. Binaries DO exist here even though `./target/` is empty, because
+`CARGO_TARGET_DIR` is redirected — look under
+`/Volumes/USBNVME16TB/temp_agent_space/cargo-target/{debug,release}/ee`, or use
+the installed `ee` on PATH. The preflight checks the ENVIRONMENT, not the code
+under test, so a stale binary is fine for it.
+
+The second is **not a free-space failure, and reading it as one wastes the
+fix.** The denying check reported 30 GB available against a 1 GB minimum; what
+failed was `external_required: true` against `external: false`, because `TMPDIR`
+pointed at the macOS default `/var/folders/...`. AGENTS.md explains why it is
+not exported globally — the USB drive is ExFAT, which has no Unix domain
+sockets, so an exported ExFAT `TMPDIR` silently breaks gitstatusd in interactive
+shells. So set it per invocation, as the `cargo()` wrapper in `~/.zshrc` does:
+
+```bash
+TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp scripts/rch_verify.sh \
+    --pinned-franken-stack --treeish HEAD \
+    --build-admission-ee-bin /Users/jemanuel/.local/bin/ee -- \
+    cargo test --locked -j 2 --test <target> <filter>
+```
+
+`--skip-build-admission` also exists and costs a documented proof degradation,
+so prefer satisfying the check over skipping it. Also note `--treeish HEAD`
+resolves at RUN time, not launch time, so a commit made while the lane is
+building changes the tree it verifies — pass an explicit sha when that matters.
+
+Ignore `selector_admission_probe` while admission is refused: it reported
+`selected_worker: null`, `no_worker_selected` and
+`workers_vs_selection_contradiction: true` across 12 reported workers in a run
+that never reached selection, which reads as a capacity problem and is not one.
+With both fixes applied the same run reported `build_admission: status=passed,
+admitted=true, degraded_codes: []` and `selector: status=selected`, which is
+what proves the contradiction was downstream of admission rather than a fleet
+condition.
+
+**Past that point the lane is a separate problem, and the report labels it.** The
+admitted run then failed in transport — a `status Some(73)` namespace refusal on
+the first worker, then `[RCH-E104] SSH command timed out after 20s` on rch's own
+retry — with `degraded_codes: ["rch_verify_remote_command_failed",
+"rch_verify_remote_transport_timeout"]` and `elapsed_ms: 31315`. That is
+bd-o7q3t / bd-s5v42 territory, not your change: `error_codes: ["RCH-E104"]` with
+a 31-second elapsed and no `test result:` line is an UNRUN acceptance. Say so
+rather than counting the admission pass as a verdict.
+
 **`RCH_VERIFY_FRANKEN_STACK_PREFLIGHT=0` disables the whole franken-stack
 preflight** (it defaults to `1`). It is a blunt escape hatch, not a fix: it
 skips provenance verification entirely rather than scoping it, so a dispatch
