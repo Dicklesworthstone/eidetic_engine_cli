@@ -169,6 +169,66 @@ is a timeout; exit 137 well short of it is worth treating as exhaustion.**
 Either way a SIGKILL is UNGRADEABLE, not RED — there is no verdict in a killed
 run, and `scripts/rch_run.sh` pins that distinction in its self-test.
 
+**That warning's text has since changed, so do not grep for the old one.** As of
+2026-10-24 rch says `— cause unconfirmed; inspect worker OOM and SSH/session
+logs; will retry on another worker if available`. The blame is gone; the reading
+rules above still apply.
+
+**DIVIDE BEFORE YOU DISPATCH: a whole-target single-threaded run of a big e2e
+target cannot finish inside any budget, and discovering that costs 4h15m.**
+Measured 2026-10-24 on `--test integration_g_m -- --test-threads=1`, uncapped by
+any filter:
+
+| | |
+|---|---|
+| announced | `running 508 tests` |
+| executed before the kill | 159 — 150 ok, 8 FAILED, 1 ignored |
+| elapsed | 15340 s (exit 137) |
+| observed rate | **96.5 s per test** |
+| implied full suite | **13.6 h** |
+| ceiling that was configured | 18000 s = 5 h |
+
+The job was unsatisfiable the moment it was sent: at that rate the ceiling buys
+about 186 of 508 tests, so it would have timed out with no `test result:` line
+even had nothing killed it. The precheck is one division — tests announced by
+the target, times the per-test cost you have measured, against your ceiling —
+and it is cheaper than every other instrument in this file. **Filter the target
+to the module you actually need.**
+
+**The 96.5 s is a PROFILE artefact, not the tests being slow (bd-3vuhv).** The
+e2e harness resolves `EE_BINARY` to the debug build and says so itself:
+
+```text
+ee_resolve_binary: PROFILE MISMATCH: caller requested release, EE_BINARY is a debug build
+ee_resolve_binary: ... A debug build ran `ee init` ~10x slower than
+ee_resolve_binary: release on an RCH worker (62.3s vs 6.18s), so timeouts calibrated for
+ee_resolve_binary: release will fire against it and report a timeout, not a profile
+```
+
+So on a debug dispatch, read any e2e timeout as a profile symptom first. In that
+same run `g5_curate_decay_e2e` went red solely because its `ee init` exited 124.
+
+**A killed run still carries per-test verdicts, and they are worth harvesting.**
+There was no summary line and the announced denominator never reconciled, so the
+run yielded no SUITE verdict — but each `test … ok` / `… FAILED` line it printed
+is a real observation of that test. Those 8 reds were the session's most
+valuable output, and two of them were genuine defects nothing else had surfaced.
+Read the log of a SIGKILLed job before paying to re-dispatch it.
+
+**After a SIGKILL, do NOT re-pin to that worker for its warm target dir.** The
+next dispatch there was refused in 19 s:
+
+```text
+WARN rch::hook: Remote execution failed on <worker>: worker source namespace
+     initialization refused on <worker> (status Some(73)): Killed
+```
+
+while `rch status` still reported that box `circuit=closed status=healthy` with
+3 free slots, and `rch workers list` showed **92 GB free** — so the kill was not
+build-disk exhaustion, and the post-kill unusability is invisible to every field
+in both commands. Same family as the healthy-but-broken worker above. Pin
+elsewhere and pay the cold build.
+
 **`rch exec` DOES have worker pinning: `--worker <ID>`**, "Execute on this exact
 worker; overrides environment/project preferences. Refuses local execution or a
 different worker when unavailable." This line said it did not until 2026-10-14,
