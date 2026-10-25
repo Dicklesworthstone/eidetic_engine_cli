@@ -221,6 +221,47 @@ Treat the slow case as the budget: `RCH_BUILD_TIMEOUT_SEC`/`RCH_TEST_TIMEOUT_SEC
 at 18000, and **one cargo stage per `--job`** — a second `cargo test` stage needs
 the TEST profile, another dependency tier on top of whatever the first stage cost.
 
+**ON THE PINNED LANE THOSE TWO VARIABLES ARE NOT THE BINDING BUDGET, AND SETTING
+ONLY THEM GUARANTEES A KILL.** `scripts/rch_verify.sh` applies its OWN per-attempt
+wall clock, `RCH_VERIFY_ATTEMPT_TIMEOUT_MS`, **defaulting to 1800000 ms = 30
+minutes** (`scripts/rch_verify.sh:123`), and it caps the whole `rch exec`
+regardless of what the build and test budgets say. Thirty minutes is *below the
+measured floor of a cold pinned build* — the fastest cold build in the table
+above is 31m57s, and the slowest is 217 minutes — so a cold pinned dispatch run
+at the default cannot reach a verdict no matter how large you set the other two.
+
+Measured 2026-10-25, a dispatch carrying `RCH_BUILD_TIMEOUT_SEC=18000` and
+`RCH_TEST_TIMEOUT_SEC=18000` exactly as advised above:
+
+| field | value |
+|---|---|
+| `status` | `capacity_or_timeout` |
+| `exit_code` | **124** |
+| `timed_out` | `true` |
+| `attempt_timeout_ms` | 1800000 |
+| `elapsed_ms` | 1800144 — **144 ms over the ceiling** |
+| `stdout_bytes` | **0**, no `test result:` line, still compiling deps |
+| `build_admission` | `passed` |
+
+Read that overshoot before reaching for any other explanation: 144 ms past a
+configured ceiling is the ceiling, the same arithmetic that distinguishes a
+timeout from exhaustion in the exit-137 case below. Exit **124** is this lane's
+timeout code and is an UNRUN acceptance, not a red. So raise all three:
+
+```bash
+RCH_VERIFY_ATTEMPT_TIMEOUT_MS=18000000 RCH_BUILD_TIMEOUT_SEC=18000 \
+RCH_TEST_TIMEOUT_SEC=18000 TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp \
+scripts/rch_verify.sh --pinned-franken-stack --treeish <sha> \
+    --build-admission-ee-bin /Users/jemanuel/.local/bin/ee -- \
+    cargo test --locked -j 2 --test <target> <filter>
+```
+
+A killed attempt is not wasted: the export is cached and reused
+(`pinned_bundle_is_valid`), and the worker keeps its target dir, so the retry
+starts warm. Note `RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC` also defaults to 1800
+but only supplies `RCH_TEST_TIMEOUT_SEC` when that is unset, so it is already
+handled if you set the variable above.
+
 **When that budget fires, rch blames the wrong thing (bd-f4pmz).** Its own
 external timeout kill is reported as resource exhaustion:
 
