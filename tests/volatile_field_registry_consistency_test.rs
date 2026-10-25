@@ -110,6 +110,128 @@ fn rust_registry_matches_bash_determinism_list() -> TestResult {
     Ok(())
 }
 
+/// Registry fields that `graph_determinism.sh` does not yet strip.
+///
+/// THIS BASELINE MAY ONLY SHRINK. None of these is emitted by a graph surface
+/// today — they belong to handoff capsules, support bundles and host probes —
+/// so the gap is latent rather than live. It is listed rather than ignored
+/// because the defect in bd-6izcn is not the 25 fields, it is that a SECOND
+/// volatile list existed with nothing pinning it, so every future registry
+/// addition would silently miss the graph harness too.
+const GRAPH_DETERMINISM_UNSTRIPPED_REGISTRY_FIELDS: &[&str] = &[
+    "run_duration_ms",
+    "capsule_id",
+    "integrity",
+    "swarm_brief_summary",
+    "swarm_incident_summary",
+    "swarm_replay_summary",
+    "environment_attestation_summary",
+    "pack_replay_summary",
+    "proof_broker_summary",
+    "regression_causality_summary",
+    "shadow_policy_summary",
+    "contention_summary",
+    "selfNodeKey",
+    "selfTailscaleIp",
+    "selfMagicDnsName",
+    "tailnetId",
+    "tailnetDisplayName",
+    "selfAdvertisedTags",
+    "peerNodeKey",
+    "peerTailscaleIps",
+    "peerMagicDnsName",
+    "peerHostname",
+    "peerAdvertisedTags",
+    "binaryVersionRaw",
+    "binaryAbsolutePath",
+];
+
+/// Fields `graph_determinism.sh` strips that are deliberately NOT registered.
+///
+/// `nondeterministic` is not a volatile VALUE: it is a constant `true` marker
+/// that labels its sibling `elapsedMs`/`elapsedMsBucket` fields as volatile,
+/// and `validate_search_performance_elapsed` in src/daemon/server.rs requires
+/// it present and exactly `true`. Stripping a constant cannot change a hash,
+/// so the graph harness keeping it is harmless — but registering it would be
+/// wrong, because then the J7 harness would delete a semantic marker. Keep
+/// this list tiny and justified.
+const GRAPH_DETERMINISM_NON_REGISTRY_STRIPS: &[&str] = &["nondeterministic"];
+
+/// bd-6izcn: `rust_registry_matches_bash_determinism_list` pins determinism.sh
+/// and nothing pinned `graph_determinism.sh`, which kept its own
+/// `VOLATILE_FIELD_NAMES` and had fallen 25 fields behind the registry without
+/// failing anything. This bounds that gap in both directions so the next
+/// registry addition cannot quietly skip the graph harness.
+#[test]
+fn graph_determinism_volatile_list_does_not_drift_further_from_the_registry() -> TestResult {
+    let script = fs::read_to_string(repo_file("scripts/e2e_overhaul/graph_determinism.sh"))
+        .map_err(|error| format!("read graph_determinism.sh: {error}"))?;
+    let graph_fields = parse_bash_volatile_list(&script)?;
+    let graph_set = graph_fields
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let registry = VOLATILE_FIELD_NAMES
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let baseline = GRAPH_DETERMINISM_UNSTRIPPED_REGISTRY_FIELDS
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let allowed_extra = GRAPH_DETERMINISM_NON_REGISTRY_STRIPS
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut errors = Vec::new();
+
+    // (1) No NEW drift: every registered field is either stripped by the graph
+    // harness or named in the baseline above.
+    for &field in &registry {
+        if !graph_set.contains(&field) && !baseline.contains(&field) {
+            errors.push(format!(
+                "`{field}` is registered but graph_determinism.sh does not strip it and the baseline does not name it; add it to that script's VOLATILE_FIELD_NAMES"
+            ));
+        }
+    }
+
+    // (2) The baseline may only shrink. A field that is now stripped, or is no
+    // longer registered, has to leave the list — otherwise the baseline goes
+    // stale and starts excusing fields it was never measured against.
+    for &field in &baseline {
+        if graph_set.contains(&field) {
+            errors.push(format!(
+                "GRAPH_DETERMINISM_UNSTRIPPED_REGISTRY_FIELDS names `{field}`, but graph_determinism.sh now strips it; remove it — this baseline may only shrink"
+            ));
+        } else if !registry.contains(&field) {
+            errors.push(format!(
+                "GRAPH_DETERMINISM_UNSTRIPPED_REGISTRY_FIELDS names `{field}`, which is no longer registered; remove it"
+            ));
+        }
+    }
+
+    // (3) Nothing unexplained in the graph list, so a field cannot be stripped
+    // there without either being registered or being justified above.
+    for &field in &graph_set {
+        if !registry.contains(&field) && !allowed_extra.contains(&field) {
+            errors.push(format!(
+                "graph_determinism.sh strips `{field}`, which is neither registered nor a documented non-registry strip"
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} graph determinism volatile-list drift(s):\n  - {}",
+            errors.len(),
+            errors.join("\n  - ")
+        ))
+    }
+}
+
 #[test]
 fn docs_mention_every_registered_volatile_field() -> TestResult {
     let docs = fs::read_to_string(repo_file("docs/volatile_field_registry.md"))
