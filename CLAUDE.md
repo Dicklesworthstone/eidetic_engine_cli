@@ -807,6 +807,37 @@ here, but nothing enforces it and it is **not** congruent with the hosted CI
 gates — several of those are disabled, so a green run is necessary, not
 sufficient. It does gate rustfmt (Rustfmt Conformance, added in `453291c25`).
 
+**ON THIS MAC IT CANNOT RUN A SINGLE STAGE, IN ANY MODE.** Measured 2026-10-26
+by running it:
+
+```text
+./scripts/verify.sh                  rc=1, 3 lines of stdout (the banner)
+./scripts/verify.sh --plan-doc-smoke rc=1, 3 lines of stdout
+./scripts/verify.sh --ci-smoke       rc=1, 3 lines of stdout
+    verify: refusing to run stages against an unverified binary.
+    verify: build it first (cargo build --locked --bin ee) or export
+    verify: EE_BINARY to one built from this source tree.
+```
+
+The gate is `scripts/verify.sh:448` and it sits BEFORE mode dispatch, so the
+narrow modes do not escape it — including `--ci-smoke`, which `--help` describes
+as "agent pre-push readiness". `ee_require_current_binary` refuses all three
+candidates on this host, correctly: `~/.local/bin/ee` is **0.14.2** against a
+**0.18.0** tree, and both `CARGO_TARGET_DIR` binaries are Linux ELF x86-64.
+Both printed remedies are unavailable — `cargo build` is tripwired
+(`check-local-cargo-tripwire.sh:112`), and `EE_BINARY` needs a native current
+binary that does not exist here.
+
+So **do not cite a local verify.sh run as evidence, and do not read its exit 1
+as a red**: nothing has been verified, and nothing has failed either. The stage
+results on this host are *unobserved*, not green. The same applies to every
+`scripts/e2e_*.sh` — `ee_require_current_binary` has 34 callers and they are all
+in this position. Use the pinned RCH lane, which builds from source on a worker
+and is the only rail that exercises this tree.
+
+Tracked as `bd-no-runnable-current-ee-binary-on-the-mac-wu6ay`. The guard is
+not the defect; the missing native binary is.
+
 ### Four ways a test run reports success having verified NOTHING
 
 All four exit 0, all four print `ok.`, and all four have cost this project

@@ -29,11 +29,14 @@
 #
 # NOTE ON fix_graph_snapshot_stale, because it corrects an earlier claim of
 # mine on bd-223vl. I first reported it as reachable, because `grep -rlw` found
-# it in src/cli/mod.rs. Both of those references -- lines 87615 and 87623 -- are
-# INSIDE a `#[cfg(test)]` module in that file. It is test-only like the other
-# eight, so bd-223vl's finding is 9 of 9, not 8 of 9. A word-boundary grep
-# cannot tell a test caller from a production one; that is the whole reason this
-# gate brace-matches test regions instead.
+# it in src/cli/mod.rs. Both of those references were INSIDE a `#[cfg(test)]`
+# module in that file. It was test-only like the other eight, so bd-223vl's
+# finding was 9 of 9, not 8 of 9. A word-boundary grep cannot tell a test caller
+# from a production one; that is the whole reason this gate brace-matches test
+# regions instead, and that lesson is why this paragraph stays.
+#
+# It has since been WIRED and is retired below. The paragraph above is kept as
+# the methodological record, not as a current claim about this surface.
 #
 # The five scoring-stack surfaces bd-6oqlx names (final_score,
 # anchor_match_score, bead_affinity_score, stale_anchor_floor,
@@ -61,10 +64,29 @@
 # all comments. The reachability is the INTRA-MODULE dispatch, which that block
 # already explains this gate counts as production. Do not "correct" this by
 # re-baselining them on the strength of an external grep.
+#
+# ---------------------------------------------------------------------------
+# 2026-10-26: SHRANK from 7 to 6, the same second direction, the same procedure.
+# The gate failed with "1 baselined entr(ies) are now reachable", found by a
+# routine local sweep rather than by looking for it.
+#
+# Retired:
+#   fix_graph_snapshot_stale              dispatch arm at doctor_fixers.rs:666
+#                                         ("graph_snapshot_stale" => Some(..))
+#
+# Earned by the procedure, not by the gate agreeing with itself: that arm sits
+# in `pub fn fix_dispatch_for_finding` at doctor_fixers.rs:656, and NO
+# `#[cfg(test)]` appears anywhere above line 666 in that file -- so the
+# reference cannot be inside a test region, which is the exact mistake the
+# NOTE above this records me making about this same surface. The remaining
+# test-only references are at :1209 and :1423, inside the test module.
+#
+# Negative control, unchanged and still discriminating: fix_snapshot_backup_owed
+# is still listed below, still has no dispatch arm, and its non-definition
+# references are all in the test module.
 # ---------------------------------------------------------------------------
 fix_agent_coordination_stale_lease
 fix_beads_jsonl_drift
-fix_graph_snapshot_stale
 fix_policy_safety_inconsistent
 fix_snapshot_backup_owed
 fix_state_file_permission_drift

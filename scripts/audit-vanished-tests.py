@@ -316,7 +316,12 @@ def audit(root: str, since: str, net: int,
         "netThreshold": net,
         "presentFnNames": len(present),
         "findings": findings,
+        # OCCURRENCES, not names: two commits can each delete the same name, and
+        # `surfaced` is a SET. Reporting only the sum put two numbers on one line
+        # that cannot be subtracted from each other, which invites a reader to
+        # try. Both are printed, labelled.
         "vanishedTotal": sum(len(f["vanished"]) for f in findings),
+        "distinctNames": len(surfaced),
         "dispositioned": {
             name: {"disposition": dispositions[name][0], "reason": dispositions[name][1]}
             for name in sorted(surfaced & set(dispositions))
@@ -503,9 +508,10 @@ def main() -> int:
                 for p in f["commitAddedPaths"]:
                     print(f"      + {p}")
         total = report.get("vanishedTotal", 0)
-        print(f"\n[vanished-tests] {total} name(s) vanished across "
-              f"{len(report.get('findings', []))} commit(s); "
-              f"{len(dispositioned)} dispositioned, "
+        print(f"\n[vanished-tests] {total} deletion(s) of "
+              f"{report.get('distinctNames')} distinct name(s) across "
+              f"{len(report.get('findings', []))} commit(s); of the distinct "
+              f"names {len(dispositioned)} dispositioned, "
               f"{len(report.get('undispositioned') or [])} NOT")
         for name in report.get("undispositioned") or []:
             print(f"  UNDISPOSITIONED  {name}")
