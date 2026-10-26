@@ -4282,7 +4282,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "registry",
-            version: "0.4.6",
+            version: "0.4.10",
             path: "https://crates.io/crates/fsqlite",
         },
         default_feature_profile: DependencyFeatureProfile {
