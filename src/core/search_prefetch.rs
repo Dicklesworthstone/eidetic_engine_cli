@@ -7,7 +7,7 @@
 
 use super::{Duration, Instant, Path, open_lexical_searcher};
 use crate::core::cass_prefetch::{
-    CassPrefetchCandidate, DEFAULT_PREFETCH_TOP_K, MAX_PREFETCH_TOPIC_ID_BYTES, TopicId,
+    CassPrefetchCandidate, MAX_PREFETCH_HISTORY, MAX_PREFETCH_TOPIC_ID_BYTES, TopicId,
 };
 use crate::core::index::IndexGenerationLease;
 
@@ -63,7 +63,8 @@ impl LexicalPrefetchOutcome {
     }
 }
 
-/// Execute at most three queries within one soft time budget. A synchronous
+/// Execute the configured number of queries within one soft time budget,
+/// bounded by [`MAX_PREFETCH_HISTORY`]. A synchronous
 /// backend call cannot be forcibly interrupted; check before/after each call
 /// and never start another when foreground work, shutdown or the budget wins.
 /// Call only with the path resolved from an already-authorized context request.
@@ -71,6 +72,7 @@ pub(crate) fn warm_prefetch_lexical(
     index_dir: &Path,
     expected_generation: u64,
     candidates: &[CassPrefetchCandidate],
+    top_k: usize,
     budget: Duration,
     should_stop: impl Fn() -> bool,
 ) -> LexicalPrefetchOutcome {
@@ -87,7 +89,7 @@ pub(crate) fn warm_prefetch_lexical(
     if let Some(stop) = checkpoint() {
         return LexicalPrefetchOutcome::stopped(stop);
     }
-    if candidates.is_empty() {
+    if candidates.is_empty() || top_k == 0 {
         return LexicalPrefetchOutcome::default();
     }
     crate::core::run_cli_with_cx(budget, |cx| async move {
@@ -119,7 +121,7 @@ pub(crate) fn warm_prefetch_lexical(
                 return outcome;
             }
         };
-        for candidate in candidates.iter().take(DEFAULT_PREFETCH_TOP_K) {
+        for candidate in candidates.iter().take(top_k.min(MAX_PREFETCH_HISTORY)) {
             if let Some(stop) = checkpoint() {
                 outcome.report.stop = stop;
                 break;

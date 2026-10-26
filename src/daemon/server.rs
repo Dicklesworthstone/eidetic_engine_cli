@@ -47,8 +47,8 @@ use rustix::fs::{FlockOperation, flock};
 
 use crate::config::env_registry::{self, EnvVar};
 use crate::core::cass_prefetch::{
-    AgentScope, CassPrefetchCoordinator, GatedPrediction, PrefetchGeneration,
-    RecencyWeightedFrequencyPredictor,
+    AgentScope, CassPrefetchCoordinator, CassPrefetchPolicy, CassPrefetchPolicyTicket,
+    GatedPrediction, PrefetchGeneration, RecencyWeightedFrequencyPredictor,
 };
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
@@ -5786,6 +5786,10 @@ fn dispatch_context(
     };
     let advisory_workspace_id =
         crate::core::workspace::bound_workspace_id_from_path(&options.workspace_path);
+    // Resolve only after the envelope and context paths have been authorized.
+    // Capture the policy before pack execution: a later request may revoke it
+    // while this request is running, and completion must not re-enable it.
+    let prefetch_ticket = configure_workspace_cass_prefetch(cass_prefetch, &options.workspace_path);
     let deadline = params.timeout_ms.map(Duration::from_millis);
     let context_run = match run_context_pack_with_performance_controlled(
         &options,
@@ -5856,6 +5860,7 @@ fn dispatch_context(
         &advisory_workspace_id,
         &params.query,
         prefetch_generation,
+        prefetch_ticket,
     );
     if params.explain && !params.no_pack_dna {
         let database_path = options
@@ -5955,6 +5960,7 @@ fn dispatch_context(
     // opt into lexical work.
     if params.source_mode != SearchSourceMode::SemanticOnly
         && let Some((worker, generation)) = prefetch_worker.zip(prefetch_generation)
+        && let Some(ticket) = prefetch_ticket
     {
         worker.submit(
             crate::config::workspace::resolve_store_index_dir(
@@ -5973,10 +5979,35 @@ fn dispatch_context(
                 workspace: advisory_workspace_id.clone(),
                 generation: PrefetchGeneration::new(0, generation),
                 corpus_revision: crate::core::index::expected_index_corpus_revision().clone(),
+                ticket,
             },
         );
     }
     pending_delivery.finish(response, defer_advisory_until_socket_write)
+}
+
+/// Adaptive behavior is opt-in and uses the same defaults, project/user files,
+/// and typed environment overrides as the config surface. Optional prefetch
+/// must fail closed on invalid configuration without failing a valid pack or
+/// exposing configuration contents in a diagnostic.
+fn configure_workspace_cass_prefetch(
+    coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
+    workspace_path: &Path,
+) -> Option<CassPrefetchPolicyTicket> {
+    let policy = match crate::core::config_surface::merged_workspace_config(workspace_path) {
+        Ok(config) => CassPrefetchPolicy::from_config(&config.values.swarm.adaptive),
+        Err(_) => {
+            tracing::debug!(
+                target: "ee::cass_prefetch",
+                "adaptive prefetch disabled: workspace configuration unavailable"
+            );
+            CassPrefetchPolicy::default()
+        }
+    };
+    coordinator
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .configure_runtime_policy(policy)
 }
 
 /// Post-success CASS prefetch observation + scheduling for one
@@ -6012,7 +6043,11 @@ fn plan_and_observe_cass_prefetch(
     workspace_id: &str,
     topic: &str,
     index_generation: Option<u64>,
+    policy_ticket: Option<CassPrefetchPolicyTicket>,
 ) -> GatedPrediction {
+    let Some(policy_ticket) = policy_ticket else {
+        return GatedPrediction::default();
+    };
     // Speculative work is the first thing to go when the daemon is stopping.
     if shutdown.load(Ordering::SeqCst) {
         return GatedPrediction::default();
@@ -6031,6 +6066,9 @@ fn plan_and_observe_cass_prefetch(
     let mut prefetch = coordinator
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !prefetch.policy_ticket_is_current(policy_ticket) {
+        return GatedPrediction::default();
+    }
 
     // bd-16pwc.7: settle the PREVIOUS warm batch against this request before
     // anything else. This is the only place that can award a hit, because
@@ -6091,6 +6129,15 @@ fn observe_and_schedule_cass_prefetch(
     topic: &str,
     index_generation: Option<u64>,
 ) -> Option<&'static str> {
+    let ticket = coordinator
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .configure_runtime_policy(CassPrefetchPolicy::from_config(
+            &crate::config::SwarmAdaptiveConfig {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        ));
     plan_and_observe_cass_prefetch(
         coordinator,
         shutdown,
@@ -6098,6 +6145,7 @@ fn observe_and_schedule_cass_prefetch(
         workspace_id,
         topic,
         index_generation,
+        ticket,
     )
     .degraded
 }
@@ -6972,6 +7020,110 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .history_for(&AgentScope::new(agent_id), PREFETCH_WORKSPACE)
             .map_or(0, |history| history.len())
+    }
+
+    #[test]
+    fn cass_prefetch_default_disabled_does_not_observe_or_measure_requests() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+        let ticket = coordinator
+            .lock()
+            .unwrap()
+            .configure_runtime_policy(CassPrefetchPolicy::default());
+        assert!(ticket.is_none());
+        for topic in ["deploy", "release", "rollback"] {
+            let prediction = plan_and_observe_cass_prefetch(
+                &coordinator,
+                &shutdown,
+                TEST_AGENT_ID,
+                PREFETCH_WORKSPACE,
+                topic,
+                Some(7),
+                ticket,
+            );
+            assert!(prediction.candidates.is_empty());
+            assert_eq!(prediction.degraded, None);
+        }
+        let guard = coordinator.lock().unwrap();
+        assert!(
+            guard
+                .history_for(&AgentScope::new(TEST_AGENT_ID), PREFETCH_WORKSPACE)
+                .is_none()
+        );
+        assert!(guard.metrics_for(PREFETCH_WORKSPACE).is_none());
+    }
+
+    #[test]
+    fn cass_prefetch_inflight_request_cannot_reenable_revoked_policy() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+        let enabled = CassPrefetchPolicy::from_config(&crate::config::SwarmAdaptiveConfig {
+            enabled: Some(true),
+            ..Default::default()
+        });
+        let ticket = coordinator
+            .lock()
+            .unwrap()
+            .configure_runtime_policy(enabled);
+        // Another authorized request disables prefetch while this one's pack
+        // is still being assembled. Its old ticket must remain revoked even
+        // after a subsequent request re-enables the same settings.
+        coordinator
+            .lock()
+            .unwrap()
+            .configure_runtime_policy(CassPrefetchPolicy::default());
+        coordinator
+            .lock()
+            .unwrap()
+            .configure_runtime_policy(enabled);
+        let prediction = plan_and_observe_cass_prefetch(
+            &coordinator,
+            &shutdown,
+            TEST_AGENT_ID,
+            PREFETCH_WORKSPACE,
+            "late request",
+            Some(7),
+            ticket,
+        );
+        assert!(prediction.candidates.is_empty());
+        assert_eq!(prediction.degraded, None);
+        let guard = coordinator.lock().unwrap();
+        assert!(
+            guard
+                .history_for(&AgentScope::new(TEST_AGENT_ID), PREFETCH_WORKSPACE)
+                .is_none()
+        );
+        assert!(guard.metrics_for(PREFETCH_WORKSPACE).is_none());
+    }
+
+    #[test]
+    fn cass_prefetch_invalid_workspace_config_disables_optional_work() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+        prefetch_call(&coordinator, &shutdown, TEST_AGENT_ID, "deploy", Some(7));
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir(workspace.path().join(".ee")).expect("config directory");
+        std::fs::write(
+            workspace.path().join(".ee/config.toml"),
+            "[swarm.adaptive]\nenabled = true\nsimilarity_threshold = 2.0\n",
+        )
+        .expect("invalid config fixture");
+        let metrics_before = prefetch_metrics(&coordinator);
+        let ticket = configure_workspace_cass_prefetch(&coordinator, workspace.path());
+        assert!(ticket.is_none());
+        let prediction = plan_and_observe_cass_prefetch(
+            &coordinator,
+            &shutdown,
+            TEST_AGENT_ID,
+            PREFETCH_WORKSPACE,
+            "release",
+            Some(7),
+            ticket,
+        );
+        assert_eq!(prediction.degraded, None);
+        assert!(prediction.candidates.is_empty());
+        assert_eq!(prefetch_history_len(&coordinator, TEST_AGENT_ID), 0);
+        assert_eq!(prefetch_metrics(&coordinator), metrics_before);
     }
 
     #[test]

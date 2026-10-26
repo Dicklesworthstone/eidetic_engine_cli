@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::cass_prefetch::DEFAULT_PREFETCH_TOP_K;
 use crate::search::{Embedder, EmbedderStack, HashEmbedder, IndexBuilder, IndexableDocument};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -70,8 +71,14 @@ fn real_warming_reads_bounded_queries_and_reuses_the_production_reader_without_w
 {
     let (root, index) = fixture()?;
     let before = fingerprint(root.path())?;
-    let outcome =
-        warm_prefetch_lexical(&index, 7, &candidates(), Duration::from_secs(10), || false);
+    let outcome = warm_prefetch_lexical(
+        &index,
+        7,
+        &candidates(),
+        DEFAULT_PREFETCH_TOP_K,
+        Duration::from_secs(10),
+        || false,
+    );
     let report = outcome.report;
     assert_eq!(report.stop, PrefetchStop::Complete);
     assert_eq!(report.completed_queries, DEFAULT_PREFETCH_TOP_K);
@@ -128,6 +135,7 @@ fn newer_and_older_generation_requests_do_not_open_a_reader() -> TestResult {
             &index,
             generation,
             &candidates(),
+            DEFAULT_PREFETCH_TOP_K,
             Duration::from_secs(10),
             || false,
         )
@@ -156,9 +164,15 @@ fn changed_corpus_or_evidence_policy_is_not_warmed() -> TestResult {
             serde_json::to_vec(&changed).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
-        let report =
-            warm_prefetch_lexical(&index, 7, &candidates(), Duration::from_secs(10), || false)
-                .report;
+        let report = warm_prefetch_lexical(
+            &index,
+            7,
+            &candidates(),
+            DEFAULT_PREFETCH_TOP_K,
+            Duration::from_secs(10),
+            || false,
+        )
+        .report;
         assert_eq!(report.stop, PrefetchStop::StaleGeneration);
         assert_eq!(report.completed_queries, 0);
     }
@@ -171,13 +185,27 @@ fn publisher_lease_is_not_waited_on_and_release_allows_warming() -> TestResult {
     let (_root, index) = fixture()?;
     let publisher = std::fs::File::open(index.parent().unwrap()).map_err(|e| e.to_string())?;
     flock(&publisher, FlockOperation::NonBlockingLockExclusive).map_err(|e| e.to_string())?;
-    let report =
-        warm_prefetch_lexical(&index, 7, &candidates(), Duration::from_secs(10), || false).report;
+    let report = warm_prefetch_lexical(
+        &index,
+        7,
+        &candidates(),
+        DEFAULT_PREFETCH_TOP_K,
+        Duration::from_secs(10),
+        || false,
+    )
+    .report;
     assert_eq!(report.stop, PrefetchStop::Unavailable);
     assert_eq!(report.completed_queries, 0);
     drop(publisher);
-    let report =
-        warm_prefetch_lexical(&index, 7, &candidates(), Duration::from_secs(10), || false).report;
+    let report = warm_prefetch_lexical(
+        &index,
+        7,
+        &candidates(),
+        DEFAULT_PREFETCH_TOP_K,
+        Duration::from_secs(10),
+        || false,
+    )
+    .report;
     assert_eq!(report.completed_queries, DEFAULT_PREFETCH_TOP_K);
     assert_eq!(report.stop, PrefetchStop::Complete);
     Ok(())
@@ -191,7 +219,15 @@ fn shutdown_and_zero_budget_do_not_even_open_missing_paths() -> TestResult {
         (Duration::from_secs(10), true, PrefetchStop::Interrupted),
         (Duration::ZERO, false, PrefetchStop::BudgetExceeded),
     ] {
-        let report = warm_prefetch_lexical(&missing, 7, &candidates(), budget, || stopping).report;
+        let report = warm_prefetch_lexical(
+            &missing,
+            7,
+            &candidates(),
+            DEFAULT_PREFETCH_TOP_K,
+            budget,
+            || stopping,
+        )
+        .report;
         assert_eq!(report.stop, expected);
         assert_eq!(report.completed_queries, 0);
         assert!(!missing.parent().unwrap().exists());
@@ -204,8 +240,15 @@ fn a_missing_generation_is_not_created_or_repaired() -> TestResult {
     let root = tempfile::tempdir().map_err(|e| e.to_string())?;
     let index = root.path().join("index");
     let before = fingerprint(root.path())?;
-    let report =
-        warm_prefetch_lexical(&index, 7, &candidates(), Duration::from_secs(10), || false).report;
+    let report = warm_prefetch_lexical(
+        &index,
+        7,
+        &candidates(),
+        DEFAULT_PREFETCH_TOP_K,
+        Duration::from_secs(10),
+        || false,
+    )
+    .report;
     assert_eq!(report.completed_queries, 0);
     assert_ne!(report.stop, PrefetchStop::Complete);
     assert_eq!(fingerprint(root.path())?, before);
@@ -219,8 +262,15 @@ fn symlinked_lexical_assets_are_rejected_before_backend_open() -> TestResult {
     std::fs::write(&target, "not index data").map_err(|e| e.to_string())?;
     std::os::unix::fs::symlink(&target, index.join("lexical").join("planted-link"))
         .map_err(|e| e.to_string())?;
-    let report =
-        warm_prefetch_lexical(&index, 7, &candidates(), Duration::from_secs(10), || false).report;
+    let report = warm_prefetch_lexical(
+        &index,
+        7,
+        &candidates(),
+        DEFAULT_PREFETCH_TOP_K,
+        Duration::from_secs(10),
+        || false,
+    )
+    .report;
     assert_eq!(report.stop, PrefetchStop::Unavailable);
     assert_eq!(report.completed_queries, 0);
     assert_eq!(
@@ -238,7 +288,14 @@ fn invalid_topics_are_skipped_and_empty_predictions_do_no_io() -> TestResult {
         CassPrefetchCandidate::new("x".repeat(MAX_PREFETCH_TOPIC_ID_BYTES + 1), 1.0, "test"),
         CassPrefetchCandidate::new("cargo", 1.0, "test"),
     ];
-    let outcome = warm_prefetch_lexical(&index, 7, &invalid, Duration::from_secs(10), || false);
+    let outcome = warm_prefetch_lexical(
+        &index,
+        7,
+        &invalid,
+        DEFAULT_PREFETCH_TOP_K,
+        Duration::from_secs(10),
+        || false,
+    );
     let report = outcome.report;
     assert_eq!(report.completed_queries, 1);
     assert_eq!(report.matching_queries, 1);
@@ -256,11 +313,65 @@ fn invalid_topics_are_skipped_and_empty_predictions_do_no_io() -> TestResult {
             .collect::<Vec<_>>(),
         vec!["cargo"]
     );
-    let outcome =
-        warm_prefetch_lexical(Path::new("absent"), 7, &[], Duration::from_secs(10), || {
-            false
-        });
+    let outcome = warm_prefetch_lexical(
+        Path::new("absent"),
+        7,
+        &[],
+        DEFAULT_PREFETCH_TOP_K,
+        Duration::from_secs(10),
+        || false,
+    );
     assert_eq!(outcome.report, LexicalPrefetchReport::default());
     assert!(outcome.warmed.is_empty());
     Ok(())
+}
+
+#[test]
+fn configured_top_k_controls_real_queries_with_a_hard_history_bound() -> TestResult {
+    let (_root, index) = fixture()?;
+    let candidates = candidates();
+    for top_k in [1, 5] {
+        let outcome = warm_prefetch_lexical(
+            &index,
+            7,
+            &candidates,
+            top_k,
+            Duration::from_secs(10),
+            || false,
+        );
+        assert_eq!(outcome.report.stop, PrefetchStop::Complete);
+        assert_eq!(outcome.report.completed_queries, top_k);
+        assert_eq!(outcome.warmed.len(), top_k);
+    }
+    let oversized: Vec<_> = candidates
+        .iter()
+        .cycle()
+        .take(MAX_PREFETCH_HISTORY + 10)
+        .cloned()
+        .collect();
+    let outcome = warm_prefetch_lexical(
+        &index,
+        7,
+        &oversized,
+        usize::MAX,
+        Duration::from_secs(10),
+        || false,
+    );
+    assert_eq!(outcome.report.stop, PrefetchStop::Complete);
+    assert_eq!(outcome.report.completed_queries, MAX_PREFETCH_HISTORY);
+    assert_eq!(outcome.warmed.len(), MAX_PREFETCH_HISTORY);
+    Ok(())
+}
+
+#[test]
+fn zero_top_k_does_not_open_a_reader() {
+    let outcome = warm_prefetch_lexical(
+        Path::new("absent"),
+        7,
+        &candidates(),
+        0,
+        Duration::from_secs(10),
+        || false,
+    );
+    assert_eq!(outcome, LexicalPrefetchOutcome::default());
 }

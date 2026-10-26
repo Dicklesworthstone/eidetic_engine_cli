@@ -171,6 +171,64 @@ pub const DEFAULT_PREFETCH_BUDGET: Duration = Duration::from_millis(50);
 /// deserializes a `CassPrefetchHistory` from a (4 MiB) request envelope.
 pub const MAX_PREFETCH_HISTORY: usize = 64;
 
+/// Resolved opt-in policy for daemon prefetch. Configuration is read by the
+/// caller; the coordinator only consumes this normalized, deterministic value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg(unix)]
+pub(crate) struct CassPrefetchPolicy {
+    enabled: bool,
+    top_k: usize,
+    budget: Duration,
+    min_score: f64,
+}
+
+#[cfg(unix)]
+impl Default for CassPrefetchPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            top_k: DEFAULT_PREFETCH_TOP_K,
+            budget: DEFAULT_PREFETCH_BUDGET,
+            min_score: DEFAULT_PREFETCH_MIN_SCORE,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl CassPrefetchPolicy {
+    pub(crate) fn from_config(config: &crate::config::SwarmAdaptiveConfig) -> Self {
+        let defaults = Self::default();
+        Self {
+            enabled: config.enabled.unwrap_or(defaults.enabled),
+            // Clamp before conversion so a valid u64 config cannot truncate on
+            // narrower targets. Match the coordinator's existing top-k bounds.
+            top_k: config
+                .prefetch_top_k
+                .unwrap_or(DEFAULT_PREFETCH_TOP_K as u64)
+                .clamp(1, MAX_PREFETCH_HISTORY as u64) as usize,
+            budget: config
+                .prefetch_budget_ms
+                .map_or(defaults.budget, Duration::from_millis),
+            min_score: config
+                .similarity_threshold
+                .filter(|score| score.is_finite())
+                .unwrap_or(defaults.min_score)
+                .clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// A batch may finish only under the policy that admitted it. Changing a
+/// policy, including disabling and re-enabling the same settings, revokes old
+/// tickets so an in-flight worker cannot repopulate cleared query history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(unix)]
+pub(crate) struct CassPrefetchPolicyTicket {
+    epoch: u64,
+    pub(crate) top_k: usize,
+    pub(crate) budget: Duration,
+}
+
 /// Bound total daemon residency, not just each individual rolling window.
 /// Rotating caller identities must not turn a bounded predictor into an
 /// unbounded process-lifetime accumulator.
@@ -1443,6 +1501,10 @@ pub struct CassPrefetchCoordinator<P: SpeculativePrefetch> {
     metrics: CassPrefetchWorkspaceMetrics,
     top_k: usize,
     budget_per_slot: Duration,
+    #[cfg(unix)]
+    runtime_policy: Option<CassPrefetchPolicy>,
+    #[cfg(unix)]
+    runtime_policy_epoch: u64,
     /// Completed warm batches awaiting their verdict, one per
     /// `(agent_scope, workspace)` (bd-16pwc.7). The worker is single-flight,
     /// so a second batch for one key means the first was superseded rather
@@ -1465,6 +1527,32 @@ impl CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor> {
     pub fn new() -> Self {
         Self::with_predictor(RecencyWeightedFrequencyPredictor::new())
     }
+
+    /// Apply the workspace's current opt-in before observing a request. Policy
+    /// changes discard retained topics and pending credit, and invalidate all
+    /// previously admitted batches. Aggregate metrics remain available.
+    #[cfg(unix)]
+    pub(crate) fn configure_runtime_policy(
+        &mut self,
+        policy: CassPrefetchPolicy,
+    ) -> Option<CassPrefetchPolicyTicket> {
+        if self.runtime_policy != Some(policy) {
+            self.runtime_policy_epoch = self.runtime_policy_epoch.wrapping_add(1);
+            self.runtime_policy = Some(policy);
+            self.predictor =
+                RecencyWeightedFrequencyPredictor::new().with_min_score(policy.min_score);
+            self.top_k = policy.top_k;
+            self.budget_per_slot = policy.budget;
+            self.histories = CassPrefetchHistoryStore::new(DEFAULT_PREFETCH_HISTORY_WINDOW);
+            self.pending.clear();
+        }
+        // A zero budget cannot warm anything and must not accumulate topics.
+        (policy.enabled && !policy.budget.is_zero()).then_some(CassPrefetchPolicyTicket {
+            epoch: self.runtime_policy_epoch,
+            top_k: policy.top_k,
+            budget: policy.budget,
+        })
+    }
 }
 
 impl<P: SpeculativePrefetch> CassPrefetchCoordinator<P> {
@@ -1478,8 +1566,20 @@ impl<P: SpeculativePrefetch> CassPrefetchCoordinator<P> {
             metrics: CassPrefetchWorkspaceMetrics::new(),
             top_k: DEFAULT_PREFETCH_TOP_K,
             budget_per_slot: DEFAULT_PREFETCH_BUDGET,
+            #[cfg(unix)]
+            runtime_policy: None,
+            #[cfg(unix)]
+            runtime_policy_epoch: 0,
             pending: BTreeMap::new(),
         }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn policy_ticket_is_current(&self, ticket: CassPrefetchPolicyTicket) -> bool {
+        self.runtime_policy_epoch == ticket.epoch
+            && self
+                .runtime_policy
+                .is_some_and(|policy| policy.enabled && !policy.budget.is_zero())
     }
 
     /// Cap the number of candidates one [`schedule`](Self::schedule) call
@@ -1795,6 +1895,157 @@ mod tests {
 
     fn history(topics_recent_first: &[&str]) -> CassPrefetchHistory {
         CassPrefetchHistory::from_topics(test_agent_scope(), topics_recent_first.iter().copied())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_policy_honors_merged_opt_in_and_disable_environment() {
+        use crate::config::{
+            ConfigLayers, PathExpander, built_in_config, config_from_env, merge_config,
+        };
+        use std::ffi::OsString;
+
+        let expander =
+            PathExpander::with_env(Some("/tmp/ee-prefetch-user".into()), BTreeMap::new());
+        let defaults = built_in_config(&expander);
+        assert_eq!(
+            CassPrefetchPolicy::from_config(&defaults.swarm.adaptive),
+            CassPrefetchPolicy::default()
+        );
+        for (project_enabled, override_value, expected_enabled) in [
+            (true, "true", false),
+            (true, "1", false),
+            (true, "false", true),
+            (true, "0", true),
+            (false, "false", false),
+            (false, "0", false),
+        ] {
+            let env = BTreeMap::from([(
+                crate::config::EnvVar::DisableAdaptive.name().to_owned(),
+                OsString::from(override_value),
+            )]);
+            let mut layers = ConfigLayers::with_defaults(defaults.clone());
+            layers.project.swarm.adaptive.enabled = Some(project_enabled);
+            layers.environment = config_from_env(&env, &expander).expect("valid override");
+            let policy =
+                CassPrefetchPolicy::from_config(&merge_config(&layers).values.swarm.adaptive);
+            let mut coordinator = CassPrefetchCoordinator::new();
+            assert_eq!(
+                coordinator.configure_runtime_policy(policy).is_some(),
+                expected_enabled,
+                "project={project_enabled}, disable override={override_value}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_policy_normalizes_unbounded_integer_config_and_zero_budget() {
+        for (requested, expected) in [(0, 1), (1, 1), (5, 5), (u64::MAX, MAX_PREFETCH_HISTORY)] {
+            let policy = CassPrefetchPolicy::from_config(&crate::config::SwarmAdaptiveConfig {
+                enabled: Some(true),
+                prefetch_top_k: Some(requested),
+                prefetch_budget_ms: Some(u64::MAX),
+                ..Default::default()
+            });
+            let ticket = CassPrefetchCoordinator::new()
+                .configure_runtime_policy(policy)
+                .expect("enabled policy");
+            assert_eq!(ticket.top_k, expected);
+            assert_eq!(ticket.budget, Duration::from_millis(u64::MAX));
+        }
+        let zero_budget = CassPrefetchPolicy::from_config(&crate::config::SwarmAdaptiveConfig {
+            enabled: Some(true),
+            prefetch_budget_ms: Some(0),
+            ..Default::default()
+        });
+        assert!(
+            CassPrefetchCoordinator::new()
+                .configure_runtime_policy(zero_budget)
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_policy_controls_predictions_and_warm_budget() {
+        let scope = test_agent_scope();
+        let revision = CorpusRevision::from("corpus:policy");
+        let generation = PrefetchGeneration::new(0, 7);
+        for (top_k, min_score, expected) in [(1, 0.0, 1), (5, 0.0, 5), (5, 1.0, 0)] {
+            let mut coordinator = CassPrefetchCoordinator::new();
+            let policy = CassPrefetchPolicy::from_config(&crate::config::SwarmAdaptiveConfig {
+                enabled: Some(true),
+                prefetch_top_k: Some(top_k),
+                prefetch_budget_ms: Some(7),
+                similarity_threshold: Some(min_score),
+                ..Default::default()
+            });
+            let ticket = coordinator.configure_runtime_policy(policy).unwrap();
+            for topic in ["alpha", "beta", "gamma", "delta", "epsilon", "current"] {
+                coordinator.observe(scope.clone(), "ws", topic, generation, &revision);
+            }
+            let prediction = coordinator.schedule(&scope, "ws", generation, &revision);
+            assert_eq!(prediction.candidates.len(), expected);
+            assert_eq!(ticket.budget, Duration::from_millis(7));
+            assert_eq!(
+                coordinator.record_warm_fetch(
+                    "ws",
+                    Duration::from_millis(8),
+                    WarmFetchOutcome::Hit
+                ),
+                Some(CASS_PREFETCH_BUDGET_EXCEEDED_CODE)
+            );
+            assert_eq!(coordinator.metrics_for("ws").unwrap().hits, 0);
+            assert_eq!(coordinator.metrics_for("ws").unwrap().budget_exceeded, 1);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_policy_changes_forget_topics_and_revoke_old_batches() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let enabled = CassPrefetchPolicy::from_config(&crate::config::SwarmAdaptiveConfig {
+            enabled: Some(true),
+            ..Default::default()
+        });
+        let ticket = coordinator.configure_runtime_policy(enabled).unwrap();
+        let scope = test_agent_scope();
+        let revision = CorpusRevision::from("corpus:policy");
+        let generation = PrefetchGeneration::new(0, 7);
+        coordinator.observe(scope.clone(), "ws", "alpha", generation, &revision);
+        coordinator.record_warm_batch(
+            scope.clone(),
+            "ws",
+            vec![TopicId::new("alpha")],
+            generation,
+            &revision,
+            Duration::from_millis(1),
+        );
+        assert_eq!(coordinator.configure_runtime_policy(enabled), Some(ticket));
+        assert_eq!(coordinator.pending_warm_topics(&scope, "ws"), 1);
+        assert!(coordinator.history_for(&scope, "ws").is_some());
+
+        assert!(
+            coordinator
+                .configure_runtime_policy(CassPrefetchPolicy::default())
+                .is_none()
+        );
+        assert!(!coordinator.policy_ticket_is_current(ticket));
+        assert_eq!(coordinator.pending_warm_topics(&scope, "ws"), 0);
+        assert!(coordinator.history_for(&scope, "ws").is_none());
+
+        let reenabled = coordinator.configure_runtime_policy(enabled).unwrap();
+        assert_ne!(ticket, reenabled);
+        assert!(!coordinator.policy_ticket_is_current(ticket));
+        assert!(coordinator.policy_ticket_is_current(reenabled));
+        let changed = CassPrefetchPolicy {
+            top_k: 1,
+            ..enabled
+        };
+        let changed_ticket = coordinator.configure_runtime_policy(changed).unwrap();
+        assert!(!coordinator.policy_ticket_is_current(reenabled));
+        assert!(coordinator.policy_ticket_is_current(changed_ticket));
     }
 
     #[test]

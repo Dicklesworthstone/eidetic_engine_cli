@@ -1,12 +1,11 @@
 //! One best-effort idle batch per server; no unbounded queue or result cache.
 
-// `Duration` is deliberately NOT imported here. Its only use is in the
-// cfg(test) `wait_for_batch_settle` signature below, so an unconditional import
-// would be unused in the lib build and red under `-D warnings`.
-use super::{Arc, AtomicBool, Condvar, InflightPool, Instant, Mutex, Ordering, PathBuf, thread};
+use super::{
+    Arc, AtomicBool, Condvar, Duration, InflightPool, Instant, Mutex, Ordering, PathBuf, thread,
+};
 use crate::core::cass_prefetch::{
-    AgentScope, CassPrefetchCandidate, CassPrefetchCoordinator, DEFAULT_PREFETCH_BUDGET,
-    PrefetchGeneration, RecencyWeightedFrequencyPredictor,
+    AgentScope, CassPrefetchCandidate, CassPrefetchCoordinator, CassPrefetchPolicyTicket,
+    DEFAULT_PREFETCH_BUDGET, PrefetchGeneration, RecencyWeightedFrequencyPredictor, TopicId,
 };
 use crate::core::search::warm_prefetch_lexical;
 use crate::models::CorpusRevision;
@@ -27,6 +26,8 @@ pub(super) struct WarmBatchScope {
     pub generation: PrefetchGeneration,
     /// The corpus revision the batch is warmed AGAINST.
     pub corpus_revision: CorpusRevision,
+    /// Revoked when the workspace disables or changes adaptive prefetch.
+    pub ticket: CassPrefetchPolicyTicket,
 }
 
 #[derive(Clone, Debug)]
@@ -178,6 +179,37 @@ impl CassPrefetchWorker {
                 .map_or(true, |active| *active != 0)
     }
 
+    fn policy_is_current(&self, ticket: CassPrefetchPolicyTicket) -> bool {
+        // Speculation yields to foreground policy changes without waiting for
+        // their lock, just as it yields to a foreground search request.
+        self.coordinator
+            .try_lock()
+            .is_ok_and(|coordinator| coordinator.policy_ticket_is_current(ticket))
+    }
+
+    fn stage_warm_batch(
+        &self,
+        scope: WarmBatchScope,
+        warmed_topics: Vec<TopicId>,
+        spent: Duration,
+    ) -> Option<&'static str> {
+        let mut coordinator = self
+            .coordinator
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !coordinator.policy_ticket_is_current(scope.ticket) {
+            return None;
+        }
+        coordinator.record_warm_batch(
+            scope.agent_scope,
+            scope.workspace,
+            warmed_topics,
+            scope.generation,
+            &scope.corpus_revision,
+            spent,
+        )
+    }
+
     pub(super) fn submit(
         &self,
         index_dir: PathBuf,
@@ -185,7 +217,7 @@ impl CassPrefetchWorker {
         candidates: Vec<CassPrefetchCandidate>,
         scope: WarmBatchScope,
     ) {
-        if candidates.is_empty() {
+        if candidates.is_empty() || !self.policy_is_current(scope.ticket) {
             return;
         }
         let Some(batch) = self.reserve() else {
@@ -200,17 +232,17 @@ impl CassPrefetchWorker {
             .name("ee-cass-prefetch".to_owned())
             .spawn(move || {
                 let _batch = batch;
-                if !worker.foreground.wait_until_idle(DEFAULT_PREFETCH_BUDGET)
+                let ticket = scope.ticket;
+                // A custom warm budget never extends the existing maximum
+                // idle-queue wait or makes shutdown wait for speculation.
+                if !worker
+                    .foreground
+                    .wait_until_idle(ticket.budget.min(DEFAULT_PREFETCH_BUDGET))
                     || worker.interrupted()
+                    || !worker.policy_is_current(ticket)
                 {
                     return;
                 }
-                let WarmBatchScope {
-                    agent_scope,
-                    workspace,
-                    generation: warmed_against,
-                    corpus_revision,
-                } = scope;
                 // Time the warming call HERE. The coordinator reads no clock
                 // (bd-kpynd determinism contract), so the budget verdict is
                 // made from an elapsed value this side measured.
@@ -219,8 +251,9 @@ impl CassPrefetchWorker {
                     &index_dir,
                     generation,
                     &candidates,
-                    DEFAULT_PREFETCH_BUDGET,
-                    || worker.interrupted(),
+                    ticket.top_k,
+                    ticket.budget,
+                    || worker.interrupted() || !worker.policy_is_current(ticket),
                 );
                 let spent = started.elapsed();
                 let report = outcome.report;
@@ -230,18 +263,7 @@ impl CassPrefetchWorker {
                 // — a hit is a statement about a later request, which warm
                 // time cannot know — but the batch is no longer discarded, so
                 // hits, misses and budget_exceeded can finally move.
-                let degraded = worker
-                    .coordinator
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .record_warm_batch(
-                        agent_scope,
-                        workspace,
-                        outcome.warmed,
-                        warmed_against,
-                        &corpus_revision,
-                        spent,
-                    );
+                let degraded = worker.stage_warm_batch(scope, outcome.warmed, spent);
                 tracing::debug!(
                     target: "ee::cass_prefetch",
                     completed_queries = report.completed_queries,
@@ -250,7 +272,7 @@ impl CassPrefetchWorker {
                     warmed_topics,
                     spent_ms = spent.as_millis(),
                     degraded = degraded.unwrap_or("none"),
-                    "staged speculative lexical warming for later evidence-use credit"
+                    "finished speculative lexical warming"
                 );
             });
         if spawned.is_err() {
@@ -262,7 +284,7 @@ impl CassPrefetchWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use crate::core::cass_prefetch::{CASS_PREFETCH_BUDGET_EXCEEDED_CODE, CassPrefetchPolicy};
 
     fn worker() -> CassPrefetchWorker {
         CassPrefetchWorker::new(
@@ -272,12 +294,24 @@ mod tests {
         )
     }
 
-    fn scope() -> WarmBatchScope {
+    fn scope(worker: &CassPrefetchWorker) -> WarmBatchScope {
+        let ticket = worker
+            .coordinator
+            .lock()
+            .unwrap()
+            .configure_runtime_policy(CassPrefetchPolicy::from_config(
+                &crate::config::SwarmAdaptiveConfig {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
         WarmBatchScope {
             agent_scope: AgentScope::new("agent:test"),
             workspace: "ws".to_owned(),
             generation: PrefetchGeneration::new(0, 7),
             corpus_revision: CorpusRevision::unknown(),
+            ticket,
         }
     }
 
@@ -424,7 +458,7 @@ mod tests {
     #[test]
     fn no_candidates_do_not_spawn_or_reserve() {
         let worker = worker();
-        worker.submit(PathBuf::from("absent"), 7, Vec::new(), scope());
+        worker.submit(PathBuf::from("absent"), 7, Vec::new(), scope(&worker));
         assert!(!worker.running.load(Ordering::Acquire));
         assert!(worker.foreground.wait_until_idle(Duration::ZERO));
         // Nothing was warmed, so nothing may be staged for credit.
@@ -436,5 +470,115 @@ mod tests {
                 .pending_warm_topics(&AgentScope::new("agent:test"), "ws"),
             0
         );
+    }
+
+    #[test]
+    fn revoked_policy_refuses_submitted_and_completed_batches() {
+        let worker = worker();
+        let revoked = scope(&worker);
+        let topics = vec![TopicId::new("cargo")];
+        worker.stage_warm_batch(revoked.clone(), topics.clone(), Duration::from_millis(1));
+        assert_eq!(
+            worker
+                .coordinator
+                .lock()
+                .unwrap()
+                .pending_warm_topics(&revoked.agent_scope, "ws"),
+            1
+        );
+        worker
+            .coordinator
+            .lock()
+            .unwrap()
+            .configure_runtime_policy(CassPrefetchPolicy::default());
+        assert!(!worker.policy_is_current(revoked.ticket));
+        worker.submit(
+            PathBuf::from("absent"),
+            7,
+            vec![CassPrefetchCandidate::new("cargo", 1.0, "test")],
+            revoked.clone(),
+        );
+        assert!(!worker.running.load(Ordering::Acquire));
+        assert_eq!(worker.batches_settled(), 0);
+
+        // A batch that was already executing when the setting changed must
+        // not restore pending topics, even if the same policy is re-enabled.
+        let current = scope(&worker);
+        assert_ne!(current.ticket, revoked.ticket);
+        let before = worker
+            .coordinator
+            .lock()
+            .unwrap()
+            .metrics_for("ws")
+            .cloned();
+        worker.stage_warm_batch(revoked, topics.clone(), Duration::from_millis(1));
+        {
+            let coordinator = worker.coordinator.lock().unwrap();
+            assert_eq!(
+                coordinator.pending_warm_topics(&current.agent_scope, "ws"),
+                0
+            );
+            assert_eq!(coordinator.metrics_for("ws").cloned(), before);
+        }
+        worker.stage_warm_batch(current.clone(), topics, Duration::from_millis(1));
+        assert_eq!(
+            worker
+                .coordinator
+                .lock()
+                .unwrap()
+                .pending_warm_topics(&current.agent_scope, "ws"),
+            1
+        );
+    }
+
+    #[test]
+    fn changed_budget_revokes_old_batch_and_settles_with_configured_budget() {
+        let worker = worker();
+        let old_scope = scope(&worker);
+        let ticket = worker
+            .coordinator
+            .lock()
+            .unwrap()
+            .configure_runtime_policy(CassPrefetchPolicy::from_config(
+                &crate::config::SwarmAdaptiveConfig {
+                    enabled: Some(true),
+                    prefetch_budget_ms: Some(5),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        let current = WarmBatchScope {
+            ticket,
+            ..old_scope.clone()
+        };
+        let topics = vec![TopicId::new("cargo")];
+        worker.stage_warm_batch(old_scope, topics.clone(), Duration::from_millis(6));
+        assert!(
+            worker
+                .coordinator
+                .lock()
+                .unwrap()
+                .metrics_for("ws")
+                .is_none()
+        );
+        assert_eq!(
+            worker.stage_warm_batch(current.clone(), topics.clone(), Duration::from_millis(6)),
+            Some(CASS_PREFETCH_BUDGET_EXCEEDED_CODE)
+        );
+        assert_eq!(
+            worker
+                .coordinator
+                .lock()
+                .unwrap()
+                .pending_warm_topics(&current.agent_scope, "ws"),
+            0
+        );
+        worker.stage_warm_batch(current.clone(), topics, Duration::from_millis(4));
+        let coordinator = worker.coordinator.lock().unwrap();
+        assert_eq!(
+            coordinator.pending_warm_topics(&current.agent_scope, "ws"),
+            1
+        );
+        assert_eq!(coordinator.metrics_for("ws").unwrap().budget_exceeded, 1);
     }
 }
