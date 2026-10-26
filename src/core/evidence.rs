@@ -93,10 +93,12 @@ impl EvidenceWithdrawReport {
 }
 
 fn storage_error(error: DbError) -> DomainError {
+    let message = format!("Failed to withdraw imported evidence: {error}");
     super::db_failure_or_storage_panic(
         &error,
+        message.clone(),
         DomainError::Storage {
-            message: format!("Failed to withdraw imported evidence: {error}"),
+            message,
             repair: Some("ee doctor --json".to_owned()),
         },
     )
