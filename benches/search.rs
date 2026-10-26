@@ -171,10 +171,10 @@ fn seed_database(workspace_path: &Path, count: usize) -> PathBuf {
             valid_to: None,
         };
         // Canonical `mem_` + Crockford payload, as the memories id CHECK requires.
-        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(
-            0x5EA_0000 + u128::try_from(index).expect("search benchmark index fits u128"),
-        ))
-        .to_string();
+        let Ok(offset) = u128::try_from(index) else {
+            panic!("search benchmark index {index} does not fit u128");
+        };
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5EA_0000 + offset)).to_string();
         if let Err(error) = connection.insert_memory(&memory_id, &input) {
             panic!("failed seeding benchmark memory {index}: {error}");
         }
