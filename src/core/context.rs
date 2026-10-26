@@ -124,6 +124,9 @@ use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::RuleIndexProjection;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
+#[path = "context_turn.rs"]
+mod turn;
+
 #[path = "context_why_not.rs"]
 mod why_not;
 use why_not::OmissionCause;
@@ -3801,6 +3804,10 @@ async fn run_context_pack_with_performance_inner(
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     apply_context_pack_contradiction_guard(read_connection, &mut draft);
     if concurrent_limit_retry_after_ms.is_none() {
+        let considered_evidence = evidence_candidates
+            .iter()
+            .map(|candidate| candidate.item.evidence_id.clone())
+            .collect::<BTreeSet<_>>();
         append_ranked_native_pack_items_with_probe(
             rule_candidates,
             evidence_candidates,
@@ -3810,6 +3817,17 @@ async fn run_context_pack_with_performance_inner(
             &mut degraded,
             control.why_not,
         );
+        if turn::permitted(options.pagination.as_ref(), options.relevance_floor) {
+            turn::complete_selected_turns(
+                read_connection,
+                &options.workspace_path,
+                &request,
+                &effective_filters,
+                &considered_evidence,
+                &mut draft,
+                &mut degraded,
+            );
+        }
     }
     if !policy_omissions.is_empty() {
         let omitted_count = policy_omissions.len();
@@ -8440,6 +8458,8 @@ fn context_pack_l2_feature_flags_hash(
     hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
     // Cached packs from before caller floors reached assembly must be rebuilt.
     hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v1");
+    // Reassemble older cached packs without bounded conversational companions.
+    hash_labeled_bytes(&mut hasher, "conversation_turn_completion_policy", b"v1");
     // Graph expansion now uses the canonical quality scorer; older cached
     // packs did not apply confidence or harmful-feedback penalties to graph hints.
     hash_labeled_bytes(&mut hasher, "graph_hint_quality_policy", b"v1");
