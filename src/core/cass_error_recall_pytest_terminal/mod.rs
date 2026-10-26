@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES};
 
 mod collection;
-mod terminal;
+pub(super) mod terminal;
 mod traceback;
 mod unittest;
 

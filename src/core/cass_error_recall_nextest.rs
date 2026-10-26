@@ -11,8 +11,8 @@ use super::super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED
 
 // Use the same conservative terminal interpretation as Python reports. In
 // particular, cursor movement, erasure and bare CR must never erase a failure.
-#[path = "cass_error_recall_pytest_terminal/terminal.rs"]
-mod terminal;
+// Reuse the Python module's copy rather than compiling terminal.rs twice.
+use super::python::terminal;
 
 const MAX_TESTS: usize = 1024;
 const MAX_LINES: usize = 4096;
