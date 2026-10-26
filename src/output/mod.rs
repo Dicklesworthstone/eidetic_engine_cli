@@ -21642,6 +21642,56 @@ mod tests {
         ensure_contains(&json, "\"releaseChannel\":\"dev\"", "dev channel")
     }
 
+    /// A PARTIAL stamp reports `state: "unknown"`, and the oracle refuses that
+    /// exactly as it refuses a missing one (bd-reality-core-convergence-1azkt.10).
+    ///
+    /// This is the one branch of `source_state` nothing exercised. The other
+    /// three are covered by the fixtures around this test -- `Some(true)` ->
+    /// dirty, `Some(false)` -> clean, and all-None -> unavailable -- which left
+    /// the interesting case untested: a commit present with NO dirty flag.
+    ///
+    /// It is load-bearing now that `scripts/rch_verify.sh` stamps committed-tree
+    /// builds, because it is what a HALF-DONE stamp produces.
+    /// `tests/retrieval_index_regression_oracle.rs:767` rejects a candidate
+    /// whose field reads `"unknown"` in the same breath as `"<absent>"` and
+    /// `"null"`, so setting VERGEN_GIT_SHA without VERGEN_GIT_DIRTY buys nothing
+    /// and looks like progress. That is why the lane sets all three together,
+    /// and this test is what makes the requirement visible rather than folklore.
+    #[test]
+    fn version_json_commit_without_dirty_flag_reports_unknown_source_state() -> TestResult {
+        let report = version_report_fixture(
+            Some("abcdef123456"),
+            None,
+            None,
+            "aarch64-apple-darwin",
+            "debug",
+            "dev",
+            Vec::new(),
+        );
+        let json = render_version_json(&report);
+
+        ensure_contains(&json, "\"gitCommit\":\"abcdef123456\"", "commit present")?;
+        ensure_contains(&json, "\"gitDirty\":null", "no dirty flag")?;
+        ensure_contains(&json, "\"state\":\"unknown\"", "partial stamp is unknown")?;
+        // And the tag alone must reach the same branch, so the predicate is
+        // `commit OR tag` rather than `commit` -- a reader of the match arm
+        // cannot tell those apart, and only one of them is written here.
+        let tag_only = version_report_fixture(
+            None,
+            Some("v9.9.9"),
+            None,
+            "aarch64-apple-darwin",
+            "debug",
+            "dev",
+            Vec::new(),
+        );
+        ensure_contains(
+            &render_version_json(&tag_only),
+            "\"state\":\"unknown\"",
+            "a tag alone also reaches unknown",
+        )
+    }
+
     #[test]
     fn version_json_missing_metadata_fixture_reports_degradations() -> TestResult {
         let report = version_report_fixture(
