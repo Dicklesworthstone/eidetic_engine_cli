@@ -3183,6 +3183,63 @@ assert_committed_tree_base_stores_xattrs() {
     fi
 }
 
+# Stamp the candidate binary with the commit it is built from (bd-reality-core-
+# convergence-1azkt.10 acceptance bullet 2).
+#
+# WHAT WAS ALREADY BUILT, AND WHAT WAS MISSING. `build.rs:76` passes
+# VERGEN_GIT_SHA / VERGEN_GIT_DESCRIBE / VERGEN_GIT_DIRTY through to rustc with
+# `rerun-if-env-changed` on each, `ee version --json` reports them at
+# `data.source.{gitCommit,gitTag,gitDirty}`, and TWO consumers already depend on
+# them: tests/retrieval_index_regression_oracle.rs refuses a candidate reporting
+# `gitCommit=null` under ORACLE_REQUIRE_ATTESTATION=1, and
+# tests/e2e_artifact_manifest_contract.rs:116 asserts
+# `/data/source/gitCommit == source_commit`.
+#
+# Nothing populated them. Measured 2026-10-26: the only setter anywhere in the
+# tree is `.github/workflows/macos-ee-artifact.yml:52`, and Actions is disabled
+# repo-wide (bd-actions-disabled-repo-wide-33mfm). The installed binary reports
+# `{"gitCommit":null,"gitTag":null,"gitDirty":null,"state":"unavailable"}`. The
+# oracle's own refusal text says this script "sets no VERGEN_* of its own, so
+# the forwarding above is still required there" -- so the acceptance bullet that
+# demands an attested candidate, through the runner bullet 1 mandates, could not
+# be met without hand-assembling the variables on every dispatch.
+#
+# WHY IT IS HONEST HERE AND ONLY HERE. On the committed-tree path the export is
+# `git archive` of exactly this commit, so the tree IS that commit and
+# `DIRTY=false` is true by construction. On the live-working-tree path it would
+# be a claim about a tree nobody checked, which is why this is scoped to
+# COMMITTED_TREE and must stay scoped.
+#
+# AN EXPLICIT --env ALWAYS WINS. If the caller passed any VERGEN_GIT_* override,
+# none are added: a caller stamping deliberately -- the oracle recipe, a
+# reproduction of a historical build -- must not have it silently rewritten.
+#
+# THE GOLDEN THIS APPEARS TO CONFLICT WITH DOES NOT ASSERT IT. build.rs:51 says
+# the null state is "precisely what tests/fixtures/golden/version/version.golden
+# has always asserted". It is not: that fixture's only consumer is
+# `golden_version_fixture_is_valid_json` (src/output/mod.rs:26586), which checks
+# that it parses and that `schema == ee.response.v2` and compares nothing to
+# live output. Its own `"version"` field reads 0.13.1 against a 0.18.0 tree,
+# which is what five minor versions of unasserted drift looks like. Checked by
+# reading the test rather than the comment next to it.
+stamp_committed_tree_build_provenance() {
+    local commit override
+    commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
+    [ -n "$commit" ] || return 0
+
+    for override in "${ENV_OVERRIDES[@]+"${ENV_OVERRIDES[@]}"}"; do
+        case "$override" in
+            VERGEN_GIT_*) return 0 ;;
+        esac
+    done
+
+    ENV_OVERRIDES+=(
+        "VERGEN_GIT_SHA=$commit"
+        "VERGEN_GIT_DESCRIBE=rch-verify-$commit"
+        "VERGEN_GIT_DIRTY=false"
+    )
+}
+
 materialize_committed_tree() {
     local commit export_base export_root short_commit
     commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
@@ -7253,6 +7310,7 @@ if [ "$COMMITTED_TREE" -eq 1 ]; then
     fi
     assert_committed_tree_base_stores_xattrs
     materialize_committed_tree
+    stamp_committed_tree_build_provenance
     # THE EXPORT BASE IS NOT WIRED INTO BUILD ADMISSION, AND THAT IS NOT AN
     # OVERSIGHT -- it was tried and measured first (bd-to1fr).
     #
