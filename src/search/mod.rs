@@ -1888,8 +1888,9 @@ pub const REQUIRED_RETRIEVAL_ENGINE: &str = "frankensearch::TwoTierSearcher";
 /// Frankensearch crate version selected by this package.
 ///
 /// Keep this synchronized with the explicit `frankensearch` dependency version
-/// in `Cargo.toml`; the local search contract test checks that drift.
-pub const FRANKENSEARCH_VERSION: &str = "0.6.0";
+/// in `Cargo.toml` (without its exact-pin `=`); the local search contract test
+/// checks that drift.
+pub const FRANKENSEARCH_VERSION: &str = "0.7.1";
 
 static SEARCH_CAPABILITIES: [SearchCapability; 8] = [
     SearchCapability::ready(

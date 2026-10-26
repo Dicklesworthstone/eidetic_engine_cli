@@ -163,6 +163,8 @@ async fn search_snapshot(
         .collect())
 }
 
+/// The frankensearch version Cargo.toml selects. The franken stack is
+/// exact-pinned (`=x.y.z`), so the requirement names one version; drop the `=`.
 fn cargo_frankensearch_version() -> TestResult<String> {
     let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let manifest = fs::read_to_string(&manifest_path)
@@ -172,7 +174,7 @@ fn cargo_frankensearch_version() -> TestResult<String> {
         .map_err(|error| format!("Cargo.toml did not parse: {error}"))?;
     document["dependencies"]["frankensearch"]["version"]
         .as_str()
-        .map(ToOwned::to_owned)
+        .map(|requirement| requirement.trim_start_matches('=').to_owned())
         .ok_or_else(|| "Cargo.toml frankensearch dependency must have a string version".to_owned())
 }
 
