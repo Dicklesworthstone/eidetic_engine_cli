@@ -202,6 +202,7 @@ fn options(
 ) -> ContextPackOptions {
     ContextPackOptions {
         task_paths: Vec::new(),
+        bead_id: None,
         task_lens: None,
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(db_path.to_path_buf()),

@@ -111,6 +111,7 @@ fn context_options(
     ppr_weight: Option<f32>,
 ) -> ContextPackOptions {
     ContextPackOptions {
+        bead_id: None,
         task_paths: Vec::new(),
         task_lens: None,
         workspace_path: workspace_path.to_path_buf(),

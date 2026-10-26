@@ -3298,6 +3298,9 @@ pub struct ContextArgs {
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
+    /// Prioritize admitted memories related to this bead in the workspace's .beads/issues.jsonl.
+    #[arg(long = "bead-id", value_name = "ID")]
+    pub bead_id: Option<String>,
     /// Query describing the task or topic to retrieve context for.
     #[arg(value_name = "QUERY")]
     pub query: String,
@@ -3668,6 +3671,9 @@ pub struct PackArgs {
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
+    /// Prioritize admitted memories related to this local bead. Not supported with pagination cursors.
+    #[arg(long = "bead-id", value_name = "ID", conflicts_with = "cursor")]
+    pub bead_id: Option<String>,
     /// Emit ee.pack.stream.v1 NDJSON frames for a task query. Requires JSON or JSONL output.
     #[arg(long, action = ArgAction::SetTrue, requires = "query", conflicts_with_all = ["output", "explain_performance", "explain_gaps", "cursor", "since"])]
     pub stream: bool,
@@ -3912,6 +3918,9 @@ pub struct PackBuildArgs {
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
+    /// Prioritize admitted memories related to this local bead. Query pagination is not supported.
+    #[arg(long = "bead-id", value_name = "ID", conflicts_with = "cursor")]
+    pub bead_id: Option<String>,
     /// Path to an `ee.query.v1` JSON query document.
     #[arg(long, value_name = "PATH")]
     pub query_file: PathBuf,
@@ -4107,6 +4116,7 @@ impl PackArgs {
 
         Ok(PackBuildArgs {
             task_paths: self.task_paths.clone(),
+            bead_id: self.bead_id.clone(),
             query_file,
             use_daemon: self.use_daemon,
             daemon_socket: self.daemon_socket.clone(),
@@ -11546,6 +11556,10 @@ pub struct WhyNotArgs {
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
 
+    /// Use the same local bead affinity as a context or pack request.
+    #[arg(long = "bead-id", value_name = "ID")]
+    pub bead_id: Option<String>,
+
     /// Report task-specific capture-demand gaps instead of a single memory exclusion.
     #[arg(long = "gaps", action = ArgAction::SetTrue)]
     pub gaps: bool,
@@ -17584,6 +17598,7 @@ fn pack_quality_actuals_for_cases(
         let (source_mode, strict_source_mode) = pack_quality_step_source_mode(&step.argv)?;
         let mut options = crate::core::context::ContextPackOptions {
             task_paths: Vec::new(),
+            bead_id: None,
             workspace_path: workspace_path.clone(),
             database_path: Some(database_path),
             index_dir: Some(index_dir.clone()),
@@ -42330,6 +42345,7 @@ fn context_json_cache_enabled(cli: &Cli, args: &ContextArgs, deprecated_alias: b
         && !args.explain_gaps
         && !args.stream
         && args.task_paths.is_empty()
+        && args.bead_id.is_none()
         && args.since.is_none()
         && args.mesh_mode == MeshCommandMode::Off
         && args.changed_symbols.is_empty()
@@ -42974,6 +42990,7 @@ where
                 .with_resource_profile(PackResourceProfile::Standard);
         let pack_options = ContextPackOptions {
             task_paths: Vec::new(),
+            bead_id: None,
             workspace_path: workspace_path.clone(),
             database_path: Some(addressed_database_path.clone()),
             index_dir: Some(addressed_index_dir.clone()),
@@ -43862,6 +43879,7 @@ where
     let options = ContextPackOptions {
         task_paths: args.task_paths.clone(),
         workspace_path: workspace_path.clone(),
+        bead_id: args.bead_id.clone(),
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
         query: args.query.clone(),
@@ -47272,6 +47290,7 @@ where
         };
         let context_args = ContextArgs {
             task_paths: args.task_paths.clone(),
+            bead_id: args.bead_id.clone(),
             use_daemon: args.use_daemon,
             daemon_socket: args.daemon_socket.clone(),
             query,
@@ -47558,6 +47577,7 @@ where
         task_paths: args.task_paths.clone(),
         workspace_path,
         database_path: args.database.clone(),
+        bead_id: args.bead_id.clone(),
         index_dir: args.index_dir.clone(),
         query: request.query,
         speed: args.speed.unwrap_or(request.speed),
@@ -56276,6 +56296,7 @@ where
         task_paths: args.task_paths.clone(),
         workspace_path,
         database_path: Some(database_path),
+        bead_id: args.bead_id.clone(),
         index_dir: None,
         query: args.task.clone(),
         speed: crate::search::SpeedMode::default(),
@@ -73058,6 +73079,7 @@ mod tests {
     fn stream_header_test_options(workspace_path: PathBuf) -> ContextPackOptions {
         ContextPackOptions {
             task_paths: Vec::new(),
+            bead_id: None,
             workspace_path,
             database_path: None,
             index_dir: None,
@@ -93172,6 +93194,14 @@ mod tests {
                     "coverage-gap postprocessing requires the structured fresh pack",
                 )?;
 
+                let mut bead_scoped = args.clone();
+                bead_scoped.bead_id = Some("bd-release".to_owned());
+                ensure_equal(
+                    &super::context_json_cache_enabled(&cli, &bead_scoped, false),
+                    &false,
+                    "mutable bead context requires a fresh structured pack",
+                )?;
+
                 let mut since = args.clone();
                 since.since = Some("blake3:prior-pack".to_owned());
                 ensure_equal(
@@ -94600,6 +94630,228 @@ mod tests {
         )?;
         ensure_ends_with(&stdout, '\n', "context json trailing newline")?;
         ensure(stderr.is_empty(), "context json stderr must be empty")
+    }
+
+    #[test]
+    fn bead_affinity_rejects_envelope_cursors_on_pack_entry_points() -> TestResult {
+        for command in [
+            vec!["ee", "pack", "release"],
+            vec!["ee", "pack", "build", "--query-file", "query.json"],
+            vec!["ee", "pack", "--query-file", "query.json"],
+        ] {
+            let mut args = command;
+            args.extend_from_slice(&["--bead-id", "bd-release", "--cursor", "prior-page"]);
+            let error = Cli::try_parse_from(args)
+                .expect_err("bead context cannot reuse an unbound envelope cursor");
+            ensure_equal(
+                &error.kind(),
+                &clap::error::ErrorKind::ArgumentConflict,
+                "bead and cursor flags conflict before file or database access",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "lexical-bm25"))]
+    #[test]
+    fn bead_affinity_cli_entry_points_use_the_addressed_tracker_and_reject_pagination() -> TestResult
+    {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let initialized = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: workspace.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        ensure(
+            !matches!(initialized.status, crate::core::init::InitStatus::Failed),
+            format!("initialize bead fixture: {:?}", initialized.action_errors),
+        )?;
+        let database = workspace.join(".ee/ee.db");
+        let connection =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_id = connection
+            .get_workspace_by_path(&workspace.to_string_lossy())
+            .map_err(|error| error.to_string())?
+            .ok_or("initialized bead fixture workspace missing")?
+            .id;
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0xbee01));
+        connection
+            .insert_memory(
+                &memory_id.to_string(),
+                &crate::db::CreateMemoryInput {
+                    workspace_id,
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Emberstone release stores verified storage checksums.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("manual://bead-cli-fixture".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["storage".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let indexed = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &indexed.status,
+            &crate::core::index::IndexRebuildStatus::Success,
+            "bead fixture index built",
+        )?;
+        fs::create_dir(workspace.join(".beads")).map_err(|error| error.to_string())?;
+        fs::write(
+            workspace.join(".beads/issues.jsonl"),
+            "{\"id\":\"bd-cli-addressed\",\"labels\":[\"storage\"]}\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let query_path = directory.path().join("bead-query.json");
+        let mut query_document = serde_json::json!({
+            "version": "ee.query.v1",
+            "workspace": workspace,
+            "query": {"text": "emberstone release"},
+            "budget": {"maxTokens": 800, "candidatePool": 10, "maxResults": 1},
+        });
+        fs::write(&query_path, query_document.to_string()).map_err(|error| error.to_string())?;
+        let workspace_arg = workspace.to_str().ok_or("UTF-8 fixture workspace")?;
+        let query_arg = query_path.to_str().ok_or("UTF-8 fixture query path")?;
+        // Query-file entry points deliberately omit --workspace: the document
+        // must select its own tracker rather than borrowing the process cwd.
+        let surfaces = [
+            (
+                "context",
+                vec![
+                    "--workspace",
+                    workspace_arg,
+                    "context",
+                    "emberstone release",
+                ],
+            ),
+            (
+                "direct pack",
+                vec!["--workspace", workspace_arg, "pack", "emberstone release"],
+            ),
+            (
+                "pack build",
+                vec!["pack", "build", "--query-file", query_arg],
+            ),
+            ("legacy query-file", vec!["pack", "--query-file", query_arg]),
+        ];
+        let invoke_surface = |command: &[&str], with_bead: bool| {
+            let mut args = vec!["ee", "--json"];
+            args.extend_from_slice(command);
+            args.extend_from_slice(&[
+                "--source-mode",
+                "lexical-only",
+                "--speed",
+                "instant",
+                "--memory-scope",
+                "workspace",
+                "--read-only",
+                "--no-lod",
+                "--as-of",
+                "2030-01-01T00:00:00Z",
+            ]);
+            if with_bead {
+                args.extend_from_slice(&["--bead-id", "bd-cli-addressed"]);
+            }
+            invoke(&args)
+        };
+        for (surface, command) in &surfaces {
+            for with_bead in [false, true] {
+                let (exit, stdout, stderr) = invoke_surface(command, with_bead);
+                ensure_equal(
+                    &exit,
+                    &ProcessExitCode::Success,
+                    &format!("{surface}, bead={with_bead}: {stdout} {stderr}"),
+                )?;
+                ensure(
+                    stderr.is_empty(),
+                    format!("{surface}: JSON stderr is empty"),
+                )?;
+                let response: serde_json::Value = serde_json::from_str(&stdout)
+                    .map_err(|error| format!("{surface}: response must parse: {error}"))?;
+                let affinity = response.pointer("/data/pack/beadAffinity");
+                if with_bead {
+                    let affinity =
+                        affinity.ok_or_else(|| format!("{surface}: bead affinity missing"))?;
+                    ensure_equal(
+                        &affinity["beadId"],
+                        &serde_json::json!("bd-cli-addressed"),
+                        "bead selector reaches the shared core",
+                    )?;
+                    ensure_equal(
+                        &affinity["schema"],
+                        &serde_json::json!("ee.context.bead_affinity.v1"),
+                        "live bead summary schema",
+                    )?;
+                    ensure(
+                        affinity["memoryBiasApplied"]
+                            .as_u64()
+                            .is_some_and(|count| count > 0),
+                        format!("{surface}: addressed tracker and live memory tags affect ranking"),
+                    )?;
+                    ensure_equal(
+                        &affinity["coldStart"],
+                        &serde_json::json!(false),
+                        "observed overlap",
+                    )?;
+                } else {
+                    ensure(
+                        affinity.is_none(),
+                        format!("{surface}: default output has no bead block"),
+                    )?;
+                }
+                ensure(
+                    response["data"]["pack"]["items"]
+                        .to_string()
+                        .contains(&memory_id.to_string()),
+                    format!("{surface}: the addressed memory reaches the pack"),
+                )?;
+            }
+        }
+
+        query_document["pagination"] = serde_json::json!({"limit": 1});
+        fs::write(&query_path, query_document.to_string()).map_err(|error| error.to_string())?;
+        for (surface, command) in surfaces.iter().skip(2) {
+            let (exit, stdout, stderr) = invoke_surface(command, true);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Usage,
+                "bead query pagination is rejected",
+            )?;
+            ensure(
+                stderr.is_empty(),
+                "pagination rejection keeps JSON stderr empty",
+            )?;
+            let response: serde_json::Value = serde_json::from_str(&stdout)
+                .map_err(|error| format!("{surface}: pagination error must parse: {error}"))?;
+            ensure(
+                response
+                    .to_string()
+                    .contains("--bead-id cannot be combined with candidate pagination"),
+                format!("{surface}: rejection explains the incompatible bead input"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

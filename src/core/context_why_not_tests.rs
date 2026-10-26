@@ -11,6 +11,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn options(workspace: &Path) -> ContextPackOptions {
     ContextPackOptions {
+        bead_id: None,
         workspace_path: workspace.to_owned(),
         query: "quasar release checksum verification".to_owned(),
         task_paths: Vec::new(),

@@ -772,6 +772,8 @@ impl CommandContext {
     }
 }
 
+#[path = "context_bead_affinity.rs"]
+mod bead_affinity;
 #[path = "context_task_paths.rs"]
 mod task_paths;
 pub use task_paths::{
@@ -793,6 +795,8 @@ pub struct ContextPackOptions {
     pub database_path: Option<PathBuf>,
     pub index_dir: Option<PathBuf>,
     pub query: String,
+    /// Opt-in local bead context used as a bounded memory-ranking prior.
+    pub bead_id: Option<String>,
     pub speed: crate::search::SpeedMode,
     pub source_mode: crate::core::search::SearchSourceMode,
     pub strict_source_mode: bool,
@@ -2442,6 +2446,7 @@ fn context_request_from_options_with_runtime_profile(
     options: &ContextPackOptions,
     runtime_profile: &RuntimeProfileReport,
 ) -> Result<RuntimeProfileCappedRequest, ContextPackError> {
+    bead_affinity::validate_request(options)?;
     let mut request = ContextRequest::new(ContextRequestInput {
         query: options.query.clone(),
         profile: options.profile,
@@ -2754,6 +2759,11 @@ async fn run_context_pack_with_performance_inner(
     control.check()?;
 
     let mut degraded = Vec::new();
+
+    // Capture external tracker inputs exactly once. Only this normalized
+    // snapshot may influence ranking and the resulting pack identity.
+    let bead_context = bead_affinity::resolve(options, &mut degraded);
+    request.bead_affinity_identity = bead_context.as_ref().map(|bead| bead.identity.clone());
 
     let index_dir = crate::config::workspace::resolve_store_index_dir(
         &options.workspace_path,
@@ -3651,6 +3661,15 @@ async fn run_context_pack_with_performance_inner(
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let agent_profile =
         apply_agent_context_profile_bias(read_connection, &options.workspace_path, &mut candidates);
+    let bead_affinity = bead_context.as_ref().map(|bead| {
+        bead_affinity::apply(
+            bead,
+            read_connection,
+            &mut candidates,
+            read_snapshot_generation,
+            &mut degraded,
+        )
+    });
     apply_attempt_family_multiplicity_discount(&mut candidates)?;
     control.check()?;
 
@@ -4107,6 +4126,7 @@ async fn run_context_pack_with_performance_inner(
     response.data.embed_backend = search_report.embed_backend;
     response.data.adaptive_budget = adaptive_budget_decision;
     response.data.agent_profile = agent_profile;
+    response.data.bead_affinity = bead_affinity;
     response.data.slo = Some(slo);
     response.data.scope_stats = Some(scope_stats);
     response.data.consensus = consensus_conflicts.consensus;
@@ -7655,6 +7675,9 @@ fn context_pack_l2_bypass_reason(
     options: &ContextPackOptions,
     filters: &crate::models::QueryFilters,
 ) -> Option<&'static str> {
+    if options.bead_id.is_some() {
+        return Some("bead_context_requires_live_snapshot");
+    }
     if read_env_bool(EnvVar::L2PackCacheDisable) == Some(true) {
         return Some("disabled_by_environment");
     }
@@ -9124,6 +9147,9 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
             .as_deref()
             .map(str::as_bytes),
     );
+    if let Some(identity) = &input.request.bead_affinity_identity {
+        hash_labeled_bytes(&mut hasher, "bead_affinity", identity.as_bytes());
+    }
     hash_labeled_bytes(
         &mut hasher,
         "context_profile",
@@ -9498,6 +9524,11 @@ fn compute_context_pack_hash_components(
     );
     hash_context_task_lens(&mut request_hasher, task_lens);
     task_paths::hash(&mut request_hasher, &request.task_paths);
+    // Do not add an absent marker: requests without bead context retain their
+    // exact historical hash. Opt-in requests bind the captured scoring inputs.
+    if let Some(identity) = &request.bead_affinity_identity {
+        hash_labeled_bytes(&mut request_hasher, "bead_affinity", identity.as_bytes());
+    }
 
     let mut reference_time_hasher = pack_hash_component_hasher("reference_time");
     hash_pack_reference_time(&mut reference_time_hasher, request.reference_time);

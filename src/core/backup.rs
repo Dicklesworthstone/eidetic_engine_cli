@@ -25195,6 +25195,7 @@ mod tests {
                     "restored predicate checks real file",
                 )?;
                 let pack_options = crate::core::context::ContextPackOptions {
+                    bead_id: None,
                     task_paths: Vec::new(),
                     workspace_path: side.clone(),
                     database_path: Some(restored_database.clone()),
@@ -25945,6 +25946,7 @@ mod tests {
             )?;
             let packed =
                 crate::core::context::run_context_pack(&crate::core::context::ContextPackOptions {
+                    bead_id: None,
                     task_paths: Vec::new(),
                     workspace_path: side,
                     database_path: Some(PathBuf::from(&restored.restored_database_path)),
@@ -27124,6 +27126,7 @@ mod tests {
             if redaction != RedactionLevel::Full {
                 let response = crate::core::context::run_context_pack(
                     &crate::core::context::ContextPackOptions {
+                        bead_id: None,
                         task_paths: Vec::new(),
                         workspace_path: side_path,
                         database_path: Some(PathBuf::from(&restored.restored_database_path)),

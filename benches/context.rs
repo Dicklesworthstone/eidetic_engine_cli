@@ -606,6 +606,7 @@ fn pack_dna_orchestration_options(
 ) -> ContextPackOptions {
     ContextPackOptions {
         task_paths: Vec::new(),
+        bead_id: None,
         task_lens: None,
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(db_path.to_path_buf()),
@@ -733,6 +734,7 @@ fn tiered_recall_options(
 ) -> ContextPackOptions {
     ContextPackOptions {
         task_paths: Vec::new(),
+        bead_id: None,
         task_lens: None,
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(db_path.to_path_buf()),
@@ -977,6 +979,7 @@ fn bench_context(c: &mut Criterion) {
                 b.iter(|| {
                     let options = ContextPackOptions {
                         task_paths: Vec::new(),
+                        bead_id: None,
                         task_lens: None,
                         workspace_path: workspace_path.clone(),
                         database_path: Some(db_path.clone()),
@@ -1040,6 +1043,7 @@ fn bench_context_memory_scales(c: &mut Criterion) {
             b.iter(|| {
                 let options = ContextPackOptions {
                     task_paths: Vec::new(),
+                    bead_id: None,
                     task_lens: None,
                     workspace_path: workspace_path.clone(),
                     database_path: Some(db_path.clone()),
@@ -1101,6 +1105,7 @@ fn bench_context_s4_resource_scales(c: &mut Criterion) {
                 b.iter(|| {
                     let options = ContextPackOptions {
                         task_paths: Vec::new(),
+                        bead_id: None,
                         task_lens: None,
                         workspace_path: workspace_path.clone(),
                         database_path: Some(db_path.clone()),

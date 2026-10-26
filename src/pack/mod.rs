@@ -1687,6 +1687,9 @@ pub struct ContextRequest {
     /// Digest of the effective quality policy captured by search execution.
     /// Direct pack builders leave this absent instead of inventing a retrieval policy.
     pub quality_scoring_policy: Option<String>,
+    /// Normalized, captured bead-scoring input. Absent requests retain their
+    /// historical pack identity and never read the workspace tracker.
+    pub bead_affinity_identity: Option<String>,
     pub query: String,
     pub profile: ContextPackProfile,
     pub budget: TokenBudget,
@@ -1728,6 +1731,7 @@ impl ContextRequest {
             task_paths: Vec::new(),
             reference_time: None,
             quality_scoring_policy: None,
+            bead_affinity_identity: None,
             query,
             profile: input.profile.unwrap_or(ContextPackProfile::Balanced),
             budget,
@@ -4793,6 +4797,7 @@ impl ContextResponse {
                 request,
                 pack,
                 agent_profile: None,
+                bead_affinity: None,
                 slo: None,
                 scope_stats: None,
                 consensus: Vec::new(),
@@ -4881,6 +4886,7 @@ impl ContextResponse {
                     hash: pack_hash,
                 },
                 agent_profile: None,
+                bead_affinity: None,
                 slo: None,
                 scope_stats: None,
                 consensus: Vec::new(),
@@ -4905,6 +4911,8 @@ pub struct ContextResponseData {
     pub request: ContextRequest,
     pub pack: PackDraft,
     pub agent_profile: Option<serde_json::Value>,
+    /// Optional bead-aware ranking explanation; omitted from JSON when absent.
+    pub bead_affinity: Option<serde_json::Value>,
     pub slo: Option<PackAssemblySlo>,
     pub scope_stats: Option<MemoryScopeStats>,
     pub consensus: Vec<ConsensusEntry>,

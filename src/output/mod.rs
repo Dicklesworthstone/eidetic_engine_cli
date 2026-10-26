@@ -3169,6 +3169,9 @@ pub fn render_context_response_json_with_options(
             if let Some(agent_profile) = &response.data.agent_profile {
                 pack.field_raw("agentProfile", &agent_profile.to_string());
             }
+            if let Some(bead_affinity) = &response.data.bead_affinity {
+                pack.field_raw("beadAffinity", &bead_affinity.to_string());
+            }
             if options.include_legacy_selection_certificate {
                 pack.field_object("deprecation", |deprecation| {
                     deprecation.field_str("deprecatedField", "selectionCertificate");

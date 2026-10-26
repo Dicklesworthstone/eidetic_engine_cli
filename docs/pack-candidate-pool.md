@@ -60,3 +60,37 @@ so an older cached response cannot bypass the new admission step.
 An explicit `--relevance-floor FLOAT` takes precedence over this heuristic.
 Use `--relevance-floor 0` to disable adaptive admission; ordinary query,
 policy, token-budget, and duplicate filters still apply.
+
+## Prioritize context for an active bead
+
+Pass `--bead-id ID` to use an existing task in the addressed workspace's
+`.beads/issues.jsonl` as an additional ranking signal:
+
+```sh
+ee context "prepare the release" --bead-id bd-release --json
+ee pack "prepare the release" --bead-id bd-release --read-only --json
+ee pack build --query-file task.eeq.json --bead-id bd-release --json
+ee why-not mem_example --task "prepare the release" --bead-id bd-release --json
+```
+
+The shared pack path compares the bead's normalized labels, title, and
+description with already-admitted local memory tags and content. The existing
+affinity policy adds at most **0.05** to a memory's ranking score before final
+sorting and relevance admission. It never admits a denied source, adds tracker
+prose to the query, or changes native rule, evidence, or nonlocal candidate
+scores. Family-link inference is not enabled. Omitting the flag preserves the
+ordinary ranking and response shape.
+
+JSON responses expose `data.pack.beadAffinity`, including applied counts,
+bounded per-memory explanations, and `determinismKey.beadContextHash`. The
+identity binds the selected bead's normalized inputs rather than unrelated
+tracker history. Raw title, description, labels, and matched tokens are not
+copied into the response. `basePackHash` remains null because a separate
+unbiased pack was not assembled.
+
+Missing, malformed, oversized, or symlinked exports leave ranking unbiased
+and report the existing bead-affinity diagnostic codes. Reads are capped at
+64 MiB. Requests carrying a bead ID bypass the persistent pack cache so a
+tracker edit cannot replay an earlier ranking. Candidate pagination in a query
+document and `--cursor` envelope continuation are rejected with bead affinity;
+build a single pack or omit the bead selector for paginated requests.
