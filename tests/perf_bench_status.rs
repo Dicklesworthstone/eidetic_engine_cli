@@ -953,7 +953,7 @@ fn arena_workspace_bench_is_wired_into_regression_gate() -> TestResult {
 
     for expected in [
         "check_regression_for_op()",
-        "EXTRA_REGRESSION_OPERATIONS=\"ee_context_pack_l2_warm ee_context_arena_workspace_reuse\"",
+        "EXTRA_REGRESSION_OPERATIONS=\"ee_context_pack_l2_warm ee_context_arena_workspace_reuse ee_orient_fast_content\"",
         "for op in $EXTRA_REGRESSION_OPERATIONS; do",
         "check_regression_for_op \"$op\"",
         "filter=\"/workspace_reuse\"",
