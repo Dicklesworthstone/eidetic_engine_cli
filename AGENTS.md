@@ -295,8 +295,45 @@ Hard rules for agents working on this Mac:
    affects where the returned artifact lands.
 5. **If the USB drive is unplugged**, the `if [ -d ... ]` guard falls
    through and cargo writes to the in-repo `./target/` as usual — slower
-   to fill the disk but builds still work. Re-plug the drive and open a
-   new shell to restore the redirect.
+   to fill the disk. Re-plug the drive and open a new shell to restore the
+   redirect.
+
+   **BUT "builds still work" IS NOT TRUE, and this note said so until
+   2026-10-26.** The guard only covers `CARGO_TARGET_DIR`. The TOOLCHAIN is on
+   the same volume:
+
+   ```text
+   ~/.rustup/toolchains  ⇒  /Volumes/USBNVME16TB/rustup_toolchains   (symlink)
+   ```
+
+   With the drive unmounted that symlink dangles, so there is no toolchain at
+   all. Measured when the drive dropped mid-session: `cargo fmt --check` — the
+   ONE cargo subcommand the local tripwire permits — exits 1 having computed
+   nothing, with zero `Diff in` lines and
+
+   ```text
+   info: syncing channel updates for nightly-2026-08-31-aarch64-apple-darwin
+   info: downloading 6 components
+   info: rolling back changes
+   error: could not create component directory:
+     '.../nightly-2026-08-31-aarch64-apple-darwin/bin': File exists (os error 17)
+   ```
+
+   That rc=1 reads exactly like unformatted code. It is not: the gate never ran.
+   Check `/sbin/mount | grep USBNVME16TB` before believing any local cargo
+   result.
+
+   **Four things live on that one volume**, so losing it takes out every
+   verification rail at once: the toolchain (above), `CARGO_TARGET_DIR`,
+   the per-invocation `TMPDIR`, and the APFS sparse image that the pinned RCH
+   lane uses as its committed-tree export base (`/Volumes/EERCHExport`, created
+   on the USB — see CLAUDE.md). A dropped drive therefore also fails every
+   dispatch, with `bash: script file read error: Input/output error` and exit
+   128 from `scripts/rch_verify.sh` re-execing itself.
+
+   **Nothing is damaged and nothing needs deleting.** Re-mounting restores all
+   four. Do not "repair" the half-synced toolchain directory — the rustup error
+   above is the dangling symlink, not corruption.
 6. **Disk-pressure cleanup playbook**: when the internal SSD gets tight,
    the safe-now wins are (in order of size):
    - `rm -rf "$CARGO_TARGET_DIR/debug/incremental"` — ~7–9 GB, only when
