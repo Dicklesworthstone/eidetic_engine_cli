@@ -58,7 +58,7 @@ fn only_the_current_job_is_started_and_each_finish_is_visible_before_next_admiss
     assert!(execution.begin_next_job()?.is_none());
     assert!(execution.begin_next_job()?.is_none());
     let rows = load_daemon_job_rows(root)?;
-    for pair in rows.chunks_exact(2) {
+    for pair in rows.as_chunks::<2>().0 {
         assert_eq!(pair[0].daemon_job_key, pair[1].daemon_job_key);
         assert_eq!(pair[0].started_at, pair[1].started_at);
         assert_ne!(pair[0].row_id, pair[1].row_id);

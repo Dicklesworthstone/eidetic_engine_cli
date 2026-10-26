@@ -127,7 +127,7 @@ fn production_runner_journals_every_requested_job_without_accumulating_tick_repo
     assert_ne!(report.run_id, "dry-run");
     let rows = load_daemon_job_rows(root)?;
     assert_eq!(rows.len(), 12);
-    for (index, pair) in rows.chunks_exact(2).enumerate() {
+    for (index, pair) in rows.as_chunks::<2>().0.iter().enumerate() {
         assert_eq!(pair[0].tick, index as u32 / 2 + 1);
         assert_eq!(pair[0].runner_job_id, format!("job-{:06}", index % 2 + 1));
         assert_eq!(pair[0].status, "running");
