@@ -7,6 +7,8 @@ mod pack_diff_native_tests;
 #[cfg(test)]
 #[path = "pack_stream_tests.rs"]
 mod pack_stream_tests;
+#[cfg(test)]
+mod remember_creation_companion_tests;
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -184,15 +186,15 @@ use crate::core::memory::{
     ExpireMemoryOptions, GetMemoryOptions, ListMemoriesOptions, MemoryExpireReport,
     MemoryLevelOptions, MemoryLevelReport, MemoryLinkMode, MemoryLinkOptions, MemoryLinkReport,
     MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions, MemoryTagsReport, MemoryTimelineOptions,
-    RememberBatchOptions, RememberGitCaptureMode, RememberGitCaptureOptions, RememberMemoryOptions,
-    RememberMemoryReport, RememberOutcome, RememberWriteControls, ReviseMemoryOptions,
-    ReviseReason, UnchangedRevisionPolicy, WorkflowCloseOptions, WorkflowCloseReport,
-    WorkflowCreateOptions, build_memory_timeline, close_workflow, create_workflow, expire_memory,
-    get_memory_details, list_memories, remember_git_capture_candidate_from_repo,
-    remember_global_memory_with_controls_and_typed_fields, remember_memory_batch_stdin,
-    remember_memory_with_controls_and_typed_fields, revise_memory,
-    revise_memory_with_transaction_hook, update_memory_level, update_memory_link,
-    update_memory_tags,
+    RememberBatchOptions, RememberCreationCompanions, RememberGitCaptureMode,
+    RememberGitCaptureOptions, RememberMemoryOptions, RememberMemoryReport, RememberOutcome,
+    RememberSealInput, RememberWriteControls, ReviseMemoryOptions, ReviseReason,
+    UnchangedRevisionPolicy, WorkflowCloseOptions, WorkflowCloseReport, WorkflowCreateOptions,
+    build_memory_timeline, close_workflow, create_workflow, expire_memory, get_memory_details,
+    list_memories, remember_git_capture_candidate_from_repo,
+    remember_global_memory_with_creation_companions, remember_memory_batch_stdin,
+    remember_memory_with_creation_companions, revise_memory, revise_memory_with_transaction_hook,
+    update_memory_level, update_memory_link, update_memory_tags,
 };
 use crate::core::orient::{
     OrientDecisionOptions, OrientFastContentOptions, orient_ambient_context, orient_decisions,
@@ -427,6 +429,11 @@ pub struct Cli {
     /// Workspace root to operate on.
     #[arg(long, global = true, value_name = "PATH")]
     pub workspace: Option<PathBuf>,
+
+    // Bind expansion and discovery once per invocation. A physical path can
+    // itself contain literal `$` characters that must never be expanded again.
+    #[arg(skip)]
+    workspace_resolution: Option<(PathBuf, WorkspaceSource)>,
 
     /// Disable colored diagnostics.
     #[arg(long, global = true, action = ArgAction::SetTrue)]
@@ -790,9 +797,19 @@ pub fn find_workspace_via_walk_up(start: &Path) -> Option<PathBuf> {
 ///      construct `<cwd>/.ee/ee.db` and either find it or not).
 ///
 /// Returns `(path, source)` so callers can report how the workspace
-/// was resolved (useful for debugging / agent observability).
+/// was resolved (useful for debugging / agent observability). Existing roots
+/// resolve to physical paths before any command derives its database path.
+/// Missing or inaccessible roots retain their input so the command can report
+/// its usual missing-workspace or storage error without creating anything.
 #[must_use]
 pub fn resolve_workspace_for_cli(cli_workspace: Option<&Path>) -> (PathBuf, WorkspaceSource) {
+    let (path, source) = discover_workspace_input_for_cli(cli_workspace);
+    (canonical_workspace_root_for_cli(path), source)
+}
+
+// Init needs the original expanded path so canonicalization cannot erase a
+// final symlink before its explicit creation policy examines it.
+fn discover_workspace_input_for_cli(cli_workspace: Option<&Path>) -> (PathBuf, WorkspaceSource) {
     if let Some(explicit) = cli_workspace {
         return (
             expand_workspace_path_for_cli(explicit),
@@ -812,6 +829,14 @@ pub fn resolve_workspace_for_cli(cli_workspace: Option<&Path>) -> (PathBuf, Work
     (cwd, WorkspaceSource::Cwd)
 }
 
+fn canonical_workspace_root_for_cli(path: PathBuf) -> PathBuf {
+    crate::config::workspace::canonicalize_workspace_location(
+        &path,
+        crate::config::workspace::SymlinkPolicy::Allow,
+    )
+    .map_or(path, |(canonical, _)| canonical)
+}
+
 fn expand_workspace_path_for_cli(raw: &Path) -> PathBuf {
     let expander = PathExpander::from_process_env();
     expand_workspace_path_for_cli_with_expander(raw, &expander)
@@ -823,10 +848,17 @@ fn expand_workspace_path_for_cli(raw: &Path) -> PathBuf {
 /// one; a handler that resolves `args.workspace`/`cli.workspace` directly
 /// silently ignores `EE_WORKSPACE` and workspace aliases.
 fn resolve_local_workspace_for_cli(cli: &Cli, local: Option<&Path>) -> (PathBuf, WorkspaceSource) {
-    let aliased = local.map(|raw| {
-        workspace_core::resolve_workspace_alias_for_cli(raw).unwrap_or_else(|| raw.to_path_buf())
-    });
-    resolve_workspace_for_cli(aliased.as_deref().or(cli.workspace.as_deref()))
+    let Some(raw) = local else {
+        return cli.resolve_workspace_with_source();
+    };
+    if let Some(path) = workspace_core::resolve_workspace_alias_for_cli(raw) {
+        // Registry entries are stored filesystem paths, not new expressions.
+        return (
+            canonical_workspace_root_for_cli(path),
+            WorkspaceSource::Flag,
+        );
+    }
+    resolve_workspace_for_cli(Some(raw))
 }
 
 fn expand_workspace_path_for_cli_with_expander(raw: &Path, expander: &PathExpander) -> PathBuf {
@@ -842,10 +874,22 @@ impl Cli {
     /// Resolve the workspace path with full D7 discovery semantics.
     ///
     /// Returns just the path; for callers that need the discovery
-    /// source, use [`resolve_workspace_for_cli`].
+    /// source, use [`Self::resolve_workspace_with_source`].
     #[must_use]
     pub fn resolve_workspace(&self) -> PathBuf {
-        resolve_workspace_for_cli(self.workspace.as_deref()).0
+        self.resolve_workspace_with_source().0
+    }
+
+    /// Return the invocation's resolved root and original discovery source.
+    #[must_use]
+    pub fn resolve_workspace_with_source(&self) -> (PathBuf, WorkspaceSource) {
+        self.workspace_resolution.clone().unwrap_or_else(|| {
+            if matches!(&self.command, Some(Command::Init(_))) {
+                discover_workspace_input_for_cli(self.workspace.as_deref())
+            } else {
+                resolve_workspace_for_cli(self.workspace.as_deref())
+            }
+        })
     }
 
     #[must_use]
@@ -10029,7 +10073,8 @@ pub struct InitArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub force: bool,
 
-    /// Allow workspace paths that traverse symlinks (default: deny).
+    /// Allow initialization through a symlinked workspace root (init only).
+    /// Other commands resolve existing roots; store paths still reject symlinks.
     #[arg(long, action = ArgAction::SetTrue)]
     pub allow_symlink: bool,
 
@@ -13849,9 +13894,12 @@ where
     let parser_metadata_only = cli.schema
         || cli.help_json
         || cli.agent_docs
-        || matches!(&cli.command, Some(Command::Introspect));
+        || matches!(
+            &cli.command,
+            None | Some(Command::Help(_) | Command::AgentDocs(_) | Command::Introspect)
+        );
     if !parser_metadata_only {
-        resolve_workspace_alias_global(&mut cli);
+        resolve_workspace_inputs_global(&mut cli);
     }
     ACTIVE_RESPONSE_SCHEMA_VERSION.with(|version| {
         version.set(cli.response_schema_version());
@@ -13877,8 +13925,7 @@ where
                 params_hash: output::governor::hash_invocation_params(governor_params_for_hash(
                     &args,
                 )),
-                workspace_root: (!parser_metadata_only)
-                    .then(|| resolve_workspace_for_cli(cli.workspace.as_deref()).0),
+                workspace_root: (!parser_metadata_only).then(|| cli.resolve_workspace()),
                 resume_cursor: None,
             });
     });
@@ -15549,8 +15596,7 @@ where
                 return exit_code;
             }
             let timing_capture = crate::models::TimingCapture::start();
-            let (workspace_path, workspace_source) =
-                resolve_workspace_for_cli(cli.workspace.as_deref());
+            let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
             if args.skyline {
                 let workspace_for_skyline = if workspace_source == WorkspaceSource::Cwd
                     && !workspace_path.join(".ee").is_dir()
@@ -18853,8 +18899,7 @@ where
 {
     use crate::core::resume::{ResumeOptions, build_resume_report};
 
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -22256,7 +22301,7 @@ where
                 target: args.target.clone(),
                 registry_path: None,
             };
-            match workspace_core::resolve_workspace_report(&options) {
+            match workspace_core::resolve_workspace_report_for_resolved_workspace(&options) {
                 Ok(report) => render_workspace_resolve(cli, &report, stdout),
                 Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
@@ -22289,7 +22334,7 @@ where
                 Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
             };
             let options = workspace_core::WorkspaceAliasOptions {
-                workspace_path: cli.workspace.clone(),
+                workspace_path: Some(cli.resolve_workspace()),
                 pick: args.pick.clone(),
                 alias,
                 clear: args.clear,
@@ -22964,13 +23009,30 @@ where
     write_stdout(stdout, rendered)
 }
 
-fn resolve_workspace_alias_global(cli: &mut Cli) {
-    let Some(raw) = cli.workspace.as_deref() else {
+fn resolve_workspace_inputs_global(cli: &mut Cli) {
+    if cli.workspace_resolution.is_some() {
         return;
-    };
-    if let Some(path) = workspace_core::resolve_workspace_alias_for_cli(raw) {
-        cli.workspace = Some(path);
     }
+    let (path, source) = cli
+        .workspace
+        .as_deref()
+        .and_then(workspace_core::resolve_workspace_alias_for_cli)
+        .map_or_else(
+            || discover_workspace_input_for_cli(cli.workspace.as_deref()),
+            |path| (path, WorkspaceSource::Flag),
+        );
+    let path = if matches!(&cli.command, Some(Command::Init(_))) {
+        path
+    } else {
+        canonical_workspace_root_for_cli(path)
+    };
+    // Some handlers consume the explicit field directly. Give them the same
+    // physical root as resolve_workspace(), without turning an implicit
+    // workspace into an explicit flag or changing source diagnostics.
+    if cli.workspace.is_some() {
+        cli.workspace = Some(path.clone());
+    }
+    cli.workspace_resolution = Some((path, source));
 }
 
 fn write_help<W>(stdout: &mut W) -> ProcessExitCode
@@ -25764,9 +25826,7 @@ where
 // ============================================================================
 
 fn lab_workspace(cli: &Cli) -> PathBuf {
-    cli.workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    cli.resolve_workspace()
 }
 
 fn write_lab_capture_report<W>(
@@ -28411,8 +28471,7 @@ fn append_perf_next_commands(out: &mut String, next_commands: &[String]) {
 }
 
 fn runtime_config_bool_enabled(cli: &Cli, key: &str) -> Result<bool, ConfigSurfaceError> {
-    let workspace_root =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_root = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = ConfigSurfaceOptions {
         workspace_root,
         config_path: None,
@@ -28442,8 +28501,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_root =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_root = resolve_cli_workspace_path(&cli.resolve_workspace());
     match command {
         ConfigCommand::Show(args) => {
             let options = ConfigSurfaceOptions {
@@ -28757,8 +28815,7 @@ struct ResolvedPackTaskLens {
 }
 
 fn load_task_lens_catalog(cli: &Cli) -> Result<(PathBuf, TaskLensCatalog), DomainError> {
-    let workspace_root =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_root = resolve_cli_workspace_path(&cli.resolve_workspace());
     let catalog = task_lens_catalog_for_workspace(&workspace_root)?;
     Ok((workspace_root, catalog))
 }
@@ -29288,9 +29345,7 @@ where
 {
     match command {
         ProfileCommand::Config(ProfileConfigCommand::Plan(args)) => {
-            let workspace_root = resolve_cli_workspace_path(
-                cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
-            );
+            let workspace_root = resolve_cli_workspace_path(&cli.resolve_workspace());
             let options = ProfileConfigOptions {
                 workspace_root,
                 config_path: args.config.clone(),
@@ -29306,9 +29361,7 @@ where
             }
         }
         ProfileCommand::Config(ProfileConfigCommand::Apply(args)) => {
-            let workspace_root = resolve_cli_workspace_path(
-                cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
-            );
+            let workspace_root = resolve_cli_workspace_path(&cli.resolve_workspace());
             let options = ProfileConfigOptions {
                 workspace_root,
                 config_path: args.config.clone(),
@@ -29484,8 +29537,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureProposeOptions {
         workspace: workspace_path,
         title: args.title.clone(),
@@ -29536,8 +29588,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureShowOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
@@ -29584,8 +29635,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureListOptions {
         workspace: workspace_path,
         status_filter: args.status.clone(),
@@ -29632,8 +29682,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureExportOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
@@ -29682,8 +29731,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedurePromoteOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
@@ -29734,8 +29782,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureRetireOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
@@ -29788,8 +29835,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureVerifyOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
@@ -29853,8 +29899,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let evidence = match parse_procedure_drift_evidence_inputs(&args.evidence) {
         Ok(evidence) => evidence,
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
@@ -31563,7 +31608,7 @@ fn handle_diag_disk_pressure<W>(
 where
     W: Write,
 {
-    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
     let report = gather_disk_pressure_report(&DiskPressureOptions {
         workspace: workspace_path,
         workspace_source: workspace_source.as_str(),
@@ -31609,7 +31654,7 @@ fn handle_diag_host_profile<W>(
 where
     W: Write,
 {
-    let (workspace_path, _workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, _workspace_source) = cli.resolve_workspace_with_source();
     let report = HostResourceProbeReport::gather_for_workspace_with_options(
         &workspace_path,
         &HostProfileProbeOptions {
@@ -31652,7 +31697,7 @@ fn handle_diag_artifacts<W>(cli: &Cli, args: &DiagArtifactsArgs, stdout: &mut W)
 where
     W: Write,
 {
-    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
     let report = gather_artifact_retention_report(&ArtifactRetentionOptions {
         workspace: workspace_path,
         workspace_source: workspace_source.as_str(),
@@ -31704,7 +31749,7 @@ fn handle_diag_build_admission<W>(
 where
     W: Write,
 {
-    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
     let report = gather_build_admission_report(&BuildAdmissionOptions {
         workspace: workspace_path,
         workspace_source: workspace_source.as_str(),
@@ -33995,8 +34040,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -34383,8 +34427,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -34506,8 +34549,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let source_database_path = args
         .database
         .clone()
@@ -34725,8 +34767,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -34880,8 +34921,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -35021,8 +35061,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -35240,8 +35279,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -35405,8 +35443,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -35508,8 +35545,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -35771,8 +35807,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -36155,8 +36190,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let mut report =
         crate::core::quarantine::QuarantineReport::gather_for_workspace(&workspace_path);
 
@@ -36190,8 +36224,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let canonical_path = match workspace_path.canonicalize() {
         Ok(path) => path,
         Err(error) => {
@@ -37104,8 +37137,7 @@ where
 
         // Retrieval-affinity edges from the latest projection snapshot
         // (honestly omitted when cold).
-        let workspace_path =
-            resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+        let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
         let workspace_id = match bound_cli_workspace_id(&conn, &workspace_path) {
             Ok(workspace_id) => workspace_id,
             Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
@@ -37737,8 +37769,7 @@ fn graph_database_path(
     cli: &Cli,
     explicit_database: Option<&Path>,
 ) -> Result<PathBuf, DomainError> {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = explicit_database
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
@@ -38050,8 +38081,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
 
     let database_path = args
         .database
@@ -38127,8 +38157,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
 
     let database_path = args
         .database
@@ -38272,8 +38301,7 @@ where
         }
     };
 
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -38463,8 +38491,7 @@ where
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -38994,8 +39021,7 @@ where
         }
     }
 
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -39301,8 +39327,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -39461,8 +39486,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -47337,7 +47361,7 @@ where
         .workspace
         .clone()
         .or_else(|| request.workspace_path.take())
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(|| cli.resolve_workspace());
     let workspace_root = resolve_cli_workspace_path(&workspace_path);
 
     // A query document may address a different workspace than the process
@@ -47664,13 +47688,7 @@ struct PackDiffItem {
 
 fn pack_database_path(cli: &Cli, database: Option<&Path>) -> PathBuf {
     database.map_or_else(
-        || {
-            cli.workspace
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ee")
-                .join("ee.db")
-        },
+        || cli.resolve_workspace().join(".ee").join("ee.db"),
         Path::to_path_buf,
     )
 }
@@ -59282,51 +59300,16 @@ fn validate_remember_git_capture_args<'a>(
     Ok(Some(selection))
 }
 
-fn persist_remember_sentinels(
-    args: &RememberArgs,
-    report: &RememberMemoryReport,
-) -> Result<(), DomainError> {
-    if (args.sentinels.is_empty() && args.revive_when.is_empty()) || report.dry_run {
-        return Ok(());
+fn remember_creation_companions_from_args<'a>(
+    args: &'a RememberArgs,
+    seal: Option<RememberSealInput<'a>>,
+) -> RememberCreationCompanions<'a> {
+    RememberCreationCompanions {
+        sentinels: &args.sentinels,
+        revive_when: &args.revive_when,
+        stale_threshold_seconds: args.sentinel_stale_threshold_seconds,
+        seal,
     }
-    let specs = args
-        .sentinels
-        .iter()
-        .map(|raw| (raw, MemorySentinelPolarity::Gate, "ee remember --sentinel"))
-        .chain(args.revive_when.iter().map(|raw| {
-            (
-                raw,
-                MemorySentinelPolarity::Revive,
-                "ee remember --revive-when",
-            )
-        }))
-        .map(|(raw, polarity, provenance)| {
-            MemorySentinelSpec::from_raw(
-                &report.memory_id.to_string(),
-                raw,
-                polarity,
-                None,
-                provenance,
-                args.sentinel_stale_threshold_seconds,
-            )
-            .map_err(memory_sentinel_validation_to_domain)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let connection =
-        DbConnection::open_file(&report.database_path).map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to open database {} for sentinel metadata: {error}",
-                report.database_path.display()
-            ),
-            repair: Some("ee doctor --workspace . --json".to_string()),
-        })?;
-    connection
-        .upsert_memory_sentinel_specs(&specs)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to persist memory sentinel metadata: {error}"),
-            repair: Some("ee doctor --workspace . --json".to_string()),
-        })
-        .map(|_| ())
 }
 
 fn remember_attempt_family_from_args(
@@ -59469,22 +59452,23 @@ fn handle_remember(
             idempotency_key: args.idempotency_key.as_deref(),
             defer_index_processing: false,
         };
+        let creation_companions = remember_creation_companions_from_args(args, None);
         let outcome = if args.global {
-            remember_global_memory_with_controls_and_typed_fields(
+            remember_global_memory_with_creation_companions(
                 &options,
                 &controls,
                 &args.typed_field_assignments,
+                creation_companions,
             )
         } else {
-            remember_memory_with_controls_and_typed_fields(
+            remember_memory_with_creation_companions(
                 &options,
                 &controls,
                 &args.typed_field_assignments,
+                None,
+                creation_companions,
             )
         }?;
-        if let RememberOutcome::Created(ref report) = outcome {
-            persist_remember_sentinels(args, report)?;
-        }
         return Ok((outcome, None));
     }
     let Some(content) = args.content.as_deref() else {
@@ -59513,6 +59497,16 @@ fn handle_remember(
     } else {
         content
     };
+    let sealed_at = seal_commitment
+        .as_ref()
+        .map(|_| chrono::Utc::now().to_rfc3339());
+    let seal = seal_commitment.as_deref().zip(sealed_at.as_deref()).map(
+        |(content_commitment, sealed_at)| RememberSealInput {
+            content_commitment,
+            sealed_at,
+        },
+    );
+    let creation_companions = remember_creation_companions_from_args(args, seal);
     let options = RememberMemoryOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -59536,66 +59530,41 @@ fn handle_remember(
         defer_index_processing: false,
     };
     let outcome = if args.global {
-        remember_global_memory_with_controls_and_typed_fields(
+        remember_global_memory_with_creation_companions(
             &options,
             &controls,
             &args.typed_field_assignments,
+            creation_companions,
         )
     } else {
-        crate::core::memory::remember_memory_with_controls_typed_fields_and_family(
+        remember_memory_with_creation_companions(
             &options,
             &controls,
             &args.typed_field_assignments,
             attempt_family.as_ref(),
+            creation_companions,
         )
     }?;
     let RememberOutcome::Created(ref report) = outcome else {
         return Ok((outcome, None));
     };
-    persist_remember_sentinels(args, report)?;
-    let seal_value = match seal_commitment {
-        Some(commitment) => Some(persist_remember_seal(report, &commitment)?),
-        None => None,
-    };
+    let seal_value = seal.map(|seal| remember_seal_report(report, seal));
     Ok((outcome, seal_value))
 }
 
-/// Persist the seal row for a freshly created sealed memory and return the
-/// seal object surfaced in the report (bd-sealed-preregistration-memory-b67be).
-/// Dry runs return the would-be seal without touching storage.
-fn persist_remember_seal(
+/// Render the seal already included in the memory's source transaction, or
+/// the same prepared seal for a dry-run preview.
+fn remember_seal_report(
     report: &RememberMemoryReport,
-    content_commitment: &str,
-) -> Result<serde_json::Value, DomainError> {
-    let sealed_at = chrono::Utc::now().to_rfc3339();
-    if !report.dry_run {
-        let connection = DbConnection::open_file(&report.database_path).map_err(|error| {
-            DomainError::Storage {
-                message: format!(
-                    "Failed to open database {} for seal metadata: {error}",
-                    report.database_path.display()
-                ),
-                repair: Some("ee doctor --workspace . --json".to_string()),
-            }
-        })?;
-        connection
-            .insert_memory_seal(
-                &report.memory_id.to_string(),
-                content_commitment,
-                &sealed_at,
-            )
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to persist memory seal: {error}"),
-                repair: Some("ee doctor --workspace . --json".to_string()),
-            })?;
-    }
-    Ok(serde_json::json!({
+    seal: RememberSealInput<'_>,
+) -> serde_json::Value {
+    serde_json::json!({
         "schema": crate::models::MEMORY_SEAL_SCHEMA_V1,
-        "contentCommitment": content_commitment,
-        "sealedAt": sealed_at,
+        "contentCommitment": seal.content_commitment,
+        "sealedAt": seal.sealed_at,
         "revealed": false,
         "revealCommand": format!("ee memory reveal {} --content-file <path> --json", report.memory_id),
-    }))
+    })
 }
 
 /// Render one bd-1pi9m.4 remember outcome with the active renderer. A sealed
@@ -62347,8 +62316,7 @@ fn resolve_certificate_store_source(
         return CertificateStoreSource::Manifest(manifest_path.to_path_buf());
     }
 
-    let workspace_path =
-        resolve_cli_workspace_path(&resolve_workspace_for_cli(cli.workspace.as_deref()).0);
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let manifest_path = workspace_path.join(CERTIFICATE_DEFAULT_MANIFEST_FILE);
     if manifest_path.exists() {
         CertificateStoreSource::Manifest(manifest_path)
@@ -63186,9 +63154,7 @@ where
     E: Write,
 {
     let options = crate::core::claims::ClaimListOptions {
-        workspace_path: resolve_cli_workspace_path(
-            cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
-        ),
+        workspace_path: resolve_cli_workspace_path(&cli.resolve_workspace()),
         claims_file: args.claims_file.clone(),
         status: args.status.clone(),
         frequency: args.frequency.clone(),
@@ -63212,9 +63178,7 @@ where
     E: Write,
 {
     let options = crate::core::claims::ClaimShowOptions {
-        workspace_path: resolve_cli_workspace_path(
-            cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
-        ),
+        workspace_path: resolve_cli_workspace_path(&cli.resolve_workspace()),
         claims_file: args.claims_file.clone(),
         claim_id: args.claim_id.clone(),
         include_manifest: args.include_manifest,
@@ -63239,9 +63203,7 @@ where
 {
     let claim_id = args.id.clone().unwrap_or_else(|| args.claim_id.clone());
     let options = crate::core::claims::ClaimVerifyOptions {
-        workspace_path: resolve_cli_workspace_path(
-            cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
-        ),
+        workspace_path: resolve_cli_workspace_path(&cli.resolve_workspace()),
         claims_file: args.claims_file.clone(),
         artifacts_dir: args.artifacts_dir.clone(),
         claim_id,
@@ -66366,7 +66328,7 @@ where
     W: Write,
     E: Write,
 {
-    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
     let selected_workspace = selected_maintenance_workspace_path(
         workspace_path,
         workspace_source,
@@ -66708,8 +66670,7 @@ fn handle_maintenance_graph_witnesses_prune<W>(
 where
     W: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = match graph_database_path(cli, args.database.as_deref()) {
         Ok(path) => path,
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, &mut io::sink()),
@@ -66867,7 +66828,7 @@ fn run_maintenance_job<W>(
 where
     W: Write,
 {
-    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
     let selected_workspace = selected_maintenance_workspace_path(
         workspace_path,
         workspace_source,
@@ -68459,10 +68420,7 @@ where
 {
     use crate::core::support_bundle::{BundleOptions, create_bundle, plan_bundle};
 
-    let workspace_path = args
-        .workspace
-        .clone()
-        .unwrap_or_else(|| cli.resolve_workspace());
+    let (workspace_path, _) = resolve_local_workspace_for_cli(cli, args.workspace.as_deref());
     let redaction = effective_redaction_level(
         &workspace_path,
         args.redaction,
@@ -70042,8 +70000,7 @@ where
 }
 
 fn economy_paths(cli: &Cli, database: Option<&Path>) -> Result<(PathBuf, PathBuf), DomainError> {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = database
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
@@ -86014,6 +85971,41 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .and_then(|options| options.iter().find(|option| option["id"] == id))
             .ok_or_else(|| format!("missing help option {id}"))
+    }
+
+    #[test]
+    fn static_help_routes_do_not_bind_workspace_governor_state() -> TestResult {
+        for route in [&[][..], &["help", "memory"][..], &["agent-docs"][..]] {
+            let mut args = vec![
+                "ee",
+                "--workspace",
+                "unresolved-metadata-alias",
+                "--max-output-tokens",
+                "2000000",
+            ];
+            args.extend_from_slice(route);
+            let (exit, stdout, stderr) = invoke(&args);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Success,
+                "static help route succeeds",
+            )?;
+            ensure(
+                !stdout.is_empty(),
+                "static help route emits its documentation",
+            )?;
+            ensure(stderr.is_empty(), "static help route leaves stderr clean")?;
+            ensure(
+                super::ACTIVE_OUTPUT_GOVERNOR.with(|state| {
+                    state
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|active| active.workspace_root.is_none())
+                }),
+                "static help does not resolve a filesystem root for the governor",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -102080,6 +102072,166 @@ demos:
         ensure(
             source == super::WorkspaceSource::Flag,
             format!("expected Flag source, got {source:?}"),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_workspace_binding_resolves_physical_roots_once_across_commands() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let physical = parent.join("physical-$HOME");
+        let linked = parent.join("workspace-link");
+        fs::create_dir(&physical).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&physical, &linked).map_err(|error| error.to_string())?;
+
+        let commands: &[&[&str]] = &[
+            &["status"],
+            &["capabilities"],
+            &["doctor"],
+            &["index", "status"],
+            &["memory", "list"],
+            &["pack", "release readiness"],
+            &["workspace", "resolve"],
+        ];
+        for command in commands {
+            let mut args = vec![OsString::from("ee"), OsString::from("--workspace")];
+            args.push(linked.as_os_str().to_owned());
+            args.extend(command.iter().map(OsString::from));
+            let mut cli = super::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+            super::resolve_workspace_inputs_global(&mut cli);
+
+            ensure_equal(
+                &cli.workspace,
+                &Some(physical.clone()),
+                &format!("{command:?} receives the physical root in its explicit field"),
+            )?;
+            ensure_equal(
+                &cli.resolve_workspace_with_source(),
+                &(physical.clone(), super::WorkspaceSource::Flag),
+                "resolved root preserves its original source and literal dollar characters",
+            )?;
+            ensure_equal(
+                &super::resolve_local_workspace_for_cli(&cli, None),
+                &(physical.clone(), super::WorkspaceSource::Flag),
+                "local fallback reuses the invocation's resolved root",
+            )?;
+            super::resolve_workspace_inputs_global(&mut cli);
+            ensure_equal(
+                &cli.resolve_workspace(),
+                &physical,
+                "repeated preparation must not expand the physical path again",
+            )?;
+        }
+        ensure(
+            !physical.join(".ee").exists(),
+            "resolving a workspace does not initialize a store",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_workspace_binding_preserves_init_policy_and_local_override() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let physical = parent.join("physical");
+        let linked = parent.join("workspace-link");
+        fs::create_dir(&physical).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&physical, &linked).map_err(|error| error.to_string())?;
+
+        for command in [&["init"][..], &["init", "--allow-symlink"][..]] {
+            let mut args = vec![OsString::from("ee"), OsString::from("--workspace")];
+            args.push(linked.as_os_str().to_owned());
+            args.extend(command.iter().map(OsString::from));
+            let mut cli = super::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+            super::resolve_workspace_inputs_global(&mut cli);
+            ensure_equal(
+                &cli.resolve_workspace(),
+                &linked,
+                "init must inspect the original symlink before applying its creation policy",
+            )?;
+        }
+
+        let mut cli = super::Cli::try_parse_from([
+            OsString::from("ee"),
+            OsString::from("--workspace"),
+            parent.as_os_str().to_owned(),
+            OsString::from("status"),
+        ])
+        .map_err(|error| error.to_string())?;
+        super::resolve_workspace_inputs_global(&mut cli);
+        ensure_equal(
+            &super::resolve_local_workspace_for_cli(&cli, Some(&linked)),
+            &(physical, super::WorkspaceSource::Flag),
+            "a local override resolves its own physical root and outranks the global root",
+        )?;
+        ensure_equal(
+            &cli.resolve_workspace(),
+            &parent,
+            "a local override does not change the invocation's global root",
+        )
+    }
+
+    #[test]
+    fn cli_workspace_binding_keeps_implicit_source_for_store_helpers() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let physical = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        for source in [super::WorkspaceSource::Env, super::WorkspaceSource::WalkUp] {
+            let mut cli =
+                super::Cli::try_parse_from(["ee", "status"]).map_err(|error| error.to_string())?;
+            cli.workspace_resolution = Some((physical.clone(), source));
+            super::resolve_workspace_inputs_global(&mut cli);
+            ensure(
+                cli.workspace.is_none(),
+                "discovery must not manufacture an explicit flag",
+            )?;
+            ensure_equal(
+                &cli.resolve_workspace_with_source(),
+                &(physical.clone(), source),
+                "the original implicit source remains available to diagnostics",
+            )?;
+            ensure_equal(
+                &super::lab_workspace(&cli),
+                &physical,
+                "lab commands use the selected implicit workspace",
+            )?;
+            ensure_equal(
+                &super::pack_database_path(&cli, None),
+                &physical.join(".ee/ee.db"),
+                "pack ledger commands use the selected implicit workspace",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cli_workspace_binding_preserves_missing_relative_paths_without_creation() -> TestResult {
+        let missing = PathBuf::from(format!("ee-missing-workspace-{}", uuid::Uuid::new_v4()));
+        let mut cli = super::Cli::try_parse_from([
+            OsString::from("ee"),
+            OsString::from("--workspace"),
+            missing.as_os_str().to_owned(),
+            OsString::from("status"),
+        ])
+        .map_err(|error| error.to_string())?;
+        super::resolve_workspace_inputs_global(&mut cli);
+        ensure_equal(
+            &cli.resolve_workspace_with_source(),
+            &(missing.clone(), super::WorkspaceSource::Flag),
+            "missing roots retain the caller's path for normal command diagnostics",
+        )?;
+        ensure(
+            !missing.exists(),
+            "path resolution must never create missing roots",
         )
     }
 

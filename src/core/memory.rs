@@ -68,6 +68,11 @@ use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 #[path = "memory_revision_typed.rs"]
 mod revision_typed;
 
+#[path = "memory_creation_companions.rs"]
+mod creation_companions;
+use creation_companions::PreparedRememberCreationCompanions;
+pub(crate) use creation_companions::{RememberCreationCompanions, RememberSealInput};
+
 /// A memory with its associated tags for display.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryDetails {
@@ -1396,6 +1401,7 @@ fn remember_memory_inner_with_store(
         typed_field_assignments,
         attempt_family,
         None,
+        RememberCreationCompanions::default(),
     )? {
         RememberOutcome::Created(report) => Ok(*report),
         _ => Err(DomainError::Storage {
@@ -1418,6 +1424,7 @@ fn remember_memory_outcome_inner_with_store(
     typed_field_assignments: &[String],
     attempt_family: Option<&RememberAttemptFamily<'_>>,
     idempotency: Option<RememberIdempotencyRequest<'_>>,
+    creation_companions: RememberCreationCompanions<'_>,
 ) -> Result<RememberOutcome, DomainError> {
     let mut prepared = prepare_remember_memory_with_store(
         options,
@@ -1426,6 +1433,7 @@ fn remember_memory_outcome_inner_with_store(
         typed_field_assignments,
         attempt_family,
     )?;
+    prepared.creation_companions = creation_companions.prepare(&prepared.memory_id.to_string())?;
     if options.dry_run {
         let typed_fields =
             remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
@@ -1628,6 +1636,7 @@ fn remember_memory_outcome_inner_with_store(
                 policy_bypass.as_ref(),
                 audit_lane,
                 idempotency,
+                &prepared.creation_companions,
             )
         },
     )?;
@@ -1637,6 +1646,7 @@ fn remember_memory_outcome_inner_with_store(
         // file append or derive links/index work for the unused candidate ID.
         write_replay_guard.mark_clean()?;
         return remember_idempotency_replay_outcome(
+            &connection,
             existing,
             idempotency.ok_or_else(|| {
                 remember_usage_error("replay identity was not prepared".to_owned())
@@ -3116,6 +3126,7 @@ struct PreparedRememberMemory {
     kind: MemoryKind,
     typed_fields_json: Option<String>,
     attempt_family: Option<crate::db::MemoryAttemptFamily>,
+    creation_companions: PreparedRememberCreationCompanions,
     confidence: f32,
     tags: Vec<String>,
     provenance_uri: Option<String>,
@@ -3341,6 +3352,7 @@ fn prepare_remember_memory_with_store(
         kind,
         typed_fields_json,
         attempt_family,
+        creation_companions: PreparedRememberCreationCompanions::default(),
         confidence,
         tags,
         provenance_uri,
@@ -4772,6 +4784,7 @@ pub(crate) fn record_prepared_remember_txn_write_in_txn(
         write.finish.policy_bypass.as_ref(),
         None,
         None,
+        &write.finish.prepared.creation_companions,
     )
 }
 
@@ -4794,6 +4807,7 @@ fn record_remembered_memory_in_txn(
     policy_bypass: Option<&RememberPolicyBypassReport>,
     audit_lane: Option<&AuditLaneHandle>,
     idempotency: Option<RememberIdempotencyRequest<'_>>,
+    creation_companions: &PreparedRememberCreationCompanions,
 ) -> crate::db::Result<()> {
     match embed_dedup_decision.content_simhash {
         Some(content_simhash) => connection.insert_memory_with_content_simhash(
@@ -4847,13 +4861,15 @@ fn record_remembered_memory_in_txn(
             memory_id: memory_id.to_owned(),
         })?;
     }
-    Ok(())
+    creation_companions.persist_in_txn(connection)
 }
 
 #[derive(Clone, Copy)]
 struct RememberIdempotencyRequest<'a> {
     key: &'a str,
     request_hash: &'a str,
+    legacy_request_hash: Option<&'a str>,
+    creation_companions: RememberCreationCompanions<'a>,
 }
 
 #[derive(Debug)]
@@ -4881,6 +4897,7 @@ fn store_remembered_memory_with_retry(
     policy_bypass: Option<&RememberPolicyBypassReport>,
     audit_lane: Option<&AuditLaneHandle>,
     idempotency: Option<RememberIdempotencyRequest<'_>>,
+    creation_companions: &PreparedRememberCreationCompanions,
 ) -> Result<RememberPrimaryWriteOutcome, DomainError> {
     for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
         match connection.with_transaction(|| {
@@ -4908,6 +4925,7 @@ fn store_remembered_memory_with_retry(
                 policy_bypass,
                 audit_lane,
                 idempotency,
+                creation_companions,
             )?;
             Ok(RememberPrimaryWriteOutcome::Created)
         }) {
@@ -7538,10 +7556,10 @@ fn remember_idempotency_conflict_error(idempotency_key: &str) -> DomainError {
     DomainError::UsageCodeWithDetails {
         code: REMEMBER_IDEMPOTENCY_CONFLICT_CODE,
         message: format!(
-            "idempotency key already exists with different content or typed fields: {idempotency_key}"
+            "idempotency key already exists with different content, typed fields, or creation guards: {idempotency_key}"
         ),
         repair: Some(
-            "Replay the original content and typed fields for this key, or supply a new --idempotency-key."
+            "Replay the original content, typed fields, and creation guards for this key, or supply a new --idempotency-key."
                 .to_owned(),
         ),
         details_json: serde_json::json!({ "idempotencyKey": idempotency_key }).to_string(),
@@ -7866,10 +7884,13 @@ fn apply_remember_reinforce_under_fence(
             remember_usage_error("reinforce replay identity was not prepared".to_owned())
         })?;
         return remember_idempotency_replay_outcome(
+            connection,
             existing,
             RememberIdempotencyRequest {
                 key,
                 request_hash: context.content_hash,
+                legacy_request_hash: None,
+                creation_companions: RememberCreationCompanions::default(),
             },
             context.database_path,
             context.dry_run,
@@ -7897,24 +7918,77 @@ fn apply_remember_reinforce_under_fence(
 }
 
 fn remember_idempotency_replay_outcome(
+    connection: &DbConnection,
     existing: StoredRememberIdempotencyKey,
     request: RememberIdempotencyRequest<'_>,
     database_path: &Path,
     dry_run: bool,
 ) -> Result<RememberOutcome, DomainError> {
-    if existing.content_hash != request.request_hash {
-        return Err(remember_idempotency_conflict_error(request.key));
+    let verify = || {
+        let has_companions = !request.creation_companions.is_empty();
+        if has_companions {
+            // The early lookup and the transaction's losing-key branch both
+            // arrive here. Refresh the binding under the same owner as the
+            // companion proof, rematerializing specs for the winning ID.
+            let current = connection
+                .get_remember_idempotency_key(&existing.workspace_id, request.key)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to refresh remember replay identity: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?
+                .ok_or_else(|| DomainError::Storage {
+                    message: "Remember replay identity disappeared before guard verification"
+                        .to_owned(),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
+            if current.memory_id != existing.memory_id
+                || current.workspace_id != existing.workspace_id
+                || current.content_hash != existing.content_hash
+                || current.idempotency_key != existing.idempotency_key
+            {
+                return Err(remember_idempotency_conflict_error(request.key));
+            }
+        }
+        let matching_hash = existing.content_hash == request.request_hash;
+        let matching_legacy_hash =
+            has_companions && request.legacy_request_hash == Some(existing.content_hash.as_str());
+        if !matching_hash && !matching_legacy_hash {
+            return Err(remember_idempotency_conflict_error(request.key));
+        }
+        if has_companions {
+            let expected = request.creation_companions.prepare(&existing.memory_id)?;
+            let matches = expected
+                .matches_persisted(connection, &existing.memory_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to verify remembered creation guards: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
+            if !matches {
+                return Err(remember_idempotency_conflict_error(request.key));
+            }
+        }
+        Ok(RememberOutcome::AlreadyRecorded(
+            RememberAlreadyRecordedReport {
+                version: env!("CARGO_PKG_VERSION"),
+                workspace_id: existing.workspace_id,
+                database_path: database_path.to_path_buf(),
+                memory_id: existing.memory_id,
+                idempotency_key: existing.idempotency_key,
+                dry_run,
+            },
+        ))
+    };
+    if request.creation_companions.is_empty() || dry_run {
+        verify()
+    } else {
+        connection.with_write_owner_fence(
+            |error| DomainError::Storage {
+                message: format!("Failed to acquire remember replay guard owner: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            },
+            verify,
+        )
     }
-    Ok(RememberOutcome::AlreadyRecorded(
-        RememberAlreadyRecordedReport {
-            version: env!("CARGO_PKG_VERSION"),
-            workspace_id: existing.workspace_id,
-            database_path: database_path.to_path_buf(),
-            memory_id: existing.memory_id,
-            idempotency_key: existing.idempotency_key,
-            dry_run,
-        },
-    ))
 }
 
 /// `remember_memory` layered with the bd-1pi9m.4 write controls:
@@ -7949,7 +8023,25 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
     typed_field_assignments: &[String],
     attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<RememberOutcome, DomainError> {
+    remember_memory_with_creation_companions(
+        options,
+        controls,
+        typed_field_assignments,
+        attempt_family,
+        RememberCreationCompanions::default(),
+    )
+}
+
+/// Create memory and its requested guards in one source transaction.
+pub(crate) fn remember_memory_with_creation_companions(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
+    creation_companions: RememberCreationCompanions<'_>,
+) -> Result<RememberOutcome, DomainError> {
     validate_remember_level_kind_cross_wire(options.level, options.kind)?;
+    creation_companions.validate_for_write(options, controls)?;
     if controls.reinforce && !typed_field_assignments.is_empty() {
         return Err(remember_usage_error(
             "--field cannot be combined with --reinforce because reinforcement does not mutate the surviving memory's typed sidecar"
@@ -7966,10 +8058,23 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
         .idempotency_key
         .map(validate_remember_idempotency_key)
         .transpose()?;
-    let idempotency_request_hash = idempotency_key
+    let original_request_hash = idempotency_key
         .as_ref()
         .map(|_| remember_request_hash(options, typed_field_assignments, attempt_family))
         .transpose()?;
+    let idempotency_request_hash = original_request_hash
+        .as_deref()
+        .map(|hash| creation_companions.request_hash(hash))
+        .transpose()?;
+    let idempotency = idempotency_key
+        .as_deref()
+        .zip(idempotency_request_hash.as_deref())
+        .map(|(key, request_hash)| RememberIdempotencyRequest {
+            key,
+            request_hash,
+            legacy_request_hash: original_request_hash.as_deref(),
+            creation_companions,
+        });
 
     if idempotency_key.is_some() || controls.reinforce {
         let canonical_content = MemoryContent::parse(options.content)
@@ -8004,30 +8109,21 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
             )
             .unwrap_or_else(|_| stable_workspace_id(&canonical));
 
-            if let Some(key) = idempotency_key.as_deref() {
+            if let Some(request) = idempotency {
                 let existing = connection
-                    .get_remember_idempotency_key(&workspace_id, key)
+                    .get_remember_idempotency_key(&workspace_id, request.key)
                     .map_err(|error| DomainError::Storage {
                         message: format!("Failed to look up idempotency key: {error}"),
                         repair: Some("ee doctor --json".to_owned()),
                     })?;
                 if let Some(existing) = existing {
-                    if idempotency_request_hash
-                        .as_deref()
-                        .is_some_and(|request_hash| existing.content_hash == request_hash)
-                    {
-                        return Ok(RememberOutcome::AlreadyRecorded(
-                            RememberAlreadyRecordedReport {
-                                version: env!("CARGO_PKG_VERSION"),
-                                workspace_id,
-                                database_path,
-                                memory_id: existing.memory_id,
-                                idempotency_key: existing.idempotency_key,
-                                dry_run: options.dry_run,
-                            },
-                        ));
-                    }
-                    return Err(remember_idempotency_conflict_error(key));
+                    return remember_idempotency_replay_outcome(
+                        &connection,
+                        existing,
+                        request,
+                        &database_path,
+                        options.dry_run,
+                    );
                 }
             }
 
@@ -8063,7 +8159,7 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
         }
     }
 
-    if idempotency_key.is_none() {
+    if idempotency_key.is_none() && creation_companions.is_empty() {
         return remember_memory_with_index_mode(
             options,
             controls.defer_index_processing,
@@ -8081,10 +8177,8 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
         None,
         typed_field_assignments,
         attempt_family,
-        idempotency_key
-            .as_deref()
-            .zip(idempotency_request_hash.as_deref())
-            .map(|(key, request_hash)| RememberIdempotencyRequest { key, request_hash }),
+        idempotency,
+        creation_companions,
     )
 }
 
@@ -8108,7 +8202,22 @@ pub fn remember_global_memory_with_controls_and_typed_fields(
     controls: &RememberWriteControls<'_>,
     typed_field_assignments: &[String],
 ) -> Result<RememberOutcome, DomainError> {
+    remember_global_memory_with_creation_companions(
+        options,
+        controls,
+        typed_field_assignments,
+        RememberCreationCompanions::default(),
+    )
+}
+
+pub(crate) fn remember_global_memory_with_creation_companions(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
+    creation_companions: RememberCreationCompanions<'_>,
+) -> Result<RememberOutcome, DomainError> {
     validate_remember_level_kind_cross_wire(options.level, options.kind)?;
+    creation_companions.validate_for_write(options, controls)?;
     if controls.reinforce {
         return Err(remember_usage_error(
             "--global cannot be combined with --reinforce".to_owned(),
@@ -8117,7 +8226,22 @@ pub fn remember_global_memory_with_controls_and_typed_fields(
 
     let paths = super::global_store::default_global_store_paths_from_env()
         .map_err(remember_global_store_error)?;
-    remember_global_memory_with_controls_at_paths(options, controls, typed_field_assignments, paths)
+    if creation_companions.is_empty() {
+        remember_global_memory_with_controls_at_paths(
+            options,
+            controls,
+            typed_field_assignments,
+            paths,
+        )
+    } else {
+        remember_global_memory_with_creation_companions_at_paths(
+            options,
+            controls,
+            typed_field_assignments,
+            paths,
+            creation_companions,
+        )
+    }
 }
 
 fn remember_global_memory_with_controls_at_paths(
@@ -8126,6 +8250,28 @@ fn remember_global_memory_with_controls_at_paths(
     typed_field_assignments: &[String],
     paths: super::global_store::GlobalStorePaths,
 ) -> Result<RememberOutcome, DomainError> {
+    remember_global_memory_with_creation_companions_at_paths(
+        options,
+        controls,
+        typed_field_assignments,
+        paths,
+        RememberCreationCompanions::default(),
+    )
+}
+
+fn remember_global_memory_with_creation_companions_at_paths(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
+    paths: super::global_store::GlobalStorePaths,
+    creation_companions: RememberCreationCompanions<'_>,
+) -> Result<RememberOutcome, DomainError> {
+    creation_companions.validate_for_write(options, controls)?;
+    if creation_companions.seal.is_some() {
+        return Err(remember_usage_error(
+            "--seal cannot be combined with --global".to_owned(),
+        ));
+    }
     let workspace_id = if options.dry_run {
         super::global_store::global_workspace_id(&paths)
     } else {
@@ -8170,37 +8316,41 @@ fn remember_global_memory_with_controls_at_paths(
         .idempotency_key
         .map(validate_remember_idempotency_key)
         .transpose()?;
-    let idempotency_request_hash = idempotency_key
+    let original_request_hash = idempotency_key
         .as_ref()
         .map(|_| remember_request_hash(&global_options, typed_field_assignments, None))
         .transpose()?;
-    if let Some(key) = idempotency_key.as_deref() {
+    let idempotency_request_hash = original_request_hash
+        .as_deref()
+        .map(|hash| creation_companions.request_hash(hash))
+        .transpose()?;
+    let idempotency = idempotency_key
+        .as_deref()
+        .zip(idempotency_request_hash.as_deref())
+        .map(|(key, request_hash)| RememberIdempotencyRequest {
+            key,
+            request_hash,
+            legacy_request_hash: original_request_hash.as_deref(),
+            creation_companions,
+        });
+    if let Some(request) = idempotency {
         if paths.database_path.exists() {
             let connection = open_remember_database_with_retry(&paths.database_path)?;
             migrate_remember_database_with_retry(&connection)?;
             if let Some(existing) = connection
-                .get_remember_idempotency_key(&workspace_id, key)
+                .get_remember_idempotency_key(&workspace_id, request.key)
                 .map_err(|error| DomainError::Storage {
                     message: format!("Failed to look up global idempotency key: {error}"),
                     repair: Some("ee doctor --json".to_owned()),
                 })?
             {
-                if idempotency_request_hash
-                    .as_deref()
-                    .is_some_and(|request_hash| existing.content_hash == request_hash)
-                {
-                    return Ok(RememberOutcome::AlreadyRecorded(
-                        RememberAlreadyRecordedReport {
-                            version: env!("CARGO_PKG_VERSION"),
-                            workspace_id,
-                            database_path: paths.database_path,
-                            memory_id: existing.memory_id,
-                            idempotency_key: existing.idempotency_key,
-                            dry_run: options.dry_run,
-                        },
-                    ));
-                }
-                return Err(remember_idempotency_conflict_error(key));
+                return remember_idempotency_replay_outcome(
+                    &connection,
+                    existing,
+                    request,
+                    &paths.database_path,
+                    options.dry_run,
+                );
             }
         }
     }
@@ -8214,10 +8364,8 @@ fn remember_global_memory_with_controls_at_paths(
         Some(&store_override),
         typed_field_assignments,
         None,
-        idempotency_key
-            .as_deref()
-            .zip(idempotency_request_hash.as_deref())
-            .map(|(key, request_hash)| RememberIdempotencyRequest { key, request_hash }),
+        idempotency,
+        creation_companions,
     )
 }
 
@@ -12979,6 +13127,10 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
 mod git_capture_identity_tests;
 
 #[cfg(test)]
+#[path = "memory_creation_companion_tests.rs"]
+mod creation_companion_tests;
+
+#[cfg(test)]
 #[path = "memory_git_capture_security_tests.rs"]
 mod git_capture_security_tests;
 
@@ -14289,6 +14441,7 @@ mod tests {
             None,
             Some(&handle),
             None,
+            &PreparedRememberCreationCompanions::default(),
         )
         .map_err(|error| error.to_string())?;
 
@@ -14547,6 +14700,7 @@ mod tests {
             None,
             None,
             None,
+            &PreparedRememberCreationCompanions::default(),
         )
         .map_err(|error| error.to_string())?;
 
@@ -21590,7 +21744,10 @@ mod tests {
                 Some(RememberIdempotencyRequest {
                     key: "rollback-key",
                     request_hash: if fail_key { "" } else { "blake3:rollback" },
+                    legacy_request_hash: None,
+                    creation_companions: RememberCreationCompanions::default(),
                 }),
+                &PreparedRememberCreationCompanions::default(),
             );
             ensure(
                 result.is_err(),
@@ -21653,7 +21810,10 @@ mod tests {
                 Some(RememberIdempotencyRequest {
                     key: "rollback-key",
                     request_hash: "blake3:rollback",
+                    legacy_request_hash: None,
+                    creation_companions: RememberCreationCompanions::default(),
                 }),
+                &PreparedRememberCreationCompanions::default(),
             )
             .map_err(|error| error.message())?;
             ensure(
@@ -21699,7 +21859,10 @@ mod tests {
                     Some(RememberIdempotencyRequest {
                         key: "concurrent-key",
                         request_hash: &request_hash,
+                        legacy_request_hash: None,
+                        creation_companions: RememberCreationCompanions::default(),
                     }),
+                    RememberCreationCompanions::default(),
                 )
                 .map_err(|error| error.message())
             }));
@@ -21763,7 +21926,10 @@ mod tests {
             Some(RememberIdempotencyRequest {
                 key: "concurrent-key",
                 request_hash: &changed_hash,
+                legacy_request_hash: None,
+                creation_companions: RememberCreationCompanions::default(),
             }),
+            RememberCreationCompanions::default(),
         )
         .expect_err("changed payload must conflict inside source fence");
         ensure(
