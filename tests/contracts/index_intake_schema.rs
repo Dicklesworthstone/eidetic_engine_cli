@@ -25,6 +25,7 @@ type TestResult = Result<(), String>;
 const SCHEMA_REL: &str = "docs/schemas/ee.index_intake.v1.json";
 const PERF_FIXTURE_REL: &str = "tests/fixtures/golden/perf_artifact/incremental_index_intake.json";
 const E2E_SCRIPT_REL: &str = "scripts/e2e_incremental_index.sh";
+const E2E_TMPROOT_REL: &str = "scripts/lib/e2e_tmproot.sh";
 const REDACTION_CONST: &str = "counts_modes_no_content";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -231,9 +232,22 @@ fn incremental_index_e2e_perf_contract_is_pinned() -> TestResult {
     )?;
 
     let script = load_text(E2E_SCRIPT_REL)?;
+    // The script must honor a caller-chosen EE_E2E_TMPDIR, either directly or
+    // through the shared temp-root resolver, which reads that variable first.
+    if !script.contains("EE_E2E_TMPDIR") {
+        ensure(
+            script.contains(E2E_TMPROOT_REL.trim_start_matches("scripts/"))
+                && script.contains("e2e_temp_root"),
+            "incremental index E2E script must honor EE_E2E_TMPDIR directly or via e2e_temp_root",
+        )?;
+        let resolver = load_text(E2E_TMPROOT_REL)?;
+        ensure(
+            resolver.contains("e2e_temp_root()") && resolver.contains("${EE_E2E_TMPDIR:-}"),
+            "shared e2e temp-root resolver must read EE_E2E_TMPDIR",
+        )?;
+    }
     for expected in [
         "EE_BINARY",
-        "EE_E2E_TMPDIR",
         "ee.test_event.v1",
         "bench_iteration",
         "index rebuild",
