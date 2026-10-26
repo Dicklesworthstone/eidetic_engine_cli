@@ -87,6 +87,7 @@ fn boolean(object: &Map<String, Value>, key: &str) -> Result<bool, String> {
 /// Narrow on purpose: one field at one path, returned untouched when the path
 /// is absent, so a response that stops carrying serverInfo FAILS the
 /// comparison rather than being normalised into agreement.
+#[cfg(feature = "mcp")]
 fn scrub_golden_server_version(mut response: Value) -> Value {
     if let Some(version) = response
         .get_mut("result")
