@@ -8834,13 +8834,14 @@ fn validate_cached_context_finalization(
         coordination: read_digest("coordination")?,
         rendered_text: read_digest("renderedText")?,
     };
-    if Some(compute_pack_hash_composite(&digests, output_options.include_skipped).as_str()) != hash
-    {
+    let composite = compute_pack_hash_composite(&digests, output_options.include_skipped);
+    if Some(composite.as_str()) != hash {
         return Err("L2 pack cache v5 composite does not match its component digests".to_owned());
     }
+    // `composite` equals the stored hash here, so it names the footer.
     let footer = crate::pack::context_markdown_identity_footer(
         crate::models::RESPONSE_SCHEMA_V2,
-        hash.expect("identity checked above"),
+        &composite,
     );
     let body = canonical_text
         .strip_suffix(&footer)
@@ -9399,18 +9400,15 @@ fn finalize_context_response(
         task_lens,
     );
     log_pack_hash_components(&components);
-    response.data.pack.hash = Some(components.composite_hash);
+    let composite_hash = components.composite_hash;
+    response.data.pack.hash = Some(composite_hash.clone());
     response.data.pack_hash_components = Some(components.digests);
-    response.data.finalized_text = Some(crate::output::render_context_markdown_for_finalization(
+    let finalized_text = crate::output::render_context_markdown_for_finalization(
         &crate::pack::ContextMarkdownInput::from(&*response),
         output_options.include_non_affecting_degradations,
-        response
-            .data
-            .pack
-            .hash
-            .as_deref()
-            .expect("hash just finalized"),
-    ));
+        &composite_hash,
+    );
+    response.data.finalized_text = Some(finalized_text);
     if let Some(profile) = response.data.agent_profile.as_mut() {
         set_agent_profile_base_pack_hash(profile, response.data.pack.hash.as_deref());
     }
