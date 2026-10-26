@@ -22,6 +22,26 @@ fn workspace_id() -> String {
     WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string()
 }
 
+fn tree_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, Option<blake3::Hash>> {
+    let mut snapshot = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if entry.file_type().unwrap().is_dir() {
+                snapshot.insert(relative, None);
+                pending.push(path);
+            } else {
+                assert!(entry.file_type().unwrap().is_file());
+                snapshot.insert(relative, Some(blake3::hash(&fs::read(path).unwrap())));
+            }
+        }
+    }
+    snapshot
+}
+
 fn source(private: bool) -> (tempfile::TempDir, PathBuf, PathBuf, String, String) {
     let (root, workspace, database) = tests::fixture().unwrap();
     let a = if private {
@@ -294,14 +314,47 @@ fn evidence_admission_fidelity_round_trips_none_and_warns_for_minimal() {
                 .any(|issue| issue.code == "backup_evidence_admission_reduced"),
             lossy
         );
-        let opts = options(
+        let mut opts = options(
             root.path(),
             &workspace,
             &backup,
             if lossy { "minimal" } else { "none" },
         );
+        let source_tree = tree_snapshot(root.path());
+        opts.dry_run = true;
+        let preview = restore_backup_to_side_path(&opts).unwrap();
+        assert_eq!(preview.status, "dry_run");
+        assert!(preview.dry_run);
+        assert_eq!(preview.imported_memory_count, 0);
+        assert_eq!(preview.restored_evidence_span_count, 0);
+        assert!(!opts.side_path.exists());
+        assert_eq!(tree_snapshot(root.path()), source_tree);
+        let preview_warning = preview
+            .degraded
+            .iter()
+            .find(|entry| entry.code == "backup_evidence_admission_reduced");
+        assert_eq!(preview_warning.is_some(), lossy);
+        if let Some(warning) = preview_warning {
+            assert!(
+                warning
+                    .message
+                    .contains("2 evidence span(s) to pack-denied")
+            );
+            assert!(warning.next_action.contains("--redaction none"));
+        }
+        assert_eq!(
+            preview.data_json()["degraded"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["code"] == "backup_evidence_admission_reduced"),
+            lossy,
+        );
+        opts.dry_run = false;
         let restored = restore_backup_to_side_path(&opts).unwrap();
         assert_eq!(restored.restored_evidence_span_count, 4);
+        assert_eq!(preview.degraded, restored.degraded);
+        assert_eq!(preview.next_actions, restored.next_actions);
         assert_eq!(
             restored
                 .degraded

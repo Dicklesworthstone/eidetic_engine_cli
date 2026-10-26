@@ -3719,6 +3719,16 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         .join(&inspect.backup_id);
     let restored_database_path = side_path.join(WORKSPACE_MARKER).join(DEFAULT_DB_FILE);
     let mut next_actions = restore_base_next_actions(&inspect.backup_id, &side_path);
+    // Preview the same recovery limitations as execution. Authentication and
+    // inventory checks above establish which artifact is being restored; a
+    // dry run must not erase its evidence-loss or peer-repair requirements.
+    let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
+    if restore_degraded
+        .iter()
+        .any(|entry| entry.code == "mesh_restore_requires_repair")
+    {
+        next_actions.push(restore_mesh_doctor_next_action(&side_path));
+    }
 
     // Preview the same destination constraints that a real restore enforces.
     ensure_side_path_is_isolated(&side_path)?;
@@ -3765,7 +3775,7 @@ fn restore_backup_to_side_path_with_recovery_hooks(
             restored_graph_cache_count: 0,
             restored_derived: Vec::new(),
             issue_count: u32::try_from(verify.issues.len()).unwrap_or(u32::MAX),
-            degraded: Vec::new(),
+            degraded: restore_degraded,
             next_actions,
         });
     }
@@ -3813,13 +3823,6 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         repair: Some("choose a writable --side-path".to_owned()),
     })?;
 
-    let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
-    if restore_degraded
-        .iter()
-        .any(|entry| entry.code == "mesh_restore_requires_repair")
-    {
-        next_actions.push(restore_mesh_doctor_next_action(&side_path));
-    }
     write_new_file(&restore_manifest_path, &manifest_bytes)?;
 
     copy_new_file(&source_records_path, &restore_records_path)?;
@@ -16433,14 +16436,37 @@ mod tests {
         )?;
 
         let side_path = tempdir.path().join("mesh-restore-side");
-        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+        let mut restore_options = BackupRestoreOptions {
             workspace_path: workspace,
             backup_path: PathBuf::from(&report.backup_path),
-            side_path,
+            side_path: side_path.clone(),
             restore_graph_cache: false,
-            dry_run: false,
-        })
-        .map_err(|error| error.message())?;
+            dry_run: true,
+        };
+        let preview =
+            restore_backup_to_side_path(&restore_options).map_err(|error| error.message())?;
+        ensure(
+            !side_path.exists(),
+            "mesh restore preview must not create the destination",
+        )?;
+        ensure_equal(
+            preview.status.as_str(),
+            "dry_run",
+            "mesh restore preview status",
+        )?;
+        restore_options.dry_run = false;
+        let restored =
+            restore_backup_to_side_path(&restore_options).map_err(|error| error.message())?;
+        ensure_equal(
+            preview.degraded,
+            restored.degraded.clone(),
+            "mesh restore preview preserves execution's peer-repair warning",
+        )?;
+        ensure_equal(
+            preview.next_actions,
+            restored.next_actions.clone(),
+            "mesh restore preview preserves execution's repair actions",
+        )?;
         ensure(
             restored
                 .degraded
