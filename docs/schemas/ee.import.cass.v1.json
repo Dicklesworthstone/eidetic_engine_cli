@@ -14,23 +14,9 @@
     "data": {
       "type": "object",
       "required": [
-        "schema",
-        "command",
-        "workspacePath",
-        "databasePath",
-        "sourceId",
-        "ledgerId",
-        "dryRun",
-        "since",
-        "sessionsDiscovered",
-        "sessionsImported",
-        "sessionsSkipped",
-        "spansImported",
-        "indexJobsQueued",
-        "indexRequiredAction",
-        "status",
-        "evidenceAdmission",
-        "sessions"
+        "schema", "command", "workspacePath", "databasePath", "sourceId", "ledgerId",
+        "dryRun", "since", "sessionsDiscovered", "sessionsImported", "sessionsSkipped",
+        "spansImported", "indexJobsQueued", "indexRequiredAction", "status", "evidenceAdmission", "sessions"
       ],
       "additionalProperties": false,
       "properties": {
@@ -74,67 +60,43 @@
   },
   "field_presets": {
     "minimal": ["schema", "command", "status"],
-    "summary": [
-      "schema",
-      "command",
-      "status",
-      "sessionsDiscovered",
-      "sessionsImported",
-      "sessionsSkipped",
-      "spansImported"
-    ],
+    "summary": ["schema", "command", "status", "sessionsDiscovered", "sessionsImported", "sessionsSkipped", "spansImported"],
     "standard": [
-      "schema",
-      "command",
-      "workspacePath",
-      "databasePath",
-      "sourceId",
-      "ledgerId",
-      "dryRun",
-      "since",
-      "sessionsDiscovered",
-      "sessionsImported",
-      "sessionsSkipped",
-      "spansImported",
-      "indexJobsQueued",
-      "indexRequiredAction",
-      "status",
-      "evidenceAdmission",
-      "sessions",
-      "review"
+      "schema", "command", "workspacePath", "databasePath", "sourceId", "ledgerId",
+      "dryRun", "since", "sessionsDiscovered", "sessionsImported", "sessionsSkipped",
+      "spansImported", "indexJobsQueued", "indexRequiredAction", "status", "evidenceAdmission", "sessions", "review"
     ],
     "full": ["*"]
   },
   "$defs": {
     "importReview": {
       "type": "object",
-      "description": "Present only for explicit --propose. Committed source import remains successful even if some independent reviews fail or exceed the proposal budget. Dry runs plan review only and do not inspect or create a store.",
+      "description": "Present only for explicit --propose. Committed source import remains successful even if independent reviews or progress writes fail. Source-revision receipts prioritize pending reviews across repeated imports, including reviews that produced no candidates. Receipts only schedule work; selected sessions are revalidated live. Dry runs plan review without opening a store.",
       "additionalProperties": false,
-      "required": ["schema", "dryRun", "status", "partialFailure", "maxSessions", "candidateLimitPerSession", "sessionsEligible", "sessionsReviewed", "sessionsPlanned", "sessionsDeferred", "sessionsRefused", "sessionsFailed", "sessionsDegraded", "duplicateSessionsSkipped", "candidateCount", "candidatesPersisted", "durableMutation", "deferredDetailsOmitted", "sessions", "nextAction"],
+      "required": ["schema", "dryRun", "status", "partialFailure", "maxSessions", "candidateLimitPerSession", "sessionsEligible", "sessionsReviewed", "sessionsPlanned", "sessionsDeferred", "sessionsRefused", "sessionsFailed", "sessionsDegraded", "sessionsPreviouslyReviewed", "sessionsNewlyReviewed", "sessionsPendingReview", "duplicateSessionsSkipped", "candidateCount", "candidatesPersisted", "durableMutation", "deferredDetailsOmitted", "sessions", "nextAction"],
       "properties": {
         "schema": { "const": "ee.import.cass.review.v1" },
         "dryRun": { "type": "boolean" },
         "status": { "enum": ["planned", "completed", "partial", "no_eligible_sessions"] },
-        "partialFailure": { "type": "boolean", "description": "At least one session review failed; source import remains committed." },
+        "partialFailure": { "type": "boolean", "description": "At least one session review or progress write failed; committed source evidence and candidates are preserved." },
         "maxSessions": { "const": 16 },
         "candidateLimitPerSession": { "const": 8 },
         "sessionsEligible": { "type": "integer", "minimum": 0 },
         "sessionsReviewed": { "type": "integer", "minimum": 0, "maximum": 16 },
         "sessionsPlanned": { "type": "integer", "minimum": 0, "maximum": 16 },
-        "sessionsDeferred": { "type": "integer", "minimum": 0 },
+        "sessionsDeferred": { "type": "integer", "minimum": 0, "description": "Reviews not executed in this invocation, including previously reviewed revisions. sessionsPendingReview counts revisions still lacking progress." },
         "sessionsRefused": { "type": "integer", "minimum": 0 },
         "sessionsFailed": { "type": "integer", "minimum": 0, "maximum": 16 },
         "sessionsDegraded": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "sessionsPreviouslyReviewed": { "type": "integer", "minimum": 0, "description": "Eligible source revisions with a verified scheduling receipt before this invocation. Dry runs do not inspect receipts." },
+        "sessionsNewlyReviewed": { "type": "integer", "minimum": 0, "maximum": 16, "description": "Previously pending source revisions successfully reviewed and acknowledged in this invocation, even when no candidate was proposed." },
+        "sessionsPendingReview": { "type": "integer", "minimum": 0, "description": "Eligible revisions minus previously and newly reviewed revisions. Repeat the same import with --propose to prioritize this backlog; this is not a proposal-quality or admission verdict." },
         "duplicateSessionsSkipped": { "type": "integer", "minimum": 0 },
         "candidateCount": { "type": "integer", "minimum": 0 },
         "candidatesPersisted": { "type": "integer", "minimum": 0, "description": "Newly inserted pending candidates; replay of existing or rejected proposals does not increment this count." },
-        "durableMutation": { "type": "boolean" },
+        "durableMutation": { "type": "boolean", "description": "Candidates or a source-bound scheduling audit were written. No memory or rule is automatically applied." },
         "deferredDetailsOmitted": { "type": "integer", "minimum": 0 },
-        "sessions": {
-          "type": "array",
-          "maxItems": 48,
-          "items": { "$ref": "#/$defs/importReviewSession" }
-        },
+        "sessions": { "type": "array", "maxItems": 48, "items": { "$ref": "#/$defs/importReviewSession" } },
         "nextAction": { "type": "string" }
       }
     },
@@ -150,8 +112,7 @@
         "candidateCount": { "type": "integer", "minimum": 0, "maximum": 8 },
         "candidatesPersisted": { "type": "integer", "minimum": 0, "maximum": 8 },
         "candidates": {
-          "type": "array",
-          "maxItems": 8,
+          "type": "array", "maxItems": 8,
           "description": "Canonical session-review proposals retain candidate IDs, source IDs, confidence and persisted status. They require explicit validation and application.",
           "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
         },
@@ -161,8 +122,7 @@
           "oneOf": [
             { "type": "null" },
             {
-              "type": "object",
-              "additionalProperties": false,
+              "type": "object", "additionalProperties": false,
               "required": ["code", "message"],
               "properties": {
                 "code": { "type": "string" },
@@ -175,10 +135,7 @@
     },
     "jsonValue": {
       "oneOf": [
-        { "type": "null" },
-        { "type": "boolean" },
-        { "type": "number" },
-        { "type": "string" },
+        { "type": "null" }, { "type": "boolean" }, { "type": "number" }, { "type": "string" },
         { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
         { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]

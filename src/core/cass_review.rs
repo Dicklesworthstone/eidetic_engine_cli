@@ -20,6 +20,9 @@ use crate::core::curate::{
 use crate::models::SessionId;
 use crate::policy::redact_public_replay_text;
 
+#[path = "cass_review_progress.rs"]
+mod progress;
+
 pub const CASS_IMPORT_REVIEW_SCHEMA_V1: &str = "ee.import.cass.review.v1";
 pub const MAX_IMPORT_REVIEW_SESSIONS: usize = 16;
 pub const MAX_IMPORT_REVIEW_CANDIDATES: u32 = 8;
@@ -43,6 +46,9 @@ pub struct CassImportReviewReport {
     pub sessions_refused: usize,
     pub sessions_failed: usize,
     pub sessions_degraded: usize,
+    pub sessions_previously_reviewed: usize,
+    pub sessions_newly_reviewed: usize,
+    pub sessions_pending_review: usize,
     pub duplicate_sessions_skipped: usize,
     pub candidate_count: usize,
     pub candidates_persisted: usize,
@@ -84,9 +90,13 @@ pub struct CassImportReviewError {
 /// Refused histories are never reviewed, and a missing ID must never silently
 /// select the most recent session in the workspace.
 ///
-/// Dry runs report planned work only. The existing session reviewer opens a
-/// writable store even in preview mode, so it must not be called here during an
-/// import dry run, including when no workspace or database exists yet.
+/// Source-bound progress receipts prioritize unreviewed revisions, including
+/// sessions that produced no candidates. Repeated bounded imports therefore
+/// reach the tail instead of reviewing the same first 16 sessions forever.
+/// Receipts only order work: every selected source is still reviewed live.
+///
+/// Dry runs report planned work only. Neither scheduling nor proposal creation
+/// may open a store during an import dry run, even when the store exists.
 #[must_use]
 pub fn review_imported_sessions(import: &CassImportReport) -> CassImportReviewReport {
     let mut report = CassImportReviewReport {
@@ -103,6 +113,9 @@ pub fn review_imported_sessions(import: &CassImportReport) -> CassImportReviewRe
         sessions_refused: 0,
         sessions_failed: 0,
         sessions_degraded: 0,
+        sessions_previously_reviewed: 0,
+        sessions_newly_reviewed: 0,
+        sessions_pending_review: 0,
         duplicate_sessions_skipped: 0,
         candidate_count: 0,
         candidates_persisted: 0,
@@ -121,7 +134,9 @@ pub fn review_imported_sessions(import: &CassImportReport) -> CassImportReviewRe
         },
     };
     let mut seen = BTreeSet::new();
-    for (session_index, session) in import.sessions.iter().enumerate() {
+    for scheduled in progress::ordered(import) {
+        let session_index = scheduled.session_index;
+        let session = &import.sessions[session_index];
         if matches!(session.status, ImportSessionStatus::Refused(_)) {
             report.sessions_refused += 1;
             continue;
@@ -135,6 +150,7 @@ pub fn review_imported_sessions(import: &CassImportReport) -> CassImportReviewRe
             continue;
         }
         report.sessions_eligible += 1;
+        report.sessions_previously_reviewed += usize::from(scheduled.previously_reviewed);
         let session_id = session
             .session_id
             .as_deref()
@@ -235,18 +251,36 @@ pub fn review_imported_sessions(import: &CassImportReport) -> CassImportReviewRe
                 report.candidate_count += entry.candidate_count;
                 report.candidates_persisted += entry.candidates_persisted;
                 report.durable_mutation |= review.durable_mutation;
-                report.sessions.push(entry);
+                match scheduled.record(import) {
+                    Ok(written) => {
+                        report.durable_mutation |= written;
+                        report.sessions_newly_reviewed += usize::from(!scheduled.previously_reviewed);
+                        report.sessions.push(entry);
+                    }
+                    Err(message) => record_failure(
+                        &mut report,
+                        entry,
+                        "cass_import_review_progress_unavailable",
+                        message,
+                    ),
+                }
             }
             Err(error) => {
                 record_failure(&mut report, entry, error.code(), &error.message());
             }
         }
     }
+    report.sessions_pending_review = report.sessions_eligible.saturating_sub(
+        report.sessions_previously_reviewed + report.sessions_newly_reviewed,
+    );
+    // Execution order may differ, but report positions remain easy to compare
+    // with the original import array. Deferred details remain independently capped.
+    report.sessions.sort_by_key(|session| session.session_index);
     report.partial_failure = report.sessions_failed > 0;
     report.status = if import.dry_run {
         "planned"
     } else if report.sessions_failed > 0
-        || report.sessions_deferred > 0
+        || (report.sessions_deferred > 0 && report.sessions_pending_review > 0)
         || report.sessions_degraded > 0
     {
         "partial"
@@ -255,6 +289,12 @@ pub fn review_imported_sessions(import: &CassImportReport) -> CassImportReviewRe
     } else {
         "completed"
     };
+    if !import.dry_run && report.sessions_pending_review > 0 {
+        report.next_action = format!(
+            "Repeat the same import with --propose to prioritize the {} pending session revisions; keep its workspace, database and discovery options. Then inspect proposals with: {}",
+            report.sessions_pending_review, report.next_action,
+        );
+    }
     report
 }
 
@@ -305,21 +345,21 @@ impl CassImportReviewReport {
                 code: "cass_import_review_partial",
                 severity: "warning",
                 message: format!(
-                    "CASS source import remains committed; {} session reviews failed and {} returned degraded proposals. Other eligible sessions were still reviewed.",
+                    "CASS source import remains committed; {} session reviews or progress writes failed and {} returned degraded proposals. Other eligible sessions were still reviewed.",
                     self.sessions_failed, self.sessions_degraded,
                 ),
-                repair: "Inspect review.sessions[].error and review.sessions[].degraded; retry the affected sessions with review.sessions[].retryCommand. Candidates require explicit validation and application.".to_owned(),
+                repair: "Inspect review.sessions[].error and review.sessions[].degraded; retry the affected sessions with review.sessions[].retryCommand or repeat the import with --propose. Candidates require explicit validation and application.".to_owned(),
             });
         }
-        if self.sessions_deferred > 0 {
+        if self.sessions_deferred > 0 && self.sessions_pending_review > 0 {
             degraded.push(CassImportDegradation {
                 code: "cass_import_review_deferred",
                 severity: "info",
                 message: format!(
-                    "{} CASS session reviews were deferred by the {}-session proposal limit; source import was not limited by proposal review.",
-                    self.sessions_deferred, self.max_sessions,
+                    "{} session revisions still need proposal review; {} reviews were deferred by the {}-session limit. Source import was not limited by proposal review.",
+                    self.sessions_pending_review, self.sessions_deferred, self.max_sessions,
                 ),
-                repair: "Run review.sessions[].retryCommand for deferred committed sessions. Additional deferred IDs are in the original import sessions array; review them explicitly with ee review session <sessionId> --propose using the same --workspace and --database. During a dry run, repeat the import without --dry-run first.".to_owned(),
+                repair: "Repeat the same import with --propose to prioritize pending revisions, or run review.sessions[].retryCommand for individual sessions. Additional deferred IDs are in the original import sessions array. During a dry run, repeat the import without --dry-run first.".to_owned(),
             });
         }
         degraded
@@ -334,7 +374,7 @@ impl CassImportReviewReport {
             )
         } else {
             format!(
-                "CASS proposal review {}: {} sessions reviewed, {} candidates ({} newly persisted), {} failed, {} deferred, {} refused.\n",
+                "CASS proposal review {}: {} sessions reviewed, {} candidates ({} newly persisted), {} failed, {} deferred, {} refused.\n  Progress: {} previously reviewed revisions, {} newly reviewed, {} pending.\n",
                 self.status,
                 self.sessions_reviewed,
                 self.candidate_count,
@@ -342,6 +382,9 @@ impl CassImportReviewReport {
                 self.sessions_failed,
                 self.sessions_deferred,
                 self.sessions_refused,
+                self.sessions_previously_reviewed,
+                self.sessions_newly_reviewed,
+                self.sessions_pending_review,
             )
         };
         for session in &self.sessions {
@@ -422,13 +465,8 @@ mod tests {
         import.sessions = (1..=60)
             .map(|id| session(id, ImportSessionStatus::WouldImport))
             .collect();
-        import
-            .sessions
-            .push(session(1, ImportSessionStatus::Skipped));
-        import.sessions.push(session(
-            61,
-            ImportSessionStatus::Refused(CassHistoryRefusal::Changed),
-        ));
+        import.sessions.push(session(1, ImportSessionStatus::Skipped));
+        import.sessions.push(session(61, ImportSessionStatus::Refused(CassHistoryRefusal::Changed)));
         let report = review_imported_sessions(&import);
         assert_eq!(report.sessions_eligible, 60);
         assert_eq!(report.sessions_planned, 16);
@@ -438,22 +476,18 @@ mod tests {
         assert_eq!(report.duplicate_sessions_skipped, 1);
         assert_eq!(report.sessions_refused, 1);
         assert_eq!(report.candidates_persisted, 0);
+        assert_eq!(report.sessions_previously_reviewed, 0);
+        assert_eq!(report.sessions_newly_reviewed, 0);
+        assert_eq!(report.sessions_pending_review, 60);
         assert!(!report.durable_mutation);
         assert_eq!(report.degradations()[0].code, "cass_import_review_deferred");
-        assert!(
-            report.sessions[16]
-                .retry_command
-                .as_deref()
-                .is_some_and(|command| command.contains(&session_id(17)))
-        );
+        assert!(report.sessions[16].retry_command.as_deref().is_some_and(|command| command.contains(&session_id(17))));
     }
 
     #[test]
     fn missing_binding_and_session_id_fail_without_selecting_a_default() {
         let mut import = import_report();
-        import
-            .sessions
-            .push(session(1, ImportSessionStatus::Imported));
+        import.sessions.push(session(1, ImportSessionStatus::Imported));
         let mut invalid = session(2, ImportSessionStatus::Imported);
         invalid.session_id = Some("latest; unsafe".to_owned());
         import.sessions.push(invalid);
@@ -471,18 +505,11 @@ mod tests {
     fn failure_diagnostics_use_public_replay_redaction() {
         let mut import = import_report();
         import.dry_run = true;
-        import
-            .sessions
-            .push(session(1, ImportSessionStatus::WouldImport));
+        import.sessions.push(session(1, ImportSessionStatus::WouldImport));
         let mut report = review_imported_sessions(&import);
         let entry = report.sessions.remove(0);
         let private_path = "/Users/private-owner/work/secret-project/private.sqlite";
-        record_failure(
-            &mut report,
-            entry,
-            "storage_error",
-            &format!("Cannot open {private_path}"),
-        );
+        record_failure(&mut report, entry, "storage_error", &format!("Cannot open {private_path}"));
         let encoded = report.data_json().to_string();
         assert!(!encoded.contains(private_path));
         assert!(encoded.contains("storage_error"));
@@ -494,14 +521,9 @@ mod tests {
         import.dry_run = true;
         import.workspace_path = "/workspace/project's notes $(touch nope)".to_owned();
         import.database_path = Some("/workspace/custom store.db".to_owned());
-        import
-            .sessions
-            .push(session(1, ImportSessionStatus::WouldImport));
+        import.sessions.push(session(1, ImportSessionStatus::WouldImport));
         let report = review_imported_sessions(&import);
-        let command = report.sessions[0]
-            .retry_command
-            .as_deref()
-            .unwrap_or_default();
+        let command = report.sessions[0].retry_command.as_deref().unwrap_or_default();
         assert!(command.contains("--workspace '/workspace/project'\\''s notes $(touch nope)'"));
         assert!(command.contains("--database '/workspace/custom store.db'"));
         assert!(command.contains("--propose --min-confidence 0.5 --limit 8 --json"));
@@ -533,10 +555,7 @@ mod tests {
         impl Fixture {
             fn new(create_workspace: bool) -> Result<Self, String> {
                 let root = tempfile::tempdir().map_err(|error| error.to_string())?;
-                let physical_root = root
-                    .path()
-                    .canonicalize()
-                    .map_err(|error| error.to_string())?;
+                let physical_root = root.path().canonicalize().map_err(|error| error.to_string())?;
                 let workspace = physical_root.join("workspace");
                 if create_workspace {
                     fs::create_dir(&workspace).map_err(|error| error.to_string())?;
@@ -557,12 +576,7 @@ mod tests {
             }
 
             fn write_transcript(&self, records: &[JsonValue]) -> TestResult {
-                let source = records
-                    .iter()
-                    .map(JsonValue::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    + "\n";
+                let source = records.iter().map(JsonValue::to_string).collect::<Vec<_>>().join("\n") + "\n";
                 fs::write(&self.source, &source).map_err(|error| error.to_string())?;
                 let sessions = json!({"sessions": [{
                     "path": self.source.to_string_lossy(),
@@ -572,31 +586,18 @@ mod tests {
                     "message_count": records.len(),
                     "token_count": 32,
                 }]});
-                let lines = records
-                    .iter()
-                    .enumerate()
-                    .map(|(index, record)| {
-                        json!({
-                            "line": index + 1,
-                            "content": record.to_string(),
-                            "highlighted": index == 0,
-                        })
-                    })
-                    .collect::<Vec<_>>();
+                let lines = records.iter().enumerate().map(|(index, record)| {
+                    json!({"line": index + 1, "content": record.to_string(), "highlighted": index == 0})
+                }).collect::<Vec<_>>();
                 let view = serde_json::to_string_pretty(&json!({
                     "path": self.source.to_string_lossy(),
-                    "target_line": 1,
-                    "context": 64,
-                    "lines": lines,
-                    "total_lines": records.len(),
-                }))
-                .map_err(|error| error.to_string())?;
+                    "target_line": 1, "context": 64, "lines": lines, "total_lines": records.len(),
+                })).map_err(|error| error.to_string())?;
                 let script = format!(
                     "#!/bin/sh\ncase \"$1\" in\n  sessions) cat <<'EE_CASS_SESSIONS'\n{sessions}\nEE_CASS_SESSIONS\n;;\n  view) cat <<'EE_CASS_VIEW'\n{view}\nEE_CASS_VIEW\n;;\n  *) exit 2;;\nesac\n"
                 );
                 fs::write(&self.binary, script).map_err(|error| error.to_string())?;
-                fs::set_permissions(&self.binary, fs::Permissions::from_mode(0o755))
-                    .map_err(|error| error.to_string())
+                fs::set_permissions(&self.binary, fs::Permissions::from_mode(0o755)).map_err(|error| error.to_string())
             }
 
             fn import(&self, dry_run: bool) -> Result<CassImportReport, String> {
@@ -605,13 +606,9 @@ mod tests {
                     &CassImportOptions {
                         workspace_path: self.workspace.clone(),
                         database_path: Some(self.database.clone()),
-                        limit: 1,
-                        since: None,
-                        dry_run,
-                        include_spans: true,
+                        limit: 1, since: None, dry_run, include_spans: true,
                     },
-                )
-                .map_err(|error| error.to_string())
+                ).map_err(|error| error.to_string())
             }
 
             fn connection(&self) -> Result<DbConnection, String> {
@@ -632,48 +629,24 @@ mod tests {
             assert_eq!(report.sessions_reviewed, 1);
             assert_eq!(report.candidate_count, 1);
             assert_eq!(report.candidates_persisted, 1);
+            assert_eq!(report.sessions_newly_reviewed, 1);
+            assert_eq!(report.sessions_pending_review, 0);
             assert!(report.durable_mutation);
-            let candidate = report.sessions[0]
-                .candidates
-                .first()
-                .ok_or("missing proposal")?;
+            let candidate = report.sessions[0].candidates.first().ok_or("missing proposal")?;
             assert_eq!(candidate.candidate_type, "create_derived_memory");
-            assert!(
-                candidate
-                    .proposed_content
-                    .contains(LESSON.trim_end_matches('.'))
-            );
+            assert!(candidate.proposed_content.contains(LESSON.trim_end_matches('.')));
             assert_eq!(candidate.source_ids.len(), 1);
             assert!(candidate.target_memory_id.is_none());
             let connection = fixture.connection()?;
-            let stored = connection
-                .get_curation_candidate(&fixture.workspace_id(), &candidate.candidate_id)
-                .map_err(|error| error.to_string())?
-                .ok_or("missing stored proposal")?;
+            let stored = connection.get_curation_candidate(&fixture.workspace_id(), &candidate.candidate_id)
+                .map_err(|error| error.to_string())?.ok_or("missing stored proposal")?;
             assert_eq!(stored.status, "pending");
-            let refs = stored
-                .derivation_source_refs_json
-                .as_deref()
-                .ok_or("missing source binding")?;
+            let refs = stored.derivation_source_refs_json.as_deref().ok_or("missing source binding")?;
             assert!(refs.contains(&candidate.source_ids[0]));
-            let metadata = stored
-                .derivation_metadata_json
-                .as_deref()
-                .ok_or("missing producer binding")?;
+            let metadata = stored.derivation_metadata_json.as_deref().ok_or("missing producer binding")?;
             assert!(metadata.contains("review_session"));
-            assert!(
-                connection
-                    .list_memories(&fixture.workspace_id(), None, false)
-                    .map_err(|error| error.to_string())?
-                    .is_empty()
-            );
-            let evidence = connection
-                .list_evidence_spans_for_session(
-                    import.sessions[0]
-                        .session_id
-                        .as_deref()
-                        .ok_or("missing session ID")?,
-                )
+            assert!(connection.list_memories(&fixture.workspace_id(), None, false).map_err(|error| error.to_string())?.is_empty());
+            let evidence = connection.list_evidence_spans_for_session(import.sessions[0].session_id.as_deref().ok_or("missing session ID")?)
                 .map_err(|error| error.to_string())?;
             assert!(evidence.iter().all(|span| span.memory_id.is_none()));
             connection.close().map_err(|error| error.to_string())
@@ -691,31 +664,23 @@ mod tests {
             assert_eq!(first.candidates_persisted, 1);
             let candidate_id = &first.sessions[0].candidates[0].candidate_id;
             let connection = fixture.connection()?;
-            assert!(
-                connection
-                    .update_curation_candidate_review(
-                        &fixture.workspace_id(),
-                        candidate_id,
-                        CurationCandidateReviewUpdate {
-                            status: "rejected",
-                            review_state: "rejected",
-                            reviewed_at: "2026-05-06T00:00:00Z",
-                            reviewed_by: "test-reviewer",
-                            snoozed_until: None,
-                            merged_into_candidate_id: None,
-                            ttl_policy_id: None,
-                        }
-                    )
-                    .map_err(|error| error.to_string())?
-            );
+            assert!(connection.update_curation_candidate_review(
+                &fixture.workspace_id(), candidate_id,
+                CurationCandidateReviewUpdate {
+                    status: "rejected", review_state: "rejected",
+                    reviewed_at: "2026-05-06T00:00:00Z", reviewed_by: "test-reviewer",
+                    snoozed_until: None, merged_into_candidate_id: None, ttl_policy_id: None,
+                }
+            ).map_err(|error| error.to_string())?);
             connection.close().map_err(|error| error.to_string())?;
             let replay = review_imported_sessions(&fixture.import(false)?);
             assert_eq!(replay.candidates_persisted, 0);
+            assert_eq!(replay.sessions_previously_reviewed, 1);
+            assert_eq!(replay.sessions_newly_reviewed, 0);
+            assert_eq!(replay.sessions_pending_review, 0);
             assert!(!replay.durable_mutation);
             let connection = fixture.connection()?;
-            let candidates = connection
-                .list_curation_candidates(&fixture.workspace_id(), None, None, None)
-                .map_err(|error| error.to_string())?;
+            let candidates = connection.list_curation_candidates(&fixture.workspace_id(), None, None, None).map_err(|error| error.to_string())?;
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].id, *candidate_id);
             assert_eq!(candidates[0].status, "rejected");
@@ -735,14 +700,15 @@ mod tests {
                 let report = review_imported_sessions(&import);
                 assert_eq!(report.sessions_failed, 0);
                 assert_eq!(report.candidate_count, 0);
-                assert!(!report.durable_mutation);
+                // Recording that the reviewer abstained is scheduling progress,
+                // not permission to turn quarantined evidence into a proposal.
+                assert!(report.durable_mutation);
+                assert_eq!(report.sessions_newly_reviewed, 1);
+                let replay = review_imported_sessions(&fixture.import(false)?);
+                assert_eq!(replay.candidate_count, 0);
+                assert!(!replay.durable_mutation);
                 let connection = fixture.connection()?;
-                assert!(
-                    connection
-                        .list_curation_candidates(&fixture.workspace_id(), None, None, None)
-                        .map_err(|error| error.to_string())?
-                        .is_empty()
-                );
+                assert!(connection.list_curation_candidates(&fixture.workspace_id(), None, None, None).map_err(|error| error.to_string())?.is_empty());
                 connection.close().map_err(|error| error.to_string())?;
             }
             Ok(())
@@ -752,9 +718,7 @@ mod tests {
         fn per_session_failure_preserves_import_and_continues_later_reviews() -> TestResult {
             let fixture = Fixture::new(true)?;
             let mut import = fixture.import(false)?;
-            import
-                .sessions
-                .insert(0, session(999, ImportSessionStatus::Skipped));
+            import.sessions.insert(0, session(999, ImportSessionStatus::Skipped));
             let report = review_imported_sessions(&import);
             assert_eq!(report.sessions_failed, 1);
             assert_eq!(report.sessions_reviewed, 1);
@@ -766,27 +730,15 @@ mod tests {
             assert_eq!(report.sessions[1].session_index, 1);
             assert_eq!(import.sessions_imported, 1);
             let connection = fixture.connection()?;
-            assert_eq!(
-                connection
-                    .list_evidence_spans_for_session(
-                        import.sessions[1]
-                            .session_id
-                            .as_deref()
-                            .ok_or("missing imported session")?
-                    )
-                    .map_err(|error| error.to_string())?
-                    .len(),
-                1
-            );
+            assert_eq!(connection.list_evidence_spans_for_session(import.sessions[1].session_id.as_deref().ok_or("missing imported session")?)
+                .map_err(|error| error.to_string())?.len(), 1);
             connection.close().map_err(|error| error.to_string())
         }
 
         #[test]
         fn dry_run_import_and_review_create_no_workspace_or_store() -> TestResult {
             let fixture = Fixture::new(false)?;
-            let files_before = fs::read_dir(&fixture.root)
-                .map_err(|error| error.to_string())?
-                .count();
+            let files_before = fs::read_dir(&fixture.root).map_err(|error| error.to_string())?.count();
             let import = fixture.import(true)?;
             assert!(import.database_path.is_none());
             let report = review_imported_sessions(&import);
@@ -794,16 +746,12 @@ mod tests {
             assert_eq!(report.sessions_planned, 1);
             assert_eq!(report.sessions_reviewed, 0);
             assert_eq!(report.candidate_count, 0);
+            assert_eq!(report.sessions_pending_review, 1);
             assert!(report.sessions[0].session_id.is_none());
             assert!(!fixture.workspace.exists());
             assert!(!fixture.database.exists());
             assert!(!fixture.root.join("store").exists());
-            assert_eq!(
-                fs::read_dir(&fixture.root)
-                    .map_err(|error| error.to_string())?
-                    .count(),
-                files_before
-            );
+            assert_eq!(fs::read_dir(&fixture.root).map_err(|error| error.to_string())?.count(), files_before);
             Ok(())
         }
 
@@ -813,27 +761,19 @@ mod tests {
             fixture.import(false)?;
             fixture.write_transcript(&[json!({"type":"assistant","message":{"role":"assistant","content":"Always run cargo clippy before cutting a release tag."}})])?;
             let refused = fixture.import(false)?;
-            assert!(matches!(
-                refused.sessions[0].status,
-                ImportSessionStatus::Refused(CassHistoryRefusal::Changed)
-            ));
+            assert!(matches!(refused.sessions[0].status, ImportSessionStatus::Refused(CassHistoryRefusal::Changed)));
             let report = review_imported_sessions(&refused);
             assert_eq!(report.sessions_refused, 1);
             assert_eq!(report.sessions_reviewed, 0);
             assert_eq!(report.candidates_persisted, 0);
+            assert_eq!(report.sessions_pending_review, 0);
             let connection = fixture.connection()?;
-            assert!(
-                connection
-                    .list_curation_candidates(&fixture.workspace_id(), None, None, None)
-                    .map_err(|error| error.to_string())?
-                    .is_empty()
-            );
+            assert!(connection.list_curation_candidates(&fixture.workspace_id(), None, None, None).map_err(|error| error.to_string())?.is_empty());
             connection.close().map_err(|error| error.to_string())
         }
 
         #[test]
-        fn append_refresh_reviews_current_evidence_without_overwriting_prior_candidates()
-        -> TestResult {
+        fn append_refresh_reviews_current_evidence_without_overwriting_prior_candidates() -> TestResult {
             let fixture = Fixture::new(true)?;
             let initial = review_imported_sessions(&fixture.import(false)?);
             assert_eq!(initial.candidates_persisted, 1);
@@ -847,22 +787,14 @@ mod tests {
             let report = review_imported_sessions(&refreshed);
             assert_eq!(report.sessions_reviewed, 1);
             assert_eq!(report.sessions_failed, 0);
+            assert_eq!(report.sessions_previously_reviewed, 0);
+            assert_eq!(report.sessions_newly_reviewed, 1);
             assert!(report.candidate_count > 0);
             let connection = fixture.connection()?;
-            let original = connection
-                .get_curation_candidate(&fixture.workspace_id(), candidate_id)
-                .map_err(|error| error.to_string())?
-                .ok_or("prior candidate lost after append")?;
-            assert_eq!(
-                original.proposed_content.as_deref(),
-                Some(initial.sessions[0].candidates[0].proposed_content.as_str())
-            );
-            assert!(
-                connection
-                    .list_memories(&fixture.workspace_id(), None, false)
-                    .map_err(|error| error.to_string())?
-                    .is_empty()
-            );
+            let original = connection.get_curation_candidate(&fixture.workspace_id(), candidate_id)
+                .map_err(|error| error.to_string())?.ok_or("prior candidate lost after append")?;
+            assert_eq!(original.proposed_content.as_deref(), Some(initial.sessions[0].candidates[0].proposed_content.as_str()));
+            assert!(connection.list_memories(&fixture.workspace_id(), None, false).map_err(|error| error.to_string())?.is_empty());
             connection.close().map_err(|error| error.to_string())
         }
     }
