@@ -336,6 +336,50 @@ is a real observation of that test. Those 8 reds were the session's most
 valuable output, and two of them were genuine defects nothing else had surfaced.
 Read the log of a SIGKILLed job before paying to re-dispatch it.
 
+**AND THE SAME IS TRUE OF A BUILD THAT FINISHED AND THEN FAILED TO POST THE
+MAIL. Exit 102 with `rch_verify_topology_blocked` can be a COMPLETELY CLEAN
+BUILD.** Measured 2026-10-26 on `cargo test --locked -j 2 --no-run --lib
+--tests`, dispatched as a detector for a test target that had silently stopped
+compiling:
+
+| field | value |
+|---|---|
+| `status` | `rch_environment_failure` |
+| `exit_code` | **102** |
+| `degraded_codes` | `rch_verify_remote_command_failed`, `rch_verify_topology_blocked` |
+| `elapsed_ms` | 11097933 — 185 minutes |
+| in the log | `Finished \`test\` profile ... in 184m 20s`, **48** `Executable` lines, **0** lines matching `^error` |
+
+The build succeeded. What failed came after it:
+
+```text
+[RCH] RCH-E327: artifact debug/ee is incompatible with aarch64-apple-darwin;
+  rejected before downloading build artifacts; local outputs were not replaced
+```
+
+`--lib` builds `unittests src/main.rs`, which produces a `debug/ee`, and rch
+correctly refuses to sync a Linux binary down onto an arm64 Mac. So the verdict
+field describes the ARTIFACT RETURN and says nothing about the compile — while
+the compile is the only thing that dispatch was for. Read `Finished` and count
+the `Executable` lines; they are what `--no-run` produces instead of a
+`test result:` line, and there must be one per built target (48 here = 46
+declared `[[test]]` targets plus `unittests src/lib.rs` and `src/main.rs`,
+which reconciles with the census above).
+
+Two consequences worth keeping:
+
+- **`--no-run --lib --tests` is the only detector for a test target that
+  cannot COMPILE**, and that failure is invisible to everything else: exit 101
+  is cargo's tests-failed code, a target that does not build prints no
+  `Running` line so announcement pairing is silent, and there is no summary for
+  the `filtered out` total to live in. One such break went unnoticed for three
+  days (see bd-mbupe). `--require-targets` is the one rule that catches it,
+  because it reads `Running` lines.
+- **Dispatch it as `--tests` without `--lib`, or set
+  `RCH_ALLOW_FOREIGN_ARTIFACTS=1`**, if you want the run to end in a status that
+  describes the build. A single `--test <target>` run produces no `debug/ee` and
+  does not hit this at all.
+
 **After a SIGKILL, do NOT re-pin to that worker for its warm target dir.** The
 next dispatch there was refused in 19 s:
 
