@@ -352,6 +352,9 @@ fn journal_and_execution_lease_symlinks_are_refused() -> TestResult {
     Ok(())
 }
 
+/// Set only for the re-executed test binary that plays the lease owner.
+const DAEMON_LEASE_ROOT_ENV: &str = "EE_TEST_DAEMON_LEASE_ROOT";
+
 struct ChildGuard(Child);
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -367,7 +370,7 @@ fn killed_owner_releases_lease_and_next_process_can_recover() -> TestResult {
     let (_temp, root, options) = fixture()?;
     let child = Command::new(std::env::current_exe()?)
         .arg("daemon_lease_child_process")
-        .env("EE_TEST_DAEMON_LEASE_ROOT", &root)
+        .env(DAEMON_LEASE_ROOT_ENV, &root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -402,7 +405,7 @@ fn killed_owner_releases_lease_and_next_process_can_recover() -> TestResult {
 
 #[test]
 fn daemon_lease_child_process() -> TestResult {
-    let Some(root) = std::env::var_os("EE_TEST_DAEMON_LEASE_ROOT") else {
+    let Some(root) = std::env::var_os(DAEMON_LEASE_ROOT_ENV) else {
         return Ok(());
     };
     let root = PathBuf::from(root);
