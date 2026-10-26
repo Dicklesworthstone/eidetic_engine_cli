@@ -7,6 +7,13 @@ use serde::Serialize;
 use crate::db::{CassEvidenceWithdrawal, CassEvidenceWithdrawalError, DbConnection, DbError};
 use crate::models::{DomainError, EvidenceId};
 
+#[path = "evidence_session.rs"]
+mod session;
+pub use session::{
+    EVIDENCE_SESSION_WITHDRAW_SCHEMA_V1, EvidenceSessionWithdrawOptions,
+    EvidenceSessionWithdrawReport, withdraw_cass_session_evidence,
+};
+
 pub const EVIDENCE_WITHDRAW_SCHEMA_V1: &str = "ee.evidence.withdraw.v1";
 
 #[derive(Clone, Debug)]
@@ -103,6 +110,43 @@ impl From<DbError> for WithdrawalTransactionError {
     }
 }
 
+fn validate_reason(reason: &str) -> Result<(), DomainError> {
+    if reason.trim().is_empty() || reason.len() > 4096 {
+        return Err(DomainError::Usage {
+            message: "Evidence withdrawal requires a nonempty reason of at most 4096 bytes."
+                .to_owned(),
+            repair: Some("Pass --reason with the reason for withdrawing this source.".to_owned()),
+        });
+    }
+    Ok(())
+}
+
+fn withdrawal_error(error: CassEvidenceWithdrawalError, resource: &str, id: &str) -> DomainError {
+    match error {
+        CassEvidenceWithdrawalError::Database(error) => storage_error(error),
+        CassEvidenceWithdrawalError::NotFound => DomainError::NotFound {
+            resource: resource.to_owned(),
+            id: id.to_owned(),
+            repair: Some("Address the workspace that owns this source ID.".to_owned()),
+        },
+        CassEvidenceWithdrawalError::UnsupportedProducer => DomainError::Usage {
+            message: "Evidence withdrawal currently supports CASS-imported sources only."
+                .to_owned(),
+            repair: None,
+        },
+        CassEvidenceWithdrawalError::InvalidMetadata => DomainError::Storage {
+            message: "The evidence security metadata is inconsistent; withdrawal was not applied."
+                .to_owned(),
+            repair: Some("ee doctor --json".to_owned()),
+        },
+        CassEvidenceWithdrawalError::InvalidReason => DomainError::Usage {
+            message: "Evidence withdrawal requires a nonempty reason of at most 4096 bytes."
+                .to_owned(),
+            repair: None,
+        },
+    }
+}
+
 /// Deny one CASS evidence source for future search, packs and derivation.
 ///
 /// The source text, historical packs and independently curated memories/rules
@@ -112,13 +156,7 @@ impl From<DbError> for WithdrawalTransactionError {
 pub fn withdraw_cass_evidence(
     options: &EvidenceWithdrawOptions<'_>,
 ) -> Result<EvidenceWithdrawReport, DomainError> {
-    if options.reason.trim().is_empty() || options.reason.len() > 4096 {
-        return Err(DomainError::Usage {
-            message: "Evidence withdrawal requires a nonempty reason of at most 4096 bytes."
-                .to_owned(),
-            repair: Some("Pass --reason with the reason for withdrawing this source.".to_owned()),
-        });
-    }
+    validate_reason(options.reason)?;
     if !options
         .evidence_id
         .parse::<EvidenceId>()
@@ -129,12 +167,43 @@ pub fn withdraw_cass_evidence(
             repair: Some("Use the evidence ID from a search result or source citation.".to_owned()),
         });
     }
-    let database_path = options
-        .database_path
+    with_withdrawal_store(
+        options.workspace_path,
+        options.database_path,
+        options.dry_run,
+        |connection, workspace_id| {
+            let decision = connection
+                .withdraw_cass_evidence_in_current_snapshot(
+                    workspace_id,
+                    options.evidence_id,
+                    options.reason,
+                    options.actor,
+                    options.dry_run,
+                )
+                .map_err(|error| withdrawal_error(error, "evidence", options.evidence_id))?;
+            Ok(EvidenceWithdrawReport::from_decision(
+                workspace_id.to_owned(),
+                decision,
+                options.dry_run,
+            ))
+        },
+    )
+}
+
+/// Share the addressed-store, migration, owner and transaction boundaries
+/// across single-source and session-wide operations. Previews never create,
+/// migrate or open a writable store. Receipts are returned only after commit.
+fn with_withdrawal_store<T>(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    dry_run: bool,
+    apply: impl Fn(&DbConnection, &str) -> Result<T, DomainError>,
+) -> Result<T, DomainError> {
+    let database_path = database_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| options.workspace_path.join(".ee/ee.db"));
+        .unwrap_or_else(|| workspace_path.join(".ee/ee.db"));
     super::ensure_addressed_database_exists(&database_path)?;
-    let connection = if options.dry_run {
+    let connection = if dry_run {
         DbConnection::open_file_read_only(&database_path)
     } else {
         DbConnection::open_file(&database_path)
@@ -149,7 +218,7 @@ pub fn withdraw_cass_evidence(
                     message: "Migrate the existing database before withdrawing evidence. The store was not changed.".to_owned(),
                     repair: Some(format!(
                         "ee migrate run --workspace {} --database {} --json",
-                        super::shell_quote_repair_arg(&options.workspace_path.to_string_lossy()),
+                        super::shell_quote_repair_arg(&workspace_path.to_string_lossy()),
                         super::shell_quote_repair_arg(&database_path.to_string_lossy()),
                     )),
                 });
@@ -164,53 +233,18 @@ pub fn withdraw_cass_evidence(
         }
         let workspace = super::workspace::addressed_workspace_row(
             &connection,
-            options.workspace_path,
+            workspace_path,
             &database_path,
         )?
         .ok_or_else(|| DomainError::NotFound {
             resource: "workspace".to_owned(),
-            id: options.workspace_path.display().to_string(),
+            id: workspace_path.display().to_string(),
             repair: Some("Address the workspace that owns the imported evidence.".to_owned()),
         })?;
-        let decision = connection
-            .withdraw_cass_evidence_in_current_snapshot(
-                &workspace.id,
-                options.evidence_id,
-                options.reason,
-                options.actor,
-                options.dry_run,
-            )
-            .map_err(|error| match error {
-                CassEvidenceWithdrawalError::Database(error) => storage_error(error),
-                CassEvidenceWithdrawalError::NotFound => DomainError::NotFound {
-                    resource: "evidence".to_owned(),
-                    id: options.evidence_id.to_owned(),
-                    repair: Some("Address the workspace that owns this evidence ID.".to_owned()),
-                },
-                CassEvidenceWithdrawalError::UnsupportedProducer => DomainError::Usage {
-                    message: "Evidence withdrawal currently supports CASS-imported sources only."
-                        .to_owned(),
-                    repair: None,
-                },
-                CassEvidenceWithdrawalError::InvalidMetadata => DomainError::Storage {
-                    message: "The evidence security metadata is inconsistent; withdrawal was not applied."
-                        .to_owned(),
-                    repair: Some("ee doctor --json".to_owned()),
-                },
-                CassEvidenceWithdrawalError::InvalidReason => DomainError::Usage {
-                    message: "Evidence withdrawal requires a nonempty reason of at most 4096 bytes."
-                        .to_owned(),
-                    repair: None,
-                },
-            })?;
-        Ok(EvidenceWithdrawReport::from_decision(
-            workspace.id,
-            decision,
-            options.dry_run,
-        ))
+        apply(&connection, &workspace.id)
     };
 
-    if options.dry_run {
+    if dry_run {
         connection.begin_read_snapshot().map_err(storage_error)?;
         match decide() {
             Ok(report) => {

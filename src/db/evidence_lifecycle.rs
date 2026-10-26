@@ -3,9 +3,12 @@
 
 use super::{
     CreateAuditInput, CreateSearchIndexJobInput, DbConnection, DbError, DbOperation,
-    EvidenceProducerKind, SearchIndexJobType, Value, audit_actions, generate_audit_id,
-    stored_evidence_security_state_hash,
+    EvidenceProducerKind, SearchIndexJobType, StoredEvidenceSpan, Value, audit_actions,
+    generate_audit_id, stored_evidence_security_state_hash,
 };
+
+#[path = "evidence_session_withdrawal.rs"]
+mod session;
 
 /// Metadata from the exact source snapshot used for a withdrawal decision.
 #[derive(Debug)]
@@ -35,6 +38,31 @@ impl From<DbError> for CassEvidenceWithdrawalError {
     }
 }
 
+/// Validate the original security envelope before preparing either kind of
+/// withdrawal. Never repair malformed authority metadata by overwriting it.
+fn withdrawal_metadata(span: &StoredEvidenceSpan) -> Result<String, CassEvidenceWithdrawalError> {
+    if EvidenceProducerKind::parse(&span.producer_kind) != Some(EvidenceProducerKind::CassImport) {
+        return Err(CassEvidenceWithdrawalError::UnsupportedProducer);
+    }
+    let classes: Vec<String> = serde_json::from_str(&span.redaction_classes_json)
+        .map_err(|_| CassEvidenceWithdrawalError::InvalidMetadata)?;
+    if !span.security_metadata_matches(EvidenceProducerKind::CassImport, &classes) {
+        return Err(CassEvidenceWithdrawalError::InvalidMetadata);
+    }
+    let mut metadata: serde_json::Value = serde_json::from_str(
+        span.metadata_json
+            .as_deref()
+            .ok_or(CassEvidenceWithdrawalError::InvalidMetadata)?,
+    )
+    .map_err(|_| CassEvidenceWithdrawalError::InvalidMetadata)?;
+    let object = metadata
+        .as_object_mut()
+        .ok_or(CassEvidenceWithdrawalError::InvalidMetadata)?;
+    object.insert("searchEligibility".to_owned(), "denied".into());
+    object.insert("packEligibility".to_owned(), "denied".into());
+    Ok(metadata.to_string())
+}
+
 impl DbConnection {
     /// Decide and optionally withdraw one source in the caller's snapshot.
     ///
@@ -50,7 +78,7 @@ impl DbConnection {
         reason: &str,
         actor: Option<&str>,
         dry_run: bool,
-    ) -> std::result::Result<CassEvidenceWithdrawal, CassEvidenceWithdrawalError> {
+    ) -> Result<CassEvidenceWithdrawal, CassEvidenceWithdrawalError> {
         if reason.trim().is_empty() || reason.len() > 4096 {
             return Err(CassEvidenceWithdrawalError::InvalidReason);
         }
@@ -67,28 +95,7 @@ impl DbConnection {
         }
         // Other producers intentionally store `denied` while still supporting
         // explicit curation. Reusing that value cannot revoke their authority.
-        if EvidenceProducerKind::parse(&span.producer_kind)
-            != Some(EvidenceProducerKind::CassImport)
-        {
-            return Err(CassEvidenceWithdrawalError::UnsupportedProducer);
-        }
-        let classes: Vec<String> = serde_json::from_str(&span.redaction_classes_json)
-            .map_err(|_| CassEvidenceWithdrawalError::InvalidMetadata)?;
-        if !span.security_metadata_matches(EvidenceProducerKind::CassImport, &classes) {
-            return Err(CassEvidenceWithdrawalError::InvalidMetadata);
-        }
-        let mut metadata: serde_json::Value = serde_json::from_str(
-            span.metadata_json
-                .as_deref()
-                .ok_or(CassEvidenceWithdrawalError::InvalidMetadata)?,
-        )
-        .map_err(|_| CassEvidenceWithdrawalError::InvalidMetadata)?;
-        let object = metadata
-            .as_object_mut()
-            .ok_or(CassEvidenceWithdrawalError::InvalidMetadata)?;
-        object.insert("searchEligibility".to_owned(), "denied".into());
-        object.insert("packEligibility".to_owned(), "denied".into());
-
+        let metadata_json = withdrawal_metadata(&span)?;
         let would_change = span.search_eligibility != "denied" || span.pack_eligibility != "denied";
         let mut outcome = CassEvidenceWithdrawal {
             evidence_id: span.id.clone(),
@@ -104,54 +111,13 @@ impl DbConnection {
             return Ok(outcome);
         }
 
-        let now = chrono::Utc::now().to_rfc3339();
-        let metadata_json = metadata.to_string();
-        let affected = self.execute_for(
-            DbOperation::Execute,
-            "UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied', metadata_json = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND session_id = ?5 AND producer_kind = 'cass_import' AND search_eligibility = ?6 AND pack_eligibility = ?7",
-            &[
-                Value::Text(metadata_json.clone()),
-                Value::Text(now.clone()),
-                Value::Text(span.id.clone()),
-                Value::Text(workspace_id.to_owned()),
-                Value::Text(span.session_id.clone()),
-                Value::Text(span.search_eligibility.clone()),
-                Value::Text(span.pack_eligibility.clone()),
-            ],
-        )?;
-        if affected != 1 {
-            return Err(DbError::MalformedRow {
-                operation: DbOperation::Execute,
-                message: "Evidence withdrawal did not update its selected source".to_owned(),
-            }
-            .into());
-        }
         let before_hash = stored_evidence_security_state_hash(&span);
-        let mut withdrawn = span;
-        withdrawn.search_eligibility = "denied".to_owned();
-        withdrawn.pack_eligibility = "denied".to_owned();
-        withdrawn.metadata_json = Some(metadata_json);
-        withdrawn.updated_at = now;
-
-        // The existing session job causes the index source reader to remove
-        // excluded evidence. Live admission already denies this row while the
-        // job waits; queuing is not a claim that index publication completed.
-        let index_job_id = format!(
-            "sidx_{}",
-            crate::models::MemoryId::now()
-                .to_string()
-                .trim_start_matches("mem_")
-        );
-        self.insert_search_index_job(
-            &index_job_id,
-            &CreateSearchIndexJobInput {
-                workspace_id: workspace_id.to_owned(),
-                job_type: SearchIndexJobType::Incremental,
-                document_source: Some("session".to_owned()),
-                document_id: Some(withdrawn.session_id.clone()),
-                documents_total: 1,
-            },
+        let withdrawn = self.deny_cass_source(
+            span,
+            metadata_json,
+            &chrono::Utc::now().to_rfc3339(),
         )?;
+        let index_job_id = self.enqueue_withdrawn_session(workspace_id, &withdrawn.session_id)?;
         let audit_id = generate_audit_id();
         self.insert_audit(
             &audit_id,
@@ -185,5 +151,66 @@ impl DbConnection {
         outcome.audit_id = Some(audit_id);
         outcome.index_job_id = Some(index_job_id);
         Ok(outcome)
+    }
+
+    /// Shared mutation boundary. Callers already validated the owner and
+    /// security envelope and own the transaction containing the receipts.
+    fn deny_cass_source(
+        &self,
+        mut span: StoredEvidenceSpan,
+        metadata_json: String,
+        now: &str,
+    ) -> Result<StoredEvidenceSpan, CassEvidenceWithdrawalError> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied', metadata_json = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND session_id = ?5 AND producer_kind = 'cass_import' AND search_eligibility = ?6 AND pack_eligibility = ?7",
+            &[
+                Value::Text(metadata_json.clone()),
+                Value::Text(now.to_owned()),
+                Value::Text(span.id.clone()),
+                Value::Text(span.workspace_id.clone()),
+                Value::Text(span.session_id.clone()),
+                Value::Text(span.search_eligibility.clone()),
+                Value::Text(span.pack_eligibility.clone()),
+            ],
+        )?;
+        if affected != 1 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "Evidence withdrawal did not update its selected source".to_owned(),
+            }
+            .into());
+        }
+        span.search_eligibility = "denied".to_owned();
+        span.pack_eligibility = "denied".to_owned();
+        span.metadata_json = Some(metadata_json);
+        span.updated_at = now.to_owned();
+        Ok(span)
+    }
+
+    fn enqueue_withdrawn_session(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> Result<String, CassEvidenceWithdrawalError> {
+        // One session job reconciles all of its excluded spans. Live admission
+        // denies them immediately; this receipt does not claim publication.
+        let id = format!(
+            "sidx_{}",
+            crate::models::MemoryId::now()
+                .to_string()
+                .trim_start_matches("mem_")
+        );
+        self.insert_search_index_job(
+            &id,
+            &CreateSearchIndexJobInput {
+                workspace_id: workspace_id.to_owned(),
+                job_type: SearchIndexJobType::Incremental,
+                document_source: Some("session".to_owned()),
+                document_id: Some(session_id.to_owned()),
+                documents_total: 1,
+            },
+        )?;
+        Ok(id)
     }
 }
