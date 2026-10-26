@@ -5758,6 +5758,7 @@ fn native_warning_candidate_for_page(
 /// Apply result caps and page offsets to one ranked candidate population.
 /// Native evidence and rules must not lose their places merely because their
 /// source kind used to follow every memory in an implicit concatenation.
+#[cfg(test)]
 fn apply_pagination_with_rules(
     candidates: &mut Vec<PackCandidate>,
     rule_candidates: &mut Vec<crate::pack::PackRuleItem>,

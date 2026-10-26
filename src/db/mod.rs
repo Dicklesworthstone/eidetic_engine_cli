@@ -27753,6 +27753,10 @@ impl DbConnection {
     /// Targets over 128 bytes become empty invalid hints. Smaller targets are
     /// preserved exactly, including embedded NUL, so projection cannot turn a
     /// malformed target into an unrelated canonical evidence or memory id.
+    ///
+    /// Test-only: production recall pages helpful targets through
+    /// `core::error_recall_feedback`; tests keep this reader as a reference.
+    #[cfg(test)]
     pub(crate) fn list_helpful_error_repair_target_ids(
         &self,
         workspace_id: &str,
