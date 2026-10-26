@@ -9482,6 +9482,42 @@ fn open_migrated_memory_database(database_path: &Path) -> Result<DbConnection, S
     Ok(conn)
 }
 
+fn open_memory_maintenance_database(
+    workspace_path: &Path,
+    database_path: &Path,
+    read_only: bool,
+) -> Result<DbConnection, DomainError> {
+    if !read_only {
+        return open_migrated_memory_database(database_path).map_err(memory_command_storage_error);
+    }
+
+    super::ensure_addressed_database_exists(database_path)?;
+    let conn = DbConnection::open_file_read_only(database_path).map_err(|error| {
+        memory_command_storage_error(format!("Failed to open database read-only: {error}"))
+    })?;
+    let addressed_args = format!(
+        "--workspace {} --database {} --json",
+        super::shell_quote_repair_arg(&workspace_path.to_string_lossy()),
+        super::shell_quote_repair_arg(&database_path.to_string_lossy()),
+    );
+    match conn.needs_migration() {
+        Ok(false) => Ok(conn),
+        Ok(true) => Err(DomainError::MigrationRequired {
+            message: "Database schema migration is required before inspecting memory maintenance. The store was not changed.".to_owned(),
+            repair: Some(format!("ee migrate run {addressed_args}")),
+        }),
+        Err(error @ crate::db::DbError::MigrationDrift { .. }) => {
+            Err(DomainError::MigrationDrift {
+                message: format!("Failed to inspect memory database schema: {error}"),
+                repair: Some(format!("ee migrate status {addressed_args}")),
+            })
+        }
+        Err(error) => Err(memory_command_storage_error(format!(
+            "Failed to inspect memory database schema: {error}"
+        ))),
+    }
+}
+
 fn truncate_content(content: &str) -> (String, bool) {
     let char_count = content.chars().count();
     if char_count <= CONTENT_PREVIEW_LEN {
@@ -10006,168 +10042,192 @@ fn expire_audit_details(reason: Option<&str>) -> String {
     .to_string()
 }
 
-/// Expire a memory by setting its validity end timestamp. No files or rows are deleted.
-pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireReport, DomainError> {
-    let conn = open_migrated_memory_database(options.database_path)
-        .map_err(memory_command_storage_error)?;
-    let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
-    let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
-    let expires_at = normalize_validity_timestamp(Utc::now());
-
-    if memory.tombstoned_at.is_some() {
-        if !options.include_tombstoned {
-            return Err(DomainError::PolicyDenied {
-                message: "Memory is tombstoned and cannot be expired.".to_owned(),
-                repair: Some("Use ee memory show to inspect the tombstoned memory.".to_owned()),
-            });
-        }
-
-        return Ok(MemoryExpireReport {
-            schema: MEMORY_EXPIRE_SCHEMA_V1,
-            version: env!("CARGO_PKG_VERSION"),
-            memory_id: options.memory_id.to_owned(),
-            workspace_id,
-            status: "already_expired".to_owned(),
-            dry_run: options.dry_run,
-            persisted: false,
-            changed: false,
-            previous_valid_to: memory.valid_to.clone(),
-            valid_to: memory.valid_to,
-            previous_tombstoned_at: memory.tombstoned_at.clone(),
-            tombstoned_at: memory.tombstoned_at,
-            audit_id: None,
-            index_job_id: None,
-            index_status: "not_scheduled".to_owned(),
-            idempotency: "no_change".to_owned(),
+fn memory_expiration_plan(
+    options: &ExpireMemoryOptions<'_>,
+    workspace_id: &str,
+    memory: &StoredMemory,
+    expires_at: DateTime<Utc>,
+) -> Result<MemoryExpireReport, DomainError> {
+    if memory.tombstoned_at.is_some() && !options.include_tombstoned {
+        return Err(DomainError::PolicyDenied {
+            message: "Memory is tombstoned and cannot be expired.".to_owned(),
+            repair: Some("Use ee memory show to inspect the tombstoned memory.".to_owned()),
         });
     }
-    if memory_validity(&memory.valid_from, &memory.valid_to).status == "expired" {
-        return Ok(MemoryExpireReport {
-            schema: MEMORY_EXPIRE_SCHEMA_V1,
-            version: env!("CARGO_PKG_VERSION"),
-            memory_id: options.memory_id.to_owned(),
-            workspace_id,
-            status: "already_expired".to_owned(),
-            dry_run: options.dry_run,
-            persisted: false,
-            changed: false,
-            previous_valid_to: memory.valid_to.clone(),
-            valid_to: memory.valid_to,
-            previous_tombstoned_at: None,
-            tombstoned_at: None,
-            audit_id: None,
-            index_job_id: None,
-            index_status: "not_scheduled".to_owned(),
-            idempotency: "no_change".to_owned(),
-        });
-    }
-
-    if options.dry_run {
-        return Ok(MemoryExpireReport {
-            schema: MEMORY_EXPIRE_SCHEMA_V1,
-            version: env!("CARGO_PKG_VERSION"),
-            memory_id: options.memory_id.to_owned(),
-            workspace_id,
-            status: "would_expire".to_owned(),
-            dry_run: true,
-            persisted: false,
-            changed: true,
-            previous_valid_to: memory.valid_to,
-            valid_to: Some(expires_at),
-            previous_tombstoned_at: None,
-            tombstoned_at: None,
-            audit_id: None,
-            index_job_id: None,
-            index_status: "dry_run_not_queued".to_owned(),
-            idempotency: "would_change".to_owned(),
-        });
-    }
-
-    let audit_id = generate_audit_id();
-    let actor = options.actor.or(Some("ee memory expire"));
-    let details = expire_audit_details(options.reason);
-    let index_job_id = generate_search_index_job_id();
-    let index_input = CreateSearchIndexJobInput {
-        workspace_id: workspace_id.clone(),
-        job_type: SearchIndexJobType::SingleDocument,
-        document_source: Some("memory".to_owned()),
-        document_id: Some(options.memory_id.to_owned()),
-        documents_total: 1,
+    // Match the database's monotonic end-marker comparison. Display validity
+    // prioritizes a future start, which must not hide an already elapsed end.
+    let changed = if memory.tombstoned_at.is_some() {
+        false
+    } else {
+        let previous_end = memory
+            .valid_to
+            .as_deref()
+            .map(DateTime::parse_from_rfc3339)
+            .transpose()
+            .map_err(|error| {
+                memory_command_storage_error(format!(
+                    "Stored memory validity end is invalid: {error}"
+                ))
+            })?;
+        previous_end.is_none_or(|end| end.with_timezone(&Utc) > expires_at)
     };
-
-    conn.with_transaction(|| {
-        let expired = conn.expire_memory_valid_to(options.memory_id, &expires_at)?;
-        if !expired {
-            return Ok(None);
-        }
-        conn.insert_audit(
-            &audit_id,
-            &CreateAuditInput {
-                workspace_id: Some(workspace_id.clone()),
-                actor: actor.map(str::to_owned),
-                action: audit_actions::MEMORY_EXPIRE.to_owned(),
-                target_type: Some("memory".to_owned()),
-                target_id: Some(options.memory_id.to_owned()),
-                details: Some(details.clone()),
-            },
-        )?;
-        if memory.level == "semantic" {
-            let mut evidence_refs = vec![expires_at.clone()];
-            if let Some(reason) = options.reason {
-                evidence_refs.push(reason.to_owned());
-            }
-            let _ = conn.apply_memory_level_transition_in_current_transaction(
-                options.memory_id,
-                &ApplyMemoryLevelTransitionInput {
-                    workspace_id: workspace_id.clone(),
-                    expected_level: Some(memory.level.clone()),
-                    level: "episodic".to_owned(),
-                    updated_at: expires_at.clone(),
-                    actor: actor.map(str::to_owned),
-                    reason: "time_bound_fact".to_owned(),
-                    automatic: true,
-                    event: "valid_to.set".to_owned(),
-                    evidence_refs,
-                    source_action: Some(audit_actions::MEMORY_EXPIRE.to_owned()),
-                },
-            )?;
-        }
-        conn.insert_search_index_job(&index_job_id, &index_input)?;
-        Ok(Some(()))
-    })
-    .map_err(|error| memory_command_storage_error(format!("Failed to expire memory: {error}")))?;
-
-    let refreshed = conn
-        .get_memory(options.memory_id)
-        .map_err(|error| {
-            memory_command_storage_error(format!("Failed to reload expired memory: {error}"))
-        })?
-        .ok_or_else(|| memory_command_not_found(options.memory_id))?;
-    let refreshed_validity = memory_validity(&refreshed.valid_from, &refreshed.valid_to);
-    let changed = refreshed_validity.status == "expired";
-
     Ok(MemoryExpireReport {
         schema: MEMORY_EXPIRE_SCHEMA_V1,
         version: env!("CARGO_PKG_VERSION"),
         memory_id: options.memory_id.to_owned(),
-        workspace_id,
+        workspace_id: workspace_id.to_owned(),
         status: if changed {
-            "expired".to_owned()
+            "would_expire".to_owned()
         } else {
             "already_expired".to_owned()
         },
-        dry_run: false,
-        persisted: changed,
+        dry_run: options.dry_run,
+        persisted: false,
         changed,
-        previous_valid_to: memory.valid_to,
-        valid_to: refreshed.valid_to,
-        previous_tombstoned_at: None,
-        tombstoned_at: refreshed.tombstoned_at,
-        audit_id: Some(audit_id),
-        index_job_id: Some(index_job_id),
-        index_status: "queued".to_owned(),
-        idempotency: "changed".to_owned(),
+        previous_valid_to: memory.valid_to.clone(),
+        valid_to: if changed {
+            Some(normalize_validity_timestamp(expires_at))
+        } else {
+            memory.valid_to.clone()
+        },
+        previous_tombstoned_at: memory.tombstoned_at.clone(),
+        tombstoned_at: memory.tombstoned_at.clone(),
+        audit_id: None,
+        index_job_id: None,
+        index_status: if changed {
+            "dry_run_not_queued".to_owned()
+        } else {
+            "not_scheduled".to_owned()
+        },
+        idempotency: if changed {
+            "would_change".to_owned()
+        } else {
+            "no_change".to_owned()
+        },
     })
+}
+
+// The caller owns the write transaction. Resolve scope, revalidate the current
+// row and retain the exact mutation result before the transaction commits.
+// Domain failures occur before writes; database failures roll all writes back.
+fn expire_memory_in_current_transaction(
+    conn: &DbConnection,
+    options: &ExpireMemoryOptions<'_>,
+) -> crate::db::Result<Result<MemoryExpireReport, DomainError>> {
+    let workspace_id = workspace_id_for_database(conn, options.workspace_path);
+    let Some(memory) = conn.get_memory(options.memory_id)? else {
+        return Ok(Err(memory_command_not_found(options.memory_id)));
+    };
+    if memory.workspace_id != workspace_id {
+        return Ok(Err(memory_command_not_found(options.memory_id)));
+    }
+    let expiry_instant = Utc::now();
+    let expires_at = normalize_validity_timestamp(expiry_instant);
+    let mut report = match memory_expiration_plan(options, &workspace_id, &memory, expiry_instant) {
+        Ok(report) => report,
+        Err(error) => return Ok(Err(error)),
+    };
+    if !report.changed {
+        return Ok(Ok(report));
+    }
+
+    if !conn.expire_memory_valid_to(options.memory_id, &expires_at)? {
+        let Some(current) = conn.get_memory(options.memory_id)? else {
+            return Ok(Err(memory_command_not_found(options.memory_id)));
+        };
+        if current.workspace_id != workspace_id {
+            return Ok(Err(memory_command_not_found(options.memory_id)));
+        }
+        let unchanged =
+            match memory_expiration_plan(options, &workspace_id, &current, expiry_instant) {
+                Ok(report) => report,
+                Err(error) => return Ok(Err(error)),
+            };
+        if unchanged.changed {
+            return Err(crate::db::DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "Memory expiry did not persist the planned validity end.".to_owned(),
+            });
+        }
+        return Ok(Ok(unchanged));
+    }
+
+    let audit_id = generate_audit_id();
+    let actor = options.actor.or(Some("ee memory expire"));
+    conn.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(workspace_id.clone()),
+            actor: actor.map(str::to_owned),
+            action: audit_actions::MEMORY_EXPIRE.to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some(options.memory_id.to_owned()),
+            details: Some(expire_audit_details(options.reason)),
+        },
+    )?;
+    if memory.level == "semantic" {
+        let mut evidence_refs = vec![expires_at.clone()];
+        if let Some(reason) = options.reason {
+            evidence_refs.push(reason.to_owned());
+        }
+        let transition = conn.apply_memory_level_transition_in_current_transaction(
+            options.memory_id,
+            &ApplyMemoryLevelTransitionInput {
+                workspace_id: workspace_id.clone(),
+                expected_level: Some(memory.level.clone()),
+                level: "episodic".to_owned(),
+                updated_at: expires_at,
+                actor: actor.map(str::to_owned),
+                reason: "time_bound_fact".to_owned(),
+                automatic: true,
+                event: "valid_to.set".to_owned(),
+                evidence_refs,
+                source_action: Some(audit_actions::MEMORY_EXPIRE.to_owned()),
+            },
+        )?;
+        if transition.is_none() {
+            return Err(crate::db::DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "Expired semantic memory did not transition to episodic.".to_owned(),
+            });
+        }
+    }
+    let index_job_id = generate_search_index_job_id();
+    conn.insert_search_index_job(
+        &index_job_id,
+        &CreateSearchIndexJobInput {
+            workspace_id,
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_owned()),
+            document_id: Some(options.memory_id.to_owned()),
+            documents_total: 1,
+        },
+    )?;
+    report.status = "expired".to_owned();
+    report.persisted = true;
+    report.audit_id = Some(audit_id);
+    report.index_job_id = Some(index_job_id);
+    report.index_status = "queued".to_owned();
+    report.idempotency = "changed".to_owned();
+    Ok(Ok(report))
+}
+
+/// Expire a memory by setting its validity end timestamp. No files or rows are deleted.
+pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireReport, DomainError> {
+    let conn = open_memory_maintenance_database(
+        options.workspace_path,
+        options.database_path,
+        options.dry_run,
+    )?;
+    if options.dry_run {
+        let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
+        let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
+        return memory_expiration_plan(options, &workspace_id, &memory, Utc::now());
+    }
+    conn.with_transaction(|| expire_memory_in_current_transaction(&conn, options))
+        .map_err(|error| {
+            memory_command_storage_error(format!("Failed to expire memory: {error}"))
+        })?
 }
 
 fn memory_lifecycle_state_from_level(level: &str) -> Option<MemoryLifecycleState> {
@@ -10265,8 +10325,11 @@ pub fn update_memory_level(
         .map(memory_level_target)
         .transpose()?
         .map(|level| level.as_str().to_owned());
-    let conn = open_migrated_memory_database(options.database_path)
-        .map_err(memory_command_storage_error)?;
+    let conn = open_memory_maintenance_database(
+        options.workspace_path,
+        options.database_path,
+        options.dry_run,
+    )?;
     let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
 
@@ -10632,8 +10695,11 @@ fn memory_link_audit_details(link: &MemoryLinkItem, metadata_json: Option<&str>)
 pub fn update_memory_link(
     options: &MemoryLinkOptions<'_>,
 ) -> Result<MemoryLinkReport, DomainError> {
-    let conn = open_migrated_memory_database(options.database_path)
-        .map_err(memory_command_storage_error)?;
+    let conn = open_memory_maintenance_database(
+        options.workspace_path,
+        options.database_path,
+        options.dry_run || matches!(options.mode, MemoryLinkMode::List { .. }),
+    )?;
     let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let source_memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
 
@@ -10829,8 +10895,11 @@ pub fn update_memory_link(
 pub fn update_memory_tags(
     options: &MemoryTagsOptions<'_>,
 ) -> Result<MemoryTagsReport, DomainError> {
-    let conn = open_migrated_memory_database(options.database_path)
-        .map_err(memory_command_storage_error)?;
+    let conn = open_memory_maintenance_database(
+        options.workspace_path,
+        options.database_path,
+        options.dry_run || matches!(options.mode, MemoryTagsMode::List),
+    )?;
     let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
 
@@ -15157,6 +15226,246 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
+    fn memory_maintenance_inspections(
+        workspace_path: &Path,
+        database_path: &Path,
+    ) -> Vec<(&'static str, Result<(), DomainError>)> {
+        let memory_id = "mem_00000000000000000000000001";
+        vec![
+            (
+                "expire preview",
+                expire_memory(&ExpireMemoryOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    reason: Some("obsolete"),
+                    actor: None,
+                    dry_run: true,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+            (
+                "level preview",
+                update_memory_level(&MemoryLevelOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    level: "procedural",
+                    expected_level: Some("semantic"),
+                    reason: Some("repeatedly verified"),
+                    actor: None,
+                    dry_run: true,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+            (
+                "tags preview",
+                update_memory_tags(&MemoryTagsOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    mode: MemoryTagsMode::Set(vec!["updated".to_owned()]),
+                    actor: None,
+                    dry_run: true,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+            (
+                "tags list",
+                update_memory_tags(&MemoryTagsOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    mode: MemoryTagsMode::List,
+                    actor: None,
+                    dry_run: false,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+            (
+                "link preview",
+                update_memory_link(&MemoryLinkOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    mode: MemoryLinkMode::Create {
+                        target_memory_id: "mem_00000000000000000000000002".to_owned(),
+                        relation: MemoryLinkRelation::Supports,
+                        weight: 0.75,
+                        confidence: 0.9,
+                        directed: true,
+                        evidence_count: 1,
+                        source: MemoryLinkSource::Human,
+                        metadata_json: None,
+                    },
+                    actor: None,
+                    dry_run: true,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+            (
+                "link list",
+                update_memory_link(&MemoryLinkOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    mode: MemoryLinkMode::List { relation: None },
+                    actor: None,
+                    dry_run: false,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+        ]
+    }
+
+    fn memory_maintenance_fixture() -> Result<(tempfile::TempDir, PathBuf, String), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("maintenance.db");
+        let workspace_path = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&workspace_path);
+        let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        conn.insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace_path.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        for memory_id in [
+            "mem_00000000000000000000000001",
+            "mem_00000000000000000000000002",
+        ] {
+            let mut input = remember_test_memory_input(&workspace_id, "A time-bound fact.");
+            input.level = "semantic".to_owned();
+            input.kind = "fact".to_owned();
+            input.tags = vec!["original".to_owned()];
+            conn.insert_memory(memory_id, &input)
+                .map_err(|error| error.to_string())?;
+        }
+        conn.close().map_err(|error| error.to_string())?;
+        Ok((temp, database_path, workspace_id))
+    }
+
+    #[test]
+    fn memory_maintenance_inspections_never_create_missing_stores() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("absent workspace");
+        let database = workspace.join(".ee/ee.db");
+        for (surface, result) in memory_maintenance_inspections(&workspace, &database) {
+            let error = result.expect_err("a missing store must remain missing");
+            ensure(error.code(), "workspace_store_missing", surface)?;
+        }
+        ensure(workspace.exists(), false, "no workspace is created")?;
+        ensure(
+            memory_list_store_snapshot(&database)?.is_empty(),
+            true,
+            "no database or sidecars are created",
+        )
+    }
+
+    #[test]
+    fn memory_maintenance_inspections_preserve_pending_schema_and_drift() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database = temp.path().join("older store's.db");
+        let migration = &crate::db::V001_INIT_SCHEMA;
+        let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        conn.ensure_migration_table()
+            .map_err(|error| error.to_string())?;
+        conn.execute_raw(migration.sql())
+            .map_err(|error| error.to_string())?;
+        conn.record_migration(
+            &crate::db::MigrationRecord::new(
+                migration.version(),
+                migration.name(),
+                migration.checksum(),
+                "2026-09-15T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        conn.close().map_err(|error| error.to_string())?;
+
+        let addressed_args = format!(
+            "--workspace {} --database {} --json",
+            crate::core::shell_quote_repair_arg(&temp.path().to_string_lossy()),
+            crate::core::shell_quote_repair_arg(&database.to_string_lossy()),
+        );
+        let before = memory_list_store_snapshot(&database)?;
+        let repair = format!("ee migrate run {addressed_args}");
+        for (surface, result) in memory_maintenance_inspections(temp.path(), &database) {
+            let error = result.expect_err("old schema must require an explicit migration");
+            ensure(error.code(), "migration_required", surface)?;
+            ensure(
+                error.repair(),
+                Some(repair.as_str()),
+                "addressed migration repair",
+            )?;
+        }
+        ensure(
+            memory_list_store_snapshot(&database)?,
+            before,
+            "previews and lists preserve pending schema, bytes and metadata",
+        )?;
+
+        let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        ensure(
+            conn.applied_migrations()
+                .map_err(|error| error.to_string())?
+                .len(),
+            1,
+            "previews never append migrations",
+        )?;
+        conn.execute_raw("UPDATE ee_schema_migrations SET name = 'tampered' WHERE version = 1")
+            .map_err(|error| error.to_string())?;
+        conn.close().map_err(|error| error.to_string())?;
+        let before_drift = memory_list_store_snapshot(&database)?;
+        let repair = format!("ee migrate status {addressed_args}");
+        for (surface, result) in memory_maintenance_inspections(temp.path(), &database) {
+            let error = result.expect_err("drift must require explicit inspection");
+            ensure(error.code(), "migration_drift", surface)?;
+            ensure(
+                error.repair(),
+                Some(repair.as_str()),
+                "addressed drift repair",
+            )?;
+        }
+        ensure(
+            memory_list_store_snapshot(&database)?,
+            before_drift,
+            "previews and lists preserve a drifted ledger",
+        )
+    }
+
+    #[test]
+    fn memory_maintenance_previews_and_lists_preserve_current_store() -> TestResult {
+        let (temp, database, _) = memory_maintenance_fixture()?;
+        let before = memory_list_store_snapshot(&database)?;
+        for (surface, result) in memory_maintenance_inspections(temp.path(), &database) {
+            result.map_err(|error| format!("{surface}: {}", error.message()))?;
+        }
+        ensure(
+            memory_list_store_snapshot(&database)?,
+            before,
+            "read-only maintenance preserves DB, WAL, SHM, audits, jobs and generation",
+        )?;
+        ensure(
+            temp.path().join(".ee").exists(),
+            false,
+            "no index or workspace side effects",
+        )
+    }
+
     #[test]
     fn expire_memory_dry_run_preserves_memory() -> TestResult {
         let (temp, created) = remember_revisable_memory("Expire dry-run target.")?;
@@ -15250,6 +15559,20 @@ mod tests {
             audit.action,
             audit_actions::MEMORY_EXPIRE.to_owned(),
             "expire audit action",
+        )?;
+        let index_job = connection
+            .get_search_index_job(
+                report
+                    .index_job_id
+                    .as_deref()
+                    .ok_or("missing index job ID")?,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or("reported index job must exist")?;
+        ensure(
+            index_job.document_id,
+            Some(created.memory_id.to_string()),
+            "reported index job targets the expired memory",
         )
     }
 
@@ -15267,6 +15590,17 @@ mod tests {
         })
         .map_err(|error| error.message())?;
         ensure(report.status, "expired".to_owned(), "initial expire status")?;
+        let connection = DbConnection::open_file_read_only(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        let audits_before = connection
+            .list_audit_by_target("memory", &created.memory_id.to_string(), None)
+            .map_err(|error| error.to_string())?
+            .len();
+        let jobs_before = connection
+            .list_search_index_jobs(&report.workspace_id, None)
+            .map_err(|error| error.to_string())?
+            .len();
+        connection.close().map_err(|error| error.to_string())?;
 
         let already = expire_memory(&ExpireMemoryOptions {
             workspace_path: temp.path(),
@@ -15284,12 +15618,281 @@ mod tests {
             "idempotent status",
         )?;
         ensure(already.persisted, false, "idempotent persisted")?;
+        ensure(already.changed, false, "idempotent changed")?;
+        ensure(already.audit_id, None, "idempotent audit ID absent")?;
+        ensure(already.index_job_id, None, "idempotent index job ID absent")?;
+        ensure(
+            already.index_status,
+            "not_scheduled".to_owned(),
+            "idempotent index status",
+        )?;
+        ensure(
+            already.idempotency,
+            "no_change".to_owned(),
+            "idempotent posture",
+        )?;
         ensure(
             already.previous_valid_to,
             report.valid_to.clone(),
             "idempotent previous valid_to",
         )?;
-        ensure(already.valid_to, report.valid_to, "idempotent valid_to")
+        ensure(already.valid_to, report.valid_to, "idempotent valid_to")?;
+        let connection = DbConnection::open_file_read_only(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .list_audit_by_target("memory", &created.memory_id.to_string(), None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            audits_before,
+            "idempotent expiry inserts no audit rows",
+        )?;
+        ensure(
+            connection
+                .list_search_index_jobs(&report.workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            jobs_before,
+            "idempotent expiry queues no index jobs",
+        )
+    }
+
+    #[test]
+    fn expire_memory_transaction_uses_current_level_and_validity() -> TestResult {
+        let (temp, database, workspace_id) = memory_maintenance_fixture()?;
+        let memory_id = "mem_00000000000000000000000001";
+        let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let options = ExpireMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: &database,
+            memory_id,
+            reason: Some("fact no longer applies"),
+            actor: Some("test"),
+            dry_run: false,
+            include_tombstoned: false,
+        };
+        conn.execute_raw(
+            "UPDATE memories SET level = 'procedural' WHERE id = 'mem_00000000000000000000000001'",
+        )
+        .map_err(|error| error.to_string())?;
+        // The same transaction can contain a newer lifecycle decision than an
+        // earlier read. Expiry must use that row, including its scheduled end.
+        let earlier = conn
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("fixture memory missing")?;
+        ensure(
+            earlier.valid_to,
+            None,
+            "earlier read had no scheduled expiry",
+        )?;
+        ensure(
+            earlier.level,
+            "procedural".to_owned(),
+            "earlier read had a different level",
+        )?;
+        let report = conn.with_transaction(|| {
+            conn.execute_raw(
+                "UPDATE memories SET level = 'semantic', valid_from = '2998-01-01T00:00:00Z', valid_to = '2999-01-01T00:00:00Z' WHERE id = 'mem_00000000000000000000000001'",
+            )?;
+            expire_memory_in_current_transaction(&conn, &options)
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.message())?;
+        ensure(report.persisted, true, "expiry committed")?;
+        ensure(
+            report.previous_valid_to,
+            Some("2999-01-01T00:00:00Z".to_owned()),
+            "report describes the row observed inside the transaction",
+        )?;
+        let expired = conn
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("expired memory missing")?;
+        ensure(
+            expired.valid_to,
+            report.valid_to,
+            "report matches committed expiry",
+        )?;
+        ensure(
+            expired.level,
+            "episodic".to_owned(),
+            "semantic expiry becomes episodic",
+        )?;
+        let audits = conn
+            .list_audit_by_target("memory", memory_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            audits.len(),
+            2,
+            "expiry and level transition are audited together",
+        )?;
+        ensure(
+            audits
+                .iter()
+                .any(|audit| audit.action == audit_actions::MEMORY_LEVEL_TRANSITION),
+            true,
+            "automatic level transition audit exists",
+        )?;
+        ensure(
+            conn.list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            1,
+            "one job covers the atomic expiry and level transition",
+        )?;
+
+        let unchanged = conn
+            .with_transaction(|| expire_memory_in_current_transaction(&conn, &options))
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.message())?;
+        ensure(
+            unchanged.changed,
+            false,
+            "a future start does not hide already expired state on the transaction recheck",
+        )?;
+        ensure(
+            unchanged.audit_id,
+            None,
+            "transaction no-op has no fabricated audit ID",
+        )?;
+        ensure(
+            unchanged.index_job_id,
+            None,
+            "transaction no-op has no fabricated index ID",
+        )
+    }
+
+    #[test]
+    fn expire_memory_transaction_rechecks_tombstones_and_scope() -> TestResult {
+        let (temp, database, _) = memory_maintenance_fixture()?;
+        let memory_id = "mem_00000000000000000000000001";
+        let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let options = ExpireMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: &database,
+            memory_id,
+            reason: None,
+            actor: None,
+            dry_run: false,
+            include_tombstoned: false,
+        };
+        let earlier = conn
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("fixture memory missing")?;
+        ensure(earlier.tombstoned_at, None, "earlier read was active")?;
+        let rejected = conn
+            .with_transaction(|| {
+                conn.tombstone_memory(memory_id)?;
+                expire_memory_in_current_transaction(&conn, &options)
+            })
+            .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(rejected, Err(DomainError::PolicyDenied { .. })),
+            true,
+            "transaction refuses a newly tombstoned memory",
+        )?;
+        let visible = conn
+            .with_transaction(|| {
+                expire_memory_in_current_transaction(
+                    &conn,
+                    &ExpireMemoryOptions {
+                        include_tombstoned: true,
+                        ..options.clone()
+                    },
+                )
+            })
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.message())?;
+        ensure(visible.changed, false, "included tombstone is a no-op")?;
+        ensure(
+            visible.tombstoned_at.is_some(),
+            true,
+            "included tombstone remains visible",
+        )?;
+        ensure(
+            visible.audit_id,
+            None,
+            "included tombstone has no expiry audit",
+        )?;
+        let foreign_workspace = temp.path().join("other workspace");
+        let foreign = conn
+            .with_transaction(|| {
+                expire_memory_in_current_transaction(
+                    &conn,
+                    &ExpireMemoryOptions {
+                        workspace_path: &foreign_workspace,
+                        include_tombstoned: true,
+                        ..options.clone()
+                    },
+                )
+            })
+            .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(foreign, Err(DomainError::NotFound { .. })),
+            true,
+            "transaction does not expose another workspace's memory",
+        )?;
+        ensure(
+            conn.list_audit_by_target("memory", memory_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            true,
+            "rejected and no-op expirations create no audit rows",
+        )
+    }
+
+    #[test]
+    fn expire_memory_rolls_back_validity_level_and_audit_when_index_queue_fails() -> TestResult {
+        let (temp, database, workspace_id) = memory_maintenance_fixture()?;
+        let memory_id = "mem_00000000000000000000000001";
+        let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let before = conn
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?;
+        conn.execute_raw(
+            "CREATE TRIGGER test_expiry_index_failure BEFORE INSERT ON search_index_jobs \
+             BEGIN SELECT RAISE(ABORT, 'intentional expiry queue failure'); END",
+        )
+        .map_err(|error| error.to_string())?;
+        conn.close().map_err(|error| error.to_string())?;
+        let result = expire_memory(&ExpireMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: &database,
+            memory_id,
+            reason: Some("obsolete"),
+            actor: None,
+            dry_run: false,
+            include_tombstoned: false,
+        });
+        ensure(
+            matches!(result, Err(DomainError::Storage { .. })),
+            true,
+            "queue failure is reported as a failed transaction",
+        )?;
+        let conn =
+            DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+        ensure(
+            conn.get_memory(memory_id)
+                .map_err(|error| error.to_string())?,
+            before,
+            "queue failure restores validity, level, provenance and timestamps",
+        )?;
+        ensure(
+            conn.list_audit_by_target("memory", memory_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            true,
+            "expiry and level audits roll back",
+        )?;
+        ensure(
+            conn.list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            true,
+            "no index job is left behind",
+        )
     }
 
     #[test]
