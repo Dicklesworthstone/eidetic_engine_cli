@@ -6170,7 +6170,9 @@ def remediation_guidance_for(blocker_kind):
         "cargo_path_dependency_version": {
             "unmapped_reason": "The historical workspace-sync implementation is closed; a current dependency-version mismatch needs its own manifest and pin diagnosis.",
         },
-        "client_daemon_version_skew": {"bead": "bd-k2fkz"},
+        "client_daemon_version_skew": {
+            "unmapped_reason": "The historical 2.0.0-client against 1.0.64-daemon skew is closed; both are 2.1.34 as of 2026-10-15. A NEW skew is a different condition with a different owner, so read the two version strings from rch --version and rchd --version and name the pair before selecting remediation.",
+        },
         "remote_checkout_incomplete": {
             "unmapped_reason": "The historical dependency-closure implementation is closed; identify the missing remote checkout before selecting remediation.",
         },

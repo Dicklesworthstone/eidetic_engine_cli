@@ -93,7 +93,17 @@ under test, so a stale binary is fine for it.
 The second is **not a free-space failure, and reading it as one wastes the
 fix.** The denying check reported 30 GB available against a 1 GB minimum; what
 failed was `external_required: true` against `external: false`, because `TMPDIR`
-pointed at the macOS default `/var/folders/...`. AGENTS.md explains why it is
+pointed at the macOS default `/var/folders/...`.
+
+(That 1 GB is the figure measured then. Re-measured 2026-10-25, `ee diag
+build-admission --json` reports `minFreeBytes: 5368709120` — **5 GiB** — on each
+of its three roots, so do not quote 1 GB as current. And note WHICH roots: it
+checks `workspace_root`, `cargo_build_target` and `temporary_directory`. It does
+NOT check the committed-tree export base, and for a cargo dispatch it checks the
+*configured* `CARGO_TARGET_DIR` rather than the `<project>/.rch-target-…` pool
+dir rch rewrites to — which is the volume that actually filled in bd-to1fr. A
+green admission is therefore not a statement about the disk the build will
+write to.) AGENTS.md explains why it is
 not exported globally — the USB drive is ExFAT, which has no Unix domain
 sockets, so an exported ExFAT `TMPDIR` silently breaks gitstatusd in interactive
 shells. So set it per invocation, as the `cargo()` wrapper in `~/.zshrc` does:
