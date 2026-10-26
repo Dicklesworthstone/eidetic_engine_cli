@@ -396,7 +396,40 @@ mod conflict_read_admission {
             Ok(envelope["data"].clone())
         }
 
+        /// Full logical snapshot of the tables a conflict read must not touch.
+        ///
+        /// READ THROUGH THE FRANKEN-STACK, NOT THROUGH `ee`. This used to call
+        /// `self.db.query(...)`, which is `pub(crate) fn query` at
+        /// src/db/mod.rs:2341 and therefore unreachable from an integration
+        /// test -- a separate crate. The whole `integration_a_d` target failed
+        /// to compile from 583aa95d4 (2026-10-22) until this was fixed:
+        ///
+        ///     error[E0624]: method `query` is private
+        ///       --> tests/suites/../contradiction_detect_properties.rs:410:22
+        ///     error: could not compile `eidetic-engine` (test "integration_a_d")
+        ///
+        /// which took K3 (`degraded_codes_doc_coverage`) and every other test
+        /// in that target with it. `FrankenConnection::open_file` plus
+        /// `query_sync` is the idiom tests/graph_migrations.rs already uses, in
+        /// a target that compiles and passes on the pinned lane today, and it
+        /// needs no production visibility change.
+        ///
+        /// The snapshot stays a full row dump on purpose: the callers assert
+        /// `state() == before` across a read-only command, so a row COUNT
+        /// would miss an in-place update, which is the mutation most worth
+        /// catching.
         fn state(&self) -> TestResult<StoredState> {
+            let database = self
+                .root
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?
+                .join(".ee/ee.db");
+            let reader = sqlmodel_frankensqlite::FrankenConnection::open_file(
+                database.to_string_lossy().into_owned(),
+            )
+            .map_err(|error| format!("open state reader: {error}"))?;
+
             [
                 "memories",
                 "memory_tags",
@@ -406,8 +439,11 @@ mod conflict_read_admission {
             ]
             .into_iter()
             .map(|table| {
-                self.db
-                    .query(&format!("SELECT * FROM {table} ORDER BY 1, 2"), &[])
+                reader
+                    .query_sync(
+                        &format!("SELECT * FROM {table} ORDER BY 1, 2"),
+                        &[] as &[sqlmodel_core::Value],
+                    )
                     .map(|rows| {
                         rows.into_iter()
                             .map(|row| {
