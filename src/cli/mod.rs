@@ -83063,6 +83063,49 @@ mod tests {
         )
     }
 
+    /// RESTORED (bd-0rkti). 90bf87b89, a recall refactor, deleted this with 168
+    /// net lines from this file and nothing replaced it, so for two months the
+    /// POSITIVE path above was asserted and the refusal was not.
+    ///
+    /// That asymmetry is the shape worth naming: `situation compare --dry-run`
+    /// succeeding does not test the policy, because a gate that stopped denying
+    /// anything would leave that test green. The product still denies -- probed
+    /// 2026-10-25 against the installed binary, which returned exit 7 with
+    /// `{"schema":"ee.error.v2","error":{"code":"policy_denied","message":
+    /// "Situation compare/link currently supports dry-run mode only."}}` and an
+    /// empty stderr -- so this is coverage that was lost, not behaviour that
+    /// changed. All four assertions below are the original ones.
+    #[test]
+    fn situation_compare_without_dry_run_is_policy_error() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "situation",
+            "compare",
+            "fix failing release workflow",
+            "fix broken login crash",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "situation compare policy exit",
+        )?;
+        ensure(stderr.is_empty(), "situation compare policy stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v2"),
+            "error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("policy_denied"),
+            "policy code",
+        )
+    }
+
     #[test]
     fn situation_link_dry_run_json_returns_link_plan() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[

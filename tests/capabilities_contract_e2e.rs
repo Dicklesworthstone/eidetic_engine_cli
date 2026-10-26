@@ -177,6 +177,53 @@ fn capabilities_json_contract_reports_inventory_counts_and_registry() -> TestRes
         }),
     )?;
 
+    // THE DAEMON WRITE AND MAINTENANCE SURFACE (bd-0rkti).
+    //
+    // 05020689c derived the command inventory from clap and deleted six
+    // `capabilities_report_*` unit tests with it. Four were list-membership
+    // against a clap-derived list and are rightly gone. Two were NOT:
+    // `capabilities_report_advertises_group_commit_daemon_write_methods` and
+    // `capabilities_report_marks_daemon_maintenance_posture` asserted
+    // AVAILABILITY for the daemon write methods and the maintenance posture,
+    // and from that commit until this block nothing in the tree did. The loop
+    // above was the only per-command `available == true` assertion and it
+    // covers six core commands.
+    //
+    // THEY COULD NOT BE RESTORED WHERE THEY WERE. `CapabilitiesReport::gather`
+    // now TAKES the inventory as a parameter instead of building it, so a unit
+    // test can only assert about an inventory it injected itself -- which
+    // asserts nothing about the published surface. Here the report comes from
+    // the real binary, which is the only place the question is answerable.
+    //
+    // Measured 2026-10-25 against the installed binary: all seven names below
+    // are present with available == true in a 59-command report.
+    for command in [
+        "diag contention --use-daemon",
+        "ee.daemon.telemetry",
+        "ee.daemon.write",
+        "ee.daemon.write_journal",
+        "daemon foreground decay_sweep",
+        "daemon foreground non-decay",
+        "daemon background",
+    ] {
+        let entry = find_object_by_string(commands, "commands", "name", command)?;
+        ensure_eq_bool(
+            bool_member(entry, "available")?,
+            true,
+            &format!("commands[{command}].available"),
+        )?;
+    }
+    workspace.log(
+        "assert_daemon_surface_inventory",
+        json!({
+            "event": "daemon_write_and_maintenance_surface_available",
+            "restores": [
+                "capabilities_report_advertises_group_commit_daemon_write_methods",
+                "capabilities_report_marks_daemon_maintenance_posture",
+            ],
+        }),
+    )?;
+
     for env_name in [
         "EE_AGENT_NAME",
         "EE_DATABASE_PATH",
