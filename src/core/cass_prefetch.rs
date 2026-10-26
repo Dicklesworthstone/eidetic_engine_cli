@@ -218,6 +218,15 @@ impl CassPrefetchPolicy {
     }
 }
 
+/// Reserves the ordering of one configuration read before it performs I/O.
+/// Only the newest read may apply its result, even when that result leaves the
+/// effective policy unchanged. This is separate from a worker's policy epoch.
+#[derive(Debug, Eq, PartialEq)]
+#[cfg(unix)]
+pub(crate) struct CassPrefetchPolicyRefresh {
+    sequence: u64,
+}
+
 /// A batch may finish only under the policy that admitted it. Changing a
 /// policy, including disabling and re-enabling the same settings, revokes old
 /// tickets so an in-flight worker cannot repopulate cleared query history.
@@ -1505,6 +1514,8 @@ pub struct CassPrefetchCoordinator<P: SpeculativePrefetch> {
     runtime_policy: Option<CassPrefetchPolicy>,
     #[cfg(unix)]
     runtime_policy_epoch: u64,
+    #[cfg(unix)]
+    runtime_policy_refresh_sequence: u64,
     /// Completed warm batches awaiting their verdict, one per
     /// `(agent_scope, workspace)` (bd-16pwc.7). The worker is single-flight,
     /// so a second batch for one key means the first was superseded rather
@@ -1528,11 +1539,49 @@ impl CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor> {
         Self::with_predictor(RecencyWeightedFrequencyPredictor::new())
     }
 
+    /// Reserve before loading configuration outside the coordinator lock.
+    /// A later reservation supersedes this one without revoking worker tickets
+    /// unless its resolved policy actually changes. Exhaustion fails closed
+    /// rather than allowing a sequence to wrap and alias an older read.
+    #[cfg(unix)]
+    pub(crate) fn begin_runtime_policy_refresh(&mut self) -> Option<CassPrefetchPolicyRefresh> {
+        self.runtime_policy_refresh_sequence =
+            self.runtime_policy_refresh_sequence.checked_add(1)?;
+        Some(CassPrefetchPolicyRefresh {
+            sequence: self.runtime_policy_refresh_sequence,
+        })
+    }
+
+    /// Ignore a configuration result superseded by a newer read. Comparing
+    /// policy epochs alone is insufficient: a newer read can confirm the same
+    /// disabled policy without changing that epoch.
+    #[cfg(unix)]
+    pub(crate) fn finish_runtime_policy_refresh(
+        &mut self,
+        refresh: CassPrefetchPolicyRefresh,
+        policy: CassPrefetchPolicy,
+    ) -> Option<CassPrefetchPolicyTicket> {
+        if refresh.sequence != self.runtime_policy_refresh_sequence {
+            return None;
+        }
+        self.apply_runtime_policy(policy)
+    }
+
+    /// Synchronous policy updates for tests still supersede outstanding reads.
+    #[cfg(all(unix, test))]
+    pub(crate) fn configure_runtime_policy(
+        &mut self,
+        policy: CassPrefetchPolicy,
+    ) -> Option<CassPrefetchPolicyTicket> {
+        let refresh = self.begin_runtime_policy_refresh()?;
+        self.finish_runtime_policy_refresh(refresh, policy)
+    }
+
     /// Apply the workspace's current opt-in before observing a request. Policy
     /// changes discard retained topics and pending credit, and invalidate all
     /// previously admitted batches. Aggregate metrics remain available.
     #[cfg(unix)]
-    pub(crate) fn configure_runtime_policy(
+    fn apply_runtime_policy(
         &mut self,
         policy: CassPrefetchPolicy,
     ) -> Option<CassPrefetchPolicyTicket> {
@@ -1570,6 +1619,8 @@ impl<P: SpeculativePrefetch> CassPrefetchCoordinator<P> {
             runtime_policy: None,
             #[cfg(unix)]
             runtime_policy_epoch: 0,
+            #[cfg(unix)]
+            runtime_policy_refresh_sequence: 0,
             pending: BTreeMap::new(),
         }
     }

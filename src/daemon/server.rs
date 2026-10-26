@@ -5994,20 +5994,36 @@ fn configure_workspace_cass_prefetch(
     coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
     workspace_path: &Path,
 ) -> Option<CassPrefetchPolicyTicket> {
-    let policy = match crate::core::config_surface::merged_workspace_config(workspace_path) {
-        Ok(config) => CassPrefetchPolicy::from_config(&config.values.swarm.adaptive),
-        Err(_) => {
-            tracing::debug!(
-                target: "ee::cass_prefetch",
-                "adaptive prefetch disabled: workspace configuration unavailable"
-            );
-            CassPrefetchPolicy::default()
+    refresh_cass_prefetch_policy(coordinator, || {
+        match crate::core::config_surface::merged_workspace_config(workspace_path) {
+            Ok(config) => CassPrefetchPolicy::from_config(&config.values.swarm.adaptive),
+            Err(_) => {
+                tracing::debug!(
+                    target: "ee::cass_prefetch",
+                    "adaptive prefetch disabled: workspace configuration unavailable"
+                );
+                CassPrefetchPolicy::default()
+            }
         }
-    };
+    })
+}
+
+fn refresh_cass_prefetch_policy(
+    coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
+    load_policy: impl FnOnce() -> CassPrefetchPolicy,
+) -> Option<CassPrefetchPolicyTicket> {
+    // Reserve before configuration I/O, without holding the coordinator lock
+    // across filesystem access. An older read must not re-enable prefetch
+    // after a newer request has confirmed that it is disabled.
+    let refresh = coordinator
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .begin_runtime_policy_refresh()?;
+    let policy = load_policy();
     coordinator
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .configure_runtime_policy(policy)
+        .finish_runtime_policy_refresh(refresh, policy)
 }
 
 /// Post-success CASS prefetch observation + scheduling for one
@@ -7051,6 +7067,96 @@ mod tests {
                 .is_none()
         );
         assert!(guard.metrics_for(PREFETCH_WORKSPACE).is_none());
+    }
+
+    #[test]
+    fn cass_prefetch_stale_config_read_cannot_override_newer_disabled_policy() {
+        let enabled = CassPrefetchPolicy::from_config(&crate::config::SwarmAdaptiveConfig {
+            enabled: Some(true),
+            ..Default::default()
+        });
+        for initially_enabled in [false, true] {
+            let coordinator = prefetch_coordinator();
+            let shutdown = AtomicBool::new(false);
+            let initial = refresh_cass_prefetch_policy(&coordinator, || {
+                if initially_enabled {
+                    enabled
+                } else {
+                    CassPrefetchPolicy::default()
+                }
+            });
+            let stale = refresh_cass_prefetch_policy(&coordinator, || {
+                // The old read has already obtained enabled settings. Before
+                // it finishes, another request reads disabled settings. With
+                // an initially disabled coordinator this does not change the
+                // policy epoch, but it must still supersede the old read.
+                let newer = refresh_cass_prefetch_policy(&coordinator, CassPrefetchPolicy::default);
+                assert!(newer.is_none());
+                enabled
+            });
+            assert!(stale.is_none(), "initially enabled: {initially_enabled}");
+            let prediction = plan_and_observe_cass_prefetch(
+                &coordinator,
+                &shutdown,
+                TEST_AGENT_ID,
+                PREFETCH_WORKSPACE,
+                "stale enabled read",
+                Some(7),
+                stale,
+            );
+            assert!(prediction.candidates.is_empty());
+            let guard = coordinator.lock().unwrap();
+            if let Some(initial) = initial {
+                assert!(!guard.policy_ticket_is_current(initial));
+            }
+            assert!(
+                guard
+                    .history_for(&AgentScope::new(TEST_AGENT_ID), PREFETCH_WORKSPACE)
+                    .is_none()
+            );
+            assert!(guard.metrics_for(PREFETCH_WORKSPACE).is_none());
+        }
+    }
+
+    #[test]
+    fn cass_prefetch_stale_config_read_stays_revoked_after_disable_and_reenable() {
+        let coordinator = prefetch_coordinator();
+        let shutdown = AtomicBool::new(false);
+        let enabled = CassPrefetchPolicy::from_config(&crate::config::SwarmAdaptiveConfig {
+            enabled: Some(true),
+            ..Default::default()
+        });
+        let initial = refresh_cass_prefetch_policy(&coordinator, || enabled).unwrap();
+        let mut current = None;
+        let stale = refresh_cass_prefetch_policy(&coordinator, || {
+            assert!(
+                refresh_cass_prefetch_policy(&coordinator, CassPrefetchPolicy::default).is_none()
+            );
+            current = refresh_cass_prefetch_policy(&coordinator, || enabled);
+            enabled
+        });
+        assert!(stale.is_none());
+        let current = current.unwrap();
+        {
+            let guard = coordinator.lock().unwrap();
+            assert!(!guard.policy_ticket_is_current(initial));
+            assert!(guard.policy_ticket_is_current(current));
+        }
+        // Neither the original request's worker ticket nor the delayed
+        // configuration read may observe topics under the re-enabled policy.
+        for ticket in [Some(initial), stale, Some(current)] {
+            plan_and_observe_cass_prefetch(
+                &coordinator,
+                &shutdown,
+                TEST_AGENT_ID,
+                PREFETCH_WORKSPACE,
+                "current request",
+                Some(7),
+                ticket,
+            );
+        }
+        assert_eq!(prefetch_history_len(&coordinator, TEST_AGENT_ID), 1);
+        assert_eq!(prefetch_metrics(&coordinator).history_too_short, 1);
     }
 
     #[test]
