@@ -8124,7 +8124,12 @@ pub fn unrelated_context() -> u64 {{
                 response.data.pack.hash.as_deref(),
                 Some(history[0].0.pack_hash.as_str())
             );
-            let ledger = crate::db::parse_stored_pack_ledger(&history[0].0);
+            // The list projection carries no ledger body; load the full row.
+            let record = connection
+                .get_pack_record(&history[0].0.id)
+                .map_err(|error| error.to_string())?
+                .ok_or("persisted pack record")?;
+            let ledger = crate::db::parse_stored_pack_ledger(&record);
             assert_eq!(
                 ledger.available_ledger().ok_or("verified ledger")?["packHash"],
                 history[0].0.pack_hash
