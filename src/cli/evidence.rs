@@ -9,20 +9,35 @@ use super::{
     Cli, ProcessExitCode, output, workspace_response_json_v2, write_domain_error, write_stdout,
 };
 use crate::core::evidence::{
-    EvidenceWithdrawOptions, EvidenceWithdrawReport, withdraw_cass_evidence,
+    EvidenceSessionWithdrawOptions, EvidenceSessionWithdrawReport, EvidenceWithdrawOptions,
+    EvidenceWithdrawReport, withdraw_cass_evidence, withdraw_cass_session_evidence,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum EvidenceCommand {
-    /// Withdraw a CASS source from future retrieval and derivation while retaining history.
+    /// Withdraw retained CASS evidence by source ID or session, without erasing history.
     Withdraw(EvidenceWithdrawArgs),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Parser)]
 pub struct EvidenceWithdrawArgs {
     /// Imported evidence ID from a search result or source citation.
-    #[arg(value_name = "EVIDENCE_ID")]
-    pub evidence_id: String,
+    #[arg(
+        value_name = "EVIDENCE_ID",
+        required_unless_present = "session",
+        conflicts_with = "session"
+    )]
+    pub evidence_id: Option<String>,
+
+    /// Withdraw all currently retained CASS sources of this session atomically.
+    /// Does not disable future imports or withdraw sources from other producers.
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        required_unless_present = "evidence_id",
+        conflicts_with = "evidence_id"
+    )]
+    pub session: Option<String>,
 
     /// Required audit reason; secrets are redacted before storage.
     #[arg(long, value_name = "REASON")]
@@ -49,10 +64,38 @@ pub(super) fn handle<W: Write, E: Write>(
 ) -> ProcessExitCode {
     let EvidenceCommand::Withdraw(args) = command;
     let workspace = cli.resolve_workspace();
+    // Clap enforces exclusive selection. Keep the same boundary for library
+    // callers constructing arguments directly: neither missing nor ambiguous
+    // input may fall through to a broader operation.
+    if args.evidence_id.is_some() == args.session.is_some() {
+        return write_domain_error(
+            &crate::models::DomainError::Usage {
+                message: "Choose one evidence ID or --session, not both.".to_owned(),
+                repair: None,
+            },
+            cli.renderer(),
+            stdout,
+            stderr,
+        );
+    }
+    if let Some(session_id) = args.session.as_deref() {
+        let report = match withdraw_cass_session_evidence(&EvidenceSessionWithdrawOptions {
+            workspace_path: &workspace,
+            database_path: args.database.as_deref(),
+            session_id,
+            reason: &args.reason,
+            actor: args.actor.as_deref().or(Some("ee evidence withdraw")),
+            dry_run: args.dry_run,
+        }) {
+            Ok(report) => report,
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        };
+        return render_report(cli, &report, &session_human_output(&report), stdout);
+    }
     let report = match withdraw_cass_evidence(&EvidenceWithdrawOptions {
         workspace_path: &workspace,
         database_path: args.database.as_deref(),
-        evidence_id: &args.evidence_id,
+        evidence_id: args.evidence_id.as_deref().unwrap_or_default(),
         reason: &args.reason,
         actor: args.actor.as_deref().or(Some("ee evidence withdraw")),
         dry_run: args.dry_run,
@@ -61,19 +104,26 @@ pub(super) fn handle<W: Write, E: Write>(
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
+    render_report(cli, &report, &human_output(&report), stdout)
+}
+
+fn render_report<T: serde::Serialize, W: Write>(
+    cli: &Cli,
+    report: &T,
+    human: &str,
+    stdout: &mut W,
+) -> ProcessExitCode {
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &human_output(&report))
-        }
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, human),
         output::Renderer::Toon => write_stdout(
             stdout,
-            &(output::render_toon_from_json(&workspace_response_json_v2(&report)) + "\n"),
+            &(output::render_toon_from_json(&workspace_response_json_v2(report)) + "\n"),
         ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            write_stdout(stdout, &(workspace_response_json_v2(&report) + "\n"))
+            write_stdout(stdout, &(workspace_response_json_v2(report) + "\n"))
         }
     }
 }
@@ -115,6 +165,40 @@ fn human_output(report: &EvidenceWithdrawReport) -> String {
     }
     text.push_str(
         "  Transcript bytes, historical packs and curated memories/rules are retained.\n",
+    );
+    text
+}
+
+fn session_human_output(report: &EvidenceSessionWithdrawReport) -> String {
+    let heading = match report.status {
+        "would_withdraw" => "Session evidence would be withdrawn",
+        "already_withdrawn" => "Session evidence already withdrawn",
+        "no_cass_sources" => "No retained CASS sources in this session",
+        _ => "Session evidence withdrawn",
+    };
+    let mut text = format!(
+        "{heading}: {}\n  Workspace: {}\n  Retained sources: {}\n  CASS sources: {}\n  Other producers unchanged: {}\n  Already withdrawn: {}\n  Would withdraw: {}\n  Withdrawn this invocation: {}\n",
+        report.session_id,
+        report.workspace_id,
+        report.retained_evidence_count,
+        report.cass_evidence_count,
+        report.excluded_producer_count,
+        report.already_withdrawn_count,
+        report.would_withdraw_count,
+        report.withdrawn_count,
+    );
+    if let Some(audit) = &report.audit_id {
+        text.push_str(&format!("  Audit: {audit}\n"));
+    }
+    if let Some(job) = &report.index_job_id {
+        text.push_str(&format!("  Index: queued; publication pending ({job})\n"));
+    } else if report.status == "would_withdraw" {
+        text.push_str("  Preview: no changes persisted and no index job queued.\n");
+    } else {
+        text.push_str("  No changes persisted and no additional index job queued.\n");
+    }
+    text.push_str(
+        "  Scope: currently retained CASS sources only; future imports are unchanged.\n  Transcript bytes, historical packs and curated memories/rules are retained.\n",
     );
     text
 }
@@ -241,7 +325,8 @@ mod tests {
             return Err("expected withdrawal arguments".into());
         };
         assert!(args.dry_run);
-        assert_eq!(args.evidence_id, fixture.evidence_id);
+        assert_eq!(args.evidence_id.as_deref(), Some(fixture.evidence_id.as_str()));
+        assert!(args.session.is_none());
         assert_eq!(args.database.as_deref(), Some(fixture.database.as_path()));
         assert!(Cli::try_parse_from(["ee", "evidence", "withdraw", &fixture.evidence_id]).is_err());
         Ok(())
@@ -406,3 +491,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "evidence_session_tests.rs"]
+mod session_tests;
