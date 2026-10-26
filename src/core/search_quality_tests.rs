@@ -578,7 +578,13 @@ fn exact_artifact_anchors_rank_live_memories_and_explain_matches_and_neutral_con
                 .iter()
                 .find(|factor| factor.name == "anchorMatch")
                 .unwrap();
-            assert_eq!(f64::from(factor.value), anchor_score);
+            // The factor is f32 and the JSON component is f64, so 0.04 differs
+            // by f32 rounding; hold them to the same 1e-6 bound as above.
+            assert!(
+                (f64::from(factor.value) - anchor_score).abs() < 1.0e-6,
+                "anchorMatch factor {} vs scoring component {anchor_score}",
+                factor.value
+            );
             assert_eq!(
                 factor.contribution,
                 if has_anchors {
