@@ -9943,9 +9943,19 @@ pub struct DoctorArgs {
     /// Run only the named failure-mode detector (FM-style stable code,
     /// e.g. `state_files_orphaned_sock`, `workspace_config_malformed_toml`).
     /// May be repeated to filter to a subset. Mutually exclusive with
-    /// the report-only modes. Currently advisory — detector wiring
-    /// honoring the filter lands alongside the per-FM detectors that
-    /// compose with bd-tu4s8.
+    /// the report-only modes.
+    ///
+    /// NOT HONORED YET: the value is parsed and nothing reads it, so the
+    /// report you get back is the UNFILTERED one. Tracked by bd-nj49t, which
+    /// owns the choice between implementing the filter and rejecting the flag.
+    ///
+    /// This note used to defer to "the per-FM detectors that compose with
+    /// bd-tu4s8". That bead has since CLOSED, so the sentence told a reader who
+    /// checked it that the wiring had landed. It had not — `DoctorArgs::only`
+    /// has no reader anywhere in the tree. Pointing a deferral at a bead that
+    /// can close without the deferred work being done is how a stale promise
+    /// outlives its cause, so this one names the bead that owns the decision
+    /// instead.
     #[arg(
         long = "only",
         value_name = "FM_CODE",
