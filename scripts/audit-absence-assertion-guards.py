@@ -90,10 +90,23 @@ ABSENCE = [
 # fired"). Without them the classifier could not see that fix at all. They are
 # only ever consulted on a peer that is NOT itself an absence assertion, since
 # `contains($SECRET) | not` is the negative side, not a guard for it.
+# `!= null` is the EXACT MIRROR of `== null` in ABSENCE above, and leaving it
+# out made the classifier miss real guards. Measured 2026-10-26 on
+# scripts/e2e_output_governor.sh:240, `(.data.memories // []) | length == 0`
+# ("stale page is EMPTY"): its peer three lines earlier asserts
+# `[... | .code] | index("cursor_stale") != null` -- a positive EXISTENCE claim
+# that the degraded array contains that code, so a run which never happened
+# fails the peer before the emptiness clause is reached. The site was reported
+# unguarded purely because the marker set had the negative form and not the
+# positive one.
+#
+# It is an existence claim, not a content-presence heuristic, so unlike
+# `contains(`/`test(` it belongs in --strict too.
 POSITIVE = [
     re.compile(r"length\s*\)?\s*>=\s*[1-9]"),
     re.compile(r"length\s*\)?\s*>\s*0\b"),
     re.compile(r"length\s*\)?\s*==\s*[1-9]"),
+    re.compile(r"!=\s*null\b"),
     re.compile(r"\|\s*any\b"),
     re.compile(r"contains\s*\("),
     re.compile(r"\btest\s*\("),
