@@ -403,6 +403,33 @@ refusing every job with `worker source namespace initialization refused (status
 same box again. Pin past a bad worker rather than retrying into it. Pinning also
 buys the warm target dir, since a `--job` reuses that worker's own directory.
 
+**`scripts/rch_verify.sh` CAN PIN TOO — it forwards `RCH_WORKER`/`RCH_WORKERS`
+to `rch exec` (`:5057-5058`) — and a WARM TARGET DIR BELONGS TO A WORKER, NOT
+TO A BUNDLE SHA.** That distinction cost 98 minutes on 2026-10-26. A 184-minute
+`--no-run` build had just finished for one pinned bundle; the very next
+dispatch, at the same sha and the same export base, was sent without a pin,
+landed on a different worker, and paid a fresh build of the same tree. The
+export was reused (`pinned_bundle_is_valid`); the compiled artifacts were not,
+because they live in the worker's own target directory.
+
+So when you deliberately want the previous run's warmth, read `worker_id` out
+of that run's proof and pass it:
+
+```bash
+RCH_WORKER=<the worker_id from the previous proof> \
+RCH_VERIFY_ATTEMPT_TIMEOUT_MS=18000000 \
+RCH_VERIFY_COMMITTED_TREE_BASE=/Volumes/EERCHExport/rch-committed-tree \
+TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp scripts/rch_verify.sh \
+    --pinned-franken-stack --treeish <sha> \
+    --build-admission-ee-bin /Users/jemanuel/.local/bin/ee -- \
+    cargo test --locked -j 2 --test <target> <filter>
+```
+
+Weigh it against the refusal classes above: a pin that cannot be admitted is
+refused whole rather than rescheduled, and a worker that has just been SIGKILLed
+is unusable while still reporting healthy. Pin when the warmth is worth more
+than the fallback, which — at 184 minutes a build — it usually is.
+
 Pinning is not a capacity escape. A pinned request that cannot be admitted is
 refused whole — `[RCH-I001] requested worker set [...] refused (selection error:
 queue_timeout)`, exit 103 — because `--worker` declines to fall back. So pin to a
