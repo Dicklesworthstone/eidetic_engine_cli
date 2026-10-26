@@ -1,0 +1,62 @@
+# Dispositions for `#[test]` functions that a commit deleted and nothing
+# restored, as surfaced by scripts/audit-vanished-tests.py (bd-z1dus, bd-0rkti).
+#
+# WHY THIS FILE EXISTS. The detector worked; its FINDINGS EXPIRED. `--since`
+# defaulted to a rolling `60 days ago`, nothing recorded which findings had been
+# triaged, and the tool exited 0 while printing them. So an untriaged deletion
+# did not stay surfaced: it aged out, and the report got CLEANER while the tree
+# did not. Measured 2026-10-25: a 2026-10-19 run with `--since 2026-09-05`
+# reported 12 names and that day's default run reported 11 -- the windows are
+# not nested, so the sets differed in BOTH directions -- and `05020689c` was two
+# days from leaving the default window with six names dispositioned nowhere in
+# the tracker.
+#
+# A detector whose output shrinks with the CLOCK rather than with REPAIR is not
+# a ratchet. This file makes it one, in two ways that only work together:
+#
+#   1. The window's lower bound is the baseline COMMIT below, not a date, so it
+#      can only grow as HEAD advances. A finding cannot expire.
+#   2. Every surfaced name must appear here, so the gate exits NONZERO on an
+#      untriaged one. An UNDISPOSITIONED name is the only thing that stands out.
+#
+# SHRINK-ONLY IN BOTH DIRECTIONS, the MESH_EMITTED_CODES_WITHOUT_FIXTURE idiom.
+# An undispositioned name fails. So does a row whose name is no longer
+# surfaced: with a growing window the only way that happens is that the test
+# came back, which makes the row a statement about the past. Deleting a row is
+# then the correct action, and it is the only correct direction.
+#
+# FORMAT  name<TAB>disposition<TAB>reason
+#
+#   retired   The assertion is deliberately gone. The thing it asserted is no
+#             longer a property worth asserting, or asserting it tests
+#             something other than this project's code.
+#   replaced  Another test or gate asserts the same property, named in the
+#             reason. This is the verdict a name-based sweep cannot reach on its
+#             own -- it is why the tool prints what the removing commit ADDED.
+#   owed      A real coverage loss, not yet restored. The reason must say what
+#             is unasserted, precisely enough that restoring it is mechanical.
+#
+# A reason is MANDATORY for every row and the parser refuses a row without one.
+# A disposition with no stated why would let someone clear this gate while
+# recording nothing, which is the gate's own failure mode written into its input.
+#
+# WHY THE BASELINE IS HERE AND NOT EARLIER. 2026-10-25: `05020689c` is the
+# oldest commit the 60-day window still surfaced, so its parent is the earliest
+# bound that keeps exactly the set that was measured and triaged. Moving it
+# EARLIER is how coverage grows later, and it will surface names nobody has
+# triaged -- which is the point, and is work, not a regression.
+#
+# baseline-commit: ddbd1dea939053435a251c01e33092b0f1366eaa
+
+read_only_semantic_pack_keeps_embedding_preparation_local	replaced	3870f412d extracted this file's tests into src/core/context_test_module.rs; read_only_semantic_pack_names_cold_daemon_fallback_without_writes (context_test_module.rs:1139) carries the same fixture and the same daemon_fallback message, and asserts MORE: the provider signature gained require_cached_local, so the old `calls == 0` is no longer expressible and the surviving test asserts `calls == 1` with require_cached_local true plus a differential model-registry check.
+
+capabilities_report_includes_capabilities_command	retired	05020689c derived the command inventory from clap, so asserting a named command appears in the report now tests clap rather than this project. capabilities_report_accepts_cli_owned_command_inventory is the handoff assertion that commit added.
+capabilities_report_includes_docs_bootstrap_commands	retired	As above: list-membership against a clap-DERIVED inventory.
+capabilities_report_includes_documented_agent_loop_commands	retired	As above: list-membership against a clap-DERIVED inventory.
+capabilities_report_includes_impact_command	retired	As above: list-membership against a clap-DERIVED inventory.
+
+capabilities_report_advertises_group_commit_daemon_write_methods	replaced	This one was SEMANTIC, not list-membership: it asserted that `diag contention --use-daemon`, ee.daemon.telemetry, ee.daemon.write and ee.daemon.write_journal are advertised AND available. From 05020689c until 2026-10-25 nothing asserted that -- tests/capabilities_contract_e2e.rs held the tree's only per-command `available == true` loop and it covered six core commands (capabilities, doctor, schema, remember, search, pack); the summary-count arm checks availableCommands against the array, which is self-consistency rather than per-command. It could NOT be restored where it was, because CapabilitiesReport::gather now TAKES the inventory as a parameter, so a unit test can only assert about an inventory it injected itself. Replaced by the daemon-surface loop added to tests/capabilities_contract_e2e.rs, which reads the report from the real binary.
+capabilities_report_marks_daemon_maintenance_posture	replaced	Same shape, same replacement block, same commit: it asserted `daemon foreground decay_sweep`, `daemon foreground non-decay` and `daemon background` exist and are available. All three are in that loop. Measured 2026-10-25 against the installed binary before asserting it: all seven names in the new loop are present with available == true in a 59-command report. Note `daemon background` has no literal in src/cli/mod.rs and a grep there reports zero -- it reaches the report via src/core/effect.rs:2386, which is why the live probe rather than the grep is the evidence.
+
+rch_verify_every_blocker_kind_has_a_remediation_mapping	replaced	86380c6e8 removed both Rust contract tests and, in the same commit, added scripts/check-rch-remediation-guidance.py covering both invariants with more cases than the tests it replaced. That gate runs locally and is green at HEAD (`{"kinds": 12, "mapped": 1, ...}`). This is the consolidation case the tool's own docstring names as the verdict a name-based sweep cannot reach.
+rch_verify_remediation_beads_are_open_or_recorded_as_stale	replaced	Same commit, same replacement gate: scripts/check-rch-remediation-guidance.py.
