@@ -65,7 +65,11 @@ pub(super) fn ordered(import: &CassImportReport) -> Vec<Entry> {
     if import.dry_run {
         return entries;
     }
-    let Some(path) = import.database_path.as_deref().filter(|path| !path.is_empty()) else {
+    let Some(path) = import
+        .database_path
+        .as_deref()
+        .filter(|path| !path.is_empty())
+    else {
         return entries;
     };
     let Ok(connection) = DbConnection::open_file_read_only(path) else {
@@ -73,11 +77,15 @@ pub(super) fn ordered(import: &CassImportReport) -> Vec<Entry> {
     };
     for entry in &mut entries {
         let source = &import.sessions[entry.session_index];
-        if !matches!(source.status, ImportSessionStatus::Imported | ImportSessionStatus::Skipped) {
+        if !matches!(
+            source.status,
+            ImportSessionStatus::Imported | ImportSessionStatus::Skipped
+        ) {
             continue;
         }
         let Some(id) = source.session_id.as_deref().filter(|id| {
-            id.parse::<SessionId>().is_ok_and(|parsed| parsed.to_string() == *id)
+            id.parse::<SessionId>()
+                .is_ok_and(|parsed| parsed.to_string() == *id)
         }) else {
             continue;
         };
@@ -179,28 +187,36 @@ impl Receipt {
         // The source revision is re-read under the write transaction. A
         // concurrent refresh must not lend a receipt to an unreviewed revision.
         let mut failure = UNAVAILABLE;
-        connection.with_transaction(|| {
-            let session = connection.get_session(&self.session_id)?.ok_or_else(|| {
-                failure = CHANGED;
-                invalid_progress()
-            })?;
-            if Self::new(&session) != *self {
-                failure = CHANGED;
-                return Err(invalid_progress());
-            }
-            if self.is_recorded(connection).map_err(|_| invalid_progress())? {
-                return Ok(false);
-            }
-            connection.insert_audit(&self.id, &CreateAuditInput {
-                workspace_id: Some(self.workspace_id.clone()),
-                actor: Some("ee import cass --propose".to_owned()),
-                action: ACTION.to_owned(),
-                target_type: Some("session".to_owned()),
-                target_id: Some(self.session_id.clone()),
-                details: Some(self.details()),
-            })?;
-            Ok(true)
-        }).map_err(|_| failure)
+        connection
+            .with_transaction(|| {
+                let session = connection.get_session(&self.session_id)?.ok_or_else(|| {
+                    failure = CHANGED;
+                    invalid_progress()
+                })?;
+                if Self::new(&session) != *self {
+                    failure = CHANGED;
+                    return Err(invalid_progress());
+                }
+                if self
+                    .is_recorded(connection)
+                    .map_err(|_| invalid_progress())?
+                {
+                    return Ok(false);
+                }
+                connection.insert_audit(
+                    &self.id,
+                    &CreateAuditInput {
+                        workspace_id: Some(self.workspace_id.clone()),
+                        actor: Some("ee import cass --propose".to_owned()),
+                        action: ACTION.to_owned(),
+                        target_type: Some("session".to_owned()),
+                        target_id: Some(self.session_id.clone()),
+                        details: Some(self.details()),
+                    },
+                )?;
+                Ok(true)
+            })
+            .map_err(|_| failure)
     }
 }
 
@@ -219,31 +235,40 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     const WORKSPACE: &str = "wsp_01234567890123456789012345";
 
-    fn insert(connection: &DbConnection, number: u128) -> Result<StoredSession, crate::db::DbError> {
+    fn insert(
+        connection: &DbConnection,
+        number: u128,
+    ) -> Result<StoredSession, crate::db::DbError> {
         let id = SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
-        connection.insert_session(&id, &CreateSessionInput {
-            workspace_id: WORKSPACE.to_owned(),
-            cass_session_id: format!("/private/sessions/{number}.jsonl"),
-            source_path: None,
-            agent_name: Some("codex".to_owned()),
-            model: None,
-            started_at: None,
-            ended_at: None,
-            message_count: 1,
-            token_count: None,
-            content_hash: format!("blake3:{}", blake3::hash(&number.to_le_bytes()).to_hex()),
-            metadata_json: None,
-        })?;
+        connection.insert_session(
+            &id,
+            &CreateSessionInput {
+                workspace_id: WORKSPACE.to_owned(),
+                cass_session_id: format!("/private/sessions/{number}.jsonl"),
+                source_path: None,
+                agent_name: Some("codex".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 1,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(&number.to_le_bytes()).to_hex()),
+                metadata_json: None,
+            },
+        )?;
         connection.get_session(&id)?.ok_or_else(invalid_progress)
     }
 
     fn database() -> Result<DbConnection, crate::db::DbError> {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
-        connection.insert_workspace(WORKSPACE, &CreateWorkspaceInput {
-            path: "/workspace/review-progress".to_owned(),
-            name: None,
-        })?;
+        connection.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: "/workspace/review-progress".to_owned(),
+                name: None,
+            },
+        )?;
         Ok(connection)
     }
 
@@ -286,18 +311,34 @@ mod tests {
     #[test]
     fn bounded_repeated_batches_reach_every_unchanged_source() -> TestResult {
         let connection = database()?;
-        let sessions = (1..=35).map(|n| insert(&connection, n)).collect::<Result<Vec<_>, _>>()?;
+        let sessions = (1..=35)
+            .map(|n| insert(&connection, n))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut first_visits = std::collections::BTreeSet::new();
         for expected_fresh in [16, 16, 3] {
-            let mut entries = sessions.iter().enumerate().map(|(index, session)| {
-                let receipt = Receipt::new(session);
-                Entry { session_index: index, previously_reviewed: receipt.is_recorded(&connection).unwrap(), receipt: Some(receipt) }
-            }).collect::<Vec<_>>();
+            let mut entries = sessions
+                .iter()
+                .enumerate()
+                .map(|(index, session)| {
+                    let receipt = Receipt::new(session);
+                    Entry {
+                        session_index: index,
+                        previously_reviewed: receipt.is_recorded(&connection).unwrap(),
+                        receipt: Some(receipt),
+                    }
+                })
+                .collect::<Vec<_>>();
             sort_entries(&mut entries);
-            let fresh = entries.iter().take(super::super::MAX_IMPORT_REVIEW_SESSIONS)
-                .filter(|entry| !entry.previously_reviewed).count();
+            let fresh = entries
+                .iter()
+                .take(super::super::MAX_IMPORT_REVIEW_SESSIONS)
+                .filter(|entry| !entry.previously_reviewed)
+                .count();
             assert_eq!(fresh, expected_fresh);
-            for entry in entries.iter().take(super::super::MAX_IMPORT_REVIEW_SESSIONS) {
+            for entry in entries
+                .iter()
+                .take(super::super::MAX_IMPORT_REVIEW_SESSIONS)
+            {
                 if entry.receipt.as_ref().unwrap().record(&connection)? {
                     assert!(first_visits.insert(entry.session_index));
                 }
@@ -312,14 +353,17 @@ mod tests {
         let connection = database()?;
         let session = insert(&connection, 3)?;
         let receipt = Receipt::new(&session);
-        connection.insert_audit(&receipt.id, &CreateAuditInput {
-            workspace_id: Some(WORKSPACE.to_owned()),
-            actor: None,
-            action: "different.action".to_owned(),
-            target_type: Some("session".to_owned()),
-            target_id: Some(session.id),
-            details: Some(receipt.details()),
-        })?;
+        connection.insert_audit(
+            &receipt.id,
+            &CreateAuditInput {
+                workspace_id: Some(WORKSPACE.to_owned()),
+                actor: None,
+                action: "different.action".to_owned(),
+                target_type: Some("session".to_owned()),
+                target_id: Some(session.id),
+                details: Some(receipt.details()),
+            },
+        )?;
         assert!(receipt.is_recorded(&connection).is_err());
         assert!(receipt.record(&connection).is_err());
         Ok(())
@@ -332,11 +376,25 @@ mod tests {
         let second = Receipt::new(&insert(&connection, 5)?);
         let mut entries = vec![
             Entry::unknown(0),
-            Entry { session_index: 1, previously_reviewed: true, receipt: Some(first) },
-            Entry { session_index: 2, previously_reviewed: false, receipt: Some(second) },
+            Entry {
+                session_index: 1,
+                previously_reviewed: true,
+                receipt: Some(first),
+            },
+            Entry {
+                session_index: 2,
+                previously_reviewed: false,
+                receipt: Some(second),
+            },
         ];
         sort_entries(&mut entries);
-        assert_eq!(entries.iter().map(|entry| entry.session_index).collect::<Vec<_>>(), [2, 1, 0]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.session_index)
+                .collect::<Vec<_>>(),
+            [2, 1, 0]
+        );
         Ok(())
     }
 }
@@ -347,8 +405,8 @@ mod workflow_tests {
     use crate::cass::import::ImportedCassSession;
     use crate::core::cass_review::review_imported_sessions;
     use crate::db::{
-        CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput,
-        EvidenceAdmissionTally, EvidenceProducerKind,
+        CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, EvidenceAdmissionTally,
+        EvidenceProducerKind,
     };
     use crate::models::EvidenceId;
 
@@ -373,10 +431,7 @@ mod workflow_tests {
                 ended_at: None,
                 message_count: 1,
                 token_count: None,
-                content_hash: format!(
-                    "blake3:{}",
-                    blake3::hash(&number.to_le_bytes()).to_hex()
-                ),
+                content_hash: format!("blake3:{}", blake3::hash(&number.to_le_bytes()).to_hex()),
                 metadata_json: None,
             },
         )?;
@@ -457,7 +512,10 @@ mod workflow_tests {
                 missing_metadata: Vec::new(),
             });
         }
-        let last_id = imported[33].session_id.clone().ok_or("missing last session")?;
+        let last_id = imported[33]
+            .session_id
+            .clone()
+            .ok_or("missing last session")?;
         let sources_before = connection.list_evidence_spans_for_session(&last_id)?;
         connection.close()?;
         let import = CassImportReport {
@@ -498,15 +556,25 @@ mod workflow_tests {
         assert_eq!(third.sessions_newly_reviewed, 2);
         assert_eq!(third.sessions_pending_review, 0);
         assert_eq!(third.candidates_persisted, 1);
-        let last = third.sessions.iter().find(|entry| entry.session_index == 33)
+        let last = third
+            .sessions
+            .iter()
+            .find(|entry| entry.session_index == 33)
             .ok_or("tail review missing")?;
         assert_eq!(last.status, "reviewed");
         assert_eq!(last.session_id.as_deref(), Some(last_id.as_str()));
         assert_eq!(last.candidates.len(), 1);
-        assert!(last.candidates[0].proposed_content.contains(LESSON.trim_end_matches('.')));
-        assert!(third.sessions.windows(2).all(|pair| {
-            pair[0].session_index < pair[1].session_index
-        }));
+        assert!(
+            last.candidates[0]
+                .proposed_content
+                .contains(LESSON.trim_end_matches('.'))
+        );
+        assert!(
+            third
+                .sessions
+                .windows(2)
+                .all(|pair| { pair[0].session_index < pair[1].session_index })
+        );
 
         let repeat = review_imported_sessions(&import);
         assert_eq!(repeat.sessions_failed, 0, "{repeat:?}");
@@ -515,19 +583,34 @@ mod workflow_tests {
         assert_eq!(repeat.sessions_pending_review, 0);
         assert_eq!(repeat.candidates_persisted, 0);
         assert!(!repeat.durable_mutation);
-        assert!(!repeat.degradations().iter().any(|entry| {
-            entry.code == "cass_import_review_deferred"
-        }));
+        assert!(
+            !repeat
+                .degradations()
+                .iter()
+                .any(|entry| { entry.code == "cass_import_review_deferred" })
+        );
         assert!(!workspace_path.join(".ee").join("ee.db").exists());
         let connection = DbConnection::open_file(&database_path)?;
-        assert_eq!(connection.list_curation_candidates(&workspace, None, None, None)?.len(), 1);
-        assert!(connection.list_memories(&workspace, None, false)?.is_empty());
+        assert_eq!(
+            connection
+                .list_curation_candidates(&workspace, None, None, None)?
+                .len(),
+            1
+        );
+        assert!(
+            connection
+                .list_memories(&workspace, None, false)?
+                .is_empty()
+        );
         let sources_after = connection.list_evidence_spans_for_session(&last_id)?;
         assert_eq!(sources_after.len(), sources_before.len());
         for (before, after) in sources_before.iter().zip(&sources_after) {
             assert_eq!(after.excerpt, before.excerpt);
             assert_eq!(after.content_hash, before.content_hash);
-            assert_eq!(after.canonical_provenance_uri(), before.canonical_provenance_uri());
+            assert_eq!(
+                after.canonical_provenance_uri(),
+                before.canonical_provenance_uri()
+            );
             assert!(after.memory_id.is_none());
         }
         connection.close()?;
@@ -539,10 +622,13 @@ mod workflow_tests {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         let workspace = "wsp_01234567890123456789012345";
-        connection.insert_workspace(workspace, &CreateWorkspaceInput {
-            path: "/workspace/progress-race".to_owned(),
-            name: None,
-        })?;
+        connection.insert_workspace(
+            workspace,
+            &CreateWorkspaceInput {
+                path: "/workspace/progress-race".to_owned(),
+                name: None,
+            },
+        )?;
         let session = source(&connection, workspace, 35)?;
         let old = Receipt::new(&session);
         // Generated typed ID and fixed SQL constants only, never user input.
@@ -552,7 +638,9 @@ mod workflow_tests {
         ))?;
         assert_eq!(old.record(&connection), Err(CHANGED));
         assert!(connection.get_audit(&old.id)?.is_none());
-        let changed = connection.get_session(&session.id)?.ok_or("session missing")?;
+        let changed = connection
+            .get_session(&session.id)?
+            .ok_or("session missing")?;
         let current = Receipt::new(&changed);
         assert_ne!(current.id, old.id);
         assert!(current.record(&connection)?);
@@ -566,10 +654,13 @@ mod workflow_tests {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         let workspace = "wsp_01234567890123456789012345";
-        connection.insert_workspace(workspace, &CreateWorkspaceInput {
-            path: "/workspace/progress-rollback".to_owned(),
-            name: None,
-        })?;
+        connection.insert_workspace(
+            workspace,
+            &CreateWorkspaceInput {
+                path: "/workspace/progress-rollback".to_owned(),
+                name: None,
+            },
+        )?;
         let session = source(&connection, workspace, 36)?;
         let receipt = Receipt::new(&session);
         connection.execute_raw(

@@ -4,8 +4,8 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::models::{DomainError, SessionId};
 use super::{validate_reason, with_withdrawal_store, withdrawal_error};
+use crate::models::{DomainError, SessionId};
 
 pub const EVIDENCE_SESSION_WITHDRAW_SCHEMA_V1: &str = "ee.evidence.withdraw_session.v1";
 
@@ -56,7 +56,9 @@ pub fn withdraw_cass_session_evidence(
     options: &EvidenceSessionWithdrawOptions<'_>,
 ) -> Result<EvidenceSessionWithdrawReport, DomainError> {
     validate_reason(options.reason)?;
-    if !options.session_id.parse::<SessionId>()
+    if !options
+        .session_id
+        .parse::<SessionId>()
         .is_ok_and(|id| id.to_string() == options.session_id)
     {
         return Err(DomainError::Usage {
@@ -69,9 +71,15 @@ pub fn withdraw_cass_session_evidence(
         options.database_path,
         options.dry_run,
         |connection, workspace_id| {
-            let decision = connection.withdraw_cass_session_in_current_snapshot(
-                workspace_id, options.session_id, options.reason, options.actor, options.dry_run,
-            ).map_err(|error| withdrawal_error(error, "session", options.session_id))?;
+            let decision = connection
+                .withdraw_cass_session_in_current_snapshot(
+                    workspace_id,
+                    options.session_id,
+                    options.reason,
+                    options.actor,
+                    options.dry_run,
+                )
+                .map_err(|error| withdrawal_error(error, "session", options.session_id))?;
             let would_change = decision.would_withdraw_count != 0;
             Ok(EvidenceSessionWithdrawReport {
                 schema: EVIDENCE_SESSION_WITHDRAW_SCHEMA_V1,

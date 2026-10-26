@@ -231,16 +231,15 @@ fn with_withdrawal_store<T>(
             }
             Err(error) => return Err(storage_error(error)),
         }
-        let workspace = super::workspace::addressed_workspace_row(
-            &connection,
-            workspace_path,
-            &database_path,
-        )?
-        .ok_or_else(|| DomainError::NotFound {
-            resource: "workspace".to_owned(),
-            id: workspace_path.display().to_string(),
-            repair: Some("Address the workspace that owns the imported evidence.".to_owned()),
-        })?;
+        let workspace =
+            super::workspace::addressed_workspace_row(&connection, workspace_path, &database_path)?
+                .ok_or_else(|| DomainError::NotFound {
+                    resource: "workspace".to_owned(),
+                    id: workspace_path.display().to_string(),
+                    repair: Some(
+                        "Address the workspace that owns the imported evidence.".to_owned(),
+                    ),
+                })?;
         apply(&connection, &workspace.id)
     };
 

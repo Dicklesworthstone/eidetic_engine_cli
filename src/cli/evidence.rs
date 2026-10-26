@@ -325,7 +325,10 @@ mod tests {
             return Err("expected withdrawal arguments".into());
         };
         assert!(args.dry_run);
-        assert_eq!(args.evidence_id.as_deref(), Some(fixture.evidence_id.as_str()));
+        assert_eq!(
+            args.evidence_id.as_deref(),
+            Some(fixture.evidence_id.as_str())
+        );
         assert!(args.session.is_none());
         assert_eq!(args.database.as_deref(), Some(fixture.database.as_path()));
         assert!(Cli::try_parse_from(["ee", "evidence", "withdraw", &fixture.evidence_id]).is_err());

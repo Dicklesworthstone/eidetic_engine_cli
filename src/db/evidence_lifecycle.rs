@@ -112,11 +112,8 @@ impl DbConnection {
         }
 
         let before_hash = stored_evidence_security_state_hash(&span);
-        let withdrawn = self.deny_cass_source(
-            span,
-            metadata_json,
-            &chrono::Utc::now().to_rfc3339(),
-        )?;
+        let withdrawn =
+            self.deny_cass_source(span, metadata_json, &chrono::Utc::now().to_rfc3339())?;
         let index_job_id = self.enqueue_withdrawn_session(workspace_id, &withdrawn.session_id)?;
         let audit_id = generate_audit_id();
         self.insert_audit(

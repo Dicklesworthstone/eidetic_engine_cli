@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-const SOURCE: &str = "The cache commits durable records before publishing the replacement checksum.";
+const SOURCE: &str =
+    "The cache commits durable records before publishing the replacement checksum.";
 const REASON: &str = "Operator requested withdrawal of the retained session observations.";
 
 struct Fixture {
@@ -80,7 +81,13 @@ impl Fixture {
             evidence.push(id);
         }
         db.close()?;
-        Ok(Self { root, database, workspace, session, evidence })
+        Ok(Self {
+            root,
+            database,
+            workspace,
+            session,
+            evidence,
+        })
     }
 
     fn args(&self, format: &str, preview: bool) -> Vec<String> {
@@ -114,7 +121,12 @@ fn dispatch(args: Vec<String>) -> TestResult<String> {
         &mut stdout,
         &mut stderr,
     );
-    assert_eq!(exit, ProcessExitCode::Success, "{}", String::from_utf8_lossy(&stderr));
+    assert_eq!(
+        exit,
+        ProcessExitCode::Success,
+        "{}",
+        String::from_utf8_lossy(&stderr)
+    );
     assert!(stderr.is_empty());
     let text = String::from_utf8(stdout)?;
     assert!(!text.contains(SOURCE) && !text.contains(REASON));
@@ -149,9 +161,16 @@ fn session_selector_is_explicit_and_exclusive_with_single_evidence() -> TestResu
     assert!(args.evidence_id.is_none() && args.dry_run);
     assert_eq!(args.database.as_deref(), Some(fixture.database.as_path()));
     assert!(Cli::try_parse_from(["ee", "evidence", "withdraw", "--reason", REASON]).is_err());
-    assert!(Cli::try_parse_from([
-        "ee", "evidence", "withdraw", "--session", fixture.session.as_str(),
-    ]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "ee",
+            "evidence",
+            "withdraw",
+            "--session",
+            fixture.session.as_str(),
+        ])
+        .is_err()
+    );
     let mut ambiguous = fixture.args("json", true);
     ambiguous.push(fixture.evidence[0].clone());
     assert!(Cli::try_parse_from(ambiguous).is_err());
@@ -184,12 +203,14 @@ fn session_full_cli_preview_projects_counts_without_mutating_any_store_bytes() -
 }
 
 #[test]
-fn session_full_cli_commits_one_receipt_preserves_other_producers_and_repeats_as_noop() -> TestResult {
+fn session_full_cli_commits_one_receipt_preserves_other_producers_and_repeats_as_noop() -> TestResult
+{
     let fixture = Fixture::new()?;
     let db = DbConnection::open_file_read_only(&fixture.database)?;
     let untouched = db.get_evidence_span(&fixture.evidence[2])?;
     db.close()?;
-    let response: serde_json::Value = serde_json::from_str(&dispatch(fixture.args("json", false))?)?;
+    let response: serde_json::Value =
+        serde_json::from_str(&dispatch(fixture.args("json", false))?)?;
     let data = &response["data"];
     assert_eq!(data["status"], "withdrawn");
     assert_eq!(data["persisted"], true);
@@ -203,7 +224,8 @@ fn session_full_cli_commits_one_receipt_preserves_other_producers_and_repeats_as
     assert_eq!(data["futureImports"], "unchanged");
     assert!(data["auditId"].is_string() && data["indexJobId"].is_string());
     for preview in [true, false] {
-        let repeated: serde_json::Value = serde_json::from_str(&dispatch(fixture.args("json", preview))?)?;
+        let repeated: serde_json::Value =
+            serde_json::from_str(&dispatch(fixture.args("json", preview))?)?;
         assert_eq!(repeated["data"]["status"], "already_withdrawn");
         assert_eq!(repeated["data"]["changed"], false);
         assert_eq!(repeated["data"]["wouldWithdrawCount"], 0);
@@ -214,14 +236,28 @@ fn session_full_cli_commits_one_receipt_preserves_other_producers_and_repeats_as
         assert!(repeated["data"]["indexJobId"].is_null());
     }
     let db = DbConnection::open_file_read_only(&fixture.database)?;
-    assert_eq!(db.list_audit_entries(Some(&fixture.workspace), None)?.len(), 1);
+    assert_eq!(
+        db.list_audit_entries(Some(&fixture.workspace), None)?.len(),
+        1
+    );
     let jobs = db.list_search_index_jobs(&fixture.workspace, None)?;
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].status, "pending");
-    assert_eq!(jobs[0].document_id.as_deref(), Some(fixture.session.as_str()));
+    assert_eq!(
+        jobs[0].document_id.as_deref(),
+        Some(fixture.session.as_str())
+    );
     for id in &fixture.evidence[..2] {
-        assert!(db.get_search_admitted_evidence_span(id, &fixture.workspace)?.is_none());
-        assert_eq!(db.get_evidence_span(id)?.ok_or("retained evidence")?.excerpt, SOURCE);
+        assert!(
+            db.get_search_admitted_evidence_span(id, &fixture.workspace)?
+                .is_none()
+        );
+        assert_eq!(
+            db.get_evidence_span(id)?
+                .ok_or("retained evidence")?
+                .excerpt,
+            SOURCE
+        );
     }
     assert_eq!(db.get_evidence_span(&fixture.evidence[2])?, untouched);
     assert!(!fixture.root.path().join(".ee").exists());
@@ -245,7 +281,13 @@ fn session_toon_and_human_preview_keep_scope_and_actual_mutation_explicit() -> T
     assert!(human.contains("future imports are unchanged"));
     assert!(human.contains("no changes persisted and no index job queued"));
     let db = DbConnection::open_file_read_only(&fixture.database)?;
-    assert!(db.list_audit_entries(Some(&fixture.workspace), None)?.is_empty());
-    assert!(db.list_search_index_jobs(&fixture.workspace, None)?.is_empty());
+    assert!(
+        db.list_audit_entries(Some(&fixture.workspace), None)?
+            .is_empty()
+    );
+    assert!(
+        db.list_search_index_jobs(&fixture.workspace, None)?
+            .is_empty()
+    );
     Ok(())
 }

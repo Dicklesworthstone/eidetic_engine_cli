@@ -25,39 +25,72 @@ impl Fixture {
         let database = root.path().join("custom.db");
         let db = DbConnection::open_file(&database)?;
         db.migrate()?;
-        db.insert_workspace(WS, &CreateWorkspaceInput {
-            path: root.path().to_string_lossy().into_owned(), name: None,
-        })?;
+        db.insert_workspace(
+            WS,
+            &CreateWorkspaceInput {
+                path: root.path().to_string_lossy().into_owned(),
+                name: None,
+            },
+        )?;
         let session = SessionId::now().to_string();
-        db.insert_session(&session, &CreateSessionInput {
-            workspace_id: WS.to_owned(), cass_session_id: "session-bulk-core".to_owned(),
-            source_path: None, agent_name: None, model: None, started_at: None, ended_at: None,
-            message_count: 2, token_count: None,
-            content_hash: format!("blake3:{}", blake3::hash(SOURCE.as_bytes())), metadata_json: None,
-        })?;
+        db.insert_session(
+            &session,
+            &CreateSessionInput {
+                workspace_id: WS.to_owned(),
+                cass_session_id: "session-bulk-core".to_owned(),
+                source_path: None,
+                agent_name: None,
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 2,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(SOURCE.as_bytes())),
+                metadata_json: None,
+            },
+        )?;
         let mut evidence = Vec::new();
         for line in 1..=2 {
             let id = EvidenceId::now().to_string();
-            db.insert_evidence_span(&id, &CreateEvidenceSpanInput {
-                workspace_id: WS.to_owned(), session_id: session.clone(), memory_id: None,
-                producer_kind: EvidenceProducerKind::CassImport,
-                cass_span_id: format!("bulk-core:{line}"), span_kind: "message".to_owned(),
-                start_line: line, end_line: line, start_byte: None, end_byte: None,
-                role: Some("assistant".to_owned()), excerpt: SOURCE.to_owned(),
-                content_hash: format!("blake3:{}", blake3::hash(SOURCE.as_bytes())),
-                metadata_json: None, inherited_redaction_classes: Vec::new(),
-            })?;
+            db.insert_evidence_span(
+                &id,
+                &CreateEvidenceSpanInput {
+                    workspace_id: WS.to_owned(),
+                    session_id: session.clone(),
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: format!("bulk-core:{line}"),
+                    span_kind: "message".to_owned(),
+                    start_line: line,
+                    end_line: line,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: SOURCE.to_owned(),
+                    content_hash: format!("blake3:{}", blake3::hash(SOURCE.as_bytes())),
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )?;
             evidence.push(id);
         }
         db.close()?;
-        Ok(Self { root, database, session, evidence })
+        Ok(Self {
+            root,
+            database,
+            session,
+            evidence,
+        })
     }
 
     fn options(&self, dry_run: bool) -> EvidenceSessionWithdrawOptions<'_> {
         EvidenceSessionWithdrawOptions {
-            workspace_path: self.root.path(), database_path: Some(&self.database),
-            session_id: &self.session, reason: "Withdraw this session's retained observations.",
-            actor: Some("bulk-core-test"), dry_run,
+            workspace_path: self.root.path(),
+            database_path: Some(&self.database),
+            session_id: &self.session,
+            reason: "Withdraw this session's retained observations.",
+            actor: Some("bulk-core-test"),
+            dry_run,
         }
     }
 
@@ -129,7 +162,10 @@ fn session_commit_and_idempotent_repeat_return_distinct_honest_receipts() -> Tes
     assert_eq!(db.list_search_index_jobs(WS, None)?.len(), 1);
     for id in &fixture.evidence {
         assert!(db.get_search_admitted_evidence_span(id, WS)?.is_none());
-        assert_eq!(db.get_evidence_span(id)?.ok_or("retained source")?.excerpt, SOURCE);
+        assert_eq!(
+            db.get_evidence_span(id)?.ok_or("retained source")?.excerpt,
+            SOURCE
+        );
     }
     Ok(())
 }
@@ -139,22 +175,38 @@ fn session_withdrawal_validates_input_and_owner_without_mutating_sources() -> Te
     let fixture = Fixture::new()?;
     let other = tempfile::tempdir()?;
     let db = DbConnection::open_file(&fixture.database)?;
-    db.insert_workspace(OTHER, &CreateWorkspaceInput {
-        path: other.path().to_string_lossy().into_owned(), name: None,
-    })?;
+    db.insert_workspace(
+        OTHER,
+        &CreateWorkspaceInput {
+            path: other.path().to_string_lossy().into_owned(),
+            name: None,
+        },
+    )?;
     db.close()?;
     for preview in [false, true] {
         for id in ["sess_invalid".to_owned(), format!(" {}", fixture.session)] {
-            assert!(matches!(withdraw_cass_session_evidence(&EvidenceSessionWithdrawOptions {
-                session_id: &id, ..fixture.options(preview)
-            }), Err(DomainError::Usage { .. })));
+            assert!(matches!(
+                withdraw_cass_session_evidence(&EvidenceSessionWithdrawOptions {
+                    session_id: &id,
+                    ..fixture.options(preview)
+                }),
+                Err(DomainError::Usage { .. })
+            ));
         }
-        assert!(matches!(withdraw_cass_session_evidence(&EvidenceSessionWithdrawOptions {
-            reason: " ", ..fixture.options(preview)
-        }), Err(DomainError::Usage { .. })));
-        assert!(matches!(withdraw_cass_session_evidence(&EvidenceSessionWithdrawOptions {
-            workspace_path: other.path(), ..fixture.options(preview)
-        }), Err(DomainError::NotFound { .. })));
+        assert!(matches!(
+            withdraw_cass_session_evidence(&EvidenceSessionWithdrawOptions {
+                reason: " ",
+                ..fixture.options(preview)
+            }),
+            Err(DomainError::Usage { .. })
+        ));
+        assert!(matches!(
+            withdraw_cass_session_evidence(&EvidenceSessionWithdrawOptions {
+                workspace_path: other.path(),
+                ..fixture.options(preview)
+            }),
+            Err(DomainError::NotFound { .. })
+        ));
     }
     // Write-mode opens may create lock sidecars. Source rows and receipts,
     // rather than incidental writer locks, are the non-mutation contract here.
@@ -172,21 +224,34 @@ fn session_preview_refuses_missing_and_unmigrated_stores_without_bootstrap() -> 
     let root = tempfile::tempdir()?;
     let id = SessionId::now().to_string();
     let options = EvidenceSessionWithdrawOptions {
-        workspace_path: root.path(), database_path: None, session_id: &id,
-        reason: "Withdraw retained observations.", actor: None, dry_run: true,
+        workspace_path: root.path(),
+        database_path: None,
+        session_id: &id,
+        reason: "Withdraw retained observations.",
+        actor: None,
+        dry_run: true,
     };
-    assert!(matches!(withdraw_cass_session_evidence(&options),
-        Err(DomainError::WorkspaceStoreMissing { .. })));
+    assert!(matches!(
+        withdraw_cass_session_evidence(&options),
+        Err(DomainError::WorkspaceStoreMissing { .. })
+    ));
     assert!(!root.path().join(".ee").exists());
     let database = root.path().join("old.db");
     let db = DbConnection::open_file(&database)?;
     db.execute_raw("CREATE TABLE original_marker (value TEXT)")?;
     db.close()?;
     let before = std::fs::read(&database)?;
-    assert!(matches!(withdraw_cass_session_evidence(&EvidenceSessionWithdrawOptions {
-        database_path: Some(&database), ..options
-    }), Err(DomainError::MigrationRequired { .. })));
+    assert!(matches!(
+        withdraw_cass_session_evidence(&EvidenceSessionWithdrawOptions {
+            database_path: Some(&database),
+            ..options
+        }),
+        Err(DomainError::MigrationRequired { .. })
+    ));
     assert_eq!(std::fs::read(&database)?, before);
-    assert_eq!(DbConnection::open_file_read_only(&database)?.schema_version()?, None);
+    assert_eq!(
+        DbConnection::open_file_read_only(&database)?.schema_version()?,
+        None
+    );
     Ok(())
 }
