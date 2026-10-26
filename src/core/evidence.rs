@@ -93,6 +93,10 @@ impl EvidenceWithdrawReport {
 }
 
 fn storage_error(error: DbError) -> DomainError {
+    // The message is passed separately from the fallback because only the
+    // REPAIR differs between the two branches: when `is_storage_panic()`,
+    // `db_failure_or_storage_panic` substitutes STORAGE_PANIC_REPAIR for the
+    // caller's. Same shape as memory_debt.rs:1376 and journal.rs:2683.
     let message = format!("Failed to withdraw imported evidence: {error}");
     super::db_failure_or_storage_panic(
         &error,
