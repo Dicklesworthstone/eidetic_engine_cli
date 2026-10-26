@@ -3924,10 +3924,13 @@ pub fn is_non_canonical_telemetry_degradation_code(code: &str) -> bool {
 
 /// The pack-hash input schema (ADR 0087 §8). Every component and the composite
 /// bind this tag, and the snapshot identity reports its version.
-pub const PACK_HASH_INPUT_SCHEMA_V4: &str = "ee.pack.hash_input.v4";
-pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 4;
+pub const PACK_HASH_INPUT_SCHEMA_V5: &str = "ee.pack.hash_input.v5";
+pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 5;
+/// The only substituted value in the v5 rendered-text digest. This value is
+/// supplied to the typed footer renderer, never replaced in arbitrary content.
+pub const PACK_HASH_TEXT_FOOTER_PLACEHOLDER: &str = "ee.pack.hash.self.v1";
 
-/// The component digests behind a v4 `pack.hash` (ADR 0087 §7). Each is a
+/// The component digests behind a v5 `pack.hash` (ADR 0087 §7). Each is a
 /// `blake3:<hex>` digest of one labeled, length-delimited component; none
 /// carries a raw input.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4333,7 +4336,7 @@ impl PackAssemblySlo {
     /// Elapsed-budget degradations, reported separately from
     /// [`Self::context_degradations`] (GH49 / bd-jikgj).
     ///
-    /// **These must never enter the pack hash.** `refresh_context_pack_hash`
+    /// **These must never enter the pack hash.** `finalize_context_response`
     /// takes the response `degraded[]` as hash input, and wall-clock time is
     /// not reproducible — folding a timing entry into `self.degradations`
     /// would make the same query over the same store hash differently on a
@@ -4792,6 +4795,7 @@ impl ContextResponse {
                 pagination: None,
                 degraded,
                 pack_hash_components: None,
+                finalized_text: None,
             },
         })
     }
@@ -4807,7 +4811,32 @@ impl ContextResponse {
         cached_json: String,
         command: &'static str,
     ) -> Self {
-        let embed_backend = cached_context_embed_backend(&cached_json);
+        let cached = serde_json::from_str::<serde_json::Value>(&cached_json).ok();
+        let embed_backend = cached
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .pointer("/data/embed_backend")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| value.parse().ok())
+            })
+            .unwrap_or_default();
+        let pack_hash = cached
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .pointer("/data/pack/hash")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::to_owned);
+        let finalized_text = cached
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .pointer("/data/pack/text")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::to_owned);
         Self {
             schema: RESPONSE_SCHEMA_V2,
             success: true,
@@ -4840,7 +4869,7 @@ impl ContextResponse {
                         selected_items: Vec::new(),
                         steps: Vec::new(),
                     },
-                    hash: None,
+                    hash: pack_hash,
                 },
                 agent_profile: None,
                 slo: None,
@@ -4854,6 +4883,7 @@ impl ContextResponse {
                 pagination: None,
                 degraded: Vec::new(),
                 pack_hash_components: None,
+                finalized_text,
             },
         }
     }
@@ -4876,22 +4906,44 @@ pub struct ContextResponseData {
     pub adaptive_budget: Option<budget_classifier::AdaptiveBudgetDecision>,
     pub pagination: Option<ContextResponsePagination>,
     pub degraded: Vec<ContextResponseDegradation>,
-    /// The per-component digests behind `pack.hash` (ADR 0087 v3), when this
+    /// The per-component digests behind `pack.hash` (ADR 0087 v5), when this
     /// process computed them. `None` for a response served from the L2 cache,
     /// whose stored JSON already carries its own snapshot identity.
     pub pack_hash_components: Option<PackHashComponentDigests>,
+    /// Immutable canonical markdown, frozen with `pack.hash` before ledger or
+    /// cache persistence. Delivery notices may still extend `degraded`, but
+    /// must not rewrite the prompt represented by this identity.
+    pub(crate) finalized_text: Option<String>,
 }
 
-fn cached_context_embed_backend(cached_json: &str) -> EmbedBackend {
-    serde_json::from_str::<serde_json::Value>(cached_json)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/data/embed_backend")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|value| value.parse().ok())
-        })
-        .unwrap_or_default()
+/// All canonical markdown inputs, borrowed so the production finalizer and
+/// pure draft-hash builders use the same renderer without cloning a pack.
+pub(crate) struct ContextMarkdownInput<'a> {
+    pub schema: &'a str,
+    pub request: &'a ContextRequest,
+    pub pack: &'a PackDraft,
+    pub degraded: &'a [ContextResponseDegradation],
+    pub embed_backend: EmbedBackend,
+    pub consensus: &'a [ConsensusEntry],
+    pub conflicts: &'a [ConflictEntry],
+    pub coordination: Option<&'a PackCoordinationSnapshot>,
+    pub pack_dna: Option<&'a serde_json::Value>,
+}
+
+impl<'a> From<&'a ContextResponse> for ContextMarkdownInput<'a> {
+    fn from(response: &'a ContextResponse) -> Self {
+        Self {
+            schema: response.schema,
+            request: &response.data.request,
+            pack: &response.data.pack,
+            degraded: &response.data.degraded,
+            embed_backend: response.data.embed_backend,
+            consensus: &response.data.consensus,
+            conflicts: &response.data.conflicts,
+            coordination: response.data.coordination.as_ref(),
+            pack_dna: response.data.pack_dna.as_ref(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4942,6 +4994,9 @@ pub fn team_pack_provenance_json(trust: &PackTrustSignal) -> Option<String> {
 /// Render a context response as the canonical Markdown prompt fragment.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
+    if let Some(text) = &response.data.finalized_text {
+        return text.clone();
+    }
     render_context_response_markdown_with_degraded(response, &response.data.degraded)
 }
 
@@ -4950,13 +5005,26 @@ pub(crate) fn render_context_response_markdown_with_degraded(
     response: &ContextResponse,
     degraded: &[ContextResponseDegradation],
 ) -> String {
-    let mut body = render_context_markdown_with_analysis(
-        &response.data.request,
-        &response.data.pack,
+    render_context_markdown_with_footer(
+        &ContextMarkdownInput::from(response),
         degraded,
-        &response.data.consensus,
-        &response.data.conflicts,
-        response.data.coordination.as_ref(),
+        response.data.pack.hash.as_deref().unwrap_or("absent"),
+    )
+}
+
+#[must_use]
+pub(crate) fn render_context_markdown_with_footer(
+    input: &ContextMarkdownInput<'_>,
+    degraded: &[ContextResponseDegradation],
+    footer_hash: &str,
+) -> String {
+    let mut body = render_context_markdown_with_analysis(
+        input.request,
+        input.pack,
+        degraded,
+        input.consensus,
+        input.conflicts,
+        input.coordination,
     );
     // Bead bd-17c65.4.3 (D3): append pack metadata as trailing HTML
     // comments. Invisible to standard markdown rendering and to LLMs
@@ -4984,10 +5052,12 @@ pub(crate) fn render_context_response_markdown_with_degraded(
     // omitting it here is a sound trade — correlation by `pack.hash`
     // is sufficient for the "find this body's structured record"
     // use case D3 describes.
-    let pack_hash = response.data.pack.hash.as_deref().unwrap_or("absent");
-    body.push_str(&format!("\n<!-- pack.hash: {pack_hash} -->\n"));
-    body.push_str(&format!("<!-- pack.schema: {} -->\n", response.schema));
+    body.push_str(&context_markdown_identity_footer(input.schema, footer_hash));
     body
+}
+
+pub(crate) fn context_markdown_identity_footer(schema: &str, hash: &str) -> String {
+    format!("\n<!-- pack.hash: {hash} -->\n<!-- pack.schema: {schema} -->\n")
 }
 
 /// Render the canonical Markdown prompt fragment from context pack parts.

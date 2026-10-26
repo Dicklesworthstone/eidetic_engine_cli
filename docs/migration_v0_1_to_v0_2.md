@@ -1,6 +1,6 @@
 # Migrating from `ee` v0.1 to v0.2 (bd-17c65.11.5 / K5)
 
-## Production quality ranking and pack identity v4
+## Production quality ranking and pack identity v5
 
 Search now applies EE's observed recency, confidence, utility, harmful-feedback,
 native-rule maturity and scope signals after Frankensearch retrieval. Candidate
@@ -21,16 +21,28 @@ validation. Memory feedback is read from the owning database at the request's
 reference time; a future event cannot penalize a historical request.
 
 New pack responses retain `ee.pack.v2` and identify their hash input as
-`ee.pack.hash_input.v4`, with `snapshotIdentity.version=4`. The added
+`ee.pack.hash_input.v5`, with `snapshotIdentity.version=5`. The
 `qualityScoring` component binds the policy actually used by retrieval; a
 direct pack builder without search binds an explicit absence marker. Thus a
 policy change can change identity even when selected items remain equal.
 Historical pack records, ledger bytes and hashes are not rewritten.
 
-The L2 cache key is now `ee.pack.l2_cache_key.v9`. Retrieval and source
+V5 finalizes the actual prompt renderer after backend, analysis and requested
+DNA attachment, before persisting or caching its identity. The text digest
+binds every delivered byte except the terminal hash-footer value, which uses
+the declared `ee.pack.hash.self.v1` placeholder while hashing. JSON may omit
+`pack.text`, but Lean Markdown remains bound. Late delivery notices remain in
+the envelope and do not change the finalized prompt or stored hash.
+
+The L2 cache key is now `ee.pack.l2_cache_key.v10`, with payload schema
+`ee.pack.l2_context_response.v4`. Cache admission verifies finalized text and
+recomposes its v5 identity; older entries miss. Retrieval and source
 admission run before cache lookup; reuse covers assembly/rendering and binds
 the actual quality policy and scored candidate pool. Daemon pack handoffs
 with observed feedback trigger fresh retrieval, avoiding stale top-K reuse.
+Requested DNA bypasses L2 and uses the held selection snapshot. Historical
+`context show` and `pack replay` remain redacted selection projections carrying
+their original opaque hashes; they do not reconstruct original prompt bytes.
 
 > **Audience.** Agent-harness authors and integration code consuming
 > `ee`'s `--json` output. Human users of the `ee` CLI surface should

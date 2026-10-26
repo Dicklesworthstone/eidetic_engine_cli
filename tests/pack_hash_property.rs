@@ -1,4 +1,4 @@
-//! ADR 0087 v4 pack-hash properties: reference time and quality policy.
+//! ADR 0087 v5 pack-hash properties: finalized renderer text and input identity.
 //!
 //! Every property here reads the product's own output as it is. There is no
 //! test-side normalizer: a comparison that scrubbed timing first could not
@@ -22,11 +22,15 @@ use uuid::Uuid;
 // Keep the original fixture bytes so the version bump changes only hashing.
 const QUERY: &str = "pack hash v2 property";
 
-/// The v4 `pack.hash` of [`pinned_fixture`], identical on every declared
+/// The v5 `pack.hash` of [`pinned_fixture`], identical on every declared
 /// target. A change here is a deliberate `snapshotIdentity.version` bump
 /// (ADR 0087 §8), never a re-pin to make a run green.
-const PINNED_V4_PACK_HASH: &str =
-    "blake3:9cc5f083d5b2c90a2236814ea5fca573a9178374ee07182919fe1ea1f667e47f";
+/// Independently derived with a reference encoder that first reproduced the
+/// previous v4 vector, rather than re-pinned from the implementation under test.
+const PINNED_V5_PACK_HASH: &str =
+    "blake3:d23147ff6ce496877c45954856a232ff376ad1c8cb4ce000aa0249076b94d86a";
+const PINNED_V5_RENDERED_TEXT: &str =
+    "blake3:da62a1cfc023edbde6d1a918f5452a488824eee1b05d993a7e5f752e6813449f";
 
 fn fixture(relevance: f32) -> Result<(ContextRequest, PackDraft), String> {
     let request = ContextRequest::from_query(QUERY).map_err(|error| error.to_string())?;
@@ -121,18 +125,48 @@ fn resource_profiles() -> impl Strategy<Value = PackResourceProfile> {
     ]
 }
 
-/// The pinned digest vector: one fixed input, one fixed v4 hash. Run on two
+/// The pinned digest vector: one fixed input, one fixed v5 hash. Run on two
 /// RCH workers, this is the cross-host half of ADR 0087 §9.
 #[test]
-fn pinned_v4_pack_hash_digest_vector() -> Result<(), String> {
-    let (request, draft) = pinned_fixture()?;
+fn pinned_v5_pack_hash_digest_vector() -> Result<(), String> {
+    let (request, mut draft) = pinned_fixture()?;
     let hash = compute_pack_hash(&request, &draft, &canonical_degraded()?);
-    println!("pack_hash_property pinned_v4_pack_hash={hash}");
-    if hash != PINNED_V4_PACK_HASH {
+    println!("pack_hash_property pinned_v5_pack_hash={hash}");
+    if hash != PINNED_V5_PACK_HASH {
         return Err(format!(
-            "v4 pack hash of the pinned fixture is {hash}, pinned {PINNED_V4_PACK_HASH}"
+            "v5 pack hash of the pinned fixture is {hash}, pinned {PINNED_V5_PACK_HASH}"
         ));
     }
+    draft.hash = Some(hash.clone());
+    let response = ContextResponse::new(request, draft, canonical_degraded()?)
+        .map_err(|error| error.to_string())?;
+    let envelope = serde_json::from_str(&render_context_response_json(&response))
+        .map_err(|error| error.to_string())?;
+    let text = shipped_text(&envelope)?;
+    let footer = format!("\n<!-- pack.hash: {hash} -->\n<!-- pack.schema: ee.response.v2 -->\n");
+    let body = text
+        .strip_suffix(&footer)
+        .ok_or("missing typed identity footer")?;
+    let canonical_text = format!(
+        "{body}\n<!-- pack.hash: {} -->\n<!-- pack.schema: ee.response.v2 -->\n",
+        ee::pack::PACK_HASH_TEXT_FOOTER_PLACEHOLDER,
+    );
+    assert_eq!(canonical_text.len(), 1022);
+    let mut text_hasher = blake3::Hasher::new();
+    for (label, value) in [
+        ("schema", ee::pack::PACK_HASH_INPUT_SCHEMA_V5.as_bytes()),
+        ("component", b"rendered_text".as_slice()),
+        ("text", canonical_text.as_bytes()),
+    ] {
+        text_hasher.update(&(label.len() as u64).to_le_bytes());
+        text_hasher.update(label.as_bytes());
+        text_hasher.update(&(value.len() as u64).to_le_bytes());
+        text_hasher.update(value);
+    }
+    assert_eq!(
+        format!("blake3:{}", text_hasher.finalize().to_hex()),
+        PINNED_V5_RENDERED_TEXT
+    );
     Ok(())
 }
 

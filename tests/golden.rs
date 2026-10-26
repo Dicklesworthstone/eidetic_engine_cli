@@ -4728,6 +4728,7 @@ mod tests {
     fn normalize_context_pack_json(json: &str) -> Result<String, String> {
         let mut value: serde_json::Value = serde_json::from_str(json)
             .map_err(|error| format!("pack golden output must be JSON: {error}"))?;
+        normalize_context_pack_snapshot_identity(&mut value)?;
         if !ee::obs::normalize_pack_slo_measurements(&mut value)? {
             return Err("pack golden output missing producer SLO measurements".to_owned());
         }
@@ -4777,6 +4778,86 @@ mod tests {
         serde_json::to_string_pretty(&value)
             .map(|serialized| serialized + "\n")
             .map_err(|error| error.to_string())
+    }
+
+    fn normalize_context_pack_snapshot_identity(value: &mut serde_json::Value) -> TestResult {
+        fn canonical_digest(value: &str) -> bool {
+            value.strip_prefix("blake3:").is_some_and(|hex| {
+                hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        }
+
+        let pack = value
+            .pointer_mut("/data/pack")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or("pack golden must contain a pack object")?;
+        let hash = pack
+            .get("hash")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("pack golden must contain a finalized hash")?
+            .to_owned();
+        let identity = pack
+            .get_mut("snapshotIdentity")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or("pack golden must contain snapshot identity")?;
+        if !canonical_digest(&hash)
+            || identity.get("digest").and_then(serde_json::Value::as_str) != Some(hash.as_str())
+            || identity.get("version").and_then(serde_json::Value::as_u64) != Some(5)
+            || identity
+                .get("inputSchema")
+                .and_then(serde_json::Value::as_str)
+                != Some("ee.pack.hash_input.v5")
+            || identity
+                .get("componentDigestsAvailableLocally")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
+            return Err("pack golden must carry a matching canonical v5 identity".to_owned());
+        }
+        let components = identity
+            .get_mut("components")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or("pack golden must contain component digests")?;
+        let names = [
+            "request",
+            "referenceTime",
+            "qualityScoring",
+            "items",
+            "omitted",
+            "degraded",
+            "coordination",
+            "renderedText",
+        ];
+        if components.len() != names.len() {
+            return Err("pack golden must contain exactly the declared v5 components".to_owned());
+        }
+        for (index, name) in names.into_iter().enumerate() {
+            if !components
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(canonical_digest)
+            {
+                return Err(format!(
+                    "pack golden has a missing or malformed {name} digest"
+                ));
+            }
+            // These wire-shape goldens already normalize the pack hash and
+            // footer. Normalize its opaque component values consistently, after
+            // validating the real values. The independent numerical v5 vector
+            // and delivered-text regressions retain exact identity coverage.
+            components.insert(
+                name.to_owned(),
+                serde_json::json!(format!("blake3:{}", (index + 1).to_string().repeat(64))),
+            );
+        }
+        identity.insert(
+            "digest".to_owned(),
+            serde_json::json!("blake3:normalized-context-pack-hash"),
+        );
+        Ok(())
     }
 
     fn normalize_context_pack_json_strings(value: &mut serde_json::Value) {

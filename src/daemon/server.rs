@@ -64,8 +64,7 @@ use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
     ContextPackOutputOptions, ContextSearchAdvisorySnapshot,
     attach_context_cached_search_advisories_for_delivery,
-    attach_context_search_advisories_for_delivery, attach_pack_dna_to_context_response,
-    run_context_pack_with_performance_controlled,
+    attach_context_search_advisories_for_delivery, run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE,
@@ -5735,6 +5734,7 @@ impl DaemonContextParams {
                 include_non_affecting_degradations: self.include_non_affecting_degradations,
             })
             .with_resource_profile(self.resource_profile)
+            .with_pack_dna(self.explain && !self.no_pack_dna)
     }
 
     fn context_options(&self, authorized_workspace_id: &str) -> Result<ContextPackOptions, String> {
@@ -6025,20 +6025,6 @@ fn dispatch_context_with_admission(
         prefetch_generation,
         prefetch_ticket,
     );
-    if params.explain && !params.no_pack_dna {
-        let database_path = options
-            .database_path
-            .clone()
-            .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
-        attach_pack_dna_to_context_response(&database_path, &mut context_response);
-    }
-    if daemon_context_deadline_expired(context_started, params.timeout_ms) {
-        return daemon_context_deadline_response(
-            request,
-            "ee.daemon.context deadline expired while attaching pack DNA.",
-        );
-    }
-
     let render_options = ContextJsonRenderOptions::from(options.output_options);
     let rendered = render_context_response_json_with_options(&context_response, render_options);
     if daemon_context_deadline_expired(context_started, params.timeout_ms) {
@@ -9657,6 +9643,200 @@ mod tests {
         let error = response.error.as_ref().expect("must have error");
         assert_eq!(error.code, DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE);
         assert!(response.degraded_codes.is_empty());
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn cli_and_daemon_finalize_dna_into_delivered_text_and_persisted_identity() {
+        use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus};
+
+        fn assert_delivered_identity(
+            fixture: &DaemonRememberReportFixture,
+            result: &serde_json::Value,
+            query: &str,
+            includes_dna: bool,
+        ) {
+            assert_eq!(result["success"], true, "{result}");
+            let pack = &result["data"]["pack"];
+            assert!(!pack["items"].as_array().expect("selected items").is_empty());
+            assert_eq!(pack["snapshotIdentity"]["version"], 5);
+            assert_eq!(
+                pack["snapshotIdentity"]["inputSchema"],
+                "ee.pack.hash_input.v5"
+            );
+            let hash = pack["hash"].as_str().expect("finalized pack hash");
+            let text = pack["text"].as_str().expect("delivered canonical text");
+            assert_eq!(pack.get("packDna").is_some(), includes_dna);
+            assert_eq!(text.contains("# Pack DNA\n"), includes_dna);
+            if includes_dna {
+                assert!(pack["packDna"].is_object(), "{result}");
+            }
+            let backend = result["data"]["embed_backend"].as_str().expect("backend");
+            assert!(text.contains(&format!("**embed_backend:** `{backend}`")));
+
+            // Independently frame the bytes actually delivered by each caller.
+            // Only the terminal self-reference is normalized; matching literal
+            // text inside a memory is left untouched.
+            let footer =
+                format!("\n<!-- pack.hash: {hash} -->\n<!-- pack.schema: ee.response.v2 -->\n");
+            let body = text
+                .strip_suffix(&footer)
+                .expect("typed terminal hash footer");
+            let normalized = format!(
+                "{body}\n<!-- pack.hash: ee.pack.hash.self.v1 -->\n<!-- pack.schema: ee.response.v2 -->\n"
+            );
+            let mut hasher = blake3::Hasher::new();
+            for (label, value) in [
+                ("schema", "ee.pack.hash_input.v5"),
+                ("component", "rendered_text"),
+                ("text", normalized.as_str()),
+            ] {
+                hasher.update(&(label.len() as u64).to_le_bytes());
+                hasher.update(label.as_bytes());
+                hasher.update(&(value.len() as u64).to_le_bytes());
+                hasher.update(value.as_bytes());
+            }
+            assert_eq!(
+                pack["snapshotIdentity"]["components"]["renderedText"],
+                format!("blake3:{}", hasher.finalize().to_hex()),
+                "the text leaf must bind the renderer output after all requested attachments"
+            );
+            let connection = crate::db::DbConnection::open_file_read_only(&fixture.database_path)
+                .expect("inspect persisted identity");
+            let stored = connection
+                .get_latest_pack_record_for_query(&fixture.workspace_id, query)
+                .expect("query persisted pack")
+                .expect("pack was persisted");
+            assert_eq!(
+                stored.pack_hash, hash,
+                "delivery must retain the committed hash"
+            );
+        }
+
+        let fixture = DaemonRememberReportFixture::new();
+        fs::write(
+            fixture.workspace_path.join(".ee/config.toml"),
+            "[graph.feature.pack_dna]\nenabled = true\n",
+        )
+        .expect("enable pack DNA");
+        let connection = crate::db::DbConnection::open_file(&fixture.database_path)
+            .expect("fixture memory connection");
+        const MEMORY_ID: &str = "mem_00000000000000000000005902";
+        connection
+            .insert_memory_with_timestamps(
+                MEMORY_ID,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Check quasar release checksums. Preserve the literal ee.pack.hash.self.v1 marker in examples.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("test://pack-finalization".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+                "2020-01-01T00:00:00+00:00",
+                "2020-01-01T00:00:00+00:00",
+                MEMORY_ID,
+            )
+            .expect("insert selected memory");
+        connection.close().expect("close fixture memory connection");
+        let rebuilt = crate::core::index::rebuild_index(&IndexRebuildOptions {
+            workspace_path: fixture.workspace_path.clone(),
+            database_path: Some(fixture.database_path.clone()),
+            index_dir: None,
+            dry_run: false,
+        })
+        .expect("rebuild fixture index");
+        assert_eq!(rebuilt.status, IndexRebuildStatus::Success);
+
+        const QUERY: &str = "quasar release checksums";
+        let query_file = fixture.workspace_path.join("task.eeq.json");
+        fs::write(
+            &query_file,
+            serde_json::json!({"version": "ee.query.v1", "query": {"text": QUERY}}).to_string(),
+        )
+        .expect("seeded query document");
+        let mut cli = crate::cli::CliProcess::default();
+        for (command, suppress_dna) in [
+            (vec!["pack", QUERY], false),
+            (vec!["pack", QUERY, "--no-pack-dna"], true),
+            (vec!["context", QUERY], false),
+            (
+                vec![
+                    "pack",
+                    "build",
+                    "--query-file",
+                    query_file.to_str().unwrap(),
+                ],
+                false,
+            ),
+        ] {
+            let mut argv = vec![
+                "ee",
+                "--json",
+                "--workspace",
+                fixture.workspace_path.to_str().unwrap(),
+            ];
+            argv.extend(command);
+            argv.extend([
+                "--explain",
+                "--source-mode",
+                "lexical_only",
+                "--speed",
+                "instant",
+                "--no-rendered-text=false",
+            ]);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = cli.run(
+                argv.into_iter().map(std::ffi::OsString::from),
+                &mut stdout,
+                &mut stderr,
+            );
+            assert_eq!(
+                exit,
+                crate::models::ProcessExitCode::Success,
+                "{}",
+                String::from_utf8_lossy(&stderr)
+            );
+            let result = serde_json::from_slice(&stdout).expect("CLI JSON response");
+            assert_delivered_identity(&fixture, &result, QUERY, !suppress_dna);
+        }
+
+        let policy =
+            DaemonDispatchPolicy::for_workspace(fixture.workspace_path.display().to_string());
+        let shutdown = AtomicBool::new(false);
+        for suppress_dna in [false, true] {
+            let mut request = DaemonRequest::new(
+                "req-context-finalization",
+                TEST_AGENT_ID,
+                METHOD_CONTEXT,
+                serde_json::json!({
+                    "task": QUERY, "workspacePath": fixture.workspace_path,
+                    "sourceMode": "lexical_only", "speed": "instant",
+                    "explain": true, "noPackDna": suppress_dna,
+                    "noRenderedText": false,
+                }),
+            );
+            request.workspace_id = Some(fixture.workspace_path.display().to_string());
+            let response = dispatch_with_echo_policy_and_workspace_inner(
+                &request, false, &policy, &shutdown, false, None,
+            );
+            assert!(response.error.is_none(), "{response:?}");
+            assert_delivered_identity(
+                &fixture,
+                &response.result.expect("daemon result"),
+                QUERY,
+                !suppress_dna,
+            );
+        }
     }
 
     // GH #37: the daemon amortises a ~500k-piece tokenizer build and a 512 MB

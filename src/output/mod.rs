@@ -3024,13 +3024,13 @@ pub fn render_context_response_json_with_options(
             pack.field_str("query", &response.data.pack.query);
             if let Some(hash) = &response.data.pack.hash {
                 pack.field_str("hash", hash);
-                // ADR 0087 v4: digest is pack.hash, the composite over the
+                // ADR 0087 v5: digest is pack.hash, the composite over the
                 // component digests listed beside it. numericDomain names the
                 // quantization of every hashed score.
                 let components = response.data.pack_hash_components.as_ref();
                 pack.field_object("snapshotIdentity", |identity| {
                     identity.field_u32("version", crate::pack::PACK_SNAPSHOT_IDENTITY_VERSION);
-                    identity.field_str("inputSchema", crate::pack::PACK_HASH_INPUT_SCHEMA_V4);
+                    identity.field_str("inputSchema", crate::pack::PACK_HASH_INPUT_SCHEMA_V5);
                     identity.field_str("digest", hash);
                     identity.field_str("numericDomain", "q20.12");
                     identity.field_bool("componentDigestsAvailableLocally", components.is_some());
@@ -3824,28 +3824,51 @@ pub fn render_context_response_markdown_with_options(
     response: &ContextResponse,
     include_non_affecting: bool,
 ) -> String {
+    if let Some(text) = &response.data.finalized_text {
+        return text.clone();
+    }
+    if let Some(cached_json) = &response.cached_json
+        && let Ok(cached) = serde_json::from_str::<serde_json::Value>(cached_json)
+        && let Some(text) = cached
+            .pointer("/data/pack/text")
+            .and_then(serde_json::Value::as_str)
+    {
+        return text.to_owned();
+    }
+    render_context_markdown_for_finalization(
+        &crate::pack::ContextMarkdownInput::from(response),
+        include_non_affecting,
+        response.data.pack.hash.as_deref().unwrap_or("absent"),
+    )
+}
+
+/// The shared renderer for finalization and unfinalized builder responses.
+/// The hash footer is an explicit argument so the v5 digest can bind every
+/// shipped byte except its own value, without replacing user-provided text.
+#[must_use]
+pub(crate) fn render_context_markdown_for_finalization(
+    input: &crate::pack::ContextMarkdownInput<'_>,
+    include_non_affecting: bool,
+    footer_hash: &str,
+) -> String {
     // ADR 0087 §1: `pack.text` is canonical, so non-canonical telemetry
     // (the elapsed-budget overrun) never reaches it, nor the counts and
     // banner derived from this slice. It stays in the envelope's `degraded[]`.
-    let filtered = response
-        .data
+    let filtered = input
         .degraded
         .iter()
         .filter(|entry| include_non_affecting || entry.category().included_by_default())
         .filter(|entry| !crate::pack::is_non_canonical_telemetry_degradation_code(&entry.code));
     let degraded = aggregate_context_degraded_as_response(filtered);
     let mut markdown =
-        crate::pack::render_context_response_markdown_with_degraded(response, &degraded);
+        crate::pack::render_context_markdown_with_footer(input, &degraded, footer_hash);
     if let Some(heading_end) = markdown.find("\n\n") {
         markdown.insert_str(
             heading_end + 2,
-            &format!(
-                "**embed_backend:** `{}`\n\n",
-                response.data.embed_backend.as_str()
-            ),
+            &format!("**embed_backend:** `{}`\n\n", input.embed_backend.as_str()),
         );
     }
-    if let Some(pack_dna) = &response.data.pack_dna {
+    if let Some(pack_dna) = input.pack_dna {
         insert_context_pack_dna_markdown(&mut markdown, pack_dna);
     }
     markdown

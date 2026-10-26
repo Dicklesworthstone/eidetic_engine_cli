@@ -6718,20 +6718,12 @@ pub fn unrelated_context() -> u64 {{
             rerank_score_count: 7,
             degraded: Vec::new(),
         };
-        let response_json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V2,
-            "success": true,
-            "data": {
-                "command": PACK_COMMAND,
-                "embed_backend": "hash_fallback",
-                "pack": { "schema": crate::models::PACK_SCHEMA_V2 }
-            },
-            "degraded": []
-        })
-        .to_string();
+        let finalized_response = finalized_l2_response_json(&request.query)?;
+        let response_json = finalized_response.to_string();
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
             "responseJson": response_json,
+            "canonicalText": finalized_response["data"]["pack"]["text"],
             "searchAdvisorySnapshot": stale_available.cache_json(),
             "sourceMode": {
                 "requested": "hybrid",
@@ -6793,6 +6785,12 @@ pub fn unrelated_context() -> u64 {{
                     agent_name: "cache-test-agent".to_owned(),
                     task_key: Some("cache-test-task".to_owned()),
                 });
+                side_effect_options
+            }),
+            ("Pack DNA", {
+                let mut side_effect_options = options.clone();
+                side_effect_options.output_options =
+                    side_effect_options.output_options.with_pack_dna(true);
                 side_effect_options
             }),
         ] {
@@ -6935,21 +6933,13 @@ pub fn unrelated_context() -> u64 {{
     /// A stored L2 payload whose inner response says it was produced by
     /// `embed_backend`. `hash_fallback` matches the fixture's key; anything
     /// else is rejected by this module after the lookup has already hit.
-    fn l2_payload_from_backend(embed_backend: &str) -> serde_json::Value {
-        let response_json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V2,
-            "success": true,
-            "data": {
-                "command": PACK_COMMAND,
-                "embed_backend": embed_backend,
-                "pack": { "schema": crate::models::PACK_SCHEMA_V2 }
-            },
-            "degraded": []
-        })
-        .to_string();
-        serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
-            "responseJson": response_json,
+    fn l2_payload_from_backend(embed_backend: &str) -> Result<serde_json::Value, String> {
+        let mut response = finalized_l2_response_json("l2 phase invariant")?;
+        response["data"]["embed_backend"] = serde_json::json!(embed_backend);
+        Ok(serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
+            "responseJson": response.to_string(),
+            "canonicalText": response["data"]["pack"]["text"],
             "searchAdvisorySnapshot": super::ContextSearchAdvisorySnapshot {
                 rerank_configured_mode: crate::config::SearchRerankMode::Auto,
                 rerank_configured_top_k: 50,
@@ -6964,7 +6954,18 @@ pub fn unrelated_context() -> u64 {{
                 "strict": false,
                 "fallback": false
             }
-        })
+        }))
+    }
+
+    fn finalized_l2_response_json(query: &str) -> Result<serde_json::Value, String> {
+        let request = ContextRequest::from_query(query).map_err(|error| error.to_string())?;
+        let draft = crate::pack::assemble_draft(query, request.budget, Vec::<PackCandidate>::new())
+            .map_err(|error| error.to_string())?;
+        let mut response = crate::pack::ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| error.to_string())?;
+        super::finalize_context_response(&mut response, Default::default(), None, None);
+        serde_json::from_str(&crate::output::render_context_response_json(&response))
+            .map_err(|error| error.to_string())
     }
 
     /// Run the real L2 lookup and return (hit?, degraded, phases).
@@ -7035,7 +7036,7 @@ pub fn unrelated_context() -> u64 {{
             .cache
             .put_compressed(
                 &fixture.l2_context.key,
-                &l2_payload_from_backend("hash_fallback"),
+                &l2_payload_from_backend("hash_fallback")?,
             )
             .map_err(|error| error.to_string())?;
         // THE TRIGGER: the stored entry's bytes no longer decode.
@@ -7062,7 +7063,7 @@ pub fn unrelated_context() -> u64 {{
             .cache
             .put_compressed(
                 &fixture.l2_context.key,
-                &l2_payload_from_backend("neural_local"),
+                &l2_payload_from_backend("neural_local")?,
             )
             .map_err(|error| error.to_string())?;
 
@@ -7105,6 +7106,9 @@ pub fn unrelated_context() -> u64 {{
             super::missing_index_search_report("l2 phase invariant", 10, test_runtime_profile());
         let mut response =
             context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(46)))?;
+        super::finalize_context_response(&mut response, fixture.options.output_options, None, None);
+        let finalized_hash = response.data.pack.hash.clone();
+        let finalized_text = crate::output::render_context_response_markdown(&response);
 
         let ((), phases) = crate::cache::pack_l2::capture_pack_l2_phases(|| {
             super::context_pack_l2_store(
@@ -7121,6 +7125,11 @@ pub fn unrelated_context() -> u64 {{
             "l2_pack_cache_unavailable",
         );
         assert_eq!(phases, ["write", "unavailable"]);
+        assert_eq!(response.data.pack.hash, finalized_hash);
+        assert_eq!(
+            crate::output::render_context_response_markdown(&response),
+            finalized_text
+        );
         Ok(())
     }
 
@@ -7144,29 +7153,18 @@ pub fn unrelated_context() -> u64 {{
 
     #[test]
     fn l2_cached_response_json_preserves_current_payload_bytes() -> Result<(), String> {
-        let response_json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V2,
-            "success": true,
-            "data": {
-                "command": "pack",
-                "embed_backend": "hash_fallback",
-                "pack": {
-                    "schema": crate::models::PACK_SCHEMA_V2,
-                    "query": "prepare release"
-                }
-            },
-            "degraded": []
-        })
-        .to_string();
+        let response = finalized_l2_response_json("prepare release")?;
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
-            "responseJson": response_json,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
+            "responseJson": response.to_string(),
+            "canonicalText": response["data"]["pack"]["text"],
         });
 
         let replayed = super::context_pack_l2_cached_response_json(
             &payload,
             "pack",
             crate::models::EmbedBackend::HashFallback,
+            Default::default(),
         )?;
 
         assert_eq!(
@@ -7181,9 +7179,139 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn l2_v5_rejects_stale_identity_tampered_text_and_forged_composites() -> TestResult {
+        let original = finalized_l2_response_json("v5 cache validation")?;
+        let text = original["data"]["pack"]["text"]
+            .as_str()
+            .ok_or("text")?
+            .to_owned();
+        let hash = original["data"]["pack"]["hash"].as_str().ok_or("hash")?;
+        for case in 0..5 {
+            let mut response = original.clone();
+            let mut canonical_text = text.clone();
+            match case {
+                0 => response["data"]["pack"]["snapshotIdentity"]["version"] = serde_json::json!(4),
+                1 => {
+                    canonical_text = format!("Changed text\n{text}");
+                    response["data"]["pack"]["text"] = serde_json::json!(canonical_text);
+                }
+                2 => {
+                    let forged_hash = format!("blake3:{}", "0".repeat(64));
+                    let footer = crate::pack::context_markdown_identity_footer(
+                        crate::models::RESPONSE_SCHEMA_V2,
+                        hash,
+                    );
+                    canonical_text = format!(
+                        "{}{}",
+                        text.strip_suffix(&footer).ok_or("footer")?,
+                        crate::pack::context_markdown_identity_footer(
+                            crate::models::RESPONSE_SCHEMA_V2,
+                            &forged_hash
+                        )
+                    );
+                    response["data"]["pack"]["hash"] = serde_json::json!(forged_hash);
+                    response["data"]["pack"]["snapshotIdentity"]["digest"] =
+                        serde_json::json!(forged_hash);
+                    response["data"]["pack"]["text"] = serde_json::json!(canonical_text);
+                }
+                3 => response["data"]["pack"]["text"] = serde_json::Value::Null,
+                _ => {
+                    response["data"]["pack"]
+                        .as_object_mut()
+                        .ok_or("pack")?
+                        .remove("text");
+                }
+            }
+            let payload = serde_json::json!({
+                "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
+                "responseJson": response.to_string(), "canonicalText": canonical_text,
+            });
+            assert!(
+                super::context_pack_l2_cached_response_json(
+                    &payload,
+                    PACK_COMMAND,
+                    EmbedBackend::HashFallback,
+                    Default::default()
+                )
+                .is_err(),
+                "invalid cache case {case}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn l2_lean_hit_retains_finalized_markdown_without_reintroducing_json_text() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut fixture = l2_try_hit_fixture(temp.path(), temp.path().join("pack-l2"))?;
+        fixture.options.output_options =
+            super::ContextPackOutputOptions::for_profile(super::ContextPackOutputProfile::Lean)
+                .with_cache_json_response(true);
+        fixture.l2_context.key_input.output_options = fixture.options.output_options;
+        fixture.l2_context.key = super::compute_pack_l2_cache_key(&fixture.l2_context.key_input);
+        let draft = crate::pack::assemble_draft(
+            &fixture.request.query,
+            fixture.request.budget,
+            Vec::<PackCandidate>::new(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut fresh =
+            crate::pack::ContextResponse::new(fixture.request.clone(), draft, Vec::new())
+                .map_err(|error| error.to_string())?;
+        super::finalize_context_response(&mut fresh, fixture.options.output_options, None, None);
+        let text = crate::output::render_context_response_markdown(&fresh);
+        let response_json = crate::output::render_context_response_json_with_options(
+            &fresh,
+            crate::output::ContextJsonRenderOptions::from(fixture.options.output_options),
+        );
+        let snapshot = super::ContextSearchAdvisorySnapshot::from_search_report(
+            &ppr_search_report(Vec::new()),
+        );
+        let payload = serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
+            "responseJson": response_json, "canonicalText": text,
+            "searchAdvisorySnapshot": snapshot.cache_json(),
+            "sourceMode": {"requested": "hybrid", "applied": "hybrid", "strict": false, "fallback": false},
+        });
+        fixture
+            .l2_context
+            .cache
+            .put_compressed(&fixture.l2_context.key, &payload)
+            .map_err(|error| error.to_string())?;
+        let mut trace = ContextPerformanceTrace::default();
+        let mut degraded = Vec::new();
+        let hit = super::context_pack_l2_try_hit(
+            &fixture.l2_context,
+            PACK_COMMAND,
+            &fixture.options,
+            &fixture.search_options,
+            &fixture.connection,
+            &fixture.request,
+            std::time::Instant::now(),
+            &mut trace,
+            &mut degraded,
+        )
+        .ok_or("expected finalized Lean cache hit")?;
+        assert!(degraded.is_empty());
+        assert_eq!(hit.response.data.pack.hash, fresh.data.pack.hash);
+        assert_eq!(
+            crate::output::render_context_response_markdown(&hit.response),
+            text
+        );
+        let replay: serde_json::Value =
+            serde_json::from_str(&crate::output::render_context_response_json_with_options(
+                &hit.response,
+                crate::output::ContextJsonRenderOptions::from(fixture.options.output_options),
+            ))
+            .map_err(|error| error.to_string())?;
+        assert!(replay.pointer("/data/pack/text").is_none());
+        Ok(())
+    }
+
+    #[test]
     fn l2_cached_response_json_rejects_unattributed_embedding_backend() {
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
             "responseJson": serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
@@ -7203,6 +7331,7 @@ pub fn unrelated_context() -> u64 {{
             &payload,
             "pack",
             crate::models::EmbedBackend::HashFallback,
+            Default::default(),
         )
         .expect_err("cache payloads without an embedding backend must be invalidated");
         assert!(
@@ -7214,7 +7343,7 @@ pub fn unrelated_context() -> u64 {{
     #[test]
     fn l2_cached_response_json_rejects_backend_mismatch_with_cache_key() {
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
             "responseJson": serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
@@ -7235,6 +7364,7 @@ pub fn unrelated_context() -> u64 {{
             &payload,
             "pack",
             crate::models::EmbedBackend::HashFallback,
+            Default::default(),
         )
         .expect_err("a neural response stored under a hash key must be rejected");
         assert!(
@@ -7280,6 +7410,7 @@ pub fn unrelated_context() -> u64 {{
             &payload,
             "pack",
             crate::models::EmbedBackend::HashFallback,
+            Default::default(),
         )
         .expect_err("v1 cached response semantics must be invalidated");
         assert!(
@@ -7291,28 +7422,22 @@ pub fn unrelated_context() -> u64 {{
 
     #[test]
     fn l2_cached_response_json_backfills_inner_pack_schema() -> Result<(), String> {
-        let response_json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V2,
-            "success": true,
-            "data": {
-                "command": "pack",
-                "embed_backend": "hash_fallback",
-                "pack": {
-                    "query": "prepare release"
-                }
-            },
-            "degraded": []
-        })
-        .to_string();
+        let mut response = finalized_l2_response_json("prepare release")?;
+        response["data"]["pack"]
+            .as_object_mut()
+            .ok_or("pack object")?
+            .remove("schema");
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
-            "responseJson": response_json,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
+            "responseJson": response.to_string(),
+            "canonicalText": response["data"]["pack"]["text"],
         });
 
         let replayed = super::context_pack_l2_cached_response_json(
             &payload,
             "pack",
             crate::models::EmbedBackend::HashFallback,
+            Default::default(),
         )?;
         let replayed_json = serde_json::from_str::<serde_json::Value>(&replayed)
             .map_err(|error| error.to_string())?;
@@ -7373,7 +7498,7 @@ pub fn unrelated_context() -> u64 {{
             no_lod: false,
         };
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
             "responseJson": "{\"schema\":\"ee.response.v2\",\"success\":true,\"data\":{\"command\":\"pack\"},\"degraded\":[]}",
             "sourceMode": {
                 "requested": "semantic_only",
@@ -7747,6 +7872,7 @@ pub fn unrelated_context() -> u64 {{
         search_report.source_mode_fallback = true;
         let mut response =
             context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(44)))?;
+        super::finalize_context_response(&mut response, options.output_options, None, None);
 
         super::context_pack_l2_store(&l2_context, &options, &search_report, &mut response);
 
@@ -7845,6 +7971,7 @@ pub fn unrelated_context() -> u64 {{
         let mut response =
             context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(45)))?;
         response.data.embed_backend = EmbedBackend::NeuralLocal;
+        super::finalize_context_response(&mut response, options.output_options, None, None);
 
         super::context_pack_l2_store(&l2_context, &options, &search_report, &mut response);
 
@@ -7874,6 +8001,7 @@ pub fn unrelated_context() -> u64 {{
                 .map_err(|error| error.to_string())?;
             let ee_dir = workspace.join(".ee");
             std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+            write_context_graph_config(&workspace, "[graph.feature.pack_dna]\nenabled = true\n")?;
             let db_path = ee_dir.join("ee.db");
             let empty_index_dir = tempdir.path().join("empty-index");
             std::fs::create_dir_all(&empty_index_dir).map_err(|error| error.to_string())?;
@@ -7915,7 +8043,13 @@ pub fn unrelated_context() -> u64 {{
                 .map_err(|error| error.to_string())?;
 
             let determinism = crate::runtime::determinism::Deterministic::from_seed(seed);
-            let response = super::run_context_pack_seeded(
+            super::set_context_pack_dna_compute_error(Some(
+                crate::graph::GraphError::AlgorithmTimeout {
+                    algorithm: "pack_dna".to_owned(),
+                    timeout_ms: 125,
+                },
+            ));
+            let result = super::run_context_pack_seeded(
                 &super::ContextPackOptions {
                     task_paths: Vec::new(),
                     workspace_path: workspace,
@@ -7947,14 +8081,20 @@ pub fn unrelated_context() -> u64 {{
                     coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
                     task_lens: None,
                     require_fresh_sentinels: false,
-                    output_options: Default::default(),
+                    output_options: super::ContextPackOutputOptions::default().with_pack_dna(true),
                     persist_pack: true,
                     baseline_write: None,
                     no_lod: false,
                 },
                 determinism,
-            )
-            .map_err(|error| error.to_string())?;
+            );
+            super::set_context_pack_dna_compute_error(None);
+            let response = result.map_err(|error| error.to_string())?;
+            assert_eq!(
+                response.data.pack_dna.as_ref().ok_or("requested DNA")?["degraded"][0]["code"],
+                crate::models::degradation::GRAPH_PACK_DNA_TIMEOUT_CODE
+            );
+            assert_finalized_text_contract(&response)?;
 
             assert!(
                 response
@@ -7969,6 +8109,15 @@ pub fn unrelated_context() -> u64 {{
                 .list_pack_records_for_memory(&memory_id, 10)
                 .map_err(|error| error.to_string())?;
             assert_eq!(history.len(), 1);
+            assert_eq!(
+                response.data.pack.hash.as_deref(),
+                Some(history[0].0.pack_hash.as_str())
+            );
+            let ledger = crate::db::parse_stored_pack_ledger(&history[0].0);
+            assert_eq!(
+                ledger.available_ledger().ok_or("verified ledger")?["packHash"],
+                history[0].0.pack_hash
+            );
             Ok(history[0].0.id.clone())
         }
 
@@ -10895,8 +11044,8 @@ pub fn unrelated_context() -> u64 {{
             serde_json::from_str(&crate::output::render_context_response_json(&response))
                 .map_err(|error| error.to_string())?;
         let identity = &json["data"]["pack"]["snapshotIdentity"];
-        assert_eq!(identity["version"], 4);
-        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v4");
+        assert_eq!(identity["version"], 5);
+        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v5");
         assert_eq!(
             identity["components"]["referenceTime"],
             first.digests.reference_time
@@ -11031,7 +11180,8 @@ pub fn unrelated_context() -> u64 {{
         );
         assert_eq!(
             changed(&base, &repair),
-            ["degraded", "rendered_text", "composite"]
+            ["degraded", "composite"],
+            "filtered workspace-state repairs are bound but absent from canonical text"
         );
 
         let coordination_later = PackCoordinationSnapshot::from_json_str(
@@ -11216,11 +11366,11 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
-    fn pack_hash_refresh_includes_late_context_degradation() -> Result<(), String> {
+    fn pack_finalization_includes_pre_persistence_degradation() -> Result<(), String> {
         use super::{
             ContextPackOutputOptions, ContextResponseDegradation, ContextResponseSeverity,
             compute_pack_hash_with_output_options_coordination_snapshot_and_lens,
-            refresh_context_pack_hash,
+            finalize_context_response,
         };
         use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
@@ -11246,7 +11396,7 @@ pub fn unrelated_context() -> u64 {{
         })
         .map_err(|error| error.to_string())?
         .with_trust_signal(PackTrustSignal::new(TrustClass::AgentValidated, None));
-        let mut draft = assemble_draft(
+        let draft = assemble_draft(
             "late degradation hash",
             TokenBudget::default_context(),
             [candidate],
@@ -11256,16 +11406,22 @@ pub fn unrelated_context() -> u64 {{
         let read_snapshot_generation = Some(17);
         let initial_degraded: Vec<ContextResponseDegradation> = Vec::new();
 
-        let stale_components = refresh_context_pack_hash(
-            &request,
-            &mut draft,
-            &initial_degraded,
+        let mut response = ContextResponse::new(request, draft, initial_degraded)
+            .map_err(|error| error.to_string())?;
+        finalize_context_response(
+            &mut response,
             output_options,
-            None,
             read_snapshot_generation,
             None,
         );
-        let stale_hash = draft
+        let stale_components = response
+            .data
+            .pack_hash_components
+            .clone()
+            .ok_or("initial components")?;
+        let stale_hash = response
+            .data
+            .pack
             .hash
             .clone()
             .ok_or_else(|| "initial hash should be assigned".to_string())?;
@@ -11278,15 +11434,18 @@ pub fn unrelated_context() -> u64 {{
                 "Increase the resource profile or retry after the pack slot clears.".to_string(),
             ),
         }];
-        let refreshed_components = refresh_context_pack_hash(
-            &request,
-            &mut draft,
-            &late_degraded,
+        response.data.degraded = late_degraded.clone();
+        finalize_context_response(
+            &mut response,
             output_options,
-            None,
             read_snapshot_generation,
             None,
         );
+        let refreshed_components = response
+            .data
+            .pack_hash_components
+            .clone()
+            .ok_or("final components")?;
         assert_ne!(
             stale_components.degraded, refreshed_components.degraded,
             "a late degradation must change the degraded component digest"
@@ -11295,13 +11454,15 @@ pub fn unrelated_context() -> u64 {{
             stale_components.request, refreshed_components.request,
             "a late degradation must not change the request component digest"
         );
-        let refreshed_hash = draft
+        let refreshed_hash = response
+            .data
+            .pack
             .hash
             .clone()
             .ok_or_else(|| "refreshed hash should be assigned".to_string())?;
         let expected_hash = compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
-            &request,
-            &draft,
+            &response.data.request,
+            &response.data.pack,
             &late_degraded,
             output_options,
             None,
@@ -11317,12 +11478,159 @@ pub fn unrelated_context() -> u64 {{
             refreshed_hash, expected_hash,
             "refreshed response hash must be computed from the final degradation list"
         );
-        let response = ContextResponse::new(request, draft, late_degraded)
-            .map_err(|error| error.to_string())?;
         assert_eq!(
             response.data.pack.hash.as_deref(),
             Some(refreshed_hash.as_str()),
             "final response must carry the hash for the final degraded set"
+        );
+        Ok(())
+    }
+
+    fn assert_finalized_text_contract(response: &crate::pack::ContextResponse) -> TestResult {
+        let json: serde_json::Value =
+            serde_json::from_str(&crate::output::render_context_response_json(response))
+                .map_err(|error| error.to_string())?;
+        let text = json
+            .pointer("/data/pack/text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("canonical text")?;
+        let hash = response.data.pack.hash.as_deref().ok_or("finalized hash")?;
+        let footer = crate::pack::context_markdown_identity_footer(response.schema, hash);
+        let body = text.strip_suffix(&footer).ok_or("typed final footer")?;
+        let normalized = format!(
+            "{body}{}",
+            crate::pack::context_markdown_identity_footer(
+                response.schema,
+                crate::pack::PACK_HASH_TEXT_FOOTER_PLACEHOLDER,
+            )
+        );
+        let mut hasher = super::pack_hash_component_hasher("rendered_text");
+        super::hash_labeled_bytes(&mut hasher, "text", normalized.as_bytes());
+        let components = response
+            .data
+            .pack_hash_components
+            .as_ref()
+            .ok_or("components")?;
+        assert_eq!(components.rendered_text, super::finalize_blake3(hasher));
+        assert_eq!(
+            text,
+            crate::output::render_context_response_markdown(response)
+        );
+        assert_eq!(
+            text,
+            crate::pack::render_context_response_markdown(response)
+        );
+        assert_eq!(json["data"]["pack"]["snapshotIdentity"]["version"], 5);
+        Ok(())
+    }
+
+    #[test]
+    fn finalized_text_binds_backend_dna_and_preserves_literal_footer_content() -> TestResult {
+        let (request, mut draft) = pack_hash_v2_fixture(Vec::new())?;
+        draft.items[0].content =
+            "Keep ee.pack.hash.self.v1 literal; <!-- pack.hash: ee.pack.hash.self.v1 -->"
+                .to_owned();
+        let mut response = crate::pack::ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| error.to_string())?;
+        response.data.pack_dna = Some(serde_json::json!({
+            "schema": "ee.context.pack_dna.v1", "snapshotVersion": 1,
+            "egoSubgraph": {"nodes": [], "edges": []}
+        }));
+        let options = super::ContextPackOutputOptions::default().with_pack_dna(true);
+        super::finalize_context_response(&mut response, options, Some(12), None);
+        assert_finalized_text_contract(&response)?;
+        let text = crate::output::render_context_response_markdown(&response);
+        assert!(text.contains("Keep ee.pack.hash.self.v1 literal"));
+        assert!(text.contains("# Pack DNA"));
+        let baseline = response
+            .data
+            .pack_hash_components
+            .clone()
+            .ok_or("base components")?;
+        let original_hash = response.data.pack.hash.clone();
+        for change_backend in [true, false] {
+            let mut changed = response.clone();
+            if change_backend {
+                changed.data.embed_backend = EmbedBackend::NeuralLocal;
+            } else {
+                changed.data.pack_dna.as_mut().ok_or("DNA")?["snapshotVersion"] =
+                    serde_json::json!(2);
+            }
+            super::finalize_context_response(&mut changed, options, Some(12), None);
+            assert_finalized_text_contract(&changed)?;
+            assert_eq!(
+                baseline.differing_components(
+                    changed
+                        .data
+                        .pack_hash_components
+                        .as_ref()
+                        .ok_or("changed components")?
+                ),
+                ["renderedText"]
+            );
+            assert_ne!(original_hash, changed.data.pack.hash);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn finalization_freezes_text_before_delivery_notices_and_json_text_omission() -> TestResult {
+        let (request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let mut response = crate::pack::ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| error.to_string())?;
+        let options =
+            super::ContextPackOutputOptions::for_profile(super::ContextPackOutputProfile::Lean);
+        super::finalize_context_response(&mut response, options, None, None);
+        assert_finalized_text_contract(&response)?;
+        let hash = response.data.pack.hash.clone();
+        let text = crate::output::render_context_response_markdown(&response);
+        let before = response
+            .data
+            .pack_hash_components
+            .clone()
+            .ok_or("before components")?;
+        response.data.degraded.push(ContextResponseDegradation {
+            code: "context_delta_prior_unknown".to_owned(),
+            severity: ContextResponseSeverity::Low,
+            message: "Delivery-only delta fallback notice.".to_owned(),
+            repair: None,
+        });
+        let json: serde_json::Value =
+            serde_json::from_str(&crate::output::render_context_response_json_with_options(
+                &response,
+                crate::output::ContextJsonRenderOptions::from(options),
+            ))
+            .map_err(|error| error.to_string())?;
+        assert!(json.pointer("/data/pack/text").is_none());
+        assert_eq!(response.data.pack.hash, hash);
+        assert_eq!(
+            crate::output::render_context_response_markdown(&response),
+            text
+        );
+        assert!(
+            json["data"]["degraded"]
+                .as_array()
+                .ok_or("degraded")?
+                .iter()
+                .any(|entry| entry["code"] == "context_delta_prior_unknown")
+        );
+        let mut changed = response.clone();
+        changed.data.degraded.clear();
+        changed.data.embed_backend = EmbedBackend::NeuralLocal;
+        super::finalize_context_response(&mut changed, options, None, None);
+        assert_eq!(
+            before.differing_components(
+                changed
+                    .data
+                    .pack_hash_components
+                    .as_ref()
+                    .ok_or("changed components")?
+            ),
+            ["renderedText"]
+        );
+        assert_ne!(
+            changed.data.pack.hash, hash,
+            "Lean identity must still bind canonical Markdown"
         );
         Ok(())
     }

@@ -165,10 +165,10 @@ const PACK_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(debug_assertions)]
 const PACK_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-/// v9: bind the executed quality policy and scored candidates after retrieval,
-/// and miss responses written before pack-hash input v4 (ADR 0087 §8).
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V9: &str = "ee.pack.l2_cache_key.v9";
-const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3: &str = "ee.pack.l2_context_response.v3";
+/// v10: bind the executed quality policy and scored candidates after retrieval,
+/// and miss responses written before finalized pack-hash input v5 (ADR 0087 §8).
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V10: &str = "ee.pack.l2_cache_key.v10";
+const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4: &str = "ee.pack.l2_context_response.v4";
 const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 const GRAPH_PPR_UPSTREAM_UNAVAILABLE_MESSAGE: &str = "Personalized PageRank pack influence is unavailable because the pinned FrankenNetworkX dependency does not expose deterministic personalized PageRank; textual ranking and non-PPR graph explanations remain active.";
@@ -884,6 +884,9 @@ pub struct ContextPackOutputOptions {
     pub profile: ContextPackOutputProfile,
     pub resource_profile: PackResourceProfile,
     pub cache_json_response: bool,
+    /// Attach graph DNA from the held context snapshot before finalizing text
+    /// and persisting its identity. DNA requests always bypass L2 replay.
+    pub include_pack_dna: bool,
     pub include_coverage_fill: bool,
     pub include_rendered_text: bool,
     pub include_skipped: bool,
@@ -937,7 +940,7 @@ pub struct ContextPackOutputOptions {
     /// contract (two identical invocations must be byte-identical).
     ///
     /// Suppressing by PROFILE is deterministic instead: the output is a pure
-    /// function of (inputs, profile), and `refresh_context_pack_hash` already
+    /// function of (inputs, profile), and `finalize_context_response` already
     /// takes `ContextPackOutputOptions` as a hash input, so the hash is already
     /// profile-aware.
     ///
@@ -964,6 +967,7 @@ impl ContextPackOutputOptions {
                 profile,
                 resource_profile: PackResourceProfile::Standard,
                 cache_json_response: false,
+                include_pack_dna: false,
                 include_coverage_fill: false,
                 include_rendered_text: false,
                 include_skipped: false,
@@ -984,6 +988,7 @@ impl ContextPackOutputOptions {
                 profile,
                 resource_profile: PackResourceProfile::Standard,
                 cache_json_response: false,
+                include_pack_dna: false,
                 include_coverage_fill: true,
                 include_rendered_text: true,
                 include_skipped: true,
@@ -1002,6 +1007,7 @@ impl ContextPackOutputOptions {
                 profile,
                 resource_profile: PackResourceProfile::Standard,
                 cache_json_response: false,
+                include_pack_dna: false,
                 include_coverage_fill: true,
                 include_rendered_text: true,
                 include_skipped: true,
@@ -1023,6 +1029,7 @@ impl ContextPackOutputOptions {
             profile: self.profile,
             resource_profile: self.resource_profile,
             cache_json_response: self.cache_json_response,
+            include_pack_dna: self.include_pack_dna,
             include_coverage_fill: overrides
                 .no_coverage_fill
                 .map_or(self.include_coverage_fill, |value| !value),
@@ -1057,6 +1064,12 @@ impl ContextPackOutputOptions {
     #[must_use]
     pub const fn with_cache_json_response(mut self, cache_json_response: bool) -> Self {
         self.cache_json_response = cache_json_response;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_pack_dna(mut self, include_pack_dna: bool) -> Self {
+        self.include_pack_dna = include_pack_dna;
         self
     }
 }
@@ -1970,21 +1983,22 @@ fn compute_context_pack_dna(
     crate::graph::pack_dna::compute_pack_dna(projection, input)
 }
 
-pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut ContextResponse) {
-    let workspace_path = workspace_path_from_database_path(database_path);
-    let pack_dna_config = match workspace_path
-        .as_deref()
+fn resolve_pack_dna_config_for_response(
+    workspace_path: Option<&Path>,
+    response: &mut ContextResponse,
+) -> Option<ContextPackDnaConfig> {
+    match workspace_path
         .map(context_pack_dna_config)
         .unwrap_or(Ok(ContextPackDnaConfig {
             enabled: false,
             max_items: DEFAULT_CONTEXT_PACK_DNA_MAX_ITEMS,
             max_edges: DEFAULT_CONTEXT_PACK_DNA_MAX_EDGES,
         })) {
-        Ok(config) if config.enabled => config,
+        Ok(config) if config.enabled => Some(config),
         Ok(_) => {
             response.data.pack_dna = Some(serde_json::Value::Null);
             push_pack_dna_feature_disabled_degradation(&mut response.data.degraded);
-            return;
+            None
         }
         Err(message) => {
             response.data.pack_dna = Some(serde_json::Value::Null);
@@ -1995,10 +2009,25 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
                 message,
                 Some("Fix or remove .ee/config.toml.".to_string()),
             );
-            return;
+            None
         }
-    };
+    }
+}
 
+/// Attach DNA while building an unfinalized response. Production callers
+/// request it through `ContextPackOutputOptions::with_pack_dna` so the held
+/// read snapshot supplies the graph before identity and persistence. A
+/// finalized response is immutable and is left unchanged by this helper.
+pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut ContextResponse) {
+    if response.data.finalized_text.is_some() {
+        return;
+    }
+    let workspace_path = workspace_path_from_database_path(database_path);
+    let Some(pack_dna_config) =
+        resolve_pack_dna_config_for_response(workspace_path.as_deref(), response)
+    else {
+        return;
+    };
     let graph_explain_start = Instant::now();
     let connection = match DbConnection::open_file_read_only(database_path) {
         Ok(connection) => connection,
@@ -2020,6 +2049,15 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         }
     };
 
+    attach_pack_dna_from_snapshot(&connection, response, pack_dna_config, graph_explain_start);
+}
+
+fn attach_pack_dna_from_snapshot(
+    connection: &DbConnection,
+    response: &mut ContextResponse,
+    pack_dna_config: ContextPackDnaConfig,
+    graph_explain_start: Instant,
+) {
     let pack_memory_ids = response
         .data
         .pack
@@ -2059,7 +2097,7 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
     };
     let projection_seed_ids = pack_dna_projection_seed_ids(&input, pack_dna_config.max_items);
     let projection = match crate::graph::build_memory_graph_for_frontier(
-        &connection,
+        connection,
         &projection_seed_ids,
         &crate::graph::FrontierProjectionOptions {
             max_depth: input.ego_radius,
@@ -3603,7 +3641,7 @@ async fn run_context_pack_with_performance_inner(
         .graph_boosted_candidates
         .saturating_add(changed_symbol_metrics.boosted_candidates);
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let mut agent_profile =
+    let agent_profile =
         apply_agent_context_profile_bias(read_connection, &options.workspace_path, &mut candidates);
     apply_attempt_family_multiplicity_discount(&mut candidates)?;
     control.check()?;
@@ -4030,12 +4068,37 @@ async fn run_context_pack_with_performance_inner(
             &cross_shard_memory_ids,
         );
     }
-    let mut pack_hash_components = refresh_context_pack_hash(
-        &request,
-        &mut draft,
-        &response_degraded,
+    let mut response = ContextResponse::new(request, draft, response_degraded)
+        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    response.data.command = command;
+    response.data.embed_backend = search_report.embed_backend;
+    response.data.adaptive_budget = adaptive_budget_decision;
+    response.data.agent_profile = agent_profile;
+    response.data.slo = Some(slo);
+    response.data.scope_stats = Some(scope_stats);
+    response.data.consensus = consensus_conflicts.consensus;
+    response.data.conflicts = consensus_conflicts.conflicts;
+    response.data.coordination = coordination;
+    if pagination_info.applied {
+        response.data.pagination = Some(pagination_info.into_response());
+    }
+    if options.output_options.include_pack_dna {
+        control.check()?;
+        if let Some(config) =
+            resolve_pack_dna_config_for_response(Some(&options.workspace_path), &mut response)
+        {
+            attach_pack_dna_from_snapshot(
+                checked_context_read_snapshot(&read_pool, &read_snapshot)?,
+                &mut response,
+                config,
+                Instant::now(),
+            );
+        }
+        control.check()?;
+    }
+    finalize_context_response(
+        &mut response,
         options.output_options,
-        coordination.as_ref(),
         read_snapshot_generation,
         options.task_lens.as_ref(),
     );
@@ -4053,9 +4116,9 @@ async fn run_context_pack_with_performance_inner(
                     PackRecordPersistence::Ambient => persist_pack_record_measured(
                         &connection,
                         &options.workspace_path,
-                        &request,
-                        &draft,
-                        &response_degraded,
+                        &response.data.request,
+                        &response.data.pack,
+                        &response.data.degraded,
                         &non_ledger_memory_ids,
                         options.task_lens.as_ref(),
                         options.baseline_write.as_ref(),
@@ -4065,9 +4128,9 @@ async fn run_context_pack_with_performance_inner(
                     PackRecordPersistence::Seeded => persist_pack_record_seeded_measured(
                         &connection,
                         &options.workspace_path,
-                        &request,
-                        &draft,
-                        &response_degraded,
+                        &response.data.request,
+                        &response.data.pack,
+                        &response.data.degraded,
                         &non_ledger_memory_ids,
                         determinism,
                         options.task_lens.as_ref(),
@@ -4089,9 +4152,9 @@ async fn run_context_pack_with_performance_inner(
                             PackRecordPersistence::Ambient => persist_pack_record_measured(
                                 &connection,
                                 &options.workspace_path,
-                                &request,
-                                &draft,
-                                &response_degraded,
+                                &response.data.request,
+                                &response.data.pack,
+                                &response.data.degraded,
                                 &non_ledger_memory_ids,
                                 options.task_lens.as_ref(),
                                 options.baseline_write.as_ref(),
@@ -4101,9 +4164,9 @@ async fn run_context_pack_with_performance_inner(
                             PackRecordPersistence::Seeded => persist_pack_record_seeded_measured(
                                 &connection,
                                 &options.workspace_path,
-                                &request,
-                                &draft,
-                                &response_degraded,
+                                &response.data.request,
+                                &response.data.pack,
+                                &response.data.degraded,
                                 &non_ledger_memory_ids,
                                 determinism,
                                 options.task_lens.as_ref(),
@@ -4137,30 +4200,26 @@ async fn run_context_pack_with_performance_inner(
         // The "persisted without its global items" notice was added before
         // the write so the persisted record and hash include it. No pack was
         // persisted, so it would now contradict `context_pack_persist_failed`.
-        response_degraded.retain(|entry| {
+        response.data.degraded.retain(|entry| {
             entry.code != GLOBAL_ITEMS_NOT_PERSISTED_CODE
                 && entry.code != CROSS_SHARD_ITEMS_NOT_PERSISTED_CODE
         });
         let (message, repair) = context_pack_persist_failed_message_and_repair(&persist_error);
         push_degradation(
-            &mut response_degraded,
+            &mut response.data.degraded,
             "context_pack_persist_failed",
             ContextResponseSeverity::Medium,
             message,
             Some(repair),
         );
-        pack_hash_components = refresh_context_pack_hash(
-            &request,
-            &mut draft,
-            &response_degraded,
+        // No record was committed, so the nonpersisted response can safely
+        // receive a new identity that includes the persistence failure.
+        finalize_context_response(
+            &mut response,
             options.output_options,
-            coordination.as_ref(),
             read_snapshot_generation,
             options.task_lens.as_ref(),
         );
-    }
-    if let Some(profile) = agent_profile.as_mut() {
-        set_agent_profile_base_pack_hash(profile, draft.hash.as_deref());
     }
     trace.pack_persistence = pack_persistence;
     trace.record_elapsed("packPersistence", persist_start);
@@ -4170,34 +4229,10 @@ async fn run_context_pack_with_performance_inner(
     // pack that blew its published latency budget says so rather than carrying
     // it only in `slo.elapsedStatus`.
     //
-    // Placed here, immediately before the response is built, because
-    // `response_degraded` is the hash input for EVERY
-    // `refresh_context_pack_hash` call in this function — including the second
-    // one inside the persist-failure branch above. Wall-clock time is not
-    // reproducible, so letting a timing entry reach any of them would make the
-    // same query over the same store hash differently on a loaded machine,
-    // breaking the determinism guarantee AGENTS.md calls non-negotiable. This
-    // is also why it is sourced from `timing_degradations()` rather than added
-    // to `slo.degradations`, which stays resource-only and deterministic.
-    //
-    // Persistence deliberately does not see it either: the persisted pack
-    // record should match the hashed, reproducible content.
-    response_degraded.extend(slo.timing_degradations());
-
-    let mut response = ContextResponse::new(request, draft, response_degraded)
-        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
-    response.data.command = command;
-    response.data.embed_backend = search_report.embed_backend;
-    response.data.adaptive_budget = adaptive_budget_decision;
-    response.data.agent_profile = agent_profile;
-    response.data.slo = Some(slo);
-    response.data.scope_stats = Some(scope_stats);
-    response.data.consensus = consensus_conflicts.consensus;
-    response.data.conflicts = consensus_conflicts.conflicts;
-    response.data.coordination = coordination;
-    response.data.pack_hash_components = Some(pack_hash_components);
-    if pagination_info.applied {
-        response.data.pagination = Some(pagination_info.into_response());
+    // Finalized prompt bytes and the persisted ledger exclude delivery
+    // telemetry. The envelope still reports it without changing either.
+    if let Some(slo) = &response.data.slo {
+        response.data.degraded.extend(slo.timing_degradations());
     }
 
     control.check()?;
@@ -4230,25 +4265,7 @@ async fn run_context_pack_with_performance_inner(
             .ok()
             == Some(l2_context.key_input.database_generation)
     {
-        let degraded_count_before_l2_store = response.data.degraded.len();
         context_pack_l2_store(l2_context, options, &search_report, &mut response);
-        if response.data.degraded.len() != degraded_count_before_l2_store {
-            // `response.data.degraded` already holds the timing entry here;
-            // the v2 hash drops it by construction (ADR 0087 §5).
-            let pack_hash_components = refresh_context_pack_hash(
-                &response.data.request,
-                &mut response.data.pack,
-                &response.data.degraded,
-                options.output_options,
-                response.data.coordination.as_ref(),
-                read_snapshot_generation,
-                options.task_lens.as_ref(),
-            );
-            response.data.pack_hash_components = Some(pack_hash_components);
-            if let Some(profile) = response.data.agent_profile.as_mut() {
-                set_agent_profile_base_pack_hash(profile, response.data.pack.hash.as_deref());
-            }
-        }
     }
     trace.record_pack_persistence_subspans();
     trace.record_elapsed("total", total_start);
@@ -7611,6 +7628,9 @@ fn context_pack_l2_bypass_reason(
     if context_validity_reference_time(options, filters).is_none() {
         return Some("implicit_validity_reference_time");
     }
+    if options.output_options.include_pack_dna {
+        return Some("pack_dna_requires_live_snapshot");
+    }
     if options.coordination_snapshot_path.is_some() {
         return Some("coordination_snapshot");
     }
@@ -7653,6 +7673,9 @@ fn context_pack_l2_bypass_reason(
 }
 
 fn context_pack_l2_side_effect_bypass_reason(options: &ContextPackOptions) -> Option<&'static str> {
+    if options.output_options.include_pack_dna {
+        return Some("pack_dna_requires_live_snapshot");
+    }
     // A cache hit returns before pack-record persistence, baseline ledger
     // writes, and the per-invocation audit. Until those side effects can be
     // replayed from a structured cache payload, write-bearing requests must
@@ -7666,6 +7689,9 @@ fn context_pack_l2_side_effect_bypass_reason(options: &ContextPackOptions) -> Op
 fn context_pack_l2_mutable_state_bypass_reason(
     options: &ContextPackOptions,
 ) -> Option<&'static str> {
+    if options.output_options.include_pack_dna {
+        return Some("pack_dna_requires_live_snapshot");
+    }
     // These mutable files are consumed after the cache lookup. Absence is
     // rechecked on every request, so a newly-created file forces a fresh run;
     // any present, unreadable, or unsafe path bypasses replay entirely.
@@ -7869,6 +7895,7 @@ fn context_pack_l2_try_hit(
                 &hit.pack_json,
                 command,
                 l2_context.key_input.embed_backend,
+                options.output_options,
             ) {
                 Ok(cached_json) => {
                     let mut search_advisory_snapshot =
@@ -7932,12 +7959,18 @@ fn context_pack_l2_try_hit(
                         dictionary_id = hit.compression.as_ref().and_then(|compression| compression.dictionary_id.as_deref()).unwrap_or("none"),
                         stored_at_epoch_seconds = hit.stored_at_epoch_seconds,
                     );
+                    let mut response = ContextResponse::from_cached_json_with_command(
+                        request.clone(),
+                        cached_json,
+                        command,
+                    );
+                    response.data.finalized_text = hit
+                        .pack_json
+                        .get("canonicalText")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
                     return Some(ContextPackPerformanceRun {
-                        response: ContextResponse::from_cached_json_with_command(
-                            request.clone(),
-                            cached_json,
-                            command,
-                        ),
+                        response,
                         performance: context_pack_l2_hit_performance_json(
                             command,
                             options,
@@ -8004,6 +8037,14 @@ fn context_pack_l2_store(
     if !options.persist_pack {
         return;
     }
+    if response.data.finalized_text.is_none() || response.data.pack_hash_components.is_none() {
+        tracing::debug!(
+            target: "ee::pack_l2",
+            event = "pack_l2_cache_write_skipped",
+            reason = "unfinalized_response",
+        );
+        return;
+    }
     if let Some(reason) = context_pack_l2_mutable_state_bypass_reason(options) {
         tracing::debug!(
             target: "ee::pack_l2",
@@ -8061,8 +8102,9 @@ fn context_pack_l2_store(
     let search_advisory_snapshot =
         ContextSearchAdvisorySnapshot::from_search_report(search_report).cache_json();
     let payload = serde_json::json!({
-        "schema": PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+        "schema": PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
         "responseJson": rendered,
+        "canonicalText": response.data.finalized_text,
         "searchAdvisorySnapshot": search_advisory_snapshot,
         "sourceMode": {
             "requested": source_mode_metadata.requested.as_str(),
@@ -8593,12 +8635,13 @@ fn context_pack_l2_cached_response_json(
     payload: &serde_json::Value,
     command: &'static str,
     expected_embed_backend: EmbedBackend,
+    output_options: ContextPackOutputOptions,
 ) -> Result<String, String> {
     let schema = payload
         .get("schema")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "L2 pack cache payload is missing schema".to_string())?;
-    if schema != PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3 {
+    if schema != PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4 {
         return Err(format!(
             "L2 pack cache payload has unexpected schema {schema}"
         ));
@@ -8631,6 +8674,11 @@ fn context_pack_l2_cached_response_json(
             expected_embed_backend.as_str()
         ));
     }
+    let canonical_text = payload
+        .get("canonicalText")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "L2 pack cache payload is missing canonicalText".to_owned())?;
+    validate_cached_context_finalization(&parsed, canonical_text, output_options)?;
     if command_matches && pack_schema_matches {
         return Ok(response_json.to_owned());
     }
@@ -8661,6 +8709,101 @@ fn context_pack_l2_cached_response_json(
     }
     serde_json::to_string(&adjusted)
         .map_err(|error| format!("L2 pack cache responseJson rewrite failed: {error}"))
+}
+
+fn validate_cached_context_finalization(
+    parsed: &serde_json::Value,
+    canonical_text: &str,
+    output_options: ContextPackOutputOptions,
+) -> Result<(), String> {
+    let identity = parsed.pointer("/data/pack/snapshotIdentity");
+    let hash = parsed
+        .pointer("/data/pack/hash")
+        .and_then(serde_json::Value::as_str);
+    if hash.is_none()
+        || identity
+            .and_then(|value| value.get("version"))
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(crate::pack::PACK_SNAPSHOT_IDENTITY_VERSION))
+        || identity
+            .and_then(|value| value.get("inputSchema"))
+            .and_then(serde_json::Value::as_str)
+            != Some(crate::pack::PACK_HASH_INPUT_SCHEMA_V5)
+        || identity
+            .and_then(|value| value.get("digest"))
+            .and_then(serde_json::Value::as_str)
+            != hash
+    {
+        return Err("L2 pack cache responseJson is missing a finalized v5 identity".to_owned());
+    }
+    match (
+        output_options.include_rendered_text,
+        parsed.pointer("/data/pack/text"),
+    ) {
+        (true, Some(serde_json::Value::String(text))) if text == canonical_text => {}
+        (false, None) => {}
+        _ => {
+            return Err(
+                "L2 pack cache responseJson text does not match its finalized output policy"
+                    .to_owned(),
+            );
+        }
+    }
+    let components = identity
+        .and_then(|value| value.get("components"))
+        .ok_or_else(|| "L2 pack cache v5 identity is missing component digests".to_owned())?;
+    let read_digest = |name| -> Result<String, String> {
+        components
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| {
+                value.strip_prefix("blake3:").is_some_and(|hex| {
+                    hex.len() == 64
+                        && hex
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+            })
+            .map(str::to_owned)
+            .ok_or_else(|| "L2 pack cache v5 identity has an invalid component digest".to_owned())
+    };
+    let digests = crate::pack::PackHashComponentDigests {
+        request: read_digest("request")?,
+        reference_time: read_digest("referenceTime")?,
+        quality_scoring: read_digest("qualityScoring")?,
+        items: read_digest("items")?,
+        omitted: read_digest("omitted")?,
+        degraded: read_digest("degraded")?,
+        coordination: read_digest("coordination")?,
+        rendered_text: read_digest("renderedText")?,
+    };
+    if Some(compute_pack_hash_composite(&digests, output_options.include_skipped).as_str()) != hash
+    {
+        return Err("L2 pack cache v5 composite does not match its component digests".to_owned());
+    }
+    let footer = crate::pack::context_markdown_identity_footer(
+        crate::models::RESPONSE_SCHEMA_V2,
+        hash.expect("identity checked above"),
+    );
+    let body = canonical_text
+        .strip_suffix(&footer)
+        .ok_or_else(|| "L2 pack cache canonical text has an invalid identity footer".to_owned())?;
+    // Only the terminal footer produced by the typed renderer is replaced.
+    // Identical-looking strings inside query or memory text are untouched.
+    let canonical_text = format!(
+        "{body}{}",
+        crate::pack::context_markdown_identity_footer(
+            crate::models::RESPONSE_SCHEMA_V2,
+            crate::pack::PACK_HASH_TEXT_FOOTER_PLACEHOLDER,
+        )
+    );
+    let mut hasher = pack_hash_component_hasher("rendered_text");
+    hash_labeled_bytes(&mut hasher, "text", canonical_text.as_bytes());
+    let digest = finalize_blake3(hasher);
+    if digests.rendered_text != digest {
+        return Err("L2 pack cache canonical text does not match its v5 text digest".to_owned());
+    }
+    Ok(())
 }
 
 fn context_pack_l2_cached_search_advisory_snapshot(
@@ -8915,7 +9058,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V9.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V10.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_bytes(&mut hasher, "database_identity", &input.database_identity);
@@ -9091,7 +9234,9 @@ fn hash_labeled_bool(hasher: &mut blake3::Hasher, label: &str, value: bool) {
 /// `render_context_markdown` byte-equality. The hash is deterministic
 /// over `(request, draft, degraded, default ContextPackOutputOptions,
 /// no coordination, no read snapshot)`; arena allocation strategy does
-/// not participate in any of those inputs.
+/// not participate in any of those inputs. Its renderer uses the default
+/// hash-fallback backend and no analysis or DNA; production finalizes the
+/// actual response metadata before persistence instead.
 pub fn compute_pack_hash(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
@@ -9178,30 +9323,37 @@ fn compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
     components.composite_hash
 }
 
-/// Set `draft.hash` and return the component digests behind it, which the
-/// caller carries to the response's snapshot identity.
-#[must_use]
-fn refresh_context_pack_hash(
-    request: &ContextRequest,
-    draft: &mut crate::pack::PackDraft,
-    degraded: &[ContextResponseDegradation],
+/// Freeze the complete canonical prompt and its v5 identity together. All
+/// canonical attachments must be present before this boundary. Later delivery
+/// notices may extend the envelope but cannot change the persisted prompt.
+fn finalize_context_response(
+    response: &mut ContextResponse,
     output_options: ContextPackOutputOptions,
-    coordination: Option<&PackCoordinationSnapshot>,
     read_snapshot_generation: Option<u64>,
     task_lens: Option<&ContextTaskLens>,
-) -> crate::pack::PackHashComponentDigests {
-    let components = compute_pack_hash_components(
-        request,
-        draft,
-        degraded,
+) {
+    let components = compute_context_pack_hash_components(
+        &crate::pack::ContextMarkdownInput::from(&*response),
         output_options,
-        coordination,
         read_snapshot_generation,
         task_lens,
     );
     log_pack_hash_components(&components);
-    draft.hash = Some(components.composite_hash);
-    components.digests
+    response.data.pack.hash = Some(components.composite_hash);
+    response.data.pack_hash_components = Some(components.digests);
+    response.data.finalized_text = Some(crate::output::render_context_markdown_for_finalization(
+        &crate::pack::ContextMarkdownInput::from(&*response),
+        output_options.include_non_affecting_degradations,
+        response
+            .data
+            .pack
+            .hash
+            .as_deref()
+            .expect("hash just finalized"),
+    ));
+    if let Some(profile) = response.data.agent_profile.as_mut() {
+        set_agent_profile_base_pack_hash(profile, response.data.pack.hash.as_deref());
+    }
 }
 
 #[derive(Debug)]
@@ -9210,15 +9362,8 @@ struct PackHashComponents {
     composite_hash: String,
 }
 
-/// The v4 pack hash (ADR 0087 §4, §7, §8).
-///
-/// Each component is its own blake3 hasher, opened with the input schema tag
-/// and the component name, over labeled, length-prefixed fields only
-/// (`hash_labeled_*`), so no two field sequences can feed the same bytes. The
-/// composite hashes the schema tag and the tagged component digests, never raw
-/// fields, which is what lets a differing composite name the component that
-/// differs. `omitted` enters the composite only when skipped items are shown,
-/// and `rendered_text` only when the text is shown, as in v1.
+/// Default metadata for the public draft-hash builder. Production finalizes
+/// the full response through `compute_context_pack_hash_components` instead.
 fn compute_pack_hash_components(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
@@ -9228,7 +9373,44 @@ fn compute_pack_hash_components(
     read_snapshot_generation: Option<u64>,
     task_lens: Option<&ContextTaskLens>,
 ) -> PackHashComponents {
-    let canonical_degraded = canonical_pack_hash_degraded(degraded);
+    compute_context_pack_hash_components(
+        &crate::pack::ContextMarkdownInput {
+            schema: crate::models::RESPONSE_SCHEMA_V2,
+            request,
+            pack: draft,
+            degraded,
+            embed_backend: EmbedBackend::HashFallback,
+            consensus: &[],
+            conflicts: &[],
+            coordination,
+            pack_dna: None,
+        },
+        output_options,
+        read_snapshot_generation,
+        task_lens,
+    )
+}
+
+/// The v5 pack hash (ADR 0087 §4, §7, §8).
+///
+/// Each component is its own blake3 hasher, opened with the input schema tag
+/// and the component name, over labeled, length-prefixed fields only
+/// (`hash_labeled_*`), so no two field sequences can feed the same bytes. The
+/// composite hashes the schema tag and the tagged component digests, never raw
+/// fields, which is what lets a differing composite name the component that
+/// differs. The actual output renderer binds its backend, analysis, DNA and
+/// filtered degradations, with only the typed footer hash value replaced by
+/// the declared placeholder. Text is bound even when JSON omits `pack.text`:
+/// the same canonical prompt remains available to Markdown consumers.
+fn compute_context_pack_hash_components(
+    input: &crate::pack::ContextMarkdownInput<'_>,
+    output_options: ContextPackOutputOptions,
+    read_snapshot_generation: Option<u64>,
+    task_lens: Option<&ContextTaskLens>,
+) -> PackHashComponents {
+    let request = input.request;
+    let draft = input.pack;
+    let canonical_degraded = canonical_pack_hash_degraded(input.degraded);
 
     let mut request_hasher = pack_hash_component_hasher("request");
     hash_labeled_bytes(&mut request_hasher, "query", request.query.as_bytes());
@@ -9267,6 +9449,11 @@ fn compute_pack_hash_components(
             "output.include_verbose_meta",
             output_options.include_verbose_meta,
         ),
+        (
+            "output.include_non_affecting_degradations",
+            output_options.include_non_affecting_degradations,
+        ),
+        ("output.include_pack_dna", output_options.include_pack_dna),
     ] {
         hash_labeled_bool(&mut request_hasher, label, value);
     }
@@ -9368,20 +9555,17 @@ fn compute_pack_hash_components(
     }
 
     let mut coordination_hasher = pack_hash_component_hasher("coordination");
-    let coordination_input = coordination.map(coordination_snapshot_hash_input);
+    let coordination_input = input.coordination.map(coordination_snapshot_hash_input);
     hash_labeled_optional_bytes(
         &mut coordination_hasher,
         "coordination.snapshot",
         coordination_input.as_deref().map(str::as_bytes),
     );
 
-    let rendered_text = crate::pack::render_context_markdown_with_analysis(
-        request,
-        draft,
-        &canonical_degraded,
-        &[],
-        &[],
-        coordination,
+    let rendered_text = crate::output::render_context_markdown_for_finalization(
+        input,
+        output_options.include_non_affecting_degradations,
+        crate::pack::PACK_HASH_TEXT_FOOTER_PLACEHOLDER,
     );
     let mut rendered_text_hasher = pack_hash_component_hasher("rendered_text");
     hash_labeled_bytes(&mut rendered_text_hasher, "text", rendered_text.as_bytes());
@@ -9397,11 +9581,22 @@ fn compute_pack_hash_components(
         rendered_text: finalize_blake3(rendered_text_hasher),
     };
 
+    PackHashComponents {
+        composite_hash: compute_pack_hash_composite(&digests, output_options.include_skipped),
+        digests,
+    }
+}
+
+/// Fresh assembly and L2 replay share exactly the same component membership.
+fn compute_pack_hash_composite(
+    digests: &crate::pack::PackHashComponentDigests,
+    include_skipped: bool,
+) -> String {
     let mut composite_hasher = blake3::Hasher::new();
     hash_labeled_bytes(
         &mut composite_hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V4.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V5.as_bytes(),
     );
     hash_labeled_bytes(&mut composite_hasher, "request", digests.request.as_bytes());
     hash_labeled_bytes(
@@ -9415,7 +9610,7 @@ fn compute_pack_hash_components(
         digests.quality_scoring.as_bytes(),
     );
     hash_labeled_bytes(&mut composite_hasher, "items", digests.items.as_bytes());
-    if output_options.include_skipped {
+    if include_skipped {
         hash_labeled_bytes(&mut composite_hasher, "omitted", digests.omitted.as_bytes());
     }
     hash_labeled_bytes(
@@ -9428,25 +9623,20 @@ fn compute_pack_hash_components(
         "coordination",
         digests.coordination.as_bytes(),
     );
-    if output_options.include_rendered_text {
-        hash_labeled_bytes(
-            &mut composite_hasher,
-            "rendered_text",
-            digests.rendered_text.as_bytes(),
-        );
-    }
+    hash_labeled_bytes(
+        &mut composite_hasher,
+        "rendered_text",
+        digests.rendered_text.as_bytes(),
+    );
 
-    PackHashComponents {
-        composite_hash: finalize_blake3(composite_hasher),
-        digests,
-    }
+    finalize_blake3(composite_hasher)
 }
 
-/// The degraded set the v4 pack hash binds (ADR 0087 §4): non-canonical
+/// The degraded set the v5 pack hash binds (ADR 0087 §4): non-canonical
 /// telemetry codes are dropped, the rest sorted by (code, severity, message,
 /// repair) with exact duplicates removed. Emission order and repetition are
 /// presentation, and timing is telemetry, so neither can fork `pack.hash`,
-/// whichever `refresh_context_pack_hash` call site passes them in.
+/// whichever finalization call site passes them in.
 fn canonical_pack_hash_degraded(
     degraded: &[ContextResponseDegradation],
 ) -> Vec<ContextResponseDegradation> {
@@ -9471,7 +9661,7 @@ fn pack_hash_component_hasher(component: &str) -> blake3::Hasher {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V4.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V5.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "component", component.as_bytes());
     hasher
