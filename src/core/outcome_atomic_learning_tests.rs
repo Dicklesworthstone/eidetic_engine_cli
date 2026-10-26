@@ -8,6 +8,7 @@ use std::path::PathBuf;
 const WORKSPACE: &str = "wsp_00000000000000000000000071";
 const MEMORY: &str = "mem_00000000000000000000000071";
 const EVENT: &str = "fb_00000000000000000000000071";
+const HELD_EVENT: &str = "fb_00000000000000000000000072";
 const SEED: u64 = 0x4154_4f4d_4943;
 
 struct Fixture {
@@ -104,6 +105,43 @@ impl Fixture {
 
     fn posterior(&self) -> (f64, f64) {
         self.db.get_memory_bayes_posterior(MEMORY).unwrap().unwrap()
+    }
+
+    fn harmful_options(&self) -> OutcomeRecordOptions<'_> {
+        let mut options = self.options();
+        options.signal = "harmful".to_owned();
+        options.weight = Some(0.25);
+        options.source_id = Some("atomic-learning-release".to_owned());
+        options.reason = Some("Release validation found a regression.".to_owned());
+        options
+    }
+
+    fn queue_harmful_feedback(&self, source_type: &str) -> String {
+        let mut options = self.harmful_options();
+        options.harmful_per_source_per_hour = 1;
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+        let prior = self.posterior();
+        options.event_id = Some(HELD_EVENT.to_owned());
+        options.source_type = source_type.to_owned();
+        let queued = record_outcome(&options).unwrap();
+        assert_eq!(queued.status, OutcomeRecordStatus::Quarantined);
+        assert_eq!(self.posterior(), prior);
+        assert!(self.db.get_feedback_event(HELD_EVENT).unwrap().is_none());
+        queued.quarantine.and_then(|summary| summary.id).unwrap()
+    }
+
+    fn release_options<'a>(&'a self, quarantine_id: &'a str) -> OutcomeQuarantineReviewOptions<'a> {
+        OutcomeQuarantineReviewOptions {
+            workspace_path: self._root.path(),
+            database_path: Some(&self.database),
+            quarantine_id,
+            reject: false,
+            actor: Some("atomic-learning-reviewer"),
+            dry_run: false,
+        }
     }
 
     fn audit_count(&self) -> u64 {
@@ -318,4 +356,202 @@ fn successful_human_promotion_and_its_feedback_commit_together() {
     );
     assert!(get_existing_event(&fixture.db, EVENT).unwrap().is_some());
     assert!(report.confidence_after.unwrap() > report.confidence_before.unwrap());
+}
+
+#[test]
+fn quarantine_release_matches_direct_memory_learning_and_applies_once() {
+    let direct = Fixture::new();
+    let mut direct_options = direct.harmful_options();
+    assert_eq!(
+        record_outcome(&direct_options).unwrap().status,
+        OutcomeRecordStatus::Recorded
+    );
+    direct_options.event_id = Some(HELD_EVENT.to_owned());
+    assert_eq!(
+        record_outcome(&direct_options).unwrap().status,
+        OutcomeRecordStatus::Recorded
+    );
+
+    let fixture = Fixture::new();
+    let quarantine_id = fixture.queue_harmful_feedback("outcome_observed");
+    let pending = fixture.db.get_feedback_quarantine(&quarantine_id).unwrap();
+    let prior = fixture.posterior();
+    let audits = fixture.audit_count();
+    let mut release = fixture.release_options(&quarantine_id);
+    release.dry_run = true;
+    assert_eq!(
+        review_feedback_quarantine(&release).unwrap().status,
+        "dry_run"
+    );
+    assert_eq!(fixture.posterior(), prior);
+    assert_eq!(fixture.audit_count(), audits);
+    assert_eq!(
+        fixture.db.get_feedback_quarantine(&quarantine_id).unwrap(),
+        pending
+    );
+    assert!(fixture.db.get_feedback_event(HELD_EVENT).unwrap().is_none());
+
+    release.dry_run = false;
+    let report = review_feedback_quarantine(&release).unwrap();
+    assert_eq!(report.status, "released");
+    assert_eq!(report.feedback_event_id.as_deref(), Some(HELD_EVENT));
+    assert_eq!(
+        fixture.posterior(),
+        (prior.0, prior.1 + DEFAULT_HARMFUL_WEIGHT)
+    );
+    assert_eq!(fixture.posterior(), direct.posterior());
+    assert_eq!(
+        fixture.db.get_memory_trust_class(MEMORY).unwrap(),
+        direct.db.get_memory_trust_class(MEMORY).unwrap()
+    );
+    let event = fixture.db.get_feedback_event(HELD_EVENT).unwrap().unwrap();
+    assert_eq!(event.signal, "harmful");
+    assert_eq!(event.weight, 0.25);
+    assert_eq!(event.source_type, direct_options.source_type);
+    assert_eq!(event.source_id, direct_options.source_id);
+    assert_eq!(event.reason, direct_options.reason);
+    let bayes_audits = fixture
+        .db
+        .list_audit_by_action(audit_actions::OUTCOME_BAYES_UPDATE, None)
+        .unwrap();
+    assert_eq!(bayes_audits.len(), 2);
+    let release_audit = bayes_audits
+        .iter()
+        .find(|audit| {
+            let details: serde_json::Value =
+                serde_json::from_str(audit.details.as_deref().unwrap()).unwrap();
+            details["feedbackEventId"] == HELD_EVENT
+        })
+        .expect("released feedback must carry its posterior audit");
+    assert_eq!(release_audit.actor.as_deref(), release.actor);
+
+    let learned = fixture.posterior();
+    let memory = fixture.db.get_memory(MEMORY).unwrap();
+    let audits = fixture.audit_count();
+    let replay = review_feedback_quarantine(&release).unwrap();
+    assert_eq!(replay.status, "already_reviewed");
+    assert!(!replay.changed);
+    assert_eq!(fixture.posterior(), learned);
+    assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory);
+    assert_eq!(fixture.audit_count(), audits);
+    assert_eq!(fixture.db.count_table_rows("feedback_events").unwrap(), 2);
+}
+
+#[test]
+fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promotion() {
+    let fixture = Fixture::new();
+    fixture.seed_agent_validated();
+    assert!(
+        fixture
+            .db
+            .update_memory_bayes_posterior(MEMORY, 100.0, 0.5)
+            .unwrap()
+    );
+    let quarantine_id = fixture.queue_harmful_feedback("human_explicit");
+    let pending = fixture.db.get_feedback_quarantine(&quarantine_id).unwrap();
+    let memory = fixture.db.get_memory(MEMORY).unwrap();
+    let prior = fixture.posterior();
+    let audits = fixture.audit_count();
+    fixture
+        .db
+        .execute_raw(&format!(
+            "CREATE TRIGGER reject_memory_release_audit BEFORE INSERT ON audit_log \
+             WHEN NEW.action = '{}' BEGIN SELECT RAISE(ABORT, 'release audit failure'); END;",
+            audit_actions::FEEDBACK_QUARANTINE_RELEASE
+        ))
+        .unwrap();
+    let release = fixture.release_options(&quarantine_id);
+    assert!(matches!(
+        review_feedback_quarantine(&release),
+        Err(DomainError::Storage { .. })
+    ));
+    assert_eq!(fixture.posterior(), prior);
+    assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory);
+    assert_eq!(
+        fixture.db.get_feedback_quarantine(&quarantine_id).unwrap(),
+        pending
+    );
+    assert!(fixture.db.get_feedback_event(HELD_EVENT).unwrap().is_none());
+    assert_eq!(fixture.audit_count(), audits);
+    assert_eq!(fixture.db.count_table_rows("feedback_events").unwrap(), 1);
+
+    fixture
+        .db
+        .execute_raw("DROP TRIGGER reject_memory_release_audit")
+        .unwrap();
+    assert_eq!(
+        review_feedback_quarantine(&release).unwrap().status,
+        "released"
+    );
+    assert_eq!(
+        fixture.posterior(),
+        (prior.0, prior.1 + DEFAULT_HARMFUL_WEIGHT)
+    );
+    // The queued human-explicit payload has an actor and reason, but reviewing
+    // its admission is not the separate explicit memory-promotion operation.
+    assert_eq!(
+        fixture
+            .db
+            .get_memory_trust_class(MEMORY)
+            .unwrap()
+            .as_deref(),
+        Some("agent_validated")
+    );
+    assert_eq!(
+        fixture
+            .db
+            .get_feedback_event(HELD_EVENT)
+            .unwrap()
+            .unwrap()
+            .source_type,
+        "human_explicit"
+    );
+}
+
+#[test]
+fn quarantine_release_rechecks_memory_workspace_and_liveness_before_learning() {
+    for tombstone in [false, true] {
+        let fixture = Fixture::new();
+        let quarantine_id = fixture.queue_harmful_feedback("outcome_observed");
+        if tombstone {
+            fixture.db.execute_raw(&format!(
+                "UPDATE memories SET tombstoned_at = '2026-09-20T00:00:00Z' WHERE id = '{MEMORY}'"
+            )).unwrap();
+        } else {
+            let foreign = "wsp_00000000000000000000000073";
+            fixture
+                .db
+                .insert_workspace(
+                    foreign,
+                    &CreateWorkspaceInput {
+                        path: "/atomic-memory-other-workspace".to_owned(),
+                        name: None,
+                    },
+                )
+                .unwrap();
+            fixture
+                .db
+                .execute_raw(&format!(
+                    "UPDATE memories SET workspace_id = '{foreign}' WHERE id = '{MEMORY}'"
+                ))
+                .unwrap();
+        }
+        let pending = fixture.db.get_feedback_quarantine(&quarantine_id).unwrap();
+        let memory = fixture.db.get_memory(MEMORY).unwrap();
+        let prior = fixture.posterior();
+        let audits = fixture.audit_count();
+        assert!(matches!(
+            review_feedback_quarantine(&fixture.release_options(&quarantine_id)),
+            Err(DomainError::Storage { .. })
+        ));
+        assert_eq!(fixture.posterior(), prior);
+        assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory);
+        assert_eq!(
+            fixture.db.get_feedback_quarantine(&quarantine_id).unwrap(),
+            pending
+        );
+        assert!(fixture.db.get_feedback_event(HELD_EVENT).unwrap().is_none());
+        assert_eq!(fixture.audit_count(), audits);
+        assert_eq!(fixture.db.count_table_rows("feedback_events").unwrap(), 1);
+    }
 }

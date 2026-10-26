@@ -1579,8 +1579,18 @@ fn apply_memory_outcome_in_txn(
     }
     let missing_target = || crate::db::DbError::MalformedRow {
         operation: crate::db::DbOperation::Execute,
-        message: "Outcome memory disappeared before learning could commit".to_owned(),
+        message: "Outcome memory is no longer live in its workspace before learning could commit"
+            .to_owned(),
     };
+    // A review may release an observation long after target resolution. Keep
+    // ownership and liveness in the same writer snapshot as its learning,
+    // including neutral signals that do not update the posterior.
+    connection
+        .get_memory(&feedback.target_id)?
+        .filter(|memory| {
+            memory.workspace_id == feedback.workspace_id && memory.tombstoned_at.is_none()
+        })
+        .ok_or_else(missing_target)?;
     let (current_alpha, current_beta) = connection
         .get_memory_bayes_posterior(&feedback.target_id)?
         .ok_or_else(missing_target)?;
@@ -2677,6 +2687,17 @@ fn release_feedback_quarantine_audited(
             }
             connection.insert_feedback_event(event_id, feedback_input)?;
             apply_native_rule_outcome_in_txn(connection, feedback_input, event_id, actor)?;
+            // Admission releases the original observation; it does not grant
+            // the separate authority needed for explicit human promotion.
+            let _ = apply_memory_outcome_in_txn(
+                connection,
+                feedback_input,
+                event_id,
+                actor,
+                false,
+                &mut OutcomeIdSource::Ambient,
+            )?;
+            apply_procedure_outcome_in_txn(connection, feedback_input, event_id, actor)?;
             connection.attach_released_feedback_quarantine_event_in_txn(&row.id, event_id)?;
             connection.insert_audit(
                 &audit_id,
