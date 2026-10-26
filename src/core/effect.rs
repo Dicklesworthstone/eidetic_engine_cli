@@ -1480,6 +1480,10 @@ impl EffectManifest {
                 "capture suggest",
                 "Suggest ambient capture candidates from session evidence without durable mutation",
             ),
+            CommandEffect::read_only(
+                "config explain",
+                "Explain one config key's effect and the layer that set it",
+            ),
             CommandEffect::read_only("config get", "Read one merged config key"),
             CommandEffect::read_only("config show", "Show merged config values"),
             CommandEffect::read_only_db(
