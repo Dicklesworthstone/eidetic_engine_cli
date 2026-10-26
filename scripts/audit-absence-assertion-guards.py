@@ -48,12 +48,27 @@ OTHER LIMITS, measured 2026-10-22 and stated so the output is not over-read:
     from the positive markers -- a command can succeed and return nothing,
     and that is precisely bd-tue5y's defect.
 """
+import pathlib
 import re
 import sys
 
 # assert_jq "$payload" '<predicate>' "label"   (predicate may span lines)
+# `[\s\\]+` between the payload and the predicate, not `\s+`.
+#
+# A backslash line-continuation is NOT whitespace, so `\s+` could not cross
+#
+#     assert_jq "$import_again" \
+#         '(.data.applied.candidateIds | length == 0) and ...'
+#
+# and every call written that way was invisible. Measured 2026-10-26 over
+# scripts/e2e_*.sh: 821 `assert_jq` occurrences, 696 with payload and predicate
+# on one line -- exactly what this file reported parsing -- and **73** split by
+# a continuation. So ~9% of parseable calls were outside the census, bunched in
+# e2e_sentinels.sh (16) and e2e_field_report_suite.sh (12); e2e_sentinels.sh did
+# not appear in the per-file output at all even though bd-tnfge's line census
+# credits it with 8 absence lines.
 CALL = re.compile(
-    r"""assert_jq\s+"(?P<payload>\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)"\s+'(?P<pred>[^']*)'""",
+    r"""assert_jq[\s\\]+"(?P<payload>\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)"[\s\\]+'(?P<pred>[^']*)'""",
     re.DOTALL,
 )
 # Any assert_jq whose payload is not a simple variable (inline $(...), etc.)
@@ -221,4 +236,19 @@ if __name__ == "__main__":
             p for p in POSITIVE if "contains" not in p.pattern and "test" not in p.pattern
         ]
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    # NO ARGUMENTS USED TO PRINT A CONFIDENT ZERO. `main([])` iterates nothing,
+    # so the obvious invocation -- `python3 scripts/audit-absence-assertion-guards.py`
+    # -- reported "ABSENCE assertions found: 0  GUARDED 0  UNGUARDED 0" and an
+    # empty per-file table. That is the constant-green shape this file's own
+    # docstring warns about, in the file that warns about it: a reader would
+    # conclude the population is clean. Default to the documented denominator,
+    # and refuse rather than report a zero that only means "no input".
+    if not args:
+        args = sorted(str(p) for p in pathlib.Path(__file__).resolve().parent.glob("e2e_*.sh"))
+        print(f"[absence-guards] no paths given; defaulting to the documented "
+              f"denominator: {len(args)} file(s) matching scripts/e2e_*.sh")
+    if not args:
+        print("[absence-guards] REFUSING: resolved zero input files. A zero "
+              "census from zero files is not a measurement.")
+        sys.exit(2)
     main(args, verbose="-v" in sys.argv)
