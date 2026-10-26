@@ -957,7 +957,7 @@ cargo() {
 status=0
 unit_contract_golden_tests || status=$?
 # `rm -f` on one just-created mktemp path, which is exactly what the stage
-# under test does to its own log at verify.sh:2293. Matching the code under
+# under test does to its own log at verify.sh:2294. Matching the code under
 # test matters more here than preferring a narrower verb.
 rm -f "$fake_log"
 exit "$status"
