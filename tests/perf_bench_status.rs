@@ -440,7 +440,7 @@ fn g6_gomory_hu_benchmark_is_wired_into_regression_gate() -> TestResult {
     }
     for expected in [
         "graph_*) compare_only=true",
-        "EE_BENCH_COMPARE_ONLY=1 cargo bench --bench \"$bench\"",
+        "EE_BENCH_COMPARE_ONLY=1 cargo bench --locked --bench \"$bench\"",
         "append_result \"ee_$bench\" \"budget_checked\"",
     ] {
         if !bench_script.contains(expected) {
@@ -515,7 +515,7 @@ fn graph_ppr_deliberate_regression_is_rejected_by_compare_only_gate() -> TestRes
 
     for expected in [
         "graph_*) compare_only=true",
-        "EE_BENCH_COMPARE_ONLY=1 cargo bench --bench \"$bench\"",
+        "EE_BENCH_COMPARE_ONLY=1 cargo bench --locked --bench \"$bench\"",
         "append_result \"ee_$bench\" \"failed\"",
         "FAILED=true",
     ] {
@@ -957,7 +957,7 @@ fn arena_workspace_bench_is_wired_into_regression_gate() -> TestResult {
         "for op in $EXTRA_REGRESSION_OPERATIONS; do",
         "check_regression_for_op \"$op\"",
         "filter=\"/workspace_reuse\"",
-        "cargo bench --bench \"$bench\" -- \"$filter\"",
+        "cargo bench --locked --bench \"$bench\" -- \"$filter\"",
         "tolerance_pct_p50",
         "UNSTABLE REGRESSION",
     ] {
