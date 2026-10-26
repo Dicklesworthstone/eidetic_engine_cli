@@ -3049,7 +3049,13 @@ fn read_side_path_no_symlinks(path: &Path) -> Result<Vec<u8>, DomainError> {
 /// rule playbook while bounding worst-case allocation. Matches the
 /// `MAX_LAB_FILE_BYTES` cap in `src/core/lab.rs` and the handoff capsule
 /// cap in `src/core/handoff.rs` (6d8d00e5).
-const MAX_PLAYBOOK_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+/// RENAMED from `MAX_PLAYBOOK_SOURCE_BYTES`, which already existed at the top
+/// of this module as `usize = 64 * 1024` — a cap on in-memory content for
+/// lesson extraction, not on a file read. Two module-level consts of the same
+/// name is E0428, so the lib did not compile; the duplicate also produced two
+/// E0308s where this name resolved to the `usize` definition. The sibling cap
+/// this doc comment cites, `MAX_LAB_FILE_BYTES`, supplies the convention.
+const MAX_PLAYBOOK_SOURCE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 fn read_playbook_source_file_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
     // Bounded read with `take(CAP + 1)`. The caller
@@ -3069,13 +3075,13 @@ fn read_playbook_source_file_no_follow(path: &Path) -> std::io::Result<Vec<u8>> 
     // `read_claim_file_bytes_no_follow` in `src/core/claims.rs`.
     let file = open_playbook_source_file_for_read(path)?;
     let mut bytes = Vec::new();
-    file.take(MAX_PLAYBOOK_SOURCE_BYTES.saturating_add(1))
+    file.take(MAX_PLAYBOOK_SOURCE_FILE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PLAYBOOK_SOURCE_BYTES {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PLAYBOOK_SOURCE_FILE_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "playbook source `{}` exceeds the {MAX_PLAYBOOK_SOURCE_BYTES}-byte cap",
+                "playbook source `{}` exceeds the {MAX_PLAYBOOK_SOURCE_FILE_BYTES}-byte cap",
                 path.display()
             ),
         ));
