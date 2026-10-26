@@ -409,7 +409,10 @@ fn foreign_missing_and_over_budget_sources_cannot_certify_a_safe_stored_card() -
                 ))?;
             }
         }
-        assert_eq!(check(&fixture, &[card.clone()])?, BTreeSet::from([card.id]));
+        assert_eq!(
+            check(&fixture, std::slice::from_ref(&card))?,
+            BTreeSet::from([card.id])
+        );
     }
     Ok(())
 }
@@ -424,11 +427,11 @@ fn unavailable_sources_return_no_partial_verdict_and_caller_transaction_remains_
             "UPDATE sessions SET workspace_id = '{OTHER}' WHERE id = '{}'",
             fixture.session
         ))?;
-        assert!(check(&fixture, &[card.clone()])?.contains(&card.id));
+        assert!(check(&fixture, std::slice::from_ref(&card))?.contains(&card.id));
         Err(unavailable())
     });
     assert!(result.is_err());
-    assert!(check(&fixture, &[card.clone()])?.is_empty());
+    assert!(check(&fixture, std::slice::from_ref(&card))?.is_empty());
     fixture.db.begin_read_snapshot()?;
     let mut checks = CardChecks::default();
     checks.observe(&card)?;

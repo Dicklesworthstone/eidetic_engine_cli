@@ -862,8 +862,11 @@ mod tests {
     fn zero_vectors_are_invalid_even_when_no_pairwise_comparison_runs() {
         for embedding in [vec![0.0], vec![-0.0, 0.0]] {
             let point = EmbeddingPoint::new("mem_zero", embedding);
-            let error =
-                agglomerate(&[point.clone()], ClusterCoherenceConfig::default()).unwrap_err();
+            let error = agglomerate(
+                std::slice::from_ref(&point),
+                ClusterCoherenceConfig::default(),
+            )
+            .unwrap_err();
             assert_eq!(
                 error.message(),
                 "cluster embeddings must not be zero vectors"

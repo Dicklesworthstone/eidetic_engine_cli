@@ -232,7 +232,7 @@ fn invalid_later_row_cannot_append_a_valid_prefix_or_repair_a_tail() -> TestResu
     let (_temp, root, _) = fixture()?;
     let path = daemon_job_table_path(&root);
     let valid = row("valid", "001", 0);
-    append_rows(&path, &[valid.clone()])?;
+    append_rows(&path, std::slice::from_ref(&valid))?;
     let tail = b"{\"reason\":\"interrupted";
     OpenOptions::new()
         .append(true)

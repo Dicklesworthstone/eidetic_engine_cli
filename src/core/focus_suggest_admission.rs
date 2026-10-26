@@ -629,7 +629,10 @@ mod tests {
         options.from_cass = true;
         let report = suggest_focus(&options).unwrap();
         assert_eq!(report.recommendations.len(), 1);
-        assert_eq!(report.recommendations[0].span_ids, [independent.clone()]);
+        assert_eq!(
+            report.recommendations[0].span_ids,
+            std::slice::from_ref(&independent)
+        );
         assert_eq!(report.recommendations[0].centrality_score, 0.0);
         assert!(
             report.recommendations[0]

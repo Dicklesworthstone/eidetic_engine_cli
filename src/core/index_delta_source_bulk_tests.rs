@@ -59,7 +59,10 @@ fn bulk_cass_intake_keeps_canonical_evidence_order_and_live_scope() {
     let expected = fixture.snapshot();
     let streamed = fixture.streamed().expect("bulk evidence stays streamed");
     assert_eq!(streamed.document_counts, expected.document_counts);
-    assert_eq!(streamed.reconciliation.delta.removals, [revoked.clone()]);
+    assert_eq!(
+        streamed.reconciliation.delta.removals,
+        std::slice::from_ref(&revoked)
+    );
     let order = streamed
         .reconciliation
         .delta
@@ -350,7 +353,10 @@ fn memory_pages_preserve_sidecars_history_and_unqueued_global_scope_changes() {
             .collect::<BTreeSet<_>>(),
         expected_upserts
     );
-    assert_eq!(captured.reconciliation.delta.removals, [revoked.clone()]);
+    assert_eq!(
+        captured.reconciliation.delta.removals,
+        std::slice::from_ref(&revoked)
+    );
     assert_eq!(
         serde_json::to_value(captured.reconciliation.digests).expect("captured digests"),
         canonical_digests(&expected)

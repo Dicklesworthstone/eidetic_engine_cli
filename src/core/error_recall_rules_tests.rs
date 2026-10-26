@@ -172,7 +172,7 @@ fn only_selected_current_native_rule_bodies_are_hydrated() -> TestResult {
         |ids| loaded = ids.iter().map(|id| (*id).to_owned()).collect(),
     )?;
     snapshot.finish()?;
-    assert_eq!(loaded, [live.clone()]);
+    assert_eq!(loaded, std::slice::from_ref(&live));
     assert_eq!(actual, [(live, BODY.to_owned())]);
     assert!(!format!("{actual:?}").contains(&unlinked));
     Ok(())

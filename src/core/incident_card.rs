@@ -921,7 +921,7 @@ mod tests {
         let expected = "I renamed `maybe` to `resolved` in src/widget.rs.";
         let anchors = anchor_terms("E0277 in src/widget.rs");
         assert_eq!(
-            fix_facet(&[copy.clone()], &anchors, 60),
+            fix_facet(std::slice::from_ref(&copy), &anchors, 60),
             Some(expected.to_owned())
         );
         assert_eq!(copy, original);

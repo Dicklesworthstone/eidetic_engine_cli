@@ -186,7 +186,7 @@ fn selector_preserves_legacy_bounds_and_aliases_when_feedback_is_uncontested() -
     let admitted = feedback::pack_targets(&connection, WS, KEY, 32)?;
     // History preserves exact metadata. The useful pack window no longer
     // spends slots on values none of its source readers can resolve.
-    assert_eq!(admitted, [good.clone()]);
+    assert_eq!(admitted, std::slice::from_ref(&good));
     assert!(legacy.iter().any(String::is_empty));
     assert!(legacy.contains(&alias));
     // Negative alias, foreign scope and another error class are not this target.
@@ -402,7 +402,7 @@ fn missing_retired_foreign_and_path_scoped_rule_windows_do_not_hide_live_advice(
     record(&connection, targets, Vec::new())?;
     let history = connection.list_error_repair_links(WS, KEY)?;
     let selected = feedback::pack_selection(&connection, WS, KEY, 32, chrono::Utc::now())?;
-    assert_eq!(selected.targets, [good.clone()]);
+    assert_eq!(selected.targets, std::slice::from_ref(&good));
     assert_eq!(selected.rules, [(good.clone(), RULE_BODY.to_owned())]);
     assert!(selected.memory_hints.is_empty());
     let query = seed(&connection)?;
@@ -577,7 +577,7 @@ fn native_refill_rechecks_changed_eligibility_and_preserves_caller_rollback() ->
             "UPDATE procedural_rules SET maturity = 'deprecated' WHERE id = '{retained_rule}'"
         ))?;
         let selected = feedback::pack_selection(&connection, WS, KEY, 1, chrono::Utc::now())?;
-        assert_eq!(selected.targets, [later.clone()]);
+        assert_eq!(selected.targets, std::slice::from_ref(&later));
         let inside = seed(&connection)?;
         assert!(inside.contains(GOOD_BODY));
         assert!(!inside.contains(MEMORY_BODY) && !inside.contains(RULE_BODY));
