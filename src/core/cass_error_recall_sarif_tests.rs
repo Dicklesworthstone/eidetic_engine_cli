@@ -342,7 +342,12 @@ fn malformed_or_unsupported_reports_cannot_salvage_a_valid_prefix() {
 #[test]
 fn bounded_input_and_late_invalid_records_fail_as_a_whole() {
     let valid = failed().to_string();
-    let padded = format!("{valid:width$}", width = MAX_SCANNED_OUTPUT_BYTES);
+    // Pad by hand: a format width above u16::MAX panics, and the cap is 64 KiB.
+    let padded = format!(
+        "{valid}{}",
+        " ".repeat(MAX_SCANNED_OUTPUT_BYTES - valid.len())
+    );
+    assert_eq!(padded.len(), MAX_SCANNED_OUTPUT_BYTES);
     assert!(decode(&padded).is_ok());
     assert!(decode(&format!("{padded} ")).is_err());
     let too_many = report(vec![
