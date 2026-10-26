@@ -3095,15 +3095,14 @@ PY
     PINNED_BUNDLE_CONTENT_HASH="$observed_content_hash"
 }
 
-materialize_committed_tree() {
-    local commit export_base export_root project_parent short_commit
-    commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
-    if [ -z "$commit" ]; then
-        echo "rch_verify: committed-tree materialization missing resolved commit" >&2
-        return 1
-    fi
+# Where committed-tree exports are materialized, as an absolute resolved path.
+#
+# Extracted from materialize_committed_tree so the AppleDouble guard below can
+# ask the same question the exporter will answer, rather than re-deriving the
+# base and drifting from it.
+resolve_committed_tree_export_base() {
+    local export_base project_parent
 
-    short_commit="${commit:0:12}"
     if [ -n "${RCH_VERIFY_COMMITTED_TREE_BASE:-}" ]; then
         export_base="$RCH_VERIFY_COMMITTED_TREE_BASE"
     elif [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
@@ -3116,10 +3115,73 @@ materialize_committed_tree() {
         export_base="${TMPDIR:-/tmp}/ee-rch-committed-tree"
     fi
     mkdir -p "$export_base"
-    COMMITTED_TREE_EXPORT_BASE="$(
+    (
         cd "$export_base"
         pwd -P
-    )"
+    )
+}
+
+# Refuse before exporting when the export base shims extended attributes into
+# AppleDouble `._*` sidecars (bd-r4iwj).
+#
+# WHAT THIS PREVENTS. rch's dependency-closure preflight globs required package
+# source entrypoints out of the LOCAL export and demands them on the worker,
+# while `.rchignore:203-206` deliberately excludes `._*` from the transfer
+# (vendored C crates compile a `._foo.c` sibling and poison the build,
+# bd-1h8ji.4). Both halves are derived locally, so when the export carries
+# sidecars NO worker can satisfy the closure: every dispatch dies
+#
+#   [RCH-E410] missing source_entrypoint .../benches/._adaptive_budget.rs
+#
+# after ~4 minutes of export and ~29 seconds of preflight, and rch labels that
+# refusal `— retryable`. It is not retryable on any worker.
+#
+# WHY A GUARD AND NOT JUST THE RECIPE IN CLAUDE.md. The documented fix is to
+# point RCH_VERIFY_COMMITTED_TREE_BASE at a sparse APFS image, which has to be
+# re-attached after a reboot. If it is not attached, this script happily
+# `mkdir -p`s the path on whatever filesystem the mount point's parent is --
+# which is the ExFAT volume -- and the lane silently returns to the broken
+# state with nothing saying the arrangement lapsed. That is the failure this
+# guard exists to make loud.
+#
+# SCOPE IS DELIBERATELY NARROW, not an oversight: pinned dispatches only. The
+# tar extraction is the same on the plain `--committed-tree` path, but the E410
+# closure refusal has only been measured on the pinned rail, and the plain
+# path's default base is `${TMPDIR:-/tmp}/...` -- which on this host IS the
+# ExFAT volume, by AGENTS.md's per-invocation TMPDIR rule. Refusing there would
+# break a rail nobody has shown to be broken. Widening this needs a measurement
+# on that rail first.
+#
+# Indeterminate probes do NOT refuse; see the probe's own header for why.
+assert_committed_tree_base_stores_xattrs() {
+    [ "$PINNED_FRANKEN_STACK" -eq 1 ] || return 0
+    [ "$(uname -s 2>/dev/null || printf unknown)" = "Darwin" ] || return 0
+
+    . "$SCRIPT_DIR/lib/appledouble_sidecar_probe.sh" 2>/dev/null || return 0
+
+    local base
+    base="$(resolve_committed_tree_export_base)" || return 0
+
+    if ee_dir_creates_appledouble_sidecars "$base"; then
+        RCH_INVOCATION=()
+        emit_json true 1 0 \
+            "committed-tree export base is on a filesystem that shims extended attributes into AppleDouble ._* sidecar files: $base. rch's dependency-closure preflight requires every globbed source entrypoint on the worker while .rchignore excludes ._* from the transfer, so every dispatch from this base is refused with [RCH-E410] missing source_entrypoint on every worker. Point RCH_VERIFY_COMMITTED_TREE_BASE at an xattr-native path -- on this host a sparse APFS image, created and attached per the recipe in CLAUDE.md -- and re-run. If that image is configured already, it is not currently attached." \
+            "" \
+            "rch_verify_committed_tree_base_appledouble_shim"
+        exit 1
+    fi
+}
+
+materialize_committed_tree() {
+    local commit export_base export_root short_commit
+    commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
+    if [ -z "$commit" ]; then
+        echo "rch_verify: committed-tree materialization missing resolved commit" >&2
+        return 1
+    fi
+
+    short_commit="${commit:0:12}"
+    COMMITTED_TREE_EXPORT_BASE="$(resolve_committed_tree_export_base)" || return 1
     export_base="$COMMITTED_TREE_EXPORT_BASE"
     if [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
         local bundle_cache_root bundle_index bundle_root
@@ -6637,6 +6699,16 @@ elif (
     status = "build_admission_refused"
 elif (
     "rch_verify_dirty_tree_refused" in degraded
+    # Grouped with the dirty-tree refusal for the same reason the build-admission
+    # pair above is grouped: this is a refusal to materialize the source AT ALL,
+    # taken locally before any export exists. Unmapped it fell through to
+    # `remote_failure`, which is the misattribution that comment warns about in
+    # its worst form -- a reader following CLAUDE.md's "read `status` first" would
+    # have read a filesystem misconfiguration on this Mac as a failing test on a
+    # worker. It must also stay OUT of `rch_environment_failure`, which this file
+    # marks retryable: no worker can satisfy an AppleDouble-bearing closure, so a
+    # retry is guaranteed waste.
+    or "rch_verify_committed_tree_base_appledouble_shim" in degraded
     or any(code.startswith("rch_verify_franken_stack_") for code in degraded)
 ):
     status = "source_state_refused"
@@ -7166,6 +7238,7 @@ if [ "$COMMITTED_TREE" -eq 1 ]; then
         emit_json true 1 0 "committed-tree preflight computed source manifest but cannot safely materialize it for RCH" "" "${source_degraded_array[@]}"
         exit 1
     fi
+    assert_committed_tree_base_stores_xattrs
     materialize_committed_tree
 fi
 

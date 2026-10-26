@@ -1,0 +1,20 @@
+{
+  "schema": "ee.rch.verify.v1",
+  "bead_id": "bd-r4iwj",
+  "command_text": "cargo test --locked -j 2 --test integration_a_d degraded_codes_doc_coverage",
+  "command_kind": "cargo_test",
+  "command_hash": "2884357cb00a206053486d9b88d2c539af367e08a9a7278474c8dfb217c40e3c",
+  "worker_id": null,
+  "exit_code": 1,
+  "elapsed_ms": 0,
+  "status": "source_state_refused",
+  "verification_attribution": "committed_tree",
+  "remote_required": true,
+  "would_offload": false,
+  "stdout_tail": "committed-tree export base is on a filesystem that shims extended attributes into AppleDouble ._* sidecar files: /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-guard-arm-exfat. rch's dependency-closure preflight requires every globbed source entrypoint on the worker while .rchignore excludes ._* from the transfer, so every dispatch from this base is refused with [RCH-E410] missing source_entrypoint on every worker. Point RCH_VERIFY_COMMITTED_TREE_BASE at an xattr-native path -- on this host a sparse APFS image, created and attached per the recipe in CLAUDE.md -- and re-run. If that image is configured already, it is not currently attached.",
+  "degraded_codes": [
+    "rch_verify_committed_tree_base_appledouble_shim"
+  ],
+  "source_state_degraded_codes": [],
+  "worker_state_degraded_codes": []
+}
