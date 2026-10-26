@@ -9753,6 +9753,9 @@ async fn run_search_inner_with_performance(
         }
         #[cfg(unix)]
         let selected = match source_generation {
+            Some(generation) if !options.source_mode.uses_embeddings() => lease
+                .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
+                .map_err(map_index_generation_error)?,
             Some(generation) => match fast_embedder_override.as_deref() {
                 Some(embedder) => lease.index_for_snapshot_with_identity(
                     cx,
@@ -9773,13 +9776,18 @@ async fn run_search_inner_with_performance(
         let selected = index_dir.clone();
         // Snapshot selection already validated the complete generation.
         if (!cfg!(unix) || source_generation.is_none())
-            && let Err(reason) = match fast_embedder_override.as_deref() {
-                Some(embedder) => {
+            && let Err(reason) = match (options.source_mode, fast_embedder_override.as_deref()) {
+                (SearchSourceMode::LexicalOnly, _) => {
+                    crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
+                        &selected,
+                    )
+                }
+                (_, Some(embedder)) => {
                     crate::core::index::validate_index_corpus_compatibility_with_embedder(
                         &selected, embedder,
                     )
                 }
-                None => crate::core::index::validate_index_corpus_compatibility(&selected),
+                (_, None) => crate::core::index::validate_index_corpus_compatibility(&selected),
             }
         {
             return Err(index_compatibility_search_error(&selected, reason));
@@ -10577,6 +10585,9 @@ async fn run_diag_search_in_snapshot(
     }
     #[cfg(unix)]
     let index_dir = match source_generation {
+        Some(generation) if !options.source_mode.uses_embeddings() => generation_lease
+            .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
+            .map_err(map_index_generation_error)?,
         Some(generation) => match fast_embedder_override.as_deref() {
             Some(embedder) => generation_lease.index_for_snapshot_with_identity(
                 cx,
@@ -10594,13 +10605,18 @@ async fn run_diag_search_in_snapshot(
         None => index_dir,
     };
     if (!cfg!(unix) || source_generation.is_none())
-        && let Err(reason) = match fast_embedder_override.as_deref() {
-            Some(embedder) => {
+        && let Err(reason) = match (options.source_mode, fast_embedder_override.as_deref()) {
+            (SearchSourceMode::LexicalOnly, _) => {
+                crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
+                    &index_dir,
+                )
+            }
+            (_, Some(embedder)) => {
                 crate::core::index::validate_index_corpus_compatibility_with_embedder(
                     &index_dir, embedder,
                 )
             }
-            None => crate::core::index::validate_index_corpus_compatibility(&index_dir),
+            (_, None) => crate::core::index::validate_index_corpus_compatibility(&index_dir),
         }
     {
         return Err(index_compatibility_search_error(&index_dir, reason));
@@ -11495,14 +11511,21 @@ fn cached_index_status_for_search(
     // cache entry was populated, and never let this request repopulate the
     // cache with an observation older than a concurrent writer's invalidation.
     if let Some(connection) = connection {
-        let status = match fast_embedder {
-            Some(embedder) => crate::core::index::get_index_status_with_embedder(
+        let status = match (options.source_mode, fast_embedder) {
+            (SearchSourceMode::LexicalOnly, _) => {
+                crate::core::index::get_index_status_for_lexical_search(
+                    &status_options,
+                    Some(connection),
+                    true,
+                )
+            }
+            (_, Some(embedder)) => crate::core::index::get_index_status_with_embedder(
                 &status_options,
                 Some(connection),
                 true,
                 embedder,
             ),
-            None => get_index_status_in_current_snapshot(&status_options, connection),
+            (_, None) => get_index_status_in_current_snapshot(&status_options, connection),
         };
         match status {
             Ok(status) => return Ok(status),
@@ -11514,6 +11537,16 @@ fn cached_index_status_for_search(
                 );
             }
         }
+    }
+
+    // Lexical health cannot reuse or populate the semantic readiness cache:
+    // the same generation may be readable lexically but need a vector rebuild.
+    if !options.source_mode.uses_embeddings() {
+        return crate::core::index::get_index_status_for_lexical_search(
+            &status_options,
+            None,
+            false,
+        );
     }
 
     // The shared cache describes the process-default expectation. A supplied
@@ -11820,14 +11853,17 @@ async fn reconcile_search_index_within_budget(
         Ok(None) => return,
         Ok(Some(true)) | Err(_) => {}
     }
-    let status = match stack_override.as_ref() {
-        Some(stack) => crate::core::index::get_index_status_with_embedder(
+    let status = match (options.source_mode, stack_override.as_ref()) {
+        (SearchSourceMode::LexicalOnly, _) => {
+            crate::core::index::get_index_status_for_lexical_search(&status_options, None, false)
+        }
+        (_, Some(stack)) => crate::core::index::get_index_status_with_embedder(
             &status_options,
             None,
             false,
             stack.fast(),
         ),
-        None => get_index_status_with_connection(&status_options, None),
+        (_, None) => get_index_status_with_connection(&status_options, None),
     };
     let status = match status {
         Ok(status) => status,

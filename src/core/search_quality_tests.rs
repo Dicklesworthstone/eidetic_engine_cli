@@ -4,6 +4,8 @@ use super::*;
 use crate::db::{
     CreateFeedbackEventInput, CreateMemoryInput, CreateProceduralRuleInput, CreateWorkspaceInput,
 };
+use crate::search::{Embedder, EmbedderStack, IndexBuilder, IndexableDocument};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const BODY: &str = "qualityquasar release guidance preserves the authoritative source.";
 const ANCHOR_MATCH_BODY: &str = "qualityquasar release guidance for `src/engine/cache/queue.rs` beside src/queue/cache/engine.rs.";
@@ -139,6 +141,302 @@ impl Fixture {
         let reader = DbConnection::open_file_read_only(self.root.join(".ee/ee.db")).unwrap();
         run_search_with_read_connection(&self.options(), &reader).unwrap()
     }
+}
+
+struct SemanticIdentityFixture {
+    hash: HashEmbedder,
+    embeds: AtomicUsize,
+}
+
+impl SemanticIdentityFixture {
+    fn new(dimension: usize) -> Self {
+        Self {
+            hash: HashEmbedder::new(dimension, frankensearch::HashAlgorithm::FnvModular),
+            embeds: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Embedder for SemanticIdentityFixture {
+    fn embed<'a>(
+        &'a self,
+        cx: &'a asupersync::Cx,
+        text: &'a str,
+    ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+        self.embeds.fetch_add(1, Ordering::Relaxed);
+        self.hash.embed(cx, text)
+    }
+
+    fn identity(
+        &self,
+    ) -> frankensearch::SearchResult<&frankensearch::core::generation::EmbeddingIdentityBundleV1>
+    {
+        self.hash.identity()
+    }
+
+    fn id(&self) -> &str {
+        self.hash.id()
+    }
+
+    fn model_name(&self) -> &str {
+        self.hash.model_name()
+    }
+
+    fn dimension(&self) -> usize {
+        self.hash.dimension()
+    }
+
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    fn is_semantic(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> frankensearch::core::traits::ModelCategory {
+        self.hash.category()
+    }
+}
+
+fn lexical_identity_fixture() -> (Fixture, String, Arc<SemanticIdentityFixture>) {
+    let fixture = Fixture::new();
+    let memory = fixture.memory(1, 1.0, 1.0, Utc::now() - chrono::Duration::seconds(1));
+    let index = fixture.options().resolve_index_dir();
+    let stored = Arc::new(SemanticIdentityFixture::new(256));
+    let stored_id = stored.id().to_owned();
+    let documents = vec![IndexableDocument::new(memory.as_str(), BODY)];
+    let generation = fixture
+        .db
+        .get_workspace_generation(&fixture.workspace)
+        .unwrap()
+        .unwrap();
+    let build_index = index.clone();
+    crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+        IndexBuilder::new(&build_index)
+            .with_embedder_stack(EmbedderStack::from_parts(stored, None))
+            .add_documents(documents.clone())
+            .build(&cx)
+            .await
+            .unwrap();
+        crate::core::index::build_lexical_tier(&cx, &build_index, &documents)
+            .await
+            .unwrap();
+        crate::core::index::write_memory_eval_index_metadata_for_generation(
+            &build_index,
+            generation,
+            1,
+        )
+        .unwrap();
+    })
+    .unwrap();
+    // Stamp the same semantic metadata that publication records for this
+    // deterministic producer. The other producer is passed explicitly, so
+    // this regression never mutates the process-global embedder or environment.
+    let path = index.join("meta.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    metadata["storedModelId"] = serde_json::json!(stored_id);
+    metadata["storedDimension"] = serde_json::json!(256);
+    std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    (fixture, memory, Arc::new(SemanticIdentityFixture::new(512)))
+}
+
+fn diagnostic_with_identity(
+    options: &SearchOptions,
+    embedder: Arc<dyn Embedder>,
+) -> Result<SearchDiagnosticReport, SearchError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+        run_diag_search_with_cx_and_workspace_embedder(&cx, options, Some(embedder)).await
+    })
+    .unwrap()
+}
+
+#[test]
+fn lexical_search_and_diagnostics_ignore_unrelated_semantic_identity() {
+    let (fixture, memory, unrelated) = lexical_identity_fixture();
+    let mut options = fixture.options();
+    options.strict_source_mode = true;
+    let index = options.resolve_index_dir();
+    assert!(
+        crate::core::index::validate_index_corpus_compatibility_with_embedder(
+            &index,
+            unrelated.as_ref()
+        )
+        .is_err(),
+        "fixture must reproduce the semantic admission mismatch"
+    );
+
+    let report = run_search_with_embedder(&options, unrelated.clone()).unwrap();
+    assert_eq!(report.status, SearchStatus::Success);
+    assert_eq!(report.results[0].doc_id, memory);
+    assert_eq!(report.source_mode_applied, SearchSourceMode::LexicalOnly);
+    assert!(report.index_freshness.is_none());
+    let diagnostic = diagnostic_with_identity(&options, unrelated.clone()).unwrap();
+    assert_eq!(diagnostic.final_report.results[0].doc_id, memory);
+    assert!(!diagnostic.pre_fusion.semantic_fast.available);
+    assert!(
+        !diagnostic
+            .final_report
+            .index_freshness
+            .as_ref()
+            .unwrap()
+            .stale
+    );
+    for report in [&report, &diagnostic.final_report] {
+        assert!(
+            !report.degraded.iter().any(|entry| matches!(
+                entry.code.as_str(),
+                "index_corrupt" | "index_stale" | "index_incompatible"
+            )),
+            "{:#?}",
+            report.degraded
+        );
+    }
+
+    for mode in [SearchSourceMode::SemanticOnly, SearchSourceMode::Hybrid] {
+        options.source_mode = mode;
+        assert!(run_search_with_embedder(&options, unrelated.clone()).is_err());
+        assert!(diagnostic_with_identity(&options, unrelated.clone()).is_err());
+    }
+    assert_eq!(unrelated.embeds.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn lexical_identity_isolation_also_applies_without_a_source_generation() {
+    let (fixture, memory, unrelated) = lexical_identity_fixture();
+    let mut options = fixture.options();
+    options.index_dir = Some(options.resolve_index_dir());
+    options.database_path = Some(fixture.root.join("unavailable-source.db"));
+    let report = run_search_with_embedder(&options, unrelated.clone()).unwrap();
+    assert_ne!(report.status, SearchStatus::IndexError);
+    let diagnostic = diagnostic_with_identity(&options, unrelated.clone()).unwrap();
+    assert!(
+        diagnostic
+            .pre_fusion
+            .lexical
+            .results
+            .iter()
+            .any(|hit| hit.doc_id == memory)
+    );
+    assert!(!diagnostic.pre_fusion.semantic_fast.available);
+    assert_eq!(unrelated.embeds.load(Ordering::Relaxed), 0);
+    assert!(!options.resolve_database_path().exists());
+}
+
+#[test]
+fn lexical_status_neither_consumes_nor_replaces_semantic_readiness_cache() {
+    let (fixture, _, unrelated) = lexical_identity_fixture();
+    let options = fixture.options();
+    let index = options.resolve_index_dir();
+    let status_options = IndexStatusOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: Some(index.clone()),
+    };
+    let semantic = crate::core::index::get_index_status_with_embedder(
+        &status_options,
+        Some(&fixture.db),
+        false,
+        unrelated.as_ref(),
+    )
+    .unwrap();
+    assert_eq!(semantic.health, IndexHealth::Stale);
+    let cache_key = IndexStatusCacheKey::from_search_options(&options, &index);
+    let cache = SEARCH_INDEX_STATUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    cache.lock().unwrap().insert(
+        cache_key.clone(),
+        CachedIndexStatus {
+            // Other parallel tests may prune the shared TTL cache. Keep this
+            // planted entry live through slow fixture I/O so expiry cannot pass
+            // for policy isolation or make the assertion machine-speed dependent.
+            checked_at: Instant::now() + Duration::from_secs(60),
+            report: semantic,
+        },
+    );
+    let lexical = cached_index_status_for_search(&options, &index, None, None).unwrap();
+    assert_eq!(lexical.health, IndexHealth::Ready);
+    assert!(lexical.embedding.is_none());
+    assert!(lexical.last_check_error.is_none());
+    assert_eq!(
+        cache.lock().unwrap().get(&cache_key).unwrap().report.health,
+        IndexHealth::Stale
+    );
+}
+
+#[test]
+fn lexical_identity_exemption_preserves_generation_and_security_admission() {
+    let (fixture, _, unrelated) = lexical_identity_fixture();
+    let options = fixture.options();
+    let index = options.resolve_index_dir();
+    let path = index.join("meta.json");
+    let original: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let status_options = IndexStatusOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: Some(index.clone()),
+    };
+    for field in [
+        "schema",
+        "corpusRevision",
+        "evidenceSecurityPolicyEpoch",
+        "tierDocumentCounts",
+    ] {
+        let mut invalid = original.clone();
+        invalid[field] = serde_json::Value::Null;
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(
+            run_search_with_embedder(&options, unrelated.clone()).is_err(),
+            "{field}"
+        );
+        assert!(
+            diagnostic_with_identity(&options, unrelated.clone()).is_err(),
+            "{field}"
+        );
+        let status = crate::core::index::get_index_status_for_lexical_search(
+            &status_options,
+            Some(&fixture.db),
+            false,
+        )
+        .unwrap();
+        assert_ne!(status.health, IndexHealth::Ready, "{field}");
+        assert!(status.last_check_error.is_some(), "{field}");
+    }
+    let mut future = original.clone();
+    let source = original["sourceGeneration"].as_u64().unwrap();
+    future["sourceGeneration"] = serde_json::json!(source + 1);
+    future["generation"] = serde_json::json!(source + 1);
+    std::fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
+    let status = crate::core::index::get_index_status_for_lexical_search(
+        &status_options,
+        Some(&fixture.db),
+        false,
+    )
+    .unwrap();
+    assert_eq!(status.health, IndexHealth::Stale);
+    assert!(
+        status
+            .last_check_error
+            .as_deref()
+            .unwrap()
+            .contains("newer than database generation")
+    );
+    assert!(run_search_with_embedder(&options, unrelated.clone()).is_err());
+    assert!(diagnostic_with_identity(&options, unrelated.clone()).is_err());
+
+    std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    assert!(
+        crate::core::index::validate_index_corpus_compatibility_for_lexical_search(&index).is_ok()
+    );
+    let vector = index.join("vector.fast.idx");
+    let mut bytes = std::fs::read(&vector).unwrap();
+    assert!(!bytes.is_empty());
+    bytes[0] ^= 0xff;
+    std::fs::write(vector, bytes).unwrap();
+    assert!(run_search_with_embedder(&options, unrelated.clone()).is_err());
+    assert!(diagnostic_with_identity(&options, unrelated.clone()).is_err());
+    assert_eq!(unrelated.embeds.load(Ordering::Relaxed), 0);
 }
 
 #[test]

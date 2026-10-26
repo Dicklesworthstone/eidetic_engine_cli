@@ -6100,6 +6100,15 @@ pub(crate) fn validate_index_corpus_compatibility(index_dir: &Path) -> Result<()
     validated_index_generation(index_dir).map(|_| ())
 }
 
+/// Lexical reads do not combine query vectors with stored vectors. Preserve
+/// complete-generation, corpus and security admission without consulting an
+/// unrelated process-wide semantic model.
+pub(crate) fn validate_index_corpus_compatibility_for_lexical_search(
+    index_dir: &Path,
+) -> Result<(), String> {
+    validated_index_generation_with_identity(index_dir, None).map(|_| ())
+}
+
 /// Admit caller-built indexes against the embedder used for this read.
 pub(crate) fn validate_index_corpus_compatibility_with_embedder(
     index_dir: &Path,
@@ -10763,14 +10772,14 @@ impl From<std::io::Error> for IndexStatusError {
 pub fn get_index_status(
     options: &IndexStatusOptions,
 ) -> Result<IndexStatusReport, IndexStatusError> {
-    get_index_status_with_connection_mode(options, None, false, None)
+    get_index_status_with_connection_mode(options, None, false, None, true)
 }
 
 pub(crate) fn get_index_status_with_connection(
     options: &IndexStatusOptions,
     connection: Option<&DbConnection>,
 ) -> Result<IndexStatusReport, IndexStatusError> {
-    get_index_status_with_connection_mode(options, connection, false, None)
+    get_index_status_with_connection_mode(options, connection, false, None, true)
 }
 
 /// Inspect index status while reusing a database connection whose caller
@@ -10784,7 +10793,7 @@ pub(crate) fn get_index_status_in_current_snapshot(
     options: &IndexStatusOptions,
     connection: &DbConnection,
 ) -> Result<IndexStatusReport, IndexStatusError> {
-    get_index_status_with_connection_mode(options, Some(connection), true, None)
+    get_index_status_with_connection_mode(options, Some(connection), true, None, true)
 }
 
 pub(crate) fn get_index_status_with_embedder(
@@ -10798,7 +10807,19 @@ pub(crate) fn get_index_status_with_embedder(
         connection,
         caller_holds_snapshot,
         Some(fast_embedder),
+        true,
     )
+}
+
+/// Inspect freshness and complete persisted tiers for an explicit lexical
+/// read. Semantic model selection and vector producer compatibility do not
+/// participate in this read; public index readiness continues to check both.
+pub(crate) fn get_index_status_for_lexical_search(
+    options: &IndexStatusOptions,
+    connection: Option<&DbConnection>,
+    caller_holds_snapshot: bool,
+) -> Result<IndexStatusReport, IndexStatusError> {
+    get_index_status_with_connection_mode(options, connection, caller_holds_snapshot, None, false)
 }
 
 fn get_index_status_with_connection_mode(
@@ -10806,6 +10827,7 @@ fn get_index_status_with_connection_mode(
     connection: Option<&DbConnection>,
     caller_holds_snapshot: bool,
     fast_embedder: Option<&dyn crate::search::Embedder>,
+    require_vector_identity: bool,
 ) -> Result<IndexStatusReport, IndexStatusError> {
     let start = Instant::now();
     let database_path = options.resolve_database_path();
@@ -10851,23 +10873,28 @@ fn get_index_status_with_connection_mode(
                 Some(stats) => stats,
                 None => get_db_stats(db, &workspace_id, caller_holds_snapshot)?,
             };
-            let descriptors = match fast_embedder {
-                Some(embedder) => (EmbedderDescriptor::from_embedder(embedder), None),
-                None => workspace_embedder_descriptors(db, &workspace_id)?,
+            let embedding = if require_vector_identity {
+                let descriptors = match fast_embedder {
+                    Some(embedder) => (EmbedderDescriptor::from_embedder(embedder), None),
+                    None => workspace_embedder_descriptors(db, &workspace_id)?,
+                };
+                let vector_coverage = embedding_vector_coverage(
+                    &index_dir,
+                    counts.total(),
+                    read_fast_vector_record_count,
+                );
+                let records = db.list_embedding_metadata_records(&workspace_id)?;
+                let embedding = embedding_posture_from_records(
+                    &descriptors.0,
+                    descriptors.1.as_ref(),
+                    &records,
+                    vector_coverage,
+                );
+                selected_embedders = Some(descriptors);
+                Some(embedding)
+            } else {
+                None
             };
-            let vector_coverage = embedding_vector_coverage(
-                &index_dir,
-                counts.total(),
-                read_fast_vector_record_count,
-            );
-            let records = db.list_embedding_metadata_records(&workspace_id)?;
-            let embedding = Some(embedding_posture_from_records(
-                &descriptors.0,
-                descriptors.1.as_ref(),
-                &records,
-                vector_coverage,
-            ));
-            selected_embedders = Some(descriptors);
             (counts, admission, generation, embedding)
         } else {
             (
@@ -10888,8 +10915,11 @@ fn get_index_status_with_connection_mode(
     let evidence_totals = EvidenceAdmissionTotals::from_report(&evidence_admission);
 
     // Read index metadata if available.
-    let metadata_status =
-        read_index_metadata_for_selection(&index_dir, fast_embedder, selected_embedders.as_ref());
+    let metadata_status = if require_vector_identity {
+        read_index_metadata_for_selection(&index_dir, fast_embedder, selected_embedders.as_ref())
+    } else {
+        read_index_metadata_with_identity(&index_dir, Ok(None))
+    };
     let last_check_error = metadata_status
         .corruption_error
         .clone()
