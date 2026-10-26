@@ -483,11 +483,14 @@ pub struct OutcomeQuarantineSummary {
     pub id: Option<String>,
     pub status: String,
     pub source_id: Option<String>,
-    pub limit: u32,
-    pub window_seconds: u32,
-    pub observed_count: u32,
+    /// Admission metrics are absent on replay because the original decision
+    /// parameters were not preserved in the quarantine row.
+    pub limit: Option<u32>,
+    pub window_seconds: Option<u32>,
+    pub observed_count: Option<u32>,
     pub reason: String,
     pub raw_event_hash: Option<String>,
+    pub replayed: bool,
 }
 
 impl OutcomeQuarantineSummary {
@@ -495,7 +498,7 @@ impl OutcomeQuarantineSummary {
     pub fn data_json(&self) -> serde_json::Value {
         let source_id = redacted_outcome_public_source_id(self.source_id.as_deref());
         let reason = redact_outcome_public_source_ref(&self.reason);
-        serde_json::json!({
+        let mut data = serde_json::json!({
             "id": &self.id,
             "status": &self.status,
             "sourceId": source_id,
@@ -504,7 +507,11 @@ impl OutcomeQuarantineSummary {
             "observedCount": self.observed_count,
             "reason": reason,
             "rawEventHash": &self.raw_event_hash,
-        })
+        });
+        if self.replayed {
+            data["replayed"] = serde_json::Value::Bool(true);
+        }
+        data
     }
 }
 
@@ -768,6 +775,14 @@ impl OutcomeRecordReport {
             OutcomeRecordStatus::Recorded => "Recorded outcome feedback",
             OutcomeRecordStatus::DryRun => "DRY RUN: Would record outcome feedback",
             OutcomeRecordStatus::AlreadyRecorded => "Outcome feedback already recorded",
+            OutcomeRecordStatus::Quarantined
+                if self
+                    .quarantine
+                    .as_ref()
+                    .is_some_and(|summary| summary.replayed) =>
+            {
+                "Outcome feedback already quarantined; live scoring was not changed"
+            }
             OutcomeRecordStatus::Quarantined => {
                 "Outcome feedback quarantined; live scoring was not changed"
             }
@@ -1117,46 +1132,43 @@ fn record_outcome_inner(
                 repair: Some("ee outcome <target-id> --signal helpful".to_string()),
             });
         };
-        let existing = get_existing_event(&connection, &event_id)?;
+        let existing = existing_feedback_outcome(&connection, &event_id, &feedback_input)?;
         #[cfg(test)]
         observe_outcome_admission_for_test(
             OutcomeAdmissionTestStage::AfterEventLookup,
             &connection,
         );
         if let Some(existing) = existing {
-            if feedback_event_matches(&existing, &feedback_input) {
-                let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
-                trace_sprt_quarantine("response", 0, &[]);
-                return Ok(OutcomeRecordReport {
-                    version: env!("CARGO_PKG_VERSION"),
-                    status: OutcomeRecordStatus::AlreadyRecorded,
-                    dry_run: false,
-                    event_id: Some(event_id),
-                    audit_id: None,
-                    target_type,
-                    target_id,
-                    workspace_id: target.workspace_id,
-                    target_verified: target.verified,
-                    signal,
-                    weight,
-                    source_type,
-                    source_id,
-                    reason_present: feedback_input.reason.is_some(),
-                    evidence_json_present: evidence_json.is_some(),
-                    session_id,
-                    quarantine: None,
-                    feedback,
-                    degraded: Vec::new(),
-                    confidence_before: None,
-                    confidence_after: None,
-                });
-            }
-
-            return Err(DomainError::Usage {
-                message: format!(
-                    "feedback event id already exists with different content: {event_id}"
-                ),
-                repair: Some("ee outcome --event-id <new-feedback-id>".to_string()),
+            let (status, quarantine) = match existing {
+                ExistingFeedbackOutcome::Recorded => (OutcomeRecordStatus::AlreadyRecorded, None),
+                ExistingFeedbackOutcome::Quarantined(summary) => {
+                    (OutcomeRecordStatus::Quarantined, Some(summary))
+                }
+            };
+            let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+            trace_sprt_quarantine("response", 0, &[]);
+            return Ok(OutcomeRecordReport {
+                version: env!("CARGO_PKG_VERSION"),
+                status,
+                dry_run: false,
+                event_id: Some(event_id),
+                audit_id: None,
+                target_type,
+                target_id,
+                workspace_id: target.workspace_id,
+                target_verified: target.verified,
+                signal,
+                weight,
+                source_type,
+                source_id,
+                reason_present: feedback_input.reason.is_some(),
+                evidence_json_present: evidence_json.is_some(),
+                session_id,
+                quarantine,
+                feedback,
+                degraded: Vec::new(),
+                confidence_before: None,
+                confidence_after: None,
             });
         }
 
@@ -1260,28 +1272,34 @@ fn record_outcome_inner(
                 .as_deref()
                 .map(redact_outcome_public_source_ref)
                 .unwrap_or_else(|| "unknown".to_owned());
-            match quarantine_cause {
-                OutcomeQuarantineCause::HarmfulBurst => {
+            match (
+                quarantine_cause,
+                final_quarantine.observed_count,
+                final_quarantine.limit,
+                final_quarantine.window_seconds,
+            ) {
+                (OutcomeQuarantineCause::HarmfulBurst, Some(observed), Some(cap), Some(window)) => {
                     tracing::info!(
                         target: "ee::outcome::harmful_burst",
                         source_id = %safe_trace_source_id,
-                        observed_rate = final_quarantine.observed_count,
-                        configured_cap = final_quarantine.limit,
-                        window_seconds = final_quarantine.window_seconds,
+                        observed_rate = observed,
+                        configured_cap = cap,
+                        window_seconds = window,
                         quarantined_candidate_id = final_quarantine.id.as_deref(),
                         "harmful burst quarantined"
                     );
                 }
-                OutcomeQuarantineCause::Sprt => {
+                (OutcomeQuarantineCause::Sprt, Some(observed), _, Some(window)) => {
                     tracing::info!(
                         target: "ee::outcome::sprt_quarantine",
                         source_id = %safe_trace_source_id,
-                        classified_event_count = final_quarantine.observed_count,
-                        window_seconds = final_quarantine.window_seconds,
+                        classified_event_count = observed,
+                        window_seconds = window,
                         quarantined_candidate_id = final_quarantine.id.as_deref(),
                         "SPRT outcome quarantined"
                     );
                 }
+                _ => {}
             }
             let degraded = vec![outcome_quarantine_degradation(
                 quarantine_cause,
@@ -2277,9 +2295,15 @@ fn harmful_burst_quarantine_degradation(
     OutcomeDegradation {
         code: HARMFUL_BURST_QUARANTINE_CODE.to_string(),
         severity: "warning".to_string(),
-        message: format!(
-            "Harmful outcome feedback rate exceeded: {observed_rate} events in {window_seconds}s (cap {configured_cap}); event was quarantined and did NOT update live scoring."
-        ),
+        message: match (observed_rate, configured_cap, window_seconds) {
+            (Some(observed_rate), Some(configured_cap), Some(window_seconds)) => format!(
+                "Harmful outcome feedback rate exceeded: {observed_rate} events in {window_seconds}s (cap {configured_cap}); event was quarantined and did NOT update live scoring."
+            ),
+            _ => {
+                "Outcome feedback remains quarantined; original rate-limit metrics are unavailable."
+                    .to_owned()
+            }
+        },
         details: Some(details),
     }
 }
@@ -2315,9 +2339,13 @@ fn sprt_quarantine_degradation(
     OutcomeDegradation {
         code: SPRT_QUARANTINE_CODE.to_string(),
         severity: "warning".to_string(),
-        message: format!(
-            "SPRT outcome quarantine threshold exceeded after {classified_event_count} classified outcome events; event was quarantined and did NOT update live scoring."
-        ),
+        message: match classified_event_count {
+            Some(classified_event_count) => format!(
+                "SPRT outcome quarantine threshold exceeded after {classified_event_count} classified outcome events; event was quarantined and did NOT update live scoring."
+            ),
+            None => "Outcome feedback remains quarantined; the original classified event count is unavailable."
+                .to_owned(),
+        },
         details: Some(details),
     }
 }
@@ -3154,6 +3182,114 @@ fn get_existing_event(
         })
 }
 
+enum ExistingFeedbackOutcome {
+    Recorded,
+    Quarantined(OutcomeQuarantineSummary),
+}
+
+/// A proposed event ID remains reserved after quarantine review. This lookup
+/// runs under the admission write owner, before either policy stream observes
+/// the request, so a retry cannot add another observation or reopen a rejection.
+fn existing_feedback_outcome(
+    connection: &DbConnection,
+    event_id: &str,
+    input: &CreateFeedbackEventInput,
+) -> Result<Option<ExistingFeedbackOutcome>, DomainError> {
+    let live = get_existing_event(connection, event_id)?;
+    let quarantine = connection
+        .get_feedback_quarantine_by_proposed_event_id(event_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query feedback event quarantine reservation: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    let Some(row) = quarantine else {
+        return match live {
+            Some(existing) if feedback_event_matches(&existing, input) => {
+                Ok(Some(ExistingFeedbackOutcome::Recorded))
+            }
+            Some(_) => Err(feedback_event_id_conflict(event_id)),
+            None => Ok(None),
+        };
+    };
+
+    // The stored hash rounds weights for its established wire contract.
+    // Compare the actual payload too: different observations must not alias
+    // merely because their weights round to the same four decimal places.
+    if !quarantined_feedback_matches(&row, input) {
+        return Err(feedback_event_id_conflict(event_id));
+    }
+    if raw_feedback_event_hash(event_id, input)? != row.raw_event_hash {
+        return Err(DomainError::PolicyDenied {
+            message: format!("quarantined feedback payload hash mismatch for {}", row.id),
+            repair: Some("ee outcome quarantine list --json".to_owned()),
+        });
+    }
+
+    let inconsistent = || DomainError::Storage {
+        message: format!(
+            "feedback event {event_id} has inconsistent quarantine and live feedback state"
+        ),
+        repair: Some("ee doctor".to_owned()),
+    };
+    match row.status.as_str() {
+        "pending" | "rejected" if live.is_some() || row.released_feedback_event_id.is_some() => {
+            Err(inconsistent())
+        }
+        "pending" => Ok(Some(ExistingFeedbackOutcome::Quarantined(
+            OutcomeQuarantineSummary {
+                id: Some(row.id),
+                status: row.status,
+                source_id: Some(row.source_id),
+                limit: None,
+                window_seconds: None,
+                observed_count: None,
+                reason: row.reason,
+                raw_event_hash: Some(row.raw_event_hash),
+                replayed: true,
+            },
+        ))),
+        "rejected" => Err(DomainError::PolicyDenied {
+            message: format!(
+                "feedback event {event_id} was rejected in quarantine {}; its event ID cannot be reused",
+                row.id
+            ),
+            repair: Some("ee outcome quarantine list --status rejected --json".to_owned()),
+        }),
+        "released"
+            if row.released_feedback_event_id.as_deref() == Some(event_id)
+                && live.as_ref().is_some_and(|event| {
+                    feedback_event_matches(event, input) && event.weight == input.weight
+                }) =>
+        {
+            Ok(Some(ExistingFeedbackOutcome::Recorded))
+        }
+        _ => Err(inconsistent()),
+    }
+}
+
+fn feedback_event_id_conflict(event_id: &str) -> DomainError {
+    DomainError::Usage {
+        message: format!("feedback event id already exists with different content: {event_id}"),
+        repair: Some("ee outcome --event-id <new-feedback-id>".to_owned()),
+    }
+}
+
+fn quarantined_feedback_matches(
+    existing: &StoredFeedbackQuarantine,
+    input: &CreateFeedbackEventInput,
+) -> bool {
+    existing.workspace_id == input.workspace_id
+        && existing.target_type == input.target_type
+        && existing.target_id == input.target_id
+        && existing.signal == input.signal
+        && existing.weight == input.weight
+        && existing.source_type == input.source_type
+        && Some(existing.source_id.as_str()) == input.source_id.as_deref()
+        && existing.event_reason == input.reason
+        && existing.evidence_json == input.evidence_json
+        && existing.session_id == input.session_id
+}
+
 fn harmful_quarantine_preview(
     connection: &DbConnection,
     workspace_id: &str,
@@ -3193,13 +3329,14 @@ fn harmful_quarantine_preview(
         id: None,
         status: "pending".to_owned(),
         source_id: Some(source_id.to_owned()),
-        limit,
-        window_seconds,
-        observed_count,
+        limit: Some(limit),
+        window_seconds: Some(window_seconds),
+        observed_count: Some(observed_count),
         reason: format!(
             "harmful feedback rate limit exceeded: source {source_id} observed {observed_count} harmful events in {window_seconds}s (limit {limit})"
         ),
         raw_event_hash: None,
+        replayed: false,
     }))
 }
 
@@ -3271,9 +3408,9 @@ fn sprt_quarantine_summary(
         id: None,
         status: "pending".to_owned(),
         source_id: Some(decision.source_id.clone()),
-        limit,
-        window_seconds,
-        observed_count: u32::try_from(decision.evaluation.event_count).unwrap_or(u32::MAX),
+        limit: Some(limit),
+        window_seconds: Some(window_seconds),
+        observed_count: Some(u32::try_from(decision.evaluation.event_count).unwrap_or(u32::MAX)),
         reason: format!(
             "SPRT harmful-feedback quarantine threshold exceeded: source {} statistic {:.3} exceeded upper bound {:.3} after {} classified outcome events (alpha={:.2}, beta={:.2})",
             decision.source_id,
@@ -3284,6 +3421,7 @@ fn sprt_quarantine_summary(
             SPRT_BETA
         ),
         raw_event_hash: None,
+        replayed: false,
     })
 }
 
@@ -6323,11 +6461,12 @@ mod tests {
                 id: Some("fq_00000000000000000000000001".to_string()),
                 status: "pending".to_string(),
                 source_id: Some(source_id.clone()),
-                limit: 1,
-                window_seconds: 60,
-                observed_count: 2,
+                limit: Some(1),
+                window_seconds: Some(60),
+                observed_count: Some(2),
                 reason: format!("source {source_id} observed too many harmful events"),
                 raw_event_hash: Some("blake3:fixture".to_string()),
+                replayed: false,
             }),
             feedback: OutcomeFeedbackSummary {
                 positive_weight: 0.0,
@@ -6373,11 +6512,12 @@ mod tests {
             id: Some("fq_00000000000000000000000099".to_string()),
             status: "pending".to_string(),
             source_id: Some("file:///Users/alice/private/outcome.json?api_key=leaky".to_string()),
-            limit: 5,
-            window_seconds: 3600,
-            observed_count: 7,
+            limit: Some(5),
+            window_seconds: Some(3600),
+            observed_count: Some(7),
             reason: "harmful feedback rate limit exceeded".to_string(),
             raw_event_hash: Some("blake3:fixture".to_string()),
+            replayed: false,
         };
         let candidate_ids = vec!["fq_00000000000000000000000099".to_string()];
 
@@ -6499,11 +6639,12 @@ mod tests {
             id: None,
             status: "pending".to_string(),
             source_id: Some("agent-cc_1".to_string()),
-            limit: 1,
-            window_seconds: 60,
-            observed_count: 2,
+            limit: Some(1),
+            window_seconds: Some(60),
+            observed_count: Some(2),
             reason: "harmful feedback rate limit exceeded".to_string(),
             raw_event_hash: None,
+            replayed: false,
         };
 
         let degradation = harmful_burst_quarantine_degradation(&summary, &[]);
@@ -8058,7 +8199,7 @@ mod tests {
         )?;
         ensure_equal(
             &summary.observed_count,
-            &4_u32,
+            &Some(4_u32),
             "SPRT summary counts classified events",
         )?;
         let degraded = quarantined

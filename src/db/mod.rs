@@ -23783,6 +23783,29 @@ impl DbConnection {
             .transpose()
     }
 
+    /// Find the quarantine reservation for a globally unique feedback event ID.
+    /// Callers that may insert the event must retain the write-owner fence
+    /// through lookup and commit. Older stores can contain duplicate proposals;
+    /// refuse an ambiguous identity rather than choosing a review decision.
+    pub(crate) fn get_feedback_quarantine_by_proposed_event_id(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<StoredFeedbackQuarantine>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, source_id, target_type, target_id, signal, weight, source_type, proposed_event_id, recorded_at, reason, event_reason, evidence_json, session_id, raw_event_hash, status, reviewed_at, reviewed_by, released_feedback_event_id FROM feedback_quarantine WHERE proposed_event_id = ?1 LIMIT 2",
+            &[Value::Text(event_id.to_owned())],
+        )?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [row] => stored_feedback_quarantine_from_row(row).map(Some),
+            _ => Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "feedback event ID has multiple quarantine reservations".to_owned(),
+            }),
+        }
+    }
+
     /// List feedback quarantine rows for one workspace in deterministic order.
     pub fn list_feedback_quarantine(
         &self,
