@@ -72,6 +72,12 @@ expression: canonical_json_text(value)
         "tier": "advisory"
       },
       {
+        "message": "No visible memory links require a graph snapshot.",
+        "name": "graph_snapshot",
+        "severity": "ok",
+        "tier": "advisory"
+      },
+      {
         "message": "Graph NUMA pinning is not implemented on this Linux platform yet for [WORKSPACE]/.ee/graph; no effect on ee memory storage or retrieval. The graph loader falls back without functional regression. Degraded code: numa_pin_linux_not_implemented.",
         "name": "graph_numa_pin",
         "severity": "ok",

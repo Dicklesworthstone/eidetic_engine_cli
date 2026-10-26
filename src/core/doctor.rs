@@ -346,7 +346,7 @@ impl DoctorReport {
         // CORE:     check_runtime, check_workspace, check_database, check_search_index
         // ADVISORY: check_ee_install_path (advisory via its own builder, bd-1et0v.18),
         //           check_shard_fanout, check_flight_recorder, check_lexical_ram_tier,
-        //           check_graph_numa_pin, check_daemon_socket_reachable,
+        //           check_graph_snapshot, check_graph_numa_pin, check_daemon_socket_reachable,
         //           check_rch_worker_pressure, check_rch_verify_ledger, check_cass
         let checks = vec![
             check_runtime(),
@@ -360,6 +360,7 @@ impl DoctorReport {
             check_flight_recorder(&flight_recorder).advisory(),
             check_search_index(workspace_path),
             check_lexical_ram_tier(workspace_path).advisory(),
+            check_graph_snapshot(workspace_path).advisory(),
             check_graph_numa_pin(workspace_path).advisory(),
             check_daemon_socket_reachable(workspace_path).advisory(),
             check_rch_worker_pressure(&rch_worker_pressure).advisory(),
@@ -3785,6 +3786,119 @@ fn lexical_ram_tier_index_path(workspace_path: Option<&Path>) -> PathBuf {
         })
 }
 
+/// Inspect a stored MemoryLinks projection in one read transaction. This does
+/// not run algorithms, publish a snapshot, or modify source records.
+fn check_graph_snapshot(workspace_path: Option<&Path>) -> CheckResult {
+    let Some(workspace_path) = workspace_path else {
+        return CheckResult::ok(
+            "graph_snapshot",
+            "Graph snapshot was not inspected without a workspace path.",
+        );
+    };
+    if !cfg!(feature = "graph") {
+        return CheckResult::ok(
+            "graph_snapshot",
+            "Graph snapshot inspection is not applicable: this binary has no graph feature.",
+        );
+    }
+    if let Some((_, reason)) = database_unreadable(workspace_path) {
+        return CheckResult::ok(
+            "graph_snapshot",
+            format!("Graph snapshot not inspected: {reason}; see the database check."),
+        );
+    }
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.is_file() {
+        return CheckResult::ok(
+            "graph_snapshot",
+            "Graph snapshot not inspected: the database is missing; see the database check.",
+        );
+    }
+    let unavailable = |error: String| {
+        CheckResult::warning(
+            "graph_snapshot",
+            format!("Graph snapshot freshness could not be measured: {error}"),
+            error_codes::DATABASE_UNAVAILABLE,
+        )
+    };
+    let connection = match DbConnection::open_file_read_only(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => return unavailable(error.to_string()),
+    };
+    if let Err(error) = connection.begin_read_snapshot() {
+        return unavailable(error.to_string());
+    }
+    let check = (|| {
+        let workspace = match crate::core::workspace::addressed_workspace_row(
+            &connection,
+            workspace_path,
+            &database_path,
+        ) {
+            Ok(Some(workspace)) => workspace,
+            Ok(None) => {
+                return unavailable("the addressed workspace row is missing".to_owned());
+            }
+            Err(error) => return unavailable(error.to_string()),
+        };
+        match crate::graph::inspect_memory_link_snapshot(&connection, &workspace.id) {
+            Ok(inspection) => graph_snapshot_check_from_inspection(&inspection),
+            Err(
+                error @ (crate::graph::GraphError::Json { .. }
+                | crate::graph::GraphError::InvalidSnapshotMetrics { .. }),
+            ) => CheckResult::warning(
+                "graph_snapshot",
+                format!("Graph snapshot metrics cannot be validated: {error}"),
+                error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED,
+            ),
+            Err(error) => unavailable(error.to_string()),
+        }
+    })();
+    if let Err(error) = connection.rollback_read_snapshot() {
+        return unavailable(error.to_string());
+    }
+    check
+}
+
+fn graph_snapshot_check_from_inspection(
+    inspection: &crate::graph::MemoryLinkSnapshotInspection,
+) -> CheckResult {
+    use crate::graph::SnapshotValidationResult;
+
+    let validation = &inspection.validation;
+    match validation.result {
+        SnapshotValidationResult::NotFound if validation.current_generation == 0 => {
+            CheckResult::ok(
+                "graph_snapshot",
+                "No visible memory links require a graph snapshot.",
+            )
+        }
+        SnapshotValidationResult::Valid if inspection.source_selection_known => CheckResult::ok(
+            "graph_snapshot",
+            format!(
+                "MemoryLinks snapshot version {} matches all {} selected source links, including endpoints, weights, confidence, and provenance.",
+                validation.snapshot_version.unwrap_or(0),
+                validation.current_generation,
+            ),
+        ),
+        SnapshotValidationResult::Valid => CheckResult::warning(
+            "graph_snapshot",
+            "Legacy MemoryLinks snapshot has no recorded source filters; freshness is unverified. Refresh to record the source selection and enable exact comparison.",
+            error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED,
+        ),
+        result => CheckResult::warning(
+            "graph_snapshot",
+            format!(
+                "MemoryLinks snapshot is {}. {}",
+                result.as_str(),
+                validation.repair_hint.as_deref().unwrap_or(
+                    "Run `ee graph centrality-refresh` to rebuild it from the current source."
+                ),
+            ),
+            error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED,
+        ),
+    }
+}
+
 fn check_graph_numa_pin(workspace_path: Option<&Path>) -> CheckResult {
     check_graph_numa_pin_with_config(workspace_path, graph_numa_pin_config_for_doctor())
 }
@@ -5515,6 +5629,14 @@ mod tests {
             report
                 .checks
                 .iter()
+                .any(|check| check.name == "graph_snapshot" && check.tier == CheckTier::Advisory),
+            true,
+            "graph freshness doctor check is advisory",
+        )?;
+        ensure(
+            report
+                .checks
+                .iter()
                 .any(|check| check.name == "daemon_socket_reachable"),
             true,
             "daemon socket doctor check exists",
@@ -5913,6 +6035,176 @@ mod tests {
             true,
             "workspace message includes selected path",
         )
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn doctor_graph_snapshot_measures_source_drift_without_writing() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path();
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let database_path = workspace.join(".ee/ee.db");
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("graph doctor".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            check_graph_snapshot(Some(workspace)).severity,
+            CheckSeverity::Ok
+        );
+        let source = "mem_00000000000000000000000181";
+        let target = "mem_00000000000000000000000182";
+        for memory_id in [source, target] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: format!("Graph doctor source {memory_id}"),
+                        workflow_id: None,
+                        confidence: 0.8,
+                        utility: 0.0,
+                        importance: 0.0,
+                        provenance_uri: None,
+                        trust_class: TrustClass::AgentAssertion.as_str().to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .insert_memory_link(
+                "link_00000000000000000000000181",
+                &crate::db::CreateMemoryLinkInput {
+                    src_memory_id: source.to_owned(),
+                    dst_memory_id: target.to_owned(),
+                    relation: crate::db::MemoryLinkRelation::Supports,
+                    weight: 0.8,
+                    confidence: 0.9,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: crate::db::MemoryLinkSource::Agent,
+                    created_by: None,
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let missing = check_graph_snapshot(Some(workspace));
+        assert_eq!(
+            missing.error_code,
+            Some(error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED)
+        );
+        assert!(missing.message.contains("not_found"));
+        let refreshed = crate::graph::refresh_graph_snapshot(
+            &connection,
+            &workspace_id,
+            &crate::graph::CentralityRefreshOptions::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let expected_id = refreshed
+            .snapshot
+            .ok_or_else(|| "refresh must publish snapshot".to_owned())?
+            .id;
+        let audits_before = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len();
+        let healthy = check_graph_snapshot(Some(workspace));
+        assert_eq!(healthy.severity, CheckSeverity::Ok);
+        assert!(
+            healthy
+                .message
+                .contains("matches all 1 selected source links")
+        );
+        assert_eq!(
+            connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            audits_before
+        );
+        assert_eq!(
+            connection
+                .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+                .map_err(|error| error.to_string())?
+                .map(|snapshot| snapshot.id),
+            Some(expected_id)
+        );
+        connection
+            .execute_raw("UPDATE memory_links SET weight = 0.4")
+            .map_err(|error| error.to_string())?;
+        let stale = check_graph_snapshot(Some(workspace));
+        assert_eq!(
+            stale.error_code,
+            Some(error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED)
+        );
+        assert!(stale.message.contains("stale"));
+        assert_eq!(
+            super::super::doctor_fixers::fix_mode_for_check(
+                stale.error_code.map(|code| code.id),
+                stale.name,
+                false
+            ),
+            (
+                super::super::doctor_fixers::FixMode::AutoGuidance,
+                Some("graph_snapshot_stale")
+            )
+        );
+        assert!(stale.advisory().is_topline_healthy());
+
+        // A failed source read cannot be passed off as either a current graph
+        // or an absent snapshot that refreshing would automatically repair.
+        connection
+            .execute_raw("ALTER TABLE memory_links RENAME TO unavailable_memory_links")
+            .map_err(|error| error.to_string())?;
+        let unavailable = check_graph_snapshot(Some(workspace));
+        assert_eq!(
+            unavailable.error_code,
+            Some(error_codes::DATABASE_UNAVAILABLE)
+        );
+        assert!(unavailable.message.contains("could not be measured"));
+        assert_eq!(
+            super::super::doctor_fixers::fix_finding_for_check(
+                unavailable.error_code.map(|code| code.id),
+                unavailable.name,
+                false
+            ),
+            None
+        );
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn doctor_graph_snapshot_does_not_claim_legacy_source_freshness() {
+        let mut validation = crate::graph::SnapshotValidationReport::not_found(
+            &crate::graph::SnapshotValidationOptions::default(),
+        );
+        validation.result = crate::graph::SnapshotValidationResult::Valid;
+        let check =
+            graph_snapshot_check_from_inspection(&crate::graph::MemoryLinkSnapshotInspection {
+                validation,
+                source_selection_known: false,
+            });
+        assert_eq!(
+            check.error_code,
+            Some(error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED)
+        );
+        assert!(check.message.contains("freshness is unverified"));
     }
 
     #[test]

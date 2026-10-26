@@ -227,6 +227,13 @@ pub const EMBEDDING_UNAVAILABLE: ErrorCode = ErrorCode {
     default_repair: Some("ee index reembed --dry-run"),
 };
 
+pub const GRAPH_SNAPSHOT_REFRESH_REQUIRED: ErrorCode = ErrorCode {
+    id: "EE-E304",
+    category: ErrorCategory::SearchIndex,
+    description: "Graph snapshot is missing, invalid, stale, or its source selection is unverified",
+    default_repair: Some("ee graph centrality-refresh --workspace . --json"),
+};
+
 // Import errors (EE-E400 - EE-E499)
 pub const IMPORT_SOURCE_NOT_FOUND: ErrorCode = ErrorCode {
     id: "EE-E400",
@@ -389,6 +396,7 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     INDEX_STALE,
     INDEX_CORRUPTED,
     EMBEDDING_UNAVAILABLE,
+    GRAPH_SNAPSHOT_REFRESH_REQUIRED,
     // Import
     IMPORT_SOURCE_NOT_FOUND,
     IMPORT_FORMAT_ERROR,

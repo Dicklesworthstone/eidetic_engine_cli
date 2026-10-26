@@ -692,7 +692,8 @@ fn capabilities_report_serializes_with_stable_schema() {
     assert_eq!(effect_of("search_index_missing"), Some("repair"));
     // Op::RunMigration records guidance and migrates nothing.
     assert_eq!(effect_of("schema_migration_pending"), Some("guidance"));
-    assert_eq!(effect_of("graph_snapshot_stale"), None);
+    // Op::RunGraphRefresh records guidance; publication uses the graph command.
+    assert_eq!(effect_of("graph_snapshot_stale"), Some("guidance"));
 }
 
 #[test]

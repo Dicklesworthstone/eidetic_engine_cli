@@ -83,7 +83,10 @@ pub fn parse_snapshot_graph(
         return Err("snapshot metrics must be a JSON object".to_owned());
     }
     if let Some(schema) = metrics.get("schema")
-        && schema.as_str() != Some("ee.graph.snapshot.metrics.v1")
+        && !matches!(
+            schema.as_str(),
+            Some("ee.graph.snapshot.metrics.v1" | "ee.graph.snapshot.metrics.v2")
+        )
     {
         return Err("snapshot metrics schema is unsupported".to_owned());
     }
@@ -1148,25 +1151,36 @@ mod tests {
 
     #[test]
     fn parse_snapshot_graph_reads_persisted_metrics_shape() {
-        let metrics = serde_json::json!({
-            "schema": "ee.graph.snapshot.metrics.v1",
-            "nodes": [
-                {"id": "m1", "pagerank": 0.5},
-                {"id": "m2", "pagerank": null},
-            ],
-            "edges": [
-                {"source": "m1", "target": "m2", "relation": "supports", "directed": true},
-            ],
-        })
-        .to_string();
-        let parsed = parse_snapshot_graph("gsnap_x", 3, "2026-08-09T00:00:00Z", &metrics).unwrap();
-        assert_eq!(parsed.nodes.len(), 2);
-        assert_eq!(parsed.nodes["m1"], Some(0.5));
-        assert_eq!(parsed.nodes["m2"], None);
-        assert_eq!(parsed.edges.len(), 1);
-        let edge = parsed.edges.values().next().unwrap();
-        assert_eq!(edge.relation, "supports");
-        assert!(edge.directed);
+        for schema in [
+            "ee.graph.snapshot.metrics.v1",
+            "ee.graph.snapshot.metrics.v2",
+        ] {
+            let mut metrics = serde_json::json!({
+                "schema": schema,
+                "nodes": [
+                    {"id": "m1", "pagerank": 0.5},
+                    {"id": "m2", "pagerank": null},
+                ],
+                "edges": [
+                    {"source": "m1", "target": "m2", "relation": "supports", "directed": true},
+                ],
+            });
+            if schema.ends_with(".v2") {
+                metrics["sourceProjection"] = serde_json::json!({
+                    "linkLimit": 50, "minWeight": 0.5, "minConfidence": null,
+                });
+            }
+            let parsed =
+                parse_snapshot_graph("gsnap_x", 3, "2026-08-09T00:00:00Z", &metrics.to_string())
+                    .unwrap();
+            assert_eq!(parsed.nodes.len(), 2);
+            assert_eq!(parsed.nodes["m1"], Some(0.5));
+            assert_eq!(parsed.nodes["m2"], None);
+            assert_eq!(parsed.edges.len(), 1);
+            let edge = parsed.edges.values().next().unwrap();
+            assert_eq!(edge.relation, "supports");
+            assert!(edge.directed);
+        }
         assert!(parse_snapshot_graph("gsnap_y", 4, "t", "not json").is_err());
         let _ = COMMUNITY_MATCH_JACCARD_THRESHOLD;
     }
