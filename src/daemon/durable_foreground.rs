@@ -229,7 +229,9 @@ pub async fn run_daemon_foreground_durable_supervised(
         if summary.completed_jobs == summary.requested_jobs {
             break;
         }
-        let last_job_in_tick = summary.completed_jobs % options.job_types.len() as u64 == 0;
+        let last_job_in_tick = summary
+            .completed_jobs
+            .is_multiple_of(options.job_types.len() as u64);
         if last_job_in_tick {
             if let Some(reason) = wait_interval(cx, options).await {
                 return stop_with(

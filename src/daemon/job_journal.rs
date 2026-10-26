@@ -350,7 +350,10 @@ fn recover_orphaned_daemon_jobs_inner(
             // This caps only the response, never the number of cancellations.
             report.recovered_rows_truncated = true;
         }
-        if report.open_jobs_cancelled % RECOVERY_SYNC_ROWS == 0 {
+        if report
+            .open_jobs_cancelled
+            .is_multiple_of(RECOVERY_SYNC_ROWS)
+        {
             file.sync_all()
                 .map_err(|e| format!("Sync daemon recovery: {e}"))?;
         }
