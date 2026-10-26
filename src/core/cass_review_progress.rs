@@ -340,3 +340,245 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+    use crate::cass::import::ImportedCassSession;
+    use crate::core::cass_review::review_imported_sessions;
+    use crate::db::{
+        CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput,
+        EvidenceAdmissionTally, EvidenceProducerKind,
+    };
+    use crate::models::EvidenceId;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    const LESSON: &str = "Always run cargo fmt --check before cutting a release tag.";
+
+    fn source(
+        connection: &DbConnection,
+        workspace: &str,
+        number: u128,
+    ) -> Result<StoredSession, crate::db::DbError> {
+        let id = SessionId::from_uuid(uuid::Uuid::from_u128(8000 + number)).to_string();
+        connection.insert_session(
+            &id,
+            &CreateSessionInput {
+                workspace_id: workspace.to_owned(),
+                cass_session_id: format!("/sessions/review-{number}.jsonl"),
+                source_path: None,
+                agent_name: Some("codex".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 1,
+                token_count: None,
+                content_hash: format!(
+                    "blake3:{}",
+                    blake3::hash(&number.to_le_bytes()).to_hex()
+                ),
+                metadata_json: None,
+            },
+        )?;
+        connection.get_session(&id)?.ok_or_else(invalid_progress)
+    }
+
+    fn evidence(
+        connection: &DbConnection,
+        session: &StoredSession,
+        number: u128,
+        role: &str,
+    ) -> Result<(), crate::db::DbError> {
+        let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(9000 + number)).to_string();
+        let excerpt = json!({
+            "type": role,
+            "message": {"role": role, "content": LESSON},
+        })
+        .to_string();
+        connection.insert_evidence_span(
+            &id,
+            &CreateEvidenceSpanInput {
+                workspace_id: session.workspace_id.clone(),
+                session_id: session.id.clone(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: format!("{}:1", session.cass_session_id),
+                span_kind: "message".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: None,
+                end_byte: None,
+                role: Some(role.to_owned()),
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                excerpt,
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn real_review_batches_reach_a_lesson_after_thirty_three_abstentions() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let workspace_path = root.join("workspace");
+        std::fs::create_dir(&workspace_path)?;
+        let database_path = root.join("explicit-review-store.db");
+        let workspace = crate::core::workspace::stable_workspace_id(&workspace_path);
+        let connection = DbConnection::open_file(&database_path)?;
+        connection.migrate()?;
+        connection.insert_workspace(
+            &workspace,
+            &CreateWorkspaceInput {
+                path: workspace_path.display().to_string(),
+                name: None,
+            },
+        )?;
+        let mut imported = Vec::new();
+        for number in 1..=34_u128 {
+            let session = source(&connection, &workspace, number)?;
+            // These first 33 rows deliberately contain the same directive as
+            // the final row, but as system records that cannot become lessons.
+            // A candidate-only progress check would starve the final source.
+            evidence(
+                &connection,
+                &session,
+                number,
+                if number == 34 { "assistant" } else { "system" },
+            )?;
+            imported.push(ImportedCassSession {
+                source_path: session.cass_session_id,
+                session_id: Some(session.id),
+                index_job_id: None,
+                status: ImportSessionStatus::Skipped,
+                spans_imported: 0,
+                message_count: Some(1),
+                missing_metadata: Vec::new(),
+            });
+        }
+        let last_id = imported[33].session_id.clone().ok_or("missing last session")?;
+        let sources_before = connection.list_evidence_spans_for_session(&last_id)?;
+        connection.close()?;
+        let import = CassImportReport {
+            schema: crate::models::IMPORT_CASS_SCHEMA_V1,
+            workspace_path: workspace_path.display().to_string(),
+            database_path: Some(database_path.display().to_string()),
+            source_id: "review-resume-regression".to_owned(),
+            ledger_id: None,
+            dry_run: false,
+            since: None,
+            sessions_discovered: 34,
+            sessions_imported: 0,
+            sessions_skipped: 34,
+            spans_imported: 0,
+            index_jobs_queued: 0,
+            index_required_action: None,
+            status: "completed".to_owned(),
+            sessions: imported,
+            evidence_admission: EvidenceAdmissionTally::default(),
+        };
+        let first = review_imported_sessions(&import);
+        assert_eq!(first.sessions_failed, 0, "{first:?}");
+        assert_eq!(first.candidates_persisted, 0);
+        assert_eq!(first.sessions_newly_reviewed, 16);
+        assert_eq!(first.sessions_pending_review, 18);
+        assert!(first.durable_mutation);
+
+        let second = review_imported_sessions(&import);
+        assert_eq!(second.sessions_failed, 0, "{second:?}");
+        assert_eq!(second.candidates_persisted, 0);
+        assert_eq!(second.sessions_previously_reviewed, 16);
+        assert_eq!(second.sessions_newly_reviewed, 16);
+        assert_eq!(second.sessions_pending_review, 2);
+
+        let third = review_imported_sessions(&import);
+        assert_eq!(third.sessions_failed, 0, "{third:?}");
+        assert_eq!(third.sessions_previously_reviewed, 32);
+        assert_eq!(third.sessions_newly_reviewed, 2);
+        assert_eq!(third.sessions_pending_review, 0);
+        assert_eq!(third.candidates_persisted, 1);
+        let last = third.sessions.iter().find(|entry| entry.session_index == 33)
+            .ok_or("tail review missing")?;
+        assert_eq!(last.status, "reviewed");
+        assert_eq!(last.session_id.as_deref(), Some(last_id.as_str()));
+        assert_eq!(last.candidates.len(), 1);
+        assert!(last.candidates[0].proposed_content.contains(LESSON.trim_end_matches('.')));
+        assert!(third.sessions.windows(2).all(|pair| {
+            pair[0].session_index < pair[1].session_index
+        }));
+
+        let repeat = review_imported_sessions(&import);
+        assert_eq!(repeat.sessions_failed, 0, "{repeat:?}");
+        assert_eq!(repeat.sessions_previously_reviewed, 34);
+        assert_eq!(repeat.sessions_newly_reviewed, 0);
+        assert_eq!(repeat.sessions_pending_review, 0);
+        assert_eq!(repeat.candidates_persisted, 0);
+        assert!(!repeat.durable_mutation);
+        assert!(!repeat.degradations().iter().any(|entry| {
+            entry.code == "cass_import_review_deferred"
+        }));
+        assert!(!workspace_path.join(".ee").join("ee.db").exists());
+        let connection = DbConnection::open_file(&database_path)?;
+        assert_eq!(connection.list_curation_candidates(&workspace, None, None, None)?.len(), 1);
+        assert!(connection.list_memories(&workspace, None, false)?.is_empty());
+        let sources_after = connection.list_evidence_spans_for_session(&last_id)?;
+        assert_eq!(sources_after.len(), sources_before.len());
+        for (before, after) in sources_before.iter().zip(&sources_after) {
+            assert_eq!(after.excerpt, before.excerpt);
+            assert_eq!(after.content_hash, before.content_hash);
+            assert_eq!(after.canonical_provenance_uri(), before.canonical_provenance_uri());
+            assert!(after.memory_id.is_none());
+        }
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_refresh_between_planning_and_acknowledgement_cannot_complete_old_work() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace = "wsp_01234567890123456789012345";
+        connection.insert_workspace(workspace, &CreateWorkspaceInput {
+            path: "/workspace/progress-race".to_owned(),
+            name: None,
+        })?;
+        let session = source(&connection, workspace, 35)?;
+        let old = Receipt::new(&session);
+        // Generated typed ID and fixed SQL constants only, never user input.
+        connection.execute_raw(&format!(
+            "UPDATE sessions SET message_count = 2, updated_at = '2030-01-01T00:00:00Z' WHERE id = '{}'",
+            session.id,
+        ))?;
+        assert_eq!(old.record(&connection), Err(CHANGED));
+        assert!(connection.get_audit(&old.id)?.is_none());
+        let changed = connection.get_session(&session.id)?.ok_or("session missing")?;
+        let current = Receipt::new(&changed);
+        assert_ne!(current.id, old.id);
+        assert!(current.record(&connection)?);
+        assert!(!current.record(&connection)?);
+        assert_eq!(connection.get_session(&session.id)?, Some(changed));
+        Ok(())
+    }
+
+    #[test]
+    fn failed_progress_audit_rolls_back_without_marking_or_rewriting_the_source() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace = "wsp_01234567890123456789012345";
+        connection.insert_workspace(workspace, &CreateWorkspaceInput {
+            path: "/workspace/progress-rollback".to_owned(),
+            name: None,
+        })?;
+        let session = source(&connection, workspace, 36)?;
+        let receipt = Receipt::new(&session);
+        connection.execute_raw(
+            "CREATE TRIGGER reject_proposal_progress BEFORE INSERT ON audit_log WHEN NEW.action = 'cass.session.proposal_reviewed' BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END;",
+        )?;
+        assert_eq!(receipt.record(&connection), Err(UNAVAILABLE));
+        assert!(!receipt.is_recorded(&connection)?);
+        assert_eq!(connection.get_session(&session.id)?, Some(session));
+        assert!(connection.list_memories(workspace, None, false)?.is_empty());
+        Ok(())
+    }
+}
