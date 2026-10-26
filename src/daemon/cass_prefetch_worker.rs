@@ -171,12 +171,7 @@ impl CassPrefetchWorker {
     }
 
     fn interrupted(&self) -> bool {
-        self.shutdown.load(Ordering::Acquire)
-            || self
-                .foreground
-                .inflight
-                .try_lock()
-                .map_or(true, |active| *active != 0)
+        self.shutdown.load(Ordering::Acquire) || !self.foreground.foreground_is_idle()
     }
 
     fn policy_is_current(&self, ticket: CassPrefetchPolicyTicket) -> bool {

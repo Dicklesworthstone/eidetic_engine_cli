@@ -6,8 +6,9 @@
 //! `ee.daemon.context` pack path.
 //!
 //! Threading: each accepted connection is dispatched onto a bounded
-//! worker pool (capped at [`super::DAEMON_MAX_INFLIGHT`], overridable
-//! via `EE_DAEMON_MAX_INFLIGHT`). When the pool is saturated the
+//! foreground pool (capped at [`super::DAEMON_MAX_INFLIGHT`], overridable
+//! via `EE_DAEMON_MAX_INFLIGHT`) and at most that many adaptive waiters.
+//! When either bounded admission gate is saturated the
 //! accept loop refuses the new connection with a framed
 //! `daemon_overloaded` response and closes it rather than queueing —
 //! that keeps total daemon RSS amplification bounded at
@@ -23,6 +24,13 @@
 //! [`super::DaemonStartError::PlatformUnsupported`].
 
 #![cfg(unix)]
+
+#[path = "adaptive_scheduler.rs"]
+mod adaptive_scheduler;
+use adaptive_scheduler::{
+    AdaptiveAdmissionError, AdaptivePolicyTickets, DaemonAdaptiveScheduler,
+    remaining_context_budget,
+};
 
 #[path = "cass_prefetch_worker.rs"]
 mod cass_prefetch_worker;
@@ -46,8 +54,10 @@ use std::time::{Duration, Instant};
 use rustix::fs::{FlockOperation, flock};
 
 use crate::config::env_registry::{self, EnvVar};
+#[cfg(test)]
+use crate::core::cass_prefetch::CassPrefetchPolicy;
 use crate::core::cass_prefetch::{
-    AgentScope, CassPrefetchCoordinator, CassPrefetchPolicy, CassPrefetchPolicyTicket,
+    ADAPTIVE_BACKOFF_APPLIED_CODE, AgentScope, CassPrefetchCoordinator, CassPrefetchPolicyTicket,
     GatedPrediction, PrefetchGeneration, RecencyWeightedFrequencyPredictor,
 };
 use crate::core::context::{
@@ -255,6 +265,8 @@ pub struct DaemonDispatchPolicy {
     /// One idle, bounded, read-only warm batch per server; absent for cold mode
     /// and for direct dispatches which have no supervised server lifetime.
     cass_prefetch_worker: Option<CassPrefetchWorker>,
+    /// Shared context admission and config ordering for both adaptive features.
+    adaptive_scheduler: Arc<DaemonAdaptiveScheduler>,
     /// Set once at daemon start when the workspace is bound and the long-lived
     /// write-owner actor is hosted (Inc 2, bd-wx6ou.3). Carries the shared
     /// runtime + a clone of the actor's submit handle to `dispatch_write`
@@ -387,52 +399,81 @@ struct DaemonSocketPublishLock {
     _file: File,
 }
 
-/// Bounded-pool permit. A clone-on-acquire counter that decrements on
-/// drop, used to cap the number of in-flight per-connection worker
-/// threads. The cap defends against the bd-jnyui local-DoS vector:
-/// before this gate, a single attacker could fork-bomb the daemon
-/// because `run_accept_loop` spawned a new `std::thread::Builder` per
-/// accept with no semaphore or queue depth.
+/// A worker owns one resident slot until drop. A bounded adaptive wait can
+/// temporarily release its active slot so other agents can execute, then
+/// attempt to reacquire foreground capacity once without queueing again.
 #[derive(Debug)]
 struct InflightPermit {
     pool: Arc<InflightPool>,
+    active: bool,
 }
 
-#[allow(clippy::expect_used)]
-impl Drop for InflightPermit {
-    fn drop(&mut self) {
+impl InflightPermit {
+    fn suspend(&mut self) -> bool {
+        if !self.active {
+            return true;
+        }
         let mut current = self
             .pool
             .inflight
-            // bd-ijg41. RECOVER rather than panic, and this site matters most:
-            // a panic inside a Drop that is itself unwinding is a double panic,
-            // which ABORTS the process. So "a worker panics -> this mutex is
-            // poisoned -> some other permit unwinds -> its Drop panics" would
-            // kill the daemon outright instead of failing one request.
-            //
-            // Recovering is sound because the counter cannot be torn: no
-            // critical section on this mutex contains a call that can unwind
-            // (compare/increment, saturating_sub, notify_all), so a poisoning
-            // always originates elsewhere in the thread's stack. Failing to
-            // decrement would leak a permit forever and deadlock
-            // wait_until_idle.
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *current = current.saturating_sub(1);
-        if *current == 0 {
-            self.pool.idle.notify_all();
+        if current.resident.saturating_sub(current.active) >= self.pool.capacity {
+            return false;
         }
+        current.active = current.active.saturating_sub(1);
+        self.active = false;
+        self.pool.idle.notify_all();
+        true
+    }
+
+    fn resume(&mut self) -> bool {
+        if self.active {
+            return true;
+        }
+        let mut current = self
+            .pool
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.active >= self.pool.capacity {
+            return false;
+        }
+        current.active += 1;
+        self.active = true;
+        true
     }
 }
 
-/// Shared, hand-rolled counting semaphore for the accept loop. The
-/// counter is bumped on `try_acquire` (returning a permit) and
-/// decremented when the permit is dropped — typically when the worker
-/// thread exits.
+impl Drop for InflightPermit {
+    fn drop(&mut self) {
+        // Recover poisoned accounting even while unwinding (bd-ijg41).
+        // These critical sections contain no fallible calls or user code.
+        let mut current = self
+            .pool
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.active {
+            current.active = current.active.saturating_sub(1);
+        }
+        current.resident = current.resident.saturating_sub(1);
+        self.pool.idle.notify_all();
+    }
+}
+
+#[derive(Debug, Default)]
+struct InflightCounts {
+    active: usize,
+    resident: usize,
+}
+
+/// Foreground admission remains bounded by N. At most N additional residents
+/// may be suspended for adaptive backoff; there is no unbounded worker queue.
 #[derive(Debug)]
 struct InflightPool {
     capacity: usize,
-    inflight: Mutex<usize>,
+    inflight: Mutex<InflightCounts>,
     idle: Condvar,
 }
 
@@ -446,7 +487,7 @@ impl InflightPool {
         let capacity = capacity.max(1);
         Arc::new(Self {
             capacity,
-            inflight: Mutex::new(0),
+            inflight: Mutex::new(InflightCounts::default()),
             idle: Condvar::new(),
         })
     }
@@ -458,40 +499,55 @@ impl InflightPool {
             // admitting work permanently after one unrelated worker panic.
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *current >= self.capacity {
+        if current.active >= self.capacity || current.resident >= self.capacity.saturating_mul(2) {
             return None;
         }
-        *current += 1;
+        current.active += 1;
+        current.resident += 1;
         Some(InflightPermit {
             pool: Arc::clone(self),
+            active: true,
         })
     }
 
+    fn foreground_is_idle(&self) -> bool {
+        self.inflight
+            .try_lock()
+            .is_ok_and(|current| current.active == 0)
+    }
+
     fn wait_until_idle(&self, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
+        self.wait_for_count(timeout, |current| current.active)
+    }
+
+    fn wait_until_drained(&self, timeout: Duration) -> bool {
+        self.wait_for_count(timeout, |current| current.resident)
+    }
+
+    fn wait_for_count(&self, timeout: Duration, count: impl Fn(&InflightCounts) -> usize) -> bool {
+        let started = Instant::now();
         let mut current = self
             .inflight
             // bd-ijg41: recover. This path never mutates the counter, so it
             // only ever reads a value the argument above shows is consistent.
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while *current > 0 {
-            let now = Instant::now();
-            if now >= deadline {
+        while count(&current) > 0 {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
                 return false;
             }
-            let remaining = deadline.saturating_duration_since(now);
             let (next, result) = self
                 .idle
                 // bd-ijg41: recover, and leave the control flow ALONE. The
-                // enclosing `while *current > 0` already re-checks the
+                // enclosing count predicate already re-checks the
                 // predicate after every wake, which is exactly what a poisoned
                 // condvar wait wants; into_inner yields the same
                 // (guard, WaitTimeoutResult) tuple the code already binds.
                 .wait_timeout(current, remaining)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             current = next;
-            if result.timed_out() && *current > 0 {
+            if result.timed_out() && count(&current) > 0 {
                 return false;
             }
         }
@@ -702,7 +758,7 @@ impl DaemonServerHandle {
         };
         let scheduler_result = self.join_scheduler_with_timeout();
 
-        let workers_drained = self.pool.wait_until_idle(worker_drain_timeout);
+        let workers_drained = self.pool.wait_until_drained(worker_drain_timeout);
         if workers_drained {
             self.workers_drained.store(true, Ordering::Release);
         }
@@ -1185,6 +1241,7 @@ fn start_server_with_dispatch_policy(
     // A cloned policy is configuration, not ownership of another daemon's
     // observations, shutdown flag or speculative single-flight slot.
     dispatch_policy.cass_prefetch = Arc::new(Mutex::new(CassPrefetchCoordinator::new()));
+    dispatch_policy.adaptive_scheduler = Arc::new(DaemonAdaptiveScheduler::default());
     // bd-16pwc.7: the worker settles its completed batch with THIS daemon's
     // coordinator, so it holds the same handle the request path locks rather
     // than a second one that could never be read.
@@ -1495,9 +1552,16 @@ impl ConnectionWorkerSpawner for ThreadConnectionWorkerSpawner {
         thread::Builder::new()
             .name("ee-daemon-conn".to_owned())
             .spawn(move || {
-                // Permit is held for the lifetime of the worker; on drop
-                // the counter decrements and the next accept can proceed.
-                handle_connection(stream, shutdown, dispatch_policy, metrics);
+                let mut permit = permit;
+                // Resident ownership lasts for the entire connection, even
+                // while context admission releases its foreground capacity.
+                handle_connection(
+                    stream,
+                    shutdown,
+                    dispatch_policy,
+                    metrics,
+                    Some(&mut permit),
+                );
                 drop(permit);
             })
     }
@@ -1908,6 +1972,7 @@ fn handle_connection(
     shutdown: Arc<AtomicBool>,
     dispatch_policy: Arc<DaemonDispatchPolicy>,
     metrics: Arc<dyn super::metrics::DaemonMetricsCollector>,
+    permit: Option<&mut InflightPermit>,
 ) {
     // Install the per-connection deadlines BEFORE any read. The read
     // timeout is the only backstop that stops a half-open peer from
@@ -2077,10 +2142,10 @@ fn handle_connection(
     // workspace path could otherwise leak that content to the
     // cross-tenant client.
     //
-    // `AssertUnwindSafe` is sound here because the only state
-    // captured by the closure is a borrow of `request`; the
-    // `DaemonResponse` value is produced fresh inside the closure and
-    // the `UnixStream` is touched only after the closure returns.
+    // `AssertUnwindSafe` is sound here because permit accounting survives
+    // an unwind in either active or suspended
+    // state. The response is produced fresh inside the closure and the
+    // UnixStream is touched only after the closure returns.
     //
     // Metrics seam (bd-3vkyp): the live dispatch goes through
     // `instrument_dispatch` with the zero-cost `NoopMetricsCollector`,
@@ -2091,7 +2156,12 @@ fn handle_connection(
     let request_id = request.request_id.clone();
     let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         super::metrics::instrument_dispatch(&request.method, metrics.as_ref(), || {
-            dispatch_with_policy_and_shutdown(&request, dispatch_policy.as_ref(), shutdown.as_ref())
+            dispatch_with_policy_and_shutdown(
+                &request,
+                dispatch_policy.as_ref(),
+                shutdown.as_ref(),
+                permit,
+            )
         })
     }));
     let mut response = match dispatched {
@@ -2274,6 +2344,7 @@ fn dispatch_with_policy_and_shutdown(
     request: &DaemonRequest,
     policy: &DaemonDispatchPolicy,
     shutdown: &AtomicBool,
+    permit: Option<&mut InflightPermit>,
 ) -> DaemonResponse {
     dispatch_with_echo_policy_and_workspace_inner(
         request,
@@ -2281,6 +2352,7 @@ fn dispatch_with_policy_and_shutdown(
         policy,
         shutdown,
         true,
+        permit,
     )
 }
 
@@ -2292,6 +2364,7 @@ fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> Dae
         &DaemonDispatchPolicy::default(),
         &shutdown,
         false,
+        None,
     )
 }
 
@@ -2301,6 +2374,7 @@ fn dispatch_with_echo_policy_and_workspace_inner(
     policy: &DaemonDispatchPolicy,
     shutdown: &AtomicBool,
     defer_advisory_until_socket_write: bool,
+    permit: Option<&mut InflightPermit>,
 ) -> DaemonResponse {
     let bound_workspace_id = policy.bound_workspace_id();
     let write_router = policy.write_router();
@@ -2376,10 +2450,9 @@ fn dispatch_with_echo_policy_and_workspace_inner(
         METHOD_CONTEXT => dispatch_context(
             request,
             shutdown,
-            search_advisory_session,
-            policy.cass_prefetch(),
-            policy.cass_prefetch_worker.as_ref(),
+            policy,
             defer_advisory_until_socket_write,
+            permit,
         ),
         METHOD_PACK_SEARCH => dispatch_pack_search(request, shutdown),
         METHOD_SEARCH => dispatch_search(
@@ -5728,11 +5801,52 @@ impl DaemonContextParams {
 fn dispatch_context(
     request: &DaemonRequest,
     shutdown: &AtomicBool,
-    search_advisory_session: &Mutex<SearchAdvisorySession>,
-    cass_prefetch: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
-    prefetch_worker: Option<&CassPrefetchWorker>,
+    policy: &DaemonDispatchPolicy,
     defer_advisory_until_socket_write: bool,
+    permit: Option<&mut InflightPermit>,
 ) -> DaemonResponse {
+    dispatch_context_with_admission(
+        request,
+        shutdown,
+        policy,
+        defer_advisory_until_socket_write,
+        permit,
+        |workspace, started, timeout_ms, permit| {
+            let tickets = policy.adaptive_scheduler.configure_workspace(
+                policy.cass_prefetch(),
+                workspace,
+                &request.agent_id,
+            );
+            let applied = policy.adaptive_scheduler.admit(
+                tickets.scheduler.as_ref(),
+                permit,
+                shutdown,
+                started,
+                timeout_ms,
+            )?;
+            Ok((tickets, applied))
+        },
+    )
+}
+
+/// Keep config I/O and waiting injectable while every caller shares the real
+/// parameter/path checks, canonical pack execution, and envelope rendering.
+fn dispatch_context_with_admission(
+    request: &DaemonRequest,
+    shutdown: &AtomicBool,
+    policy: &DaemonDispatchPolicy,
+    defer_advisory_until_socket_write: bool,
+    permit: Option<&mut InflightPermit>,
+    admit: impl FnOnce(
+        &Path,
+        Instant,
+        Option<u64>,
+        Option<&mut InflightPermit>,
+    ) -> Result<(AdaptivePolicyTickets, bool), AdaptiveAdmissionError>,
+) -> DaemonResponse {
+    let search_advisory_session = policy.search_advisory_session();
+    let cass_prefetch = policy.cass_prefetch();
+    let prefetch_worker = policy.cass_prefetch_worker.as_ref();
     if shutdown.load(Ordering::SeqCst) {
         return daemon_shutting_down_response(
             request.request_id.clone(),
@@ -5789,14 +5903,63 @@ fn dispatch_context(
     // Resolve only after the envelope and context paths have been authorized.
     // Capture the policy before pack execution: a later request may revoke it
     // while this request is running, and completion must not re-enable it.
-    let prefetch_ticket = configure_workspace_cass_prefetch(cass_prefetch, &options.workspace_path);
-    let deadline = params.timeout_ms.map(Duration::from_millis);
-    let context_run = match run_context_pack_with_performance_controlled(
+    let (tickets, backoff_applied) = match admit(
+        &options.workspace_path,
+        context_started,
+        params.timeout_ms,
+        permit,
+    ) {
+        Ok(admission) => admission,
+        Err(AdaptiveAdmissionError::Deadline) => {
+            return daemon_context_deadline_response(
+                request,
+                "ee.daemon.context deadline expired during adaptive admission.",
+            );
+        }
+        Err(AdaptiveAdmissionError::Shutdown) => {
+            return daemon_shutting_down_response(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+            );
+        }
+        Err(AdaptiveAdmissionError::Overloaded) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_OVERLOADED_CODE,
+                "ee.daemon.context foreground capacity or adaptive wait capacity is busy.",
+            )
+            .with_degraded(DAEMON_OVERLOADED_CODE);
+        }
+    };
+    let prefetch_ticket = tickets.prefetch;
+    if shutdown.load(Ordering::SeqCst) {
+        return daemon_shutting_down_response(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+        );
+    }
+    let Some(deadline) = remaining_context_budget(params.timeout_ms, context_started.elapsed())
+    else {
+        return daemon_context_deadline_response(
+            request,
+            "ee.daemon.context deadline expired before pack execution started.",
+        );
+    };
+    let execution_started = Instant::now();
+    let context_result = run_context_pack_with_performance_controlled(
         &options,
         "pack",
-        deadline,
+        Some(deadline),
         Some(shutdown),
-    ) {
+    );
+    policy
+        .adaptive_scheduler
+        .observe_execution(tickets.scheduler.as_ref(), execution_started.elapsed());
+    let context_run = match context_result {
         Ok(run) => run,
         Err(ContextPackError::DeadlineExceeded(error)) => {
             return DaemonResponse::err(
@@ -5940,6 +6103,10 @@ fn dispatch_context(
     if let Some(code) = prefetch_prediction.degraded {
         response = response.with_degraded(code);
     }
+    // Runtime contention is transport telemetry, not canonical pack content.
+    if backoff_applied {
+        response = response.with_degraded(ADAPTIVE_BACKOFF_APPLIED_CODE);
+    }
     if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
         return DaemonResponse::err(
             request.request_id.clone(),
@@ -5990,6 +6157,7 @@ fn dispatch_context(
 /// and typed environment overrides as the config surface. Optional prefetch
 /// must fail closed on invalid configuration without failing a valid pack or
 /// exposing configuration contents in a diagnostic.
+#[cfg(test)]
 fn configure_workspace_cass_prefetch(
     coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
     workspace_path: &Path,
@@ -6008,6 +6176,7 @@ fn configure_workspace_cass_prefetch(
     })
 }
 
+#[cfg(test)]
 fn refresh_cass_prefetch_policy(
     coordinator: &Mutex<CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor>>,
     load_policy: impl FnOnce() -> CassPrefetchPolicy,
@@ -6249,7 +6418,7 @@ fn filter_context_large_gap_advisory_inner(
 }
 
 fn daemon_context_deadline_expired(started: Instant, timeout_ms: Option<u64>) -> bool {
-    timeout_ms.is_some_and(|timeout_ms| started.elapsed() >= Duration::from_millis(timeout_ms))
+    remaining_context_budget(timeout_ms, started.elapsed()).is_none()
 }
 
 fn daemon_context_deadline_response(
@@ -6950,9 +7119,19 @@ mod tests {
         );
 
         // try_acquire must keep admitting work (the :446 site).
-        let permit = pool
+        let mut permit = pool
             .try_acquire()
             .expect("try_acquire must recover from a poisoned mutex");
+        assert!(
+            permit.suspend(),
+            "suspension must recover poisoned accounting"
+        );
+        assert!(pool.wait_until_idle(Duration::ZERO));
+        assert!(!pool.wait_until_drained(Duration::ZERO));
+        assert!(
+            permit.resume(),
+            "resumption must recover poisoned accounting"
+        );
 
         // Dropping exercises the abort path (the :408 site): on the old code
         // this Drop would panic against the poisoned mutex.
@@ -6964,6 +7143,7 @@ mod tests {
             pool.wait_until_idle(Duration::from_secs(5)),
             "pool must report idle after the permit is dropped"
         );
+        assert!(pool.wait_until_drained(Duration::ZERO));
     }
 
     fn context_request(
@@ -9757,6 +9937,7 @@ mod tests {
             &DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID),
             &shutdown,
             false,
+            None,
         );
         let error = response.error.as_ref().expect("must have error");
         assert_eq!(error.code, DAEMON_METHOD_UNAUTHORIZED_CODE);
@@ -11520,6 +11701,7 @@ mod tests {
             &DaemonDispatchPolicy::default(),
             &shutdown,
             false,
+            None,
         );
 
         assert!(response.error.is_none());
@@ -11711,7 +11893,10 @@ mod tests {
     #[test]
     fn daemon_shutdown_timeout_can_be_retried_after_workers_drain() {
         let pool = InflightPool::new(1);
-        let permit = pool.try_acquire().expect("first permit must acquire");
+        let mut permit = pool.try_acquire().expect("first permit must acquire");
+        assert!(permit.suspend());
+        assert!(pool.wait_until_idle(Duration::ZERO));
+        assert!(!pool.wait_until_drained(Duration::ZERO));
         let mut handle = DaemonServerHandle {
             socket_path: std::env::temp_dir().join(format!(
                 "ee-daemon-drain-test-{}-{}",
@@ -13410,7 +13595,7 @@ mod tests {
         ));
         let metrics = Arc::new(super::super::metrics::NoopMetricsCollector);
         let worker = thread::spawn(move || {
-            handle_connection(server_side, shutdown, dispatch_policy, metrics)
+            handle_connection(server_side, shutdown, dispatch_policy, metrics, None)
         });
 
         let mut request = DaemonRequest::new(

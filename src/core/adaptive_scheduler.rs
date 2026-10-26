@@ -1,8 +1,9 @@
 //! Pure SRR5 per-agent adaptive scheduler model.
 //!
-//! The daemon wiring lives in follow-up slices. This module is deliberately
-//! side-effect free: callers feed observed latencies in, and the model returns
-//! an advisory pass/backoff decision for that agent only.
+//! The daemon context adapter applies these decisions with bounded, cancellable
+//! waits that release foreground capacity. This module stays side-effect free:
+//! callers feed execution latencies in, and the model returns a decision for
+//! that agent only.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -104,6 +105,12 @@ impl AdaptiveScheduler {
     #[must_use]
     pub fn state_for(&self, agent_id: &str) -> Option<&AgentAdaptiveState> {
         self.agents.get(agent_id)
+    }
+
+    /// Release a runtime-evicted identity without retaining its latency window.
+    #[cfg(unix)]
+    pub(crate) fn forget_agent(&mut self, agent_id: &str) {
+        self.agents.remove(agent_id);
     }
 
     pub fn observe_latency_ms(
