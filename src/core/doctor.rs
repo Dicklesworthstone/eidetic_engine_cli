@@ -4338,7 +4338,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "registry",
-            version: "0.6.0",
+            version: "0.7.1",
             path: "https://crates.io/crates/frankensearch",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -4495,7 +4495,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "registry",
-            version: "0.2.3",
+            version: "0.3.8",
             path: "https://crates.io/crates/franken-agent-detection",
         },
         default_feature_profile: DependencyFeatureProfile {
