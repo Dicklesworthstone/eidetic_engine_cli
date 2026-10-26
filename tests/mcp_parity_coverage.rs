@@ -97,6 +97,7 @@ fn parity_invoked_tools() -> Result<BTreeSet<String>, String> {
     for line in MCP_PARITY_SOURCE
         .lines()
         .filter(|line| line.contains("load_parity_fixture("))
+        .filter(|line| !line.trim_start().starts_with("fn "))
     {
         let values = quoted_values(line);
         if values.len() < 2 {

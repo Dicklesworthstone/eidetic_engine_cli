@@ -1,0 +1,26 @@
+{
+  "surface": "graph_neighborhood",
+  "mcpTool": "ee_graph_neighborhood",
+  "cliArgs": [
+    "ee",
+    "--json",
+    "--workspace",
+    "__WORKSPACE__",
+    "graph",
+    "neighborhood",
+    "__MEMORY_ID__",
+    "--direction",
+    "outgoing",
+    "--relation",
+    "supports",
+    "--limit",
+    "1"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "memoryId": "__MEMORY_ID__",
+    "direction": "outgoing",
+    "relation": "supports",
+    "limit": 1
+  }
+}

@@ -39,6 +39,10 @@ const PARITY_TESTED_TOOLS: &[&str] = &[
     "ee_memory_show",
     "ee_why",
     "ee_remember",
+    "ee_curate_candidates",
+    "ee_curate_validate",
+    "ee_curate_apply",
+    "ee_graph_neighborhood",
     "ee_capture_git",
     "ee_outcome",
     "ee_journal_append",
@@ -1178,6 +1182,425 @@ fn mcp_manifest_covers_walking_skeleton_commands() -> TestResult {
         )?;
     }
 
+    Ok(())
+}
+
+// Seed source-of-truth rows directly: the MCP workflow needs no model or index.
+const CURATION_WORKSPACE: &str = "wsp_00000000000000000000000401";
+const CURATION_MEMORY: &str = "mem_00000000000000000000000401";
+const CURATION_NEIGHBOR: &str = "mem_00000000000000000000000402";
+const CURATION_CANDIDATE: &str = "curate_00000000000000000000000401";
+
+struct CurationFixture {
+    _directory: tempfile::TempDir,
+    workspace: PathBuf,
+}
+
+#[derive(Debug, PartialEq)]
+struct CurationStoreState {
+    memories: Vec<ee::db::StoredMemory>,
+    candidates: Vec<ee::db::StoredCurationCandidate>,
+    audits: Vec<ee::db::StoredAuditEntry>,
+    jobs: Vec<ee::db::StoredSearchIndexJob>,
+    links: Vec<ee::db::StoredMemoryLink>,
+}
+
+impl CurationFixture {
+    fn new() -> Result<Self, String> {
+        use ee::db::{
+            CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
+            CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
+            WorkspaceScopeFields,
+        };
+
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(workspace.join(".ee/ee.db"))
+            .map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .upsert_workspace_with_scope(
+                CURATION_WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: None,
+                },
+                &WorkspaceScopeFields::standalone(),
+            )
+            .map_err(|error| error.to_string())?;
+        for (id, content) in [
+            (
+                CURATION_MEMORY,
+                "Confirm release artifacts against the published manifest.",
+            ),
+            (
+                CURATION_NEIGHBOR,
+                "Keep the release manifest with the build evidence.",
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: CURATION_WORKSPACE.to_owned(),
+                        level: "episodic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.5,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .insert_curation_candidate(
+                CURATION_CANDIDATE,
+                &CreateCurationCandidateInput {
+                    workspace_id: CURATION_WORKSPACE.to_owned(),
+                    candidate_type: "promote".to_owned(),
+                    target_memory_id: Some(CURATION_MEMORY.to_owned()),
+                    proposed_content: None,
+                    proposed_confidence: Some(0.875),
+                    proposed_trust_class: None,
+                    source_type: "feedback_event".to_owned(),
+                    source_id: Some("fb_00000000000000000000000401".to_owned()),
+                    reason: "Repeatedly confirmed release constraint.".to_owned(),
+                    confidence: 0.875,
+                    status: Some("pending".to_owned()),
+                    created_at: None,
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (id, src, dst, relation) in [
+            (
+                "link_00000000000000000000000401",
+                CURATION_MEMORY,
+                CURATION_NEIGHBOR,
+                MemoryLinkRelation::Supports,
+            ),
+            (
+                "link_00000000000000000000000402",
+                CURATION_NEIGHBOR,
+                CURATION_MEMORY,
+                MemoryLinkRelation::Related,
+            ),
+        ] {
+            connection
+                .insert_memory_link(
+                    id,
+                    &CreateMemoryLinkInput {
+                        src_memory_id: src.to_owned(),
+                        dst_memory_id: dst.to_owned(),
+                        relation,
+                        weight: 0.75,
+                        confidence: 0.875,
+                        directed: true,
+                        evidence_count: 1,
+                        last_reinforced_at: None,
+                        source: MemoryLinkSource::Human,
+                        created_by: Some("mcp-workflow-test".to_owned()),
+                        metadata_json: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(Self {
+            _directory: directory,
+            workspace,
+        })
+    }
+
+    fn state(&self) -> Result<CurationStoreState, String> {
+        let connection =
+            ee::db::DbConnection::open_file_read_only(self.workspace.join(".ee/ee.db"))
+                .map_err(|error| error.to_string())?;
+        let mut state = CurationStoreState {
+            memories: connection
+                .list_memories(CURATION_WORKSPACE, None, true)
+                .map_err(|error| error.to_string())?,
+            candidates: connection
+                .list_curation_candidates(CURATION_WORKSPACE, None, None, None)
+                .map_err(|error| error.to_string())?,
+            audits: connection
+                .list_audit_entries(Some(CURATION_WORKSPACE), None)
+                .map_err(|error| error.to_string())?,
+            jobs: connection
+                .list_search_index_jobs(CURATION_WORKSPACE, None)
+                .map_err(|error| error.to_string())?,
+            links: connection
+                .list_memory_links_for_memory(CURATION_MEMORY, None)
+                .map_err(|error| error.to_string())?,
+        };
+        state.memories.sort_by(|left, right| left.id.cmp(&right.id));
+        state
+            .candidates
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        state.audits.sort_by(|left, right| left.id.cmp(&right.id));
+        state.jobs.sort_by(|left, right| left.id.cmp(&right.id));
+        state.links.sort_by(|left, right| left.id.cmp(&right.id));
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(state)
+    }
+
+    fn call(&self, tool: &str, mut arguments: JsonValue) -> Result<JsonValue, String> {
+        arguments["workspace"] = json!(self.workspace);
+        let response = run_mcp_tool_call(tool, arguments)?;
+        ensure(
+            response["result"]["exitCode"] == 0,
+            format!("{tool}: {response}"),
+        )?;
+        serde_json::from_str(&extract_mcp_tool_text(&response)?).map_err(|error| error.to_string())
+    }
+
+    fn fixture_parity(&self, input: &JsonValue) -> Result<JsonValue, String> {
+        let tool = fixture_mcp_tool(input)?;
+        let args = fixture_cli_args(input, &self.workspace, Some(CURATION_MEMORY), None)?;
+        let (exit, stdout, stderr) = run_cli(args);
+        ensure(
+            exit == ee::models::ProcessExitCode::Success,
+            format!("{tool} CLI: {stdout} {stderr}"),
+        )?;
+        let arguments = fixture_mcp_arguments(input, &self.workspace, Some(CURATION_MEMORY), None)?;
+        let payload = self.call(tool, arguments)?;
+        assert_json_equal_modulo_timestamps(&stdout, &payload.to_string(), tool)?;
+        Ok(payload)
+    }
+
+    fn parity(&self, tool: &str, arguments: JsonValue, tail: &[&str]) -> Result<JsonValue, String> {
+        let mut args = vec![
+            OsString::from("ee"),
+            OsString::from("--json"),
+            OsString::from("--workspace"),
+            self.workspace.as_os_str().to_owned(),
+        ];
+        args.extend(tail.iter().map(|argument| OsString::from(*argument)));
+        let (exit, stdout, stderr) = run_cli(args);
+        ensure(
+            exit == ee::models::ProcessExitCode::Success,
+            format!("{tool} CLI: {stdout} {stderr}"),
+        )?;
+        let payload = self.call(tool, arguments)?;
+        assert_json_equal_modulo_timestamps(&stdout, &payload.to_string(), tool)?;
+        Ok(payload)
+    }
+}
+
+#[test]
+fn mcp_curation_workflow_preserves_preview_approval_and_apply_semantics() -> TestResult {
+    let fixture = CurationFixture::new()?;
+    let initial = fixture.state()?;
+    let candidates_input = load_parity_fixture("curate_candidates", "basic")?;
+    for offset in [0, 1] {
+        let offset_text = offset.to_string();
+        let listed = if offset == 0 {
+            fixture.fixture_parity(&candidates_input)?
+        } else {
+            fixture.parity(
+                "ee_curate_candidates",
+                json!({"type": "promote", "targetMemoryId": CURATION_MEMORY, "limit": 1, "offset": offset}),
+                &["curate", "candidates", "--type", "promote", "--target-memory", CURATION_MEMORY, "--limit", "1", "--offset", &offset_text],
+            )?
+        };
+        assert_eq!(listed["data"]["totalCount"], 1, "{listed}");
+        assert_eq!(
+            listed["data"]["returnedCount"],
+            if offset == 0 { 1 } else { 0 }
+        );
+        if offset == 0 {
+            assert_eq!(listed["data"]["candidates"][0]["id"], CURATION_CANDIDATE);
+        }
+    }
+    assert_eq!(
+        fixture.state()?,
+        initial,
+        "listing changed the source store"
+    );
+
+    // The MCP write gate cannot approve a pending candidate on its own.
+    let blocked = fixture.call(
+        "ee_curate_apply",
+        json!({
+            "candidateId": CURATION_CANDIDATE, "dryRun": false, "allowWrite": true,
+        }),
+    )?;
+    assert_eq!(blocked["success"], false, "{blocked}");
+    assert_eq!(
+        blocked["data"]["application"]["status"], "blocked",
+        "{blocked}"
+    );
+    assert!(
+        blocked["data"]["application"]["errors"]
+            .as_array()
+            .ok_or("missing apply errors")?
+            .iter()
+            .any(|error| error["code"] == "candidate_requires_validation")
+    );
+    assert_eq!(
+        fixture.state()?,
+        initial,
+        "unapproved apply changed the store"
+    );
+
+    // allowWrite alone still previews: dryRun=false must also be explicit.
+    let validate_input = load_parity_fixture("curate_validate", "dry_run")?;
+    let preview = fixture.fixture_parity(&validate_input)?;
+    assert_eq!(
+        preview["data"]["validation"]["decision"], "approved",
+        "{preview}"
+    );
+    assert_eq!(preview["data"]["mutation"]["persisted"], false);
+    assert_eq!(
+        fixture.state()?,
+        initial,
+        "validation preview changed the store"
+    );
+
+    let validated = fixture.call(
+        "ee_curate_validate",
+        json!({
+            "candidateId": CURATION_CANDIDATE, "actor": "mcp-reviewer",
+            "dryRun": false, "allowWrite": true,
+        }),
+    )?;
+    assert_eq!(
+        validated["data"]["mutation"]["persisted"], true,
+        "{validated}"
+    );
+    let approved = fixture.state()?;
+    assert_eq!(approved.candidates[0].status, "approved");
+    assert_eq!(approved.memories, initial.memories);
+    assert_eq!(
+        approved
+            .audits
+            .iter()
+            .filter(
+                |audit| audit.action == ee::db::audit_actions::CURATION_CANDIDATE_VALIDATE
+                    && audit.target_id.as_deref() == Some(CURATION_CANDIDATE)
+                    && audit.actor.as_deref() == Some("mcp-reviewer")
+            )
+            .count(),
+        1
+    );
+
+    let apply_input = load_parity_fixture("curate_apply", "dry_run")?;
+    let preview = fixture.fixture_parity(&apply_input)?;
+    assert_eq!(preview["success"], true, "{preview}");
+    assert_eq!(preview["data"]["application"]["status"], "would_apply");
+    assert_eq!(
+        fixture.state()?,
+        approved,
+        "apply preview changed the store"
+    );
+
+    let arguments = json!({
+        "candidateId": CURATION_CANDIDATE, "actor": "mcp-reviewer",
+        "dryRun": false, "allowWrite": true,
+    });
+    let applied = fixture.call("ee_curate_apply", arguments.clone())?;
+    assert_eq!(applied["success"], true, "{applied}");
+    assert_eq!(applied["data"]["application"]["status"], "applied");
+    let final_state = fixture.state()?;
+    assert_eq!(final_state.candidates[0].status, "applied");
+    let memory = final_state
+        .memories
+        .iter()
+        .find(|memory| memory.id == CURATION_MEMORY)
+        .ok_or("curated memory disappeared")?;
+    assert_eq!(memory.level, "semantic");
+    assert_eq!(memory.confidence, 0.875);
+    assert_eq!(memory.content, initial.memories[0].content);
+    assert_eq!(
+        final_state
+            .audits
+            .iter()
+            .filter(
+                |audit| audit.action == ee::db::audit_actions::CURATION_CANDIDATE_APPLY
+                    && audit.target_id.as_deref() == Some(CURATION_CANDIDATE)
+                    && audit.actor.as_deref() == Some("mcp-reviewer")
+            )
+            .count(),
+        1
+    );
+
+    let replay = fixture.call("ee_curate_apply", arguments)?;
+    assert_eq!(
+        replay["data"]["application"]["status"], "already_applied",
+        "{replay}"
+    );
+    assert_eq!(
+        fixture.state()?,
+        final_state,
+        "replay repeated the mutation"
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_graph_neighborhood_preserves_direction_relation_and_limits() -> TestResult {
+    let fixture = CurationFixture::new()?;
+    let before = fixture.state()?;
+    let graph_input = load_parity_fixture("graph_neighborhood", "basic")?;
+    for (direction, relation, expected_count, limited) in [
+        ("outgoing", Some("supports"), 1, false),
+        ("incoming", Some("supports"), 0, false),
+        ("both", None, 1, true),
+    ] {
+        let mut arguments =
+            json!({"memoryId": CURATION_MEMORY, "direction": direction, "limit": 1});
+        let mut tail = vec![
+            "graph",
+            "neighborhood",
+            CURATION_MEMORY,
+            "--direction",
+            direction,
+            "--limit",
+            "1",
+        ];
+        if let Some(relation) = relation {
+            arguments["relation"] = json!(relation);
+            tail.extend(["--relation", relation]);
+        }
+        let graph = if direction == "outgoing" {
+            fixture.fixture_parity(&graph_input)?
+        } else {
+            fixture.parity("ee_graph_neighborhood", arguments, &tail)?
+        };
+        assert_eq!(graph["data"]["memoryId"], CURATION_MEMORY, "{graph}");
+        assert_eq!(graph["data"]["direction"], direction, "{graph}");
+        assert_eq!(
+            graph["data"]["graph"]["edgeCount"], expected_count,
+            "{graph}"
+        );
+        assert_eq!(graph["data"]["limited"], limited, "{graph}");
+        if expected_count == 1 && relation.is_some() {
+            assert_eq!(
+                graph["data"]["edges"][0]["neighborMemoryId"],
+                CURATION_NEIGHBOR
+            );
+            assert_eq!(graph["data"]["edges"][0]["relation"], "supports");
+        }
+        assert_eq!(
+            fixture.state()?,
+            before,
+            "graph inspection changed the store"
+        );
+    }
     Ok(())
 }
 

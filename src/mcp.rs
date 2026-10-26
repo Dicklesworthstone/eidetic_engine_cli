@@ -230,6 +230,37 @@ const OUTCOME_TOOL_EFFECT: McpToolEffect = McpToolEffect {
     destructive: false,
 };
 
+const CURATE_VALIDATE_TOOL_EFFECT: McpToolEffect = McpToolEffect {
+    kind: "durable_write",
+    write_surface: &["curation_candidates", "audit_log"],
+    default_dry_run: true,
+    requires_allow_write_when_dry_run_false: true,
+    audit: "ee curate validate records its approval or rejection through the CLI core path",
+    redaction: "candidate content, trust and evidence are checked by the existing curation validator",
+    idempotency: "reviewing an unchanged candidate already in its resulting state does not repeat the transition",
+    destructive: false,
+};
+
+const CURATE_APPLY_TOOL_EFFECT: McpToolEffect = McpToolEffect {
+    kind: "durable_write",
+    write_surface: &[
+        "curation_candidates",
+        "memories",
+        "memory_links",
+        "procedural_rules",
+        "procedures",
+        "plan_recipes",
+        "audit_log",
+        "search_index_jobs",
+    ],
+    default_dry_run: true,
+    requires_allow_write_when_dry_run_false: true,
+    audit: "ee curate apply records the reviewed mutation and its audit identity through the CLI core path",
+    redaction: "existing approval, live evidence, trust and load-bearing protections remain authoritative",
+    idempotency: "an already-applied candidate is not applied again; derived publication may be retried",
+    destructive: true,
+};
+
 const PRIMER_TOOL_EFFECT: McpToolEffect = McpToolEffect {
     kind: "derived_cache_write",
     write_surface: &["primer_cache"],
@@ -368,6 +399,14 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
         args_builder: build_proximity_tool_args,
     },
     McpToolEntry {
+        name: "ee_graph_neighborhood",
+        description: "Run ee graph neighborhood --json to inspect a memory's typed links with direction, relation and limit filters",
+        input_schema: graph_neighborhood_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_graph_neighborhood_tool_args,
+    },
+    McpToolEntry {
         name: "ee_pack_dna_explain",
         description: "Run ee pack --explain --json and return only data.pack.packDna",
         input_schema: pack_dna_explain_tool_schema,
@@ -406,6 +445,33 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
         annotations: WRITE_TOOL_ANNOTATIONS,
         effect: Some(REMEMBER_TOOL_EFFECT),
         args_builder: build_remember_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_curate_candidates",
+        description: "Run ee curate candidates --json to inspect and page the review queue without approving or applying candidates",
+        input_schema: curate_candidates_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_curate_candidates_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_curate_validate",
+        description: "Validate a curation candidate through the CLI; preview by default, record approval or rejection only with dryRun=false and allowWrite=true",
+        input_schema: curate_validate_tool_schema,
+        annotations: WRITE_TOOL_ANNOTATIONS,
+        effect: Some(CURATE_VALIDATE_TOOL_EFFECT),
+        args_builder: build_curate_validate_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_curate_apply",
+        description: "Apply an already-approved curation candidate through the CLI; preview by default, mutate only with dryRun=false and allowWrite=true",
+        input_schema: curate_apply_tool_schema,
+        annotations: McpToolAnnotations {
+            destructive: true,
+            ..WRITE_TOOL_ANNOTATIONS
+        },
+        effect: Some(CURATE_APPLY_TOOL_EFFECT),
+        args_builder: build_curate_apply_tool_args,
     },
     McpToolEntry {
         name: "ee_capture_git",
@@ -835,7 +901,7 @@ fn render_review_session_prompt(arguments: &Value) -> Result<String, String> {
     };
 
     Ok(format!(
-        "Review a prior coding-agent session through ee and convert only evidence-backed lessons into candidates.\n\nSession:\n{session}\n\nRecommended command:\n`ee --workspace {workspace} --json review session{session_arg}{propose_flag}`\n\nInspect the JSON envelope for proposed memories, evidence spans, confidence, degraded capabilities, and next actions. Do not apply or promote curation candidates unless the follow-up command is explicit and auditable."
+        "Review a prior coding-agent session through ee and convert only evidence-backed lessons into candidates.\n\nSession:\n{session}\n\nRecommended command:\n`ee --workspace {workspace} --json review session{session_arg}{propose_flag}`\n\nInspect the JSON envelope for proposed memories, evidence spans, confidence, degraded capabilities, and next actions. Use ee_curate_candidates to inspect the review queue, ee_curate_validate to preview validation, and ee_curate_apply to preview an approved candidate. Both validation and application default to dry runs; recording approval or applying a candidate requires explicit dryRun=false and allowWrite=true on that tool call. Do not apply or promote curation candidates unless the follow-up command is explicit and auditable."
     ))
 }
 
@@ -1304,6 +1370,81 @@ fn why_tool_schema() -> Value {
             }
         },
         "required": ["memoryId"]
+    })
+}
+
+fn graph_neighborhood_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["memoryId"],
+        "properties": {
+            "workspace": {"type": "string", "description": "Workspace path"},
+            "database": {"type": "string", "description": "Optional explicit database path"},
+            "memoryId": {"type": "string", "minLength": 1},
+            "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"], "default": "both"},
+            "relation": {
+                "type": "string",
+                "enum": crate::db::MemoryLinkRelation::ALL.map(|relation| relation.as_str())
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": u32::MAX}
+        }
+    })
+}
+
+fn curate_candidates_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "workspace": {"type": "string", "description": "Workspace path"},
+            "database": {"type": "string", "description": "Optional explicit database path"},
+            "type": {"type": "string", "description": "Candidate action type, such as promote, consolidate, rule or create_derived_memory"},
+            "status": {"type": "string", "description": "Candidate status; defaults to pending unless all=true"},
+            "all": {"type": "boolean", "default": false, "description": "Include all statuses; cannot be combined with status"},
+            "targetMemoryId": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": u32::MAX, "default": 100},
+            "offset": {"type": "integer", "minimum": 0, "maximum": u32::MAX, "default": 0},
+            "sort": {"type": "string", "enum": ["review_state", "created_at", "confidence"], "default": "review_state"},
+            "groupDuplicates": {"type": "boolean", "default": false},
+            "cursor": {"type": "string", "description": "Continuation cursor from a budget-truncated page"}
+        }
+    })
+}
+
+fn curate_validate_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidateId"],
+        "properties": {
+            "workspace": {"type": "string", "description": "Workspace path"},
+            "database": {"type": "string", "description": "Optional explicit database path"},
+            "candidateId": {"type": "string", "minLength": 1},
+            "actor": {"type": "string", "description": "Actor recorded in review and audit metadata"},
+            "dryRun": {"type": "boolean", "default": true, "description": "Preview validation without recording approval or rejection"},
+            "allowWrite": {"type": "boolean", "default": false, "description": "Must be true when dryRun=false"}
+        }
+    })
+}
+
+fn curate_apply_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidateId"],
+        "properties": {
+            "workspace": {"type": "string", "description": "Workspace path"},
+            "database": {"type": "string", "description": "Optional explicit database path"},
+            "candidateId": {"type": "string", "minLength": 1},
+            "actor": {"type": "string", "description": "Actor recorded in apply and audit metadata"},
+            "dryRun": {"type": "boolean", "default": true, "description": "Preview the already-approved candidate without applying it"},
+            "allowWrite": {"type": "boolean", "default": false, "description": "Must be true when dryRun=false; does not bypass candidate approval"},
+            "allowTombstoneLoadBearing": {"type": "boolean", "default": false, "description": "Explicitly permit the CLI's load-bearing tombstone override"},
+            "asRecipe": {"type": "string", "minLength": 1, "description": "Save an eligible rule/procedure proposal as a draft recipe with this name; requires when"},
+            "when": {"type": "string", "minLength": 1, "description": "Recipe applicability; requires asRecipe"}
+        },
+        "dependencies": {"asRecipe": ["when"], "when": ["asRecipe"]}
     })
 }
 
@@ -2122,6 +2263,134 @@ fn build_why_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<()
         push_arg(args, "--confidence-threshold");
         push_arg(args, threshold);
     }
+    Ok(())
+}
+
+/// Keep these closed schemas effective for clients that do not validate them.
+/// Unknown names are not echoed because they can contain private source text.
+fn validate_closed_tool_argument_names(arguments: &Value, schema: &Value) -> Result<(), String> {
+    let object = arguments
+        .as_object()
+        .ok_or("Tool arguments must be an object")?;
+    if object
+        .keys()
+        .any(|key| schema["properties"].get(key).is_none())
+    {
+        return Err("Tool arguments contain an unsupported field".to_owned());
+    }
+    Ok(())
+}
+
+fn append_optional_u32_flag(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+    name: &str,
+    flag: &str,
+    minimum: u32,
+) -> Result<(), String> {
+    if let Some(value) = optional_u32(arguments, &[name])? {
+        if value < minimum {
+            return Err(format!("{name} must be at least {minimum}"));
+        }
+        push_arg(args, flag);
+        push_arg(args, value.to_string());
+    }
+    Ok(())
+}
+
+fn build_graph_neighborhood_tool_args(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+) -> Result<(), String> {
+    validate_closed_tool_argument_names(arguments, &graph_neighborhood_tool_schema())?;
+    push_arg(args, "graph");
+    push_arg(args, "neighborhood");
+    for (name, flag) in [
+        ("database", "--database"),
+        ("direction", "--direction"),
+        ("relation", "--relation"),
+    ] {
+        append_optional_string_flag(args, arguments, &[name], flag)?;
+    }
+    append_optional_u32_flag(args, arguments, "limit", "--limit", 1)?;
+    push_arg(args, "--");
+    push_arg(args, required_string(arguments, &["memoryId"])?);
+    Ok(())
+}
+
+fn build_curate_candidates_tool_args(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+) -> Result<(), String> {
+    validate_closed_tool_argument_names(arguments, &curate_candidates_tool_schema())?;
+    push_arg(args, "curate");
+    push_arg(args, "candidates");
+    for (name, flag) in [
+        ("database", "--database"),
+        ("type", "--type"),
+        ("status", "--status"),
+        ("targetMemoryId", "--target-memory"),
+        ("sort", "--sort"),
+        ("cursor", "--cursor"),
+    ] {
+        append_optional_string_flag(args, arguments, &[name], flag)?;
+    }
+    for (name, flag, minimum) in [("limit", "--limit", 1), ("offset", "--offset", 0)] {
+        append_optional_u32_flag(args, arguments, name, flag, minimum)?;
+    }
+    for (name, flag) in [("all", "--all"), ("groupDuplicates", "--group-duplicates")] {
+        if optional_bool(arguments, &[name])? {
+            push_arg(args, flag);
+        }
+    }
+    Ok(())
+}
+
+fn build_curate_validate_tool_args(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+) -> Result<(), String> {
+    validate_closed_tool_argument_names(arguments, &curate_validate_tool_schema())?;
+    let dry_run = gated_write_dry_run("ee_curate_validate", arguments)?;
+    push_arg(args, "curate");
+    push_arg(args, "validate");
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    append_optional_string_flag(args, arguments, &["actor"], "--actor")?;
+    if dry_run {
+        push_arg(args, "--dry-run");
+    }
+    push_arg(args, "--");
+    push_arg(args, required_string(arguments, &["candidateId"])?);
+    Ok(())
+}
+
+fn build_curate_apply_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    validate_closed_tool_argument_names(arguments, &curate_apply_tool_schema())?;
+    let dry_run = gated_write_dry_run("ee_curate_apply", arguments)?;
+    let recipe = optional_string(arguments, &["asRecipe"])?;
+    let when = optional_string(arguments, &["when"])?;
+    if recipe.is_some() != when.is_some() {
+        return Err("Curation recipe output requires both asRecipe and when".to_owned());
+    }
+    push_arg(args, "curate");
+    push_arg(args, "apply");
+    for (name, flag) in [
+        ("database", "--database"),
+        ("actor", "--actor"),
+        ("asRecipe", "--as-recipe"),
+        ("when", "--when"),
+    ] {
+        append_optional_string_flag(args, arguments, &[name], flag)?;
+    }
+    if dry_run {
+        push_arg(args, "--dry-run");
+    }
+    if optional_bool(arguments, &["allowTombstoneLoadBearing"])? {
+        push_arg(args, "--allow-tombstone-load-bearing");
+    }
+    // An ID is always positional data, even if a caller supplies flag syntax.
+    push_arg(args, "--");
+    push_arg(args, required_string(arguments, &["candidateId"])?);
     Ok(())
 }
 
@@ -4026,6 +4295,7 @@ mod tests {
         assert!(tool_names.contains(&"ee_capabilities"));
         assert!(tool_names.contains(&"ee_insights"));
         assert!(tool_names.contains(&"ee_proximity"));
+        assert!(tool_names.contains(&"ee_graph_neighborhood"));
         assert!(tool_names.contains(&"ee_recall"));
         assert!(tool_names.contains(&"ee_ask"));
         assert!(tool_names.contains(&"ee_primer"));
@@ -4034,6 +4304,9 @@ mod tests {
         assert!(tool_names.contains(&"ee_memory_show"));
         assert!(tool_names.contains(&"ee_why"));
         assert!(tool_names.contains(&"ee_remember"));
+        assert!(tool_names.contains(&"ee_curate_candidates"));
+        assert!(tool_names.contains(&"ee_curate_validate"));
+        assert!(tool_names.contains(&"ee_curate_apply"));
         assert!(tool_names.contains(&"ee_outcome"));
         assert!(tool_names.contains(&"ee_journal_append"));
         assert!(tool_names.contains(&"ee_decide_record"));
@@ -4058,6 +4331,8 @@ mod tests {
             "ee_primer",
             "ee_insights",
             "ee_proximity",
+            "ee_graph_neighborhood",
+            "ee_curate_candidates",
             "ee_pack_dna_explain",
             "ee_revision_impact",
             "ee_memory_show",
@@ -4569,6 +4844,146 @@ mod tests {
         assert!(!args.contains(&"--dry-run".to_string()));
         assert!(!args.contains(&"--allow-write".to_string()));
         Ok(())
+    }
+
+    #[test]
+    fn curation_tools_require_both_explicit_write_controls() -> Result<(), String> {
+        use clap::Parser as _;
+
+        for name in ["ee_curate_validate", "ee_curate_apply"] {
+            for allow_write in [false, true] {
+                let arguments = json!({"candidateId": "curate_00000000000000000000000401", "allowWrite": allow_write});
+                let args = build_cli_args_for_tool(registry_tool(name)?, &arguments)?;
+                let parsed =
+                    crate::cli::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+                let dry_run = match parsed.command {
+                    Some(crate::cli::Command::Curate(crate::cli::CurateCommand::Validate(
+                        args,
+                    ))) => args.dry_run,
+                    Some(crate::cli::Command::Curate(crate::cli::CurateCommand::Apply(args))) => {
+                        args.dry_run
+                    }
+                    other => {
+                        return Err(format!(
+                            "curation tool selected the wrong command: {other:?}"
+                        ));
+                    }
+                };
+                assert!(dry_run, "allowWrite alone must not opt into mutation");
+            }
+            let response = handle_tools_call(
+                json!(1),
+                Some(&json!({
+                    "name": name,
+                    "arguments": {"candidateId": "curate_00000000000000000000000401", "dryRun": false}
+                })),
+            );
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+            assert_eq!(
+                response["error"]["message"],
+                format!("Write tool {name} requires allowWrite=true when dryRun=false"),
+            );
+            let descriptor = mcp_tool_descriptor(registry_tool(name)?);
+            assert_eq!(descriptor["inputSchema"]["additionalProperties"], false);
+            assert_eq!(
+                descriptor["inputSchema"]["properties"]["dryRun"]["default"],
+                true
+            );
+            assert_eq!(descriptor["eeEffect"]["defaultDryRun"], true);
+        }
+        assert_eq!(
+            mcp_tool_descriptor(registry_tool("ee_curate_apply")?)["annotations"]["destructiveHint"],
+            true,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn curation_apply_forwards_explicit_overrides_without_treating_ids_as_flags()
+    -> Result<(), String> {
+        use clap::Parser as _;
+
+        let args = build_cli_args_for_tool(
+            registry_tool("ee_curate_apply")?,
+            &json!({
+                "candidateId": "--allow-tombstone-load-bearing",
+                "dryRun": false,
+                "allowWrite": true,
+                "actor": "mcp-reviewer",
+                "asRecipe": "Release checks",
+                "when": "Before shipping a release"
+            }),
+        )?;
+        let parsed = crate::cli::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+        let Some(crate::cli::Command::Curate(crate::cli::CurateCommand::Apply(args))) =
+            parsed.command
+        else {
+            return Err("apply tool did not select curate apply".to_owned());
+        };
+        assert!(!args.dry_run);
+        assert!(
+            !args.allow_tombstone_load_bearing,
+            "an ID cannot enable an override"
+        );
+        assert_eq!(args.candidate_id, "--allow-tombstone-load-bearing");
+        assert_eq!(args.actor.as_deref(), Some("mcp-reviewer"));
+        assert_eq!(args.as_recipe.as_deref(), Some("Release checks"));
+        assert_eq!(args.when.as_deref(), Some("Before shipping a release"));
+
+        let args = build_cli_args_for_tool(
+            registry_tool("ee_curate_apply")?,
+            &json!({"candidateId": "curate_00000000000000000000000401", "allowTombstoneLoadBearing": true}),
+        )?;
+        let parsed = crate::cli::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+        let Some(crate::cli::Command::Curate(crate::cli::CurateCommand::Apply(args))) =
+            parsed.command
+        else {
+            return Err("apply tool did not select curate apply".to_owned());
+        };
+        assert!(args.dry_run);
+        assert!(args.allow_tombstone_load_bearing);
+        Ok(())
+    }
+
+    #[test]
+    fn curation_and_neighborhood_dispatch_reject_invalid_arguments_before_execution() {
+        for (name, arguments) in [
+            ("ee_curate_candidates", json!({"limit": 0})),
+            ("ee_curate_candidates", json!({"limit": 1.5})),
+            ("ee_curate_candidates", json!({"offset": -1})),
+            ("ee_curate_candidates", json!({"apply": true})),
+            (
+                "ee_curate_validate",
+                json!({"candidateId": "curate_1", "dryRun": false, "allowWrite": "true"}),
+            ),
+            (
+                "ee_curate_apply",
+                json!({"candidateId": "curate_1", "asRecipe": "Unpaired recipe"}),
+            ),
+            (
+                "ee_curate_apply",
+                json!({"candidateId": "curate_1", "force": true}),
+            ),
+            (
+                "ee_graph_neighborhood",
+                json!({"memoryId": "mem_1", "limit": 0}),
+            ),
+            (
+                "ee_graph_neighborhood",
+                json!({"memoryId": "mem_1", "limit": -1}),
+            ),
+            (
+                "ee_graph_neighborhood",
+                json!({"memoryId": "mem_1", "propose": true}),
+            ),
+        ] {
+            let response = handle_tools_call(
+                json!(1),
+                Some(&json!({"name": name, "arguments": arguments})),
+            );
+            assert_eq!(response["error"]["code"], -32602, "{name}: {response}");
+            assert!(response.get("result").is_none(), "{name}: {response}");
+        }
     }
 
     #[test]
