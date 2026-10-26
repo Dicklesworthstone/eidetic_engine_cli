@@ -83,7 +83,9 @@ fn threshold_and_headroom_hold_across_boundary_shapes() {
                     selected.len()
                 );
                 assert!(selected.iter().all(|id| before.contains_key(id)));
-                assert!(count - selected.len() + 1 <= (limit.max(1) / 2).max(1));
+                // Unselected segments survive and the selection merges into one.
+                let after = count - selected.len() + 1;
+                assert!(after <= (limit.max(1) / 2).max(1));
             }
         }
     }
