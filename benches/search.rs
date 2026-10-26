@@ -21,7 +21,7 @@ use tempfile::TempDir;
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::search::{SearchDedupMode, SearchOptions, SearchSourceMode, run_search};
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
-use ee::models::{MemoryScope, WorkspaceId};
+use ee::models::{MemoryId, MemoryScope, WorkspaceId};
 use ee::search::SpeedMode;
 
 const BENCH_GROUP_NAME: &str = "ee_search";
@@ -170,7 +170,11 @@ fn seed_database(workspace_path: &Path, count: usize) -> PathBuf {
             valid_from: None,
             valid_to: None,
         };
-        let memory_id = format!("mem_search_bench_{index:05}");
+        // Canonical `mem_` + Crockford payload, as the memories id CHECK requires.
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(
+            0x5EA_0000 + u128::try_from(index).expect("search benchmark index fits u128"),
+        ))
+        .to_string();
         if let Err(error) = connection.insert_memory(&memory_id, &input) {
             panic!("failed seeding benchmark memory {index}: {error}");
         }
