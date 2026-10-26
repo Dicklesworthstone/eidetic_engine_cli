@@ -7253,6 +7253,36 @@ if [ "$COMMITTED_TREE" -eq 1 ]; then
     fi
     assert_committed_tree_base_stores_xattrs
     materialize_committed_tree
+    # THE EXPORT BASE IS NOT WIRED INTO BUILD ADMISSION, AND THAT IS NOT AN
+    # OVERSIGHT -- it was tried and measured first (bd-to1fr).
+    #
+    # The gap is real: `ee diag build-admission` checks free space, this script
+    # forwards every `--artifact-destination` it is given, and
+    # BUILD_ADMISSION_ARTIFACT_DESTINATIONS starts EMPTY -- so the committed-tree
+    # export base, the one path this script writes gigabytes to, is checked by
+    # nothing. A pinned proof's `build_admission.checks[]` carries
+    # workspace_root, cargo_build_target and temporary_directory and no entry
+    # for it.
+    #
+    # BUT ADDING IT BRICKS THE LANE TODAY. Measured 2026-10-25 against the
+    # installed binary with the APFS export image as the destination:
+    #
+    #     label  artifact_destination   role  artifact_sync_down_destination
+    #     bytesAvailable 250502467584   minFreeBytes 5368709120
+    #     required false                admitted FALSE
+    #     externalRequired true         external FALSE
+    #
+    # 250 GB free against a 5 GiB minimum and it is still refused, because the
+    # `external` predicate does not recognise a disk-image-backed APFS volume as
+    # external -- and the APFS image is the arrangement CLAUDE.md now REQUIRES
+    # for this base. Note also that `required: false` does not exempt it: the
+    # overall verdict came back `admitted: false`, which on this lane is
+    # `rch_verify_pinned_build_admission_verdict_required` and exit 1 for every
+    # dispatch.
+    #
+    # So the wiring waits on
+    # bd-build-admission-external-predicate-rejects-image-5bfb4. Until then it
+    # is one `+=` here, and it is one line that must not be written.
 fi
 
 FRANKEN_STACK_JSON="$(compute_franken_stack_json)"
