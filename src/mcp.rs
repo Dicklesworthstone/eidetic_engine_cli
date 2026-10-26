@@ -230,6 +230,17 @@ const OUTCOME_TOOL_EFFECT: McpToolEffect = McpToolEffect {
     destructive: false,
 };
 
+const CURATE_CANDIDATES_TOOL_EFFECT: McpToolEffect = McpToolEffect {
+    kind: "durable_write",
+    write_surface: &["curation_candidates", "audit_log"],
+    default_dry_run: true,
+    requires_allow_write_when_dry_run_false: true,
+    audit: "explicit dedup proposal creation records candidates and audit entries through the CLI core path",
+    redaction: "dedup proposals retain the existing curation content and evidence validation",
+    idempotency: "stable proposal identities prevent repeated discovery from duplicating candidates",
+    destructive: false,
+};
+
 const CURATE_VALIDATE_TOOL_EFFECT: McpToolEffect = McpToolEffect {
     kind: "durable_write",
     write_surface: &["curation_candidates", "audit_log"],
@@ -448,10 +459,10 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
     },
     McpToolEntry {
         name: "ee_curate_candidates",
-        description: "Run ee curate candidates --json to inspect and page the review queue without approving or applying candidates",
+        description: "Inspect the review queue and preview dedup proposals; persist new dedup proposals only with type=dedup, dryRun=false and allowWrite=true",
         input_schema: curate_candidates_tool_schema,
-        annotations: READ_ONLY_TOOL_ANNOTATIONS,
-        effect: None,
+        annotations: WRITE_TOOL_ANNOTATIONS,
+        effect: Some(CURATE_CANDIDATES_TOOL_EFFECT),
         args_builder: build_curate_candidates_tool_args,
     },
     McpToolEntry {
@@ -1399,7 +1410,7 @@ fn curate_candidates_tool_schema() -> Value {
         "properties": {
             "workspace": {"type": "string", "description": "Workspace path"},
             "database": {"type": "string", "description": "Optional explicit database path"},
-            "type": {"type": "string", "description": "Candidate action type, such as promote, consolidate, rule or create_derived_memory"},
+            "type": {"type": "string", "description": "Candidate action type, such as dedup, promote, consolidate, rule or create_derived_memory; durable discovery requires dedup"},
             "status": {"type": "string", "description": "Candidate status; defaults to pending unless all=true"},
             "all": {"type": "boolean", "default": false, "description": "Include all statuses; cannot be combined with status"},
             "targetMemoryId": {"type": "string"},
@@ -1407,7 +1418,9 @@ fn curate_candidates_tool_schema() -> Value {
             "offset": {"type": "integer", "minimum": 0, "maximum": u32::MAX, "default": 0},
             "sort": {"type": "string", "enum": ["review_state", "created_at", "confidence"], "default": "review_state"},
             "groupDuplicates": {"type": "boolean", "default": false},
-            "cursor": {"type": "string", "description": "Continuation cursor from a budget-truncated page"}
+            "cursor": {"type": "string", "description": "Continuation cursor from a budget-truncated page"},
+            "dryRun": {"type": "boolean", "default": true, "description": "List and preview without persisting newly discovered dedup proposals"},
+            "allowWrite": {"type": "boolean", "default": false, "description": "Must be true when dryRun=false; only pending dedup discovery can write"}
         }
     })
 }
@@ -2323,6 +2336,7 @@ fn build_curate_candidates_tool_args(
     arguments: &Value,
 ) -> Result<(), String> {
     validate_closed_tool_argument_names(arguments, &curate_candidates_tool_schema())?;
+    let dry_run = gated_write_dry_run("ee_curate_candidates", arguments)?;
     push_arg(args, "curate");
     push_arg(args, "candidates");
     for (name, flag) in [
@@ -2334,6 +2348,9 @@ fn build_curate_candidates_tool_args(
         ("cursor", "--cursor"),
     ] {
         append_optional_string_flag(args, arguments, &[name], flag)?;
+    }
+    if !dry_run {
+        push_arg(args, "--propose");
     }
     for (name, flag, minimum) in [("limit", "--limit", 1), ("offset", "--offset", 0)] {
         append_optional_u32_flag(args, arguments, name, flag, minimum)?;
@@ -4332,7 +4349,6 @@ mod tests {
             "ee_insights",
             "ee_proximity",
             "ee_graph_neighborhood",
-            "ee_curate_candidates",
             "ee_pack_dna_explain",
             "ee_revision_impact",
             "ee_memory_show",
@@ -4847,6 +4863,61 @@ mod tests {
     }
 
     #[test]
+    fn candidate_discovery_previews_unless_both_write_controls_are_explicit() -> Result<(), String>
+    {
+        use clap::Parser as _;
+
+        for allow_write in [false, true] {
+            let args = build_cli_args_for_tool(
+                registry_tool("ee_curate_candidates")?,
+                &json!({"type": "dedup", "allowWrite": allow_write}),
+            )?;
+            let parsed =
+                crate::cli::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+            let Some(crate::cli::Command::Curate(crate::cli::CurateCommand::Candidates(args))) =
+                parsed.command
+            else {
+                return Err("candidate tool selected the wrong command".to_owned());
+            };
+            assert!(!args.propose, "allowWrite alone must remain a preview");
+        }
+
+        let rejected = handle_tools_call(
+            json!(1),
+            Some(&json!({
+                "name": "ee_curate_candidates",
+                "arguments": {"type": "dedup", "dryRun": false}
+            })),
+        );
+        assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+        assert_eq!(
+            rejected["error"]["message"],
+            "Write tool ee_curate_candidates requires allowWrite=true when dryRun=false"
+        );
+
+        let args = build_cli_args_for_tool(
+            registry_tool("ee_curate_candidates")?,
+            &json!({"type": "dedup", "dryRun": false, "allowWrite": true}),
+        )?;
+        let parsed = crate::cli::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+        let Some(crate::cli::Command::Curate(crate::cli::CurateCommand::Candidates(args))) =
+            parsed.command
+        else {
+            return Err("candidate tool selected the wrong command".to_owned());
+        };
+        assert!(args.propose);
+        let descriptor = mcp_tool_descriptor(registry_tool("ee_curate_candidates")?);
+        assert_eq!(descriptor["annotations"]["readOnlyHint"], false);
+        assert_eq!(descriptor["annotations"]["destructiveHint"], false);
+        assert_eq!(descriptor["eeEffect"]["defaultDryRun"], true);
+        assert_eq!(
+            descriptor["inputSchema"]["properties"]["dryRun"]["default"],
+            true
+        );
+        Ok(())
+    }
+
+    #[test]
     fn curation_tools_require_both_explicit_write_controls() -> Result<(), String> {
         use clap::Parser as _;
 
@@ -4952,6 +5023,10 @@ mod tests {
             ("ee_curate_candidates", json!({"limit": 1.5})),
             ("ee_curate_candidates", json!({"offset": -1})),
             ("ee_curate_candidates", json!({"apply": true})),
+            (
+                "ee_curate_candidates",
+                json!({"type": "dedup", "dryRun": false, "allowWrite": "true"}),
+            ),
             (
                 "ee_curate_validate",
                 json!({"candidateId": "curate_1", "dryRun": false, "allowWrite": "true"}),

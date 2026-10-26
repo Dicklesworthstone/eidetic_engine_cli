@@ -1214,6 +1214,7 @@ pub(crate) const DRY_RUN_CAPABLE: &[&str] = &[
     "curate snooze",
     "curate tombstone",
     "curate untombstone",
+    "curate validate",
     "daemon",
     "decide record",
     "demo run",
@@ -1532,7 +1533,6 @@ impl EffectManifest {
                 "curate show",
                 "Inspect a single curation candidate read-only with apply preview",
             ),
-            CommandEffect::read_only_db("curate validate", "Validate curation candidate"),
             CommandEffect::read_only("demo list", "List demo manifests"),
             CommandEffect::read_only_db("demo show", "Show persisted demo audit rows"),
             CommandEffect::read_only_db("demo verify", "Verify demo artifacts"),
@@ -2715,6 +2715,16 @@ impl EffectManifest {
                     "audit_log",
                 ],
                 "Apply a curation candidate",
+            ),
+            CommandEffect::durable_write(
+                "curate candidates --propose",
+                vec!["curation_candidates", "audit_log"],
+                "Explicitly persist discovered dedup proposals; omit --propose for a read-only preview",
+            ),
+            CommandEffect::durable_write(
+                "curate validate",
+                vec!["curation_candidates", "audit_log"],
+                "Record candidate approval or rejection; --dry-run validates without mutation",
             ),
             CommandEffect::durable_write(
                 "curate disposition",
@@ -4699,6 +4709,41 @@ mod tests {
                 ));
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn curation_effects_separate_discovery_from_durable_review() -> TestResult {
+        let manifest = EffectManifest::build();
+        let preview = manifest
+            .get("curate candidates")
+            .ok_or("missing candidate preview")?;
+        assert_eq!(preview.default_effect, EffectClass::ReadOnly);
+        assert!(preview.write_surfaces.is_empty());
+
+        let propose = manifest
+            .get("curate candidates --propose")
+            .ok_or("missing candidate proposal effect")?;
+        assert_eq!(propose.default_effect, EffectClass::DurableMemoryWrite);
+        assert!(propose.requires_audit);
+        assert!(
+            propose
+                .write_surfaces
+                .db_tables
+                .contains(&"curation_candidates")
+        );
+        assert!(propose.write_surfaces.db_tables.contains(&"audit_log"));
+        assert!(
+            propose.dry_run_effect.is_none(),
+            "omit --propose to preview"
+        );
+
+        let validate = manifest
+            .get("curate validate")
+            .ok_or("missing candidate validation effect")?;
+        assert_eq!(validate.default_effect, EffectClass::DurableMemoryWrite);
+        assert_eq!(validate.dry_run_effect, Some(EffectClass::ReadOnly));
+        assert!(validate.requires_audit);
         Ok(())
     }
 

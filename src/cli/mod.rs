@@ -10719,6 +10719,10 @@ pub struct CurateCandidatesArgs {
     #[arg(long = "type", value_name = "TYPE")]
     pub candidate_type: Option<String>,
 
+    /// Persist discovered paraphrase_dedup_proposal candidates; otherwise preview them without writing.
+    #[arg(long, action = ArgAction::SetTrue, requires = "candidate_type")]
+    pub propose: bool,
+
     /// Optional status filter. Defaults to pending unless --all is set.
     #[arg(long)]
     pub status: Option<String>,
@@ -59861,6 +59865,7 @@ where
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
         candidate_type: args.candidate_type.as_deref(),
+        propose: args.propose,
         status,
         target_memory_id: args.target_memory_id.as_deref(),
         limit: args.limit,
@@ -70522,6 +70527,9 @@ impl NormalizedInvocation {
                     MigrateCommand::ShardFanout(_) => "migrate shard-fanout".to_string(),
                 },
                 Command::Curate(curate) => match curate {
+                    CurateCommand::Candidates(args) if args.propose => {
+                        "curate candidates --propose".to_string()
+                    }
                     CurateCommand::Candidates(_) => "curate candidates".to_string(),
                     CurateCommand::Doctor(_) => "curate doctor".to_string(),
                     CurateCommand::Show(_) => "curate show".to_string(),
@@ -82246,6 +82254,23 @@ mod tests {
 
         let curate_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         seed_legacy_v011_database(curate_dir.path())?;
+        let database_path = curate_dir.path().join(".ee").join("ee.db");
+        let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
+        let shm_path = PathBuf::from(format!("{}-shm", database_path.display()));
+        let paths = [&database_path, &wal_path, &shm_path];
+        let snapshot = || {
+            paths
+                .iter()
+                .map(|path| {
+                    if path.exists() {
+                        fs::read(path).map(Some).map_err(|error| error.to_string())
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()
+        };
+        let before = snapshot()?;
         let curate_workspace = curate_dir.path().to_string_lossy().into_owned();
         let (curate_exit, curate_stdout, curate_stderr) = invoke(&[
             "ee",
@@ -82258,8 +82283,53 @@ mod tests {
         ]);
         ensure_equal(
             &curate_exit,
+            &ProcessExitCode::MigrationRequired,
+            "read-only curate candidates migration-required exit",
+        )?;
+        ensure(
+            curate_stderr.is_empty(),
+            "curate candidates JSON stderr clean",
+        )?;
+        let curate_json: serde_json::Value =
+            serde_json::from_str(&curate_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &curate_json["error"]["code"],
+            &serde_json::json!("migration_required"),
+            "curate candidates require explicit migration",
+        )?;
+        ensure_equal(
+            &snapshot()?,
+            &before,
+            "read-only candidates must not alter the database or WAL sidecars",
+        )?;
+
+        let (migration_exit, _, migration_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &curate_workspace,
+            "--json",
+            "migrate",
+            "run",
+        ]);
+        ensure_equal(
+            &migration_exit,
             &ProcessExitCode::Success,
-            "curate candidates exit",
+            "explicit migration exit",
+        )?;
+        ensure(migration_stderr.is_empty(), "migration JSON stderr clean")?;
+        let (curate_exit, curate_stdout, curate_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &curate_workspace,
+            "--json",
+            "curate",
+            "candidates",
+            "--all",
+        ]);
+        ensure_equal(
+            &curate_exit,
+            &ProcessExitCode::Success,
+            "curate candidates exit after explicit migration",
         )?;
         ensure(
             curate_stderr.is_empty(),
@@ -98611,6 +98681,7 @@ demos:
                 ensure_equal(&args.limit, &25, "limit")?;
                 ensure_equal(&args.offset, &5, "offset")?;
                 ensure_equal(&args.all, &false, "all statuses")?;
+                ensure_equal(&args.propose, &false, "proposal persistence is opt-in")?;
                 ensure_equal(&args.sort, &"review_state".to_string(), "default sort")?;
                 ensure_equal(&args.group_duplicates, &false, "default duplicate grouping")
             }
@@ -98643,6 +98714,65 @@ demos:
             }
             _ => Err("expected Curate Candidates command".to_string()),
         }
+    }
+
+    #[test]
+    fn curate_candidates_proposal_persistence_is_explicit() -> TestResult {
+        ensure(
+            Cli::try_parse_from(["ee", "curate", "candidates", "--propose"]).is_err(),
+            "--propose requires an explicit candidate type",
+        )?;
+        let manifest = crate::core::effect::EffectManifest::build();
+        for (argv, expected_path, mutates) in [
+            (
+                vec!["ee", "curate", "candidates"],
+                "curate candidates",
+                false,
+            ),
+            (
+                vec![
+                    "ee",
+                    "curate",
+                    "candidates",
+                    "--type",
+                    "paraphrase_dedup_proposal",
+                ],
+                "curate candidates",
+                false,
+            ),
+            (
+                vec![
+                    "ee",
+                    "curate",
+                    "candidates",
+                    "--type",
+                    "paraphrase_dedup_proposal",
+                    "--propose",
+                ],
+                "curate candidates --propose",
+                true,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .map_err(|error| format!("parse {argv:?}: {error}"))?;
+            let Some(Command::Curate(CurateCommand::Candidates(options))) = cli.command.as_ref()
+            else {
+                return Err("expected curation candidate arguments".to_owned());
+            };
+            ensure_equal(&options.propose, &mutates, "candidate propose flag")?;
+            let args = argv.iter().map(OsString::from).collect::<Vec<_>>();
+            let path = super::NormalizedInvocation::from_cli(&cli, &args).command_path;
+            ensure_equal(&path.as_str(), &expected_path, "candidate invocation")?;
+            let effect = manifest
+                .get(&path)
+                .ok_or_else(|| format!("missing effect for {path}"))?;
+            ensure_equal(
+                &effect.default_effect.is_mutating(),
+                &mutates,
+                "candidate effect matches explicit persistence",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

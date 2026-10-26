@@ -1207,6 +1207,13 @@ struct CurationStoreState {
 
 impl CurationFixture {
     fn new() -> Result<Self, String> {
+        Self::with_memory_contents(
+            "Confirm release artifacts against the published manifest.",
+            "Keep the release manifest with the build evidence.",
+        )
+    }
+
+    fn with_memory_contents(content: &str, neighbor_content: &str) -> Result<Self, String> {
         use ee::db::{
             CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
             CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
@@ -1233,14 +1240,8 @@ impl CurationFixture {
             )
             .map_err(|error| error.to_string())?;
         for (id, content) in [
-            (
-                CURATION_MEMORY,
-                "Confirm release artifacts against the published manifest.",
-            ),
-            (
-                CURATION_NEIGHBOR,
-                "Keep the release manifest with the build evidence.",
-            ),
+            (CURATION_MEMORY, content),
+            (CURATION_NEIGHBOR, neighbor_content),
         ] {
             connection
                 .insert_memory(
@@ -1547,6 +1548,112 @@ fn mcp_curation_workflow_preserves_preview_approval_and_apply_semantics() -> Tes
         fixture.state()?,
         final_state,
         "replay repeated the mutation"
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_dedup_discovery_requires_explicit_write_and_preserves_preview_state() -> TestResult {
+    let fixture = CurationFixture::with_memory_contents(
+        "run cargo fmt before release cargo fmt",
+        "before release run cargo fmt cargo fmt",
+    )?;
+    let initial = fixture.state()?;
+    let preview = fixture.parity(
+        "ee_curate_candidates",
+        json!({"type": "dedup"}),
+        &["curate", "candidates", "--type", "dedup"],
+    )?;
+    assert_eq!(preview["data"]["durableMutation"], false, "{preview}");
+    let proposed_ids = preview["data"]["candidates"]
+        .as_array()
+        .ok_or("missing dedup candidates")?
+        .iter()
+        .map(|candidate| {
+            candidate["id"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or("missing candidate ID")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        !proposed_ids.is_empty(),
+        "dedup preview must discover a real candidate"
+    );
+    assert_eq!(
+        fixture.state()?,
+        initial,
+        "preview persisted a proposal or audit"
+    );
+
+    let refused = run_mcp_tool_call(
+        "ee_curate_candidates",
+        json!({"workspace": fixture.workspace, "type": "dedup", "dryRun": false}),
+    )?;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    assert_eq!(
+        fixture.state()?,
+        initial,
+        "refused tool call changed the store"
+    );
+
+    let still_preview = fixture.call(
+        "ee_curate_candidates",
+        json!({"type": "dedup", "allowWrite": true}),
+    )?;
+    assert_eq!(still_preview["data"]["durableMutation"], false);
+    assert_eq!(
+        fixture.state()?,
+        initial,
+        "allowWrite alone opted into writes"
+    );
+
+    let arguments = json!({"type": "dedup", "dryRun": false, "allowWrite": true});
+    let persisted = fixture.call("ee_curate_candidates", arguments.clone())?;
+    assert_eq!(persisted["data"]["durableMutation"], true, "{persisted}");
+    let after = fixture.state()?;
+    assert_eq!(
+        after.memories, initial.memories,
+        "proposal creation changed memory"
+    );
+    assert_eq!(
+        after.jobs, initial.jobs,
+        "proposal creation queued application work"
+    );
+    assert_eq!(after.links, initial.links);
+    assert_eq!(
+        after.candidates.len(),
+        initial.candidates.len() + proposed_ids.len()
+    );
+    for id in &proposed_ids {
+        assert!(after.candidates.iter().any(|candidate| &candidate.id == id));
+        assert_eq!(
+            after
+                .audits
+                .iter()
+                .filter(|audit| {
+                    audit.action == ee::db::audit_actions::CURATION_CANDIDATE_CREATE
+                        && audit.target_id.as_deref() == Some(id.as_str())
+                })
+                .count(),
+            1,
+            "each new proposal must have exactly one audit",
+        );
+    }
+
+    let replay = fixture.call("ee_curate_candidates", arguments)?;
+    assert_eq!(replay["data"]["durableMutation"], false, "{replay}");
+    assert_eq!(fixture.state()?, after, "proposal replay changed the store");
+    let listed = fixture.parity(
+        "ee_curate_candidates",
+        json!({"type": "dedup"}),
+        &["curate", "candidates", "--type", "dedup"],
+    )?;
+    assert_eq!(listed["data"]["durableMutation"], false);
+    assert_eq!(
+        fixture.state()?,
+        after,
+        "listing persisted candidates changed state"
     );
     Ok(())
 }
