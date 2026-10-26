@@ -3159,13 +3159,24 @@ assert_committed_tree_base_stores_xattrs() {
 
     . "$SCRIPT_DIR/lib/appledouble_sidecar_probe.sh" 2>/dev/null || return 0
 
-    local base
+    local base base_origin
     base="$(resolve_committed_tree_export_base)" || return 0
+
+    # Name WHERE the value came from. On this host RCH_VERIFY_COMMITTED_TREE_BASE
+    # is exported from ~/.zshenv, so the operator who reads this refusal did not
+    # type the path and will not find it on their command line. "Point
+    # RCH_VERIFY_COMMITTED_TREE_BASE somewhere else" is unactionable advice to
+    # someone who does not know it is already set.
+    if [ -n "${RCH_VERIFY_COMMITTED_TREE_BASE:-}" ]; then
+        base_origin="from RCH_VERIFY_COMMITTED_TREE_BASE in the environment, which on this host is exported by the shell profile rather than passed on the command line"
+    else
+        base_origin="derived by this script, since RCH_VERIFY_COMMITTED_TREE_BASE is unset"
+    fi
 
     if ee_dir_creates_appledouble_sidecars "$base"; then
         RCH_INVOCATION=()
         emit_json true 1 0 \
-            "committed-tree export base is on a filesystem that shims extended attributes into AppleDouble ._* sidecar files: $base. rch's dependency-closure preflight requires every globbed source entrypoint on the worker while .rchignore excludes ._* from the transfer, so every dispatch from this base is refused with [RCH-E410] missing source_entrypoint on every worker. Point RCH_VERIFY_COMMITTED_TREE_BASE at an xattr-native path -- on this host a sparse APFS image, created and attached per the recipe in CLAUDE.md -- and re-run. If that image is configured already, it is not currently attached." \
+            "committed-tree export base is on a filesystem that shims extended attributes into AppleDouble ._* sidecar files: $base ($base_origin). rch's dependency-closure preflight requires every globbed source entrypoint on the worker while .rchignore excludes ._* from the transfer, so every dispatch from this base is refused with [RCH-E410] missing source_entrypoint on every worker. Point RCH_VERIFY_COMMITTED_TREE_BASE at an xattr-native path -- on this host a sparse APFS image, created and attached per the recipe in CLAUDE.md -- and re-run. If that image is configured already, it is not currently attached." \
             "" \
             "rch_verify_committed_tree_base_appledouble_shim"
         exit 1

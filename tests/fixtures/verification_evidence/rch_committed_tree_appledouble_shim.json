@@ -11,7 +11,7 @@
   "verification_attribution": "committed_tree",
   "remote_required": true,
   "would_offload": false,
-  "stdout_tail": "committed-tree export base is on a filesystem that shims extended attributes into AppleDouble ._* sidecar files: /Volumes/USBNVME16TB/temp_agent_space/tmp/ee-guard-arm-exfat. rch's dependency-closure preflight requires every globbed source entrypoint on the worker while .rchignore excludes ._* from the transfer, so every dispatch from this base is refused with [RCH-E410] missing source_entrypoint on every worker. Point RCH_VERIFY_COMMITTED_TREE_BASE at an xattr-native path -- on this host a sparse APFS image, created and attached per the recipe in CLAUDE.md -- and re-run. If that image is configured already, it is not currently attached.",
+  "stdout_tail": "committed-tree export base is on a filesystem that shims extended attributes into AppleDouble ._* sidecar files: /Volumes/USBNVME16TB/rch-committed-tree (from RCH_VERIFY_COMMITTED_TREE_BASE in the environment, which on this host is exported by the shell profile rather than passed on the command line). rch's dependency-closure preflight requires every globbed source entrypoint on the worker while .rchignore excludes ._* from the transfer, so every dispatch from this base is refused with [RCH-E410] missing source_entrypoint on every worker. Point RCH_VERIFY_COMMITTED_TREE_BASE at an xattr-native path -- on this host a sparse APFS image, created and attached per the recipe in CLAUDE.md -- and re-run. If that image is configured already, it is not currently attached.",
   "degraded_codes": [
     "rch_verify_committed_tree_base_appledouble_shim"
   ],

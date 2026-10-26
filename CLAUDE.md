@@ -419,10 +419,44 @@ TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp scripts/rch_verify.sh \
 ```
 
 `RCH_VERIFY_COMMITTED_TREE_BASE` overrides the export base at
-`scripts/rch_verify.sh:3107-3108`, so this needs no code change. Do NOT point
-it at `/` instead: one export root is 27 GB against 29 GB free there, and a
-`.recovery-1` slot can double it — filling `/` already killed a 50-minute run
-(bd-to1fr). The image must be re-attached after a reboot. See bd-r4iwj.
+`resolve_committed_tree_export_base` (`scripts/rch_verify.sh:3103`), so this
+needs no code change. Do NOT point it at `/` instead: one export root is 27 GB
+against 29 GB free there, and a `.recovery-1` slot can double it — filling `/`
+already killed a 50-minute run (bd-to1fr). The image must be re-attached after
+a reboot. See bd-r4iwj.
+
+**THIS IS NOT A REMEDY YOU REACH FOR AFTER AN E410 — IT IS MANDATORY ON EVERY
+PINNED DISPATCH, because the DEFAULT on this host is the broken filesystem.**
+`~/.zshenv:62` exports
+
+```text
+RCH_VERIFY_COMMITTED_TREE_BASE=/Volumes/USBNVME16TB/rch-committed-tree
+```
+
+which is the ExFAT volume, and it is in the live environment of every shell —
+so a dispatch that passes no base at all inherits the hazardous one without
+anything on the command line to show it. That path already holds 106 cached
+bundles. Measured 2026-10-25: a pinned dry run with no override resolves to
+exactly that base and is refused.
+
+**The wrapper now refuses this before exporting rather than letting rch find it
+four minutes later.** `assert_committed_tree_base_stores_xattrs`
+(`scripts/rch_verify.sh:3156`) writes a real extended attribute into the
+resolved base and looks for the `._*` sidecar it produces:
+
+```text
+status          source_state_refused     (NOT rch_environment_failure: nothing
+exit_code       1                         to retry — no worker can satisfy it)
+degraded_codes  ["rch_verify_committed_tree_base_appledouble_shim"]
+stdout_tail     names the base, says it came from the environment, and gives
+                the fix
+```
+
+Do not reach for the xattr write's exit status if you ever reimplement this.
+Measured on both filesystems, `xattr -w` returns **0 on ExFAT as well as on
+APFS** — it succeeds on ExFAT precisely because the shim writes the sidecar, so
+a guard keyed on the write passes the hazardous case and detects nothing. The
+sidecar's existence is the only reading that separates them.
 
 **CONFIRMED on a real export, not just the probe.** The materialized bundle in
 the image held **0** AppleDouble files against 8745 real `.rs` — the second

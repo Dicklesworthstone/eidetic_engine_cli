@@ -163,9 +163,11 @@ fn rch_remote_compile_error_fixture_classifies_as_code_failure() -> TestResult {
 /// failure (bd-r4iwj).
 ///
 /// THE FIXTURE IS A REAL PROOF, not an authored shape: it is the projection of
-/// an actual `scripts/rch_verify.sh --pinned-franken-stack --dry-run` run whose
-/// `RCH_VERIFY_COMMITTED_TREE_BASE` pointed at an ExFAT directory, reduced to
-/// this corpus's key set with every value kept verbatim.
+/// an actual `scripts/rch_verify.sh --pinned-franken-stack --dry-run` run,
+/// reduced to this corpus's key set with every value kept verbatim. The run
+/// carried NO base override, so the shape is the one this host produces by
+/// default -- `RCH_VERIFY_COMMITTED_TREE_BASE` is exported from `~/.zshenv` to
+/// an ExFAT path, which is why the guard exists at all.
 ///
 /// WHY THE `error_codes` ARM IS LOAD-BEARING. The two classifications this file
 /// exists to separate are `EnvironmentBlocked` and `FailedInCode`, and the
