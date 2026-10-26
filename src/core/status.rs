@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 
+use crate::config::workspace::resolve_workspace_with_expanded_explicit_path;
 use crate::config::{
     EnvVar, GRAPH_FEATURE_SKYLINE_ENABLED_KEY, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
     WorkspaceResolution, WorkspaceResolutionMode, WorkspaceResolutionRequest,
     WorkspaceResolutionSource, diagnose_workspace_resolution, parse_env_bool_flag, read_env_var,
-    read_env_var_or_default, read_env_var_os, resolve_workspace, workspace_config,
+    read_env_var_or_default, read_env_var_os, workspace_config,
 };
 use crate::db::{
     CreateWorkspaceInput, DatabaseConfig, DbConnection, FeedbackSourceHarmfulCount,
@@ -5075,7 +5076,7 @@ fn gather_workspace_status(workspace_path: Option<&Path>) -> Option<WorkspaceSta
         )
         .with_explicit_workspace(workspace_path.to_path_buf()),
     };
-    let resolution = resolve_workspace(&request).ok()?;
+    let resolution = resolve_workspace_with_expanded_explicit_path(&request).ok()?;
     let diagnostics = diagnose_workspace_resolution(&request, &resolution);
     Some(WorkspaceStatusReport::from_resolution(
         resolution,
@@ -7159,6 +7160,46 @@ mod tests {
             super::super::profile::path_probe_calls_for_test(),
             1,
             "non-CLI status consumers retain full external collection",
+        )
+    }
+
+    #[test]
+    fn workspace_status_keeps_literal_environment_syntax_in_resolved_path() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("literal-${PATH}");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+
+        let report = gather_workspace_status(Some(&workspace))
+            .ok_or_else(|| "resolved workspace must produce workspace status".to_owned())?;
+
+        ensure(report.root, workspace.clone(), "literal workspace root")?;
+        ensure(
+            report.canonical_root,
+            workspace.clone(),
+            "literal canonical workspace root",
+        )?;
+        ensure(
+            report.config_dir,
+            workspace.join(".ee"),
+            "literal marker path",
+        )?;
+        ensure(
+            report.marker_present,
+            true,
+            "existing literal workspace marker",
+        )?;
+        ensure(
+            report.fingerprint,
+            crate::config::workspace_fingerprint(&workspace),
+            "workspace fingerprint follows the addressed filesystem root",
+        )?;
+        ensure(
+            workspace.join(".ee/ee.db").exists(),
+            false,
+            "workspace status inspection does not create a store",
         )
     }
 

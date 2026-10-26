@@ -1539,6 +1539,12 @@ equivalence, fallback, and RCH-only E2E contracts.
 
 ### Workspace, models, schemas
 
+Operational commands resolve an existing workspace root to its physical path,
+so a symlinked `--workspace` or `EE_WORKSPACE` selects the same store as its target.
+Path expressions are expanded once, before resolving symlinks. `ee init` still
+requires `--allow-symlink` to initialize through a symlinked root. Symlinks inside
+the store path, including `.ee` and `ee.db`, remain refused.
+
 | Command | Purpose |
 |---|---|
 | `ee workspace resolve` / `list` / `alias <name>` | Identity, monorepo subscopes, and aliases |
