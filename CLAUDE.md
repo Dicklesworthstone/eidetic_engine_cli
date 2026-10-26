@@ -13,6 +13,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `check`, `test`, `bench`, `clippy`, `doc`, `run`, `install`, `rustc` and `fix`.
 `fmt` is the one exception, so it is also the only local syntax check you have.
 
+**But it is not the only local GATE, and treating it as such is how three
+features shipped past a red assertion.** `scripts/check-*.py` are pure-Python
+checks over tracked files: they need no toolchain, no USB volume and no lane,
+and the whole family runs in seconds.
+
+```bash
+for s in scripts/check-*.py; do python3 "$s" || echo "FAILED $s"; done
+```
+
+Several of them mirror a Rust assertion that is otherwise unreachable here.
+`check-boundary-inventory-coverage.py` is one: the assertion it precedes was red
+for `config explain`, `curate candidates --propose`, `evidence withdraw`,
+`index backfill-anchors`, `memory anchors` and `workspace rebind` at once,
+because `verify.sh` exits 1 before any stage on this host, hosted Actions is off
+repo-wide, and nobody pays for a pinned dispatch to check a markdown table
+(bd-no-compile-gate-before-a-commit-lands-qdxc0). Run the family before a commit
+that touches docs or the CLI surface; it is the cheapest gate in the repository.
+
 ```bash
 cargo fmt --check                   # The ONLY cargo subcommand allowed locally
 ./scripts/verify.sh                 # Full verification; dispatches its own cargo stages

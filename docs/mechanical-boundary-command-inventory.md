@@ -284,6 +284,20 @@ command path is added, removed, renamed, or reclassified.
 
 ### Matrix Maintenance Rules
 
+**Check your edit before you commit it — no toolchain needed:**
+
+```bash
+python3 scripts/check-boundary-inventory-coverage.py
+```
+
+That reports any CLI command path holding no row of its own, in milliseconds. It
+is a precheck for `mechanical_boundary_inventory_covers_all_cli_command_paths`
+in `tests/mechanical_boundary_inventory.rs`, which stays the authority. Run it
+when you add a command, because that assertion went red for three features
+before anyone noticed (bd-no-compile-gate-before-a-commit-lands-qdxc0): it
+cannot run from `verify.sh` on a dev machine, hosted Actions is off repo-wide,
+and nobody dispatches a pinned lane for a markdown table.
+
 - Every command path in the inventory below must appear either directly or through its family in the
   matrix above.
 - The `Side-effect / idempotency` cell must start with one of the class labels in
