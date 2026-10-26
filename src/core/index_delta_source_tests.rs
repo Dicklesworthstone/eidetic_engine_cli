@@ -16,7 +16,7 @@ impl Fixture {
         let root = tempfile::tempdir().expect("source fixture directory");
         let db = DbConnection::open_file(&root.path().join("source.db")).expect("source database");
         db.migrate().expect("source schema");
-        let workspace_id = crate::models::WorkspaceId::from_uuid(uuid::Uuid::new_v4()).to_string();
+        let workspace_id = crate::models::WorkspaceId::from_uuid(uuid::Uuid::now_v7()).to_string();
         db.insert_workspace(
             &workspace_id,
             &CreateWorkspaceInput {
@@ -54,7 +54,7 @@ impl Fixture {
     }
 
     fn other_workspace(&self) -> String {
-        let id = crate::models::WorkspaceId::from_uuid(uuid::Uuid::new_v4()).to_string();
+        let id = crate::models::WorkspaceId::from_uuid(uuid::Uuid::now_v7()).to_string();
         self.db
             .insert_workspace(
                 &id,
@@ -549,7 +549,7 @@ fn cancelled_streamed_stage_preserves_active_files_and_retryable_job() {
 }
 
 fn insert_session(fixture: &Fixture, workspace: &str) -> String {
-    let id = crate::models::SessionId::from_uuid(uuid::Uuid::new_v4()).to_string();
+    let id = crate::models::SessionId::from_uuid(uuid::Uuid::now_v7()).to_string();
     fixture
         .db
         .insert_session(

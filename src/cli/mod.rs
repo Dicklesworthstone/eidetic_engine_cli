@@ -102645,7 +102645,7 @@ demos:
 
     #[test]
     fn cli_workspace_binding_preserves_missing_relative_paths_without_creation() -> TestResult {
-        let missing = PathBuf::from(format!("ee-missing-workspace-{}", uuid::Uuid::new_v4()));
+        let missing = PathBuf::from(format!("ee-missing-workspace-{}", uuid::Uuid::now_v7()));
         let mut cli = super::Cli::try_parse_from([
             OsString::from("ee"),
             OsString::from("--workspace"),
