@@ -23826,6 +23826,29 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
+    /// Finish a claimed release after its feedback event has been inserted.
+    /// The claim, event effects and this attachment share the caller's review
+    /// transaction; a failed attachment must roll the entire release back.
+    pub(crate) fn attach_released_feedback_quarantine_event_in_txn(
+        &self,
+        id: &str,
+        event_id: &str,
+    ) -> Result<()> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE feedback_quarantine SET released_feedback_event_id = ?1 WHERE id = ?2 AND status = 'released' AND released_feedback_event_id IS NULL",
+            &[Value::Text(event_id.to_owned()), Value::Text(id.to_owned())],
+        )?;
+        if affected != 1 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "feedback quarantine release no longer owns its unlinked review claim"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Insert a feedback event and audit entry in one transaction (EE-083).
     pub fn insert_feedback_event_audited(
         &self,

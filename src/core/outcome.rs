@@ -2368,24 +2368,11 @@ pub fn review_feedback_quarantine(
     }
 
     if options.reject {
-        let audit_id = update_feedback_quarantine_review_audited(
-            &connection,
-            &row,
-            "rejected",
-            options.actor,
-            None,
-        )?;
+        let summary = reject_feedback_quarantine_audited(&connection, &row, options.actor)?;
         return Ok(outcome_quarantine_review_report(
             &prepared,
             &quarantine_id,
-            QuarantineReviewSummary {
-                action,
-                status: "rejected",
-                changed: true,
-                dry_run: false,
-                feedback_event_id: None,
-                audit_id: Some(audit_id),
-            },
+            summary,
         ));
     }
 
@@ -2412,7 +2399,7 @@ pub fn review_feedback_quarantine(
             repair: Some(format!("ee outcome quarantine release {} --reject", row.id)),
         });
     }
-    let audit_id = release_feedback_quarantine_audited(
+    let summary = release_feedback_quarantine_audited(
         &connection,
         &row,
         &event_id,
@@ -2422,14 +2409,7 @@ pub fn review_feedback_quarantine(
     Ok(outcome_quarantine_review_report(
         &prepared,
         &quarantine_id,
-        QuarantineReviewSummary {
-            action,
-            status: "released",
-            changed: true,
-            dry_run: false,
-            feedback_event_id: Some(event_id),
-            audit_id: Some(audit_id),
-        },
+        summary,
     ))
 }
 
@@ -2609,23 +2589,47 @@ fn feedback_quarantine_not_found(quarantine_id: &str) -> DomainError {
     }
 }
 
-fn update_feedback_quarantine_review_audited(
+fn already_reviewed_feedback_quarantine_summary(
     connection: &DbConnection,
     row: &StoredFeedbackQuarantine,
-    status: &str,
+    action: &'static str,
+) -> crate::db::Result<QuarantineReviewSummary<'static>> {
+    let current = connection
+        .get_feedback_quarantine(&row.id)?
+        .filter(|current| current.workspace_id == row.workspace_id)
+        .ok_or_else(|| crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "feedback quarantine disappeared before its review could commit".to_owned(),
+        })?;
+    if !matches!(current.status.as_str(), "released" | "rejected") {
+        return Err(crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "feedback quarantine review claim failed without a completed review"
+                .to_owned(),
+        });
+    }
+    Ok(QuarantineReviewSummary {
+        action,
+        status: "already_reviewed",
+        changed: false,
+        dry_run: false,
+        feedback_event_id: current.released_feedback_event_id,
+        audit_id: None,
+    })
+}
+
+fn reject_feedback_quarantine_audited(
+    connection: &DbConnection,
+    row: &StoredFeedbackQuarantine,
     actor: Option<&str>,
-    released_feedback_event_id: Option<&str>,
-) -> Result<String, DomainError> {
+) -> Result<QuarantineReviewSummary<'static>, DomainError> {
     let audit_id = generate_audit_id();
-    let details = feedback_quarantine_review_audit_details(row, status, released_feedback_event_id);
+    let details = feedback_quarantine_review_audit_details(row, "rejected", None);
     connection
         .with_transaction(|| {
-            connection.update_feedback_quarantine_status(
-                &row.id,
-                status,
-                actor,
-                released_feedback_event_id,
-            )?;
+            if !connection.update_feedback_quarantine_status(&row.id, "rejected", actor, None)? {
+                return already_reviewed_feedback_quarantine_summary(connection, row, "reject");
+            }
             connection.insert_audit(
                 &audit_id,
                 &CreateAuditInput {
@@ -2633,22 +2637,25 @@ fn update_feedback_quarantine_review_audited(
                     actor: actor
                         .map(str::to_owned)
                         .or_else(|| Some("ee outcome quarantine".to_owned())),
-                    action: if status == "released" {
-                        audit_actions::FEEDBACK_QUARANTINE_RELEASE.to_owned()
-                    } else {
-                        audit_actions::FEEDBACK_QUARANTINE_REJECT.to_owned()
-                    },
+                    action: audit_actions::FEEDBACK_QUARANTINE_REJECT.to_owned(),
                     target_type: Some("feedback_quarantine".to_owned()),
                     target_id: Some(row.id.clone()),
                     details: Some(details.clone()),
                 },
-            )
+            )?;
+            Ok(QuarantineReviewSummary {
+                action: "reject",
+                status: "rejected",
+                changed: true,
+                dry_run: false,
+                feedback_event_id: None,
+                audit_id: Some(audit_id),
+            })
         })
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to review feedback quarantine: {error}"),
             repair: Some("ee doctor".to_owned()),
-        })?;
-    Ok(audit_id)
+        })
 }
 
 fn release_feedback_quarantine_audited(
@@ -2657,19 +2664,20 @@ fn release_feedback_quarantine_audited(
     event_id: &str,
     feedback_input: &CreateFeedbackEventInput,
     actor: Option<&str>,
-) -> Result<String, DomainError> {
+) -> Result<QuarantineReviewSummary<'static>, DomainError> {
     let audit_id = generate_audit_id();
     let details = feedback_quarantine_review_audit_details(row, "released", Some(event_id));
     connection
         .with_transaction(|| {
+            // The caller's pending row may predate a competing review. Claim
+            // the transition before feedback, rule updates or audit work. The
+            // event FK is attached after insertion, within this transaction.
+            if !connection.update_feedback_quarantine_status(&row.id, "released", actor, None)? {
+                return already_reviewed_feedback_quarantine_summary(connection, row, "release");
+            }
             connection.insert_feedback_event(event_id, feedback_input)?;
             apply_native_rule_outcome_in_txn(connection, feedback_input, event_id, actor)?;
-            connection.update_feedback_quarantine_status(
-                &row.id,
-                "released",
-                actor,
-                Some(event_id),
-            )?;
+            connection.attach_released_feedback_quarantine_event_in_txn(&row.id, event_id)?;
             connection.insert_audit(
                 &audit_id,
                 &CreateAuditInput {
@@ -2682,13 +2690,20 @@ fn release_feedback_quarantine_audited(
                     target_id: Some(row.id.clone()),
                     details: Some(details.clone()),
                 },
-            )
+            )?;
+            Ok(QuarantineReviewSummary {
+                action: "release",
+                status: "released",
+                changed: true,
+                dry_run: false,
+                feedback_event_id: Some(event_id.to_owned()),
+                audit_id: Some(audit_id),
+            })
         })
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to release feedback quarantine: {error}"),
             repair: Some("ee doctor".to_owned()),
-        })?;
-    Ok(audit_id)
+        })
 }
 
 fn feedback_quarantine_review_audit_details(
@@ -8400,6 +8415,111 @@ mod tests {
     }
 
     #[test]
+    fn stale_quarantine_reviews_preserve_the_winning_decision_and_all_effects() -> TestResult {
+        for (winner_rejects, stale_rejects) in [(true, false), (false, true), (false, false)] {
+            let (dir, database) = seed_outcome_database("ee-stale-quarantine-review")?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_native_outcome_rule(&connection, OUTCOME_TEST_WORKSPACE_ID)?;
+            connection.close().map_err(|error| error.to_string())?;
+            let mut first =
+                native_rule_outcome_options(&database, "harmful", "fb_00000000000000000000000610");
+            first.harmful_per_source_per_hour = 1;
+            assert_eq!(
+                record_outcome(&first)
+                    .map_err(|error| error.message())?
+                    .status,
+                OutcomeRecordStatus::Recorded
+            );
+            let event_id = "fb_00000000000000000000000611";
+            let mut second = native_rule_outcome_options(&database, "harmful", event_id);
+            second.harmful_per_source_per_hour = 1;
+            let quarantined = record_outcome(&second).map_err(|error| error.message())?;
+            assert_eq!(quarantined.status, OutcomeRecordStatus::Quarantined);
+            let quarantine_id = quarantined
+                .quarantine
+                .and_then(|summary| summary.id)
+                .ok_or("quarantine id")?;
+
+            // Both requests read pending before either gets the writer fence.
+            // Keep the losing request's actual row while the public winner
+            // commits, then resume its transaction without any timing race.
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let stale = connection
+                .get_feedback_quarantine(&quarantine_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("pending quarantine")?;
+            assert_eq!(stale.status, "pending");
+            connection.close().map_err(|error| error.to_string())?;
+            let winner =
+                super::review_feedback_quarantine(&super::OutcomeQuarantineReviewOptions {
+                    workspace_path: dir.path(),
+                    database_path: Some(&database),
+                    quarantine_id: &quarantine_id,
+                    reject: winner_rejects,
+                    actor: Some("winning-reviewer"),
+                    dry_run: false,
+                })
+                .map_err(|error| error.message())?;
+            assert!(winner.changed);
+            let after_winner = native_rule_feedback_state(&database)?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let winning_row = connection
+                .get_feedback_quarantine(&quarantine_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("reviewed quarantine")?;
+            let losing_summary = if stale_rejects {
+                super::reject_feedback_quarantine_audited(
+                    &connection,
+                    &stale,
+                    Some("stale-reviewer"),
+                )
+            } else {
+                let feedback_input = CreateFeedbackEventInput {
+                    workspace_id: stale.workspace_id.clone(),
+                    target_type: stale.target_type.clone(),
+                    target_id: stale.target_id.clone(),
+                    signal: stale.signal.clone(),
+                    weight: stale.weight,
+                    source_type: stale.source_type.clone(),
+                    source_id: Some(stale.source_id.clone()),
+                    reason: stale.event_reason.clone(),
+                    evidence_json: stale.evidence_json.clone(),
+                    session_id: stale.session_id.clone(),
+                };
+                super::release_feedback_quarantine_audited(
+                    &connection,
+                    &stale,
+                    event_id,
+                    &feedback_input,
+                    Some("stale-reviewer"),
+                )
+            }
+            .map_err(|error| error.message())?;
+            assert_eq!(losing_summary.status, "already_reviewed");
+            assert!(!losing_summary.changed);
+            assert!(losing_summary.audit_id.is_none());
+            assert_eq!(losing_summary.feedback_event_id, winner.feedback_event_id);
+            assert_eq!(
+                connection
+                    .get_feedback_quarantine(&quarantine_id)
+                    .map_err(|error| error.to_string())?,
+                Some(winning_row),
+                "a stale review cannot rewrite the winner's status, actor, timestamp or event"
+            );
+            connection.close().map_err(|error| error.to_string())?;
+            assert_eq!(
+                native_rule_feedback_state(&database)?,
+                after_winner,
+                "stale reviews cannot insert feedback, mutate rules or create jobs/audits"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn native_rule_quarantine_release_applies_once_and_rolls_back_failed_publication() -> TestResult
     {
         let (dir, database) = seed_outcome_database("ee-native-rule-quarantine")?;
@@ -8445,6 +8565,10 @@ mod tests {
         assert_eq!(native_rule_feedback_state(&database)?, quarantined);
 
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let pending_before = connection
+            .get_feedback_quarantine(&quarantine_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("pending native feedback")?;
         connection.execute_raw("CREATE TRIGGER fail_native_rule_release BEFORE INSERT ON search_index_jobs WHEN NEW.document_source = 'rule' BEGIN SELECT RAISE(ABORT, 'native rule release blocked'); END")
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
@@ -8468,6 +8592,10 @@ mod tests {
             .ok_or("pending native feedback disappeared")?;
         assert_eq!(pending.status, "pending");
         assert!(pending.released_feedback_event_id.is_none());
+        assert_eq!(
+            pending, pending_before,
+            "failed release must roll back its initial review claim"
+        );
         connection
             .execute_raw("DROP TRIGGER fail_native_rule_release")
             .map_err(|error| error.to_string())?;
