@@ -2250,6 +2250,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "status",
                 "evidenceAdmission",
                 "sessions",
+                "review",
             ],
             FieldProfile::Full => &["*"],
         },

@@ -63,6 +63,7 @@
             }
           }
         },
+        "review": { "$ref": "#/$defs/importReview" },
         "sessions": {
           "type": "array",
           "description": "Per-session status is imported, skipped, would_import, or refused. Refused entries additionally carry refusalCode and repair; their historical rows were not changed.",
@@ -99,11 +100,79 @@
       "indexRequiredAction",
       "status",
       "evidenceAdmission",
-      "sessions"
+      "sessions",
+      "review"
     ],
     "full": ["*"]
   },
   "$defs": {
+    "importReview": {
+      "type": "object",
+      "description": "Present only for explicit --propose. Committed source import remains successful even if some independent reviews fail or exceed the proposal budget. Dry runs plan review only and do not inspect or create a store.",
+      "additionalProperties": false,
+      "required": ["schema", "dryRun", "status", "partialFailure", "maxSessions", "candidateLimitPerSession", "sessionsEligible", "sessionsReviewed", "sessionsPlanned", "sessionsDeferred", "sessionsRefused", "sessionsFailed", "sessionsDegraded", "duplicateSessionsSkipped", "candidateCount", "candidatesPersisted", "durableMutation", "deferredDetailsOmitted", "sessions", "nextAction"],
+      "properties": {
+        "schema": { "const": "ee.import.cass.review.v1" },
+        "dryRun": { "type": "boolean" },
+        "status": { "enum": ["planned", "completed", "partial", "no_eligible_sessions"] },
+        "partialFailure": { "type": "boolean", "description": "At least one session review failed; source import remains committed." },
+        "maxSessions": { "const": 16 },
+        "candidateLimitPerSession": { "const": 8 },
+        "sessionsEligible": { "type": "integer", "minimum": 0 },
+        "sessionsReviewed": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "sessionsPlanned": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "sessionsDeferred": { "type": "integer", "minimum": 0 },
+        "sessionsRefused": { "type": "integer", "minimum": 0 },
+        "sessionsFailed": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "sessionsDegraded": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "duplicateSessionsSkipped": { "type": "integer", "minimum": 0 },
+        "candidateCount": { "type": "integer", "minimum": 0 },
+        "candidatesPersisted": { "type": "integer", "minimum": 0, "description": "Newly inserted pending candidates; replay of existing or rejected proposals does not increment this count." },
+        "durableMutation": { "type": "boolean" },
+        "deferredDetailsOmitted": { "type": "integer", "minimum": 0 },
+        "sessions": {
+          "type": "array",
+          "maxItems": 48,
+          "items": { "$ref": "#/$defs/importReviewSession" }
+        },
+        "nextAction": { "type": "string" }
+      }
+    },
+    "importReviewSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionIndex", "sessionId", "status", "evidenceSpanCount", "candidateCount", "candidatesPersisted", "candidates", "degraded", "retryCommand", "error"],
+      "properties": {
+        "sessionIndex": { "type": "integer", "minimum": 0, "description": "Index into the original import report's sessions array; no source filenames are duplicated here." },
+        "sessionId": { "type": ["string", "null"] },
+        "status": { "enum": ["planned", "reviewed", "failed", "deferred"] },
+        "evidenceSpanCount": { "type": "integer", "minimum": 0 },
+        "candidateCount": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "candidatesPersisted": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "candidates": {
+          "type": "array",
+          "maxItems": 8,
+          "description": "Canonical session-review proposals retain candidate IDs, source IDs, confidence and persisted status. They require explicit validation and application.",
+          "items": { "type": "object", "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
+        },
+        "degraded": { "type": "array", "items": { "type": "object" } },
+        "retryCommand": { "type": ["string", "null"] },
+        "error": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message"],
+              "properties": {
+                "code": { "type": "string" },
+                "message": { "type": "string", "description": "Public-replay-screened diagnostic; raw storage errors and private paths are not echoed." }
+              }
+            }
+          ]
+        }
+      }
+    },
     "jsonValue": {
       "oneOf": [
         { "type": "null" },

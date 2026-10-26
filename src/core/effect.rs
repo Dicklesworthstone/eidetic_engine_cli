@@ -2529,6 +2529,7 @@ impl EffectManifest {
                 vec![
                     "sessions",
                     "evidence_spans",
+                    "curation_candidates",
                     "search_index_jobs",
                     "import_ledger",
                     "workspace_generations",

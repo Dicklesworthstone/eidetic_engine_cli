@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cass_import_review_deferred",
+  "introduced_by": { "bead": "bd-2d32o", "epic_letter": "I" },
+  "surfaces": ["import cass"],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "More than 16 distinct successful or reused imported sessions are eligible for explicit proposal review. Only the first 16 are reviewed (or planned in dry run); remaining sessions keep their source import result and explicit follow-up review commands.",
+    "setup_commands": [
+      "# Use a CASS corpus with at least 17 distinct eligible sessions for the selected workspace."
+    ],
+    "invocation": "ee import cass --workspace . --limit 17 --propose --json"
+  },
+  "expected_emission": {
+    "code": "cass_import_review_deferred",
+    "severity": "info",
+    "message_contains": ["session reviews were deferred", "16-session proposal limit", "source import was not limited"],
+    "repair_contains": "review.sessions[].retryCommand",
+    "repair_string": "Run review.sessions[].retryCommand for deferred committed sessions. Additional deferred IDs are in the original import sessions array; review them explicitly with ee review session <sessionId> --propose using the same --workspace and --database. During a dry run, repeat the import without --dry-run first."
+  }
+}

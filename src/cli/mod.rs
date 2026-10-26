@@ -1,6 +1,8 @@
 #[cfg(test)]
 #[path = "candidate_pool_tests.rs"]
 mod candidate_pool_tests;
+#[cfg(test)]
+mod cass_import_proposal_tests;
 mod context_delta_evidence;
 #[cfg(test)]
 mod pack_diff_native_tests;
@@ -59,6 +61,7 @@ use crate::core::backup::{
     restore_backup_to_side_path, verify_backup,
 };
 use crate::core::capabilities::{CapabilitiesReport, CommandEntry};
+use crate::core::cass_review::{CassImportReviewReport, review_imported_sessions};
 use crate::core::causal::{
     CompareOptions, EstimateOptions, PromotePlanOptions, TraceOptions,
     compare_causal_chains_from_store, compare_causal_evidence, compare_causal_filtered_from_store,
@@ -11627,6 +11630,10 @@ pub struct CassImportArgs {
     /// Query CASS and render the import plan without writing storage.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Propose reviewable lessons from imported sessions; validation and application remain explicit.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "no_spans")]
+    pub propose: bool,
 
     /// Skip first-window evidence span capture through `cass view`.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -24668,21 +24675,31 @@ where
 
     match import_cass_sessions(&cass_client, &options) {
         Ok(mut report) => {
-            let degradation = reconcile_cass_import_index(&mut report);
+            let review = args.propose.then(|| review_imported_sessions(&report));
+            // Proposals advance the workspace generation, including when a
+            // repeat import reused every source and queued no new index jobs.
+            let degradation = reconcile_cass_import_index(
+                &mut report,
+                review
+                    .as_ref()
+                    .is_some_and(|review| review.durable_mutation),
+            );
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => write_stdout(
                     stdout,
-                    &report.human_summary_with_degradation(degradation.as_ref()),
+                    &cass_import_human_summary(&report, degradation.as_ref(), review.as_ref()),
                 ),
                 output::Renderer::Toon => {
-                    let json = cass_import_response_v2(&report, degradation.as_ref());
+                    let json =
+                        cass_import_response_v2(&report, degradation.as_ref(), review.as_ref());
                     write_stdout(stdout, &output::render_toon_from_json(&json.to_string()))
                 }
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => {
-                    let json = cass_import_response_v2(&report, degradation.as_ref());
+                    let json =
+                        cass_import_response_v2(&report, degradation.as_ref(), review.as_ref());
                     write_stdout(stdout, &(json.to_string() + "\n"))
                 }
             }
@@ -24697,23 +24714,56 @@ where
 fn cass_import_response_v2(
     report: &CassImportReport,
     degradation: Option<&CassImportDegradation>,
+    review: Option<&CassImportReviewReport>,
 ) -> serde_json::Value {
     let history = report.history_degradation();
+    let review_degradations = review
+        .map(CassImportReviewReport::degradations)
+        .unwrap_or_default();
     let degraded = history
         .iter()
         .chain(degradation)
+        .chain(&review_degradations)
         .map(CassImportDegradation::data_json)
         .collect::<Vec<_>>();
+    let mut data = report.data_json();
+    if let Some(review) = review {
+        data["review"] = review.data_json();
+    }
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
-        "data": report.data_json(),
+        "data": data,
         "degraded": degraded,
     })
 }
 
-fn reconcile_cass_import_index(report: &mut CassImportReport) -> Option<CassImportDegradation> {
-    if report.dry_run || report.index_jobs_queued == 0 {
+fn cass_import_human_summary(
+    report: &CassImportReport,
+    degradation: Option<&CassImportDegradation>,
+    review: Option<&CassImportReviewReport>,
+) -> String {
+    let mut summary = report.human_summary_with_degradation(degradation);
+    if let Some(review) = review {
+        summary.push_str(&review.human_summary());
+        for degradation in review.degradations() {
+            summary.push_str(&format!(
+                "  Degraded:\n    - {}: {} Repair: {}\n",
+                degradation.code, degradation.message, degradation.repair
+            ));
+        }
+    }
+    summary
+}
+
+fn reconcile_cass_import_index(
+    report: &mut CassImportReport,
+    proposal_mutation: bool,
+) -> Option<CassImportDegradation> {
+    // A proposal-only backfill still needs a generation check. If no queued
+    // job can publish that generation, keep an explicit rebuild repair rather
+    // than describing the previous index as ready.
+    if report.dry_run || (report.index_jobs_queued == 0 && !proposal_mutation) {
         return None;
     }
 

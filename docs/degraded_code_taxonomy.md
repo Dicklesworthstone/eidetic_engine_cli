@@ -489,6 +489,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `search_index_large_gap` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `cass_import_index_publish_failed` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `cass_import_history_refused` | high | gh-66, gh-82 (I): response-time refusal preserves oversized, unstable, unverifiable or changed session history while later sessions import |
+| `cass_import_review_partial` | warning | CASS import-to-review (I): response-time proposal failure or degraded review; committed source import and independently completed proposals remain intact |
+| `cass_import_review_deferred` | info | CASS import-to-review (I): response-time proposal session budget leaves additional imported sessions available for explicit review |
 | `search_index_degraded` | medium | bd-17c65.10.6 (J6) |
 | `search_live_snapshot_lexical` | warning | bd-l2271 — a stale persisted generation was replaced for this request by complete current-source lexical retrieval; no source/index writes or semantic credit |
 | `search_live_snapshot_unavailable` | warning | bd-l2271 — complete current-source retrieval exceeded its bound or could not run; newly committed content may be absent and persisted-index staleness remains explicit |
