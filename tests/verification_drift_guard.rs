@@ -929,6 +929,199 @@ fn the_run_stage_harness_extracts_real_functions() {
     );
 }
 
+/// Runs the REAL `unit_contract_golden_tests` with `cargo` STUBBED (bd-mbupe).
+///
+/// Same technique as `closure_stage_through_run_stage`, applied to verify.sh's
+/// only test stage: the function is extracted with awk, `cargo` is replaced by a
+/// shell function that prints `log` and exits `cargo_rc`, and the stage's real
+/// body -- its capture-through-`||`, its real grader invocation and its real
+/// `--require-targets` list -- runs unchanged. Nothing is compiled, which is
+/// what makes this arm possible at all: `cargo test` is the one thing this
+/// stage does and the one thing a local run cannot do.
+///
+/// Returns (merged output, exit status).
+fn unit_contract_stage_with_stubbed_cargo(log: &str, cargo_rc: i32) -> (String, i32) {
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -euo pipefail
+fake_log="$(mktemp "${TMPDIR:-/tmp}/ee-mbupe-fake-cargo-log.XXXXXX")"
+printf '%s' "$EE_FAKE_LOG_TEXT" >"$fake_log"
+export EE_FAKE_LOG="$fake_log"
+eval "$(awk '/^unit_contract_golden_tests\(\) /,/^}/' "$VERIFY_SCRIPT")"
+cargo() {
+    cat "$EE_FAKE_LOG"
+    return "$EE_FAKE_CARGO_RC"
+}
+status=0
+unit_contract_golden_tests || status=$?
+# `rm -f` on one just-created mktemp path, which is exactly what the stage
+# under test does to its own log at verify.sh:2293. Matching the code under
+# test matters more here than preferring a narrower verb.
+rm -f "$fake_log"
+exit "$status"
+"#,
+        )
+        .env("VERIFY_SCRIPT", verify_script_path())
+        .env("REPO_ROOT", project_root())
+        .env("EE_FAKE_LOG_TEXT", log)
+        .env("EE_FAKE_CARGO_RC", cargo_rc.to_string())
+        .current_dir(project_root())
+        .output()
+        .expect("run unit_contract_golden_tests with a stubbed cargo");
+
+    let mut merged = String::from_utf8_lossy(&output.stdout).into_owned();
+    merged.push_str(&String::from_utf8_lossy(&output.stderr));
+    (merged, output.status.code().unwrap_or(-1))
+}
+
+/// A log shaped exactly like cargo's, for the three targets the stage requires.
+///
+/// THE `(binary path)` SUFFIX IS LOAD-BEARING AND IS WHY THIS HELPER EXISTS.
+/// `grade_test_log.py`'s `RUNNING_TARGET` is
+/// `^\s*Running (?:unittests )?(\S+)\s*\(([^)]+)\)` -- it takes the target NAME
+/// from the binary in parentheses, so a `Running tests/contracts.rs` line with
+/// no parenthesised binary names no target at all. Measured while writing these
+/// arms: a fixture missing it made the grader report all three required targets
+/// absent, on a log that visibly contained three `Running` lines and three
+/// reconciling summaries. The two failure arms below PASSED against that broken
+/// fixture, because they only require the stage to fail; only the success arm
+/// caught it. That is the whole argument for keeping a positive arm beside the
+/// negative ones.
+fn cargo_shaped_log(include_integration_a_d: bool) -> String {
+    let mut log = String::from("   Compiling eidetic-engine v0.18.0\n");
+    log.push_str(
+        "     Running tests/contracts.rs (/build/target/debug/deps/contracts-1a2b3c4d5e6f7890)\n\
+         running 2 tests\n\
+         test failure_mode_fixtures::alpha ... ok\n\
+         test failure_mode_fixtures::beta ... ok\n\
+         test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1508 filtered out; finished in 0.31s\n",
+    );
+    if include_integration_a_d {
+        log.push_str(
+            "     Running tests/suites/integration_a_d.rs (/build/target/debug/deps/integration_a_d-0f1e2d3c4b5a6978)\n\
+             running 8 tests\n\
+             test degraded_codes_doc_coverage::every_fixture_has_a_doc_section ... ok\n\
+             test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 540 filtered out; finished in 1.02s\n",
+        );
+    }
+    log.push_str(
+        "     Running tests/verification_drift_guard.rs (/build/target/debug/deps/verification_drift_guard-9988776655443322)\n\
+         running 3 tests\n\
+         test verify_budget_manifest_declares_every_verify_stage ... ok\n\
+         test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 97 filtered out; finished in 0.10s\n",
+    );
+    log
+}
+
+/// THE ARM bd-mbupe WAS FILED FOR, and it is not hypothetical.
+///
+/// verify.sh:2271 runs `cargo test --workspace --lib --bins --tests --examples`
+/// with no `--no-fail-fast`, so cargo stops at the first failing target and the
+/// chronically-red lib target means no `--tests` target is reached. Before
+/// `--require-targets`, the grader judged only the pairs that were PRESENT, so a
+/// target that never ran contributed no pair and could not fail any rule: the
+/// stage passed while the gates it exists to run had not executed.
+///
+/// Measured on the pinned lane 2026-10-25, which is where the fixture's shape
+/// comes from: `integration_a_d` had not COMPILED since 583aa95d4, so it
+/// announced nothing while the rest of the run looked clean, and K3 let
+/// docs/degraded_codes.md drift for three days.
+#[test]
+fn unit_contract_stage_fails_when_a_required_target_never_reported() {
+    let (output, code) = unit_contract_stage_with_stubbed_cargo(&cargo_shaped_log(false), 0);
+    assert_ne!(
+        code, 0,
+        "cargo exited 0 and the surviving targets all reconciled, so ONLY the \
+         required-target check can fail this stage; it must:\n{output}"
+    );
+    assert!(
+        output.contains("integration_a_d"),
+        "the failure must NAME the absent target, or a reader cannot act on \
+         it:\n{output}"
+    );
+    assert!(
+        output.contains("does NOT grade green"),
+        "the stage must attribute the failure to the grade rather than to \
+         cargo, which exited 0:\n{output}"
+    );
+}
+
+/// The positive control. Without it the arm above is satisfied by a stage that
+/// fails on EVERY log, which is exactly what a broken fixture produced here.
+#[test]
+fn unit_contract_stage_passes_when_every_required_target_reported() {
+    let (output, code) = unit_contract_stage_with_stubbed_cargo(&cargo_shaped_log(true), 0);
+    assert_eq!(
+        code, 0,
+        "a complete, reconciling log with cargo 0 must pass the stage:\n{output}"
+    );
+    assert!(
+        output.contains("GREEN"),
+        "the grader must report GREEN on a complete log:\n{output}"
+    );
+}
+
+/// Cargo's own exit code still wins, and is reported as cargo's.
+///
+/// `one value cannot express two states`: a green GRADE over a failing cargo run
+/// must not become a pass. This pins the precedence the stage's own comment
+/// describes, with a log that grades green so the only possible cause of
+/// failure is the exit code.
+#[test]
+fn unit_contract_stage_reports_cargos_exit_code_even_on_a_green_grade() {
+    let (output, code) = unit_contract_stage_with_stubbed_cargo(&cargo_shaped_log(true), 101);
+    assert_eq!(
+        code, 101,
+        "the stage must return cargo's exit code, not 1:\n{output}"
+    );
+    assert!(
+        output.contains("cargo test exited 101"),
+        "and must say it was cargo:\n{output}"
+    );
+}
+
+/// Vacuity guard, matching `the_run_stage_harness_extracts_real_functions`.
+///
+/// An awk range that matched nothing would define no function, the call would
+/// return 127, and the two failure arms above would pass for the wrong reason.
+#[test]
+fn the_unit_contract_stage_harness_extracts_a_real_function() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    assert!(
+        script.contains("unit_contract_golden_tests() {"),
+        "verify.sh must define unit_contract_golden_tests at column 0 for the \
+         awk extraction to find it"
+    );
+    let body: Vec<&str> = script
+        .lines()
+        .skip_while(|line| !line.starts_with("unit_contract_golden_tests() "))
+        .take_while(|line| *line != "}")
+        .collect();
+    assert!(
+        body.len() > 10,
+        "the awk range captured {} lines; a truncated extraction would make \
+         these arms vacuous",
+        body.len()
+    );
+    let (_, code) = unit_contract_stage_with_stubbed_cargo(&cargo_shaped_log(false), 0);
+    assert_ne!(
+        code, 127,
+        "exit 127 means the extracted function was never defined"
+    );
+
+    // And the stage must still be the one that names these three targets, or
+    // the arms above are about a list that has moved on without them.
+    for target in ["contracts", "integration_a_d", "verification_drift_guard"] {
+        assert!(
+            script.contains(target),
+            "verify.sh no longer mentions {target}; --require-targets has \
+             changed and these arms need re-grounding"
+        );
+    }
+}
+
 /// Runs verify.sh's own closing verdict against an injected stage tally.
 ///
 /// Extracts `verification_exit_status` and `verification_summary_banner` from
