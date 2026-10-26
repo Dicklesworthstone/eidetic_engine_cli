@@ -3620,16 +3620,25 @@ fn why_not_filters(
             code: omission.reason.as_str().to_string(),
             passed: false,
             detail: if omission.reason == PackOmissionReason::BelowRelevanceFloor {
-                format!(
-                    "target relevance {:.4} is below effective relevance floor {:.4} ({})",
-                    omission.relevance.into_inner(),
-                    options.effective_relevance_floor(),
-                    if options.relevance_floor.is_some() {
-                        "caller override"
-                    } else {
-                        "default coverage fill"
-                    },
-                )
+                if options.relevance_floor.is_none()
+                    && omission.rejected_at == PackRejectionStage::CandidateFilter
+                {
+                    format!(
+                        "target relevance {:.4} was excluded by the uncalibrated query-relative elbow fallback; see context_filtered_results for the per-source cutoff",
+                        omission.relevance.into_inner(),
+                    )
+                } else {
+                    format!(
+                        "target relevance {:.4} is below effective relevance floor {:.4} ({})",
+                        omission.relevance.into_inner(),
+                        options.effective_relevance_floor(),
+                        if options.relevance_floor.is_some() {
+                            "caller override"
+                        } else {
+                            "default coverage fill"
+                        },
+                    )
+                }
             } else {
                 format!("target memory was omitted at {}", omission.rejected_at)
             },
@@ -15401,6 +15410,62 @@ mod tests {
                 && filter.detail.contains("0.3000")
                 && filter.detail.contains("0.5000")
                 && filter.detail.contains("caller override")
+                && !filter.detail.contains("elbow")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn why_not_selected_explains_adaptive_admission_without_inventing_a_floor() -> TestResult {
+        let target = candidate(1, 0.1936, 1.0, 10)?;
+        let selected = candidate(2, 0.3968, 1.0, 10)?;
+        let budget = TokenBudget::new(100).map_err(|error| error.to_string())?;
+        let mut draft = assemble_draft_with_profile_and_options(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            vec![selected.clone()],
+            classic_pack_options(),
+        )
+        .map_err(|error| error.to_string())?;
+        draft.omitted.push(super::PackOmission::from_candidate_at(
+            &target,
+            PackOmissionReason::BelowRelevanceFloor,
+            PackRejectionStage::CandidateFilter,
+            None,
+        ));
+        let report = super::explain_why_not_selected_from_draft(
+            super::WhyNotSelectedInput::new(
+                "prepare release",
+                target.clone(),
+                budget,
+                ContextPackProfile::Balanced,
+                vec![selected, target],
+            )
+            .with_options(classic_pack_options())
+            .with_degraded(vec![super::WhyNotSelectionDegradation::new(
+                "context_filtered_results",
+                "low",
+                "Uncalibrated query-relative elbow omitted a lexical candidate below 0.3968.",
+                Some("Pass --relevance-floor 0 to disable the heuristic.".to_owned()),
+            )]),
+            draft,
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.primary_reason, "omitted_by_score_floor");
+        assert!(report.filters_applied.iter().any(|filter| {
+            filter.code == "below_relevance_floor"
+                && filter.stage == "candidate_filter"
+                && !filter.passed
+                && filter.detail.contains("0.1936")
+                && filter.detail.contains("uncalibrated query-relative elbow")
+                && filter.detail.contains("context_filtered_results")
+                && !filter.detail.contains("0.0500")
+                && !filter.detail.contains("caller override")
+        }));
+        assert!(report.filters_applied.iter().any(|filter| {
+            filter.code == "context_filtered_results" && filter.detail.contains("0.3968")
         }));
         Ok(())
     }
@@ -15826,6 +15891,7 @@ mod tests {
                     && !filter.passed
                     && filter.detail.contains("0.0500")
                     && filter.detail.contains("default coverage fill")
+                    && !filter.detail.contains("elbow")
             }),
             "score-floor filter should name the effective default floor",
         )

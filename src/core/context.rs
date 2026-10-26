@@ -3334,6 +3334,12 @@ async fn run_context_pack_with_performance_inner(
     trace.record_elapsed("candidateResolution", candidate_start);
     control.check()?;
 
+    let mut required_relevance_candidates = effective_filters
+        .graph
+        .seed_memories
+        .iter()
+        .filter_map(|seed| MemoryId::from_str(seed).ok())
+        .collect::<BTreeSet<_>>();
     let focus_start = Instant::now();
     trace.focus_state_read_attempts = trace.focus_state_read_attempts.saturating_add(1);
     match read_active_focus_state(&options.workspace_path) {
@@ -3405,6 +3411,8 @@ async fn run_context_pack_with_performance_inner(
                 )?;
             }
             trace.focus_candidate_count = focus_candidates.len();
+            required_relevance_candidates
+                .extend(focus_candidates.iter().map(|candidate| candidate.memory_id));
             candidates.extend(focus_candidates);
         }
         Ok(None) => {}
@@ -3676,6 +3684,22 @@ async fn run_context_pack_with_performance_inner(
     }
     // Every fan-in has joined and final ranking scores are known. Reject
     // below-floor items before they can consume a result slot or page offset.
+    let mut relevance_excluded_evidence = evidence_candidates
+        .iter()
+        .map(|candidate| candidate.item.evidence_id.clone())
+        .collect::<BTreeSet<_>>();
+    policy_omissions.extend(filter_context_pack_candidates_by_query_relative_elbow(
+        &search_report.results,
+        &required_relevance_candidates,
+        &mut candidates,
+        &mut rule_candidates,
+        &mut evidence_candidates,
+        options.relevance_floor,
+        &mut degraded,
+    ));
+    for candidate in &evidence_candidates {
+        relevance_excluded_evidence.remove(&candidate.item.evidence_id);
+    }
     policy_omissions.extend(filter_context_pack_candidates_by_relevance_floor(
         &mut candidates,
         &mut rule_candidates,
@@ -3862,6 +3886,7 @@ async fn run_context_pack_with_performance_inner(
                 &request,
                 &effective_filters,
                 &considered_evidence,
+                &relevance_excluded_evidence,
                 &mut draft,
                 &mut degraded,
             );
@@ -3885,13 +3910,21 @@ async fn run_context_pack_with_performance_inner(
         .iter()
         .filter(|omission| omission.reason == PackOmissionReason::BelowRelevanceFloor)
         .count();
-    if options.relevance_floor.is_none() && below_relevance_floor_count > 0 {
+    let coverage_fill_below_floor_count = draft
+        .omitted
+        .iter()
+        .filter(|omission| {
+            omission.reason == PackOmissionReason::BelowRelevanceFloor
+                && omission.rejected_at == PackRejectionStage::Selection
+        })
+        .count();
+    if options.relevance_floor.is_none() && coverage_fill_below_floor_count > 0 {
         push_degradation(
             &mut degraded,
             "context_filtered_results",
             ContextResponseSeverity::Low,
             format!(
-                "{below_relevance_floor_count} memory candidates omitted by default coverage-fill relevance floor {:.4} (below_relevance_floor).",
+                "{coverage_fill_below_floor_count} memory candidates omitted by default coverage-fill relevance floor {:.4} (below_relevance_floor).",
                 crate::pack::DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR,
             ),
             None,
@@ -8498,8 +8531,9 @@ fn context_pack_l2_feature_flags_hash(
     // Older responses classify elapsed breaches as within_budget and include
     // elapsed time in signed resource warnings. They cannot satisfy this policy.
     hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
-    // Cached packs from before caller floors reached assembly must be rebuilt.
-    hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v1");
+    // Reassemble older packs that filled the budget with an uncalibrated tail
+    // before query-relative admission reached the complete candidate universe.
+    hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v2");
     // Reassemble older cached packs without bounded conversational companions.
     hash_labeled_bytes(&mut hasher, "conversation_turn_completion_policy", b"v1");
     // Graph expansion now uses the canonical quality scorer; older cached
@@ -15228,6 +15262,180 @@ struct DirectEvidencePackCandidate {
     source: String,
 }
 
+/// Find a clear separation in one query's uncalibrated ranking domain.
+///
+/// This is admission policy, not a relevance estimator: scores and their
+/// interpretation remain unchanged. A small or smooth pool provides no
+/// evidence of a background tail. Require at least three entities, a gap
+/// spanning more than half the observed range, and a drop of at least a
+/// quarter of the best score. The upper edge keeps every tied leading hit.
+fn query_relative_elbow_floor(scores: &[f32]) -> Option<f32> {
+    if scores.len() < 3
+        || scores
+            .iter()
+            .any(|score| !score.is_finite() || !(0.0..=1.0).contains(score))
+    {
+        return None;
+    }
+    let mut ordered = scores.to_vec();
+    ordered.sort_by(|left, right| right.total_cmp(left));
+    let best = ordered[0];
+    let spread = best - ordered[ordered.len() - 1];
+    if best <= 0.0 || spread <= 0.0 {
+        return None;
+    }
+    let mut largest_gap = 0.0_f32;
+    let mut floor = best;
+    for pair in ordered.windows(2) {
+        let gap = pair[0] - pair[1];
+        if gap > largest_gap {
+            largest_gap = gap;
+            floor = pair[0];
+        }
+    }
+    // Nearly equal adjacent gaps must not manufacture an elbow through f32
+    // subtraction noise. The margin scales with this pool, like the policy.
+    let tolerance = 4.0 * f32::EPSILON * best;
+    (largest_gap >= 0.25 * best && largest_gap > 0.5 * spread + tolerance).then_some(floor)
+}
+
+/// Apply the fresh-store fallback after all native and memory fan-in, before
+/// pagination. Each local retrieval source is fitted independently; lexical
+/// pool ratios, cosine, and reranker values are not a shared confidence scale.
+fn filter_context_pack_candidates_by_query_relative_elbow(
+    search_hits: &[SearchHit],
+    required_memory_ids: &BTreeSet<MemoryId>,
+    candidates: &mut Vec<PackCandidate>,
+    rule_candidates: &mut Vec<crate::pack::PackRuleItem>,
+    evidence_candidates: &mut Vec<DirectEvidencePackCandidate>,
+    relevance_floor: Option<f32>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Vec<PackOmission> {
+    if relevance_floor.is_some() {
+        return Vec::new();
+    }
+    let sources = search_hits
+        .iter()
+        .filter(|hit| {
+            !search_hit_is_global_store_lane(hit)
+                && hit
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("calibrated"))
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+        })
+        .map(|hit| (hit.doc_id.as_str(), hit.source.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut population = BTreeMap::<ContextPackEntityKey, (&str, f32)>::new();
+    for candidate in candidates.iter() {
+        // Focus, explicit graph seeds, warnings, and independently normalized
+        // stores neither set this local cutoff nor lose their reservation to it.
+        if candidate.section == PackSection::Failures
+            || candidate.origin.is_some()
+            || required_memory_ids.contains(&candidate.memory_id)
+        {
+            continue;
+        }
+        if let Some(source) = sources.get(candidate.memory_id.to_string().as_str()) {
+            let score = candidate.relevance.into_inner();
+            population
+                .entry(ContextPackEntityKey::Memory(candidate.memory_id))
+                .and_modify(|entry| entry.1 = entry.1.max(score))
+                .or_insert((*source, score));
+        }
+    }
+    for item in rule_candidates.iter() {
+        if item.section != PackSection::Failures
+            && let Some(source) = sources.get(item.rule_id.as_str())
+        {
+            population.insert(
+                ContextPackEntityKey::Rule(item.rule_id.clone()),
+                (*source, item.relevance.into_inner()),
+            );
+        }
+    }
+    for candidate in evidence_candidates.iter() {
+        // A derived card can replace several source spans. Its synthesis is
+        // not another independent observation of their retrieval distribution.
+        if !candidate.incident_card
+            && let Some(source) = sources.get(candidate.item.evidence_id.as_str())
+        {
+            population.insert(
+                ContextPackEntityKey::Evidence(candidate.item.evidence_id.clone()),
+                (*source, candidate.item.relevance.into_inner()),
+            );
+        }
+    }
+    let mut score_pools = BTreeMap::<&str, Vec<f32>>::new();
+    for (source, score) in population.values() {
+        score_pools.entry(source).or_default().push(*score);
+    }
+    let floors = score_pools
+        .iter()
+        .filter_map(|(source, scores)| {
+            query_relative_elbow_floor(scores).map(|floor| (*source, floor))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let rejected = population
+        .iter()
+        .filter_map(|(entity, (source, score))| {
+            floors
+                .get(source)
+                .filter(|floor| score < *floor)
+                .map(|floor| (entity.clone(), *floor))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if rejected.is_empty() {
+        return Vec::new();
+    }
+
+    let mut omitted = Vec::new();
+    candidates.retain(|candidate| {
+        let Some(floor) = rejected.get(&ContextPackEntityKey::Memory(candidate.memory_id)) else {
+            return true;
+        };
+        let options = crate::pack::PackAssemblyOptions {
+            relevance_floor: Some(*floor),
+            ..crate::pack::PackAssemblyOptions::default()
+        };
+        if let Some(omission) = options.relevance_floor_omission(candidate) {
+            omitted.push(omission);
+            false
+        } else {
+            true
+        }
+    });
+    omitted.sort_by_key(|omission| omission.memory_id);
+    let rule_count = rule_candidates.len();
+    rule_candidates
+        .retain(|item| !rejected.contains_key(&ContextPackEntityKey::Rule(item.rule_id.clone())));
+    let rule_count = rule_count.saturating_sub(rule_candidates.len());
+    let evidence_count = evidence_candidates.len();
+    evidence_candidates.retain(|candidate| {
+        !rejected.contains_key(&ContextPackEntityKey::Evidence(
+            candidate.item.evidence_id.clone(),
+        ))
+    });
+    let evidence_count = evidence_count.saturating_sub(evidence_candidates.len());
+    let cutoffs = floors
+        .iter()
+        .map(|(source, floor)| format!("{source}={floor:.4}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_degradation(
+        degraded,
+        "context_filtered_results",
+        ContextResponseSeverity::Low,
+        format!(
+            "{} memory, {rule_count} procedural rule, and {evidence_count} imported evidence candidates excluded by heuristic_uncalibrated query-relative elbow admission (below_relevance_floor); per-source cutoffs: {cutoffs}. These cutoffs are ranking heuristics, not calibrated confidence.",
+            omitted.len(),
+        ),
+        Some("Pass --relevance-floor 0 to disable default relevance admission.".to_owned()),
+    );
+    omitted
+}
+
 /// Enforce the caller's floor after every candidate source and score adjustment.
 fn filter_context_pack_candidates_by_relevance_floor(
     candidates: &mut Vec<PackCandidate>,
@@ -16753,6 +16961,278 @@ mod relevance_floor_tests {
             });
         }
         candidates
+    }
+
+    fn elbow_candidate_set(scores: &[f32]) -> CandidateSet {
+        let mut candidates = candidate_set(scores);
+        for evidence in &mut candidates.evidence {
+            evidence.incident_card = false;
+        }
+        candidates
+    }
+
+    fn retrieval_hits(candidates: &CandidateSet) -> Vec<SearchHit> {
+        candidates
+            .memories
+            .iter()
+            .map(|candidate| candidate.memory_id.to_string())
+            .chain(candidates.rules.iter().map(|item| item.rule_id.clone()))
+            .chain(
+                candidates
+                    .evidence
+                    .iter()
+                    .map(|candidate| candidate.item.evidence_id.clone()),
+            )
+            .map(|doc_id| SearchHit {
+                doc_id,
+                // The admission fit must use final candidate scores, not this
+                // unrelated raw engine value or a second scoring formula.
+                score: 0.0,
+                source: crate::core::search::ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: None,
+                explanation: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn query_relative_elbow_separates_measured_release_tail_and_preserves_ties() {
+        let mut scores = [
+            0.3968, 0.3968, 0.1936, 0.1906, 0.1877, 0.1848, 0.1821, 0.1794, 0.1768, 0.1743,
+        ];
+        assert_eq!(query_relative_elbow_floor(&scores), Some(0.3968));
+        scores.reverse();
+        assert_eq!(query_relative_elbow_floor(&scores), Some(0.3968));
+    }
+
+    #[test]
+    fn query_relative_elbow_does_not_invent_a_split_for_small_or_smooth_pools() {
+        for scores in [
+            vec![],
+            vec![0.5],
+            vec![0.9, 0.1],
+            vec![0.0, 0.0, 0.0],
+            vec![0.2, 0.2, 0.2],
+            vec![0.2, 0.19, 0.18],
+            vec![0.9, 0.7, 0.5, 0.3],
+            vec![1.0, 0.6, 0.2],
+            vec![1.0, 0.999, 0.9988],
+            vec![1.0, f32::NAN, 0.01],
+            vec![1.0, f32::INFINITY, 0.01],
+            vec![1.0, -0.1, 0.01],
+        ] {
+            assert_eq!(query_relative_elbow_floor(&scores), None, "{scores:?}");
+        }
+    }
+
+    #[test]
+    fn default_query_relative_admission_filters_all_native_kinds_before_pagination() {
+        let scores = [
+            0.3968, 0.3968, 0.1936, 0.1906, 0.1877, 0.1848, 0.1821, 0.1794, 0.1768, 0.1743,
+        ];
+        let mut candidates = elbow_candidate_set(&scores);
+        let hits = retrieval_hits(&candidates);
+        let retained_memories = candidates.memories[..2]
+            .iter()
+            .map(|candidate| candidate.memory_id)
+            .collect::<Vec<_>>();
+        let mut degraded = Vec::new();
+        let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            &hits,
+            &BTreeSet::new(),
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            None,
+            &mut degraded,
+        );
+        assert_eq!(omitted.len(), 8);
+        assert!(omitted.iter().all(|item| {
+            item.reason == PackOmissionReason::BelowRelevanceFloor
+                && item.rejected_at == PackRejectionStage::CandidateFilter
+        }));
+        assert_eq!(
+            candidates
+                .memories
+                .iter()
+                .map(|candidate| candidate.memory_id)
+                .collect::<Vec<_>>(),
+            retained_memories,
+        );
+        assert_eq!(candidates.rules.len(), 2);
+        assert_eq!(candidates.evidence.len(), 2);
+        assert_eq!(candidates.rules[0].rule_id, "rule_0");
+        assert_eq!(candidates.evidence[1].item.evidence_id, "ev_1");
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_filtered_results"
+                && entry.message.contains("heuristic_uncalibrated")
+                && entry.message.contains("lexical=0.3968")
+                && entry
+                    .message
+                    .contains("8 memory, 8 procedural rule, and 8 imported evidence")
+                && entry
+                    .repair
+                    .as_deref()
+                    .is_some_and(|repair| repair.contains("--relevance-floor 0"))
+        }));
+
+        let page = apply_pagination_with_rules(
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            &Some(ContextPagination {
+                offset: 2,
+                limit: 4,
+                query_hash: "adaptive-relevance".to_owned(),
+            }),
+            Some(6),
+            None,
+            &mut degraded,
+        );
+        assert_eq!(page.total, 6, "excluded tails cannot occupy result offsets");
+        assert_eq!(page.page_size, 4);
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn query_relative_admission_respects_every_explicit_floor_including_zero() {
+        for floor in [0.0, 0.5, 1.0] {
+            let mut candidates = elbow_candidate_set(&[0.9, 0.8, 0.1]);
+            let hits = retrieval_hits(&candidates);
+            let mut degraded = Vec::new();
+            let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+                &hits,
+                &BTreeSet::new(),
+                &mut candidates.memories,
+                &mut candidates.rules,
+                &mut candidates.evidence,
+                Some(floor),
+                &mut degraded,
+            );
+            assert!(omitted.is_empty());
+            assert!(degraded.is_empty());
+            assert_eq!(candidates.memories.len(), 3);
+            assert_eq!(candidates.rules.len(), 3);
+            assert_eq!(candidates.evidence.len(), 3);
+        }
+    }
+
+    #[test]
+    fn query_relative_admission_never_compares_distinct_score_sources() {
+        let mut candidates = elbow_candidate_set(&[0.9, 0.85, 0.1, 0.2, 0.19, 0.18]);
+        candidates.rules.clear();
+        candidates.evidence.clear();
+        let mut hits = retrieval_hits(&candidates);
+        for hit in &mut hits[3..] {
+            hit.source = crate::core::search::ScoreSource::SemanticFast;
+        }
+        let mut degraded = Vec::new();
+        let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            &hits,
+            &BTreeSet::new(),
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            None,
+            &mut degraded,
+        );
+        assert_eq!(omitted.len(), 1);
+        assert_eq!(candidates.memories.len(), 5);
+        assert!(candidates.memories.iter().any(|candidate| {
+            candidate.memory_id == MemoryId::from_uuid(uuid::Uuid::from_u128(6))
+        }));
+        assert!(degraded[0].message.contains("lexical=0.8500"));
+        assert!(!degraded[0].message.contains("semantic_fast="));
+    }
+
+    #[test]
+    fn protected_candidates_do_not_create_an_elbow_in_unrelated_action_scores() {
+        for protection in [
+            "required",
+            "warning",
+            "nonlocal",
+            "calibrated",
+            "not_retrieved",
+        ] {
+            let mut candidates = elbow_candidate_set(&[0.99, 0.2, 0.19, 0.18]);
+            candidates.rules.clear();
+            candidates.evidence.clear();
+            let mut hits = retrieval_hits(&candidates);
+            let mut required = BTreeSet::new();
+            match protection {
+                "required" => {
+                    required.insert(candidates.memories[0].memory_id);
+                }
+                "warning" => candidates.memories[0].section = PackSection::Failures,
+                "nonlocal" => {
+                    candidates.memories[0].origin = Some(crate::pack::PackItemOrigin {
+                        lane: crate::pack::PackItemOrigin::GLOBAL_LANE.to_owned(),
+                        workspace_id: "global-fixture".to_owned(),
+                    });
+                }
+                "calibrated" => hits[0].metadata = Some(serde_json::json!({"calibrated": true})),
+                "not_retrieved" => {
+                    hits.remove(0);
+                }
+                _ => unreachable!(),
+            }
+            let mut degraded = Vec::new();
+            let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+                &hits,
+                &required,
+                &mut candidates.memories,
+                &mut candidates.rules,
+                &mut candidates.evidence,
+                None,
+                &mut degraded,
+            );
+            assert!(omitted.is_empty(), "{protection}");
+            assert!(degraded.is_empty(), "{protection}");
+            assert_eq!(candidates.memories.len(), 4, "{protection}");
+        }
+    }
+
+    #[test]
+    fn query_relative_admission_preserves_required_native_and_memory_candidates() {
+        let mut candidates = elbow_candidate_set(&[0.9, 0.8, 0.1, 0.05, 0.04]);
+        let required = BTreeSet::from([candidates.memories[2].memory_id]);
+        candidates.memories[3].origin = Some(crate::pack::PackItemOrigin {
+            lane: crate::pack::PackItemOrigin::CROSS_SHARD_LANE.to_owned(),
+            workspace_id: "peer-workspace".to_owned(),
+        });
+        candidates.rules[2].section = PackSection::Failures;
+        candidates.evidence[2].incident_card = true;
+        let mut hits = retrieval_hits(&candidates);
+        for hit in &mut hits {
+            if hit.doc_id == "rule_3" || hit.doc_id == "ev_3" {
+                hit.metadata = Some(serde_json::json!({"calibrated": true}));
+            }
+        }
+        let mut degraded = Vec::new();
+        let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            &hits,
+            &required,
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            None,
+            &mut degraded,
+        );
+        assert_eq!(omitted.len(), 1);
+        assert_eq!(
+            omitted[0].memory_id,
+            MemoryId::from_uuid(uuid::Uuid::from_u128(5))
+        );
+        assert_eq!(candidates.memories.len(), 4);
+        assert_eq!(candidates.rules.len(), 4);
+        assert_eq!(candidates.evidence.len(), 4);
+        assert_eq!(candidates.rules[2].section, PackSection::Failures);
+        assert!(candidates.evidence[2].incident_card);
+        assert_eq!(candidates.evidence[3].item.evidence_id, "ev_3");
     }
 
     #[test]

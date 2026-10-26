@@ -221,6 +221,7 @@ pub(super) fn complete_selected_turns(
     request: &ContextRequest,
     filters: &crate::models::QueryFilters,
     considered_evidence: &BTreeSet<String>,
+    relevance_excluded_evidence: &BTreeSet<String>,
     draft: &mut PackDraft,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) {
@@ -294,7 +295,9 @@ pub(super) fn complete_selected_turns(
             let Some((source, companion)) = partner(anchor, &locators) else {
                 continue;
             };
-            if selected_ids.contains(companion.id.as_str()) {
+            if selected_ids.contains(companion.id.as_str())
+                || relevance_excluded_evidence.contains(&companion.id)
+            {
                 continue;
             }
             let bytes = source.bytes.saturating_add(companion.bytes);
@@ -534,6 +537,7 @@ mod tests {
                 request,
                 &crate::models::QueryFilters::default(),
                 &considered,
+                &BTreeSet::new(),
                 draft,
                 &mut degraded,
             );
@@ -593,6 +597,78 @@ mod tests {
                 .list_evidence_spans_for_session(&session)
                 .unwrap(),
             before
+        );
+    }
+
+    #[test]
+    fn adaptive_relevance_exclusions_cannot_reenter_through_turn_completion() {
+        let fixture = Fixture::new();
+        let (_, first_user, first_answer) = fixture.pair(800);
+        let second_session = fixture.session(900);
+        let second_user = fixture.line(
+            &second_session,
+            901,
+            1,
+            "user",
+            "Which emberstone configuration retains debug symbols?",
+        );
+        let second_answer = fixture.line(
+            &second_session,
+            902,
+            2,
+            "assistant",
+            "The debug profile retains diagnostic symbols.",
+        );
+        let request = ContextRequest::from_query("emberstone").unwrap();
+        let original = fixture.draft(&[&first_user, &second_user], &request);
+        assert_eq!(original.evidence_items.len(), 2);
+
+        let mut unrestricted = original.clone();
+        fixture.complete(&request, &mut unrestricted);
+        assert_eq!(unrestricted.evidence_items.len(), 4);
+        assert!(unrestricted.evidence_items.iter().any(|item| {
+            item.evidence_id == first_answer && item.relevance.into_inner() == 0.0
+        }));
+
+        let considered = BTreeSet::from([first_user, second_user]);
+        let excluded = BTreeSet::from([first_answer.clone()]);
+        let mut filtered = original.clone();
+        let mut degraded = Vec::new();
+        complete_selected_turns(
+            &fixture.db,
+            Path::new(WORKSPACE_PATH),
+            &request,
+            &crate::models::QueryFilters::default(),
+            &considered,
+            &excluded,
+            &mut filtered,
+            &mut degraded,
+        );
+
+        assert!(degraded.is_empty(), "{degraded:?}");
+        assert_eq!(filtered.evidence_items.len(), 3);
+        assert_eq!(
+            &filtered.evidence_items[..2],
+            original.evidence_items.as_slice()
+        );
+        assert!(
+            filtered
+                .evidence_items
+                .iter()
+                .all(|item| item.evidence_id != first_answer)
+        );
+        assert_eq!(filtered.evidence_items[2].evidence_id, second_answer);
+        assert_eq!(filtered.evidence_items[2].relevance.into_inner(), 0.0);
+        assert_eq!(filtered.selection_audit.selected_count, 3);
+        assert_eq!(filtered.selection_audit.candidate_count, 3);
+        assert_eq!(filtered.selection_audit.budget_used, filtered.used_tokens);
+        assert_eq!(
+            filtered.used_tokens,
+            filtered
+                .evidence_items
+                .iter()
+                .map(|item| item.estimated_tokens)
+                .sum::<u32>(),
         );
     }
 
@@ -753,6 +829,7 @@ mod tests {
                 &request,
                 &filters,
                 &considered,
+                &BTreeSet::new(),
                 &mut draft,
                 &mut degraded,
             );

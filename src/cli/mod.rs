@@ -3493,8 +3493,8 @@ pub struct ContextArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_stale: bool,
 
-    /// Minimum score (0.0..=1.0) for a search hit before context packing.
-    /// Defaults to 0.0 so context can inspect the full candidate pool.
+    /// Caller relevance cutoff (0.0..=1.0) before packing; 0 disables adaptive admission.
+    /// When omitted, uncalibrated local candidates use a query-relative cutoff.
     #[arg(long, value_name = "FLOAT", value_parser = parse_relevance_floor_arg)]
     pub relevance_floor: Option<f32>,
 
@@ -3705,7 +3705,8 @@ pub struct PackArgs {
     #[arg(long)]
     pub candidate_pool: Option<u32>,
 
-    /// Minimum score (0.0..=1.0) for a search hit before packing; defaults to 0.0.
+    /// Caller relevance cutoff (0.0..=1.0) before packing; 0 disables adaptive admission.
+    /// When omitted, uncalibrated local candidates use a query-relative cutoff.
     #[arg(long, value_name = "FLOAT", value_parser = parse_relevance_floor_arg)]
     pub relevance_floor: Option<f32>,
 
@@ -3932,7 +3933,8 @@ pub struct PackBuildArgs {
     #[arg(long)]
     pub candidate_pool: Option<u32>,
 
-    /// Minimum score (0.0..=1.0) for a search hit before packing; defaults to 0.0.
+    /// Caller relevance cutoff (0.0..=1.0) before packing; 0 disables adaptive admission.
+    /// When omitted, uncalibrated local candidates use a query-relative cutoff.
     #[arg(long, value_name = "FLOAT", value_parser = parse_relevance_floor_arg)]
     pub relevance_floor: Option<f32>,
 
