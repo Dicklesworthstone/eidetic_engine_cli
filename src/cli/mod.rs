@@ -4,6 +4,7 @@ mod candidate_pool_tests;
 #[cfg(test)]
 mod cass_import_proposal_tests;
 mod context_delta_evidence;
+mod evidence;
 #[cfg(test)]
 mod pack_diff_native_tests;
 #[cfg(test)]
@@ -1194,6 +1195,9 @@ pub enum Command {
     /// Record, list, and revisit durable typed decision memories.
     #[command(subcommand)]
     Decide(DecideCommand),
+    /// Manage whether retained imported evidence may enter future retrieval and derivation.
+    #[command(subcommand)]
+    Evidence(evidence::EvidenceCommand),
     /// Apply or inspect workspace schema migrations.
     ///
     /// `ee migrate status` reports the current schema version, the latest
@@ -15616,6 +15620,7 @@ where
             handle_situation_explain(&cli, args, stdout, stderr)
         }
         Some(Command::Decide(ref command)) => handle_decide(&cli, command, stdout, stderr),
+        Some(Command::Evidence(ref command)) => evidence::handle(&cli, command, stdout, stderr),
         Some(Command::Status(ref args)) => {
             if let Some(exit_code) =
                 reject_unsupported_mermaid_format(&cli, "status", stdout, stderr)
@@ -70592,6 +70597,9 @@ impl NormalizedInvocation {
                     DecideCommand::List(_) => "decide list".to_string(),
                     DecideCommand::Revisit(_) => "decide revisit".to_string(),
                 },
+                Command::Evidence(evidence::EvidenceCommand::Withdraw(_)) => {
+                    "evidence withdraw".to_string()
+                }
                 Command::Migrate(migrate) => match migrate {
                     MigrateCommand::Status(_) => "migrate status".to_string(),
                     MigrateCommand::Run(_) => "migrate run".to_string(),

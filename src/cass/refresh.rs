@@ -856,9 +856,15 @@ mod canonical_reference_tests {
         let (db, workspace, id, session) = fixture("/private/denied-session.jsonl", 1);
         let first = span(&session, 1);
         let first_id = stable_evidence_id(&id, &first.cass_span_id);
-        db.execute_raw(
-            "UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied'",
-        )
+        db.with_transaction_error(|| {
+            db.withdraw_cass_evidence_in_current_snapshot(
+                &workspace,
+                &first_id,
+                "Withdraw this source before importing later transcript lines.",
+                Some("withdrawal-refresh-test"),
+                false,
+            )
+        })
         .unwrap();
         let denied = db.get_evidence_span(&first_id).unwrap().unwrap();
         let incoming = vec![first, span(&session, 2)];

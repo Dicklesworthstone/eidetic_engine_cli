@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.evidence.withdraw.v1.json",
+  "title": "ee.evidence.withdraw.v1",
+  "description": "Metadata-only data payload of ee evidence withdraw, inside the ee.response.v2 envelope. Withdraws one CASS source from future retrieval and derivation while retaining source bytes and historical packs. An index job receipt confirms queuing, not publication.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "command", "version", "workspaceId", "evidenceId", "sessionId",
+    "status", "dryRun", "persisted", "changed", "wouldChange",
+    "previousSearchEligibility", "previousPackEligibility", "searchEligibility",
+    "packEligibility", "auditId", "indexJobId", "indexStatus"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.evidence.withdraw.v1" },
+    "command": { "type": "string", "const": "evidence withdraw" },
+    "version": { "type": "string" },
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "evidenceId": { "type": "string", "pattern": "^ev_[0-9A-HJKMNP-TV-Z]{26}$" },
+    "sessionId": { "type": "string", "minLength": 1 },
+    "status": { "type": "string", "enum": ["would_withdraw", "withdrawn", "already_withdrawn"] },
+    "dryRun": { "type": "boolean" },
+    "persisted": { "type": "boolean", "description": "True only when this invocation committed a withdrawal." },
+    "changed": { "type": "boolean", "description": "Committed mutation flag; false for previews and idempotent repeats." },
+    "wouldChange": { "type": "boolean", "description": "Whether the selected source still required denial in the transaction snapshot." },
+    "previousSearchEligibility": { "$ref": "#/$defs/eligibility" },
+    "previousPackEligibility": { "$ref": "#/$defs/eligibility" },
+    "searchEligibility": { "type": "string", "const": "denied", "description": "Requested final posture, including during preview." },
+    "packEligibility": { "type": "string", "const": "denied", "description": "Requested final posture, including during preview." },
+    "auditId": { "type": ["string", "null"] },
+    "indexJobId": { "type": ["string", "null"] },
+    "indexStatus": { "type": "string", "enum": ["dry_run_not_queued", "queued", "not_scheduled"] }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "status": { "const": "would_withdraw" }, "dryRun": { "const": true },
+        "persisted": { "const": false }, "changed": { "const": false }, "wouldChange": { "const": true },
+        "auditId": { "type": "null" }, "indexJobId": { "type": "null" }, "indexStatus": { "const": "dry_run_not_queued" }
+      }
+    },
+    {
+      "properties": {
+        "status": { "const": "withdrawn" }, "dryRun": { "const": false },
+        "persisted": { "const": true }, "changed": { "const": true }, "wouldChange": { "const": true },
+        "auditId": { "type": "string", "minLength": 1 }, "indexJobId": { "type": "string", "minLength": 1 }, "indexStatus": { "const": "queued" }
+      }
+    },
+    {
+      "properties": {
+        "status": { "const": "already_withdrawn" }, "persisted": { "const": false },
+        "changed": { "const": false }, "wouldChange": { "const": false },
+        "previousSearchEligibility": { "const": "denied" }, "previousPackEligibility": { "const": "denied" },
+        "auditId": { "type": "null" }, "indexJobId": { "type": "null" }, "indexStatus": { "const": "not_scheduled" }
+      }
+    }
+  ],
+  "field_presets": {
+    "minimal": ["schema", "evidenceId", "status", "dryRun", "persisted", "changed", "wouldChange", "indexStatus"],
+    "summary": ["schema", "evidenceId", "sessionId", "status", "dryRun", "persisted", "changed", "wouldChange", "searchEligibility", "packEligibility", "indexStatus"],
+    "standard": ["schema", "command", "version", "workspaceId", "evidenceId", "sessionId", "status", "dryRun", "persisted", "changed", "wouldChange", "previousSearchEligibility", "previousPackEligibility", "searchEligibility", "packEligibility", "auditId", "indexJobId", "indexStatus"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "eligibility": { "type": "string", "enum": ["admitted", "quarantined", "denied"] }
+  },
+  "examples": [
+    {
+      "schema": "ee.evidence.withdraw.v1", "command": "evidence withdraw", "version": "0.1.0",
+      "workspaceId": "wsp_01234567890123456789012345", "evidenceId": "ev_00000000000000000000000001", "sessionId": "sess_00000000000000000000000001",
+      "status": "would_withdraw", "dryRun": true, "persisted": false, "changed": false, "wouldChange": true,
+      "previousSearchEligibility": "admitted", "previousPackEligibility": "admitted", "searchEligibility": "denied", "packEligibility": "denied",
+      "auditId": null, "indexJobId": null, "indexStatus": "dry_run_not_queued"
+    },
+    {
+      "schema": "ee.evidence.withdraw.v1", "command": "evidence withdraw", "version": "0.1.0",
+      "workspaceId": "wsp_01234567890123456789012345", "evidenceId": "ev_00000000000000000000000001", "sessionId": "sess_00000000000000000000000001",
+      "status": "withdrawn", "dryRun": false, "persisted": true, "changed": true, "wouldChange": true,
+      "previousSearchEligibility": "quarantined", "previousPackEligibility": "quarantined", "searchEligibility": "denied", "packEligibility": "denied",
+      "auditId": "audit_00000000000000000000000000000001", "indexJobId": "sidx_00000000000000000000000001", "indexStatus": "queued"
+    },
+    {
+      "schema": "ee.evidence.withdraw.v1", "command": "evidence withdraw", "version": "0.1.0",
+      "workspaceId": "wsp_01234567890123456789012345", "evidenceId": "ev_00000000000000000000000001", "sessionId": "sess_00000000000000000000000001",
+      "status": "already_withdrawn", "dryRun": false, "persisted": false, "changed": false, "wouldChange": false,
+      "previousSearchEligibility": "denied", "previousPackEligibility": "denied", "searchEligibility": "denied", "packEligibility": "denied",
+      "auditId": null, "indexJobId": null, "indexStatus": "not_scheduled"
+    }
+  ]
+}

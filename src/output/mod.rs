@@ -1657,6 +1657,7 @@ fn command_name_from_schema(schema: &str) -> String {
         "ee.decide.record.v1" => "decide record".to_string(),
         "ee.decide.list.v1" => "decide list".to_string(),
         "ee.decide.revisit.v1" => "decide revisit".to_string(),
+        "ee.evidence.withdraw.v1" => "evidence withdraw".to_string(),
         "ee.toolchain_provenance.v1" => "diag toolchain-provenance".to_string(),
         "ee.ask.v1" => "ask".to_string(),
         "ee.recall.v1" => "recall".to_string(),
@@ -1824,6 +1825,52 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "fallbacks",
                 "refusals",
                 "ledgerSummary",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "evidence withdraw" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "evidenceId",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "wouldChange",
+                "indexStatus",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "evidenceId",
+                "sessionId",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "wouldChange",
+                "searchEligibility",
+                "packEligibility",
+                "indexStatus",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "command",
+                "version",
+                "workspaceId",
+                "evidenceId",
+                "sessionId",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "wouldChange",
+                "previousSearchEligibility",
+                "previousPackEligibility",
+                "searchEligibility",
+                "packEligibility",
+                "auditId",
+                "indexJobId",
+                "indexStatus",
             ],
             FieldProfile::Full => &["*"],
         },
@@ -12132,6 +12179,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: decide_record_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::evidence::EVIDENCE_WITHDRAW_SCHEMA_V1,
+            version: "1",
+            description: "Metadata-only receipt for withdrawing a retained CASS source from future retrieval and derivation; queued indexing is distinct from publication.",
+            category: "memory",
+            definition: evidence_withdraw_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::decide::DECIDE_LIST_SCHEMA_V1,
             version: "1",
             description: "Data payload emitted by ee decide list under the standard ee.response.v2 envelope.",
@@ -12337,6 +12391,10 @@ fn session_budget_plan_schema_definition() -> String {
 
 fn decide_record_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.decide.record.v1.json").to_string()
+}
+
+fn evidence_withdraw_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.evidence.withdraw.v1.json").to_string()
 }
 
 fn decide_list_schema_definition() -> String {

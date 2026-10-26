@@ -1219,6 +1219,7 @@ pub(crate) const DRY_RUN_CAPABLE: &[&str] = &[
     "decide record",
     "demo run",
     "diag pack-record",
+    "evidence withdraw",
     "export",
     "export agentsmd",
     "graph centrality-refresh",
@@ -2955,6 +2956,27 @@ impl EffectManifest {
                 vec!["memories", "search_index_jobs", "audit_log"],
                 "Expire a memory through an audited tombstone without deleting data",
             ),
+            {
+                let mut withdrawal = CommandEffect::durable_write(
+                    "evidence withdraw",
+                    vec![
+                        "evidence_spans",
+                        "search_index_jobs",
+                        "workspace_generations",
+                        "audit_log",
+                    ],
+                    "Deny a retained CASS source for future retrieval and derivation, atomically auditing the withdrawal and queuing session reindexing",
+                );
+                withdrawal.idempotency = IdempotencyClass::Idempotent;
+                withdrawal.mutation_contract.idempotency_key =
+                    Some("workspace id plus evidence id with search and pack eligibility denied");
+                withdrawal.mutation_contract.db_generation_effect = "advances only on a new withdrawal; unchanged on preview, already-denied source, or rollback";
+                withdrawal.mutation_contract.index_generation_effect = "queues one session index job atomically; index publication occurs later through the existing worker";
+                withdrawal.mutation_contract.dry_run_behavior = Some(
+                    "read-only existing-store snapshot; no migrations, evidence changes, audit rows, or index jobs",
+                );
+                withdrawal
+            },
             CommandEffect::durable_write(
                 "memory reveal",
                 vec!["memories", "memory_seals", "search_index_jobs", "audit_log"],
@@ -4745,6 +4767,46 @@ mod tests {
         assert_eq!(validate.default_effect, EffectClass::DurableMemoryWrite);
         assert_eq!(validate.dry_run_effect, Some(EffectClass::ReadOnly));
         assert!(validate.requires_audit);
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_withdrawal_is_an_audited_idempotent_write_with_read_only_preview() -> TestResult {
+        let manifest = EffectManifest::build();
+        let withdrawal = manifest
+            .get("evidence withdraw")
+            .ok_or("missing evidence withdrawal effect")?;
+        assert_eq!(withdrawal.default_effect, EffectClass::DurableMemoryWrite);
+        assert_eq!(withdrawal.dry_run_effect, Some(EffectClass::ReadOnly));
+        assert_eq!(withdrawal.idempotency, IdempotencyClass::Idempotent);
+        assert!(withdrawal.requires_audit);
+        assert!(!withdrawal.is_safe_mid_task());
+        assert_eq!(
+            withdrawal.mutation_contract.side_effect_class,
+            SideEffectClass::AuditedMutation,
+        );
+        assert_eq!(
+            withdrawal.mutation_contract.audit_surface,
+            Some("audit_log")
+        );
+        assert_eq!(
+            withdrawal.write_surfaces.db_tables,
+            vec![
+                "evidence_spans",
+                "search_index_jobs",
+                "workspace_generations",
+                "audit_log",
+            ],
+        );
+        assert!(withdrawal.write_surfaces.derived_paths.is_empty());
+        assert!(withdrawal.write_surfaces.workspace_files.is_empty());
+        assert_eq!(
+            DRY_RUN_CAPABLE
+                .iter()
+                .filter(|path| **path == "evidence withdraw")
+                .count(),
+            1,
+        );
         Ok(())
     }
 

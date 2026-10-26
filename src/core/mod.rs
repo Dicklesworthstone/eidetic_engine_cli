@@ -63,6 +63,7 @@ pub mod effect;
 pub mod environment_attestation;
 pub mod error_diagnosis;
 pub mod error_recall;
+pub mod evidence;
 pub mod explanation_latency_budget;
 pub mod feedback;
 pub mod focus;

@@ -46,12 +46,14 @@ use crate::models::{
 use crate::models::{MemorySeal, validate_attestation_seal_fields};
 
 mod evidence_admission_counts;
+mod evidence_lifecycle;
 mod evidence_reader_projection;
 mod memory_temporal;
 pub mod migrate;
 pub mod read_pool;
 pub mod shard;
 
+pub(crate) use evidence_lifecycle::{CassEvidenceWithdrawal, CassEvidenceWithdrawalError};
 pub use evidence_reader_projection::EvidenceReaderProjection;
 
 pub const SUBSYSTEM: &str = "db";
@@ -131,6 +133,9 @@ pub mod audit_actions {
     /// reason codes, and the resulting admission class; raw evidence content
     /// and upstream references are never copied into the audit chain.
     pub const EVIDENCE_SECURITY_RESCREEN: &str = "evidence.security_rescreen";
+    /// An operator withdrew one CASS source from future retrieval and derivation.
+    /// Source bytes and historical packs are retained.
+    pub const EVIDENCE_WITHDRAW: &str = "evidence.withdraw";
 
     /// Beta-Bernoulli posterior updated on a feedback/outcome event
     /// (N7.1 / ADR 0032). Details carry prior (alpha, beta), event
@@ -15657,7 +15662,8 @@ impl StoredEvidenceSpan {
     /// by bd-reality-core-convergence-1azkt.45/.46/.59/.60): their text was
     /// secret-screened at ingest. A record quarantined for instruction risk
     /// (class B), a stale screening revision or a drifted hash never
-    /// qualifies, and neither does anything outside the live session join.
+    /// qualifies, and neither does an explicitly denied CASS source or
+    /// anything outside the live session join.
     #[must_use]
     pub fn is_class_a_derivation_readable(
         &self,
@@ -15667,6 +15673,8 @@ impl StoredEvidenceSpan {
         if !self.is_bound_to_session(expected_workspace_id, session)
             || EvidenceProducerKind::parse(&self.producer_kind)
                 != Some(EvidenceProducerKind::CassImport)
+            || self.search_eligibility == "denied"
+            || self.pack_eligibility == "denied"
             || self.screening_version != EVIDENCE_SCREENING_VERSION
             || self.security_policy_epoch != EVIDENCE_SECURITY_POLICY_EPOCH
             || self.canonical_provenance_revision != EVIDENCE_CANONICAL_PROVENANCE_REVISION
