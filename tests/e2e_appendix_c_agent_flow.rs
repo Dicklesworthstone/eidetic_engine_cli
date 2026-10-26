@@ -806,8 +806,8 @@ fn appendix_c_agent_flow_parity_scenario() -> TestResult {
                         index + 6
                     ),
                     format!(
-                        "Before modifying src/middleware/rate_limit.rs:{}, run `ee search \"Send + Sync error governor\" --json` from workspace root to retrieve governor failures from rate-limit-feb-2026 workflow.",
-                        42 + index * 10
+                        "Lesson {}: Before modifying src/middleware/rate_limit.rs:42, run `ee search \"Send + Sync error governor\" --json` from workspace root to retrieve governor failures from rate-limit-feb-2026 workflow.",
+                        index + 1
                     ),
                 ],
                 expected_exit_code: 0,
