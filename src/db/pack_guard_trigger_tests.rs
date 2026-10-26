@@ -306,7 +306,12 @@ fn v132_rule_failure_sections_preserve_history_guards_and_recovery() {
     assert!(connection.get_pack_record(warning_pack).unwrap().is_none());
 
     let upgrade = connection.migrate().expect("upgrade existing source");
-    assert_eq!(upgrade.applied(), &[132]);
+    // Later migrations also run on this V131 store; V132 is the one under test.
+    assert!(
+        upgrade.applied().contains(&132),
+        "V132 was applied: {:?}",
+        upgrade.applied()
+    );
     assert_eq!(
         connection
             .get_pack_history_for_recovery(legacy_pack)
