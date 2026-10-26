@@ -213,6 +213,115 @@ fn trust_audit_failure_rolls_back_posterior_event_and_all_new_audits() {
 }
 
 #[test]
+fn agent_profile_audit_failure_rolls_back_all_learning_and_same_id_retry_applies_once() {
+    let fixture = Fixture::new();
+    fixture.seed_agent_validated();
+    let agent = "atomic-profile-agent";
+    let initial_counts = AgentContextProfileCounts::new(8, 1, 0);
+    assert!(initial_counts.bias().cold_start);
+    let profile_before = fixture
+        .db
+        .upsert_agent_context_profile_event(&UpsertAgentContextProfileInput {
+            workspace_id: WORKSPACE.to_owned(),
+            agent_name: agent.to_owned(),
+            memory_id: MEMORY.to_owned(),
+            counts_delta: initial_counts,
+            last_seen_at: Some("2026-09-20T00:00:00Z".to_owned()),
+            weight_cached: initial_counts.bias().weight,
+        })
+        .unwrap();
+    let prior = fixture.posterior();
+    let memory_before = fixture.db.get_memory(MEMORY).unwrap();
+    let audits = fixture.audit_count();
+    fixture
+        .db
+        .execute_raw(&format!(
+            "CREATE TRIGGER reject_agent_profile_audit BEFORE INSERT ON audit_log \
+             WHEN NEW.action = '{}' BEGIN SELECT RAISE(ABORT, 'profile audit failure'); END;",
+            audit_actions::AGENT_PROFILE_UPDATE
+        ))
+        .unwrap();
+    let mut options = fixture.options();
+    options.source_type = "human_explicit".to_owned();
+    options.agent_name = Some(format!("  {agent}  "));
+    assert!(matches!(
+        record_outcome(&options),
+        Err(DomainError::Storage { .. })
+    ));
+    // The profile audit is written after feedback, posterior, trust promotion
+    // and profile upsert. Every one must roll back with the rejected audit.
+    fixture.assert_unrecorded(prior, audits);
+    assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory_before);
+    assert_eq!(
+        fixture
+            .db
+            .get_agent_context_profile(WORKSPACE, agent, MEMORY)
+            .unwrap(),
+        Some(profile_before)
+    );
+
+    fixture
+        .db
+        .execute_raw("DROP TRIGGER reject_agent_profile_audit")
+        .unwrap();
+    let recorded = record_outcome(&options).unwrap();
+    assert_eq!(recorded.status, OutcomeRecordStatus::Recorded);
+    assert_eq!(fixture.posterior(), (prior.0 + 1.0, prior.1));
+    assert_eq!(
+        fixture
+            .db
+            .get_memory_trust_class(MEMORY)
+            .unwrap()
+            .as_deref(),
+        Some("human_explicit")
+    );
+    let learned = fixture
+        .db
+        .get_agent_context_profile(WORKSPACE, agent, MEMORY)
+        .unwrap()
+        .unwrap();
+    assert_eq!(learned.counts, AgentContextProfileCounts::new(9, 1, 0));
+    assert!(!learned.counts.bias().cold_start);
+    assert_eq!(learned.weight_cached, learned.counts.bias().weight);
+    assert!(learned.weight_cached > 0.0);
+    let profile_audits = fixture
+        .db
+        .list_audit_by_action(audit_actions::AGENT_PROFILE_UPDATE, None)
+        .unwrap();
+    assert_eq!(profile_audits.len(), 1);
+    assert_eq!(profile_audits[0].actor.as_deref(), options.actor.as_deref());
+    let details: serde_json::Value =
+        serde_json::from_str(profile_audits[0].details.as_deref().unwrap()).unwrap();
+    assert_eq!(details["feedbackEventId"], EVENT);
+    assert_eq!(details["agentName"], agent);
+    assert_eq!(details["coldStart"], false);
+
+    let posterior = fixture.posterior();
+    let memory = fixture.db.get_memory(MEMORY).unwrap();
+    let audits = fixture.audit_count();
+    let replay = record_outcome(&options).unwrap();
+    assert_eq!(replay.status, OutcomeRecordStatus::AlreadyRecorded);
+    assert_eq!(fixture.posterior(), posterior);
+    assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory);
+    assert_eq!(
+        fixture
+            .db
+            .get_agent_context_profile(WORKSPACE, agent, MEMORY)
+            .unwrap(),
+        Some(learned)
+    );
+    assert_eq!(fixture.db.count_table_rows("feedback_events").unwrap(), 1);
+    assert_eq!(
+        fixture
+            .db
+            .count_table_rows("agent_context_profiles")
+            .unwrap(),
+        1
+    );
+    assert_eq!(fixture.audit_count(), audits);
+}
+
+#[test]
 fn retry_after_learning_failure_records_and_learns_exactly_once() {
     let fixture = Fixture::new();
     fixture.collide_audit(2);

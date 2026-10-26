@@ -1322,6 +1322,17 @@ fn record_outcome_inner(
                         &event_id,
                         options.actor.as_deref(),
                     )?;
+                    if target_type == "memory" {
+                        record_agent_context_profile_update_in_txn(
+                            &connection,
+                            &target.workspace_id,
+                            &target_id,
+                            &signal,
+                            &event_id,
+                            options.agent_name.as_deref(),
+                            options.actor.as_deref(),
+                        )?;
+                    }
                     Ok((audit_id, confidence))
                 })
                 .map_err(|error| DomainError::Storage {
@@ -1330,18 +1341,6 @@ fn record_outcome_inner(
                 })
         },
     )?;
-
-    if target_type == "memory" {
-        record_agent_context_profile_update(
-            &connection,
-            &target.workspace_id,
-            &target_id,
-            &signal,
-            &event_id,
-            options.agent_name.as_deref(),
-            options.actor.as_deref(),
-        )?;
-    }
 
     // These values describe the learning committed with the event, never a
     // second best-effort transaction that an idempotent retry could skip.
@@ -2969,7 +2968,10 @@ fn current_feedback_summary(
         })
 }
 
-fn record_agent_context_profile_update(
+/// Apply per-agent learning in the transaction that admits its feedback.
+/// Reading the prior counts under the same writer fence keeps the cached bias
+/// consistent with the stored counters, including concurrent outcomes.
+fn record_agent_context_profile_update_in_txn(
     connection: &DbConnection,
     workspace_id: &str,
     memory_id: &str,
@@ -2977,7 +2979,7 @@ fn record_agent_context_profile_update(
     feedback_event_id: &str,
     agent_name: Option<&str>,
     actor: Option<&str>,
-) -> Result<(), DomainError> {
+) -> crate::db::Result<()> {
     let Some(agent_name) = agent_name.and_then(normalized_agent_name) else {
         return Ok(());
     };
@@ -2985,55 +2987,43 @@ fn record_agent_context_profile_update(
         return Ok(());
     };
 
-    let existing = connection
-        .get_agent_context_profile(workspace_id, &agent_name, memory_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to read agent context profile: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+    let existing = connection.get_agent_context_profile(workspace_id, &agent_name, memory_id)?;
     let next_counts = existing.as_ref().map_or(counts_delta, |profile| {
         add_agent_profile_counts(profile.counts, counts_delta)
     });
     let next_bias = next_counts.bias();
     let last_seen_at = Utc::now().to_rfc3339();
 
-    connection
-        .with_transaction(|| {
-            let stored =
-                connection.upsert_agent_context_profile_event(&UpsertAgentContextProfileInput {
-                    workspace_id: workspace_id.to_owned(),
-                    agent_name: agent_name.clone(),
-                    memory_id: memory_id.to_owned(),
-                    counts_delta,
-                    last_seen_at: Some(last_seen_at.clone()),
-                    weight_cached: next_bias.weight,
-                })?;
-            let audit_id = generate_audit_id();
-            connection.insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(workspace_id.to_owned()),
-                    actor: actor
-                        .map(str::to_owned)
-                        .or_else(|| Some(agent_name.clone())),
-                    action: audit_actions::AGENT_PROFILE_UPDATE.to_owned(),
-                    target_type: Some("memory".to_owned()),
-                    target_id: Some(memory_id.to_owned()),
-                    details: Some(agent_profile_update_audit_details(
-                        feedback_event_id,
-                        &agent_name,
-                        &counts_delta,
-                        &stored.counts,
-                        stored.weight_cached,
-                        next_bias.cold_start,
-                    )),
-                },
-            )
-        })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to update agent context profile: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })
+    let stored =
+        connection.upsert_agent_context_profile_event(&UpsertAgentContextProfileInput {
+            workspace_id: workspace_id.to_owned(),
+            agent_name: agent_name.clone(),
+            memory_id: memory_id.to_owned(),
+            counts_delta,
+            last_seen_at: Some(last_seen_at),
+            weight_cached: next_bias.weight,
+        })?;
+    let audit_id = generate_audit_id();
+    connection.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(workspace_id.to_owned()),
+            actor: actor
+                .map(str::to_owned)
+                .or_else(|| Some(agent_name.clone())),
+            action: audit_actions::AGENT_PROFILE_UPDATE.to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some(memory_id.to_owned()),
+            details: Some(agent_profile_update_audit_details(
+                feedback_event_id,
+                &agent_name,
+                &counts_delta,
+                &stored.counts,
+                stored.weight_cached,
+                next_bias.cold_start,
+            )),
+        },
+    )
 }
 
 fn normalized_agent_name(raw: &str) -> Option<String> {
