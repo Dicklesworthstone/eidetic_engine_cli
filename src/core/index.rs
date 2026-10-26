@@ -10893,7 +10893,13 @@ fn get_index_status_with_connection_mode(
     let last_check_error = metadata_status
         .corruption_error
         .clone()
-        .or_else(|| metadata_status.compatibility_error.clone());
+        .or_else(|| metadata_status.compatibility_error.clone())
+        .or_else(|| match (db_generation, metadata_status.generation) {
+            (Some(source), Some(index)) if index > source => Some(format!(
+                "Search index generation {index} is newer than database generation {source}; the index cannot describe the current source snapshot. Run ee index rebuild --workspace ."
+            )),
+            _ => None,
+        });
 
     // Determine health
     let health = determine_health(
@@ -11653,7 +11659,10 @@ fn determine_health(
     }
 
     match (db_generation, index_generation) {
-        (Some(db_gen), Some(idx_gen)) if db_gen > idx_gen => IndexHealth::Stale,
+        // A restored source may be older than its surviving derived index.
+        // Reader leases refuse that future generation; status and doctor must
+        // not advertise it as ready merely because it does not lag the store.
+        (Some(db_gen), Some(idx_gen)) if db_gen != idx_gen => IndexHealth::Stale,
         (Some(_), None) => IndexHealth::Stale, // DB has generation but index doesn't
         _ => IndexHealth::Ready,
     }
@@ -15632,6 +15641,134 @@ mod tests {
             before,
             "inspection must not repair, restamp, or mutate persisted vectors"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn index_readiness_rejects_a_generation_newer_than_the_source_snapshot() -> TestResult {
+        let fixture = RequestedIndexRepairFixture::new()?;
+        let stack = EmbedderStack::from_parts(Arc::new(HashEmbedder::default_256()), None);
+        let _selection = install_test_workspace_embedder(&fixture.workspace_id, stack.clone());
+        let snapshot = collect_workspace_index_source_snapshot(&fixture.db, &fixture.workspace_id)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            snapshot.document_counts,
+            IndexDocumentCounts::memory_only(1)
+        );
+        let index_dir = fixture.options.resolve_index_dir();
+        let stats = build_index_generation_sync(&index_dir, stack.clone(), snapshot.documents)?;
+        validate_built_generation(&index_dir, stats, snapshot.document_counts)?;
+        write_index_metadata(
+            &index_dir,
+            snapshot.generation,
+            snapshot.document_counts,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let options = IndexStatusOptions {
+            workspace_path: fixture.options.workspace_path.clone(),
+            database_path: fixture.options.database_path.clone(),
+            index_dir: Some(index_dir.clone()),
+        };
+        let ready = get_index_status_with_connection(&options, Some(&fixture.db))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(ready.health, IndexHealth::Ready, "{ready:?}");
+        assert_eq!(ready.index_document_count, Some(1));
+        assert!(ready.last_check_error.is_none());
+
+        // A valid surviving index may describe a later source generation after
+        // a database restore. Keep its real vector/lexical tiers and producer
+        // intact so neither corruption nor an empty world can satisfy the test.
+        let future_generation = snapshot
+            .generation
+            .checked_add(1)
+            .ok_or("generation overflow")?;
+        write_index_metadata(
+            &index_dir,
+            future_generation,
+            snapshot.document_counts,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let before = index_regular_file_snapshot(&index_dir)?;
+        let stale = get_index_status_with_connection(&options, Some(&fixture.db))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(stale.health, IndexHealth::Stale, "{stale:?}");
+        assert_eq!(stale.db_generation, Some(snapshot.generation));
+        assert_eq!(stale.index_generation, Some(future_generation));
+        assert_eq!(stale.db_memory_count, 1);
+        assert_eq!(stale.index_document_count, Some(1));
+        let reason = stale
+            .last_check_error
+            .as_deref()
+            .ok_or("missing future-generation cause")?;
+        assert!(
+            reason.contains("newer than database generation"),
+            "{reason}"
+        );
+        assert_eq!(stale.repair_hint, Some("ee index rebuild --workspace ."));
+        assert_eq!(stale.data_json()["degradationCode"], "index_stale");
+        assert_eq!(
+            crate::core::status::DerivedAssetReport::from_index_status(&stale).status,
+            crate::core::status::DerivedAssetStatus::Stale,
+        );
+        assert_eq!(
+            crate::core::status::probe_search_capability(Some(&options.workspace_path)),
+            crate::models::CapabilityStatus::Degraded,
+        );
+        let doctor =
+            crate::core::doctor::DoctorReport::gather_for_workspace(&options.workspace_path);
+        let check = doctor
+            .checks
+            .iter()
+            .find(|check| check.name == "search_index")
+            .ok_or("doctor omitted the search index check")?;
+        assert_eq!(check.severity, crate::core::doctor::CheckSeverity::Warning);
+        assert!(check.message.contains(reason), "{}", check.message);
+        assert_eq!(
+            check.repair,
+            crate::models::error_codes::INDEX_STALE.default_repair,
+        );
+
+        #[cfg(unix)]
+        {
+            let index_path = &index_dir;
+            let source_generation = snapshot.generation;
+            crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+                let lease = IndexGenerationLease::read(&cx, index_path)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let error = lease
+                    .index_for_snapshot_with_identity(&cx, index_path, source_generation, None)
+                    .expect_err("the real reader must refuse the future generation");
+                assert!(error.to_string().contains("newer than the source snapshot"));
+                Ok::<(), String>(())
+            })
+            .map_err(|error| error.to_string())??;
+        }
+
+        assert_eq!(index_regular_file_snapshot(&index_dir)?, before);
+        assert_eq!(
+            fixture
+                .db
+                .get_workspace_generation(&fixture.workspace_id)
+                .map_err(|error| error.to_string())?,
+            Some(snapshot.generation),
+            "diagnostics must not advance the source to fit the future index",
+        );
+        // A real rebuild restores this watermark. Readiness must recover as
+        // soon as the existing complete tiers again describe the source.
+        write_index_metadata(
+            &index_dir,
+            snapshot.generation,
+            snapshot.document_counts,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let repaired = get_index_status_with_connection(&options, Some(&fixture.db))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(repaired.health, IndexHealth::Ready, "{repaired:?}");
+        assert!(repaired.last_check_error.is_none());
         Ok(())
     }
 
@@ -23175,9 +23312,10 @@ mod tests {
     }
 
     #[test]
-    fn cache_invalidation_ready_when_index_ahead() {
+    fn cache_invalidation_stale_when_index_ahead() {
         let health = determine_health(true, 5, Some(8), Some(10), true, false, false);
-        assert_eq!(health, IndexHealth::Ready);
+        assert_eq!(health, IndexHealth::Stale);
+        assert_eq!(health.degradation_code(), Some("index_stale"));
     }
 
     #[test]
