@@ -181,4 +181,92 @@ stdout_capture="$(ee_dir_creates_appledouble_sidecars "$REPO_ROOT" 2>/dev/null |
     fail "the probe wrote to stdout" "got: $stdout_capture"
 pass "the probe is silent on stdout"
 
+# ---------------------------------------------------------------------------
+# THE GUARD THAT CONSUMES THE PROBE (bd-r4iwj).
+#
+# Everything above tests the probe. Nothing tested
+# `assert_committed_tree_base_stores_xattrs` in scripts/rch_verify.sh: its
+# Darwin gate, its deliberately narrow pinned-only scope, the degraded code it
+# emits, or that it refuses rather than warns. A probe that answers correctly
+# inside a guard that never calls it is worth nothing, so the guard is driven
+# here directly.
+#
+# The function is extracted with awk and `emit_json` is stubbed -- the same
+# technique tests/verification_drift_guard.rs uses on verify.sh's stages. That
+# keeps the real guard body, including its own `exit 1`, which is why each arm
+# runs in a subshell.
+# ---------------------------------------------------------------------------
+
+RCH_VERIFY="$REPO_ROOT/scripts/rch_verify.sh"
+
+# Vacuity guard first: an awk range that matched nothing would define no
+# function and every arm below would "pass" on a command-not-found.
+for fn in resolve_committed_tree_export_base assert_committed_tree_base_stores_xattrs; do
+    grep -q "^${fn}() {" "$RCH_VERIFY" ||
+        fail "rch_verify.sh must define $fn at column 0 for the awk extraction to find it"
+done
+pass "both extracted functions are defined at column 0 in rch_verify.sh"
+
+# Runs the real guard against one base. Echoes "EMIT <codes>" if it refused.
+guard_against() {
+    local base="$1" pinned="$2"
+    (
+        set -uo pipefail
+        export SCRIPT_DIR="$REPO_ROOT/scripts"
+        eval "$(awk '/^resolve_committed_tree_export_base\(\) /,/^}/' "$RCH_VERIFY")"
+        eval "$(awk '/^assert_committed_tree_base_stores_xattrs\(\) /,/^}/' "$RCH_VERIFY")"
+        emit_json() { printf 'EMIT %s\n' "${*: -1}"; }
+        RCH_INVOCATION=()
+        PINNED_FRANKEN_STACK="$pinned"
+        RCH_VERIFY_COMMITTED_TREE_BASE="$base"
+        assert_committed_tree_base_stores_xattrs
+        printf 'RETURNED 0\n'
+    )
+}
+
+if [ -n "$shim_point" ]; then
+    guard_dir="$(mktemp -d "$shim_point/.ee-guard-arm.XXXXXX")"
+
+    out="$(guard_against "$guard_dir" 1 || true)"
+    case "$out" in
+        *"EMIT rch_verify_committed_tree_base_appledouble_shim"*)
+            pass "the guard REFUSES a pinned dispatch whose base shims xattrs" ;;
+        *) fail "the guard did not refuse a shimming base" "got: $out" ;;
+    esac
+
+    # THE SCOPE ARM. Refusing is deliberately limited to the pinned lane: the
+    # plain --committed-tree default base is ${TMPDIR:-/tmp}/..., which on this
+    # host IS the shimming volume, so refusing there would break a rail nobody
+    # has shown to be broken. Without this arm that scope looks like an
+    # oversight and gets "fixed".
+    out="$(guard_against "$guard_dir" 0 || true)"
+    case "$out" in
+        "RETURNED 0") pass "the guard is SILENT off the pinned lane, on the same hazardous base" ;;
+        *) fail "the guard fired off the pinned lane; its scope is pinned-only on purpose" "got: $out" ;;
+    esac
+
+    rmdir "$guard_dir" 2>/dev/null ||
+        printf 'SKIP guard probe dir not empty, left in place: %s\n' "$guard_dir"
+else
+    printf 'SKIP no xattr-shimming mount point; the guard refusal arm did not run\n'
+fi
+
+if [ -n "$native_point" ]; then
+    native_guard_dir="$(mktemp -d "${TMPDIR:-/tmp}/ee-guard-arm-native.XXXXXX")"
+    # Only meaningful if this temp dir is itself xattr-native; on this host
+    # TMPDIR is the shimming volume, so check rather than assume.
+    if [ "$(probe_rc "$native_guard_dir")" = "1" ]; then
+        out="$(guard_against "$native_guard_dir" 1 || true)"
+        case "$out" in
+            "RETURNED 0") pass "the guard PASSES a pinned dispatch whose base stores xattrs natively" ;;
+            *) fail "the guard refused an xattr-native base" "got: $out" ;;
+        esac
+    else
+        printf 'SKIP %s is not xattr-native; the guard acceptance arm did not run\n' "$native_guard_dir"
+    fi
+    rmdir "$native_guard_dir" 2>/dev/null || true
+else
+    printf 'SKIP no xattr-native mount point; the guard acceptance arm did not run\n'
+fi
+
 printf '\nappledouble_sidecar_probe self-test: %s of %s arms passed\n' "$ARMS" "$ARMS"
