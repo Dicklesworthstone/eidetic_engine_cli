@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_projection_is_utf8_safe_and_cannot_create_completion_authority() {
+    fn terminal_projection_is_utf8_safe_and_cannot_grant_completion_authority() {
         let plain = "Finished compiling 界-cache 🦀\n";
         assert!(matches!(terminal_text(plain), Ok(Cow::Borrowed(_))));
         for decorated in [
