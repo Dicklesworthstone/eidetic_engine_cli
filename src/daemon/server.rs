@@ -5991,7 +5991,7 @@ fn dispatch_context_with_admission(
             );
         }
     };
-    let mut context_response = context_run.response;
+    let context_response = context_run.response;
     let context_search_report = context_run.search_report;
     let context_search_advisory_snapshot = context_run.search_advisory_snapshot;
 
