@@ -2,6 +2,8 @@
 //!
 //! Explicit exports take precedence over historical scheduler implementations.
 //! Manual and bounded foreground callers keep their existing APIs and reports.
+//! The shadowed scheduler in `steward/mod.rs` is reached only by that file's
+//! tests and carries `expect(dead_code)` until it is removed.
 
 #[path = "steward/mod.rs"]
 mod implementation;

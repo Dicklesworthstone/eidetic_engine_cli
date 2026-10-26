@@ -49,6 +49,7 @@ pub const DAEMON_JOB_ROW_SCHEMA_V1: &str = "ee.steward.daemon_job_row.v1";
 /// allocation. Truncation past the cap surfaces through the existing
 /// `serde_json::from_str` error path, so callers see an explicit parse
 /// failure instead of silent data loss.
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 const DAEMON_JOB_TABLE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 pub const DAEMON_STATUS_SCHEMA_V1: &str = "ee.steward.daemon_status.v1";
 pub const DAEMON_RECOVERY_SCHEMA_V1: &str = "ee.steward.daemon_recovery.v1";
@@ -218,6 +219,7 @@ fn serve_search_advisory_state() -> &'static ServeSearchAdvisoryState {
     STATE.get_or_init(ServeSearchAdvisoryState::default)
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn trace_serve_localhost(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
     tracing::info!(
         workspace_id = "serve-localhost",
@@ -2597,6 +2599,7 @@ fn serve_transport_timeout_error(timeout: Duration) -> DomainError {
 }
 
 #[derive(Clone, Debug)]
+#[expect(dead_code, reason = "replaced by job_journal.rs")]
 pub struct DaemonRunPlan {
     pub run_id: String,
     pub table_path: PathBuf,
@@ -2650,6 +2653,7 @@ impl DaemonJobRow {
 }
 
 #[derive(Clone, Debug)]
+#[expect(dead_code, reason = "replaced by job_journal.rs")]
 pub struct DaemonRecoveryReport {
     pub workspace: String,
     pub table_path: PathBuf,
@@ -2661,6 +2665,7 @@ pub struct DaemonRecoveryReport {
 
 impl DaemonRecoveryReport {
     #[must_use]
+    #[expect(dead_code, reason = "replaced by job_journal.rs")]
     pub fn data_json(&self) -> JsonValue {
         json!({
             "schema": DAEMON_RECOVERY_SCHEMA_V1,
@@ -2747,6 +2752,7 @@ pub fn daemon_job_table_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".ee").join("daemon-jobs.jsonl")
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 pub fn record_daemon_foreground_start(
     workspace_path: &Path,
     options: &DaemonForegroundOptions,
@@ -2828,6 +2834,7 @@ pub fn record_daemon_foreground_start(
     })
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 pub fn record_daemon_foreground_report(
     workspace_path: &Path,
     report: &DaemonForegroundReport,
@@ -2859,6 +2866,7 @@ pub fn record_daemon_foreground_report(
     Ok(rows)
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 pub fn recover_orphaned_daemon_jobs(
     workspace_path: &Path,
     reason: &str,
@@ -2918,6 +2926,7 @@ pub fn recover_orphaned_daemon_jobs(
     })
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 pub fn daemon_status_report(
     workspace_path: &Path,
     requested_job_types: &[JobType],
@@ -2945,6 +2954,7 @@ pub fn daemon_status_report(
     })
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, String> {
     let table_path = daemon_job_table_path(workspace_path);
     if !daemon_job_table_path_is_regular_file(&table_path, "read")? {
@@ -2995,6 +3005,7 @@ pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, 
     Ok(rows)
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<(), String> {
     if rows.is_empty() {
         return Ok(());
@@ -3085,6 +3096,7 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
         .map_err(|error| format!("Failed to sync daemon job table: {error}"))
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn open_daemon_job_table_for_read(table_path: &Path) -> std::io::Result<fs::File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -3092,6 +3104,7 @@ fn open_daemon_job_table_for_read(table_path: &Path) -> std::io::Result<fs::File
     options.open(table_path)
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn open_daemon_job_table_for_append(table_path: &Path) -> std::io::Result<fs::File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -3100,6 +3113,7 @@ fn open_daemon_job_table_for_append(table_path: &Path) -> std::io::Result<fs::Fi
 }
 
 #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn configure_daemon_job_table_open_options(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -3109,6 +3123,7 @@ fn configure_daemon_job_table_open_options(options: &mut OpenOptions) {
 #[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
 fn configure_daemon_job_table_open_options(_options: &mut OpenOptions) {}
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn ensure_daemon_job_table_path_is_not_symlink(table_path: &Path) -> Result<(), String> {
     if let Some(symlink_path) = first_existing_symlink_component(table_path)? {
         return Err(format!(
@@ -3120,6 +3135,7 @@ fn ensure_daemon_job_table_path_is_not_symlink(table_path: &Path) -> Result<(), 
     Ok(())
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn daemon_job_table_path_is_regular_file(
     table_path: &Path,
     operation: &str,
@@ -3146,6 +3162,7 @@ fn daemon_job_table_path_is_regular_file(
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn daemon_job_table_path_exists_as_non_regular_file(table_path: &Path) -> Result<bool, String> {
     match fs::symlink_metadata(table_path) {
         Ok(metadata) => Ok(!metadata.file_type().is_file()),
@@ -3164,6 +3181,7 @@ fn daemon_job_table_path_exists_as_non_regular_file(table_path: &Path) -> Result
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, String> {
     crate::core::path_safety::first_existing_symlink_component(path).map_err(|error| {
         format!(
@@ -3173,6 +3191,7 @@ fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, Stri
     })
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn latest_daemon_rows(rows: &[DaemonJobRow]) -> Vec<DaemonJobRow> {
     let mut by_key = BTreeMap::new();
     for row in rows {
@@ -3181,6 +3200,7 @@ fn latest_daemon_rows(rows: &[DaemonJobRow]) -> Vec<DaemonJobRow> {
     by_key.into_values().collect()
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn row_from_result(
     workspace_path: &Path,
     run_id: &str,
@@ -3221,20 +3241,24 @@ fn row_from_result(
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn daemon_run_id(workspace_path: &Path, recorded_at: &str) -> String {
     let input = format!("{}|{recorded_at}", workspace_path.display());
     let digest = blake3::hash(input.as_bytes()).to_hex().to_string();
     format!("daemon-run-{}", &digest[..16])
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn daemon_job_key(run_id: &str, tick: u32, runner_job_id: &str) -> String {
     format!("{run_id}:tick-{tick:06}:{runner_job_id}")
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn runner_job_id(offset: usize) -> String {
     format!("job-{:06}", offset.saturating_add(1))
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn row_id(run_id: &str, tick: u32, runner_job_id: &str, phase: &str) -> String {
     let input = format!(
         "{run_id}|{tick}|{runner_job_id}|{phase}|{}",

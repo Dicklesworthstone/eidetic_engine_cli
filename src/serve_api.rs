@@ -3,7 +3,9 @@
 //! Transport implementation and wire types remain in `serve.rs`. Explicit
 //! journal exports take precedence over the transport module's historical
 //! implementations so CLI status, startup and recovery all use the same
-//! locking and bounded-reader contract.
+//! locking and bounded-reader contract. The shadowed copies in `serve.rs` are
+//! reached only by that file's tests and carry `expect(dead_code)` until they
+//! are removed.
 
 #[path = "serve.rs"]
 mod transport;

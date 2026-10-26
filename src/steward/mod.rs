@@ -7719,10 +7719,12 @@ pub const BACKGROUND_SCHEDULER_INTERVAL_MS: u64 = 60_000;
 
 /// Polling fallback for callers that set the shutdown flag without unparking
 /// the scheduler thread. The daemon handle also unparks it for prompt shutdown.
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by durable_scheduler"))]
 const BACKGROUND_SCHEDULER_SLEEP_SLICE_MS: u64 = 500;
 
 /// Job types run by the background scheduler on every tick. These are the
 /// low-overhead jobs safe to run unattended inside the daemon process.
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by durable_scheduler"))]
 const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] = &[
     JobType::DecaySweep,
     JobType::HealthCheck,
@@ -7751,6 +7753,7 @@ const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] = &[
 /// An explicit rebuild takes precedence, avoiding two publications in one tick.
 /// An unreadable queue is reported and retried on a later tick; it never
 /// authorizes a rebuild or adopts another workspace's jobs.
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by durable_scheduler"))]
 fn background_scheduler_job_types(workspace: &str) -> Vec<JobType> {
     let mut job_types = BACKGROUND_SCHEDULER_JOB_TYPES.to_vec();
     if crate::core::index::pending_index_rebuild_request(Path::new(workspace)).is_some() {
@@ -7769,6 +7772,7 @@ fn background_scheduler_job_types(workspace: &str) -> Vec<JobType> {
     job_types
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by durable_scheduler"))]
 fn background_index_jobs_need_processing(workspace: &Path) -> Result<bool, String> {
     let workspace = normalize_runner_workspace_path(workspace);
     let database_path = workspace.join(".ee").join("ee.db");
@@ -7794,6 +7798,7 @@ fn background_index_jobs_need_processing(workspace: &Path) -> Result<bool, Strin
         .map_err(|error| format!("Failed to inspect pending background index jobs: {error}"))
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by durable_scheduler"))]
 fn background_scheduler_tick_options(
     workspace: &str,
     shutdown: Arc<AtomicBool>,
@@ -7829,6 +7834,7 @@ fn background_scheduler_tick_options(
 /// jobs with `tick_limit = 1`. Per-tick errors are swallowed: the scheduler
 /// is best-effort and must not crash the daemon over a transient DB open
 /// failure. The steward's own job rows record per-tick outcomes.
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by durable_scheduler"))]
 pub fn run_daemon_background_scheduler(workspace: &str, shutdown: Arc<AtomicBool>) {
     loop {
         // Wait first so short-lived daemon processes never run a steward tick.
@@ -7842,6 +7848,7 @@ pub fn run_daemon_background_scheduler(workspace: &str, shutdown: Arc<AtomicBool
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by durable_scheduler"))]
 fn wait_for_background_scheduler_tick(shutdown: &AtomicBool, deadline: Instant) -> bool {
     loop {
         if shutdown.load(Ordering::Acquire) {
