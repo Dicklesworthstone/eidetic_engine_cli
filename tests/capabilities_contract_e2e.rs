@@ -177,52 +177,27 @@ fn capabilities_json_contract_reports_inventory_counts_and_registry() -> TestRes
         }),
     )?;
 
-    // THE DAEMON WRITE AND MAINTENANCE SURFACE (bd-0rkti).
+    // NO DAEMON-SURFACE AVAILABILITY LOOP HERE, AND THAT IS LOAD-BEARING
+    // (bd-0rkti). I added one on 2026-10-25 and it was wrong in the most
+    // expensive way available: it asserted the OPPOSITE of what this tree
+    // already asserts.
     //
-    // 05020689c derived the command inventory from clap and deleted six
-    // `capabilities_report_*` unit tests with it. Four were list-membership
-    // against a clap-derived list and are rightly gone. Two were NOT:
-    // `capabilities_report_advertises_group_commit_daemon_write_methods` and
-    // `capabilities_report_marks_daemon_maintenance_posture` asserted
-    // AVAILABILITY for the daemon write methods and the maintenance posture,
-    // and from that commit until this block nothing in the tree did. The loop
-    // above was the only per-command `available == true` assertion and it
-    // covers six core commands.
+    // `src/cli/mod.rs:87082` carries a `forbidden_path` list -- "diag
+    // contention --use-daemon", "ee.daemon.telemetry", "ee.daemon.write",
+    // "ee.daemon.write_journal", "daemon foreground decay_sweep", "daemon
+    // foreground non-decay" -- and fails with "non-canonical capability path
+    // leaked" if any of them appears in the inventory. They must be ABSENT.
     //
-    // THEY COULD NOT BE RESTORED WHERE THEY WERE. `CapabilitiesReport::gather`
-    // now TAKES the inventory as a parameter instead of building it, so a unit
-    // test can only assert about an inventory it injected itself -- which
-    // asserts nothing about the published surface. Here the report comes from
-    // the real binary, which is the only place the question is answerable.
+    // My evidence that they were present and available was a probe of the
+    // INSTALLED binary, which reports 0.14.2 against this tree's 0.18.0. The
+    // inventory was deliberately made canonical inside that four-version gap,
+    // so the two `capabilities_report_*` tests 05020689c deleted were retired
+    // along with their premise rather than losing coverage -- recorded as
+    // `retired` in scripts/vanished-tests-dispositions.txt with that reason.
     //
-    // Measured 2026-10-25 against the installed binary: all seven names below
-    // are present with available == true in a 59-command report.
-    for command in [
-        "diag contention --use-daemon",
-        "ee.daemon.telemetry",
-        "ee.daemon.write",
-        "ee.daemon.write_journal",
-        "daemon foreground decay_sweep",
-        "daemon foreground non-decay",
-        "daemon background",
-    ] {
-        let entry = find_object_by_string(commands, "commands", "name", command)?;
-        ensure_eq_bool(
-            bool_member(entry, "available")?,
-            true,
-            &format!("commands[{command}].available"),
-        )?;
-    }
-    workspace.log(
-        "assert_daemon_surface_inventory",
-        json!({
-            "event": "daemon_write_and_maintenance_surface_available",
-            "restores": [
-                "capabilities_report_advertises_group_commit_daemon_write_methods",
-                "capabilities_report_marks_daemon_maintenance_posture",
-            ],
-        }),
-    )?;
+    // So the honest statement about per-command availability is the loop above:
+    // it covers the six canonical core commands, and widening it needs a
+    // canonical path, not a path this tree forbids.
 
     for env_name in [
         "EE_AGENT_NAME",

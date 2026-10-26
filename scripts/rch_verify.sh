@@ -7272,17 +7272,41 @@ if [ "$COMMITTED_TREE" -eq 1 ]; then
     #     required false                admitted FALSE
     #     externalRequired true         external FALSE
     #
-    # 250 GB free against a 5 GiB minimum and it is still refused, because the
-    # `external` predicate does not recognise a disk-image-backed APFS volume as
-    # external -- and the APFS image is the arrangement CLAUDE.md now REQUIRES
-    # for this base. Note also that `required: false` does not exempt it: the
-    # overall verdict came back `admitted: false`, which on this lane is
-    # `rch_verify_pinned_build_admission_verdict_required` and exit 1 for every
+    # 250 GB free against a 5 GiB minimum and still refused. THE CAUSE IS A
+    # LEXICAL PREFIX, not a property of the device -- read from the source at
+    # HEAD, after a first reading that blamed disk images and was wrong:
+    #
+    #   src/core/disk_pressure.rs:23    EXTERNAL_BUILD_ROOT =
+    #                                     "/Volumes/USBNVME16TB/temp_agent_space"
+    #   src/core/disk_pressure.rs:2021  trusted_external_path = starts_with(root)
+    #                                     && no `..` component
+    #                                     && no symlink component
+    #
+    # The APFS image mounts at /Volumes/EERCHExport, which is outside that one
+    # hardcoded prefix, so `external` is false. Confirmed by probing a directory
+    # that differs ONLY in the prefix: a path under the external root reports
+    # `external: true, admitted: true`.
+    #
+    # `required: false` does not save it, and the reason is specific rather than
+    # a bug: build_admission_check_admitted is
+    # `(!required || has_space) && !untrusted && (!external_required || external)`
+    # -- `required` gates the CAPACITY arm only, and the external arm has no
+    # `required` term at all. On this lane an unadmitted check is
+    # `rch_verify_pinned_build_admission_verdict_required`, exit 1, every
     # dispatch.
     #
-    # So the wiring waits on
-    # bd-build-admission-external-predicate-rejects-image-5bfb4. Until then it
-    # is one `+=` here, and it is one line that must not be written.
+    # SO THERE IS A FIX WITH NO CODE CHANGE: attach the sparse image at a
+    # mountpoint UNDER the external root, e.g.
+    #   hdiutil attach -mountpoint \
+    #     /Volumes/USBNVME16TB/temp_agent_space/ee-rch-export <image>
+    # which is both xattr-native (no RCH-E410) and inside the prefix (admission
+    # passes). That is an environment change on a path CLAUDE.md names in
+    # several places, and detaching a volume mid-dispatch would break another
+    # agent's run, so it is written down rather than done unilaterally.
+    #
+    # Tracked on bd-build-admission-external-predicate-rejects-image-5bfb4.
+    # Until the base moves, this is one `+=` here, and one line that must not
+    # be written.
 fi
 
 FRANKEN_STACK_JSON="$(compute_franken_stack_json)"

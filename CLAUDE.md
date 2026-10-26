@@ -84,11 +84,38 @@ test result, and both name themselves precisely:
 | `denied` | a `checks[]` entry with `admitted: false`, plus `degraded_codes: ["build_admission_denied", "tmpdir_not_external"]` | set `TMPDIR` for the invocation |
 
 The first is near-circular: the lane that verifies the code wants a built binary
-to start. Binaries DO exist here even though `./target/` is empty, because
-`CARGO_TARGET_DIR` is redirected — look under
-`/Volumes/USBNVME16TB/temp_agent_space/cargo-target/{debug,release}/ee`, or use
-the installed `ee` on PATH. The preflight checks the ENVIRONMENT, not the code
-under test, so a stale binary is fine for it.
+to start. Use the installed `ee` on PATH. The preflight checks the ENVIRONMENT,
+not the code under test, so a stale binary is fine for it.
+
+**AND IT IS STALE — THERE IS NO RUNNABLE CURRENT `ee` ON THIS MAC.** Measured
+2026-10-26, and this is fine for admission and ruinous for anything else:
+
+| | |
+|---|---|
+| `~/.local/bin/ee --version` | **ee 0.14.2** |
+| `Cargo.toml` | **0.18.0** — four minor versions ahead |
+| `$CARGO_TARGET_DIR/debug/ee`, `release/ee` | **`ELF 64-bit LSB pie executable, x86-64`** — Linux binaries from remote builds; `exec format error` on this arm64 host |
+
+So the advice above to "look under `CARGO_TARGET_DIR`" was wrong and is removed:
+those files exist, are 2.1 GB and 159 MB, and cannot run here.
+
+**NEVER USE THAT BINARY AS EVIDENCE ABOUT PRODUCT BEHAVIOUR.** It cost two
+wrong changes in one session, both shipped before being caught:
+
+- a probe showed `ee situation compare` without `--dry-run` returning exit 7
+  `policy_denied`, so a deleted test asserting that was "restored". At HEAD
+  `handle_situation_compare` returns `ProcessExitCode::Success` unconditionally
+  and never reads `args.dry_run`, whose doc comment says why: "comparisons never
+  persist changes". The test had been deleted *with its premise*;
+- a probe showed seven daemon capability paths present with `available: true`,
+  so an e2e loop was added asserting exactly that. `src/cli/mod.rs:87082` lists
+  six of them as `forbidden_path` and fails with "non-canonical capability path
+  leaked" if they appear. The new assertion contradicted a test already in the
+  tree.
+
+Both behaviours changed inside the 0.14.2 → 0.18.0 gap. **Read the source at
+HEAD, or dispatch to the lane.** A binary probe is only evidence about the
+binary, and the one on PATH is not this tree.
 
 The second is **not a free-space failure, and reading it as one wastes the
 fix.** The denying check reported 30 GB available against a 1 GB minimum; what
