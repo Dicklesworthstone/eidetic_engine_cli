@@ -206,7 +206,7 @@ pub(super) fn apply(
                     candidate.why.push_str(&format!(
                         " Bead {} affinity added {:.6} to relevance ({}).",
                         context.bead_id,
-                        actual_bias,
+                        canonical_pack_explanation_delta(actual_bias),
                         features.join(", "),
                     ));
                     applied_count = applied_count.saturating_add(1);

@@ -8724,6 +8724,9 @@ fn context_pack_l2_feature_flags_hash(
     // Older responses classify elapsed breaches as within_budget and include
     // elapsed time in signed resource warnings. They cannot satisfy this policy.
     hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
+    // Old cached prose and Pack DNA can retain score noise even when numeric
+    // hash inputs already occupy the same fixed-point bin.
+    hash_labeled_bytes(&mut hasher, "pack_score_explanation_policy", b"q20_12.v1");
     // Reassemble older packs that filled the budget with an uncalibrated tail
     // before query-relative admission reached the complete candidate universe.
     hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v2");
@@ -10996,7 +10999,7 @@ fn apply_memory_tier_assignment_to_candidate(
         candidate.why,
         assignment.tier.as_str(),
         assignment.tier_score,
-        adjusted.into_inner() - base,
+        canonical_pack_explanation_delta(adjusted.into_inner() - base),
         assignment.required_evidence_preserved,
         assignment.policy_version,
     );
@@ -11194,8 +11197,12 @@ fn apply_personalized_pagerank_rerank(
             candidate.score_breakdown =
                 Some(PackScoreBreakdown::ppr(base, ppr_score, score.into_inner()));
             candidate.why = format!(
-                "{} Personalized PageRank rerank blended base={base:.4}, ppr={ppr_score:.4}, weight={:.2}, snapshot={}.",
-                candidate.why, ppr_weight, snapshot.id
+                "{} Personalized PageRank rerank blended base={:.4}, ppr={:.4}, weight={:.2}, snapshot={}.",
+                candidate.why,
+                canonical_pack_explanation_score(base),
+                canonical_pack_explanation_score(ppr_score),
+                ppr_weight,
+                snapshot.id
             );
             reranked_candidates = reranked_candidates.saturating_add(1);
         }
@@ -11783,10 +11790,13 @@ fn apply_context_profile_hits_boost(
         };
         candidate.relevance = score;
         candidate.why = format!(
-            "{} Context profile `{}` HITS boost blended base={base:.4}, authority={authority:.4} (weight {:.2}), hub={hub:.4} (weight {:.2}), snapshot={}.",
+            "{} Context profile `{}` HITS boost blended base={:.4}, authority={:.4} (weight {:.2}), hub={:.4} (weight {:.2}), snapshot={}.",
             candidate.why,
             profile.as_str(),
+            canonical_pack_explanation_score(base),
+            canonical_pack_explanation_score(authority),
             weights.authority,
+            canonical_pack_explanation_score(hub),
             weights.hub,
             snapshot.id
         );
@@ -12070,7 +12080,7 @@ fn apply_changed_symbol_context_boost(
                 "{} symbolBoost changedSymbol={} boost={:.4} reason={}.",
                 candidate.why,
                 symbol_match.canonical_name,
-                boosted - base,
+                canonical_pack_explanation_delta(boosted - base),
                 symbol_match.reason
             );
             boosted_candidates = boosted_candidates.saturating_add(1);
@@ -12884,8 +12894,8 @@ fn quality_score_direct_memory_candidates(
         candidate.why = format!(
             "{} {source_label} relevance {:.3} adjusted to {:.3} by the active memory-quality policy.",
             candidate.why,
-            graph_relevance,
-            relevance.into_inner(),
+            canonical_pack_explanation_score(graph_relevance),
+            canonical_pack_explanation_score(relevance.into_inner()),
         );
         true
     });
@@ -14467,6 +14477,24 @@ fn focus_candidate_why(
     )
 }
 
+/// Score prose is part of both item identity and the canonical prompt. Use
+/// the numeric hash's Q20.12 value here too, or four-decimal formatting can
+/// reintroduce sub-quantum jitter through `why` and the rendered-text digest.
+/// Ranking and public numeric scores retain their original precision.
+fn canonical_pack_explanation_score(value: impl Into<f64>) -> f64 {
+    f64::from(crate::pack::quantize_q20_12(value.into())) / 4096.0
+}
+
+fn canonical_pack_explanation_delta(value: impl Into<f64>) -> f64 {
+    let value = value.into();
+    let magnitude = canonical_pack_explanation_score(value.abs());
+    if value < 0.0 && magnitude != 0.0 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
 /// Generate a per-item `why` string for a context pack candidate.
 ///
 /// Bead bd-17c65.1.3 (A3) — replaced the previous 350-character math-
@@ -14505,6 +14533,8 @@ fn candidate_selection_why(
         query.to_owned()
     };
 
+    let search_score = canonical_pack_explanation_score(search_score);
+    let utility = canonical_pack_explanation_score(utility);
     let base = format!(
         "matched '{display_query}' via {search_source} (relevance {search_score:.4}, utility {utility:.4})",
     );
@@ -15619,7 +15649,7 @@ fn filter_context_pack_candidates_by_query_relative_elbow(
     let evidence_count = evidence_count.saturating_sub(evidence_candidates.len());
     let cutoffs = floors
         .iter()
-        .map(|(source, floor)| format!("{source}={floor:.4}"))
+        .map(|(source, floor)| format!("{source}={:.4}", canonical_pack_explanation_score(*floor)))
         .collect::<Vec<_>>()
         .join(", ");
     push_degradation(
@@ -15894,12 +15924,13 @@ fn apply_direct_evidence_query_relative_floor(
     candidates.retain(|candidate| candidate.item.relevance.into_inner() >= floor);
     let excluded = before - candidates.len();
     if excluded > 0 {
+        let display_floor = canonical_pack_explanation_score(floor);
         push_degradation(
             degraded,
             "context_evidence_below_relative_floor",
             ContextResponseSeverity::Low,
             format!(
-                "{excluded} imported evidence candidate(s) scored below {:.0}% of the best evidence match (relevance {floor:.4}) and were left out of the pack.",
+                "{excluded} imported evidence candidate(s) scored below {:.0}% of the best evidence match (relevance {display_floor:.4}) and were left out of the pack.",
                 DIRECT_EVIDENCE_RELATIVE_FLOOR * 100.0
             ),
             Some("Pass --relevance-floor 0 to include every admitted evidence match.".to_owned()),
@@ -16091,8 +16122,9 @@ fn direct_evidence_pack_candidate(
     let through = matched_through
         .map(|turn| format!(" through its source turn {turn}"))
         .unwrap_or_default();
+    let display_relevance = canonical_pack_explanation_score(relevance_score);
     let why = format!(
-        "matched '{query}' via {source}{through} (relevance {relevance_score:.4}, utility 0.5000); {selected}"
+        "matched '{query}' via {source}{through} (relevance {display_relevance:.4}, utility 0.5000); {selected}"
     );
     Some(DirectEvidencePackCandidate {
         linked_memory_id: span.memory_id,
@@ -17269,7 +17301,7 @@ mod relevance_floor_tests {
         assert!(degraded.iter().any(|entry| {
             entry.code == "context_filtered_results"
                 && entry.message.contains("heuristic_uncalibrated")
-                && entry.message.contains("lexical=0.3968")
+                && entry.message.contains("lexical=0.3967")
                 && entry
                     .message
                     .contains("8 memory, 8 procedural rule, and 8 imported evidence")
@@ -17344,7 +17376,7 @@ mod relevance_floor_tests {
         assert!(candidates.memories.iter().any(|candidate| {
             candidate.memory_id == MemoryId::from_uuid(uuid::Uuid::from_u128(6))
         }));
-        assert!(degraded[0].message.contains("lexical=0.8500"));
+        assert!(degraded[0].message.contains("lexical=0.8501"));
         assert!(!degraded[0].message.contains("semantic_fast="));
     }
 

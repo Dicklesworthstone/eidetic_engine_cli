@@ -2692,7 +2692,7 @@ mod tests {
         assert_eq!(promoted.section, PackSection::ProceduralRules);
         assert_eq!(promoted.relevance.into_inner(), 1.0);
         assert!((promoted.utility.into_inner() - 0.35).abs() < 1e-6);
-        assert!(promoted.why.contains("utility 0.3500"), "{}", promoted.why);
+        assert!(promoted.why.contains("utility 0.3501"), "{}", promoted.why);
         assert!(promoted.why.contains(&rule_id), "{}", promoted.why);
         let mut invalid_rule = rule.clone();
         invalid_rule.utility = f32::NAN;
@@ -9897,7 +9897,7 @@ pub fn unrelated_context() -> u64 {{
         );
         assert_eq!(
             why,
-            "matched 'prepare release' via hybrid (relevance 0.9123, utility 0.5568); via registered artifact art_0123456789abcdef01234567"
+            "matched 'prepare release' via hybrid (relevance 0.9124, utility 0.5569); via registered artifact art_0123456789abcdef01234567"
         );
     }
 
@@ -9914,7 +9914,7 @@ pub fn unrelated_context() -> u64 {{
         );
         assert_eq!(
             why,
-            "matched 'prepare release' via hybrid (relevance 0.9123, utility 0.5568); via applied procedural rule rule_0123456789abcdef01234567"
+            "matched 'prepare release' via hybrid (relevance 0.9124, utility 0.5569); via applied procedural rule rule_0123456789abcdef01234567"
         );
     }
 
@@ -9931,7 +9931,7 @@ pub fn unrelated_context() -> u64 {{
         );
         assert_eq!(
             why,
-            "matched 'prepare release' via hybrid (relevance 0.9123, utility 0.5568); via imported evidence ev_01234567890123456789012345"
+            "matched 'prepare release' via hybrid (relevance 0.9124, utility 0.5569); via imported evidence ev_01234567890123456789012345"
         );
     }
 
@@ -10875,7 +10875,7 @@ pub fn unrelated_context() -> u64 {{
 
     #[test]
     fn pack_hash_q20_12_collapses_sub_quantum_score_noise() -> Result<(), String> {
-        use super::compute_pack_hash;
+        use super::{ContextPackOutputOptions, compute_pack_hash_components};
         use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
             ContextRequest, PackDraft, PackDraftItem, PackProvenance, PackSection,
@@ -10883,7 +10883,18 @@ pub fn unrelated_context() -> u64 {{
             TokenBudget, quantize_q20_12,
         };
 
-        assert_eq!(quantize_q20_12(0.8), quantize_q20_12(0.8 + 1e-7));
+        // This pair crosses the four-decimal prose boundary but occupies
+        // one Q20.12 bin. A constant fixture `why` missed this real path.
+        let quiet = UnitScore::parse(0.800_049).map_err(|error| error.to_string())?;
+        let noisy = UnitScore::parse(0.800_051).map_err(|error| error.to_string())?;
+        assert_ne!(
+            format!("{:.4}", quiet.into_inner()),
+            format!("{:.4}", noisy.into_inner()),
+        );
+        assert_eq!(
+            quantize_q20_12(f64::from(quiet.into_inner())),
+            quantize_q20_12(f64::from(noisy.into_inner())),
+        );
         assert_ne!(quantize_q20_12(0.8), quantize_q20_12(0.81));
 
         let request = ContextRequest::from_query("q20.12 hash contract")
@@ -10918,6 +10929,14 @@ pub fn unrelated_context() -> u64 {{
         let draft_with = |relevance: UnitScore| {
             let mut scored = item.clone();
             scored.relevance = relevance;
+            scored.utility = relevance;
+            scored.why = candidate_selection_why(
+                &request.query,
+                "lexical",
+                relevance.into_inner(),
+                relevance.into_inner(),
+                None,
+            );
             PackDraft {
                 query: request.query.clone(),
                 budget: TokenBudget::default_context(),
@@ -10945,20 +10964,120 @@ pub fn unrelated_context() -> u64 {{
                 hash: None,
             }
         };
-        let quiet = UnitScore::parse(0.8).map_err(|error| error.to_string())?;
-        let noisy = UnitScore::parse(0.8001).map_err(|error| error.to_string())?;
         let shifted = UnitScore::parse(0.81).map_err(|error| error.to_string())?;
-        let hash_quiet = compute_pack_hash(&request, &draft_with(quiet), &[]);
-        let hash_noisy = compute_pack_hash(&request, &draft_with(noisy), &[]);
-        let hash_shifted = compute_pack_hash(&request, &draft_with(shifted), &[]);
-        assert_eq!(
-            hash_quiet, hash_noisy,
-            "sub-quantum relevance noise must not fork pack.hash"
-        );
+        let hash = |draft: &crate::pack::PackDraft| {
+            compute_pack_hash_components(
+                &request,
+                draft,
+                &[],
+                ContextPackOutputOptions::default(),
+                None,
+                None,
+                None,
+            )
+        };
+        let quiet_draft = draft_with(quiet);
+        let noisy_draft = draft_with(noisy);
         assert_ne!(
-            hash_quiet, hash_shifted,
+            quiet_draft.items[0].relevance,
+            noisy_draft.items[0].relevance
+        );
+        assert_ne!(quiet_draft.items[0].utility, noisy_draft.items[0].utility);
+        let hash_quiet = hash(&quiet_draft);
+        let hash_noisy = hash(&noisy_draft);
+        let hash_shifted = hash(&draft_with(shifted));
+        assert_eq!(
+            hash_quiet.digests, hash_noisy.digests,
+            "real score explanations must preserve both item and rendered-text identity"
+        );
+        assert_eq!(hash_quiet.composite_hash, hash_noisy.composite_hash);
+        assert_ne!(
+            hash_quiet.composite_hash, hash_shifted.composite_hash,
             "super-quantum relevance change must fork pack.hash"
         );
+        let mut changed = quiet_draft.clone();
+        changed.items[0].content.push_str(" changed source");
+        assert_ne!(hash_quiet.composite_hash, hash(&changed).composite_hash);
+        let mut changed = quiet_draft;
+        changed.items[0].provenance[0]
+            .note
+            .push_str(" changed provenance");
+        assert_ne!(hash_quiet.composite_hash, hash(&changed).composite_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_pack_explanation_deltas_preserve_direction_and_normalize_zero() {
+        for delta in [-0.250_049_f32, -0.250_051] {
+            assert_eq!(super::canonical_pack_explanation_delta(delta), -0.25);
+        }
+        assert_eq!(super::canonical_pack_explanation_delta(0.250_051), 0.25);
+        for delta in [-0.0_f32, -0.000_049, 0.000_049] {
+            assert_eq!(
+                super::canonical_pack_explanation_delta(delta).to_bits(),
+                0.0_f64.to_bits(),
+                "sub-quantum signed zero must not return through explanation text"
+            );
+        }
+    }
+
+    #[test]
+    fn native_rule_hash_uses_canonical_selection_explanations() -> TestResult {
+        let rule_id = "rule_0123456789abcdef01234567";
+        let (request, draft) = pack_hash_v2_fixture(vec![
+            PackProvenance::new(
+                ProvenanceUri::EeMemory(MemoryId::from_uuid(uuid::Uuid::from_u128(87))),
+                "source memory",
+            )
+            .map_err(|error| error.to_string())?,
+        ])?;
+        let with_rule = |score: f32| -> Result<crate::pack::PackDraft, String> {
+            let mut native = draft.clone();
+            let item = native.items.remove(0);
+            native.rule_items.push(crate::pack::PackRuleItem {
+                rank: 1,
+                rule_id: rule_id.to_owned(),
+                entity_revision: "rule-revision-1".to_owned(),
+                section: item.section,
+                content: item.content,
+                estimated_tokens: item.estimated_tokens,
+                relevance: UnitScore::parse(score).map_err(|error| error.to_string())?,
+                utility: item.utility,
+                provenance: item.provenance,
+                why: candidate_selection_why(&request.query, "hybrid", score, 0.5, Some(rule_id)),
+                trust: item.trust,
+            });
+            Ok(native)
+        };
+        let hash = |draft: &crate::pack::PackDraft| {
+            super::compute_pack_hash_components(
+                &request,
+                draft,
+                &[],
+                super::ContextPackOutputOptions::default(),
+                None,
+                None,
+                None,
+            )
+        };
+        let quiet = with_rule(0.800_049)?;
+        let noisy = with_rule(0.800_051)?;
+        assert_ne!(quiet.rule_items[0].relevance, noisy.rule_items[0].relevance);
+        assert!(quiet.rule_items[0].why.contains(rule_id));
+        assert_eq!(hash(&quiet).digests, hash(&noisy).digests);
+        assert_eq!(hash(&quiet).composite_hash, hash(&noisy).composite_hash);
+        assert_ne!(
+            hash(&quiet).composite_hash,
+            hash(&with_rule(0.81)?).composite_hash
+        );
+        let mut changed = quiet.clone();
+        changed.rule_items[0].content.push_str(" changed rule");
+        assert_ne!(hash(&quiet).composite_hash, hash(&changed).composite_hash);
+        let mut changed = quiet.clone();
+        changed.rule_items[0].provenance[0]
+            .note
+            .push_str(" changed provenance");
+        assert_ne!(hash(&quiet).composite_hash, hash(&changed).composite_hash);
         Ok(())
     }
 

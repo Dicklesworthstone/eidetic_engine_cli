@@ -8740,12 +8740,23 @@ pub fn render_pack_dna_markdown(pack_dna: &serde_json::Value) -> String {
         let _ = writeln!(output);
         let _ = writeln!(output, "## PPR Neighbors");
         for neighbor in ppr_neighbors {
+            // This block is part of the canonical pack text and therefore its
+            // hash. Match the score identity used by the pack itself; the JSON
+            // explanation keeps the original graph score for inspection.
+            let raw_score = json_object_field(neighbor, "score");
+            let score = raw_score.and_then(serde_json::Value::as_f64).map_or_else(
+                || json_markdown_value(raw_score),
+                |value| {
+                    let canonical = f64::from(crate::pack::quantize_q20_12(value)) / 4096.0;
+                    format!("{canonical:.4}")
+                },
+            );
             let _ = writeln!(
                 output,
                 "- rank={} `{}` score={}",
                 json_markdown_value(json_object_field(neighbor, "rank")),
                 json_field_string(neighbor, "memoryId").unwrap_or("unavailable"),
-                json_markdown_value(json_object_field(neighbor, "score"))
+                score
             );
         }
     }
@@ -25006,7 +25017,7 @@ mod tests {
         )?;
         ensure_contains(
             &markdown,
-            "- rank=1 `mem_rch_remote_required` score=0.41",
+            "- rank=1 `mem_rch_remote_required` score=0.4099",
             "pack DNA markdown ppr",
         )?;
         ensure_contains(
@@ -25023,6 +25034,35 @@ mod tests {
         let toon = render_pack_dna_toon(&value);
 
         ensure_toon_matches_json(&json, &toon, "decoded pack DNA TOON")
+    }
+
+    #[test]
+    fn pack_dna_score_text_is_stable_within_one_hash_quantum() {
+        let mut first = sample_pack_dna_value();
+        first["pprNeighbors"][0]["score"] = serde_json::json!(0.800_049);
+        let mut second = first.clone();
+        second["pprNeighbors"][0]["score"] = serde_json::json!(0.800_051);
+        assert_eq!(
+            render_pack_dna_markdown(&first),
+            render_pack_dna_markdown(&second),
+            "sub-quantum graph noise must not change the canonical prompt"
+        );
+        assert_ne!(
+            render_pack_dna_json(&first),
+            render_pack_dna_json(&second),
+            "machine-readable graph scores must retain their original precision"
+        );
+        second["pprNeighbors"][0]["score"] = serde_json::json!(0.801);
+        assert_ne!(
+            render_pack_dna_markdown(&first),
+            render_pack_dna_markdown(&second)
+        );
+        second = first.clone();
+        second["pprNeighbors"][0]["memoryId"] = serde_json::json!("mem_different_source");
+        assert_ne!(
+            render_pack_dna_markdown(&first),
+            render_pack_dna_markdown(&second)
+        );
     }
 
     #[test]

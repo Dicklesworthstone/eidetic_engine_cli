@@ -226,6 +226,25 @@ fn actual_float_score_change_never_exceeds_policy_cap() {
 }
 
 #[test]
+fn bead_bias_explanation_collapses_sub_quantum_noise_without_narrowing_f64() {
+    let quiet = f64::from(1.0_f32) - f64::from(0.999_949_4_f32);
+    let noisy = f64::from(1.0_f32) - f64::from(0.999_949_6_f32);
+    assert_ne!(format!("{quiet:.6}"), format!("{noisy:.6}"));
+    assert_eq!(
+        canonical_pack_explanation_delta(quiet),
+        canonical_pack_explanation_delta(noisy),
+    );
+
+    // Narrowing the actual f64 delta to f32 first rounds this value across
+    // the Q20.12 boundary, even though the supplied value is below it.
+    let below_boundary = 1.5_f64 / 4096.0 - 1e-12;
+    assert_eq!(
+        canonical_pack_explanation_delta(below_boundary),
+        1.0 / 4096.0
+    );
+}
+
+#[test]
 fn tracker_reads_are_bounded_and_missing_or_malformed_records_fall_back() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().canonicalize().unwrap();
