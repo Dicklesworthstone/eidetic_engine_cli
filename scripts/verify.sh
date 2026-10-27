@@ -2097,6 +2097,35 @@ run_stage "RCH Doc Examples Lint" "python3 scripts/check-rch-doc-examples.py --j
 run_stage "Action Pins Contract" "python3 scripts/check-action-pins.py"
 run_stage "Degraded Code Classification Contract" "python3 scripts/check-degraded-code-classified.py"
 run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation.py"
+# This repository is PUBLIC and its one disclosure control could not be run by
+# the person about to publish. `tests/fleet_identifier_guard.rs` ends in
+# `assert!(total_violations == 0)` and was RED at HEAD on 1173 carrying lines
+# across 3 files with nobody aware of it: cargo cannot run on the Mac checkout
+# at all, hosted Actions is off repo-wide, and verify.sh's own binary gate exits
+# before any stage there. A correct gate nobody can run is indistinguishable
+# from an absent one, and this is the class where that is most expensive --
+# publication is not reversible.
+#
+# The mirror is not a second opinion about what an identifier is. It PARSES the
+# token list, the allowlists, the skip rules AND the 25 fixture arms out of the
+# Rust guard at run time, so it carries no identifier of its own and cannot
+# drift; it refuses to report a census at all if that extraction comes back thin
+# (a silently-empty token list scans a carrying tree clean and reports green).
+# It is a ratchet because the remaining 1159 lines are in the tracker export,
+# which `br` regenerates from SQLite, so they are an operator-scheduled
+# migration (bd-42puv) rather than a text pass: a carrying file absent from
+# tests/fixtures/fleet_identifier_baseline.json fails, a listed file over its
+# ceiling fails, and a listed file that reaches ZERO also fails so the entry
+# gets deleted and the baseline can only shrink.
+#
+# 14s, which is the largest p50 in this block and is NOT sub-second, so it does
+# not take the "declares 1s" convention below. Measured over eight runs
+# (13.4-14.8s, median 14.1) scanning 4951 tracked files and 2.26M lines; the
+# cost is proportional to bytes and three correctness-preserving filters each
+# measured flat, which the script records so the next reader does not re-run
+# them. The non-benchmark readiness total goes 578 -> 592 of 608 and no
+# neighbour's p50 was retuned to make room.
+run_stage "Fleet Identifier Census Ratchet" "python3 scripts/check-fleet-identifier-census.py"
 run_stage "Graph Metric FNX Routing Contract" "python3 scripts/check-graph-metric-fnx-routing.py"
 run_stage "Production Reachability Contract" "python3 scripts/check-production-reachability.py"
 run_stage "RCH Remediation Guidance Contract" "python3 scripts/check-rch-remediation-guidance.py"

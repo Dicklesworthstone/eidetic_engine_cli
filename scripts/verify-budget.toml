@@ -530,6 +530,29 @@ expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]
+name = "Fleet Identifier Census Ratchet"
+# MEASURED, not estimated, and deliberately the one stage in the sub-second
+# Python contract block that does not take that block's "declares 1s"
+# convention. Eight runs on the Mac checkout, 2026-10-27:
+#   median 14.1   min 13.4   max 14.8   spread 1.4
+# It scans every git-tracked file -- 4951 files, 2.26M lines -- because that is
+# exactly the set this public repository publishes, and the cost is
+# proportional to bytes scanned. Three correctness-preserving filters were
+# tried and each measured flat (the script records all three, with the reason,
+# so the next reader does not repeat the experiment), so 14s is the honest
+# price of the scan rather than a number waiting to be optimised away.
+#
+# The 1.5x factor puts the ceiling at 21s, which is 6.2s of headroom over the
+# slowest observed run. That is deliberate for this stage: it reads 4951 files
+# off disk, so a cold page cache is its realistic worst case, not a regression.
+#
+# No ceiling raise was taken. The non-benchmark readiness total was 578/608
+# before this stage and is 592/608 after it; `total_expected_seconds` stays at
+# 608 and no neighbour's p50 was retuned to make room.
+expected_seconds_p50 = 14
+regression_factor = 1.5
+
+[[stage]]
 name = "Graph Metric FNX Routing Contract"
 expected_seconds_p50 = 1
 regression_factor = 1.5
