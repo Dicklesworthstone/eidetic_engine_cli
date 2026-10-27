@@ -1,5 +1,24 @@
 # Migrating from `ee` v0.1 to v0.2 (bd-17c65.11.5 / K5)
 
+## Verified retrieval-tuning application
+
+`ee.shadow.retrieval_tuning_report.v1` keeps its public shape. Promotion now
+requires a matching private evaluator receipt and an append-only attestation
+in the addressed database. Regenerate older reports with `ee shadow run`;
+editing or rehashing a report cannot make it eligible. Default persistence
+writes both report files and an audit receipt; `--no-persist` saves none of
+them. Promotion rechecks the current evidence, source binding, generation,
+policy gates, and effective configuration before applying weights.
+
+Promotion/demotion publish config through a durable intent and an atomic file
+replacement, with recovery for an interrupted completion audit. Demotion owns
+only `search.lexical_weight`, `search.semantic_weight`, and
+`search.graph_weight`: unrelated later edits survive, conflicting manual
+weight changes are refused, and unchanged config restores prior bytes exactly.
+Legacy promotion audits without source binding and owned-field snapshots are
+retained but cannot authorize automatic demotion. No public response schema or
+database table migration is introduced by these authority and recovery checks.
+
 ## Optional explanation budgets
 
 `runtime.explanation_budget_ms` and `EE_EXPLANATION_BUDGET_MS` opt into a

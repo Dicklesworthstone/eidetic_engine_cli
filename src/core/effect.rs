@@ -1772,10 +1772,6 @@ impl EffectManifest {
             CommandEffect::read_only_db("migrate status", "Report pending schema migrations"),
             CommandEffect::read_only("mcp manifest", "Inspect optional MCP adapter manifest"),
             CommandEffect::read_only("mcp validate", "Validate optional MCP adapter contracts"),
-            CommandEffect::read_only_db(
-                "shadow run",
-                "Execute a shadowable policy evaluator offline (ADR 0070): label extraction, seeded read-only query replay, deterministic candidate sweep, report emission; writes nothing",
-            ),
             CommandEffect::read_only_db("memory drift", "Report read-only memory provenance drift"),
             CommandEffect::read_only_db("memory history", "Show memory revision history"),
             CommandEffect::read_only_db("memory list", "List memories"),
@@ -2989,20 +2985,76 @@ impl EffectManifest {
                 vec!["memories", "memory_seals", "search_index_jobs", "audit_log"],
                 "Verify supplied bytes against a sealed memory's commitment; on match publish the content through the revise path, mark the seal revealed, and audit memory.reveal — a mismatch mutates nothing and audits memory.reveal_failed (bd-sealed-preregistration-memory-b67be)",
             ),
-            // The promoted/demoted config is a workspace file, not a table
-            // (bd-hb5os).
-            CommandEffect::durable_write_with_workspace_files(
-                "shadow promote",
-                vec!["audit_log"],
-                vec![".ee/config.toml"],
-                "Apply the persisted promotable tuning report's [search] fusion-weight overlay to <workspace>/.ee/config.toml via toml_edit, recording the full prior config bytes in the promotion audit; refusals (missing/stale/abstained/non-promotable report) are typed exit-7 policy denials and dry-run writes nothing (ADR 0070 §5)",
-            ),
-            CommandEffect::durable_write_with_workspace_files(
-                "shadow demote",
-                vec!["audit_log"],
-                vec![".ee/config.toml"],
-                "Restore the pre-promotion config.toml bytes from the promotion audit (byte-identical; an absent prior restores as empty, never a deletion) and record the demotion",
-            ),
+            {
+                let mut run = CommandEffect::durable_write_with_workspace_files(
+                    "shadow run",
+                    vec!["audit_log"],
+                    vec![
+                        ".ee/shadow/retrieval_tuning_report.json",
+                        ".ee/shadow/retrieval_tuning_authority.json",
+                    ],
+                    "Evaluate outcome-tuned retrieval weights offline and persist the report, source-bound authority receipt, and database attestation; --no-persist evaluates without durable writes",
+                );
+                run.mutation_contract.transaction_scope = Some(
+                    "write-owner fence; append evaluation attestation before atomic report and receipt publication",
+                );
+                run.mutation_contract.idempotency_key =
+                    Some("workspace id plus report hash plus authority hash");
+                run.mutation_contract.db_generation_effect = "source DB generation unchanged";
+                run.mutation_contract.index_generation_effect = "none";
+                run.mutation_contract.dry_run_behavior = Some(
+                    "--no-persist returns the evaluation without report files, authority receipt, or audit writes",
+                );
+                run.mutation_contract.recovery_behavior = "rerun evaluation after incomplete file publication; promotion requires matching report, authority receipt, and database attestation";
+                run.runtime_contract.partial_progress_policy = "evaluation is read-only; persistence attests before publishing files, and mismatched or incomplete files cannot authorize promotion";
+                run
+            },
+            {
+                let mut promote = CommandEffect::durable_write_with_workspace_files(
+                    "shadow promote",
+                    vec!["audit_log"],
+                    vec![".ee/config.toml"],
+                    "Verify evaluator authority, policy gates, current evidence and configuration before applying the three [search] fusion weights; append durable intent before atomic config publication and completion audit; dry-run writes nothing",
+                );
+                promote.idempotency = IdempotencyClass::Idempotent;
+                promote.mutation_contract.transaction_scope = Some(
+                    "write-owner fence across validation, intent audit, atomic config replacement, and completion audit",
+                );
+                promote.mutation_contract.idempotency_key =
+                    Some("workspace id plus evaluator authority plus config transition intent");
+                promote.mutation_contract.db_generation_effect = "source DB generation unchanged";
+                promote.mutation_contract.index_generation_effect =
+                    "none; later retrieval uses the published config weights";
+                promote.mutation_contract.dry_run_behavior = Some(
+                    "validate and return the proposed config diff without config or audit writes",
+                );
+                promote.mutation_contract.recovery_behavior = "completion-audit failure compare-and-restores only the published bytes; retry can finish an already-published intent even after evidence changes";
+                promote.runtime_contract.partial_progress_policy = "durable intent precedes config publication; recovery never overwrites an intervening config edit";
+                promote
+            },
+            {
+                let mut demote = CommandEffect::durable_write_with_workspace_files(
+                    "shadow demote",
+                    vec!["audit_log"],
+                    vec![".ee/config.toml"],
+                    "Restore only the promotion-owned fusion weights, preserving unrelated later config edits and refusing conflicting weight edits; unchanged config restores prior bytes exactly, with an absent prior represented by an empty file",
+                );
+                demote.idempotency = IdempotencyClass::Idempotent;
+                demote.mutation_contract.transaction_scope = Some(
+                    "write-owner fence across recovery, owned-field validation, intent audit, atomic config replacement, and completion audit",
+                );
+                demote.mutation_contract.idempotency_key =
+                    Some("workspace id plus promotion audit plus demotion intent");
+                demote.mutation_contract.db_generation_effect = "source DB generation unchanged";
+                demote.mutation_contract.index_generation_effect =
+                    "none; later retrieval uses the restored config weights";
+                demote.mutation_contract.dry_run_behavior = Some(
+                    "validate and return the owned-field restoration diff without config or audit writes",
+                );
+                demote.mutation_contract.recovery_behavior = "retry completes a matching published intent; repeated demotion is a no-op; unrelated config edits survive and conflicting owned-field edits are refused";
+                demote.runtime_contract.partial_progress_policy = "durable intent precedes config publication; failed completion restores only unchanged published bytes, never a later edit";
+                demote
+            },
             CommandEffect::durable_write(
                 "memory promote-global",
                 vec!["memories", "audit_log"],

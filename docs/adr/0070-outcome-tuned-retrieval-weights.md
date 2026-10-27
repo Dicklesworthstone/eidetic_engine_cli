@@ -4,6 +4,11 @@ Status: proposed
 Date: 2026-06-10
 Bead: bd-2tehh.1 (epic bd-2tehh, 2026-06 idea-wizard wave)
 
+Implementation status: the three fusion-weight evaluator, explicit promotion,
+source-bound authority, recoverable publication, and owned-field demotion are
+implemented. The post-promotion `retrieval_weights_overlay_active` response
+notice remains planned; it is not currently emitted.
+
 ## Context
 
 Retrieval mixing weights are global constants (`SearchScoringConfig` in
@@ -63,15 +68,17 @@ score(vector) = Σ_q  norm_q · Σ_(m,s,w)  w · gain(s) / log2(1 + rank_q(m))
 
 ### 3. Search space (deterministic, guard-railed)
 
-- Enumerated, no RNG: incumbent vector + a fixed offset grid (±0.05, ±0.10
-  on each of lexical/semantic/graph weights and recency tau ±10d) +
+- Enumerated, no RNG: actual live incumbent vector + a fixed offset grid
+  (±0.05, ±0.10 on each of lexical/semantic/graph weights) +
   bounded coordinate descent around the grid winner (≤ 2 rounds, step
   halving). Total ≤ ~40 vectors, evaluated in deterministic order with
   `&Cx` cancellation checkpoints between vectors.
 - **Clamps** (a degenerate label set must not produce a pathological
   overlay): lexical and semantic weights ∈ [0.2, 0.7]; graph weight
-  ∈ [0.0, 0.3]; recency tau ∈ [7, 120] days. Clamps live in code next to
-  the policy, not in user config.
+  ∈ [0.0, 0.3]. Clamps apply to candidate alternatives; the incumbent is
+  scored as configured so the baseline reflects live behavior. Clamps live
+  in code next to the policy, not in user config. Recency-tau tuning is not
+  part of the implemented fusion-weight overlay.
 
 ### 4. Evidence gate (abstention contract)
 
@@ -92,23 +99,37 @@ the winner to beat the incumbent by ≥ 3% relative metric margin
   executes the evaluator and persists an
   `ee.shadow.retrieval_tuning_report.v1` (incumbent score, per-candidate
   scores, winner, evidence counts, label-set hash, abstention reason when
-  applicable). Score/verdict reuse the existing
-  `ee.shadow_policy_score/verdict.v1` contracts.
-- **Promote**: bd-2tehh.3 first AUDITS the existing
-  `promote_shadow_policy_from_score()` semantics (what it mutates, what it
-  audits, what reaches it) and EXTENDS it — no parallel path — to: validate
-  the verdict (margin, evidence gate, generation freshness), write the
-  `[search]` overlay keys into `<workspace>/.ee/config.toml` via
-  `toml_edit` (format-preserving), record an audit row with policy id,
-  report hash, overlay hash, and PRIOR VALUES (RULE 1: nothing lost), and
-  print the exact diff. Refusal is exit 7 with structured reasons.
-- **Demote** restores the prior values from the audit trail; config
-  restoration is byte-identical (tested).
-- Post-promotion honesty: subsequent search/pack responses carry
+  applicable). Persistence also writes a private authority sidecar and an
+  append-only database attestation binding both hashes. The receipt binds
+  workspace/database paths, schema, raw and effective config, evaluation time,
+  evidence extraction settings, and policy gates. `--no-persist` evaluates
+  without saving files or audit rows; the public report shape remains v1.
+- **Promote** validates the attested report, candidate walk and bounds,
+  incumbent/winner scores, nonzero evidence thresholds, strict improvement,
+  minimum 3% margin, current generation, re-extracted labels, and effective
+  configuration. A report edited to say `promotable=true` has no authority.
+  Under the write-owner fence, a durable intent records the complete prior
+  and proposed config bytes before atomic `toml_edit` publication. A final
+  exact-byte/effective-config check refuses an intervening edit. Completion
+  is audited separately; `--dry-run` writes nothing. Refusal is exit 7 with
+  structured reasons.
+- **Recovery** uses the durable intent to finish an already-published
+  transition even after later evidence changes. Completion-audit failure
+  compare-and-restores only this operation's published bytes, never a later
+  edit. Files and database records are separate durability boundaries.
+- **Demote** restores only lexical, semantic, and graph weights from the
+  promotion audit. Unchanged config restores byte-identically; unrelated
+  later settings/comments survive, and conflicting owned-weight edits cause
+  refusal. Repeated demotion is a no-op. Recovery can undo a published intent
+  after a newer report replaces the report files. An absent prior config
+  restores as empty without deletion. Legacy reports must be reevaluated;
+  legacy promotion audits lacking source binding and owned-field snapshots
+  cannot authorize automatic demotion.
+- Planned post-promotion honesty: subsequent search/pack responses should carry
   `retrieval_weights_overlay_active` (info, with the overlay hash) so
   ranking changes are attributable. **Pack hashes legitimately change at
-  promotion** — config is a pack-hash input and THAT IS CORRECT; eval
-  fixtures pin configs (asserted in the e2e).
+  promotion** — config is a pack-hash input. The response notice is not yet
+  emitted and the sparse CLI fixture does not assert it.
 
 ### 6. Determinism story (the part reviewers probe)
 
@@ -122,7 +143,7 @@ per-query dynamics, no hidden state.
 | Code | Severity | Class | Trigger |
 |---|---|---|---|
 | `insufficient_outcome_evidence` | info | response_time | evidence gate not met; evaluator abstained |
-| `retrieval_weights_overlay_active` | info | response_time | a promoted overlay is in effect (carries overlay hash) |
+| `retrieval_weights_overlay_active` | info | response_time | planned: a promoted overlay is in effect (carries overlay hash); not emitted yet |
 
 Fixture/taxonomy files land with the emitting commits (bd-2tehh.2/.3).
 
@@ -160,19 +181,22 @@ Fixture/taxonomy files land with the emitting commits (bd-2tehh.2/.3).
   micro-cases; enumeration determinism (two runs ⇒ byte-identical
   reports); evidence-gate abstention; clamp enforcement; cancellation
   mid-sweep leaves no partial state; injection-point isolation.
-- Unit (bd-2tehh.3): existing-promote-path audit findings recorded;
-  promote validation matrix (stale report, abstained report, margin miss,
-  generation drift); toml_edit format preservation; demote byte-identity;
-  audit completeness incl. prior values.
+- Unit (bd-2tehh.3): authenticated promotion and rollback; tampered and
+  rehashed reports/receipts; bounds, margin and evidence gates; config and
+  outcome staleness; database binding; failed intent/completion audits;
+  crash recovery after evidence changes or report replacement; byte identity
+  for untouched config; preservation of unrelated edits and conflicting
+  owned-field refusal; actual unclamped incumbent scoring.
 - Property (bd-2tehh.4): evaluator monotonicity — adding a helpful label
   for a memory never lowers the score of vectors ranking it higher.
-- E2E (bd-2tehh.4): `scripts/e2e_shadow_retrieval_tuning.sh` — planted
-  semantic-bias corpus via real CLI outcomes; run → winner; sparse fixture
-  → exit-7 abstention on promote; promote on the planted fixture →
-  overlay diff + audit + `retrieval_weights_overlay_active` + ranking
-  actually changed + pack hash changed attributably; demote → byte-
-  identical config + ranking reverts. `ee.test_event.v1` logging
-  throughout.
+- E2E (bd-2tehh.4): `scripts/e2e_shadow_retrieval_tuning.sh` records real
+  CLI pack-item outcomes on a sparse fixture, verifies abstention, then edits
+  the report into a fabricated winner and requires exit-7 refusal for both
+  dry-run and live promotion with unchanged config. Demotion without a
+  promotion also refuses; an authentic rerun restores the abstained report.
+  Positive promotion/rollback are covered by core tests with persisted
+  evidence. A full planted-corpus CLI winner/ranking reversal remains a
+  separate E2E coverage gap. `ee.test_event.v1` logging is retained.
 
 ## Appendix: `ee.shadow.retrieval_tuning_report.v1` (normative draft)
 

@@ -2363,10 +2363,15 @@ The retrieval-weights domain is the first with a full runnable loop:
 `ee shadow run --policy candidate.retrieval.outcome_tuned_weights --json`
 evaluates outcome-labeled evidence offline and persists an
 `ee.shadow.retrieval_tuning_report.v1` report (abstaining honestly below the
-evidence gate); `ee shadow promote [--dry-run]` applies a promotable winner
-as an audited `[search]` config overlay carrying the full prior bytes, and
-`ee shadow demote` restores those bytes exactly. Determinism is preserved
-because adaptation is an explicit, reviewable config change — see
+evidence gate), a private source receipt, and a database evaluation attestation.
+Use `--no-persist` to evaluate without saving files or audit rows.
+`ee shadow promote [--dry-run]` verifies that evidence, configuration, and
+source store still match the evaluator before applying the winner. A durable
+audit intent precedes atomic config publication, making interrupted changes
+recoverable. `ee shadow demote` restores the three tuning-owned weights while
+preserving unrelated later config edits; an untouched config restores its
+prior bytes exactly. Older reports without evaluator authority must be rerun.
+Determinism is preserved because adaptation is an explicit config change — see
 [docs/agent-ux/retrieval-adaptation.md](docs/agent-ux/retrieval-adaptation.md).
 
 ---

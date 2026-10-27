@@ -77,7 +77,7 @@ const PACK_METADATA_QUERY_CHAR_CAP: usize = 2048;
 
 /// Tuning knobs for label extraction (config-file wiring lands with the CLI
 /// slice; core takes explicit values so extraction stays deterministic).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelExtractionConfig {
     /// Maximum minutes a `search.returned_mem` audit row may precede a
     /// memory outcome and still label it (weak source).
@@ -1041,7 +1041,6 @@ pub fn evaluate_fusion_candidates(
         .collect();
     let grouped = group_label_gains(labels);
 
-    let incumbent = incumbent.clamped();
     let incumbent_score = CandidateScore {
         weights: incumbent,
         score: score_candidate(&replays_by_query, &grouped, incumbent.to_fusion()),
@@ -1131,7 +1130,7 @@ pub const INSUFFICIENT_OUTCOME_EVIDENCE_CODE: &str = "insufficient_outcome_evide
 const REPORT_HASH_DOMAIN: &str = "ee.shadow.retrieval_tuning_report.hash.v1";
 
 /// ADR §4 evidence gate. Tune the thresholds with data; never remove them.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RetrievalTuningGateConfig {
     pub min_triples: usize,
     pub min_queries: usize,
@@ -1162,6 +1161,26 @@ pub struct RetrievalTuningReport {
     pub promotable: bool,
     /// `blake3:<hex>` over the canonical report JSON (without this field).
     pub report_hash: String,
+    /// Only the evaluator can bind a report to persisted source authority.
+    /// This is deliberately absent from the stable public report JSON.
+    authority: Option<PromotionAuthority>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromotionAuthority {
+    schema: String,
+    report_hash: String,
+    workspace_id: String,
+    workspace_path: String,
+    database_path: String,
+    database_schema: Option<u32>,
+    config_hash: String,
+    effective_config_hash: String,
+    effective_context_hash: String,
+    as_of: DateTime<Utc>,
+    extraction: LabelExtractionConfig,
+    gate: RetrievalTuningGateConfig,
 }
 
 /// Apply the ADR §4 evidence gate and assemble the report.
@@ -1176,6 +1195,15 @@ pub fn assemble_retrieval_tuning_report(
     db_generation: u64,
     gate: &RetrievalTuningGateConfig,
 ) -> Result<RetrievalTuningReport, ShadowTuningError> {
+    if gate.min_triples == 0
+        || gate.min_queries == 0
+        || !gate.promote_margin.is_finite()
+        || gate.promote_margin < RetrievalTuningGateConfig::default().promote_margin
+    {
+        return Err(ShadowTuningError::Configuration {
+            message: "retrieval tuning requires nonzero evidence thresholds and a promotion margin of at least 0.03".to_owned(),
+        });
+    }
     let abstained =
         labels.triples.len() < gate.min_triples || labels.distinct_queries < gate.min_queries;
     if abstained != evaluation.is_none() {
@@ -1205,6 +1233,7 @@ pub fn assemble_retrieval_tuning_report(
         evaluation,
         promotable,
         report_hash: String::new(),
+        authority: None,
     };
     let canonical = retrieval_tuning_report_json_value(&report, false).to_string();
     let mut input = Vec::new();
@@ -1229,31 +1258,83 @@ pub async fn run_retrieval_tuning_with_cx(
     gate: &RetrievalTuningGateConfig,
 ) -> Result<RetrievalTuningReport, ShadowTuningError> {
     shadow_checkpoint(cx)?;
+    if extraction.label_window_minutes == 0 {
+        return Err(ShadowTuningError::Configuration {
+            message: "retrieval tuning requires a nonzero label window".to_owned(),
+        });
+    }
+    let authority = capture_promotion_authority(
+        workspace_path,
+        connection,
+        workspace_id,
+        as_of,
+        extraction,
+        gate,
+    )?;
     let incumbent = TuningWeights::incumbent_for_workspace(workspace_path)?;
+    let before_generation = connection
+        .get_workspace_generation(workspace_id)
+        .map_err(|error| storage_error("read workspace generation", &error))?
+        .unwrap_or(0);
     let labels = extract_labeled_triples(cx, connection, workspace_id, extraction, as_of)?;
     let db_generation = connection
         .get_workspace_generation(workspace_id)
         .map_err(|error| storage_error("read workspace generation", &error))?
         .unwrap_or(0);
-    if labels.triples.len() < gate.min_triples || labels.distinct_queries < gate.min_queries {
-        return assemble_retrieval_tuning_report(labels, None, db_generation, gate);
-    }
-    let queries: BTreeSet<String> = labels
-        .triples
-        .iter()
-        .map(|triple| triple.query.clone())
-        .collect();
-    let replays = collect_query_replays_with_cx(
-        cx,
-        connection,
+    let evaluation =
+        if labels.triples.len() < gate.min_triples || labels.distinct_queries < gate.min_queries {
+            None
+        } else {
+            let queries = labels
+                .triples
+                .iter()
+                .map(|triple| triple.query.clone())
+                .collect();
+            let replays = collect_query_replays_with_cx(
+                cx,
+                connection,
+                workspace_path,
+                database_path,
+                &queries,
+                as_of,
+            )
+            .await?;
+            Some(evaluate_fusion_candidates(
+                cx,
+                &replays.replays,
+                &labels.triples,
+                incumbent,
+            )?)
+        };
+    let after_generation = connection
+        .get_workspace_generation(workspace_id)
+        .map_err(|error| storage_error("recheck workspace generation", &error))?
+        .unwrap_or(0);
+    let after_authority = capture_promotion_authority(
         workspace_path,
-        database_path,
-        &queries,
+        connection,
+        workspace_id,
         as_of,
-    )
-    .await?;
-    let evaluation = evaluate_fusion_candidates(cx, &replays.replays, &labels.triples, incumbent)?;
-    assemble_retrieval_tuning_report(labels, Some(evaluation), db_generation, gate)
+        extraction,
+        gate,
+    )?;
+    let after_labels = extract_labeled_triples(cx, connection, workspace_id, extraction, as_of)?;
+    if before_generation != db_generation
+        || after_generation != db_generation
+        || after_authority != authority
+        || after_labels != labels
+    {
+        return Err(storage_error(
+            "evaluate retrieval weights",
+            &"source or configuration changed during evaluation; rerun shadow run",
+        ));
+    }
+    let mut report = assemble_retrieval_tuning_report(labels, evaluation, db_generation, gate)?;
+    report.authority = Some(PromotionAuthority {
+        report_hash: report.report_hash.clone(),
+        ..authority
+    });
+    Ok(report)
 }
 
 /// Synchronous entry for CLI handlers: runs the full tuning pass under one
@@ -1388,18 +1469,20 @@ pub fn render_retrieval_tuning_report_json(report: &RetrievalTuningReport) -> St
 
 // ============ S4: promotion mechanics (ADR 0070 §5, bd-2tehh.3) ============
 //
-// Live ranking changes ONLY through this explicit promote step: it validates
-// the persisted report (schema, abstention, promotability, dbGeneration
-// freshness), writes the [search] fusion-weight overlay into the workspace
-// config via toml_edit, and records an audit row carrying the ENTIRE prior
-// config.toml bytes — so demote restores the file byte-identically (RULE 1:
-// nothing lost; a config that did not exist restores as an empty file, never
-// a deletion).
+// Live ranking changes only through an evaluated, database-attested receipt.
+// Promotion binds source evidence and effective configuration; an audit intent
+// precedes atomic config publication. Demotion restores exact original bytes
+// when untouched and only owned fields when unrelated settings changed. A
+// previously absent config restores as empty, never as a file deletion.
 
 /// Persisted report location under the workspace store directory.
 pub const RETRIEVAL_TUNING_REPORT_FILENAME: &str = "retrieval_tuning_report.json";
 pub const PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION: &str = "shadow.promote_retrieval_weights";
 pub const DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION: &str = "shadow.demote_retrieval_weights";
+const OVERLAY_INTENT_AUDIT_ACTION: &str = "shadow.retrieval_weights_intent";
+const EVALUATION_AUDIT_ACTION: &str = "shadow.retrieval_tuning_evaluated";
+const PROMOTION_AUTHORITY_SCHEMA: &str = "ee.shadow.retrieval_promotion_authority.v1";
+const OWNED_WEIGHT_KEYS: [&str; 3] = ["lexical_weight", "semantic_weight", "graph_weight"];
 
 /// `<workspace>/.ee/shadow/retrieval_tuning_report.json`.
 #[must_use]
@@ -1415,14 +1498,57 @@ pub fn persist_retrieval_tuning_report(
     workspace_path: &Path,
     report: &RetrievalTuningReport,
 ) -> Result<std::path::PathBuf, ShadowTuningError> {
-    let path = shadow_report_path(workspace_path);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| storage_error("create shadow report directory", &error))?;
+    let authority = report.authority.as_ref().ok_or_else(|| {
+        storage_error(
+            "persist shadow report",
+            &"report has no evaluator source receipt; rerun shadow run",
+        )
+    })?;
+    if authority.report_hash != report.report_hash {
+        return Err(storage_error(
+            "persist shadow report",
+            &"report and source receipt disagree",
+        ));
     }
-    std::fs::write(&path, render_retrieval_tuning_report_json(report))
-        .map_err(|error| storage_error("write shadow report", &error))?;
-    Ok(path)
+    let workspace = workspace_path
+        .canonicalize()
+        .map_err(|error| storage_error("bind report destination", &error))?;
+    if workspace.to_string_lossy().as_ref() != authority.workspace_path.as_str() {
+        return Err(storage_error(
+            "persist shadow report",
+            &"report belongs to a different workspace",
+        ));
+    }
+    let receipt = serde_json::to_string(authority)
+        .map_err(|error| storage_error("encode shadow source receipt", &error))?;
+    let authority_hash = content_digest(&receipt);
+    let connection = DbConnection::open_file(&authority.database_path)
+        .map_err(|error| storage_error("open tuning receipt database", &error))?;
+    connection.with_write_owner_fence(
+        |error| storage_error("own tuning receipt publication", &error),
+        || {
+            // The typed evaluator result owns the receipt. Files alone cannot
+            // manufacture this append-only database attestation by recomputing
+            // checksums over invented scores or weakened evidence thresholds.
+            if !evaluation_attested(&connection, &authority.workspace_id, authority)? {
+                insert_overlay_audit(
+                    &connection,
+                    &authority.workspace_id,
+                    EVALUATION_AUDIT_ACTION,
+                    &serde_json::json!({
+                        "schema": "ee.shadow.retrieval_evaluation_receipt.v1",
+                        "policyId": RETRIEVAL_TUNING_POLICY_ID,
+                        "reportHash": report.report_hash,
+                        "authorityHash": authority_hash,
+                    }),
+                )?;
+            }
+            let path = shadow_report_path(workspace_path);
+            atomic_shadow_write(&path, &render_retrieval_tuning_report_json(report))?;
+            atomic_shadow_write(&authority_path(workspace_path), &receipt)?;
+            Ok(path)
+        },
+    )
 }
 
 /// Typed promote refusal (exit-7 material at the CLI).
@@ -1479,12 +1605,379 @@ fn workspace_config_path(workspace_path: &Path) -> std::path::PathBuf {
 }
 
 fn read_config_bytes(workspace_path: &Path) -> Result<(String, bool), ShadowTuningError> {
-    let path = workspace_config_path(workspace_path);
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => Ok((contents, true)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((String::new(), false)),
-        Err(error) => Err(storage_error("read workspace config.toml", &error)),
+    read_shadow_file(&workspace_config_path(workspace_path))
+        .map(|contents| contents.map_or_else(|| (String::new(), false), |text| (text, true)))
+}
+
+fn read_shadow_file(path: &Path) -> Result<Option<String>, ShadowTuningError> {
+    crate::core::config_surface::read_optional_config_contents(path)
+        .map_err(|error| storage_error("read shadow state", &error))
+}
+
+fn authority_path(workspace: &Path) -> std::path::PathBuf {
+    workspace.join(".ee/shadow/retrieval_tuning_authority.json")
+}
+
+fn content_digest(text: &str) -> String {
+    format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())
+}
+
+fn config_digest(text: &str, _existed: bool) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"ee.shadow.config.v1\0");
+    hash.update(text.as_bytes());
+    format!("blake3:{}", hash.finalize().to_hex())
+}
+
+fn capture_promotion_authority(
+    workspace: &Path,
+    connection: &DbConnection,
+    workspace_id: &str,
+    as_of: DateTime<Utc>,
+    extraction: &LabelExtractionConfig,
+    gate: &RetrievalTuningGateConfig,
+) -> Result<PromotionAuthority, ShadowTuningError> {
+    let (config, existed) = read_config_bytes(workspace)?;
+    let effective_config_hash = effective_config_digest(workspace)?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| storage_error("bind tuning workspace", &error))?;
+    let crate::db::DatabaseLocation::File(database) = connection.location() else {
+        return Err(storage_error(
+            "bind tuning database",
+            &"persisted tuning requires a file database",
+        ));
+    };
+    let database = database
+        .canonicalize()
+        .map_err(|error| storage_error("bind tuning database", &error))?;
+    Ok(PromotionAuthority {
+        schema: PROMOTION_AUTHORITY_SCHEMA.to_owned(),
+        report_hash: String::new(),
+        workspace_id: workspace_id.to_owned(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        database_path: database.to_string_lossy().into_owned(),
+        database_schema: connection
+            .schema_version()
+            .map_err(|error| storage_error("bind tuning schema", &error))?,
+        config_hash: config_digest(&config, existed),
+        effective_config_hash,
+        effective_context_hash: effective_context_digest(workspace.as_path())?,
+        as_of,
+        extraction: extraction.clone(),
+        gate: *gate,
+    })
+}
+
+fn effective_config_digest(workspace: &Path) -> Result<String, ShadowTuningError> {
+    let effective =
+        crate::core::config_surface::merged_workspace_config(workspace).map_err(|error| {
+            ShadowTuningError::Configuration {
+                message: error.to_string(),
+            }
+        })?;
+    let rendered = serde_json::to_string(&effective.to_show_report())
+        .map_err(|error| storage_error("fingerprint tuning configuration", &error))?;
+    Ok(content_digest(&rendered))
+}
+
+fn effective_context_digest(workspace: &Path) -> Result<String, ShadowTuningError> {
+    let effective =
+        crate::core::config_surface::merged_workspace_config(workspace).map_err(|error| {
+            ShadowTuningError::Configuration {
+                message: error.to_string(),
+            }
+        })?;
+    let entries: Vec<_> = effective
+        .to_show_report()
+        .entries
+        .into_iter()
+        .filter(|entry| {
+            !matches!(
+                entry.key,
+                "search.lexical_weight" | "search.semantic_weight" | "search.graph_weight"
+            )
+        })
+        .collect();
+    let rendered = serde_json::to_string(&entries)
+        .map_err(|error| storage_error("fingerprint tuning context", &error))?;
+    Ok(content_digest(&rendered))
+}
+
+/// Publish complete bytes via the same no-follow, bounded config path checks
+/// as `ee config set`. Failed temporaries are retained rather than deleted.
+fn atomic_shadow_write(path: &Path, text: &str) -> Result<(), ShadowTuningError> {
+    atomic_shadow_write_expected(path, text, None)
+}
+
+fn atomic_shadow_write_expected(
+    path: &Path,
+    text: &str,
+    expected: Option<&str>,
+) -> Result<(), ShadowTuningError> {
+    atomic_shadow_write_authorized(path, text, expected, None, || {})
+}
+
+fn atomic_shadow_write_authorized(
+    path: &Path,
+    text: &str,
+    expected: Option<&str>,
+    authority: Option<&PromotionAuthority>,
+    before_publish: impl FnOnce(),
+) -> Result<(), ShadowTuningError> {
+    use std::io::Write as _;
+
+    let _ = read_shadow_file(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| storage_error("write shadow state", &"missing parent"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| storage_error("create shadow state directory", &error))?;
+    let _ = read_shadow_file(path)?;
+    let temporary = parent.join(format!(".shadow-{}.tmp", crate::db::generate_audit_id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
     }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| storage_error("create shadow state temporary", &error))?;
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        file.set_permissions(metadata.permissions())
+            .map_err(|error| storage_error("preserve shadow state permissions", &error))?;
+    }
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| storage_error("write shadow state temporary", &error))?;
+    before_publish();
+    if let Some(authority) = authority {
+        if effective_config_digest(Path::new(&authority.workspace_path))?
+            != authority.effective_config_hash
+        {
+            return Err(storage_error(
+                "publish shadow state",
+                &"effective configuration changed before publication; no replacement made",
+            ));
+        }
+    }
+    if let Some(expected) = expected {
+        if read_shadow_file(path)?.as_deref().unwrap_or("") != expected {
+            return Err(storage_error(
+                "publish shadow state",
+                &"configuration changed before publication; no replacement made",
+            ));
+        }
+    }
+    crate::core::config_surface::publish_config_temp_file(path, &temporary)
+        .map_err(|error| storage_error("publish shadow state", &error))
+}
+
+fn invalid_report(reason: impl Into<String>) -> PromoteRefusal {
+    PromoteRefusal::ReportInvalid {
+        reason: reason.into(),
+    }
+}
+
+fn parsed_candidate(
+    value: &serde_json::Value,
+    incumbent: bool,
+) -> Result<CandidateScore, PromoteRefusal> {
+    let origin = match value.get("origin").and_then(serde_json::Value::as_str) {
+        Some("incumbent") if incumbent => "incumbent",
+        Some("grid") if !incumbent => "grid",
+        Some("descent") if !incumbent => "descent",
+        _ => return Err(invalid_report("candidate origin is invalid")),
+    };
+    let weights = value
+        .get("weights")
+        .ok_or_else(|| invalid_report("candidate has no weights"))?;
+    let read_weight = |key: &str, bounds: (f32, f32)| {
+        let number = weights
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| invalid_report("candidate weight is not numeric"))?;
+        let bounds = if incumbent { (0.0, 1.0) } else { bounds };
+        if !number.is_finite() || number < f64::from(bounds.0) || number > f64::from(bounds.1) {
+            return Err(invalid_report("candidate weight exceeds the policy bounds"));
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let number = number as f32;
+        Ok(number)
+    };
+    let score = value
+        .get("score")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|score| score.is_finite())
+        .ok_or_else(|| invalid_report("candidate score is not finite"))?;
+    Ok(CandidateScore {
+        weights: TuningWeights {
+            lexical: read_weight("lexical", FUSION_LEXICAL_CLAMP)?,
+            semantic: read_weight("semantic", FUSION_SEMANTIC_CLAMP)?,
+            graph: read_weight("graph", FUSION_GRAPH_CLAMP)?,
+        },
+        score,
+        origin,
+    })
+}
+
+/// Reconstruct the same bounded grid/descent walk. A self-consistent hash on a
+/// hand-edited winner is not an evaluated policy: every vector and its origin
+/// must still belong to the actual evaluator's deterministic search.
+fn validate_candidate_walk(
+    incumbent: CandidateScore,
+    candidates: &[CandidateScore],
+) -> Result<CandidateScore, PromoteRefusal> {
+    let mut seen = BTreeSet::from([incumbent.weights.key()]);
+    let mut position = 0;
+    let mut take = |weights: TuningWeights, origin: &'static str| {
+        if !seen.insert(weights.key()) {
+            return Ok(None);
+        }
+        let candidate = candidates
+            .get(position)
+            .ok_or_else(|| invalid_report("evaluation is missing a candidate"))?;
+        if candidate.weights != weights || candidate.origin != origin {
+            return Err(invalid_report(
+                "candidate order or origin differs from the evaluator",
+            ));
+        }
+        position += 1;
+        Ok(Some(*candidate))
+    };
+    let mut best = incumbent;
+    for weights in enumerate_grid(incumbent.weights) {
+        if let Some(candidate) = take(weights, "grid")? {
+            if candidate.score > best.score {
+                best = candidate;
+            }
+        }
+    }
+    for round in 0..DESCENT_MAX_ROUNDS {
+        let step = DESCENT_INITIAL_STEP / 2.0_f32.powi(i32::try_from(round).unwrap_or(0));
+        let mut improved = false;
+        for weights in descent_neighbors(best.weights, step) {
+            if let Some(candidate) = take(weights, "descent")? {
+                if candidate.score > best.score {
+                    best = candidate;
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    if position != candidates.len() {
+        return Err(invalid_report("evaluation contains extra candidates"));
+    }
+    Ok(best)
+}
+
+fn validated_report(
+    report: &serde_json::Value,
+    authority: &PromotionAuthority,
+) -> Result<(CandidateScore, CandidateScore, u64), PromoteRefusal> {
+    let mut unhashed = report.clone();
+    let object = unhashed
+        .as_object_mut()
+        .ok_or_else(|| invalid_report("report is not an object"))?;
+    let hash = object
+        .remove("reportHash")
+        .and_then(|hash| hash.as_str().map(str::to_owned))
+        .ok_or_else(|| invalid_report("report hash is missing"))?;
+    let mut bytes = Vec::new();
+    append_len_prefixed(&mut bytes, REPORT_HASH_DOMAIN.as_bytes());
+    append_len_prefixed(&mut bytes, unhashed.to_string().as_bytes());
+    let expected_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    if hash != expected_hash
+        || hash != authority.report_hash
+        || report.get("schema").and_then(serde_json::Value::as_str)
+            != Some(RETRIEVAL_TUNING_REPORT_SCHEMA_V1)
+        || report.get("policyId").and_then(serde_json::Value::as_str)
+            != Some(RETRIEVAL_TUNING_POLICY_ID)
+        || authority.schema != PROMOTION_AUTHORITY_SCHEMA
+    {
+        return Err(invalid_report(
+            "report hash, policy or evaluator receipt does not match",
+        ));
+    }
+    if report.get("abstained").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err(PromoteRefusal::Abstained);
+    }
+    if report.get("abstained").and_then(serde_json::Value::as_bool) != Some(false)
+        || !report
+            .get("abstentionReason")
+            .is_some_and(serde_json::Value::is_null)
+        || authority.gate.min_triples == 0
+        || authority.gate.min_queries == 0
+        || !authority.gate.promote_margin.is_finite()
+        || authority.gate.promote_margin < RetrievalTuningGateConfig::default().promote_margin
+        || authority.extraction.label_window_minutes == 0
+    {
+        return Err(invalid_report("evaluator evidence gate is invalid"));
+    }
+    let count = |pointer| {
+        report
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or_else(|| invalid_report("evidence count is missing or invalid"))
+    };
+    let triples = count("/labelSet/triples")?;
+    let queries = count("/labelSet/distinctQueries")?;
+    if triples < authority.gate.min_triples
+        || queries < authority.gate.min_queries
+        || queries > triples
+    {
+        return Err(invalid_report("report does not satisfy its evidence gate"));
+    }
+    let incumbent = parsed_candidate(&report["incumbent"], true)?;
+    let values = report
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .filter(|candidates| candidates.len() <= 64)
+        .ok_or_else(|| invalid_report("evaluation candidate set is missing or oversized"))?;
+    let candidates = values
+        .iter()
+        .map(|value| parsed_candidate(value, false))
+        .collect::<Result<Vec<_>, _>>()?;
+    if report
+        .pointer("/diagnostics/evaluationHash")
+        .and_then(serde_json::Value::as_str)
+        != Some(evaluation_hash(&incumbent, &candidates, triples).as_str())
+    {
+        return Err(invalid_report(
+            "evaluation hash does not match its candidates",
+        ));
+    }
+    let best = validate_candidate_walk(incumbent, &candidates)?;
+    let winner = parsed_candidate(&report["winner"], false)?;
+    let margin = report
+        .pointer("/winner/relativeMargin")
+        .and_then(serde_json::Value::as_f64);
+    let expected_margin = (incumbent.score.abs() > f64::EPSILON)
+        .then(|| (best.score - incumbent.score) / incumbent.score.abs());
+    if report
+        .get("promotable")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || best != winner
+        || winner.score <= incumbent.score
+        || margin != expected_margin
+        || !margin.is_some_and(|margin| margin >= authority.gate.promote_margin)
+    {
+        return Err(PromoteRefusal::NotPromotable {
+            relative_margin: margin,
+        });
+    }
+    let generation = report
+        .get("dbGeneration")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| invalid_report("database generation is missing"))?;
+    Ok((incumbent, winner, generation))
 }
 
 /// Validate the persisted report and apply the `[search]` fusion-weight
@@ -1497,15 +1990,27 @@ pub fn promote_retrieval_weights(
     workspace_id: &str,
     dry_run: bool,
 ) -> Result<Result<OverlayChange, PromoteRefusal>, ShadowTuningError> {
+    connection.with_write_owner_fence(
+        |error| storage_error("own retrieval promotion", &error),
+        || promote_retrieval_weights_owned(workspace_path, connection, workspace_id, dry_run),
+    )
+}
+
+#[allow(clippy::type_complexity)]
+fn promote_retrieval_weights_owned(
+    workspace_path: &Path,
+    connection: &DbConnection,
+    workspace_id: &str,
+    dry_run: bool,
+) -> Result<Result<OverlayChange, PromoteRefusal>, ShadowTuningError> {
     let report_path = shadow_report_path(workspace_path);
-    let raw = match std::fs::read_to_string(&report_path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    let raw = match read_shadow_file(&report_path)? {
+        Some(raw) => raw,
+        None => {
             return Ok(Err(PromoteRefusal::ReportMissing {
                 path: report_path.display().to_string(),
             }));
         }
-        Err(error) => return Err(storage_error("read shadow report", &error)),
     };
     let report: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(value) => value,
@@ -1515,60 +2020,99 @@ pub fn promote_retrieval_weights(
             }));
         }
     };
-    if report.get("schema").and_then(serde_json::Value::as_str)
-        != Some(RETRIEVAL_TUNING_REPORT_SCHEMA_V1)
-    {
-        return Ok(Err(PromoteRefusal::ReportInvalid {
-            reason: "schema is not ee.shadow.retrieval_tuning_report.v1".to_owned(),
-        }));
-    }
-    if report.get("abstained").and_then(serde_json::Value::as_bool) == Some(true) {
-        return Ok(Err(PromoteRefusal::Abstained));
-    }
-    if report
-        .get("promotable")
-        .and_then(serde_json::Value::as_bool)
-        != Some(true)
-    {
-        let relative_margin = report
-            .pointer("/winner/relativeMargin")
-            .and_then(serde_json::Value::as_f64);
-        return Ok(Err(PromoteRefusal::NotPromotable { relative_margin }));
-    }
-    let report_generation = report
-        .get("dbGeneration")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
+    let Some(receipt) = read_shadow_file(&authority_path(workspace_path))? else {
+        return Ok(Err(invalid_report(
+            "evaluator source receipt is missing; rerun shadow run",
+        )));
+    };
+    let authority: PromotionAuthority = match serde_json::from_str(&receipt) {
+        Ok(authority) => authority,
+        Err(_) => return Ok(Err(invalid_report("evaluator source receipt is malformed"))),
+    };
+    let (incumbent, winner, report_generation) = match validated_report(&report, &authority) {
+        Ok(validated) => validated,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
     let current_generation = connection
         .get_workspace_generation(workspace_id)
         .map_err(|error| storage_error("read workspace generation", &error))?
         .unwrap_or(0);
+    let (prior_config, prior_existed) = read_config_bytes(workspace_path)?;
+    let mut current_authority = capture_promotion_authority(
+        workspace_path,
+        connection,
+        workspace_id,
+        authority.as_of,
+        &authority.extraction,
+        &authority.gate,
+    )?;
+    current_authority.report_hash = authority.report_hash.clone();
+    if current_authority.workspace_id != authority.workspace_id
+        || current_authority.workspace_path != authority.workspace_path
+        || current_authority.database_path != authority.database_path
+        || current_authority.database_schema < authority.database_schema
+    {
+        return Ok(Err(invalid_report(
+            "receipt belongs to a different workspace or database",
+        )));
+    }
+    if !evaluation_attested(connection, workspace_id, &authority)? {
+        return Ok(Err(invalid_report(
+            "evaluation receipt is not attested by this database; rerun shadow run",
+        )));
+    }
+    // Finishing a transition already proved by its durable intent is recovery,
+    // not a new policy decision. Later memory/outcome writes must not strand a
+    // published overlay just because its evaluation is no longer fresh.
+    if let Some(replay) =
+        recover_promotion(connection, workspace_id, &authority, &prior_config, dry_run)?
+    {
+        return Ok(Ok(replay));
+    }
     if report_generation != current_generation {
         return Ok(Err(PromoteRefusal::StaleGeneration {
             report: report_generation,
             current: current_generation,
         }));
     }
-    let Some(weights) = report.pointer("/winner/weights") else {
-        return Ok(Err(PromoteRefusal::ReportInvalid {
-            reason: "promotable report has no winner weights".to_owned(),
-        }));
-    };
-    let (Some(lexical), Some(semantic), Some(graph)) = (
-        weights.get("lexical").and_then(serde_json::Value::as_f64),
-        weights.get("semantic").and_then(serde_json::Value::as_f64),
-        weights.get("graph").and_then(serde_json::Value::as_f64),
-    ) else {
-        return Ok(Err(PromoteRefusal::ReportInvalid {
-            reason: "winner weights are not numeric".to_owned(),
-        }));
-    };
-    let report_hash = report
-        .get("reportHash")
+    let extraction = &authority.extraction;
+    let as_of = authority.as_of;
+    let labels =
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+            extract_labeled_triples(&cx, connection, workspace_id, extraction, as_of)
+        })
+        .map_err(|error| storage_error("recheck tuning evidence", &error))??;
+    if report
+        .pointer("/labelSet/hash")
         .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-
-    let (prior_config, prior_existed) = read_config_bytes(workspace_path)?;
+        != Some(labels.label_set_hash.as_str())
+        || report
+            .pointer("/labelSet/triples")
+            .and_then(serde_json::Value::as_u64)
+            != u64::try_from(labels.triples.len()).ok()
+        || report
+            .pointer("/labelSet/distinctQueries")
+            .and_then(serde_json::Value::as_u64)
+            != u64::try_from(labels.distinct_queries).ok()
+    {
+        return Ok(Err(invalid_report(
+            "outcome evidence changed after evaluation; rerun shadow run",
+        )));
+    }
+    if current_authority != authority {
+        return Ok(Err(invalid_report(
+            "workspace or effective configuration changed after evaluation; rerun shadow run",
+        )));
+    }
+    if TuningWeights::incumbent_for_workspace(workspace_path)? != incumbent.weights {
+        return Ok(Err(invalid_report(
+            "report incumbent differs from the live retrieval weights",
+        )));
+    }
+    let lexical = f64::from(winner.weights.lexical);
+    let semantic = f64::from(winner.weights.semantic);
+    let graph = f64::from(winner.weights.graph);
+    let report_hash = Some(authority.report_hash.clone());
     let mut document = prior_config
         .parse::<toml_edit::DocumentMut>()
         .map_err(|error| {
@@ -1614,36 +2158,436 @@ pub fn promote_retrieval_weights(
         return Ok(Ok(change));
     }
 
-    std::fs::write(workspace_config_path(workspace_path), &new_config)
-        .map_err(|error| storage_error("write workspace config.toml", &error))?;
     let details = serde_json::json!({
         "schema": "ee.shadow.retrieval_weights_promotion.v1",
         "policyId": RETRIEVAL_TUNING_POLICY_ID,
+        "workspacePath": authority.workspace_path,
+        "databasePath": authority.database_path,
+        "databaseSchema": authority.database_schema,
         "reportHash": report_hash,
         "priorExisted": prior_existed,
         "priorConfigToml": prior_config,
+        "newConfigToml": new_config,
+        "priorConfigHash": content_digest(&change.prior_config),
+        "newConfigHash": content_digest(&change.new_config),
+        "overlayHash": content_digest(&weights_json(winner.weights).to_string()),
+        "authorityHash": content_digest(&serde_json::to_string(&authority).map_err(|error| storage_error("encode tuning authority", &error))?),
         "newValues": { "lexical": lexical, "semantic": semantic, "graph": graph },
-    })
-    .to_string();
-    connection
-        .insert_audit(
-            &crate::db::generate_audit_id(),
-            &crate::db::CreateAuditInput {
-                workspace_id: Some(workspace_id.to_owned()),
-                actor: None,
-                action: PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION.to_owned(),
-                target_type: Some("workspace".to_owned()),
-                target_id: Some(workspace_id.to_owned()),
-                details: Some(details),
-            },
-        )
-        .map_err(|error| storage_error("record promotion audit", &error))?;
+    });
+    publish_audited_overlay(
+        workspace_path,
+        connection,
+        workspace_id,
+        &change,
+        details,
+        Some(&authority),
+        PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+    )?;
     Ok(Ok(change))
 }
 
-/// Restore the prior config from the most recent promotion audit
-/// (byte-identical; a previously-absent file restores as empty, never a
-/// deletion) and record the demotion.
+fn overlay_audits(
+    connection: &DbConnection,
+    workspace_id: &str,
+    action: &str,
+) -> Result<Vec<StoredAuditEntry>, ShadowTuningError> {
+    let mut audits = connection
+        .list_audit_by_action(action, None)
+        .map_err(|error| storage_error("read retrieval overlay history", &error))?;
+    audits.retain(|entry| entry.workspace_id.as_deref() == Some(workspace_id));
+    audits.sort_by(|left, right| {
+        right
+            .timestamp
+            .cmp(&left.timestamp)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    Ok(audits)
+}
+
+fn overlay_details(entry: &StoredAuditEntry) -> Option<serde_json::Value> {
+    serde_json::from_str(entry.details.as_deref()?).ok()
+}
+
+fn evaluation_attested(
+    connection: &DbConnection,
+    workspace_id: &str,
+    authority: &PromotionAuthority,
+) -> Result<bool, ShadowTuningError> {
+    let hash = content_digest(
+        &serde_json::to_string(authority)
+            .map_err(|error| storage_error("encode evaluation authority", &error))?,
+    );
+    evaluation_hashes_attested(connection, workspace_id, &authority.report_hash, &hash)
+}
+
+fn evaluation_hashes_attested(
+    connection: &DbConnection,
+    workspace_id: &str,
+    report_hash: &str,
+    authority_hash: &str,
+) -> Result<bool, ShadowTuningError> {
+    Ok(
+        overlay_audits(connection, workspace_id, EVALUATION_AUDIT_ACTION)?
+            .iter()
+            .filter_map(overlay_details)
+            .any(|receipt| {
+                receipt.get("schema").and_then(serde_json::Value::as_str)
+                    == Some("ee.shadow.retrieval_evaluation_receipt.v1")
+                    && receipt.get("policyId").and_then(serde_json::Value::as_str)
+                        == Some(RETRIEVAL_TUNING_POLICY_ID)
+                    && receipt
+                        .get("reportHash")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(report_hash)
+                    && receipt
+                        .get("authorityHash")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(authority_hash)
+            }),
+    )
+}
+
+fn insert_overlay_audit(
+    connection: &DbConnection,
+    workspace_id: &str,
+    action: &str,
+    details: &serde_json::Value,
+) -> Result<String, ShadowTuningError> {
+    let id = crate::db::generate_audit_id();
+    connection
+        .insert_audit(
+            &id,
+            &crate::db::CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: None,
+                action: action.to_owned(),
+                target_type: Some("workspace".to_owned()),
+                target_id: Some(workspace_id.to_owned()),
+                details: Some(details.to_string()),
+            },
+        )
+        .map_err(|error| storage_error("record retrieval overlay audit", &error))?;
+    Ok(id)
+}
+
+fn receipt_has_config(details: &serde_json::Value, current: &str) -> bool {
+    details.get("policyId").and_then(serde_json::Value::as_str) == Some(RETRIEVAL_TUNING_POLICY_ID)
+        && details
+            .get("newConfigToml")
+            .and_then(serde_json::Value::as_str)
+            == Some(current)
+        && details
+            .get("newConfigHash")
+            .and_then(serde_json::Value::as_str)
+            == Some(content_digest(current).as_str())
+        && details
+            .get("priorConfigToml")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|prior| {
+                details
+                    .get("priorConfigHash")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(content_digest(prior).as_str())
+            })
+}
+
+fn receipt_matches_store(
+    details: &serde_json::Value,
+    workspace: &Path,
+    connection: &DbConnection,
+) -> Result<bool, ShadowTuningError> {
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| storage_error("bind overlay workspace", &error))?;
+    let crate::db::DatabaseLocation::File(database) = connection.location() else {
+        return Ok(false);
+    };
+    let database = database
+        .canonicalize()
+        .map_err(|error| storage_error("bind overlay database", &error))?;
+    let schema = connection
+        .schema_version()
+        .map_err(|error| storage_error("bind overlay schema", &error))?;
+    let recorded_schema = details
+        .get("databaseSchema")
+        .and_then(serde_json::Value::as_u64);
+    Ok(details
+        .get("workspacePath")
+        .and_then(serde_json::Value::as_str)
+        == Some(workspace.to_string_lossy().as_ref())
+        && details
+            .get("databasePath")
+            .and_then(serde_json::Value::as_str)
+            == Some(database.to_string_lossy().as_ref())
+        // A normal migration preserves historical transition authority.
+        // New promotions still require the exact evaluator schema snapshot.
+        && schema.zip(recorded_schema).is_some_and(|(current, recorded)| u64::from(current) >= recorded))
+}
+
+/// An intent is committed before replacement. If the second audit write fails,
+/// restore only the exact bytes we published, never an intervening edit. A
+/// crash leaves the full intended transition in the audit log for retry.
+#[allow(clippy::too_many_arguments)]
+fn publish_audited_overlay(
+    workspace: &Path,
+    connection: &DbConnection,
+    workspace_id: &str,
+    change: &OverlayChange,
+    mut details: serde_json::Value,
+    authority: Option<&PromotionAuthority>,
+    action: &str,
+) -> Result<(), ShadowTuningError> {
+    let completed: BTreeSet<_> = overlay_audits(connection, workspace_id, action)?
+        .iter()
+        .filter_map(overlay_details)
+        .filter_map(|details| {
+            details
+                .get("intentId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    let existing = overlay_audits(connection, workspace_id, OVERLAY_INTENT_AUDIT_ACTION)?
+        .into_iter()
+        .find(|entry| {
+            !completed.contains(&entry.id)
+                && overlay_details(entry).is_some_and(|intent| {
+                    intent.get("action").and_then(serde_json::Value::as_str) == Some(action)
+                        && intent.get("completion") == Some(&details)
+                })
+        });
+    let intent_id = match existing {
+        Some(entry) => entry.id,
+        None => insert_overlay_audit(
+            connection,
+            workspace_id,
+            OVERLAY_INTENT_AUDIT_ACTION,
+            &serde_json::json!({
+                "schema": "ee.shadow.retrieval_weights_intent.v1",
+                "action": action,
+                "completion": details,
+            }),
+        )?,
+    };
+    atomic_shadow_write_authorized(
+        &workspace_config_path(workspace),
+        &change.new_config,
+        Some(&change.prior_config),
+        authority,
+        || {},
+    )?;
+    details["intentId"] = serde_json::Value::String(intent_id);
+    if let Err(error) = insert_overlay_audit(connection, workspace_id, action, &details) {
+        let rollback = atomic_shadow_write_expected(
+            &workspace_config_path(workspace),
+            &change.prior_config,
+            Some(&change.new_config),
+        );
+        return Err(storage_error(
+            "complete retrieval overlay audit",
+            &match rollback {
+                Ok(()) => format!("{error}; prior configuration restored; retry the same command"),
+                Err(rollback) => format!(
+                    "{error}; restoration refused or failed: {rollback}; durable intent retained for recovery"
+                ),
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn recover_promotion(
+    connection: &DbConnection,
+    workspace_id: &str,
+    authority: &PromotionAuthority,
+    current: &str,
+    dry_run: bool,
+) -> Result<Option<OverlayChange>, ShadowTuningError> {
+    let authority_hash = content_digest(
+        &serde_json::to_string(authority)
+            .map_err(|error| storage_error("encode tuning authority", &error))?,
+    );
+    let matches = |details: &serde_json::Value| {
+        receipt_has_config(details, current)
+            && details
+                .get("reportHash")
+                .and_then(serde_json::Value::as_str)
+                == Some(authority.report_hash.as_str())
+            && details
+                .get("authorityHash")
+                .and_then(serde_json::Value::as_str)
+                == Some(authority_hash.as_str())
+    };
+    let promotions = overlay_audits(
+        connection,
+        workspace_id,
+        PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+    )?;
+    let demoted: BTreeSet<_> = overlay_audits(
+        connection,
+        workspace_id,
+        DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+    )?
+    .iter()
+    .filter_map(overlay_details)
+    .filter_map(|details| {
+        details
+            .get("restoredFromAudit")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    })
+    .collect();
+    if promotions.iter().any(|entry| {
+        !demoted.contains(&entry.id)
+            && overlay_details(entry).is_some_and(|details| matches(&details))
+    }) {
+        return Ok(Some(OverlayChange {
+            applied: false,
+            prior_config: current.to_owned(),
+            new_config: current.to_owned(),
+            diff: Vec::new(),
+            report_hash: Some(authority.report_hash.clone()),
+        }));
+    }
+    let completed: BTreeSet<_> = promotions
+        .iter()
+        .filter_map(overlay_details)
+        .filter_map(|details| {
+            details
+                .get("intentId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    for intent in overlay_audits(connection, workspace_id, OVERLAY_INTENT_AUDIT_ACTION)? {
+        if completed.contains(&intent.id) {
+            continue;
+        }
+        let Some(value) = overlay_details(&intent) else {
+            continue;
+        };
+        if value.get("action").and_then(serde_json::Value::as_str)
+            != Some(PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION)
+        {
+            continue;
+        }
+        let Some(mut details) = value
+            .get("completion")
+            .cloned()
+            .filter(|details| matches(details))
+        else {
+            continue;
+        };
+        if !dry_run {
+            details["intentId"] = serde_json::Value::String(intent.id);
+            insert_overlay_audit(
+                connection,
+                workspace_id,
+                PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+                &details,
+            )?;
+        }
+        return Ok(Some(OverlayChange {
+            applied: !dry_run,
+            prior_config: current.to_owned(),
+            new_config: current.to_owned(),
+            diff: vec!["Complete the audit for the already-published retrieval overlay".to_owned()],
+            report_hash: Some(authority.report_hash.clone()),
+        }));
+    }
+    Ok(None)
+}
+
+/// Rollback remains available after a subsequent `shadow run` replaces the
+/// singleton report. The durable evaluated intent, exact published bytes and
+/// absence of a newer completed transition suffice to finish its audit.
+fn recover_published_promotion_for_demote(
+    workspace: &Path,
+    connection: &DbConnection,
+    workspace_id: &str,
+    current: &str,
+    dry_run: bool,
+) -> Result<Option<StoredAuditEntry>, ShadowTuningError> {
+    let mut transitions = overlay_audits(
+        connection,
+        workspace_id,
+        PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+    )?;
+    transitions.extend(overlay_audits(
+        connection,
+        workspace_id,
+        DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+    )?);
+    let latest = transitions
+        .iter()
+        .map(|entry| (&entry.timestamp, &entry.id))
+        .max();
+    let completed: BTreeSet<_> = transitions
+        .iter()
+        .filter_map(overlay_details)
+        .filter_map(|details| {
+            details
+                .get("intentId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    for mut intent in overlay_audits(connection, workspace_id, OVERLAY_INTENT_AUDIT_ACTION)? {
+        if completed.contains(&intent.id)
+            || latest.is_some_and(|last| (&intent.timestamp, &intent.id) <= last)
+        {
+            continue;
+        }
+        let Some(value) = overlay_details(&intent) else {
+            continue;
+        };
+        if value.get("action").and_then(serde_json::Value::as_str)
+            != Some(PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION)
+        {
+            continue;
+        }
+        let Some(mut details) = value
+            .get("completion")
+            .cloned()
+            .filter(|details| receipt_has_config(details, current))
+        else {
+            continue;
+        };
+        if !receipt_matches_store(&details, workspace, connection)? {
+            continue;
+        }
+        let (Some(report_hash), Some(authority_hash)) = (
+            details
+                .get("reportHash")
+                .and_then(serde_json::Value::as_str),
+            details
+                .get("authorityHash")
+                .and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if !evaluation_hashes_attested(connection, workspace_id, report_hash, authority_hash)? {
+            continue;
+        }
+        details["intentId"] = serde_json::Value::String(intent.id.clone());
+        if !dry_run {
+            intent.id = insert_overlay_audit(
+                connection,
+                workspace_id,
+                PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+                &details,
+            )?;
+        }
+        intent.action = PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION.to_owned();
+        intent.details = Some(details.to_string());
+        return Ok(Some(intent));
+    }
+    Ok(None)
+}
+
+/// Restore only tuning-owned fields from the most recent completed promotion.
+/// An untouched config regains its exact original bytes; unrelated later edits
+/// survive and conflicting edits to an owned weight refuse the rollback.
 #[allow(clippy::type_complexity)]
 pub fn demote_retrieval_weights(
     workspace_path: &Path,
@@ -1651,68 +2595,222 @@ pub fn demote_retrieval_weights(
     workspace_id: &str,
     dry_run: bool,
 ) -> Result<Result<OverlayChange, PromoteRefusal>, ShadowTuningError> {
-    let audits = connection
-        .list_audit_by_action(PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION, None)
-        .map_err(|error| storage_error("list promotion audits", &error))?;
-    let Some(promotion) = audits
-        .iter()
-        .find(|entry| entry.workspace_id.as_deref() == Some(workspace_id))
-    else {
+    connection.with_write_owner_fence(
+        |error| storage_error("own retrieval demotion", &error),
+        || demote_retrieval_weights_owned(workspace_path, connection, workspace_id, dry_run),
+    )
+}
+
+#[allow(clippy::type_complexity)]
+fn demote_retrieval_weights_owned(
+    workspace_path: &Path,
+    connection: &DbConnection,
+    workspace_id: &str,
+    dry_run: bool,
+) -> Result<Result<OverlayChange, PromoteRefusal>, ShadowTuningError> {
+    let (current_config, _) = read_config_bytes(workspace_path)?;
+    let recovered = recover_published_promotion_for_demote(
+        workspace_path,
+        connection,
+        workspace_id,
+        &current_config,
+        dry_run,
+    )?;
+    let audits = overlay_audits(
+        connection,
+        workspace_id,
+        PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+    )?;
+    let Some(promotion) = recovered.as_ref().or_else(|| audits.first()) else {
         return Ok(Err(PromoteRefusal::NoPriorPromotion));
     };
-    let details: serde_json::Value = promotion
-        .details
-        .as_deref()
-        .and_then(|raw| serde_json::from_str(raw).ok())
-        .unwrap_or(serde_json::Value::Null);
+    let details = overlay_details(promotion).unwrap_or(serde_json::Value::Null);
+    if !receipt_matches_store(&details, workspace_path, connection)? {
+        return Ok(Err(invalid_report(
+            "promotion belongs to a different workspace or database",
+        )));
+    }
+    let report_hash = details
+        .get("reportHash")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    if overlay_audits(
+        connection,
+        workspace_id,
+        DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+    )?
+    .iter()
+    .filter_map(overlay_details)
+    .any(|details| {
+        details
+            .get("restoredFromAudit")
+            .and_then(serde_json::Value::as_str)
+            == Some(promotion.id.as_str())
+    }) {
+        return Ok(Ok(OverlayChange {
+            applied: false,
+            prior_config: current_config.clone(),
+            new_config: current_config,
+            diff: Vec::new(),
+            report_hash,
+        }));
+    }
     let Some(prior_config) = details
         .get("priorConfigToml")
         .and_then(serde_json::Value::as_str)
     else {
-        return Ok(Err(PromoteRefusal::ReportInvalid {
-            reason: "promotion audit carries no priorConfigToml".to_owned(),
-        }));
+        return Ok(Err(invalid_report(
+            "promotion audit has no prior configuration",
+        )));
     };
-    let (current_config, _) = read_config_bytes(workspace_path)?;
+    let Some(promoted_config) = details
+        .get("newConfigToml")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(Err(invalid_report(
+            "promotion audit has no owned-field snapshot; cannot safely demote",
+        )));
+    };
+    if !receipt_has_config(&details, promoted_config) {
+        return Ok(Err(invalid_report(
+            "promotion audit configuration hashes disagree",
+        )));
+    }
+    // A demotion can itself have published just before a crash. Only the
+    // matching durable intent may authorize finishing that audit on retry.
+    for intent in overlay_audits(connection, workspace_id, OVERLAY_INTENT_AUDIT_ACTION)? {
+        let Some(value) = overlay_details(&intent) else {
+            continue;
+        };
+        if value.get("action").and_then(serde_json::Value::as_str)
+            != Some(DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION)
+        {
+            continue;
+        }
+        let Some(mut completion) = value.get("completion").cloned() else {
+            continue;
+        };
+        if completion
+            .get("restoredFromAudit")
+            .and_then(serde_json::Value::as_str)
+            == Some(promotion.id.as_str())
+            && receipt_has_config(&completion, &current_config)
+        {
+            if !dry_run {
+                completion["intentId"] = serde_json::Value::String(intent.id);
+                insert_overlay_audit(
+                    connection,
+                    workspace_id,
+                    DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+                    &completion,
+                )?;
+            }
+            return Ok(Ok(OverlayChange {
+                applied: !dry_run,
+                prior_config: current_config.clone(),
+                new_config: current_config,
+                diff: vec![
+                    "Complete the audit for the already-restored retrieval weights".to_owned(),
+                ],
+                report_hash,
+            }));
+        }
+    }
+    let (restored, diff) =
+        match restore_owned_weights(&current_config, promoted_config, prior_config) {
+            Ok(restored) => restored,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
     let change = OverlayChange {
         applied: !dry_run,
         prior_config: current_config,
-        new_config: prior_config.to_owned(),
-        diff: vec![format!(
-            "config.toml restored to pre-promotion bytes ({} bytes)",
-            prior_config.len()
-        )],
-        report_hash: details
-            .get("reportHash")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+        new_config: restored,
+        diff,
+        report_hash,
     };
     if dry_run {
         return Ok(Ok(change));
     }
-    std::fs::write(workspace_config_path(workspace_path), prior_config)
-        .map_err(|error| storage_error("restore workspace config.toml", &error))?;
     let demote_details = serde_json::json!({
         "schema": "ee.shadow.retrieval_weights_demotion.v1",
         "policyId": RETRIEVAL_TUNING_POLICY_ID,
         "restoredFromAudit": promotion.id,
-        "restoredBytes": prior_config.len(),
-    })
-    .to_string();
-    connection
-        .insert_audit(
-            &crate::db::generate_audit_id(),
-            &crate::db::CreateAuditInput {
-                workspace_id: Some(workspace_id.to_owned()),
-                actor: None,
-                action: DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION.to_owned(),
-                target_type: Some("workspace".to_owned()),
-                target_id: Some(workspace_id.to_owned()),
-                details: Some(demote_details),
-            },
-        )
-        .map_err(|error| storage_error("record demotion audit", &error))?;
+        "restoredBytes": change.new_config.len(),
+        "reportHash": change.report_hash,
+        "priorConfigToml": change.prior_config,
+        "newConfigToml": change.new_config,
+        "priorConfigHash": content_digest(&change.prior_config),
+        "newConfigHash": content_digest(&change.new_config),
+    });
+    publish_audited_overlay(
+        workspace_path,
+        connection,
+        workspace_id,
+        &change,
+        demote_details,
+        None,
+        DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+    )?;
     Ok(Ok(change))
+}
+
+fn restore_owned_weights(
+    current: &str,
+    promoted: &str,
+    prior: &str,
+) -> Result<(String, Vec<String>), PromoteRefusal> {
+    let parse = |text: &str| {
+        text.parse::<toml_edit::DocumentMut>()
+            .map_err(|_| invalid_report("configuration snapshot is not valid TOML"))
+    };
+    let prior_document = parse(prior)?;
+    let promoted_document = parse(promoted)?;
+    let mut current_document = parse(current)?;
+    let table = |document: &toml_edit::DocumentMut, key: &str| {
+        document
+            .get("search")
+            .and_then(toml_edit::Item::as_table_like)
+            .and_then(|search| search.get(key))
+            .cloned()
+    };
+    let mut diff = Vec::new();
+    for key in OWNED_WEIGHT_KEYS {
+        let expected = table(&promoted_document, key)
+            .and_then(|item| item.as_float())
+            .ok_or_else(|| invalid_report("promotion does not carry all owned weights"))?;
+        if table(&current_document, key).and_then(|item| item.as_float()) != Some(expected) {
+            return Err(invalid_report(format!(
+                "search.{key} changed since promotion; refusing to overwrite that edit"
+            )));
+        }
+        let original = table(&prior_document, key);
+        diff.push(format!(
+            "search.{key}: {expected} -> {}",
+            original
+                .as_ref()
+                .map_or_else(|| "(unset)".to_owned(), std::string::ToString::to_string)
+        ));
+        let search = current_document
+            .get_mut("search")
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .ok_or_else(|| invalid_report("current search configuration is not a table"))?;
+        match original {
+            Some(item) => {
+                search.insert(key, item);
+            }
+            None => {
+                search.remove(key);
+            }
+        }
+    }
+    Ok((
+        if current == promoted {
+            prior.to_owned()
+        } else {
+            current_document.to_string()
+        },
+        diff,
+    ))
 }
 
 #[cfg(test)]
@@ -2702,19 +3800,81 @@ mod tests {
 
     // ===== S4: promotion mechanics tests =====
 
-    fn promotable_report_fixture() -> Result<RetrievalTuningReport, String> {
-        let labels = flip_fixture_label_report()?;
+    fn promotable_report_fixture(
+        workspace: &Path,
+        connection: &DbConnection,
+        generation: Option<u64>,
+    ) -> Result<RetrievalTuningReport, String> {
+        const PACK: &str = "pack_00000000000000000000001001";
+        connection
+            .insert_pack_record(
+                PACK,
+                &CreatePackRecordInput {
+                    task_paths: Vec::new(),
+                    workspace_id: WORKSPACE.to_owned(),
+                    query: "q1".to_owned(),
+                    profile: "balanced".to_owned(),
+                    max_tokens: 4000,
+                    used_tokens: 0,
+                    item_count: 0,
+                    omitted_count: 0,
+                    pack_hash: format!("blake3:{}", "0".repeat(64)),
+                    degraded_json: None,
+                    created_by: None,
+                },
+                &[],
+                &[],
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_feedback_event_for_recovery(&event(
+                "fb_00000000000000000000001001",
+                "mem-b",
+                ts(0),
+                Some(pack_item_evidence(PACK)),
+            ))
+            .map_err(|error| error.to_string())?;
+        let extraction = LabelExtractionConfig::default();
         let cx = Cx::for_testing();
-        let evaluation =
-            evaluate_fusion_candidates(&cx, &flip_fixture_replays(), &labels.triples, incumbent())
-                .map_err(|error| error.to_string())?;
+        let labels = extract_labeled_triples(&cx, connection, WORKSPACE, &extraction, ts(0))
+            .map_err(|error| error.to_string())?;
+        let evaluation = evaluate_fusion_candidates(
+            &cx,
+            &flip_fixture_replays(),
+            &labels.triples,
+            TuningWeights::incumbent_for_workspace(workspace).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
         let gate = RetrievalTuningGateConfig {
             min_triples: 1,
             min_queries: 1,
             promote_margin: 0.03,
         };
-        assemble_retrieval_tuning_report(labels, Some(evaluation), 0, &gate)
-            .map_err(|error| error.to_string())
+        let generation = generation.unwrap_or(
+            connection
+                .get_workspace_generation(WORKSPACE)
+                .map_err(|error| error.to_string())?
+                .unwrap_or(0),
+        );
+        let mut report =
+            assemble_retrieval_tuning_report(labels, Some(evaluation), generation, &gate)
+                .map_err(|error| error.to_string())?;
+        let mut authority = capture_promotion_authority(
+            workspace,
+            connection,
+            WORKSPACE,
+            ts(0),
+            &extraction,
+            &gate,
+        )
+        .map_err(|error| error.to_string())?;
+        authority.report_hash = report.report_hash.clone();
+        report.authority = Some(authority);
+        assert!(
+            report.promotable,
+            "positive fixture must be evaluated as promotable"
+        );
+        Ok(report)
     }
 
     #[test]
@@ -2737,7 +3897,7 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let report = promotable_report_fixture()?;
+        let report = promotable_report_fixture(workspace, &connection, None)?;
         persist_retrieval_tuning_report(workspace, &report).map_err(|error| error.to_string())?;
 
         // Dry-run writes nothing.
@@ -2799,25 +3959,651 @@ mod tests {
         }
 
         // A report evaluated at a different generation is stale.
-        let labels = flip_fixture_label_report()?;
-        let cx = Cx::for_testing();
-        let evaluation =
-            evaluate_fusion_candidates(&cx, &flip_fixture_replays(), &labels.triples, incumbent())
-                .map_err(|error| error.to_string())?;
-        let gate = RetrievalTuningGateConfig {
-            min_triples: 1,
-            min_queries: 1,
-            promote_margin: 0.03,
-        };
-        let stale = assemble_retrieval_tuning_report(labels, Some(evaluation), 5, &gate)
+        connection
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: None,
+                },
+            )
             .map_err(|error| error.to_string())?;
+        let stale = promotable_report_fixture(workspace, &connection, Some(5))?;
         persist_retrieval_tuning_report(workspace, &stale).map_err(|error| error.to_string())?;
-        match promote_retrieval_weights(workspace, &connection, "ws-missing", false)
+        match promote_retrieval_weights(workspace, &connection, WORKSPACE, false)
             .map_err(|error| error.to_string())?
         {
             Err(PromoteRefusal::StaleGeneration { report: 5, .. }) => Ok(()),
             other => Err(format!("stale report must refuse: {other:?}")),
         }
+    }
+
+    struct OverlayFixture {
+        directory: tempfile::TempDir,
+        connection: DbConnection,
+        report: RetrievalTuningReport,
+    }
+
+    fn overlay_fixture(config: &str) -> Result<OverlayFixture, String> {
+        let directory = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace = directory.path();
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::write(workspace_config_path(workspace), config)
+            .map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(workspace.join(".ee/ee.db"))
+            .map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let report = promotable_report_fixture(workspace, &connection, None)?;
+        persist_retrieval_tuning_report(workspace, &report).map_err(|error| error.to_string())?;
+        Ok(OverlayFixture {
+            directory,
+            connection,
+            report,
+        })
+    }
+
+    fn no_promotion(fixture: &OverlayFixture) -> TestResult {
+        let workspace = fixture.directory.path();
+        let before = read_config_bytes(workspace).map_err(|error| error.to_string())?;
+        for dry_run in [true, false] {
+            assert!(
+                promote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, dry_run)
+                    .map_err(|error| error.to_string())?
+                    .is_err()
+            );
+            assert_eq!(
+                read_config_bytes(workspace).map_err(|error| error.to_string())?,
+                before
+            );
+        }
+        assert!(
+            overlay_audits(
+                &fixture.connection,
+                WORKSPACE,
+                PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION
+            )
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        );
+        assert!(
+            overlay_audits(&fixture.connection, WORKSPACE, OVERLAY_INTENT_AUDIT_ACTION)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn edited_report_never_authorizes_live_weights_or_demotion() -> TestResult {
+        let fixture = overlay_fixture("# Original config\n")?;
+        let workspace = fixture.directory.path();
+        let mut edited: serde_json::Value =
+            serde_json::from_str(&render_retrieval_tuning_report_json(&fixture.report))
+                .map_err(|error| error.to_string())?;
+        edited["winner"]["weights"]["lexical"] = serde_json::json!(0.65);
+        std::fs::write(shadow_report_path(workspace), edited.to_string())
+            .map_err(|error| error.to_string())?;
+        no_promotion(&fixture)?;
+        for dry_run in [true, false] {
+            assert!(matches!(
+                demote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, dry_run)
+                    .map_err(|error| error.to_string())?,
+                Err(PromoteRefusal::NoPriorPromotion)
+            ));
+        }
+        assert_eq!(
+            read_config_bytes(workspace)
+                .map_err(|error| error.to_string())?
+                .0,
+            "# Original config\n"
+        );
+        Ok(())
+    }
+
+    fn rehash_report(value: &mut serde_json::Value, authority: &mut PromotionAuthority) {
+        value.as_object_mut().unwrap().remove("reportHash");
+        let mut input = Vec::new();
+        append_len_prefixed(&mut input, REPORT_HASH_DOMAIN.as_bytes());
+        append_len_prefixed(&mut input, value.to_string().as_bytes());
+        authority.report_hash = format!("blake3:{}", blake3::hash(&input).to_hex());
+        value["reportHash"] = serde_json::Value::String(authority.report_hash.clone());
+    }
+
+    #[test]
+    fn self_consistent_checksums_do_not_bypass_bounds_gate_or_evaluator() -> TestResult {
+        let fixture = overlay_fixture("")?;
+        for mutation in ["bounds", "gate", "margin", "evaluation"] {
+            let mut forged: serde_json::Value =
+                serde_json::from_str(&render_retrieval_tuning_report_json(&fixture.report))
+                    .map_err(|error| error.to_string())?;
+            let mut authority = fixture.report.authority.clone().ok_or("authority")?;
+            match mutation {
+                "bounds" => forged["winner"]["weights"]["lexical"] = serde_json::json!(0.9),
+                "gate" => authority.gate.min_triples = 0,
+                "margin" => authority.gate.promote_margin = 0.0,
+                _ => forged["diagnostics"]["evaluationHash"] = serde_json::json!("blake3:forged"),
+            }
+            rehash_report(&mut forged, &mut authority);
+            assert!(
+                validated_report(&forged, &authority).is_err(),
+                "mutation {mutation}"
+            );
+            std::fs::write(
+                shadow_report_path(fixture.directory.path()),
+                forged.to_string(),
+            )
+            .map_err(|error| error.to_string())?;
+            std::fs::write(
+                authority_path(fixture.directory.path()),
+                serde_json::to_string(&authority).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            no_promotion(&fixture)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rehashed_report_and_sidecar_cannot_invent_an_evaluation() -> TestResult {
+        let fixture = overlay_fixture("")?;
+        let mut forged: serde_json::Value =
+            serde_json::from_str(&render_retrieval_tuning_report_json(&fixture.report))
+                .map_err(|error| error.to_string())?;
+        let mut authority = fixture.report.authority.clone().ok_or("authority")?;
+        // Scale every score together, preserving the candidate walk, winner
+        // and relative margin. Both checksum layers remain internally valid.
+        for key in ["incumbent", "winner"] {
+            forged[key]["score"] =
+                serde_json::json!(forged[key]["score"].as_f64().ok_or("score")? / 2.0);
+        }
+        for candidate in forged["candidates"].as_array_mut().ok_or("candidates")? {
+            candidate["score"] =
+                serde_json::json!(candidate["score"].as_f64().ok_or("score")? / 2.0);
+        }
+        let incumbent =
+            parsed_candidate(&forged["incumbent"], true).map_err(|error| error.message())?;
+        let candidates = forged["candidates"]
+            .as_array()
+            .ok_or("candidates")?
+            .iter()
+            .map(|candidate| parsed_candidate(candidate, false))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.message())?;
+        forged["diagnostics"]["evaluationHash"] = serde_json::Value::String(evaluation_hash(
+            &incumbent,
+            &candidates,
+            fixture.report.labels.triples.len(),
+        ));
+        rehash_report(&mut forged, &mut authority);
+        assert!(validated_report(&forged, &authority).is_ok());
+        std::fs::write(
+            shadow_report_path(fixture.directory.path()),
+            forged.to_string(),
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(
+            authority_path(fixture.directory.path()),
+            serde_json::to_string(&authority).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        no_promotion(&fixture)
+    }
+
+    #[test]
+    fn same_generation_config_and_outcome_edits_invalidate_promotion() -> TestResult {
+        let config_fixture = overlay_fixture("")?;
+        let workspace = config_fixture.directory.path();
+        let before_generation = config_fixture
+            .connection
+            .get_workspace_generation(WORKSPACE)
+            .map_err(|error| error.to_string())?;
+        std::fs::write(
+            workspace_config_path(workspace),
+            "[scoring]\nrecency_tau_days = 45.0\n",
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            config_fixture
+                .connection
+                .get_workspace_generation(WORKSPACE)
+                .map_err(|error| error.to_string())?,
+            before_generation
+        );
+        no_promotion(&config_fixture)?;
+
+        let outcome_fixture = overlay_fixture("")?;
+        let before_generation = outcome_fixture
+            .connection
+            .get_workspace_generation(WORKSPACE)
+            .map_err(|error| error.to_string())?;
+        outcome_fixture.connection.execute_raw("UPDATE feedback_events SET signal = 'harmful' WHERE id = 'fb_00000000000000000000001001'")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            outcome_fixture
+                .connection
+                .get_workspace_generation(WORKSPACE)
+                .map_err(|error| error.to_string())?,
+            before_generation
+        );
+        no_promotion(&outcome_fixture)
+    }
+
+    #[test]
+    fn receipt_cannot_move_to_an_equal_generation_database() -> TestResult {
+        let fixture = overlay_fixture("")?;
+        let workspace = fixture.directory.path();
+        let other = DbConnection::open_file(workspace.join(".ee/other.db"))
+            .map_err(|error| error.to_string())?;
+        other.migrate().map_err(|error| error.to_string())?;
+        other
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let other_report = promotable_report_fixture(workspace, &other, None)?;
+        assert_eq!(other_report.db_generation, fixture.report.db_generation);
+        assert_eq!(other_report.labels, fixture.report.labels);
+        for dry_run in [true, false] {
+            assert!(matches!(
+                promote_retrieval_weights(workspace, &other, WORKSPACE, dry_run)
+                    .map_err(|error| error.to_string())?,
+                Err(PromoteRefusal::ReportInvalid { .. })
+            ));
+        }
+        assert_eq!(
+            read_config_bytes(workspace)
+                .map_err(|error| error.to_string())?
+                .0,
+            ""
+        );
+        assert!(
+            overlay_audits(&other, WORKSPACE, OVERLAY_INTENT_AUDIT_ACTION)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_failure_rolls_back_and_retry_recovers_published_intent() -> TestResult {
+        let fixture = overlay_fixture("# Before tuning\n")?;
+        let workspace = fixture.directory.path();
+        fixture.connection.execute_raw("CREATE TRIGGER refuse_shadow_completion BEFORE INSERT ON audit_log WHEN NEW.action = 'shadow.promote_retrieval_weights' BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END")
+            .map_err(|error| error.to_string())?;
+        let error = promote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false)
+            .expect_err("completion audit must fail");
+        assert!(error.to_string().contains("prior configuration restored"));
+        assert_eq!(
+            read_config_bytes(workspace)
+                .map_err(|error| error.to_string())?
+                .0,
+            "# Before tuning\n"
+        );
+        assert!(
+            overlay_audits(
+                &fixture.connection,
+                WORKSPACE,
+                PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION
+            )
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        );
+        let intents = overlay_audits(&fixture.connection, WORKSPACE, OVERLAY_INTENT_AUDIT_ACTION)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(intents.len(), 1);
+        // An unapplied intent is not rollback authority.
+        assert!(matches!(
+            demote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false)
+                .map_err(|error| error.to_string())?,
+            Err(PromoteRefusal::NoPriorPromotion)
+        ));
+        let intent = overlay_details(&intents[0]).ok_or("intent")?;
+        let published = intent
+            .pointer("/completion/newConfigToml")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("new config")?;
+        fixture
+            .connection
+            .execute_raw("DROP TRIGGER refuse_shadow_completion")
+            .map_err(|error| error.to_string())?;
+        // Simulate a crash after publication but before its completion row.
+        std::fs::write(workspace_config_path(workspace), published)
+            .map_err(|error| error.to_string())?;
+        fixture.connection.execute_raw(&format!(
+            "INSERT INTO workspace_generations (workspace_id, generation, updated_at) VALUES ('{WORKSPACE}', 20, '2026-08-01T12:01:00Z') ON CONFLICT(workspace_id) DO UPDATE SET generation = 20"
+        )).map_err(|error| error.to_string())?;
+        fixture.connection.execute_raw("UPDATE feedback_events SET signal = 'harmful' WHERE id = 'fb_00000000000000000000001001'")
+            .map_err(|error| error.to_string())?;
+        let recovered = promote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("{refusal:?}"))?;
+        assert!(recovered.applied);
+        assert_eq!(recovered.prior_config, recovered.new_config);
+        assert_eq!(
+            read_config_bytes(workspace)
+                .map_err(|error| error.to_string())?
+                .0,
+            published
+        );
+        let promotions = overlay_audits(
+            &fixture.connection,
+            WORKSPACE,
+            PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(promotions.len(), 1);
+        assert_eq!(
+            overlay_details(&promotions[0]).ok_or("completion")?["intentId"].as_str(),
+            Some(intents[0].id.as_str())
+        );
+        let repeated = promote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("{refusal:?}"))?;
+        assert!(!repeated.applied);
+        assert_eq!(
+            overlay_audits(
+                &fixture.connection,
+                WORKSPACE,
+                PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION
+            )
+            .map_err(|error| error.to_string())?
+            .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn demote_recovers_a_published_intent_after_report_replacement() -> TestResult {
+        let fixture = overlay_fixture("# Before tuning\n")?;
+        let workspace = fixture.directory.path();
+        fixture.connection.execute_raw("CREATE TRIGGER interrupt_shadow_completion BEFORE INSERT ON audit_log WHEN NEW.action = 'shadow.promote_retrieval_weights' BEGIN SELECT RAISE(ABORT, 'interrupted completion'); END")
+            .map_err(|error| error.to_string())?;
+        assert!(
+            promote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false).is_err()
+        );
+        let intents = overlay_audits(&fixture.connection, WORKSPACE, OVERLAY_INTENT_AUDIT_ACTION)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(intents.len(), 1);
+        let intent = overlay_details(&intents[0]).ok_or("intent")?;
+        let published = intent
+            .pointer("/completion/newConfigToml")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("new config")?;
+        fixture
+            .connection
+            .execute_raw("DROP TRIGGER interrupt_shadow_completion")
+            .map_err(|error| error.to_string())?;
+        std::fs::write(workspace_config_path(workspace), published)
+            .map_err(|error| error.to_string())?;
+        // The report files no longer provide any authority. Rollback must be
+        // driven by the original evaluated intent in this database.
+        std::fs::write(shadow_report_path(workspace), "{}").map_err(|error| error.to_string())?;
+        std::fs::write(authority_path(workspace), "{}").map_err(|error| error.to_string())?;
+        let plan = demote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, true)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("{refusal:?}"))?;
+        assert!(!plan.applied);
+        assert_eq!(plan.new_config, "# Before tuning\n");
+        assert!(
+            overlay_audits(
+                &fixture.connection,
+                WORKSPACE,
+                PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION
+            )
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        );
+        let demotion = demote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("{refusal:?}"))?;
+        assert!(demotion.applied);
+        assert_eq!(
+            read_config_bytes(workspace)
+                .map_err(|error| error.to_string())?
+                .0,
+            "# Before tuning\n"
+        );
+        assert_eq!(
+            overlay_audits(
+                &fixture.connection,
+                WORKSPACE,
+                PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION
+            )
+            .map_err(|error| error.to_string())?
+            .len(),
+            1
+        );
+        assert_eq!(
+            overlay_audits(
+                &fixture.connection,
+                WORKSPACE,
+                DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION
+            )
+            .map_err(|error| error.to_string())?
+            .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn intent_failure_cannot_change_live_configuration() -> TestResult {
+        let fixture = overlay_fixture("# Original config\n")?;
+        fixture.connection.execute_raw("CREATE TRIGGER refuse_shadow_intent BEFORE INSERT ON audit_log WHEN NEW.action = 'shadow.retrieval_weights_intent' BEGIN SELECT RAISE(ABORT, 'injected intent failure'); END")
+            .map_err(|error| error.to_string())?;
+        assert!(
+            promote_retrieval_weights(
+                fixture.directory.path(),
+                &fixture.connection,
+                WORKSPACE,
+                false
+            )
+            .is_err()
+        );
+        assert_eq!(
+            read_config_bytes(fixture.directory.path())
+                .map_err(|error| error.to_string())?
+                .0,
+            "# Original config\n"
+        );
+        assert!(
+            overlay_audits(&fixture.connection, WORKSPACE, OVERLAY_INTENT_AUDIT_ACTION)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        assert!(
+            overlay_audits(
+                &fixture.connection,
+                WORKSPACE,
+                PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION
+            )
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        );
+        assert!(matches!(
+            demote_retrieval_weights(
+                fixture.directory.path(),
+                &fixture.connection,
+                WORKSPACE,
+                false
+            )
+            .map_err(|error| error.to_string())?,
+            Err(PromoteRefusal::NoPriorPromotion)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn demotion_preserves_later_settings_and_is_idempotent() -> TestResult {
+        let original = "# Keep this comment\n[search]\nlexical_weight = 0.5\nsemantic_weight = 0.5\ngraph_weight = 0.0\n";
+        let fixture = overlay_fixture(original)?;
+        let workspace = fixture.directory.path();
+        promote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("{refusal:?}"))?;
+        let promoted = read_config_bytes(workspace)
+            .map_err(|error| error.to_string())?
+            .0;
+        let edited =
+            format!("{promoted}\n# A later unrelated setting\n[pack]\ndefault_max_tokens = 3000\n");
+        std::fs::write(workspace_config_path(workspace), &edited)
+            .map_err(|error| error.to_string())?;
+        fixture.connection.execute_raw("CREATE TRIGGER refuse_shadow_demotion BEFORE INSERT ON audit_log WHEN NEW.action = 'shadow.demote_retrieval_weights' BEGIN SELECT RAISE(ABORT, 'injected demotion audit failure'); END")
+            .map_err(|error| error.to_string())?;
+        assert!(
+            demote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false).is_err()
+        );
+        assert_eq!(
+            read_config_bytes(workspace)
+                .map_err(|error| error.to_string())?
+                .0,
+            edited
+        );
+        fixture
+            .connection
+            .execute_raw("DROP TRIGGER refuse_shadow_demotion")
+            .map_err(|error| error.to_string())?;
+        let demotion = demote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("{refusal:?}"))?;
+        assert!(demotion.applied);
+        let restored = read_config_bytes(workspace)
+            .map_err(|error| error.to_string())?
+            .0;
+        assert!(restored.contains("# Keep this comment"));
+        assert!(restored.contains("# A later unrelated setting"));
+        let document = restored
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            document["pack"]["default_max_tokens"].as_integer(),
+            Some(3000)
+        );
+        assert_eq!(document["search"]["lexical_weight"].as_float(), Some(0.5));
+        assert_eq!(document["search"]["semantic_weight"].as_float(), Some(0.5));
+        assert_eq!(document["search"]["graph_weight"].as_float(), Some(0.0));
+        let repeated = demote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("{refusal:?}"))?;
+        assert!(!repeated.applied);
+        assert_eq!(
+            read_config_bytes(workspace)
+                .map_err(|error| error.to_string())?
+                .0,
+            restored
+        );
+        assert_eq!(
+            overlay_audits(
+                &fixture.connection,
+                WORKSPACE,
+                DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION
+            )
+            .map_err(|error| error.to_string())?
+            .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn demotion_refuses_conflicting_weight_edits() -> TestResult {
+        let fixture = overlay_fixture("")?;
+        let workspace = fixture.directory.path();
+        promote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, false)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("{refusal:?}"))?;
+        let promoted = read_config_bytes(workspace)
+            .map_err(|error| error.to_string())?
+            .0;
+        let mut document = promoted
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|error| error.to_string())?;
+        document["search"]["lexical_weight"] = toml_edit::value(0.01);
+        let edited = document.to_string();
+        std::fs::write(workspace_config_path(workspace), &edited)
+            .map_err(|error| error.to_string())?;
+        for dry_run in [true, false] {
+            assert!(matches!(
+                demote_retrieval_weights(workspace, &fixture.connection, WORKSPACE, dry_run)
+                    .map_err(|error| error.to_string())?,
+                Err(PromoteRefusal::ReportInvalid { .. })
+            ));
+            assert_eq!(
+                read_config_bytes(workspace)
+                    .map_err(|error| error.to_string())?
+                    .0,
+                edited
+            );
+        }
+        assert!(
+            overlay_audits(
+                &fixture.connection,
+                WORKSPACE,
+                DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION
+            )
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_publication_refuses_an_interleaved_config_edit() -> TestResult {
+        let directory = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(directory.path().join(".ee")).map_err(|error| error.to_string())?;
+        let path = workspace_config_path(directory.path());
+        std::fs::write(&path, "# original\n").map_err(|error| error.to_string())?;
+        let result = atomic_shadow_write_authorized(
+            &path,
+            "# proposed overlay\n",
+            Some("# original\n"),
+            None,
+            || std::fs::write(&path, "# concurrent edit\n").unwrap(),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).map_err(|error| error.to_string())?,
+            "# concurrent edit\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn evaluator_scores_the_real_unclamped_incumbent() -> TestResult {
+        let actual = TuningWeights {
+            lexical: 0.9,
+            semantic: 0.1,
+            graph: 0.0,
+        };
+        let labels = flip_fixture_label_report()?;
+        let replays = flip_fixture_replays();
+        let result =
+            evaluate_fusion_candidates(&Cx::for_testing(), &replays, &labels.triples, actual)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(result.incumbent.weights, actual);
+        assert_ne!(result.incumbent.weights, actual.clamped());
+        assert_eq!(
+            result.incumbent.score,
+            score_fusion_candidate(&replays, &labels.triples, actual)
+        );
+        for candidate in result.candidates {
+            assert_eq!(candidate.weights, candidate.weights.clamped());
+        }
+        Ok(())
     }
 
     #[test]

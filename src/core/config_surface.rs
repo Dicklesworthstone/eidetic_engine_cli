@@ -610,7 +610,9 @@ fn read_optional_config(path: &Path) -> Result<(bool, String), ConfigSurfaceErro
 /// `ee config get` reject a config that `ee remember` happily accepts.
 const CONFIG_SURFACE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
-fn read_optional_config_contents(path: &Path) -> Result<Option<String>, ConfigSurfaceError> {
+pub(crate) fn read_optional_config_contents(
+    path: &Path,
+) -> Result<Option<String>, ConfigSurfaceError> {
     use std::io::Read as _;
 
     ensure_no_config_symlink_components(path, "read").map_err(|source| {
@@ -793,7 +795,10 @@ fn ensure_config_temp_path_is_missing(path: &Path) -> Result<(), io::Error> {
     }
 }
 
-fn publish_config_temp_file(path: &Path, temp_path: &Path) -> Result<(), ConfigSurfaceError> {
+pub(crate) fn publish_config_temp_file(
+    path: &Path,
+    temp_path: &Path,
+) -> Result<(), ConfigSurfaceError> {
     ensure_no_config_symlink_components(path, "publish").map_err(|source| {
         ConfigSurfaceError::Write {
             path: path.to_path_buf(),

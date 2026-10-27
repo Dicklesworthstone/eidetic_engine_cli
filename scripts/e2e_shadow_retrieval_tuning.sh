@@ -6,10 +6,12 @@
 #   - a sparse corpus abstains with insufficient_outcome_evidence and still
 #     persists the report;
 #   - promote on an abstained report is a typed exit-7 refusal;
-#   - a promotable report (persisted report edited in place — promote trusts
-#     the local report file by design; same trust domain as config.toml)
-#     dry-runs without writing, then applies the [search] overlay;
-#   - demote restores the pre-promotion config bytes exactly.
+#   - editing an abstained report into a purported winner cannot authorize
+#     either dry-run or live promotion;
+#   - rejected reports leave config bytes and demotion authority unchanged;
+#   - a fresh evaluator run restores an authentic, still-abstained report.
+# Positive promotion and selective rollback use evaluator-backed receipts in
+# the core shadow_tuning tests; this sparse CLI corpus proves the refusal path.
 #
 # Environment:
 #   EE_BIN / EE_BINARY  Path to the ee binary (default: `ee` on PATH)
@@ -125,8 +127,7 @@ run_ee shadow promote --workspace "${WS}" --json
 [[ "${LAST_EXIT}" -eq 7 ]] && event promote_abstained_refuses_exit7 pass \
     || event promote_abstained_refuses_exit7 fail "exit ${LAST_EXIT} (wanted 7)"
 
-# --- make the persisted report promotable (in place; promote trusts the
-# --- local report file by design) and exercise dry-run + apply + demote ---
+# --- a changed report cannot manufacture evidence or authorize promotion ---
 if [[ -f "${REPORT_FILE}" ]]; then
     jq '.abstained = false
         | .abstentionReason = null
@@ -135,34 +136,50 @@ if [[ -f "${REPORT_FILE}" ]]; then
         "${REPORT_FILE}" >"${REPORT_FILE}.tmp" && mv "${REPORT_FILE}.tmp" "${REPORT_FILE}"
 fi
 CONFIG_FILE="${WS}/.ee/config.toml"
-PRIOR_CONFIG=""
-[[ -f "${CONFIG_FILE}" ]] && PRIOR_CONFIG="$(cat "${CONFIG_FILE}")"
+PRIOR_CONFIG_FILE="${LOG_DIR}/config.before.toml"
+PRIOR_CONFIG_PRESENT=false
+if [[ -f "${CONFIG_FILE}" ]]; then
+    PRIOR_CONFIG_PRESENT=true
+    cp "${CONFIG_FILE}" "${PRIOR_CONFIG_FILE}"
+fi
+
+config_unchanged() {
+    if [[ "${PRIOR_CONFIG_PRESENT}" == true ]]; then
+        [[ -f "${CONFIG_FILE}" ]] && cmp -s "${PRIOR_CONFIG_FILE}" "${CONFIG_FILE}"
+    else
+        [[ ! -e "${CONFIG_FILE}" ]]
+    fi
+}
 
 run_ee shadow promote --dry-run --workspace "${WS}" --json
-if [[ "${LAST_EXIT}" -eq 0 ]] && [[ "$(jq -r '.data.applied' "${LAST_STDOUT}")" == "false" ]]; then
-    CURRENT=""
-    [[ -f "${CONFIG_FILE}" ]] && CURRENT="$(cat "${CONFIG_FILE}")"
-    [[ "${CURRENT}" == "${PRIOR_CONFIG}" ]] && event promote_dry_run_writes_nothing pass \
-        || event promote_dry_run_writes_nothing fail "config changed under --dry-run"
+if [[ "${LAST_EXIT}" -eq 7 ]] && config_unchanged; then
+    event tampered_report_dry_run_refused pass
 else
-    event promote_dry_run_writes_nothing fail "exit ${LAST_EXIT}; $(head -c 200 "${LAST_STDOUT}")"
+    event tampered_report_dry_run_refused fail "exit ${LAST_EXIT}; $(head -c 200 "${LAST_STDOUT}")"
 fi
 
 run_ee shadow promote --workspace "${WS}" --json
-if [[ "${LAST_EXIT}" -eq 0 ]] && grep -q 'lexical_weight' "${CONFIG_FILE}" 2>/dev/null \
-    && grep -q '\[search\]' "${CONFIG_FILE}" 2>/dev/null; then
-    event promote_applies_overlay pass
+if [[ "${LAST_EXIT}" -eq 7 ]] && config_unchanged; then
+    event tampered_report_promotion_refused pass
 else
-    event promote_applies_overlay fail "exit ${LAST_EXIT}; config: $(head -c 200 "${CONFIG_FILE}" 2>/dev/null || echo missing)"
+    event tampered_report_promotion_refused fail "exit ${LAST_EXIT}; $(head -c 200 "${LAST_STDOUT}")"
 fi
 
 run_ee shadow demote --workspace "${WS}" --json
-RESTORED=""
-[[ -f "${CONFIG_FILE}" ]] && RESTORED="$(cat "${CONFIG_FILE}")"
-if [[ "${LAST_EXIT}" -eq 0 ]] && [[ "${RESTORED}" == "${PRIOR_CONFIG}" ]]; then
-    event demote_restores_bytes pass
+if [[ "${LAST_EXIT}" -eq 7 ]] && config_unchanged; then
+    event rejected_report_grants_no_demotion_authority pass
 else
-    event demote_restores_bytes fail "exit ${LAST_EXIT}; restored bytes differ from prior"
+    event rejected_report_grants_no_demotion_authority fail "exit ${LAST_EXIT}; $(head -c 200 "${LAST_STDOUT}")"
+fi
+
+run_ee shadow run --policy "${POLICY}" --workspace "${WS}" --json
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && [[ "$(jq -r '.data.report.abstained' "${LAST_STDOUT}")" == true ]] \
+    && [[ "$(jq -r '.promotable' "${REPORT_FILE}")" == false ]] \
+    && config_unchanged; then
+    event rerun_restores_authentic_abstention pass
+else
+    event rerun_restores_authentic_abstention fail "exit ${LAST_EXIT}; $(head -c 200 "${LAST_STDOUT}")"
 fi
 
 echo
