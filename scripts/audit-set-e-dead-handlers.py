@@ -203,7 +203,7 @@ def call_contexts(name, all_lines):
         # "repairing" working error handling would have been the worst place
         # to be wrong.
         errexit = False
-        for l in lines:
+        for idx, l in enumerate(lines):
             bare = _decomment(l)
             if SET_E.search(bare):
                 errexit = True
@@ -217,10 +217,22 @@ def call_contexts(name, all_lines):
             if not errexit:
                 kinds.add("tested")
                 continue
-            m = TEST_CTX.match(l)
+            # A CALL SITE WRAPS TOO, and judging its first physical line alone
+            # read `|| return 1` on the continuation as absent. Measured
+            # 2026-10-27: run_rerank_json() in e2e_overhaul/determinism.sh was
+            # classified {bare, tested} purely because three of its four
+            # wrapped call sites carry their `|| return 1` on the next line
+            # (:658, :717, :737). Every real call site of that function, and of
+            # the one function that calls it bare, is tested -- so the handler
+            # is live and the 'bare' was an artefact of this loop, not of the
+            # script. Same joiner as the two censuses, for the same reason.
+            logical, _ = join_continuations(lines, idx)
+            m = TEST_CTX.match(logical)
             tested = bool(m and name in (m.group(1) or m.group(2) or m.group(3) or ""))
             # `f || x` / `f && x` / `if f` / `! f` all suppress -e in f's body.
-            if tested or re.match(r"^\s*" + re.escape(name) + r"\b[^|&]*(\|\||&&)", l):
+            if tested or re.match(
+                r"^\s*" + re.escape(name) + r"\b[^|&]*(\|\||&&)", logical
+            ):
                 kinds.add("tested")
             else:
                 kinds.add("bare")
