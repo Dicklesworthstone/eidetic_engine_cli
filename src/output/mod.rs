@@ -1657,9 +1657,12 @@ fn command_name_from_schema(schema: &str) -> String {
         "ee.decide.record.v1" => "decide record".to_string(),
         "ee.decide.list.v1" => "decide list".to_string(),
         "ee.decide.revisit.v1" => "decide revisit".to_string(),
+        "ee.evidence.withdraw.v1" => "evidence withdraw".to_string(),
         "ee.toolchain_provenance.v1" => "diag toolchain-provenance".to_string(),
         "ee.ask.v1" => "ask".to_string(),
         "ee.recall.v1" => "recall".to_string(),
+        "ee.memory.anchors.v1" => "memory anchors".to_string(),
+        "ee.index.backfill_anchors.v1" => "index backfill-anchors".to_string(),
         "ee.swarm.brief.v1" | "ee.swarm_brief.v1" => "swarm brief".to_string(),
         "ee.swarm.next_action.v1" | "ee.swarm.next-action.v1" | "ee.swarm_next_action.v1" => {
             "swarm next-action".to_string()
@@ -1825,6 +1828,52 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
             ],
             FieldProfile::Full => &["*"],
         },
+        "evidence withdraw" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "evidenceId",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "wouldChange",
+                "indexStatus",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "evidenceId",
+                "sessionId",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "wouldChange",
+                "searchEligibility",
+                "packEligibility",
+                "indexStatus",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "command",
+                "version",
+                "workspaceId",
+                "evidenceId",
+                "sessionId",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "wouldChange",
+                "previousSearchEligibility",
+                "previousPackEligibility",
+                "searchEligibility",
+                "packEligibility",
+                "auditId",
+                "indexJobId",
+                "indexStatus",
+            ],
+            FieldProfile::Full => &["*"],
+        },
         "decide record" => match preset {
             FieldProfile::Minimal => &["schema", "version", "status", "dryRun", "persisted"],
             FieldProfile::Summary => &[
@@ -1981,6 +2030,53 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "queryAssist",
             ],
             FieldProfile::Full => &["*"],
+        },
+        "memory anchors" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "memoryId",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "addedAnchorCount",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "version",
+                "memoryId",
+                "workspaceId",
+                "status",
+                "dryRun",
+                "persisted",
+                "changed",
+                "addedAnchorCount",
+                "auditId",
+                "indexJobId",
+            ],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
+        },
+        "index backfill-anchors" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "dryRun",
+                "proposedAnchorCount",
+                "appliedAnchorCount",
+                "nextAfter",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "version",
+                "dryRun",
+                "scannedMemoryCount",
+                "proposedMemoryCount",
+                "proposedAnchorCount",
+                "appliedMemoryCount",
+                "appliedAnchorCount",
+                "skippedMemoryCount",
+                "nextAfter",
+            ],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
         },
         "recall" => match preset {
             FieldProfile::Minimal => &["schema", "query", "memoryId", "score"],
@@ -2201,6 +2297,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "status",
                 "evidenceAdmission",
                 "sessions",
+                "review",
             ],
             FieldProfile::Full => &["*"],
         },
@@ -2975,13 +3072,13 @@ pub fn render_context_response_json_with_options(
             pack.field_str("query", &response.data.pack.query);
             if let Some(hash) = &response.data.pack.hash {
                 pack.field_str("hash", hash);
-                // ADR 0087 v4: digest is pack.hash, the composite over the
+                // ADR 0087 v5: digest is pack.hash, the composite over the
                 // component digests listed beside it. numericDomain names the
                 // quantization of every hashed score.
                 let components = response.data.pack_hash_components.as_ref();
                 pack.field_object("snapshotIdentity", |identity| {
                     identity.field_u32("version", crate::pack::PACK_SNAPSHOT_IDENTITY_VERSION);
-                    identity.field_str("inputSchema", crate::pack::PACK_HASH_INPUT_SCHEMA_V4);
+                    identity.field_str("inputSchema", crate::pack::PACK_HASH_INPUT_SCHEMA_V5);
                     identity.field_str("digest", hash);
                     identity.field_str("numericDomain", "q20.12");
                     identity.field_bool("componentDigestsAvailableLocally", components.is_some());
@@ -3118,6 +3215,9 @@ pub fn render_context_response_json_with_options(
             }
             if let Some(agent_profile) = &response.data.agent_profile {
                 pack.field_raw("agentProfile", &agent_profile.to_string());
+            }
+            if let Some(bead_affinity) = &response.data.bead_affinity {
+                pack.field_raw("beadAffinity", &bead_affinity.to_string());
             }
             if options.include_legacy_selection_certificate {
                 pack.field_object("deprecation", |deprecation| {
@@ -3775,28 +3875,51 @@ pub fn render_context_response_markdown_with_options(
     response: &ContextResponse,
     include_non_affecting: bool,
 ) -> String {
+    if let Some(text) = &response.data.finalized_text {
+        return text.clone();
+    }
+    if let Some(cached_json) = &response.cached_json
+        && let Ok(cached) = serde_json::from_str::<serde_json::Value>(cached_json)
+        && let Some(text) = cached
+            .pointer("/data/pack/text")
+            .and_then(serde_json::Value::as_str)
+    {
+        return text.to_owned();
+    }
+    render_context_markdown_for_finalization(
+        &crate::pack::ContextMarkdownInput::from(response),
+        include_non_affecting,
+        response.data.pack.hash.as_deref().unwrap_or("absent"),
+    )
+}
+
+/// The shared renderer for finalization and unfinalized builder responses.
+/// The hash footer is an explicit argument so the v5 digest can bind every
+/// shipped byte except its own value, without replacing user-provided text.
+#[must_use]
+pub(crate) fn render_context_markdown_for_finalization(
+    input: &crate::pack::ContextMarkdownInput<'_>,
+    include_non_affecting: bool,
+    footer_hash: &str,
+) -> String {
     // ADR 0087 §1: `pack.text` is canonical, so non-canonical telemetry
     // (the elapsed-budget overrun) never reaches it, nor the counts and
     // banner derived from this slice. It stays in the envelope's `degraded[]`.
-    let filtered = response
-        .data
+    let filtered = input
         .degraded
         .iter()
         .filter(|entry| include_non_affecting || entry.category().included_by_default())
         .filter(|entry| !crate::pack::is_non_canonical_telemetry_degradation_code(&entry.code));
     let degraded = aggregate_context_degraded_as_response(filtered);
     let mut markdown =
-        crate::pack::render_context_response_markdown_with_degraded(response, &degraded);
+        crate::pack::render_context_markdown_with_footer(input, &degraded, footer_hash);
     if let Some(heading_end) = markdown.find("\n\n") {
         markdown.insert_str(
             heading_end + 2,
-            &format!(
-                "**embed_backend:** `{}`\n\n",
-                response.data.embed_backend.as_str()
-            ),
+            &format!("**embed_backend:** `{}`\n\n", input.embed_backend.as_str()),
         );
     }
-    if let Some(pack_dna) = &response.data.pack_dna {
+    if let Some(pack_dna) = input.pack_dna {
         insert_context_pack_dna_markdown(&mut markdown, pack_dna);
     }
     markdown
@@ -3918,7 +4041,8 @@ fn build_repair_fields(obj: &mut JsonBuilder, repair: &str) {
     obj.field_str("repairKind", repair_command_kind_name(repair));
 }
 
-fn repair_command_kind_name(repair: &str) -> &'static str {
+/// The `repairKind` wire name for `repair`.
+pub(crate) fn repair_command_kind_name(repair: &str) -> &'static str {
     match classify_repair_command(repair) {
         RepairCommandKind::Actionable => "actionable",
         RepairCommandKind::Template => "template",
@@ -6686,6 +6810,21 @@ pub fn render_why_json(report: &WhyReport) -> String {
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
+            // bd-6ox3b. The PAYLOAD schema id, which `ee why` was the only
+            // surface not emitting. Two authorities agree on the value and that
+            // it belongs here:
+            //   docs/schemas/ee.why.v1.json declares its root `schema` as
+            //     {"type": "string", "const": "ee.why.v1"} and lists it in
+            //     `required` -- and that schema's root describes THIS object,
+            //     not the envelope (its properties are schema/memoryId/graph).
+            //   src/core/mod.rs registers SupportedSchema::new("why_augmented",
+            //     "ee.why.v1").
+            // Siblings already carry theirs the same way: .data.schema is
+            // "ee.insights.v1" for insights and "ee.status.skyline.v1" for
+            // status --skyline. First key because serde_json runs with
+            // preserve_order here, so this matches the schema's own ordering
+            // rather than landing wherever it was appended.
+            "schema": "ee.why.v1",
             "command": "why",
             "version": report.version,
             "memoryId": report.entity.is_none().then_some(&report.memory_id),
@@ -6723,17 +6862,68 @@ pub fn render_why_json(report: &WhyReport) -> String {
             }),
         );
     }
-    if let Some(load_bearing) = load_bearing
+    // The `graph` augmentation block that docs/schemas/ee.why.v1.json defines
+    // carries four members. Only `loadBearing` was ever attached here, so the
+    // documented `graph.hits` contract was never emitted at all -- even though
+    // every value it needs is already computed and already served on this same
+    // response under `graphRetrievalFeatures.hits`. Sixteen e2e assertions in
+    // scripts/e2e_overhaul/g10_hits.sh read the documented paths and had been
+    // red for exactly that reason. bd-maisx.
+    //
+    // $defs.hitsEvidence requires a NON-nullable graphType and snapshotVersion,
+    // and profileInfluence's three boosts are non-nullable numbers with
+    // minimum 0. why_graph_score_json_value yields null for a non-finite
+    // score, so the block is emitted only when a snapshot witness, a graph
+    // type, and finite non-negative normalized scores are all present.
+    // Emitting it otherwise would publish a payload that fails the very schema
+    // this block exists to satisfy.
+    let graph_hits_contract = report.graph_retrieval.as_ref().and_then(|graph| {
+        let hits = graph.hits.as_ref()?;
+        let snapshot = graph.source.snapshot.as_ref()?;
+        let graph_type = graph.source.graph_type.as_ref()?;
+        let authority = hits.authority.normalized;
+        let hub = hits.hub.normalized;
+        if !authority.is_finite() || !hub.is_finite() || authority < 0.0 || hub < 0.0 {
+            return None;
+        }
+        Some(serde_json::json!({
+            "authorityScore": why_graph_score_json_value(authority),
+            "authorityRank": hits.authority.rank,
+            "hubScore": why_graph_score_json_value(hub),
+            "hubRank": hits.hub.rank,
+            // Same value as graphRetrievalFeatures.hits.roleLabel on this
+            // response; two fields naming the same role must never disagree.
+            "dominantRole": hits.role_label,
+            // Semantics taken from the schema's own example, where
+            // groundingBoost equals authorityScore, orientationBoost equals
+            // hubScore, and balancedBoost is exactly their mean.
+            "profileInfluence": {
+                "groundingBoost": why_graph_score_json_value(authority),
+                "orientationBoost": why_graph_score_json_value(hub),
+                "balancedBoost": why_graph_score_json_value((authority + hub) / 2.0),
+            },
+            "evidence": {
+                "schema": hits.schema,
+                "algorithm": "hits_centrality_directed",
+                "graphType": graph_type,
+                "snapshotVersion": snapshot.snapshot_version,
+            },
+            "rationale": &hits.role_rationale,
+        }))
+    });
+    let mut graph_block = serde_json::Map::new();
+    if let Some(load_bearing) = load_bearing {
+        graph_block.insert("loadBearing".to_owned(), load_bearing);
+    }
+    if let Some(graph_hits_contract) = graph_hits_contract {
+        graph_block.insert("hits".to_owned(), graph_hits_contract);
+    }
+    if !graph_block.is_empty()
         && let Some(data) = json
             .get_mut("data")
             .and_then(serde_json::Value::as_object_mut)
     {
-        data.insert(
-            "graph".to_owned(),
-            serde_json::json!({
-                "loadBearing": load_bearing,
-            }),
-        );
+        data.insert("graph".to_owned(), serde_json::Value::Object(graph_block));
     }
     if let Some(causal_explanation) = &report.causal_explanation {
         if let Some(data) = json
@@ -9659,6 +9849,15 @@ pub fn render_curate_show_human(report: &CurateShowReport) -> String {
     } else {
         lines.push("  targetMemoryId: (none — create-derived candidate)".to_owned());
     }
+    if let Some(plan) = report
+        .candidate
+        .proposed_content
+        .as_deref()
+        .and_then(crate::core::conflict_proposal::public_reviewed_plan_text)
+    {
+        lines.push("  reviewedConflictPlan:".to_owned());
+        lines.extend(plan.lines().map(|line| format!("    {line}")));
+    }
     if let Some(planned) = &report.planned_application {
         lines.push(format!(
             "  plannedApplication: status={} decision={}",
@@ -11339,6 +11538,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: conflict_resolve_schema_definition,
         },
         SchemaEntry {
+            id: "ee.conflict.proposal.v1",
+            version: "1",
+            description: "Pending conflict-resolution proposal with an immutable source receipt and explicit curation review commands.",
+            category: "graph",
+            definition: conflict_proposal_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.context.agent_profile.v1",
             version: "1",
             description: "Agent-specific retrieval bias summary emitted by ee context --explain --json.",
@@ -11898,6 +12104,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: why_not_selected_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::context::WHY_NOT_SELECTED_SCHEMA_V2,
+            version: "2",
+            description: "Native-entity explanation observed in the mixed-source context pack by ee why-not.",
+            category: "context",
+            definition: why_not_selected_v2_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.why.causal.v1",
             version: "1",
             description: "Causal explanation block for ee why graph-accretion output.",
@@ -11982,6 +12195,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: decide_record_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::evidence::EVIDENCE_WITHDRAW_SCHEMA_V1,
+            version: "1",
+            description: "Metadata-only receipt for withdrawing a retained CASS source from future retrieval and derivation; queued indexing is distinct from publication.",
+            category: "memory",
+            definition: evidence_withdraw_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::decide::DECIDE_LIST_SCHEMA_V1,
             version: "1",
             description: "Data payload emitted by ee decide list under the standard ee.response.v2 envelope.",
@@ -12001,6 +12221,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             description: "Code-anchored recall result emitted by ee recall (ADR 0064): reverse lookup from paths, symbols, or a git diff to anchored memories with deterministic freshness x confidence x level-tilt ranking.",
             category: "search",
             definition: recall_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::anchors::MEMORY_ANCHORS_SCHEMA_V1,
+            version: "1",
+            description: "Redaction-safe listing, preview, and additive attachment of validated code anchors without changing memory content or source provenance.",
+            category: "memory",
+            definition: memory_anchors_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::anchors::ANCHOR_BACKFILL_SCHEMA_V1,
+            version: "1",
+            description: "Bounded code-anchor backfill preview and explicit application for eligible memories in one workspace.",
+            category: "search",
+            definition: anchor_backfill_schema_definition,
         },
         SchemaEntry {
             id: crate::models::schema::TIMELINE_SCHEMA_V1,
@@ -12080,6 +12314,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: global_promotion_report_schema_definition,
         },
         SchemaEntry {
+            id: "ee.global_promotion.plan.v2",
+            version: "2",
+            description: "Workspace-to-global promotion plan with explicit near-duplicate merge review proposals and typed refusals.",
+            category: "memory",
+            definition: global_promotion_plan_v2_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.global_promotion.report.v2",
+            version: "2",
+            description: "Global promotion receipt with durable merge-candidate review, idempotent applied-merge replay, and index publication status.",
+            category: "memory",
+            definition: global_promotion_report_v2_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.global_demotion.report.v1",
             version: "1",
             description: "Execution report for ee memory demote-global: tombstone of a promoted global row with origin parsed from promotion provenance.",
@@ -12109,6 +12357,14 @@ fn global_promotion_plan_schema_definition() -> String {
 
 fn global_promotion_report_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.global_promotion.report.v1.json").to_string()
+}
+
+fn global_promotion_plan_v2_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.global_promotion.plan.v2.json").to_string()
+}
+
+fn global_promotion_report_v2_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.global_promotion.report.v2.json").to_string()
 }
 
 fn global_demotion_report_schema_definition() -> String {
@@ -12175,6 +12431,10 @@ fn decide_record_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.decide.record.v1.json").to_string()
 }
 
+fn evidence_withdraw_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.evidence.withdraw.v1.json").to_string()
+}
+
 fn decide_list_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.decide.list.v1.json").to_string()
 }
@@ -12189,6 +12449,14 @@ fn toolchain_provenance_schema_definition() -> String {
 
 fn recall_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.recall.v1.json").to_string()
+}
+
+fn memory_anchors_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory.anchors.v1.json").to_string()
+}
+
+fn anchor_backfill_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.index.backfill_anchors.v1.json").to_string()
 }
 
 fn timeline_schema_definition() -> String {
@@ -12596,6 +12864,10 @@ fn conflict_resolve_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.conflict.resolve.v1.json").to_string()
 }
 
+fn conflict_proposal_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.conflict.proposal.v1.json").to_string()
+}
+
 fn graph_diff_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.graph.diff.v1.json").to_string()
 }
@@ -13001,6 +13273,7 @@ fn maintenance_job_row_schema_definition() -> String {
             "requestedJob": { "type": "string" },
             "command": { "type": "string" },
             "workspace": { "type": "string" },
+            "databasePath": { "type": ["string", "null"] },
             "recordedAt": { "type": "string" },
             "completedAt": { "type": "string" },
             "outcome": { "type": "string" },
@@ -13410,6 +13683,10 @@ fn verification_evidence_schema_definition() -> String {
 
 fn why_not_selected_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.why_not_selected.v1.json").to_string()
+}
+
+fn why_not_selected_v2_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.why_not_selected.v2.json").to_string()
 }
 
 fn why_causal_schema_definition() -> String {
@@ -15712,6 +15989,23 @@ pub fn error_response_toon(error: &DomainError) -> String {
     render_toon_from_json(&error_response_json(error))
 }
 
+/// Error codes whose envelope severity is `critical` rather than the coarse
+/// `high` that the `handoff_`/`strict_mode_` prefixes otherwise carry.
+///
+/// Every one of these is an integrity or key-authentication failure: the
+/// capsule body did not verify, its HMAC is absent, or the key material
+/// needed to verify it cannot be derived here. The published catalog in
+/// `tests/fixtures/failure_modes/<code>.json` declares the same severity,
+/// and `failure_mode_fixtures.rs` reads this list to pin the two together —
+/// so adding a code here without updating its fixture fails that gate
+/// instead of diverging silently (bd-xqkoo).
+pub const CRITICAL_ERROR_CODES: &[&str] = &[
+    "handoff_hmac_missing",
+    "handoff_capsule_tampered",
+    "handoff_capsule_machine_mismatch",
+    "strict_mode_no_salt_file",
+];
+
 fn domain_error_severity(error: &DomainError) -> &'static str {
     if error.code().starts_with("level_transition_") {
         return "medium";
@@ -15728,13 +16022,7 @@ fn domain_error_severity(error: &DomainError) -> &'static str {
             _ => {}
         }
     }
-    if matches!(
-        error.code(),
-        "handoff_hmac_missing"
-            | "handoff_capsule_tampered"
-            | "handoff_capsule_machine_mismatch"
-            | "strict_mode_no_salt_file"
-    ) {
+    if CRITICAL_ERROR_CODES.contains(&error.code()) {
         return "critical";
     }
     if error.code().starts_with("handoff_") || error.code().starts_with("strict_mode_") {
@@ -21455,6 +21743,56 @@ mod tests {
         ensure_contains(&json, "\"gitDirty\":true", "dirty flag")?;
         ensure_contains(&json, "\"state\":\"dirty\"", "dirty state")?;
         ensure_contains(&json, "\"releaseChannel\":\"dev\"", "dev channel")
+    }
+
+    /// A PARTIAL stamp reports `state: "unknown"`, and the oracle refuses that
+    /// exactly as it refuses a missing one (bd-reality-core-convergence-1azkt.10).
+    ///
+    /// This is the one branch of `source_state` nothing exercised. The other
+    /// three are covered by the fixtures around this test -- `Some(true)` ->
+    /// dirty, `Some(false)` -> clean, and all-None -> unavailable -- which left
+    /// the interesting case untested: a commit present with NO dirty flag.
+    ///
+    /// It is load-bearing now that `scripts/rch_verify.sh` stamps committed-tree
+    /// builds, because it is what a HALF-DONE stamp produces.
+    /// `tests/retrieval_index_regression_oracle.rs:767` rejects a candidate
+    /// whose field reads `"unknown"` in the same breath as `"<absent>"` and
+    /// `"null"`, so setting VERGEN_GIT_SHA without VERGEN_GIT_DIRTY buys nothing
+    /// and looks like progress. That is why the lane sets all three together,
+    /// and this test is what makes the requirement visible rather than folklore.
+    #[test]
+    fn version_json_commit_without_dirty_flag_reports_unknown_source_state() -> TestResult {
+        let report = version_report_fixture(
+            Some("abcdef123456"),
+            None,
+            None,
+            "aarch64-apple-darwin",
+            "debug",
+            "dev",
+            Vec::new(),
+        );
+        let json = render_version_json(&report);
+
+        ensure_contains(&json, "\"gitCommit\":\"abcdef123456\"", "commit present")?;
+        ensure_contains(&json, "\"gitDirty\":null", "no dirty flag")?;
+        ensure_contains(&json, "\"state\":\"unknown\"", "partial stamp is unknown")?;
+        // And the tag alone must reach the same branch, so the predicate is
+        // `commit OR tag` rather than `commit` -- a reader of the match arm
+        // cannot tell those apart, and only one of them is written here.
+        let tag_only = version_report_fixture(
+            None,
+            Some("v9.9.9"),
+            None,
+            "aarch64-apple-darwin",
+            "debug",
+            "dev",
+            Vec::new(),
+        );
+        ensure_contains(
+            &render_version_json(&tag_only),
+            "\"state\":\"unknown\"",
+            "a tag alone also reaches unknown",
+        )
     }
 
     #[test]

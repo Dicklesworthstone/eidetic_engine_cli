@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::super::{CanonicalDiagnostic, MAX_DIAGNOSTICS_PER_FAILURE, MAX_SCANNED_OUTPUT_BYTES};
 
 mod collection;
-mod terminal;
+pub(super) mod terminal;
 mod traceback;
 mod unittest;
 
@@ -78,10 +78,17 @@ impl Execution {
                 && proof.failed.is_empty()
                 && required.verified_by(&proof.passed_modules);
         }
+        // Named Python subjects include their module/class/parameter identity,
+        // unlike an anonymous libtest suite whose inventory is its identity.
+        // A repair may add regressions, but cannot remove original subjects or
+        // turn a previously passing or failing test into a skip/expected
+        // outcome. Inventory membership is not execution coverage.
         self.has_known_failures()
             && proof.complete
-            && self.inventory == proof.inventory
+            && proof.failed.is_empty()
+            && self.inventory.is_subset(&proof.inventory)
             && self.failed.is_subset(&proof.passed)
+            && self.passed.is_subset(&proof.passed)
     }
 }
 
@@ -505,3 +512,6 @@ mod tests;
 
 #[cfg(test)]
 mod store_tests;
+
+#[cfg(test)]
+mod growth_tests;

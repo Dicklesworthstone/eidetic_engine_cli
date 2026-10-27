@@ -130,6 +130,11 @@ const MI_DEDUP_MIN_NORMALIZED_MI: f64 = 0.72;
 const MI_DEDUP_MAX_MEMORIES: usize = 400;
 const MI_DEDUP_CANDIDATE_CREATED_AT: &str = "1970-01-01T00:00:00Z";
 
+#[cfg(test)]
+thread_local! {
+    static DEDUP_PROPOSAL_FAIL_AFTER_INSERTS: RefCell<Option<usize>> = const { RefCell::new(None) };
+}
+
 fn serialization_failed_report(schema: &str, command: &str, status_field: &str) -> String {
     let mut payload = serde_json::Map::new();
     payload.insert(
@@ -168,6 +173,9 @@ pub struct CurateCandidatesOptions<'a> {
     pub sort: &'a str,
     /// Group likely duplicates contiguously in the result ordering.
     pub group_duplicates: bool,
+    /// Persist newly synthesized deduplication proposals. Without this explicit
+    /// opt-in, discovery previews candidates without writing or migrating.
+    pub propose: bool,
 }
 
 /// Options for validating one curation candidate through `ee curate validate`.
@@ -2622,67 +2630,25 @@ fn reflection_retention_cutoff(
         .map(|cutoff| cutoff.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
-/// List curation candidates for the selected workspace.
+/// List curation candidates, previewing deduplication proposals by default.
+/// Only `propose` may persist new proposals; a read never initializes or
+/// migrates the store, and invalid options are rejected before opening it.
 pub fn list_curation_candidates(
     options: &CurateCandidatesOptions<'_>,
 ) -> Result<CurateCandidatesReport, DomainError> {
-    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let candidate_type = parse_optional_candidate_type(options.candidate_type)?;
     let status = parse_optional_status(options.status)?;
     let target_memory_id = parse_optional_memory_id(options.target_memory_id)?;
     validate_list_window(options.limit)?;
     let synthesize_dedup =
         should_synthesize_mi_dedup_candidates(candidate_type.as_deref(), status.as_deref());
-
-    let connection = open_bound_curate_read(&mut prepared)?;
-    let query_target_memory_id = if synthesize_dedup {
-        None
-    } else {
-        target_memory_id.as_deref()
-    };
-    let stored = connection
-        .list_curation_candidates(
-            &prepared.workspace_id,
-            candidate_type.as_deref(),
-            status.as_deref(),
-            query_target_memory_id,
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list curation candidates: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?;
-    let mut stored = stored;
-    let mut durable_mutation = false;
-    if synthesize_dedup {
-        durable_mutation |= append_embedding_dedup_candidates(
-            &connection,
-            &prepared.workspace_id,
-            target_memory_id.as_deref(),
-            &mut stored,
-        )? > 0;
-        durable_mutation |= append_mi_dedup_candidates(
-            &connection,
-            &prepared.workspace_id,
-            target_memory_id.as_deref(),
-            &mut stored,
-        )? > 0;
+    if options.propose && !synthesize_dedup {
+        return Err(curate_usage_error(
+            "--propose requires --type dedup and an absent or pending status filter".to_owned(),
+            "ee curate candidates --type dedup --propose --json",
+        ));
     }
-    if let (true, Some(target)) = (synthesize_dedup, target_memory_id.as_deref()) {
-        stored.retain(|candidate| dedup_candidate_matches_target(candidate, target));
-    }
-    let now = Utc::now().to_rfc3339();
     let sort_mode = parse_curate_candidate_sort_mode(options.sort)?;
-    let mut stored = if status.as_deref() == Some(CandidateStatus::Pending.as_str()) {
-        stored
-            .into_iter()
-            .filter(|candidate| !candidate_hidden_from_default_queue(candidate, &now))
-            .collect::<Vec<_>>()
-    } else {
-        stored
-    };
-    sort_curate_candidates(&mut stored, sort_mode, options.group_duplicates);
-
-    let total_count = stored.len();
     let offset = usize::try_from(options.offset).map_err(|_| {
         curate_usage_error(
             "curate candidates offset is too large".to_owned(),
@@ -2695,45 +2661,151 @@ pub fn list_curation_candidates(
             "ee curate candidates --help",
         )
     })?;
-    let candidates = stored
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .map(|candidate| {
-            candidate_summary_from_database(&connection, candidate, &prepared.workspace_path)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let returned_count = candidates.len();
-    let truncated = offset.saturating_add(returned_count) < total_count;
-    let next_action = candidates.first().map_or_else(
-        || "no pending curation candidates".to_owned(),
-        |candidate| candidate.next_action.clone(),
-    );
 
-    Ok(CurateCandidatesReport {
-        schema: CURATE_CANDIDATES_SCHEMA_V1,
-        command: "curate candidates",
-        version: env!("CARGO_PKG_VERSION"),
-        workspace_id: prepared.workspace_id,
-        workspace_path: prepared.workspace_path.display().to_string(),
-        database_path: prepared.database_path.display().to_string(),
-        total_count,
-        returned_count,
-        limit: options.limit,
-        offset: options.offset,
-        truncated,
-        durable_mutation,
-        filter: CurateCandidatesFilter {
-            candidate_type,
-            status,
-            target_memory_id,
-            sort: sort_mode.as_str().to_owned(),
-            group_duplicates: options.group_duplicates,
-        },
-        candidates,
-        degraded: Vec::new(),
-        next_action,
-    })
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let connection = if options.propose {
+        open_bound_curate_read(&mut prepared)?
+    } else {
+        open_bound_curate_snapshot(&mut prepared)?
+    };
+    let build_report = || -> Result<CurateCandidatesReport, DomainError> {
+        let query_target_memory_id = if synthesize_dedup {
+            None
+        } else {
+            target_memory_id.as_deref()
+        };
+        let stored = connection
+            .list_curation_candidates(
+                &prepared.workspace_id,
+                candidate_type.as_deref(),
+                status.as_deref(),
+                query_target_memory_id,
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list curation candidates: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?;
+        let mut stored = stored;
+        let persisted_ids = stored
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut proposed_count = 0;
+        if synthesize_dedup {
+            proposed_count += append_embedding_dedup_candidates(
+                &connection,
+                &prepared.workspace_id,
+                target_memory_id.as_deref(),
+                &mut stored,
+                options.propose,
+            )?;
+            proposed_count += append_mi_dedup_candidates(
+                &connection,
+                &prepared.workspace_id,
+                target_memory_id.as_deref(),
+                &mut stored,
+                options.propose,
+            )?;
+        }
+        let durable_mutation = options.propose && proposed_count > 0;
+        if let (true, Some(target)) = (synthesize_dedup, target_memory_id.as_deref()) {
+            stored.retain(|candidate| dedup_candidate_matches_target(candidate, target));
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut stored = if status.as_deref() == Some(CandidateStatus::Pending.as_str()) {
+            stored
+                .into_iter()
+                .filter(|candidate| !candidate_hidden_from_default_queue(candidate, &now))
+                .collect::<Vec<_>>()
+        } else {
+            stored
+        };
+        sort_curate_candidates(&mut stored, sort_mode, options.group_duplicates);
+
+        let total_count = stored.len();
+        let candidates = stored
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|candidate| {
+                let preview_only = !options.propose && !persisted_ids.contains(&candidate.id);
+                let mut summary = candidate_summary_from_database(
+                    &connection,
+                    candidate,
+                    &prepared.workspace_path,
+                )?;
+                if preview_only {
+                    let command = dedup_proposal_command(&prepared, target_memory_id.as_deref());
+                    summary.requires_validate = false;
+                    summary.requires_apply = false;
+                    summary.next_action.clone_from(&command);
+                    summary.validation.next_action = command;
+                }
+                Ok(summary)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let returned_count = candidates.len();
+        let truncated = offset.saturating_add(returned_count) < total_count;
+        let next_action = candidates.first().map_or_else(
+            || "no pending curation candidates".to_owned(),
+            |candidate| candidate.next_action.clone(),
+        );
+
+        Ok(CurateCandidatesReport {
+            schema: CURATE_CANDIDATES_SCHEMA_V1,
+            command: "curate candidates",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: prepared.workspace_id,
+            workspace_path: prepared.workspace_path.display().to_string(),
+            database_path: prepared.database_path.display().to_string(),
+            total_count,
+            returned_count,
+            limit: options.limit,
+            offset: options.offset,
+            truncated,
+            durable_mutation,
+            filter: CurateCandidatesFilter {
+                candidate_type,
+                status,
+                target_memory_id,
+                sort: sort_mode.as_str().to_owned(),
+                group_duplicates: options.group_duplicates,
+            },
+            candidates,
+            degraded: Vec::new(),
+            next_action,
+        })
+    };
+    if options.propose {
+        connection
+            .with_transaction_error(|| build_report().map_err(CandidateProposalTransactionError))
+            .map_err(|error: CandidateProposalTransactionError| error.0)
+    } else {
+        build_report()
+    }
+}
+
+/// Preserve rich curation errors while the database rolls back a whole batch.
+struct CandidateProposalTransactionError(DomainError);
+
+impl From<DbError> for CandidateProposalTransactionError {
+    fn from(error: DbError) -> Self {
+        Self(DomainError::Storage {
+            message: format!("Failed to persist curation proposals atomically: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })
+    }
+}
+
+fn dedup_proposal_command(prepared: &PreparedCurateRead, target_memory_id: Option<&str>) -> String {
+    let workspace = shell_quote_command_arg(&prepared.workspace_path.display().to_string());
+    let database = shell_quote_command_arg(&prepared.database_path.display().to_string());
+    let target = target_memory_id.map_or_else(String::new, |id| {
+        format!(" --target-memory {}", shell_quote_command_arg(id))
+    });
+    format!(
+        "ee curate candidates --type dedup --propose --workspace {workspace} --database {database}{target} --json"
+    )
 }
 
 /// Review imported CASS evidence for a session and optionally persist proposals.
@@ -4360,12 +4432,8 @@ impl ReviewLessons {
         let mut seen = BTreeSet::new();
         let mut supporting_spans = 0_usize;
         for span in spans {
-            let Some(text) = review_learning_text(span) else {
-                continue;
-            };
             let mut supported = false;
-            let from_user = span.role.as_deref() == Some("user");
-            for sentence in review_lesson_sentences(&text, from_user) {
+            for sentence in review_span_lesson_sentences(span) {
                 supported = true;
                 let key = sentence.to_ascii_lowercase();
                 if sentences.len() < REVIEW_LESSON_MAX_SENTENCES && seen.insert(key) {
@@ -4394,6 +4462,28 @@ impl ReviewLessons {
             self.confidence()
         )
     }
+}
+
+/// A CASS window can contain both sides of a conversation. Its stored role is
+/// only a fallback for unstructured excerpts; applying it to every decoded turn
+/// would promote user task requests or suppress assistant lessons depending on
+/// how that window was imported. The learning projector validates the entire
+/// window before any record can contribute a sentence.
+fn review_span_lesson_sentences(span: &StoredEvidenceSpan) -> Vec<String> {
+    if EvidenceProducerKind::parse(&span.producer_kind) == Some(EvidenceProducerKind::CassImport) {
+        return crate::cass::transcript::learning_projections(&span.excerpt)
+            .into_iter()
+            .flatten()
+            .flat_map(|projection| {
+                let role = projection
+                    .role
+                    .map(crate::cass::CassRole::as_str)
+                    .or(span.role.as_deref());
+                review_lesson_sentences(&projection.text, role == Some("user"))
+            })
+            .collect();
+    }
+    review_lesson_sentences(&span.reader_body(), span.role.as_deref() == Some("user"))
 }
 
 /// Directive sentences in projected conversation text, in source order.
@@ -4621,6 +4711,7 @@ fn append_mi_dedup_candidates(
     workspace_id: &str,
     target_memory_id: Option<&str>,
     stored: &mut Vec<StoredCurationCandidate>,
+    persist: bool,
 ) -> Result<usize, DomainError> {
     let memories = connection
         .list_memories(workspace_id, None, false)
@@ -4645,11 +4736,12 @@ fn append_mi_dedup_candidates(
         {
             continue;
         }
-        if !persist_synthetic_dedup_candidate(
+        if !prepare_synthetic_dedup_candidate(
             connection,
             workspace_id,
             &proposal,
             "mutual_information_dedup",
+            persist,
         )? {
             continue;
         }
@@ -4664,6 +4756,7 @@ fn append_embedding_dedup_candidates(
     workspace_id: &str,
     target_memory_id: Option<&str>,
     stored: &mut Vec<StoredCurationCandidate>,
+    persist: bool,
 ) -> Result<usize, DomainError> {
     let memories = connection
         .list_memories(workspace_id, None, false)
@@ -4698,11 +4791,12 @@ fn append_embedding_dedup_candidates(
         {
             continue;
         }
-        if !persist_synthetic_dedup_candidate(
+        if !prepare_synthetic_dedup_candidate(
             connection,
             workspace_id,
             &proposal,
             "embedding_dedup",
+            persist,
         )? {
             continue;
         }
@@ -4736,11 +4830,14 @@ fn dedup_candidate_matches_target(
             .any(|id| id == target_memory_id)
 }
 
-fn persist_synthetic_dedup_candidate(
+/// Called under the proposal batch's writer transaction when `persist` is true.
+/// Preview still checks the complete queue so rejected/applied IDs stay hidden.
+fn prepare_synthetic_dedup_candidate(
     connection: &DbConnection,
     workspace_id: &str,
     candidate: &StoredCurationCandidate,
     proposal_source: &str,
+    persist: bool,
 ) -> Result<bool, DomainError> {
     if connection
         .get_curation_candidate(workspace_id, &candidate.id)
@@ -4752,8 +4849,11 @@ fn persist_synthetic_dedup_candidate(
     {
         return Ok(false);
     }
+    if !persist {
+        return Ok(true);
+    }
 
-    let result = connection.with_transaction(|| {
+    let result: crate::db::Result<bool> = (|| {
         if connection
             .get_curation_candidate(workspace_id, &candidate.id)?
             .is_some()
@@ -4782,6 +4882,27 @@ fn persist_synthetic_dedup_candidate(
             },
         )?;
 
+        #[cfg(test)]
+        if DEDUP_PROPOSAL_FAIL_AFTER_INSERTS.with(|slot| {
+            let mut remaining = slot.borrow_mut();
+            match *remaining {
+                Some(0 | 1) => {
+                    *remaining = None;
+                    true
+                }
+                Some(count) => {
+                    *remaining = Some(count - 1);
+                    false
+                }
+                None => false,
+            }
+        }) {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "Injected dedup proposal failure after candidate insert".to_owned(),
+            });
+        }
+
         let audit_id = generate_audit_id();
         connection.insert_audit(
             &audit_id,
@@ -4798,7 +4919,7 @@ fn persist_synthetic_dedup_candidate(
             },
         )?;
         Ok(true)
-    });
+    })();
 
     let inserted = result.map_err(|error| DomainError::Storage {
         message: format!("Failed to persist dedupe curation candidate: {error}"),
@@ -5719,6 +5840,36 @@ fn review_state_rank(review_state: &str) -> u8 {
     }
 }
 
+/// Persist an explicit conflict plan as a reviewable pending proposal.
+pub(crate) fn propose_conflict_resolution(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    request: &crate::core::contradiction_detect::ConflictResolveRequest<'_>,
+    actor: Option<&str>,
+) -> Result<crate::core::conflict_proposal::ConflictProposalReport, DomainError> {
+    let mut prepared = prepare_curate_read(workspace_path, database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
+    let mut report = persist_curation_transaction(&connection, "conflict proposal", || {
+        crate::core::conflict_proposal::create_in_transaction(
+            &connection,
+            &prepared.workspace_id,
+            request,
+            actor,
+        )
+    })?;
+    let workspace_arg = shell_quote_command_arg(&prepared.workspace_path.display().to_string());
+    let database_arg = shell_quote_command_arg(&prepared.database_path.display().to_string());
+    let candidate_arg = shell_quote_command_arg(&report.candidate_id);
+    report.next_commands.push(format!("ee curate show {candidate_arg} --workspace {workspace_arg} --database {database_arg} --json"));
+    if report.candidate_status == "pending" {
+        report.next_commands.push(format!("ee curate validate {candidate_arg} --workspace {workspace_arg} --database {database_arg} --json"));
+    }
+    if matches!(report.candidate_status.as_str(), "pending" | "approved") {
+        report.next_commands.push(format!("ee curate apply {candidate_arg} --workspace {workspace_arg} --database {database_arg} --json"));
+    }
+    Ok(report)
+}
+
 /// Validate one curation candidate and record the curation review decision.
 pub fn validate_curation_candidate(
     options: &CurateValidateOptions<'_>,
@@ -5732,7 +5883,11 @@ pub fn validate_curation_candidate(
         .unwrap_or("ee")
         .to_owned();
 
-    let connection = open_bound_curate_read(&mut prepared)?;
+    let connection = if options.dry_run {
+        open_bound_curate_snapshot(&mut prepared)?
+    } else {
+        open_bound_curate_read(&mut prepared)?
+    };
     let stored = connection
         .get_curation_candidate(&prepared.workspace_id, &candidate_id)
         .map_err(|error| DomainError::Storage {
@@ -5756,30 +5911,48 @@ pub fn validate_curation_candidate(
     .map(|c| c.value == "true")
     .unwrap_or(true);
     let parsed_candidate_type = CandidateType::from_str(&stored.candidate_type);
-    let decision = match parsed_candidate_type {
-        Ok(CandidateType::CreateDerivedMemory) => evaluate_create_derived_candidate_for_validation(
-            &connection,
-            &stored,
-            &now,
-            prompt_injection_guard,
-        ),
-        Ok(_) | Err(_) => {
-            let target_memory_id = required_stored_target_memory_id(&stored)?;
-            let target_memory =
-                connection
-                    .get_memory(target_memory_id)
-                    .map_err(|error| DomainError::Storage {
+    let mut decision = if crate::core::conflict_proposal::is_candidate(&stored) {
+        evaluate_conflict_candidate_for_validation(&connection, &stored)
+    } else {
+        match parsed_candidate_type {
+            Ok(CandidateType::CreateDerivedMemory) => {
+                evaluate_create_derived_candidate_for_validation(
+                    &connection,
+                    &stored,
+                    &now,
+                    prompt_injection_guard,
+                )
+            }
+            Ok(_) | Err(_) => {
+                let target_memory_id = required_stored_target_memory_id(&stored)?;
+                let target_memory = connection.get_memory(target_memory_id).map_err(|error| {
+                    DomainError::Storage {
                         message: format!("Failed to load target memory: {error}"),
                         repair: Some("ee memory show <memory-id> --json".to_owned()),
-                    })?;
-            evaluate_candidate_for_validation(
-                &stored,
-                target_memory.as_ref(),
-                &now,
-                prompt_injection_guard,
-            )
+                    }
+                })?;
+                evaluate_candidate_for_validation(
+                    &stored,
+                    target_memory.as_ref(),
+                    &now,
+                    prompt_injection_guard,
+                )
+            }
         }
     };
+    if let Err(message) =
+        crate::core::global_promotion::validate_merge_candidate(&connection, &stored)
+    {
+        decision = blocked_validation(
+            &stored,
+            vec![validation_issue(
+                "global_merge_snapshot_changed",
+                message,
+                "Review the live global memory and propose the promotion again.",
+            )],
+            Vec::new(),
+        );
+    }
     let from_status = stored.status.clone();
     let mut reviewed_at = None;
     let mut persisted = false;
@@ -5871,7 +6044,7 @@ pub fn show_curation_candidate(
     let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let candidate_id = validate_curate_candidate_id(options.candidate_id)?;
 
-    let connection = open_bound_curate_read(&mut prepared)?;
+    let connection = open_bound_curate_snapshot(&mut prepared)?;
     let stored = connection
         .get_curation_candidate(&prepared.workspace_id, &candidate_id)
         .map_err(|error| DomainError::Storage {
@@ -5884,32 +6057,55 @@ pub fn show_curation_candidate(
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
 
-    let planned_application = match CandidateType::from_str(&stored.candidate_type) {
-        Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
-            let decision =
-                evaluate_link_candidate_for_apply(&connection, &stored, &Utc::now().to_rfc3339());
-            Some(planned_application_from_decision(&stored, &decision))
+    let planned_application = if let Err(message) =
+        crate::core::global_promotion::validate_merge_candidate(&connection, &stored)
+    {
+        let decision = blocked_apply(
+            &stored,
+            None,
+            vec![validation_issue(
+                "global_merge_snapshot_changed",
+                message,
+                "Review the live global memory and propose the promotion again.",
+            )],
+            Vec::new(),
+            "ee curate candidates --json".to_owned(),
+        );
+        Some(planned_application_from_decision(&stored, &decision))
+    } else if crate::core::conflict_proposal::is_candidate(&stored) {
+        let decision = evaluate_conflict_candidate_for_apply(&connection, &stored);
+        Some(planned_application_from_decision(&stored, &decision))
+    } else {
+        match CandidateType::from_str(&stored.candidate_type) {
+            Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
+                let decision = evaluate_link_candidate_for_apply(
+                    &connection,
+                    &stored,
+                    &Utc::now().to_rfc3339(),
+                );
+                Some(planned_application_from_decision(&stored, &decision))
+            }
+            Ok(CandidateType::CreateDerivedMemory) => {
+                let now = Utc::now().to_rfc3339();
+                let prompt_injection_guard = crate::core::config_surface::get_config(
+                    &crate::core::config_surface::ConfigSurfaceOptions {
+                        workspace_root: options.workspace_path.to_path_buf(),
+                        config_path: None,
+                    },
+                    crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
+                )
+                .map(|c| c.value == "true")
+                .unwrap_or(true);
+                let decision = evaluate_create_derived_candidate_for_apply(
+                    &connection,
+                    &stored,
+                    &now,
+                    prompt_injection_guard,
+                );
+                Some(planned_application_from_decision(&stored, &decision))
+            }
+            _ => None,
         }
-        Ok(CandidateType::CreateDerivedMemory) => {
-            let now = Utc::now().to_rfc3339();
-            let prompt_injection_guard = crate::core::config_surface::get_config(
-                &crate::core::config_surface::ConfigSurfaceOptions {
-                    workspace_root: options.workspace_path.to_path_buf(),
-                    config_path: None,
-                },
-                crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
-            )
-            .map(|c| c.value == "true")
-            .unwrap_or(true);
-            let decision = evaluate_create_derived_candidate_for_apply(
-                &connection,
-                &stored,
-                &now,
-                prompt_injection_guard,
-            );
-            Some(planned_application_from_decision(&stored, &decision))
-        }
-        _ => None,
     };
 
     let candidate = candidate_summary_from_database(&connection, stored, &prepared.workspace_path)?;
@@ -6095,43 +6291,8 @@ fn apply_curation_candidate_with_recipe(
         .unwrap_or("ee")
         .to_owned();
 
-    let connection = if recipe_output.is_some() && options.dry_run {
-        if !prepared.database_path.exists() {
-            return Err(crate::core::storeless_workspace_error(
-                &prepared.database_path,
-            ));
-        }
-        let connection =
-            DbConnection::open_file_read_only(&prepared.database_path).map_err(|error| {
-                DomainError::Storage {
-                    message: format!("Failed to open recipe preview: {error}"),
-                    repair: Some("ee doctor --json".to_owned()),
-                }
-            })?;
-        connection
-            .begin_read_snapshot()
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to read recipe preview snapshot: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            })?;
-        if connection
-            .needs_migration()
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to inspect recipe preview schema: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            })?
-        {
-            return Err(DomainError::MigrationRequired {
-                message: "Migrate the database before previewing recipe promotion.".to_owned(),
-                repair: Some("ee migrate run --workspace . --json".to_owned()),
-            });
-        }
-        prepared.workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
-            &connection,
-            &prepared.workspace_id,
-            &[prepared.workspace_path.as_path()],
-        )?;
-        connection
+    let connection = if options.dry_run {
+        open_bound_curate_snapshot(&mut prepared)?
     } else {
         open_bound_curate_read(&mut prepared)?
     };
@@ -6146,6 +6307,18 @@ fn apply_curation_candidate_with_recipe(
             id: candidate_id.clone(),
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
+    let global_merge_index_paths = crate::core::global_promotion::merge_index_paths(
+        &connection,
+        &stored,
+        &prepared.workspace_path,
+        &prepared.database_path,
+    )
+    .map_err(|message| DomainError::Usage {
+        message,
+        repair: Some(
+            "Use the global promotion report's review command and apply that candidate.".to_owned(),
+        ),
+    })?;
     let now = Utc::now().to_rfc3339();
     let parsed_candidate_type = CandidateType::from_str(&stored.candidate_type);
     if recipe_output.is_some()
@@ -6164,79 +6337,97 @@ fn apply_curation_candidate_with_recipe(
         &parsed_candidate_type,
         Ok(CandidateType::CreateDerivedMemory)
     );
-    let mut decision = match parsed_candidate_type {
-        Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
-            evaluate_link_candidate_for_apply(&connection, &stored, &now)
-        }
-        Ok(CandidateType::CreateDerivedMemory) => {
-            let prompt_injection_guard = crate::core::config_surface::get_config(
-                &crate::core::config_surface::ConfigSurfaceOptions {
-                    workspace_root: options.workspace_path.to_path_buf(),
-                    config_path: None,
-                },
-                crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
-            )
-            .map(|c| c.value == "true")
-            .unwrap_or(true);
-            evaluate_create_derived_candidate_for_apply(
-                &connection,
-                &stored,
-                &now,
-                prompt_injection_guard,
-            )
-        }
-        Ok(_) | Err(_) => {
-            let target_memory_id = required_stored_target_memory_id(&stored)?;
-            let target_memory =
-                connection
-                    .get_memory(target_memory_id)
-                    .map_err(|error| DomainError::Storage {
+    let mut decision = if crate::core::conflict_proposal::is_candidate(&stored) {
+        evaluate_conflict_candidate_for_apply(&connection, &stored)
+    } else {
+        match parsed_candidate_type {
+            Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
+                evaluate_link_candidate_for_apply(&connection, &stored, &now)
+            }
+            Ok(CandidateType::CreateDerivedMemory) => {
+                let prompt_injection_guard = crate::core::config_surface::get_config(
+                    &crate::core::config_surface::ConfigSurfaceOptions {
+                        workspace_root: options.workspace_path.to_path_buf(),
+                        config_path: None,
+                    },
+                    crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
+                )
+                .map(|c| c.value == "true")
+                .unwrap_or(true);
+                evaluate_create_derived_candidate_for_apply(
+                    &connection,
+                    &stored,
+                    &now,
+                    prompt_injection_guard,
+                )
+            }
+            Ok(_) | Err(_) => {
+                let target_memory_id = required_stored_target_memory_id(&stored)?;
+                let target_memory = connection.get_memory(target_memory_id).map_err(|error| {
+                    DomainError::Storage {
                         message: format!("Failed to load target memory: {error}"),
                         repair: Some("ee memory show <memory-id> --json".to_owned()),
-                    })?;
-            let absorb_resolution =
-                if matches!(parsed_candidate_type, Ok(CandidateType::Consolidate)) {
-                    resolve_consolidate_absorb(
+                    }
+                })?;
+                let absorb_resolution =
+                    if matches!(parsed_candidate_type, Ok(CandidateType::Consolidate)) {
+                        resolve_consolidate_absorb(
+                            &connection,
+                            &prepared.workspace_id,
+                            &stored,
+                            target_memory.as_ref(),
+                        )?
+                    } else {
+                        ConsolidateAbsorbResolution::LegacyUpdate
+                    };
+                let mut decision = evaluate_candidate_for_apply(
+                    &stored,
+                    target_memory.as_ref(),
+                    &absorb_resolution,
+                    &now,
+                );
+                if let Some(absorb) = decision.consolidate_absorb.as_mut() {
+                    absorb.allow_tombstone_load_bearing = options.allow_tombstone_load_bearing;
+                }
+                if (decision.tombstone_memory || decision.consolidate_absorb.is_some())
+                    && !options.allow_tombstone_load_bearing
+                    && let Some(protection) = load_bearing_tombstone_protection(
                         &connection,
                         &prepared.workspace_id,
-                        &stored,
-                        target_memory.as_ref(),
-                    )?
-                } else {
-                    ConsolidateAbsorbResolution::LegacyUpdate
-                };
-            let mut decision = evaluate_candidate_for_apply(
-                &stored,
-                target_memory.as_ref(),
-                &absorb_resolution,
-                &now,
-            );
-            if let Some(absorb) = decision.consolidate_absorb.as_mut() {
-                absorb.allow_tombstone_load_bearing = options.allow_tombstone_load_bearing;
-            }
-            if (decision.tombstone_memory || decision.consolidate_absorb.is_some())
-                && !options.allow_tombstone_load_bearing
-                && let Some(protection) = load_bearing_tombstone_protection(
-                    &connection,
-                    &prepared.workspace_id,
-                    target_memory_id,
-                )?
-            {
-                decision = blocked_apply(
-                    &stored,
-                    decision.target_before.clone(),
-                    vec![load_bearing_tombstone_issue(
                         target_memory_id,
-                        &protection,
-                        "ee curate apply <candidate-id> --allow-tombstone-load-bearing",
-                    )],
-                    decision.application.warnings,
-                    "ee why <memory-id> --json".to_owned(),
-                );
+                    )?
+                {
+                    decision = blocked_apply(
+                        &stored,
+                        decision.target_before.clone(),
+                        vec![load_bearing_tombstone_issue(
+                            target_memory_id,
+                            &protection,
+                            "ee curate apply <candidate-id> --allow-tombstone-load-bearing",
+                        )],
+                        decision.application.warnings,
+                        "ee why <memory-id> --json".to_owned(),
+                    );
+                }
+                decision
             }
-            decision
         }
     };
+    if let Err(message) =
+        crate::core::global_promotion::validate_merge_candidate(&connection, &stored)
+    {
+        decision = blocked_apply(
+            &stored,
+            decision.target_before.clone(),
+            vec![validation_issue(
+                "global_merge_snapshot_changed",
+                message,
+                "Review the live global memory and propose the promotion again.",
+            )],
+            Vec::new(),
+            "ee curate candidates --json".to_owned(),
+        );
+    }
     let source_memory_ids =
         if decision.should_persist && (decision.rule_create.is_some() || recipe_output.is_some()) {
             let ids = audited_source_memory_ids_for_rule_candidate(&connection, &stored)?;
@@ -6388,18 +6579,40 @@ fn apply_curation_candidate_with_recipe(
     let mut audit_id = None;
 
     if decision.should_persist && !options.dry_run {
-        let audit = persist_candidate_application(
-            &connection,
-            &prepared.workspace_id,
-            &stored,
-            &decision,
-            recipe.as_ref(),
-            &now,
-            &applied_by,
-        )?;
-        applied_at = Some(now.clone());
+        if crate::core::conflict_proposal::is_candidate(&stored) {
+            let checked =
+                crate::core::conflict_proposal::validate_candidate(&connection, &stored, true)?;
+            let report = crate::core::conflict_proposal::apply(
+                &prepared.workspace_path,
+                &prepared.database_path,
+                &stored,
+                &checked,
+                Some(&applied_by),
+            )?;
+            decision.application.created_memory_id =
+                Some(report.decision.decision.memory_id.clone());
+            for warning in report.decision.warnings {
+                decision.application.warnings.push(validation_issue(
+                    "conflict_resolution_followup_pending", warning,
+                    "Inspect the committed decision and its durable index job; do not repeat the resolution.",
+                ));
+            }
+            audit_id = report.candidate_audit_id;
+            applied_at = report.candidate_applied_at;
+        } else {
+            let audit = persist_candidate_application(
+                &connection,
+                &prepared.workspace_id,
+                &stored,
+                &decision,
+                recipe.as_ref(),
+                &now,
+                &applied_by,
+            )?;
+            audit_id = Some(audit);
+        }
+        applied_at.get_or_insert_with(|| now.clone());
         persisted = true;
-        audit_id = Some(audit);
     } else if decision.should_persist || options.dry_run {
         applied_at = Some(now.clone());
     }
@@ -6436,6 +6649,40 @@ fn apply_curation_candidate_with_recipe(
         })
         .into_iter()
         .collect();
+
+    if !options.dry_run
+        && decision.application.errors.is_empty()
+        && (persisted || decision.application.status == "already_applied")
+        && let Some(paths) = &global_merge_index_paths
+        && let Some(job_id) = crate::core::global_promotion::merge_index_job_id(&stored)
+    {
+        let report = crate::core::memory::reconcile_committed_memory_index_job(
+            &connection,
+            &prepared.workspace_id,
+            &job_id,
+            &paths.index_dir,
+        );
+        let provisional = crate::core::memory::remember_index_status(&report);
+        let status = crate::core::memory::authoritative_remember_index_status(
+            &prepared.workspace_id,
+            &paths.root,
+            &paths.database_path,
+            &paths.index_dir,
+            std::slice::from_ref(&job_id),
+            &provisional,
+        );
+        if status != "indexed" {
+            let mut failure =
+                curate_apply_index_publish_failed(&job_id, &status, "reviewed global memory");
+            failure.repair = format!(
+                "ee curate apply {} --workspace {} --database {} --json",
+                stored.id,
+                shell_quote_command_arg(&paths.root.display().to_string()),
+                shell_quote_command_arg(&paths.database_path.display().to_string()),
+            );
+            degraded.push(failure);
+        }
+    }
 
     if !options.dry_run
         && recipe_output.is_none()
@@ -6661,7 +6908,7 @@ fn curate_apply_index_publish_failed(
     outcome: &str,
     subject: &str,
 ) -> CurateCandidatesDegradation {
-    let entity = if subject == "create-derived memory" {
+    let entity = if matches!(subject, "create-derived memory" | "reviewed global memory") {
         "memory"
     } else {
         "rule"
@@ -6715,6 +6962,9 @@ pub fn review_curation_candidate(
     };
 
     let now = Utc::now().to_rfc3339();
+    if options.action == CurateReviewAction::Accept {
+        validate_guarded_candidate_for_review(&connection, &stored)?;
+    }
     let decision = evaluate_candidate_for_review(
         &stored,
         options.action,
@@ -10424,6 +10674,124 @@ struct ReviewDecision {
     snoozed_until: Option<String>,
     merged_into_candidate_id: Option<String>,
     next_action: String,
+}
+
+fn conflict_proposal_validation_issue(error: &DomainError) -> CurateValidationIssue {
+    validation_issue(
+        error.code(),
+        error.message(),
+        error.repair().unwrap_or("ee conflict list --json"),
+    )
+}
+
+fn evaluate_conflict_candidate_for_validation(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+) -> ValidationDecision {
+    match crate::core::conflict_proposal::validate_candidate(connection, stored, false) {
+        Ok(_) => finish_candidate_validation(
+            stored,
+            CandidateStatus::from_str(&stored.status).ok(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        Err(error) => blocked_validation(
+            stored,
+            vec![conflict_proposal_validation_issue(&error)],
+            Vec::new(),
+        ),
+    }
+}
+
+fn evaluate_conflict_candidate_for_apply(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+) -> ApplyDecision {
+    let mut decision = blocked_apply(
+        stored,
+        None,
+        Vec::new(),
+        Vec::new(),
+        format!("ee curate show {} --json", stored.id),
+    );
+    if stored.status == "applied" && stored.applied_at.is_some() {
+        if let Err(error) = crate::core::conflict_proposal::validate_receipt(stored) {
+            decision
+                .application
+                .errors
+                .push(conflict_proposal_validation_issue(&error));
+            return decision;
+        }
+        decision.application.status = "already_applied".to_owned();
+        decision.next_action = "no action required".to_owned();
+        return decision;
+    }
+    let checked =
+        match crate::core::conflict_proposal::validate_candidate(connection, stored, false) {
+            Ok(checked) => checked,
+            Err(error) => {
+                decision
+                    .application
+                    .errors
+                    .push(conflict_proposal_validation_issue(&error));
+                return decision;
+            }
+        };
+    // Pending show still explains every planned effect, without granting
+    // application authority or writing any memory state.
+    decision.application.changes.push(CurateApplyChange {
+        field: "conflictResolutionPlan".to_owned(),
+        before: None,
+        after: serde_json::to_string(&checked.plan).ok(),
+    });
+    if stored.status != "approved" || stored.review_state != "accepted" {
+        decision.application.errors.push(validation_issue(
+            "candidate_not_approved",
+            "Conflict proposal must be approved before application.",
+            format!("ee curate validate {} --json", stored.id),
+        ));
+        return decision;
+    }
+    decision.application.status = "ready".to_owned();
+    decision.application.decision = "resolve_conflict".to_owned();
+    decision.to_status = "applied".to_owned();
+    decision.should_persist = true;
+    decision.next_action = format!("ee curate apply {} --json", stored.id);
+    decision
+}
+
+fn validate_guarded_candidate_for_review(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+) -> Result<(), DomainError> {
+    crate::core::global_promotion::validate_merge_candidate(connection, stored).map_err(
+        |message| DomainError::UsageCodeWithDetails {
+            code: "global_merge_snapshot_changed",
+            message,
+            repair: Some(
+                "Review the live global memory and propose the promotion again.".to_owned(),
+            ),
+            details_json: "{}".to_owned(),
+        },
+    )?;
+    if crate::core::conflict_proposal::is_candidate(stored) {
+        let current = connection
+            .get_curation_candidate(&stored.workspace_id, &stored.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Could not reload conflict proposal: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        if current.as_ref() != Some(stored) {
+            return Err(DomainError::UsageCodeWithDetails {
+                code: crate::core::conflict_proposal::STALE_CODE,
+                message: "Conflict proposal changed during review.".to_owned(),
+                repair: Some("Inspect the proposal again before reviewing it.".to_owned()),
+                details_json: "{}".to_owned(),
+            });
+        }
+        crate::core::conflict_proposal::validate_candidate(connection, stored, false)?;
+    }
+    Ok(())
 }
 
 fn evaluate_candidate_for_validation(
@@ -14466,6 +14834,7 @@ fn persist_candidate_validation_inner(
     decision: &ValidationDecision,
 ) -> Result<String, DomainError> {
     if to_status == CandidateStatus::Approved.as_str() {
+        validate_guarded_candidate_for_review(connection, stored)?;
         corroboration::validate_recorded(connection, stored)
             .map_err(session_arc::pair_domain_error)?;
     }
@@ -14591,6 +14960,9 @@ fn persist_candidate_review_inner(
     reviewed_by: &str,
     reason: Option<&str>,
 ) -> Result<String, DomainError> {
+    if action == CurateReviewAction::Accept {
+        validate_guarded_candidate_for_review(connection, stored)?;
+    }
     let updated = connection
         .update_curation_candidate_review(
             workspace_id,
@@ -14714,6 +15086,16 @@ fn persist_candidate_application_inner(
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
+    crate::core::global_promotion::validate_merge_candidate(connection, stored).map_err(
+        |message| DomainError::UsageCodeWithDetails {
+            code: "global_merge_snapshot_changed",
+            message,
+            repair: Some(
+                "Review the live global memory and propose the promotion again.".to_owned(),
+            ),
+            details_json: "{}".to_owned(),
+        },
+    )?;
     if decision.rule_create.is_some() || recipe.is_some() {
         let sources = audited_source_memory_ids_for_rule_candidate(connection, stored)?;
         let sources_changed = if let Some(rule) = &decision.rule_create {
@@ -14886,6 +15268,16 @@ fn persist_candidate_application_inner(
     } else {
         false
     };
+    if memory_changed {
+        crate::core::global_promotion::persist_merge_index_job(connection, stored).map_err(
+            |error| DomainError::Storage {
+                message: format!("Failed to queue reviewed global memory indexing: {error}"),
+                repair: Some(
+                    "Retry the reviewed global candidate after inspecting storage.".to_owned(),
+                ),
+            },
+        )?;
+    }
     let mut created_rule_id = None;
     let mut created_procedure_id = None;
     if let Some(recipe) = recipe {
@@ -16794,6 +17186,53 @@ fn proposed_tags_for_candidate(
     tags.into_iter().collect()
 }
 
+/// One coherent, enforced read-only view for curation discovery and previews.
+/// Missing or older stores require an explicit init/migration command.
+fn open_bound_curate_snapshot(
+    prepared: &mut PreparedCurateRead,
+) -> Result<DbConnection, DomainError> {
+    if !prepared.database_path.exists() {
+        return Err(crate::core::storeless_workspace_error(
+            &prepared.database_path,
+        ));
+    }
+    let connection =
+        DbConnection::open_file_read_only(&prepared.database_path).map_err(|error| {
+            DomainError::Storage {
+                message: format!("Failed to open curation preview: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            }
+        })?;
+    connection
+        .begin_read_snapshot()
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to read curation preview snapshot: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    if connection
+        .needs_migration()
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect curation preview schema: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?
+    {
+        return Err(DomainError::MigrationRequired {
+            message: "Migrate the database before reading curation candidates.".to_owned(),
+            repair: Some(format!(
+                "ee migrate run --workspace {} --database {} --json",
+                shell_quote_command_arg(&prepared.workspace_path.display().to_string()),
+                shell_quote_command_arg(&prepared.database_path.display().to_string())
+            )),
+        });
+    }
+    prepared.workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &prepared.workspace_id,
+        &[prepared.workspace_path.as_path()],
+    )?;
+    Ok(connection)
+}
+
 fn open_bound_curate_read(prepared: &mut PreparedCurateRead) -> Result<DbConnection, DomainError> {
     let connection = open_existing_database(&prepared.database_path)?;
     prepared.workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
@@ -16828,12 +17267,19 @@ fn open_existing_database(database_path: &Path) -> Result<DbConnection, DomainEr
             message: format!("Failed to open database: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
-    connection
-        .migrate()
-        .map_err(|error| DomainError::MigrationRequired {
-            message: format!("Failed to migrate curation database: {error}"),
-            repair: Some("ee migrate run --workspace . --json".to_owned()),
-        })?;
+    connection.migrate().map_err(|error| {
+        // bd-12ybp: see db_failure_or_storage_panic — a recovered panic must
+        // not be reported as "migration required" (exit 8).
+        let message = format!("Failed to migrate curation database: {error}");
+        crate::core::db_failure_or_storage_panic(
+            &error,
+            message.clone(),
+            DomainError::MigrationRequired {
+                message,
+                repair: Some("ee migrate run --workspace . --json".to_owned()),
+            },
+        )
+    })?;
     Ok(connection)
 }
 
@@ -18012,11 +18458,16 @@ mod tests {
                     message.contains("Gaps-only") && message.contains("summary"),
                     "policy-denied message must name the kind; got `{message}`"
                 );
+                // bd-kgt76: the check is on `--gaps-only` alone. The earlier form also
+                // accepted a bare "gaps-only", which SUBSUMES the dashed spelling, so a
+                // hint reading "use gaps-only mode" passed an assertion whose own message
+                // demands the flag. The emitter above (the PolicyDenied in
+                // ingest_reflection_result) names `--gaps-only` in a plain literal, so
+                // narrowing this costs nothing today and catches a hint that drops it.
+                let repair_hint = repair.as_deref().unwrap_or("");
                 assert!(
-                    repair
-                        .as_deref()
-                        .is_some_and(|r| r.contains("gaps-only") || r.contains("--gaps-only")),
-                    "repair hint must mention the gaps-only flag; got `{repair:?}`"
+                    repair_hint.contains("--gaps-only"),
+                    "repair hint must name the --gaps-only flag; got `{repair:?}`"
                 );
                 Ok(())
             }
@@ -19918,6 +20369,7 @@ mod tests {
         );
 
         let report = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path: fixture.workspace_path.as_path(),
             database_path: Some(fixture.database_path.as_path()),
             candidate_type: Some("rule"),
@@ -20327,6 +20779,7 @@ mod tests {
         )));
 
         let report = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path: fixture.workspace_path.as_path(),
             database_path: Some(fixture.database_path.as_path()),
             candidate_type: Some(CandidateType::CreateDerivedMemory.as_str()),
@@ -21096,6 +21549,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         let report = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("promote"),
@@ -21223,6 +21677,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         let report = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("rule"),
@@ -21386,6 +21841,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         let report = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("rule"),
@@ -21532,6 +21988,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         let report = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: None,
@@ -21664,6 +22121,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         let report = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: None,
@@ -21712,6 +22170,7 @@ mod tests {
         );
 
         let target_filtered = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: None,
@@ -21897,7 +22356,8 @@ mod tests {
     }
 
     #[test]
-    fn list_curation_candidates_synthesizes_mi_dedup_clusters() -> TestResult {
+    fn list_curation_candidates_previews_then_atomically_proposes_mi_dedup_clusters() -> TestResult
+    {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
@@ -21950,7 +22410,25 @@ mod tests {
         }
         connection.close().map_err(|error| error.to_string())?;
 
-        let report = list_curation_candidates(&CurateCandidatesOptions {
+        let snapshot = || -> Result<(i64, i64, Option<u64>), String> {
+            let database = DbConnection::open_file_read_only(&database_path)
+                .map_err(|error| error.to_string())?;
+            Ok((
+                database
+                    .count_table_rows("curation_candidates")
+                    .map_err(|error| error.to_string())?,
+                database
+                    .count_table_rows("audit_log")
+                    .map_err(|error| error.to_string())?,
+                database
+                    .get_workspace_generation(&workspace_id)
+                    .map_err(|error| error.to_string())?,
+            ))
+        };
+        let before = snapshot()?;
+        let bytes_before = fs::read(&database_path).map_err(|error| error.to_string())?;
+        let mut options = CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("dedup"),
@@ -21960,9 +22438,57 @@ mod tests {
             offset: 0,
             sort: "confidence",
             group_duplicates: false,
-        })
-        .map_err(|error| error.message())?;
+        };
+        let preview = list_curation_candidates(&options).map_err(|error| error.message())?;
+        assert_eq!(preview.total_count, 2);
+        assert!(!preview.durable_mutation);
+        assert!(preview.next_action.contains("--propose"));
+        for candidate in &preview.candidates {
+            assert!(!candidate.requires_validate && !candidate.requires_apply);
+            assert!(candidate.next_action.contains("--propose"));
+            assert_eq!(candidate.next_action, candidate.validation.next_action);
+        }
+        assert_eq!(before, snapshot()?);
+        assert_eq!(
+            bytes_before,
+            fs::read(&database_path).map_err(|error| error.to_string())?
+        );
+
+        options.propose = true;
+        options.sort = "invalid-sort";
+        assert!(matches!(
+            list_curation_candidates(&options),
+            Err(DomainError::Usage { .. })
+        ));
+        assert_eq!(before, snapshot()?);
+        options.sort = "confidence";
+        super::DEDUP_PROPOSAL_FAIL_AFTER_INSERTS.with(|slot| *slot.borrow_mut() = Some(2));
+        let failed = list_curation_candidates(&options);
+        super::DEDUP_PROPOSAL_FAIL_AFTER_INSERTS.with(|slot| *slot.borrow_mut() = None);
+        assert!(matches!(failed, Err(DomainError::Storage { .. })));
+        assert_eq!(
+            before,
+            snapshot()?,
+            "the whole proposal/audit batch must roll back"
+        );
+
+        let report = list_curation_candidates(&options).map_err(|error| error.message())?;
+        assert_eq!(
+            preview
+                .candidates
+                .iter()
+                .map(|candidate| &candidate.id)
+                .collect::<Vec<_>>(),
+            report
+                .candidates
+                .iter()
+                .map(|candidate| &candidate.id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(snapshot()?.0, 2);
+        assert_eq!(snapshot()?.1, before.1 + 2);
         let second = list_curation_candidates(&CurateCandidatesOptions {
+            propose: true,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("paraphrase_dedup_proposal"),
@@ -22028,6 +22554,39 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(member_sets.contains(&vec![memory_ids[0].clone(), memory_ids[1].clone()]));
         assert!(member_sets.contains(&vec![memory_ids[2].clone(), memory_ids[3].clone()]));
+
+        // Filtering to pending must not turn terminal deterministic IDs back
+        // into fresh virtual proposals; explicit proposal replay also abstains.
+        for terminal in ["rejected", "applied"] {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection
+                .update_curation_candidate_review(
+                    &workspace_id,
+                    &report.candidates[0].id,
+                    crate::db::CurationCandidateReviewUpdate {
+                        status: terminal,
+                        review_state: terminal,
+                        reviewed_at: "2026-10-25T00:00:00Z",
+                        reviewed_by: "test",
+                        snoozed_until: None,
+                        merged_into_candidate_id: None,
+                        ttl_policy_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            let terminal_snapshot = snapshot()?;
+            for propose in [false, true] {
+                options.propose = propose;
+                let pending =
+                    list_curation_candidates(&options).map_err(|error| error.message())?;
+                assert_eq!(pending.returned_count, 1);
+                assert_eq!(pending.candidates[0].id, report.candidates[1].id);
+                assert!(!pending.durable_mutation);
+                assert_eq!(terminal_snapshot, snapshot()?);
+            }
+        }
         Ok(())
     }
 
@@ -22167,6 +22726,7 @@ mod tests {
         connection.close().map_err(|error| error.to_string())?;
 
         let report = list_curation_candidates(&CurateCandidatesOptions {
+            propose: true,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("dedup"),
@@ -22222,6 +22782,7 @@ mod tests {
         );
 
         let target_filtered = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("dedup"),
@@ -22234,6 +22795,7 @@ mod tests {
         })
         .map_err(|error| error.message())?;
         let manual_only_filtered = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("dedup"),
@@ -22251,6 +22813,7 @@ mod tests {
         assert!(!manual_only_filtered.durable_mutation);
 
         let replay = list_curation_candidates(&CurateCandidatesOptions {
+            propose: true,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("dedup"),
@@ -22351,6 +22914,7 @@ mod tests {
         connection.close().map_err(|error| error.to_string())?;
 
         let empty_report = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("dedup"),
@@ -22392,6 +22956,7 @@ mod tests {
         connection.close().map_err(|error| error.to_string())?;
 
         let included = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("dedup"),
@@ -22404,6 +22969,7 @@ mod tests {
         })
         .map_err(|error| error.message())?;
         let excluded = list_curation_candidates(&CurateCandidatesOptions {
+            propose: false,
             workspace_path,
             database_path: Some(&database_path),
             candidate_type: Some("dedup"),
@@ -22421,7 +22987,150 @@ mod tests {
             included.candidates[0].member_memory_ids,
             vec![memory_one, memory_two]
         );
+        assert!(!included.durable_mutation);
+        assert!(included.next_action.contains("--target-memory"));
+        assert!(
+            included
+                .next_action
+                .contains(&included.candidates[0].member_memory_ids[1])
+        );
         assert_eq!(excluded.returned_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn curation_candidate_proposal_options_are_validated_before_store_access() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = tempdir.path().join("absent").join("ee.db");
+        let mut options = CurateCandidatesOptions {
+            workspace_path: tempdir.path(),
+            database_path: Some(&database_path),
+            candidate_type: Some("rule"),
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "review_state",
+            group_duplicates: false,
+            propose: true,
+        };
+        for candidate_type in [None, Some("rule"), Some("consolidate")] {
+            options.candidate_type = candidate_type;
+            assert!(matches!(
+                list_curation_candidates(&options),
+                Err(DomainError::Usage { .. })
+            ));
+            assert!(!database_path.exists());
+        }
+        options.candidate_type = Some("dedup");
+        for status in [Some("approved"), Some("rejected"), Some("applied")] {
+            options.status = status;
+            assert!(matches!(
+                list_curation_candidates(&options),
+                Err(DomainError::Usage { .. })
+            ));
+            assert!(!database_path.exists());
+        }
+        options.status = Some("pending");
+        options.sort = "invalid-sort";
+        assert!(matches!(
+            list_curation_candidates(&options),
+            Err(DomainError::Usage { .. })
+        ));
+        assert!(!database_path.exists());
+        assert!(!tempdir.path().join("absent").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn curation_read_and_preview_surfaces_refuse_migration_without_changing_store() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("CREATE TABLE preview_sentinel (value TEXT NOT NULL)")
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("INSERT INTO preview_sentinel VALUES ('keep this store unchanged')")
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let before = fs::read(&database_path).map_err(|error| error.to_string())?;
+        let candidate_id = "curate_00000000000000000000000001";
+        let expected_repair = format!(
+            "ee migrate run --workspace {} --database {} --json",
+            super::shell_quote_command_arg(&workspace_path.display().to_string()),
+            super::shell_quote_command_arg(&database_path.display().to_string())
+        );
+        let results = [
+            list_curation_candidates(&CurateCandidatesOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_type: Some("dedup"),
+                status: Some("pending"),
+                target_memory_id: None,
+                limit: 10,
+                offset: 0,
+                sort: "review_state",
+                group_duplicates: false,
+                propose: false,
+            })
+            .map(|_| ()),
+            validate_curation_candidate(&super::CurateValidateOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id,
+                actor: None,
+                dry_run: true,
+            })
+            .map(|_| ()),
+            apply_curation_candidate(&super::CurateApplyOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id,
+                actor: None,
+                dry_run: true,
+                allow_tombstone_load_bearing: false,
+            })
+            .map(|_| ()),
+            show_curation_candidate(&super::CurateShowOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id,
+            })
+            .map(|_| ()),
+        ];
+        for result in results {
+            match result {
+                Err(DomainError::MigrationRequired { repair, .. }) => {
+                    assert_eq!(repair.as_deref(), Some(expected_repair.as_str()));
+                }
+                other => {
+                    return Err(format!(
+                        "expected read-only migration refusal, got {other:?}"
+                    ));
+                }
+            }
+        }
+        assert_eq!(
+            before,
+            fs::read(&database_path).map_err(|error| error.to_string())?
+        );
+        let connection =
+            DbConnection::open_file_read_only(&database_path).map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .needs_migration()
+                .map_err(|error| error.to_string())?
+        );
+        assert_eq!(
+            connection
+                .count_table_rows("preview_sentinel")
+                .map_err(|error| error.to_string())?,
+            1
+        );
+        connection.close().map_err(|error| error.to_string())?;
         Ok(())
     }
 

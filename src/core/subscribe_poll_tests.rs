@@ -514,3 +514,542 @@ fn invalid_time_filters_fail_instead_of_disabling_the_cutoff() {
         None
     );
 }
+
+#[test]
+fn fetching_a_notified_memory_does_not_start_a_subscription_feedback_loop() {
+    use crate::core::memory::{GetMemoryOptions, get_memory_details};
+
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    let created = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    let first = f.poll(0, 1, SubscribeFilter::default());
+    assert_eq!(first.delta_count, 1);
+    assert_eq!(first.next_cursor, created);
+    let original = f.db.get_memory(&id).expect("source").expect("present");
+    let mut cursor = first.next_cursor;
+    for expected_reads in 1..=3 {
+        // Exercise the actual public read producer, not a fabricated show row.
+        let shown = get_memory_details(&GetMemoryOptions {
+            database_path: &f.database,
+            memory_id: &id,
+            include_tombstoned: false,
+        });
+        assert!(shown.found && shown.error.is_none(), "{shown:?}");
+        let reads =
+            f.db.query(
+                "SELECT COUNT(*), MAX(rowid) FROM audit_log WHERE action = ?1 AND target_id = ?2",
+                &[
+                    SqlValue::Text(audit_actions::MEMORY_SHOW.to_owned()),
+                    SqlValue::Text(id.clone()),
+                ],
+            )
+            .expect("actual read audits");
+        assert_eq!(
+            reads[0].get(0).and_then(SqlValue::as_i64),
+            Some(expected_reads)
+        );
+        let read_cursor = u64::try_from(
+            reads[0]
+                .get(1)
+                .and_then(SqlValue::as_i64)
+                .expect("read cursor"),
+        )
+        .expect("positive cursor");
+        assert!(
+            read_cursor > cursor,
+            "the producer must really have emitted its audit"
+        );
+        let next = f.poll(cursor, 1, SubscribeFilter::default());
+        assert!(next.deltas.is_empty() && next.invalidations.is_empty());
+        assert!(!next.has_more);
+        assert_eq!(next.next_cursor, read_cursor);
+        assert_eq!(next.high_watermark, read_cursor);
+        cursor = next.next_cursor;
+    }
+    assert_eq!(
+        f.db.get_memory(&id)
+            .expect("source after reads")
+            .expect("present")
+            .content,
+        original.content
+    );
+    let changed = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_TAG_SET,
+    );
+    let next = f.poll(cursor, 1, SubscribeFilter::default());
+    assert_eq!(next.delta_count, 1, "real changes still notify");
+    assert_eq!(next.deltas[0].cursor, changed);
+    assert_eq!(next.deltas[0].changed_fields, ["tags"]);
+}
+
+#[test]
+fn observation_prefixes_and_tails_do_not_consume_change_page_slots() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    for _ in 0..5 {
+        for action in OBSERVATION_ONLY_ACTIONS {
+            f.audit(Some(&f.own), Some(&id), Some("memory"), action);
+        }
+    }
+    let first = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_TAG_ADD,
+    );
+    f.audit(None, Some(&id), None, audit_actions::MEMORY_SHOW);
+    let second = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    let tail = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        "memory.reveal_failed",
+    );
+    let page = f.poll(0, 1, SubscribeFilter::default());
+    assert_eq!(page.delta_count, 1);
+    assert_eq!(page.deltas[0].cursor, first);
+    assert_eq!(
+        page.next_cursor, first,
+        "never acknowledge the second change as lookahead"
+    );
+    assert!(page.has_more);
+    assert_eq!(page.high_watermark, tail);
+    let next = f.poll(first, 1, SubscribeFilter::default());
+    assert_eq!(next.delta_count, 1);
+    assert_eq!(next.deltas[0].cursor, second);
+    assert_eq!(next.next_cursor, tail);
+    assert!(!next.has_more, "read-only tail is not more change work");
+    let replay = f.poll(tail, 1, SubscribeFilter::default());
+    assert!(replay.deltas.is_empty() && replay.invalidations.is_empty());
+    assert_eq!(replay.next_cursor, tail);
+}
+
+#[test]
+fn observations_neither_invalidate_filtered_membership_nor_require_tag_storage() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "private-tag");
+    let mut tail = 0;
+    for action in OBSERVATION_ONLY_ACTIONS {
+        tail = f.audit(Some(&f.own), Some(&id), Some("memory"), action);
+    }
+    f.db.execute_raw("ALTER TABLE memory_tags RENAME TO subscription_observation_tags")
+        .expect("make an unintended hydration observable");
+    for expression in [
+        None,
+        Some("TAG=release"),
+        Some("LEVEL=episodic,TAG=release"),
+    ] {
+        let filter = super::super::parse_subscribe_filter(expression).expect("filter");
+        let page = f.poll(0, 1, filter);
+        assert!(page.deltas.is_empty() && page.invalidations.is_empty());
+        assert_eq!(page.next_cursor, tail);
+        assert!(!page.has_more);
+    }
+    let rows =
+        f.db.query("SELECT COUNT(*) FROM audit_log", &[])
+            .expect("history remains");
+    assert_eq!(
+        rows[0].get(0).and_then(SqlValue::as_i64),
+        Some(OBSERVATION_ONLY_ACTIONS.len() as i64)
+    );
+}
+
+#[test]
+fn observation_exclusion_is_exact_and_unknown_mutations_remain_visible() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_SHOW,
+    );
+    let mut expected = Vec::new();
+    for action in [
+        "memory.show.changed",
+        "memory.reveal_failed_recovered",
+        "future.reclassify",
+        audit_actions::MEMORY_UPDATE,
+    ] {
+        expected.push(f.audit(Some(&f.own), Some(&id), Some("memory"), action));
+    }
+    let page = f.poll(0, 100, SubscribeFilter::default());
+    assert_eq!(
+        page.deltas
+            .iter()
+            .map(|delta| delta.cursor)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(!page.has_more);
+    assert_eq!(page.next_cursor, page.high_watermark);
+}
+
+#[test]
+fn noncontent_changes_reach_the_right_subscribers_without_claiming_body_edits() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    let original =
+        f.db.get_memory(&id)
+            .expect("source")
+            .expect("present")
+            .content;
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET confidence = 0.9 WHERE id = '{id}'"
+    ))
+    .expect("confidence update");
+    let confidence = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_REINFORCE,
+    );
+    f.db.insert_memory_seal(
+        &id,
+        &format!("blake3:{}", "a".repeat(64)),
+        "2026-01-01T00:00:00Z",
+    )
+    .expect("seal");
+    assert!(
+        f.db.mark_memory_seal_revealed(&id, "2026-01-02T00:00:00Z")
+            .expect("reveal")
+    );
+    let seal = f.audit(Some(&f.own), Some(&id), Some("memory"), "memory.reveal");
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET trust_class = 'agent_validated' WHERE id = '{id}'"
+    ))
+    .expect("prior trust");
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET trust_class = 'human_explicit' WHERE id = '{id}'"
+    ))
+    .expect("explicit promotion");
+    let trust = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::TRUST_CLASS_PROMOTION_OVERRIDE,
+    );
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET level = 'semantic' WHERE id = '{id}'"
+    ))
+    .expect("level demotion");
+    let level = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_DECAY_DEMOTE,
+    );
+    let tail = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_SHOW,
+    );
+    for (field, cursor, kind) in [
+        ("confidence", confidence, "updated"),
+        ("seal_state", seal, "updated"),
+        ("trust_class", trust, "updated"),
+        ("level", level, "level_transitioned"),
+    ] {
+        let filter = super::super::parse_subscribe_filter(Some(&format!("CHANGED_FIELDS={field}")))
+            .expect("filter");
+        let report = f.poll(0, 100, filter);
+        assert_eq!(report.delta_count, 1, "{field}");
+        assert_eq!(report.deltas[0].cursor, cursor, "{field}");
+        assert_eq!(report.deltas[0].kind, kind, "{field}");
+        assert_eq!(report.deltas[0].changed_fields, [field], "{field}");
+        assert!(report.invalidations.is_empty());
+        assert_eq!(report.next_cursor, tail);
+    }
+    let content = super::super::parse_subscribe_filter(Some("CHANGED_FIELDS=content_hash"))
+        .expect("content filter");
+    let report = f.poll(0, 100, content);
+    assert!(report.deltas.is_empty() && report.invalidations.is_empty());
+    let prior_level =
+        super::super::parse_subscribe_filter(Some("LEVEL=procedural,CHANGED_FIELDS=level"))
+            .expect("level-membership filter");
+    let report = f.poll(0, 100, prior_level);
+    assert!(report.deltas.is_empty());
+    assert_eq!(report.invalidations.len(), 1);
+    assert_eq!(report.invalidations[0].cursor, level);
+    assert_eq!(report.invalidations[0].memory_id, id);
+    assert_eq!(
+        f.db.get_memory(&id)
+            .expect("source remains")
+            .expect("present")
+            .content,
+        original
+    );
+}
+
+#[test]
+fn concurrent_observations_do_not_advance_a_pinned_page_over_a_later_change() {
+    let f = Fixture::new();
+    let id = f.memory(&f.own, 1, "release");
+    let initial = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    let reader = DbConnection::open(DatabaseConfig::read_only_file(f.database.clone()))
+        .expect("independent reader");
+    let snapshot = SubscriptionSnapshot::begin(&reader).expect("snapshot");
+    assert_eq!(snapshot.high_watermark(&f.own).expect("pin"), initial);
+    for action in OBSERVATION_ONLY_ACTIONS {
+        f.audit(Some(&f.own), Some(&id), Some("memory"), action);
+    }
+    f.db.execute_raw(&format!(
+        "UPDATE memories SET confidence = 0.95 WHERE id = '{id}'"
+    ))
+    .expect("new change");
+    let mutation = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_REINFORCE,
+    );
+    let tail = f.audit(
+        Some(&f.own),
+        Some(&id),
+        Some("memory"),
+        audit_actions::MEMORY_SHOW,
+    );
+    let page = snapshot
+        .page(&f.own, initial, 1, &SubscribeFilter::default(), None)
+        .expect("old page");
+    assert!(page.deltas.is_empty() && page.invalidations.is_empty());
+    assert_eq!(page.next_cursor, initial);
+    assert_eq!(page.high_watermark, initial);
+    snapshot.finish().expect("release old view");
+    let filter = super::super::parse_subscribe_filter(Some("CHANGED_FIELDS=confidence"))
+        .expect("confidence filter");
+    let fresh = f.poll(initial, 1, filter.clone());
+    assert_eq!(fresh.delta_count, 1);
+    assert_eq!(fresh.deltas[0].cursor, mutation);
+    assert_eq!(fresh.next_cursor, tail);
+    assert!(!fresh.has_more);
+    let acknowledged = f.poll(fresh.next_cursor, 1, filter);
+    assert!(acknowledged.deltas.is_empty() && acknowledged.invalidations.is_empty());
+}
+
+#[test]
+fn scoped_audit_lanes_replay_in_one_cursor_order_at_every_page_size() {
+    let f = Fixture::new();
+    let local = f.memory(&f.own, 1, "release");
+    let foreign = f.memory(&f.other, 2, "private-lane");
+    let mut expected = Vec::new();
+    for n in 0..65 {
+        f.audit(
+            Some(&f.other),
+            Some(&foreign),
+            Some("memory"),
+            audit_actions::MEMORY_UPDATE,
+        );
+        f.audit(
+            Some(&f.own),
+            Some(&foreign),
+            Some("memory"),
+            audit_actions::MEMORY_UPDATE,
+        );
+        f.audit(None, Some(&foreign), None, audit_actions::MEMORY_UPDATE);
+        f.audit(
+            Some(&f.own),
+            Some(&local),
+            Some("memory"),
+            audit_actions::MEMORY_SHOW,
+        );
+        let scope = if n % 2 == 0 {
+            Some(f.own.as_str())
+        } else {
+            None
+        };
+        expected.push(f.audit(
+            scope,
+            Some(&local),
+            Some("memory"),
+            audit_actions::MEMORY_UPDATE,
+        ));
+    }
+    let tail = f.audit(Some(&f.own), None, None, "index.rebuild");
+    for limit in [1, 2, 3, 7, 32, 64, 128, 10_000] {
+        let mut cursor = 0;
+        let mut actual = Vec::new();
+        loop {
+            let report = f.poll(cursor, limit, SubscribeFilter::default());
+            assert!(report.deltas.len() <= limit as usize);
+            assert_eq!(report.high_watermark, tail);
+            assert!(report.invalidations.is_empty());
+            for delta in &report.deltas {
+                assert_eq!(delta.memory_id, local);
+                assert_eq!(delta.tags, ["release"]);
+                assert_eq!(delta.workspace_id.as_deref(), Some(f.own.as_str()));
+                actual.push(delta.cursor);
+            }
+            assert!(report.next_cursor > cursor, "replay must make progress");
+            cursor = report.next_cursor;
+            if !report.has_more {
+                break;
+            }
+            assert_eq!(
+                Some(&cursor),
+                actual.last(),
+                "lookahead is not acknowledged"
+            );
+        }
+        assert_eq!(actual, expected, "page size {limit}");
+        assert_eq!(cursor, tail);
+        assert_eq!(
+            f.poll(cursor, limit, SubscribeFilter::default())
+                .delta_count,
+            0
+        );
+    }
+}
+
+#[test]
+fn lane_lookahead_preserves_filtered_empty_pages_and_owned_missing_targets() {
+    let f = Fixture::new();
+    let excluded = f.memory(&f.own, 1, "other");
+    let included = f.memory(&f.own, 2, "release");
+    let first = f.audit(
+        Some(&f.own),
+        Some(&excluded),
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    let second = f.audit(None, Some(&excluded), None, audit_actions::MEMORY_CREATE);
+    let third = f.audit(None, Some(&included), None, audit_actions::MEMORY_CREATE);
+    let missing = MemoryId::from_uuid(uuid::Uuid::from_u128(999)).to_string();
+    let last = f.audit(
+        Some(&f.own),
+        Some(&missing),
+        Some("memory"),
+        audit_actions::MEMORY_TOMBSTONE,
+    );
+    let filter = super::super::parse_subscribe_filter(Some("TAG=release")).expect("filter");
+    let empty = f.poll(0, 2, filter.clone());
+    assert!(empty.deltas.is_empty());
+    assert!(empty.invalidations.is_empty());
+    assert_eq!(empty.next_cursor, second);
+    assert!(empty.has_more);
+    assert!(first < second && second < third);
+    let rest = f.poll(empty.next_cursor, 2, filter);
+    assert_eq!(rest.delta_count, 1);
+    assert_eq!(rest.deltas[0].cursor, third);
+    assert_eq!(rest.deltas[0].memory_id, included);
+    assert_eq!(rest.invalidations.len(), 1);
+    assert_eq!(rest.invalidations[0].memory_id, missing);
+    assert_eq!(rest.invalidations[0].cursor, last);
+    assert_eq!(rest.next_cursor, last);
+    assert!(!rest.has_more);
+}
+
+#[test]
+fn both_scoped_lanes_read_the_same_source_snapshot() {
+    let f = Fixture::new();
+    let local = f.memory(&f.own, 1, "release");
+    f.audit(
+        Some(&f.own),
+        Some(&local),
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    let head = f.audit(
+        None,
+        Some(&local),
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    let reader =
+        DbConnection::open(DatabaseConfig::read_only_file(f.database.clone())).expect("reader");
+    let snapshot = SubscriptionSnapshot::begin(&reader).expect("snapshot");
+    assert_eq!(snapshot.high_watermark(&f.own).expect("pinned head"), head);
+    let mut late = 0;
+    let rows = snapshot
+        .audit_window(&f.own, 0, head, 10, || {
+            f.db.execute_raw(&format!(
+                "UPDATE memories SET level = 'semantic' WHERE id = '{local}'"
+            ))
+            .map_err(storage_error)?;
+            late = f.audit(
+                None,
+                Some(&local),
+                Some("memory"),
+                audit_actions::MEMORY_UPDATE,
+            );
+            Ok(())
+        })
+        .expect("consistent lane merge");
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        let raw = raw_delta_from_row(&row).expect("source row");
+        assert_eq!(raw.level.as_deref(), Some("procedural"));
+        assert!(raw.cursor <= head);
+    }
+    snapshot.finish().expect("release read snapshot");
+    let fresh = f.poll(head, 10, SubscribeFilter::default());
+    assert_eq!(fresh.delta_count, 1);
+    assert_eq!(fresh.deltas[0].cursor, late);
+    assert_eq!(fresh.deltas[0].levels, ["semantic"]);
+}
+
+#[test]
+fn failure_between_scoped_lanes_returns_no_prefix_and_preserves_the_callers_transaction() {
+    let f = Fixture::new();
+    let local = f.memory(&f.own, 1, "release");
+    f.audit(
+        Some(&f.own),
+        Some(&local),
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    let head = f.audit(
+        None,
+        Some(&local),
+        Some("memory"),
+        audit_actions::MEMORY_UPDATE,
+    );
+    f.db.execute_raw("BEGIN IMMEDIATE")
+        .expect("caller transaction");
+    let borrowed = SubscriptionSnapshot {
+        connection: &f.db,
+        active: false,
+    };
+    let mut between = 0;
+    let error = borrowed
+        .audit_window(&f.own, 0, head, 10, || {
+            between += 1;
+            f.db.execute_raw("ALTER TABLE memories RENAME TO private_subscription_memory_fault")
+                .map_err(storage_error)
+        })
+        .expect_err("the second lane must not become an empty success");
+    assert_eq!(between, 1);
+    assert!(
+        !error
+            .message()
+            .contains("private_subscription_memory_fault")
+    );
+    assert!(!error.message().contains(&local));
+    assert!(
+        f.db.begin_read_snapshot().is_err(),
+        "caller still owns its transaction"
+    );
+    f.db.execute_raw("ROLLBACK").expect("repair source");
+    let retry = f.poll(0, 10, SubscribeFilter::default());
+    assert_eq!(retry.delta_count, 2);
+    assert_eq!(retry.next_cursor, head);
+}

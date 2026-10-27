@@ -507,17 +507,18 @@ fn verified_packed_memory_ids(
             if admitted_items >= item_limit {
                 break;
             }
-            let memory_id = item
-                .get("memoryId")
-                .and_then(JsonValue::as_str)
-                .ok_or_else(|| {
-                    TrustReportError::Storage(DbError::MalformedRow {
-                        operation: DbOperation::Query,
-                        message: "verified pack selection evidence omitted a memory id".to_owned(),
-                    })
-                })?;
             admitted_items = admitted_items.saturating_add(1);
-            packed_memory_ids.insert(memory_id.to_owned());
+            match crate::core::pack_selection_identity::classify(item).map_err(|message| {
+                TrustReportError::Storage(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: format!("verified pack selection evidence {message}"),
+                })
+            })? {
+                crate::core::pack_selection_identity::PackSelectionIdentity::Memory(memory_id) => {
+                    packed_memory_ids.insert(memory_id.to_owned());
+                }
+                crate::core::pack_selection_identity::PackSelectionIdentity::Native { .. } => {}
+            }
         }
     }
     if admitted_items < item_limit && record_cap_exhausted {

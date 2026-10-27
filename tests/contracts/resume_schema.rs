@@ -906,27 +906,46 @@ fn resume_real_binary_completes_under_two_seconds_on_10k_store() -> TestResult {
         )
         .map_err(|error| format!("insert acceptance workspace: {error}"))?;
 
-    for index in 0..CORPUS_SIZE {
-        let input = CreateMemoryInput {
-            workspace_id: workspace_id.clone(),
-            level: "episodic".to_owned(),
-            kind: "note".to_owned(),
-            content: format!("Resume 10k acceptance memory {index:05}"),
-            workflow_id: None,
-            confidence: 0.8,
-            utility: 0.5,
-            importance: 0.5,
-            provenance_uri: Some("test://resume/10k-acceptance".to_owned()),
-            trust_class: "agent_assertion".to_owned(),
-            trust_subclass: None,
-            tags: vec!["session-resume-10k".to_owned()],
-            valid_from: None,
-            valid_to: None,
-        };
-        connection
-            .insert_memory(&format!("mem_{index:026}"), &input)
-            .map_err(|error| format!("insert acceptance memory {index}: {error}"))?;
-    }
+    // ONE transaction for the whole corpus, not 10_000. This is fixture SETUP
+    // for an assertion about `resume` taking under two seconds, and it was
+    // costing far more than the thing it measures: a dispatch on 2026-10-17
+    // (bd-fyack) spent >72 minutes in the test phase and was killed at a 4-hour
+    // cap before printing a result, having already spent 168 minutes compiling.
+    // 10_000 separate `insert_memory` calls are 10_000 separate write
+    // transactions, so the cost was WAL fsyncs on a shared worker volume.
+    //
+    // Safe to wrap: `insert_memory` delegates to `insert_memory_inner`, which
+    // opens no transaction of its own, so nothing nests here. The store still
+    // ends with CORPUS_SIZE rows and `resume` is still measured against it --
+    // no assertion is weakened and no threshold moves.
+    //
+    // The error mapping moves OUT of the loop because `?` now propagates the
+    // db error type; one commit also means a failure leaves no partial corpus
+    // rather than rows 0..N, which nothing below depends on (the fingerprints
+    // are taken after `drop(connection)`).
+    let seeded: ee::db::Result<()> = connection.with_transaction(|| {
+        for index in 0..CORPUS_SIZE {
+            let input = CreateMemoryInput {
+                workspace_id: workspace_id.clone(),
+                level: "episodic".to_owned(),
+                kind: "note".to_owned(),
+                content: format!("Resume 10k acceptance memory {index:05}"),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: Some("test://resume/10k-acceptance".to_owned()),
+                trust_class: "agent_assertion".to_owned(),
+                trust_subclass: None,
+                tags: vec!["session-resume-10k".to_owned()],
+                valid_from: None,
+                valid_to: None,
+            };
+            connection.insert_memory(&format!("mem_{index:026}"), &input)?;
+        }
+        Ok(())
+    });
+    seeded.map_err(|error| format!("seed 10k acceptance corpus: {error}"))?;
     drop(connection);
 
     let fingerprint = |label: &str| -> Result<Vec<(String, String)>, String> {

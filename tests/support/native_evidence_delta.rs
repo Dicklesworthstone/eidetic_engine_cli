@@ -87,7 +87,7 @@ fn imported_evidence_survives_add_noop_and_remove_deltas() -> TestResult {
         ("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", OsString::from("1")),
         ("NO_COLOR", OsString::from("1")),
     ];
-    let run = |name: &'static str, args: Vec<String>, schema: &'static str| {
+    let run_recorded = |name: &'static str, args: Vec<String>, schema: &'static str| {
         let mut full_args = vec![
             "--workspace".to_owned(),
             workspace.display().to_string(),
@@ -108,7 +108,9 @@ fn imported_evidence_survives_add_noop_and_remove_deltas() -> TestResult {
             },
             &envs,
         )
-        .map(|(_, value)| value)
+    };
+    let run = |name: &'static str, args: Vec<String>, schema: &'static str| {
+        run_recorded(name, args, schema).map(|(_, value)| value)
     };
     run("01_init", vec!["init".to_owned()], "ee.response.v2")?;
     let imported = run(
@@ -148,22 +150,6 @@ fn imported_evidence_survives_add_noop_and_remove_deltas() -> TestResult {
             "1200".into(),
         ];
         if let Some(hash) = since {
-            // bd-ojcq2 defect 3: `--max-delta-bytes` is declared on ContextArgs
-            // (src/cli/mod.rs:3358), NOT on PackArgs (3588), and these are `ee pack`
-            // arguments — so clap refused it with
-            // {"code":"usage","message":"unexpected argument '--max-delta-bytes'"} and
-            // step 06 died before the delta ran. Every other flag here IS on PackArgs
-            // (max_tokens 3626, source_mode 3642, read_only 3689, since 3695), which is
-            // why only this one failed.
-            //
-            // DROPPED rather than added to PackArgs, because it was never exercising
-            // anything: 1000000 is a 1 MB cap over a fixture of 7 spans, so it could not
-            // bind. `--since` alone still produces the delta this test is about.
-            //
-            // That `ee pack --since` emits a delta with NO WAY TO BOUND IT, while
-            // `ee context --since` can, is a real product gap and is filed separately —
-            // it is not this bead's acceptance, and silently satisfying it here by
-            // widening a CLI surface would be the wrong place to decide it.
             args.extend(["--since".into(), hash.to_owned(), "--read-only".into()]);
         }
         args
@@ -302,7 +288,7 @@ fn imported_evidence_survives_add_noop_and_remove_deltas() -> TestResult {
         .collect::<BTreeSet<_>>();
     ensure_equal(
         &removed_ids,
-        &expected_ids.into_iter().collect::<BTreeSet<_>>(),
+        &expected_ids.iter().cloned().collect::<BTreeSet<_>>(),
         "native removals preserve every exact prior evidence ID",
     )?;
     for value in [&added, &unchanged, &removed] {
@@ -321,6 +307,60 @@ fn imported_evidence_survives_add_noop_and_remove_deltas() -> TestResult {
             !output.contains(DENIED_CASS_PRIVATE_PATH)
                 && !output.contains(DENIED_CASS_SECRET_PROBE),
             "delta does not reveal private evidence fixtures",
+        )?;
+    }
+
+    let byte_budget = 1_000_000_u64;
+    let mut bounded_args = pack_args(evidence_query, Some(&evidence_hash));
+    bounded_args.extend(["--max-delta-bytes".into(), byte_budget.to_string()]);
+    let (bounded_event, bounded) = run_recorded(
+        "09_native_delta_with_byte_budget",
+        bounded_args,
+        "ee.context.delta.v2",
+    )?;
+    let wire_bytes = bounded_event.stdout.len() as u64;
+    ensure(
+        bounded_event.stdout.ends_with('\n') && wire_bytes <= byte_budget,
+        "bounded delta must fit its byte budget including the transport newline",
+    )?;
+    ensure_equal(
+        &bounded["data"]["tokenSavings"]["deltaBytes"],
+        &json!(wire_bytes),
+        "bounded delta reports the actual transport bytes",
+    )?;
+    ensure_equal(
+        &bounded["data"]["items"],
+        &unchanged["data"]["items"],
+        "a non-binding byte budget preserves the uncapped delta",
+    )?;
+    ensure_equal(
+        &bounded["data"]["newPackHash"],
+        &json!(evidence_hash),
+        "a transport budget does not change pack identity",
+    )?;
+    ensure(
+        wire_bytes > 1,
+        "the one-byte fallback control must actually exceed its budget",
+    )?;
+
+    for (command, step) in [
+        ("pack", "10_pack_delta_byte_budget_fallback"),
+        ("context", "11_context_delta_byte_budget_fallback"),
+    ] {
+        let mut over_budget_args = pack_args(evidence_query, Some(&evidence_hash));
+        over_budget_args[0] = command.to_owned();
+        over_budget_args.extend(["--max-delta-bytes".into(), "1".into()]);
+        let fallback = run(step, over_budget_args, "ee.response.v2")?;
+        ensure_equal(
+            &native_ids(&fallback)?,
+            &expected_ids,
+            "an oversized delta falls back to the complete native-evidence pack",
+        )?;
+        ensure(
+            json_array(&fallback, "/degraded", "byte-budget fallback")?
+                .iter()
+                .any(|entry| entry["code"] == "context_delta_larger_than_full"),
+            format!("{command} must report its binding byte-budget fallback"),
         )?;
     }
     Ok(())

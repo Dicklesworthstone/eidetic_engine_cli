@@ -234,14 +234,40 @@ fn oversize_and_tampered_records_fail_closed() {
         .expect_err("oversize refused");
     assert!(matches!(error, KeyStoreError::CapExceeded { .. }));
 
+    // bd-key-store-write-replace-dead-end-1kgjt: this phase used to
+    // `write_replace` the oversized record planted above, and it could never
+    // run. `write_replace` validates the DESTINATION — it stats the resident
+    // file and calls `verify_record_stat`, which rejects the 65537-byte record
+    // — so the replacement bytes were never evaluated and the `.expect()`
+    // panicked with `CapExceeded` reporting the RESIDENT file's length. The
+    // malformed-path assertion below was unreachable.
+    //
+    // Refusing to operate on an anomalous file is the intended posture, not a
+    // bug: no supported path produces an oversized record. The one production
+    // caller that hands unbounded bytes to the uncapped `write_replace` is
+    // `share_team_bodies_represented`, bounded by `models::MAX_CONTENT_BYTES`
+    // being equal to `MAX_RECORD_BYTES` (now asserted in key_store's own
+    // tests), and the remote-body route through `apply_fetched_team_body` has
+    // no production caller at all.
+    //
+    // So the malformed record goes under a FRESH name. The store is not asked
+    // to repair an anomalous file, and the tampered-record property this test
+    // is named for is finally exercised.
     store
         .secure_dir()
-        .write_replace("pair.peer-77.current.json", b"not json at all")
-        .expect("replace with garbage");
+        .write_exclusive("pair.peer-78.current.json", b"not json at all")
+        .expect("plant malformed record under a fresh name");
     let error = store
-        .load_pair_key("peer-77", PairKeyClass::Current)
+        .load_pair_key("peer-78", PairKeyClass::Current)
         .expect_err("garbage refused");
     assert!(matches!(error, KeyStoreError::Malformed { .. }));
+
+    // The oversized record is still there and still refused: the fresh-name
+    // write must not be read as having repaired it.
+    let error = store
+        .load_pair_key("peer-77", PairKeyClass::Current)
+        .expect_err("oversize still refused");
+    assert!(matches!(error, KeyStoreError::CapExceeded { .. }));
 }
 
 #[test]

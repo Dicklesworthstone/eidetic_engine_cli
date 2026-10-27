@@ -439,3 +439,120 @@ fn metadata_invalidation_is_not_acknowledged_when_a_later_tag_batch_fails() {
     assert_eq!(page.deltas[0].cursor, matched);
     assert_eq!(page.next_cursor, matched);
 }
+
+#[test]
+fn cancelled_poll_withholds_a_memory_page_and_retries_without_acknowledgement() {
+    let f = Fixture::new();
+    f.memory(FIRST, LOCAL, "release");
+    let cursor = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    let options = f.options(0, 100, Some("TAG=release"));
+    let error = crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+        cx.cancel_with(asupersync::CancelKind::User, Some("cancel subscription"));
+        poll_memory_deltas(&options)
+    })
+    .expect("runtime")
+    .expect_err("cancelled page has no acknowledgement");
+    assert!(!error.to_string().contains(FIRST));
+    assert!(!error.to_string().contains("release"));
+    assert_eq!(audit_head(&f.writer).unwrap(), cursor);
+    let retry = poll_memory_deltas(&f.options(0, 100, Some("TAG=release"))).unwrap();
+    assert_eq!(retry.deltas.len(), 1);
+    assert_eq!(retry.next_cursor, cursor);
+    assert_eq!(retry.deltas[0].memory_id, FIRST);
+}
+
+#[test]
+fn cancellation_after_the_first_tag_batch_leaves_the_page_and_snapshot_unacknowledged() {
+    let f = Fixture::new();
+    for number in 0..257 {
+        let id = format!("mem_{:026}", 1000 + number);
+        f.memory(&id, LOCAL, "release");
+        f.audit(
+            Some(LOCAL),
+            &id,
+            Some("memory"),
+            audit_actions::MEMORY_CREATE,
+        );
+    }
+    let reader = DbConnection::open(DatabaseConfig::read_only_file(f.database.clone())).unwrap();
+    let snapshot = SubscriptionSnapshot::begin(&reader).unwrap();
+    let page = snapshot
+        .page(LOCAL, 0, 300, &SubscribeFilter::default(), None)
+        .unwrap();
+    assert_eq!(page.deltas.len(), 257);
+    let mut deltas = page.deltas;
+    for delta in &mut deltas {
+        delta.tags.clear();
+    }
+    let before = deltas.clone();
+    let borrowed_snapshot = &snapshot;
+    let (result, batches, deltas) =
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+            let mut batches = 0;
+            let result = borrowed_snapshot.hydrate_tags_observed(&mut deltas, || {
+                batches += 1;
+                cx.cancel_with(
+                    asupersync::CancelKind::User,
+                    Some("cancel after source batch"),
+                );
+                Ok(())
+            });
+            (result, batches, deltas)
+        })
+        .expect("runtime");
+    assert!(result.is_err());
+    assert_eq!(
+        batches, 1,
+        "do not read the next source batch after cancellation"
+    );
+    assert_eq!(deltas, before, "a staged batch is not a completed page");
+    assert!(
+        reader.begin_read_snapshot().is_err(),
+        "caller still owns the view"
+    );
+    snapshot
+        .finish()
+        .expect("caller can release its view outside the cancelled request");
+    let retry = poll_memory_deltas(&f.options(0, 300, Some("TAG=release"))).unwrap();
+    assert_eq!(retry.deltas.len(), 257);
+    assert_eq!(retry.next_cursor, page.next_cursor);
+    assert_eq!(audit_head(&f.writer).unwrap(), retry.next_cursor);
+}
+
+#[test]
+fn cancellation_at_finalization_discards_the_page_and_releases_the_owned_snapshot() {
+    let f = Fixture::new();
+    f.memory(FIRST, LOCAL, "release");
+    let cursor = f.audit(
+        Some(LOCAL),
+        FIRST,
+        Some("memory"),
+        audit_actions::MEMORY_CREATE,
+    );
+    let reader = DbConnection::open(DatabaseConfig::read_only_file(f.database.clone())).unwrap();
+    let snapshot = SubscriptionSnapshot::begin(&reader).unwrap();
+    let page = snapshot
+        .page(LOCAL, 0, 100, &SubscribeFilter::default(), None)
+        .unwrap();
+    assert_eq!(page.deltas.len(), 1);
+    let result =
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+            cx.cancel_with(asupersync::CancelKind::User, Some("cancel finalization"));
+            snapshot.finish()
+        })
+        .expect("runtime");
+    assert!(result.is_err());
+    reader
+        .begin_read_snapshot()
+        .expect("failed owner finalized by rollback");
+    reader.rollback_read_snapshot().unwrap();
+    assert_eq!(audit_head(&f.writer).unwrap(), cursor);
+    let retry = poll_memory_deltas(&f.options(0, 100, None)).unwrap();
+    assert_eq!(retry.deltas, page.deltas);
+    assert_eq!(retry.next_cursor, cursor);
+}

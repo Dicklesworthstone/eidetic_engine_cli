@@ -1,21 +1,20 @@
 //! bd-1n0np.7.3 — `ee conflict list|explain|cluster` read-only contradiction surface.
 //!
 //! Thin CLI layer over
-//! [`crate::core::contradiction_detect::assemble_conflict_surface`] (which reuses
+//! [`crate::core::contradiction_detect::assemble_conflict_surface_for_workspace`] (which reuses
 //! the 7.2 gather + explicit-evidence detector). list|explain|cluster are
 //! read-only. `resolve` (bd-3a1op.4, ADR 0066) plans via the pure
 //! [`crate::core::contradiction_detect::plan_conflict_resolution`] engine and,
-//! only under `--apply`, executes the plan through EXISTING audited core atoms
-//! (`decide_record`, `expire_memory`, `update_memory_link`,
-//! `update_memory_tags`) — no novel mutation paths.
+//! only under `--apply`, executes the complete plan through the decision
+//! writer's single transaction and existing audited storage operations.
 
 use std::path::Path;
 
 use clap::{Args, Subcommand};
 
 use crate::core::contradiction_detect::{
-    ConflictResolutionPlan, ConflictSurface, ContradictionDetectionConfig, PlannedResolutionAction,
-    assemble_conflict_surface,
+    ConflictReadSnapshot, ConflictResolutionPlan, ConflictSurface, ContradictionDetectionConfig,
+    PlannedResolutionAction, assemble_conflict_surface_for_workspace,
 };
 use crate::db::DbConnection;
 use crate::models::{DomainError, RESPONSE_SCHEMA_V2};
@@ -57,9 +56,12 @@ pub struct ConflictResolveArgs {
     /// scope-split only: comma-separated tags scoping memory B.
     #[arg(long, value_name = "TAGS")]
     pub scope_b_tags: Option<String>,
-    /// Execute the plan. Without this flag the command is a dry-run report.
+    /// Execute the plan immediately. Without --apply or --propose, only preview it.
     #[arg(long)]
     pub apply: bool,
+    /// Queue the explicit plan for curate show/validate/accept/apply review.
+    #[arg(long, conflicts_with = "apply")]
+    pub propose: bool,
     /// Actor recorded in audit rows.
     #[arg(long, value_name = "ACTOR")]
     pub actor: Option<String>,
@@ -74,8 +76,8 @@ pub struct ResolutionActionResult {
     pub created_memory_id: Option<String>,
 }
 
-/// Execute an approved plan through the existing audited core atoms,
-/// fail-fast, returning per-atom audit evidence.
+/// Execute the complete approved plan atomically, returning per-action audit
+/// evidence only after its rationale and terminal resolution are committed.
 pub fn execute_conflict_resolution(
     workspace: &Path,
     database_path: &Path,
@@ -83,123 +85,48 @@ pub fn execute_conflict_resolution(
     reason: &str,
     actor: Option<&str>,
 ) -> Result<Vec<ResolutionActionResult>, DomainError> {
-    use crate::core::decide::{DecideRecordOptions, decide_record};
-    use crate::core::memory::{
-        ExpireMemoryOptions, MemoryLinkMode, MemoryLinkOptions, MemoryTagsMode, MemoryTagsOptions,
-        expire_memory, update_memory_link, update_memory_tags,
-    };
-    use crate::db::{MemoryLinkRelation, MemoryLinkSource};
+    use crate::core::decide::{DecideRecordOptions, decide_conflict_resolution};
 
-    let mut results = Vec::with_capacity(plan.actions.len());
-    for action in &plan.actions {
-        let result = match action {
-            PlannedResolutionAction::RecordDecision {
-                topic,
-                chosen,
-                alternatives,
-                supersedes,
-            } => {
-                let report = decide_record(&DecideRecordOptions {
-                    workspace_path: workspace,
-                    database_path: Some(database_path),
-                    topic,
-                    chosen,
-                    alternatives: alternatives.clone(),
-                    rationale: reason,
-                    revisit_by: None,
-                    supersedes: supersedes.as_deref(),
-                    dry_run: false,
-                    actor,
-                    now: None,
-                })?;
-                ResolutionActionResult {
-                    action: "recordDecision".to_owned(),
-                    audit_ids: [
-                        report.memory_audit_id.clone(),
-                        report.link_audit_id.clone(),
-                        report.expire_audit_id.clone(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect(),
-                    created_memory_id: Some(report.decision.memory_id.clone()),
-                }
-            }
-            PlannedResolutionAction::ExpireMemory { memory_id, reason } => {
-                let report = expire_memory(&ExpireMemoryOptions {
-                    workspace_path: workspace,
-                    database_path,
-                    memory_id,
-                    reason: Some(reason),
-                    actor,
-                    dry_run: false,
-                    include_tombstoned: false,
-                })?;
-                ResolutionActionResult {
-                    action: "expireMemory".to_owned(),
-                    audit_ids: report.audit_id.into_iter().collect(),
-                    created_memory_id: None,
-                }
-            }
-            PlannedResolutionAction::CreateLink { from, to, relation } => {
-                let relation =
-                    MemoryLinkRelation::parse(relation).ok_or_else(|| DomainError::Usage {
-                        message: format!("Unknown link relation {relation}."),
-                        repair: None,
-                    })?;
-                let report = update_memory_link(&MemoryLinkOptions {
-                    workspace_path: workspace,
-                    database_path,
-                    memory_id: from,
-                    mode: MemoryLinkMode::Create {
-                        target_memory_id: to.clone(),
-                        relation,
-                        weight: 1.0,
-                        confidence: 1.0,
-                        directed: false,
-                        evidence_count: 0,
-                        source: MemoryLinkSource::Agent,
-                        metadata_json: Some(
-                            serde_json::json!({
-                                "resolution": "both_valid",
-                                "conflictId": plan.conflict_id,
-                            })
-                            .to_string(),
-                        ),
-                    },
-                    actor,
-                    dry_run: false,
-                    include_tombstoned: false,
-                })?;
-                ResolutionActionResult {
-                    action: "createLink".to_owned(),
-                    audit_ids: report.audit_id.into_iter().collect(),
-                    created_memory_id: None,
-                }
-            }
-            PlannedResolutionAction::AddTags { memory_id, tags } => {
-                let report = update_memory_tags(&MemoryTagsOptions {
-                    workspace_path: workspace,
-                    database_path,
-                    memory_id,
-                    mode: MemoryTagsMode::Patch {
-                        add: tags.clone(),
-                        remove: Vec::new(),
-                    },
-                    actor,
-                    dry_run: false,
-                    include_tombstoned: false,
-                })?;
-                ResolutionActionResult {
-                    action: "addTags".to_owned(),
-                    audit_ids: report.audit_ids,
-                    created_memory_id: None,
-                }
-            }
-        };
-        results.push(result);
-    }
-    Ok(results)
+    let Some(PlannedResolutionAction::RecordDecision {
+        topic,
+        chosen,
+        alternatives,
+        supersedes,
+    }) = plan
+        .actions
+        .iter()
+        .find(|action| matches!(action, PlannedResolutionAction::RecordDecision { .. }))
+    else {
+        return Err(DomainError::Usage {
+            message: "Conflict resolution requires a decision rationale".to_owned(),
+            repair: Some("Create a fresh plan with ee conflict resolve.".to_owned()),
+        });
+    };
+    let report = decide_conflict_resolution(
+        &DecideRecordOptions {
+            workspace_path: workspace,
+            database_path: Some(database_path),
+            topic,
+            chosen,
+            alternatives: alternatives.clone(),
+            rationale: reason,
+            revisit_by: None,
+            supersedes: supersedes.as_deref(),
+            dry_run: false,
+            actor,
+            now: None,
+        },
+        plan,
+    )?;
+    Ok(report
+        .results
+        .into_iter()
+        .map(|result| ResolutionActionResult {
+            action: result.action,
+            audit_ids: result.audit_ids,
+            created_memory_id: result.created_memory_id,
+        })
+        .collect())
 }
 
 /// `ee conflict list`
@@ -226,7 +153,7 @@ fn open_workspace_db(workspace: &Path) -> Result<DbConnection, DomainError> {
             repair: Some("Run `ee init --workspace . --json` first.".to_owned()),
         });
     }
-    DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+    DbConnection::open_file_read_only(&database_path).map_err(|error| DomainError::Storage {
         message: format!("Failed to open workspace database: {error}"),
         repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
     })
@@ -235,10 +162,28 @@ fn open_workspace_db(workspace: &Path) -> Result<DbConnection, DomainError> {
 /// Build the full read-only conflict surface for a workspace.
 pub fn build_conflict_surface(workspace: &Path) -> Result<ConflictSurface, DomainError> {
     let connection = open_workspace_db(workspace)?;
-    Ok(assemble_conflict_surface(
+    let snapshot =
+        ConflictReadSnapshot::begin(&connection).map_err(|_| conflict_snapshot_error())?;
+    let binding = crate::core::workspace::addressed_workspace_row(
         &connection,
-        ContradictionDetectionConfig::default(),
-    ))
+        workspace,
+        &workspace.join(".ee").join("ee.db"),
+    )?;
+    let config = ContradictionDetectionConfig::default();
+    let surface = binding.map_or_else(
+        || ConflictSurface::empty(config),
+        |row| assemble_conflict_surface_for_workspace(&connection, &row.id, config),
+    );
+    snapshot.finish().map_err(|_| conflict_snapshot_error())?;
+    Ok(surface)
+}
+
+fn conflict_snapshot_error() -> DomainError {
+    DomainError::Storage {
+        message: "Could not read a coherent conflict source snapshot; no partial result returned"
+            .to_owned(),
+        repair: Some("Retry ee conflict; use ee doctor --json if the failure persists.".to_owned()),
+    }
 }
 
 /// Build the surface filtered to the conflicts implicating one memory

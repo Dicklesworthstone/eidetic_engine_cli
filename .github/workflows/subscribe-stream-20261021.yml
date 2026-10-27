@@ -1,0 +1,15 @@
+# Retained delivery-attempt record. The push-triggered attempt did not start;
+# this file grants no write permission and cannot perform the pending patch.
+# The original attempt also requires the old stream-engine blob, so it refuses
+# the newer engine even if an old event were later scheduled.
+name: Retired subscription stream integration attempt
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  retired:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Retired. The exact CLI bridge remains in scripts/delivery/subscribe-stream-20261021.patch.'

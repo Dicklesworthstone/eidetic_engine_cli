@@ -93,7 +93,7 @@ fn l2_warm_context_cache_benchmark_is_registered() -> TestResult {
 
     for expected in [
         "run_context_l2_warm_bench",
-        "cargo bench --bench \"$bench\" -- ee_context_pack_l2_warm",
+        "cargo bench --locked --bench \"$bench\" -- ee_context_pack_l2_warm",
         "append_measured_ms \"$key\"",
         "if [ \"$PROFILE\" != \"ci-smoke\" ] &&",
         "run_context_l2_warm_bench",
@@ -147,7 +147,7 @@ fn arena_workspace_reuse_context_benchmark_is_registered() -> TestResult {
     for expected in [
         "run_context_arena_mode_bench()",
         "filter=\"/workspace_reuse\"",
-        "cargo bench --bench \"$bench\" -- \"$filter\" $BENCH_ARGS",
+        "cargo bench --locked --bench \"$bench\" -- \"$filter\" $BENCH_ARGS",
         "append_result \"$key\" \"measured\"",
     ] {
         if !BENCH_SCRIPT.contains(expected) {

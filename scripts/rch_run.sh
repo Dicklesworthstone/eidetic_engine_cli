@@ -297,7 +297,19 @@ emit_verdict_block() {
             warn "log records ${recorded_failure}; refusing to call this a pass despite exit 0."
             return 1
         fi
-        if printf '%s\n' "$plain" | grep -qa '^[[:space:]]*Finished '; then
+        # HERESTRING, NOT A PIPE. `grep -q` exits at the first match and closes
+        # the pipe; `printf`, still writing, takes SIGPIPE and exits 141, and
+        # `set -uo pipefail` (:45) reports 141 for the pipeline -- so a MATCHED
+        # pattern reads as false. It only bites when the left side is still
+        # writing, i.e. when the log carries content AFTER the Finished line,
+        # which is exactly the compile-then-list case this branch grades.
+        # Measured 2026-10-18 under pipefail:
+        #     Finished at the very end, 469 KB        -> MATCH
+        #     Finished + 5000 trailing lines, 778 KB  -> NO MATCH
+        # This one fails CLOSED (a good build falls through to the no-Finished
+        # branch and is not graded GREEN), unlike the same defect in
+        # scripts/check-format.sh which failed OPEN; both are the same bug.
+        if grep -qa '^[[:space:]]*Finished ' <<<"$plain"; then
             local built
             built="$(printf '%s\n' "$plain" | grep -ca '^[[:space:]]*Executable ' 2>/dev/null || true)"
             printf '  [compile-only] Finished present; %s executable(s) built; no tests expected.\n' "${built:-0}"

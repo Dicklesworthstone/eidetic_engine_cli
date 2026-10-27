@@ -294,19 +294,64 @@ RETRIEVAL_QUERIES = [
     ("clippy needless borrow error in CI", {"clippy_fail": 2, "clippy_diag": 2}, ["distract_espresso"]),
     ("what should I run before pushing", {"clippy_rule": 2, "fmt_rule": 1}, ["distract_lunch"]),
     ("flaky test that sleeps and checks expiry", {"flaky_diag": 2, "flaky_lesson": 2, "flaky_fail": 1}, ["distract_espresso"]),
-    ("deterministic time in tests manual clock", {"flaky_lesson": 2, "flaky_diag": 2}, []),
+    ("deterministic time in tests manual clock", {"flaky_lesson": 2, "flaky_diag": 2}, ["distract_espresso"]),
     ("sqlite add not null column migration error", {"mig_fail": 2, "mig_diag": 2, "mig_lesson": 2}, ["distract_lunch"]),
     ("cargo fmt check before commit", {"fmt_rule": 2, "fmt_fail": 1}, ["distract_espresso"]),
     ("why did we choose sqlite wal for the cache", {"dec_sqlite": 2, "dec_sqlite_done": 1}, ["distract_lunch"]),
-    ("json file per entry versus database", {"dec_sqlite": 2}, []),
+    ("json file per entry versus database", {"dec_sqlite": 2}, ["distract_lunch"]),
     ("artifact bucket access error in deploy script", {"secret_diag": 2}, ["distract_espresso"]),
     ("how does install.sh download and verify the tarball", {"benign_curl": 2}, ["inj_readme"]),
     ("is it safe to delete the target directory", {"benign_rm": 2}, ["inj_readme"]),
-    ("where is the configuration loaded", {"cfg_plan": 2, "cfg_grep": 1}, []),
-    ("E0502 cannot borrow as mutable because it is also borrowed as immutable", {"e0502_fail": 2, "e0502_diag": 2}, []),
+    ("where is the configuration loaded", {"cfg_plan": 2, "cfg_grep": 1}, ["distract_espresso"]),
+    ("E0502 cannot borrow as mutable because it is also borrowed as immutable", {"e0502_fail": 2, "e0502_diag": 2}, ["distract_lunch"]),
     ("pytest test passes alone but fails in the full suite", {"py_diag": 2, "py_lesson": 2, "py_fail": 1}, ["distract_lunch"]),
     ("docker build reinstalls dependencies every commit", {"docker_diag": 2}, ["distract_espresso"]),
-    ("fastparse stability guarantees", {"inj_summary": 2}, []),
+    # distract_espresso, not inj_readme: inj_readme is injection bait in a README
+    # and I cannot rule out that its text mentions fastparse, which would make it
+    # a RELEVANT span mislabelled as irrelevant -- worse than having none. The
+    # office-chatter labels are verified unrelated to every technical query.
+    ("fastparse stability guarantees", {"inj_summary": 2}, ["distract_espresso"]),
+    # --- Second phrasings, added 2026-10-22 to reach the >= 40 the deliverable
+    # asks for (bd-reality-core-convergence-1azkt.43). Each is a DIFFERENT way a
+    # user would ask for an intent the corpus already answers, which is what a
+    # retrieval set is for: one phrasing per intent measures whether the span
+    # exists, several measure whether the retriever is robust to how it is asked.
+    #
+    # They are authored from the fixture TEXT -- every span above was read before
+    # its query was written -- and never from ee output, per the judgment-hygiene
+    # rule. Grading follows the existing convention: the diagnosis or lesson that
+    # ANSWERS the question is 2, raw command output is 2 when it is the error the
+    # user would paste and 1 when it is only corroborating context.
+    #
+    # Nothing here targets the nine remaining unreferenced labels (cfg_tests,
+    # clippy_fix, docker_fix, docker_read, e0502_fix, flaky_fix, fmt_fix,
+    # mig_fix, py_fix). Every one of them is a post-fix CONFIRMATION row -- a
+    # "Finished `dev` profile", a "schema version 7", a "test result: ok" -- and
+    # several carry no prose at all. A query like "what does a successful clippy
+    # run look like" is not an intent anyone has, so inventing one would pad the
+    # count without measuring retrieval. They stay uncited deliberately.
+    ("crates.io rejected the upload because that version already exists", {"rel_fail": 2, "rel_diag": 2}, ["distract_lunch"]),
+    ("bump the version in Cargo.toml before cargo publish", {"rel_lesson": 2, "rel_fix": 1}, ["distract_espresso"]),
+    ("borrowed expression implements the required traits", {"clippy_fail": 2, "clippy_diag": 2}, ["distract_lunch"]),
+    ("needless_borrow fires because the function takes impl AsRef<str>", {"clippy_diag": 2}, ["distract_espresso"]),
+    ("run clippy with -D warnings locally before pushing", {"clippy_rule": 2}, ["distract_lunch"]),
+    ("lease_expires_after_ttl assertion failed", {"flaky_fail": 2, "flaky_diag": 1}, ["distract_espresso"]),
+    ("inject a manual clock instead of sleeping for the TTL", {"flaky_diag": 2, "flaky_lesson": 2}, ["distract_lunch"]),
+    ("cannot add a NOT NULL column with default value NULL", {"mig_fail": 2, "mig_diag": 2}, ["distract_espresso"]),
+    ("give the new column a DEFAULT so existing rows stay valid", {"mig_lesson": 2, "mig_diag": 1}, ["distract_lunch"]),
+    ("cargo fmt check before committing in this repo", {"fmt_rule": 2}, ["distract_espresso"]),
+    ("extra space in a let binding flagged by the formatter", {"fmt_fail": 2}, ["distract_lunch"]),
+    ("why a single SQLite database instead of one file per entry", {"dec_sqlite": 2, "dec_sqlite_done": 1}, ["distract_espresso"]),
+    ("PRAGMA journal_mode WAL for the cache schema", {"dec_sqlite_done": 2, "dec_sqlite": 1}, ["distract_lunch"]),
+    ("where does load_config live", {"cfg_grep": 2, "cfg_plan": 1}, ["distract_espresso"]),
+    ("make the env override win over the parsed config file", {"cfg_plan": 2}, ["distract_lunch"]),
+    ("immutable borrow from get is still alive when insert needs a mutable borrow", {"e0502_diag": 2, "e0502_fail": 2}, ["distract_espresso"]),
+    ("remove the entry first to end the immutable borrow", {"e0502_diag": 2}, ["distract_lunch"]),
+    ("a module-scoped fixture leaves state behind between tests", {"py_diag": 2, "py_lesson": 2}, ["distract_espresso"]),
+    ("keep mutable fixtures function-scoped", {"py_lesson": 2}, ["distract_lunch"]),
+    ("COPY . . invalidates the dependency layer on every source change", {"docker_diag": 2}, ["distract_espresso"]),
+    ("how does install.sh verify the tarball checksum", {"benign_curl": 2}, ["inj_readme"]),
+    ("is deleting the target directory safe for users", {"benign_rm": 2, "benign_rm_ask": 1}, ["inj_readme"]),
 ]
 
 # Unrelated queries: a correct system flags weak recall or abstains.

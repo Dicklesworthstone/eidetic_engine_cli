@@ -177,6 +177,28 @@ fn capabilities_json_contract_reports_inventory_counts_and_registry() -> TestRes
         }),
     )?;
 
+    // NO DAEMON-SURFACE AVAILABILITY LOOP HERE, AND THAT IS LOAD-BEARING
+    // (bd-0rkti). I added one on 2026-10-25 and it was wrong in the most
+    // expensive way available: it asserted the OPPOSITE of what this tree
+    // already asserts.
+    //
+    // `src/cli/mod.rs:87082` carries a `forbidden_path` list -- "diag
+    // contention --use-daemon", "ee.daemon.telemetry", "ee.daemon.write",
+    // "ee.daemon.write_journal", "daemon foreground decay_sweep", "daemon
+    // foreground non-decay" -- and fails with "non-canonical capability path
+    // leaked" if any of them appears in the inventory. They must be ABSENT.
+    //
+    // My evidence that they were present and available was a probe of the
+    // INSTALLED binary, which reports 0.14.2 against this tree's 0.18.0. The
+    // inventory was deliberately made canonical inside that four-version gap,
+    // so the two `capabilities_report_*` tests 05020689c deleted were retired
+    // along with their premise rather than losing coverage -- recorded as
+    // `retired` in scripts/vanished-tests-dispositions.txt with that reason.
+    //
+    // So the honest statement about per-command availability is the loop above:
+    // it covers the six canonical core commands, and widening it needs a
+    // canonical path, not a path this tree forbids.
+
     for env_name in [
         "EE_AGENT_NAME",
         "EE_DATABASE_PATH",

@@ -38,6 +38,9 @@ const DEFAULT_LEARN_GAPS_LIMIT: u32 = 10;
 /// similarity against the representative query (bd-3ap2m.4 follow-up: the
 /// remember-from-template loop must visibly close the gap).
 const LIKELY_COVERED_SIMILARITY: f32 = 0.55;
+/// Explicit privacy-preserving binding used to close a hash-only demand gap.
+/// The value is a stable gap id, never query text or a query vector.
+const GAP_COVERAGE_TAG_PREFIX: &str = "knowledge-gap:";
 
 /// Schema for learning agenda report.
 pub const LEARN_AGENDA_SCHEMA_V1: &str = "ee.learn.agenda.v1";
@@ -762,14 +765,17 @@ pub fn show_gaps(options: &LearnGapsOptions) -> Result<LearnGapsReport, DomainEr
                 retention_days,
                 &snapshot.curation_candidates,
                 &snapshot.memories,
+                &snapshot.memory_tags,
                 &options.workspace,
             )
         })
         .collect::<Vec<_>>();
+    // Preserve covered history without allowing it to crowd open demand out of
+    // a bounded report. Demand score still orders clusters within each status.
     gaps.sort_by(|left, right| {
-        right
-            .demand_score
-            .total_cmp(&left.demand_score)
+        (left.status != "open")
+            .cmp(&(right.status != "open"))
+            .then_with(|| right.demand_score.total_cmp(&left.demand_score))
             .then_with(|| right.miss_count.cmp(&left.miss_count))
             .then_with(|| left.query_hash.cmp(&right.query_hash))
     });
@@ -994,7 +1000,6 @@ fn query_miss_cluster_assignments<'a>(
     }
     assignments
 }
-
 fn query_miss_cluster_key(query_hash: &str, representative_queries: &[String]) -> String {
     representative_queries
         .first()
@@ -1046,6 +1051,7 @@ fn learn_gap_cluster(
     retention_days: u64,
     candidates: &[StoredCurationCandidate],
     memories: &BTreeMap<String, StoredMemory>,
+    memory_tags: &BTreeMap<String, Vec<String>>,
     workspace: &Path,
 ) -> LearnGapCluster {
     let representative_redacted_queries = cluster
@@ -1054,42 +1060,65 @@ fn learn_gap_cluster(
         .take(5)
         .cloned()
         .collect::<Vec<_>>();
+    let cluster_id = format!(
+        "gap_{}",
+        stable_suffix("learn_gap", &cluster.cluster_key, 20)
+    );
+    let coverage_tag = format!("{GAP_COVERAGE_TAG_PREFIX}{cluster_id}");
     let remember_template = infer_remember_template(
         &cluster.cluster_key,
         representative_redacted_queries.first(),
     );
     let (nearest_existing_evidence, nearest_existing_evidence_status, top_hit) =
         nearest_gap_evidence(&representative_redacted_queries, memories);
-    // A sufficiently similar memory WRITTEN AFTER the last recorded miss
-    // means someone likely filled this demand (e.g. via the remember
-    // template): flip the cluster to likely_covered instead of re-nagging.
-    let (status, covered_by, covered_by_created_at) = match &top_hit {
-        Some((memory_id, created_at, similarity))
-            if *similarity >= LIKELY_COVERED_SIMILARITY
-                && DateTime::parse_from_rfc3339(created_at)
-                    .is_ok_and(|created| created.with_timezone(&Utc) > cluster.last_seen_at) =>
-        {
-            (
-                "likely_covered".to_owned(),
-                Some(memory_id.clone()),
-                Some(created_at.clone()),
-            )
+    // Production miss rows intentionally persist only a query hash. Therefore
+    // similarity cannot close every real gap: there may be no representative
+    // query to embed. The suggested remember command carries an explicit,
+    // opaque gap binding instead. A newer live memory with that exact tag is
+    // authoritative coverage for this cluster; no query text/vector is stored.
+    let explicit_coverage = memories.values().find(|memory| {
+        memory.tombstoned_at.is_none()
+            && DateTime::parse_from_rfc3339(&memory.created_at)
+                .is_ok_and(|created| created.with_timezone(&Utc) > cluster.last_seen_at)
+            && memory_tags
+                .get(&memory.id)
+                .is_some_and(|tags| tags.iter().any(|tag| tag == &coverage_tag))
+    });
+    let (status, covered_by, covered_by_created_at) = if let Some(memory) = explicit_coverage {
+        (
+            "likely_covered".to_owned(),
+            Some(memory.id.clone()),
+            Some(memory.created_at.clone()),
+        )
+    } else {
+        match &top_hit {
+            Some((memory_id, created_at, similarity))
+                if *similarity >= LIKELY_COVERED_SIMILARITY
+                    && DateTime::parse_from_rfc3339(created_at).is_ok_and(|created| {
+                        created.with_timezone(&Utc) > cluster.last_seen_at
+                    }) =>
+            {
+                (
+                    "likely_covered".to_owned(),
+                    Some(memory_id.clone()),
+                    Some(created_at.clone()),
+                )
+            }
+            _ => (default_gap_status(), None, None),
         }
-        _ => (default_gap_status(), None, None),
     };
+    let suggested_tags = format!("knowledge-gap,query-miss,{coverage_tag}");
     let suggested_command = format!(
-        "ee remember --workspace {} --level {} --kind {} {} --json",
+        "ee remember --workspace {} --level {} --kind {} --tags {} {} --json",
         shell_quote(&workspace.display().to_string()),
         remember_template.suggested_level,
         remember_template.suggested_kind,
+        shell_quote(&suggested_tags),
         shell_quote(&remember_template.content_skeleton)
     );
 
     LearnGapCluster {
-        cluster_id: format!(
-            "gap_{}",
-            stable_suffix("learn_gap", &cluster.cluster_key, 20)
-        ),
+        cluster_id,
         query_hash: cluster
             .query_hashes
             .first()
@@ -1997,7 +2026,6 @@ fn redact_learning_public_path_like_segments(value: &str) -> String {
 fn learning_public_path_boundary(c: char) -> bool {
     c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
-
 /// Attach evidence observed during a learning experiment.
 ///
 /// Dry runs validate and render the observation without opening storage. Real
@@ -5429,6 +5457,98 @@ mod tests {
     }
 
     #[test]
+    fn hash_only_gap_closes_via_explicit_coverage_tag_without_query_text() -> TestResult {
+        let (workspace, database, workspace_id) =
+            seed_learning_workspace("ee-learn-gaps-hash-bound-coverage")?;
+        for (index, audit_id) in [
+            "audit_00000000000000000000000141",
+            "audit_00000000000000000000000142",
+            "audit_00000000000000000000000143",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_query_miss_audit(
+                &database,
+                &workspace_id,
+                audit_id,
+                "hash_only_gap",
+                "no_relevant_results",
+                Some("search"),
+                None,
+            )?;
+            let _ = index;
+        }
+
+        let before = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        let gap = before.gaps.first().ok_or("expected hash-only gap")?;
+        if gap.status != "open"
+            || gap.nearest_existing_evidence_status != "unavailable_raw_query_not_persisted"
+        {
+            return Err(format!(
+                "hash-only gap must start open without query text: {} / {}",
+                gap.status, gap.nearest_existing_evidence_status
+            ));
+        }
+        let coverage_tag = format!("{GAP_COVERAGE_TAG_PREFIX}{}", gap.cluster_id);
+        if !gap.suggested_command.contains(&coverage_tag) {
+            return Err(format!(
+                "suggested remember command did not carry coverage binding {coverage_tag}: {}",
+                gap.suggested_command
+            ));
+        }
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000141",
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Engage magnetic clamps before zebra hovercraft docking.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec![coverage_tag],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let after = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        let gap = after.gaps.first().ok_or("covered gap must remain listed")?;
+        if gap.status != "likely_covered"
+            || gap.covered_by.as_deref() != Some("mem_00000000000000000000000141")
+        {
+            return Err(format!(
+                "explicit coverage binding did not close hash-only gap: {} / {:?}",
+                gap.status, gap.covered_by
+            ));
+        }
+        if gap.nearest_existing_evidence_status != "unavailable_raw_query_not_persisted" {
+            return Err("coverage must not require persisted query text".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn learn_gaps_templates_redact_and_cross_link_agenda_item() -> TestResult {
         let (workspace, database, workspace_id) =
             seed_learning_workspace("ee-learn-gaps-template")?;
@@ -5975,7 +6095,6 @@ mod tests {
             "9999-01-01T00:00:00Z",
         )?;
         connection.close().map_err(|error| error.to_string())?;
-
         let all = show_summary(&LearnSummaryOptions {
             workspace: dir.path().to_path_buf(),
             period: "all".to_string(),
@@ -6996,6 +7115,76 @@ mod tests {
         connection.close().map_err(|e| e.to_string())
     }
 
+    // bd-learn-rs-truncation-residual-iq8o2: the seven tests below were lost
+    // collateral in 5c3392996, which truncated this file mid-expression (53
+    // insertions, 339 deletions) and left the lib unparseable until 1679e0fa4
+    // restored only the 20 lines needed to close the delimiters. A symbol diff
+    // against bc4dd2a77 showed every function lost was a #[test], and none of
+    // the seven concerns the similarity-based closure paths that commit set out
+    // to remove -- they cover redaction, peer provenance, two refusal paths and
+    // the generated_at sentinel. So they were accidental, not deliberate.
+    // Restored verbatim from bc4dd2a77; all six struct literals below were
+    // field-checked against today's definitions before pasting.
+    #[test]
+    fn experiment_proposal_json_redacts_sensitive_evidence_ids() -> TestResult {
+        let raw_evidence = "/data/private/cluster.json?token=ghp_FAKEabc123def456ghi7890";
+        let report = LearnExperimentProposalReport {
+            schema: LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1.to_string(),
+            proposals: vec![ExperimentProposal {
+                experiment_id: "exp_sensitive".to_string(),
+                question_id: "q_sensitive".to_string(),
+                title: "Review sensitive evidence".to_string(),
+                hypothesis: "Sensitive evidence can be reviewed safely.".to_string(),
+                status: "proposed".to_string(),
+                topic: "sensitive".to_string(),
+                expected_value: 0.5,
+                uncertainty_reduction: 0.25,
+                confidence: 0.4,
+                budget: ExperimentBudget {
+                    attention_tokens: 100,
+                    max_runtime_seconds: 30,
+                    dry_run_required: true,
+                    budget_class: "small".to_string(),
+                },
+                safety: ExperimentSafetyPlan {
+                    boundary: "dry_run_only".to_string(),
+                    dry_run_first: true,
+                    mutation_allowed: false,
+                    review_required: true,
+                    stop_conditions: Vec::new(),
+                    denied_reasons: Vec::new(),
+                },
+                decision_impact: ExperimentDecisionImpact {
+                    decision_id: "decision_sensitive".to_string(),
+                    target_artifact_ids: vec![raw_evidence.to_string()],
+                    current_decision: "retain".to_string(),
+                    possible_change: "review".to_string(),
+                    impact_score: 0.5,
+                },
+                evidence_ids: vec![raw_evidence.to_string()],
+                next_command: "ee learn experiment run exp_sensitive --dry-run --json".to_string(),
+            }],
+            total_candidates: 1,
+            returned: 1,
+            min_expected_value: 0.0,
+            max_attention_tokens: 100,
+            max_runtime_seconds: 30,
+            generated_at: stable_learning_generated_at(),
+        };
+
+        let rendered = report.to_json();
+        assert!(rendered.contains("[REDACTED_PATH]"));
+        assert!(rendered.contains("[REDACTED:"));
+        assert!(!rendered.contains(raw_evidence));
+        assert!(!rendered.contains("/data/private"));
+        assert!(!rendered.contains("ghp_FAKE"));
+        assert_eq!(
+            report.proposals[0].evidence_ids,
+            vec![raw_evidence.to_string()]
+        );
+        Ok(())
+    }
+
     #[test]
     fn learn_experiment_proposals_preserve_peer_evidence_provenance() -> TestResult {
         let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-peer-propose")?;
@@ -7078,63 +7267,52 @@ mod tests {
     }
 
     #[test]
-    fn experiment_proposal_json_redacts_sensitive_evidence_ids() -> TestResult {
-        let raw_evidence = "/data/private/cluster.json?token=ghp_FAKEabc123def456ghi7890";
-        let report = LearnExperimentProposalReport {
-            schema: LEARN_EXPERIMENT_PROPOSAL_SCHEMA_V1.to_string(),
-            proposals: vec![ExperimentProposal {
-                experiment_id: "exp_sensitive".to_string(),
-                question_id: "q_sensitive".to_string(),
-                title: "Review sensitive evidence".to_string(),
-                hypothesis: "Sensitive evidence can be reviewed safely.".to_string(),
-                status: "proposed".to_string(),
-                topic: "sensitive".to_string(),
-                expected_value: 0.5,
-                uncertainty_reduction: 0.25,
-                confidence: 0.4,
-                budget: ExperimentBudget {
-                    attention_tokens: 100,
-                    max_runtime_seconds: 30,
-                    dry_run_required: true,
-                    budget_class: "small".to_string(),
-                },
-                safety: ExperimentSafetyPlan {
-                    boundary: "dry_run_only".to_string(),
-                    dry_run_first: true,
-                    mutation_allowed: false,
-                    review_required: true,
-                    stop_conditions: Vec::new(),
-                    denied_reasons: Vec::new(),
-                },
-                decision_impact: ExperimentDecisionImpact {
-                    decision_id: "decision_sensitive".to_string(),
-                    target_artifact_ids: vec![raw_evidence.to_string()],
-                    current_decision: "retain".to_string(),
-                    possible_change: "review".to_string(),
-                    impact_score: 0.5,
-                },
-                evidence_ids: vec![raw_evidence.to_string()],
-                next_command: "ee learn experiment run exp_sensitive --dry-run --json".to_string(),
-            }],
-            total_candidates: 1,
-            returned: 1,
-            min_expected_value: 0.0,
-            max_attention_tokens: 100,
-            max_runtime_seconds: 30,
-            generated_at: stable_learning_generated_at(),
-        };
+    fn learn_experiment_run_rejects_non_dry_run_before_loading_registry() -> TestResult {
+        match run_experiment(&LearnExperimentRunOptions {
+            experiment_id: "exp_database_contract_fixture".to_string(),
+            dry_run: false,
+            ..Default::default()
+        }) {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                assert!(message.contains("--dry-run"));
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|repair| repair.contains("learn experiment run"))
+                );
+                Ok(())
+            }
+            Err(error) => Err(format!("expected policy denial, got {}", error.code())),
+            Ok(_) => Err("expected policy denial, got success".to_string()),
+        }
+    }
 
-        let rendered = report.to_json();
-        assert!(rendered.contains("[REDACTED_PATH]"));
-        assert!(rendered.contains("[REDACTED:"));
-        assert!(!rendered.contains(raw_evidence));
-        assert!(!rendered.contains("/data/private"));
-        assert!(!rendered.contains("ghp_FAKE"));
-        assert_eq!(
-            report.proposals[0].evidence_ids,
-            vec![raw_evidence.to_string()]
-        );
-        Ok(())
+    #[test]
+    fn learn_experiment_run_reports_not_found_for_unregistered_experiment() -> TestResult {
+        let (dir, _database, _workspace_id) = seed_learning_workspace("ee-learn-run-missing")?;
+        match run_experiment(&LearnExperimentRunOptions {
+            workspace: dir.path().to_path_buf(),
+            experiment_id: "exp_unknown_experiment".to_string(),
+            dry_run: true,
+            ..Default::default()
+        }) {
+            Err(DomainError::NotFound {
+                resource,
+                id,
+                repair,
+            }) => {
+                assert_eq!(resource, "learning experiment");
+                assert_eq!(id, "exp_unknown_experiment");
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|repair| repair.contains("learn experiment propose"))
+                );
+                Ok(())
+            }
+            Err(error) => Err(format!("expected not_found, got {}", error.code())),
+            Ok(_) => Err("expected not_found, got success".to_string()),
+        }
     }
 
     #[test]
@@ -7217,75 +7395,6 @@ mod tests {
     }
 
     #[test]
-    fn learn_experiment_run_rejects_non_dry_run_before_loading_registry() -> TestResult {
-        match run_experiment(&LearnExperimentRunOptions {
-            experiment_id: "exp_database_contract_fixture".to_string(),
-            dry_run: false,
-            ..Default::default()
-        }) {
-            Err(DomainError::PolicyDenied { message, repair }) => {
-                assert!(message.contains("--dry-run"));
-                assert!(
-                    repair
-                        .as_deref()
-                        .is_some_and(|repair| repair.contains("learn experiment run"))
-                );
-                Ok(())
-            }
-            Err(error) => Err(format!("expected policy denial, got {}", error.code())),
-            Ok(_) => Err("expected policy denial, got success".to_string()),
-        }
-    }
-
-    #[test]
-    fn learn_experiment_run_reports_not_found_for_unregistered_experiment() -> TestResult {
-        let (dir, _database, _workspace_id) = seed_learning_workspace("ee-learn-run-missing")?;
-        match run_experiment(&LearnExperimentRunOptions {
-            workspace: dir.path().to_path_buf(),
-            experiment_id: "exp_unknown_experiment".to_string(),
-            dry_run: true,
-            ..Default::default()
-        }) {
-            Err(DomainError::NotFound {
-                resource,
-                id,
-                repair,
-            }) => {
-                assert_eq!(resource, "learning experiment");
-                assert_eq!(id, "exp_unknown_experiment");
-                assert!(
-                    repair
-                        .as_deref()
-                        .is_some_and(|repair| repair.contains("learn experiment propose"))
-                );
-                Ok(())
-            }
-            Err(error) => Err(format!("expected not_found, got {}", error.code())),
-            Ok(_) => Err("expected not_found, got success".to_string()),
-        }
-    }
-
-    // ========================================================================
-    // Bead bd-17c65.7.1 (G1) — learn summary generated_at is wall-clock
-    // ========================================================================
-
-    /// Lock in the fix: `stable_learning_generated_at` no longer returns
-    /// the 1970-01-01 epoch sentinel. This is the regression test for
-    /// the 2026-05-10 walkthrough's most-cited stub.
-    #[test]
-    fn learning_generated_at_is_not_epoch_sentinel() {
-        let ts = super::stable_learning_generated_at();
-        assert!(
-            !ts.starts_with("1970-01-01"),
-            "stable_learning_generated_at must reflect wall-clock; got `{ts}`"
-        );
-        assert!(
-            ts.starts_with("20") || ts.starts_with("21"),
-            "expected 21st-century RFC 3339 timestamp; got `{ts}`"
-        );
-    }
-
-    #[test]
     fn learning_generated_at_changes_across_calls() {
         // Wall-clock generator: calls separated by any amount of time
         // are allowed to differ (and typically will at nanosecond
@@ -7302,6 +7411,22 @@ mod tests {
         assert!(
             chrono::DateTime::parse_from_rfc3339(&b).is_ok(),
             "b parses as RFC 3339: {b}"
+        );
+    }
+
+    /// Lock in the fix: `stable_learning_generated_at` no longer returns
+    /// the 1970-01-01 epoch sentinel. This is the regression test for
+    /// the 2026-05-10 walkthrough's most-cited stub.
+    #[test]
+    fn learning_generated_at_is_not_epoch_sentinel() {
+        let ts = super::stable_learning_generated_at();
+        assert!(
+            !ts.starts_with("1970-01-01"),
+            "stable_learning_generated_at must reflect wall-clock; got `{ts}`"
+        );
+        assert!(
+            ts.starts_with("20") || ts.starts_with("21"),
+            "expected 21st-century RFC 3339 timestamp; got `{ts}`"
         );
     }
 }

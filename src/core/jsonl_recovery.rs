@@ -126,6 +126,13 @@ impl ExpectedRecords {
         for (table, expected) in [
             ("memories", self.memories.len()),
             ("memory_links", self.links.len()),
+            (
+                "memory_code_anchor_sources",
+                self.memories
+                    .iter()
+                    .map(|memory| memory.code_anchors.len())
+                    .sum(),
+            ),
         ] {
             let actual = connection.count_table_rows(table).map_err(unreadable)?;
             if u64::try_from(actual).ok() != Some(expected as u64) {
@@ -152,6 +159,12 @@ impl ExpectedRecords {
                 .is_some()
             {
                 return Err(mismatch("typed memory fields differ"));
+            }
+            if code_anchor_conflict_issue(connection, expected)
+                .map_err(unreadable)?
+                .is_some()
+            {
+                return Err(mismatch("durable code-anchor bindings differ"));
             }
             if connection
                 .get_memory_logical_id(&expected.id)
@@ -506,6 +519,40 @@ mod tests {
         changed[4]["tag"] = json!("release");
         let expected = fixture.expected(&changed).map_err(|e| e.to_string())?;
         assert!(verify_in_snapshot(&fixture.db, &expected, &fixture.workspace).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn code_anchor_recovery_checks_binding_values_and_owners_not_only_counts() -> TestResult {
+        let mut rows = records();
+        rows[1]["code_anchors"] = json!([
+            {"kind":"path","value":"src/recovered.rs","source":"explicit","provenance":"memory.anchors"}
+        ]);
+        let fixture = Fixture::new(&rows)?;
+        let expected = fixture.expected(&rows).map_err(|error| error.message())?;
+        verify_in_snapshot(&fixture.db, &expected, &fixture.workspace)
+            .map_err(|error| error.message())?;
+        for mutation in ["value", "owner", "provenance"] {
+            let mut changed = rows.clone();
+            match mutation {
+                "value" => changed[1]["code_anchors"][0]["value"] = json!("src/other.rs"),
+                "owner" => {
+                    changed[3]["code_anchors"] = changed[1]["code_anchors"].take();
+                    changed[1]["code_anchors"] = json!([]);
+                }
+                "provenance" => {
+                    changed[1]["code_anchors"][0]["provenance"] = json!("different.source")
+                }
+                _ => unreachable!(),
+            }
+            let expected = fixture
+                .expected(&changed)
+                .map_err(|error| error.message())?;
+            assert!(
+                verify_in_snapshot(&fixture.db, &expected, &fixture.workspace).is_err(),
+                "{mutation}"
+            );
+        }
         Ok(())
     }
 

@@ -14,6 +14,9 @@
 //!   `tests/fixtures/rch_verify_control_plane/topology_refusal.json`.
 //! - `rch_remote_compile_error.json` — a genuine code failure, used to
 //!   prove environment blockers and code failures are separated.
+//! - `rch_committed_tree_appledouble_shim.json` — the client-side
+//!   AppleDouble-sidecar refusal (bd-r4iwj), reduced verbatim from a real
+//!   `--pinned-franken-stack --dry-run` proof.
 //! - `verify_script_rch_e327_event.json` — `ee.test_event.v1`
 //!   verify-script tail with the active RCH-E327 environment blocker.
 //! - `github_actions_check_failure.json` — canonical check-run summary
@@ -153,6 +156,45 @@ fn rch_remote_compile_error_fixture_classifies_as_code_failure() -> TestResult {
         evidence.first_error.message.as_deref(),
         Some("expected struct, got enum")
     );
+    Ok(())
+}
+
+/// The AppleDouble-sidecar refusal is an environment blocker, not a code
+/// failure (bd-r4iwj).
+///
+/// THE FIXTURE IS A REAL PROOF, not an authored shape: it is the projection of
+/// an actual `scripts/rch_verify.sh --pinned-franken-stack --dry-run` run,
+/// reduced to this corpus's key set with every value kept verbatim. The run
+/// carried NO base override, so the shape is the one this host produces by
+/// default -- `RCH_VERIFY_COMMITTED_TREE_BASE` is exported from `~/.zshenv` to
+/// an ExFAT path, which is why the guard exists at all.
+///
+/// WHY THE `error_codes` ARM IS LOAD-BEARING. The two classifications this file
+/// exists to separate are `EnvironmentBlocked` and `FailedInCode`, and the
+/// failure that matters is the second being reported for the first: a reader
+/// who sees a code failure goes looking for a defect in the tree under test,
+/// when what is wrong is the filesystem the export landed on. Asserting the
+/// status alone would pass for a parser that also invented an error code.
+#[test]
+fn rch_committed_tree_appledouble_shim_fixture_classifies_as_environment_blocked() -> TestResult {
+    let evidence = parse_rch_fixture("rch_committed_tree_appledouble_shim.json")?;
+    assert_eq!(evidence.source, EvidenceSource::RchVerify);
+    assert_eq!(evidence.status, EvidenceStatus::EnvironmentBlocked);
+    assert!(
+        evidence
+            .environment_blocker_codes
+            .iter()
+            .any(|code| code == "rch_verify_committed_tree_base_appledouble_shim"),
+        "the AppleDouble refusal must reach the environment-blocker set; got {:?}",
+        evidence.environment_blocker_codes
+    );
+    assert!(
+        evidence.error_codes.is_empty(),
+        "a client-side filesystem refusal carries no compiler or test error code; got {:?}",
+        evidence.error_codes
+    );
+    // No worker was ever selected, so nothing about the fleet is implicated.
+    assert_eq!(evidence.worker_id, None);
     Ok(())
 }
 

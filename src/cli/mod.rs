@@ -1,12 +1,17 @@
 #[cfg(test)]
 #[path = "candidate_pool_tests.rs"]
 mod candidate_pool_tests;
+#[cfg(test)]
+mod cass_import_proposal_tests;
 mod context_delta_evidence;
+mod evidence;
 #[cfg(test)]
 mod pack_diff_native_tests;
 #[cfg(test)]
 #[path = "pack_stream_tests.rs"]
 mod pack_stream_tests;
+#[cfg(test)]
+mod remember_creation_companion_tests;
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -57,6 +62,7 @@ use crate::core::backup::{
     restore_backup_to_side_path, verify_backup,
 };
 use crate::core::capabilities::{CapabilitiesReport, CommandEntry};
+use crate::core::cass_review::{CassImportReviewReport, review_imported_sessions};
 use crate::core::causal::{
     CompareOptions, EstimateOptions, PromotePlanOptions, TraceOptions,
     compare_causal_chains_from_store, compare_causal_evidence, compare_causal_filtered_from_store,
@@ -78,8 +84,7 @@ use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
     ContextPackOutputOptions, ContextPackOutputProfile, ContextSearchAdvisorySnapshot,
     ContextTaskLens, attach_context_cached_search_advisories_for_delivery,
-    attach_pack_dna_to_context_response, context_request_from_options, explain_why_not_default,
-    run_context_pack_with_performance,
+    context_request_from_options, explain_why_not_default, run_context_pack_with_performance,
 };
 use crate::core::context_delta::{
     CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE, CONTEXT_DELTA_NO_BASELINE_CODE,
@@ -185,15 +190,15 @@ use crate::core::memory::{
     ExpireMemoryOptions, GetMemoryOptions, ListMemoriesOptions, MemoryExpireReport,
     MemoryLevelOptions, MemoryLevelReport, MemoryLinkMode, MemoryLinkOptions, MemoryLinkReport,
     MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions, MemoryTagsReport, MemoryTimelineOptions,
-    RememberBatchOptions, RememberGitCaptureMode, RememberGitCaptureOptions, RememberMemoryOptions,
-    RememberMemoryReport, RememberOutcome, RememberWriteControls, ReviseMemoryOptions,
-    ReviseReason, UnchangedRevisionPolicy, WorkflowCloseOptions, WorkflowCloseReport,
-    WorkflowCreateOptions, build_memory_timeline, close_workflow, create_workflow, expire_memory,
-    get_memory_details, list_memories, remember_git_capture_candidate_from_repo,
-    remember_global_memory_with_controls_and_typed_fields, remember_memory_batch_stdin,
-    remember_memory_with_controls_and_typed_fields, revise_memory,
-    revise_memory_with_transaction_hook, update_memory_level, update_memory_link,
-    update_memory_tags,
+    RememberBatchOptions, RememberCreationCompanions, RememberGitCaptureMode,
+    RememberGitCaptureOptions, RememberMemoryOptions, RememberMemoryReport, RememberOutcome,
+    RememberSealInput, RememberWriteControls, ReviseMemoryOptions, ReviseReason,
+    UnchangedRevisionPolicy, WorkflowCloseOptions, WorkflowCloseReport, WorkflowCreateOptions,
+    build_memory_timeline, close_workflow, create_workflow, expire_memory, get_memory_details,
+    list_memories, remember_git_capture_candidate_from_repo,
+    remember_global_memory_with_creation_companions, remember_memory_batch_stdin,
+    remember_memory_with_creation_companions, revise_memory, revise_memory_with_transaction_hook,
+    update_memory_level, update_memory_link, update_memory_tags,
 };
 use crate::core::orient::{
     OrientDecisionOptions, OrientFastContentOptions, orient_ambient_context, orient_decisions,
@@ -376,7 +381,7 @@ const HELP_PRELUDE_SUFFIX: &str = concat!(
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
     "  Inspect:        doctor, capabilities, insights, impact, why-not, recall, similar, primer, trust report, memory show, memory history\n",
-    "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome, journal\n",
+    "  Memory ops:     link, tag, memory anchors, memory level, memory expire, memory revise, outcome, journal\n",
     "  Assert:         claim, certificate, attest, demo, tripwire\n",
     "  Coordinate:     swarm, handoff, preflight, situation, plan, workflow\n",
     "  Mesh consent:   mesh preview-grant <peer-id> --lane <lane> [--issue-approval-token]; mesh grant <peer-id> --lane <lane> --preview-token-stdin; mesh revoke-lane <peer-id> --lane <lane>\n",
@@ -428,6 +433,11 @@ pub struct Cli {
     /// Workspace root to operate on.
     #[arg(long, global = true, value_name = "PATH")]
     pub workspace: Option<PathBuf>,
+
+    // Bind expansion and discovery once per invocation. A physical path can
+    // itself contain literal `$` characters that must never be expanded again.
+    #[arg(skip)]
+    workspace_resolution: Option<(PathBuf, WorkspaceSource)>,
 
     /// Disable colored diagnostics.
     #[arg(long, global = true, action = ArgAction::SetTrue)]
@@ -791,9 +801,19 @@ pub fn find_workspace_via_walk_up(start: &Path) -> Option<PathBuf> {
 ///      construct `<cwd>/.ee/ee.db` and either find it or not).
 ///
 /// Returns `(path, source)` so callers can report how the workspace
-/// was resolved (useful for debugging / agent observability).
+/// was resolved (useful for debugging / agent observability). Existing roots
+/// resolve to physical paths before any command derives its database path.
+/// Missing or inaccessible roots retain their input so the command can report
+/// its usual missing-workspace or storage error without creating anything.
 #[must_use]
 pub fn resolve_workspace_for_cli(cli_workspace: Option<&Path>) -> (PathBuf, WorkspaceSource) {
+    let (path, source) = discover_workspace_input_for_cli(cli_workspace);
+    (canonical_workspace_root_for_cli(path), source)
+}
+
+// Init needs the original expanded path so canonicalization cannot erase a
+// final symlink before its explicit creation policy examines it.
+fn discover_workspace_input_for_cli(cli_workspace: Option<&Path>) -> (PathBuf, WorkspaceSource) {
     if let Some(explicit) = cli_workspace {
         return (
             expand_workspace_path_for_cli(explicit),
@@ -813,6 +833,14 @@ pub fn resolve_workspace_for_cli(cli_workspace: Option<&Path>) -> (PathBuf, Work
     (cwd, WorkspaceSource::Cwd)
 }
 
+fn canonical_workspace_root_for_cli(path: PathBuf) -> PathBuf {
+    crate::config::workspace::canonicalize_workspace_location(
+        &path,
+        crate::config::workspace::SymlinkPolicy::Allow,
+    )
+    .map_or(path, |(canonical, _)| canonical)
+}
+
 fn expand_workspace_path_for_cli(raw: &Path) -> PathBuf {
     let expander = PathExpander::from_process_env();
     expand_workspace_path_for_cli_with_expander(raw, &expander)
@@ -824,10 +852,17 @@ fn expand_workspace_path_for_cli(raw: &Path) -> PathBuf {
 /// one; a handler that resolves `args.workspace`/`cli.workspace` directly
 /// silently ignores `EE_WORKSPACE` and workspace aliases.
 fn resolve_local_workspace_for_cli(cli: &Cli, local: Option<&Path>) -> (PathBuf, WorkspaceSource) {
-    let aliased = local.map(|raw| {
-        workspace_core::resolve_workspace_alias_for_cli(raw).unwrap_or_else(|| raw.to_path_buf())
-    });
-    resolve_workspace_for_cli(aliased.as_deref().or(cli.workspace.as_deref()))
+    let Some(raw) = local else {
+        return cli.resolve_workspace_with_source();
+    };
+    if let Some(path) = workspace_core::resolve_workspace_alias_for_cli(raw) {
+        // Registry entries are stored filesystem paths, not new expressions.
+        return (
+            canonical_workspace_root_for_cli(path),
+            WorkspaceSource::Flag,
+        );
+    }
+    resolve_workspace_for_cli(Some(raw))
 }
 
 fn expand_workspace_path_for_cli_with_expander(raw: &Path, expander: &PathExpander) -> PathBuf {
@@ -843,10 +878,22 @@ impl Cli {
     /// Resolve the workspace path with full D7 discovery semantics.
     ///
     /// Returns just the path; for callers that need the discovery
-    /// source, use [`resolve_workspace_for_cli`].
+    /// source, use [`Self::resolve_workspace_with_source`].
     #[must_use]
     pub fn resolve_workspace(&self) -> PathBuf {
-        resolve_workspace_for_cli(self.workspace.as_deref()).0
+        self.resolve_workspace_with_source().0
+    }
+
+    /// Return the invocation's resolved root and original discovery source.
+    #[must_use]
+    pub fn resolve_workspace_with_source(&self) -> (PathBuf, WorkspaceSource) {
+        self.workspace_resolution.clone().unwrap_or_else(|| {
+            if matches!(&self.command, Some(Command::Init(_))) {
+                discover_workspace_input_for_cli(self.workspace.as_deref())
+            } else {
+                resolve_workspace_for_cli(self.workspace.as_deref())
+            }
+        })
     }
 
     #[must_use]
@@ -1148,6 +1195,9 @@ pub enum Command {
     /// Record, list, and revisit durable typed decision memories.
     #[command(subcommand)]
     Decide(DecideCommand),
+    /// Manage whether retained imported evidence may enter future retrieval and derivation.
+    #[command(subcommand)]
+    Evidence(evidence::EvidenceCommand),
     /// Apply or inspect workspace schema migrations.
     ///
     /// `ee migrate status` reports the current schema version, the latest
@@ -2819,11 +2869,11 @@ pub struct DaemonArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub once: bool,
 
-    /// Maximum foreground scheduler ticks before exiting.
+    /// Maximum foreground scheduler ticks before exiting (1 to 1000).
     #[arg(long, default_value_t = crate::steward::DEFAULT_DAEMON_FOREGROUND_TICK_LIMIT, value_name = "N")]
     pub max_ticks: u32,
 
-    /// Delay between ticks in milliseconds.
+    /// Delay between ticks in milliseconds (at most 60000).
     #[arg(long, default_value_t = crate::steward::DEFAULT_DAEMON_FOREGROUND_INTERVAL_MS, value_name = "MS")]
     pub interval_ms: u64,
 
@@ -2914,6 +2964,9 @@ pub enum DaemonCommand {
     /// workers and socket to be released.
     Stop(DaemonHotModeStopArgs),
     /// Install a user-scoped launchd/systemd/Windows-task unit for the team steward.
+    /// The unit pins this command's workspace (`--workspace`, `EE_WORKSPACE`, or
+    /// the nearest `.ee/`), which must already hold a store, and runs one
+    /// `--once` steward tick about once a minute.
     /// This does not start the hot search RPC daemon; use `ee daemon start`
     /// for resident embeddings and `ee hook <harness> --install` for harness hooks.
     Install(DaemonServiceInstallArgs),
@@ -3057,6 +3110,11 @@ pub struct JobListArgs {
     /// Maximum rows to return.
     #[arg(long, short = 'n', default_value_t = 20)]
     pub limit: usize,
+
+    /// Read the job history of this database's store, as written by
+    /// `ee job run --database`. Defaults to the workspace history.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee job show <id>`.
@@ -3065,6 +3123,11 @@ pub struct JobShowArgs {
     /// Job history row ID, or the steward runner job ID for the latest match.
     #[arg(value_name = "JOB_ID")]
     pub id: String,
+
+    /// Read the job history of this database's store, as written by
+    /// `ee job run --database`. Defaults to the workspace history.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee maintenance run`.
@@ -3239,6 +3302,9 @@ pub struct ContextArgs {
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
+    /// Prioritize admitted memories related to this bead in the workspace's .beads/issues.jsonl.
+    #[arg(long = "bead-id", value_name = "ID")]
+    pub bead_id: Option<String>,
     /// Query describing the task or topic to retrieve context for.
     #[arg(value_name = "QUERY")]
     pub query: String,
@@ -3437,8 +3503,8 @@ pub struct ContextArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_stale: bool,
 
-    /// Minimum score (0.0..=1.0) for a search hit before context packing.
-    /// Defaults to 0.0 so context can inspect the full candidate pool.
+    /// Caller relevance cutoff (0.0..=1.0) before packing; 0 disables adaptive admission.
+    /// When omitted, uncalibrated local candidates use a query-relative cutoff.
     #[arg(long, value_name = "FLOAT", value_parser = parse_relevance_floor_arg)]
     pub relevance_floor: Option<f32>,
 
@@ -3453,6 +3519,26 @@ pub struct ContextArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    ///
+    /// ADR 0059 names search, pack and why as the surfaces the fence must reach
+    /// (bd-1n0np.8.13). A pack assembled from a derived asset that trails the
+    /// database is the worst case of the three, because the pack is what an
+    /// agent then reasons from. `eventual` is the existing behaviour and opens
+    /// no store.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when --read-fence observes a derived asset trailing the
+    /// database, rather than packing rows that may be stale.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
 }
 
 impl ContextArgs {
@@ -3589,6 +3675,9 @@ pub struct PackArgs {
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
+    /// Prioritize admitted memories related to this local bead. Not supported with pagination cursors.
+    #[arg(long = "bead-id", value_name = "ID", conflicts_with = "cursor")]
+    pub bead_id: Option<String>,
     /// Emit ee.pack.stream.v1 NDJSON frames for a task query. Requires JSON or JSONL output.
     #[arg(long, action = ArgAction::SetTrue, requires = "query", conflicts_with_all = ["output", "explain_performance", "explain_gaps", "cursor", "since"])]
     pub stream: bool,
@@ -3629,7 +3718,8 @@ pub struct PackArgs {
     #[arg(long)]
     pub candidate_pool: Option<u32>,
 
-    /// Minimum score (0.0..=1.0) for a search hit before packing; defaults to 0.0.
+    /// Caller relevance cutoff (0.0..=1.0) before packing; 0 disables adaptive admission.
+    /// When omitted, uncalibrated local candidates use a query-relative cutoff.
     #[arg(long, value_name = "FLOAT", value_parser = parse_relevance_floor_arg)]
     pub relevance_floor: Option<f32>,
 
@@ -3693,6 +3783,11 @@ pub struct PackArgs {
     /// only; other formats emit the full pack with a degraded notice.
     #[arg(long, value_name = "PACK_HASH")]
     pub since: Option<String>,
+
+    /// Maximum serialized delta bytes before falling back to the full pack.
+    /// Includes the trailing line ending; does not limit full-pack responses.
+    #[arg(long = "max-delta-bytes", value_name = "BYTES")]
+    pub max_delta_bytes: Option<u64>,
 
     /// Task scope for baseline recording and `--since last` resolution.
     #[arg(long = "task-key", value_name = "KEY")]
@@ -3795,6 +3890,19 @@ pub struct PackArgs {
     /// Fail closed when relevant evidence exists outside the requested memory scope.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_scope: bool,
+
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when the requested read fence cannot be satisfied before packing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
 }
 
 /// Pack subcommands: build, replay, diff.
@@ -3814,6 +3922,9 @@ pub struct PackBuildArgs {
     /// Literal workspace-relative task path for scoped procedural rules; repeat for multiple files.
     #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
     pub task_paths: Vec<String>,
+    /// Prioritize admitted memories related to this local bead. Query pagination is not supported.
+    #[arg(long = "bead-id", value_name = "ID", conflicts_with = "cursor")]
+    pub bead_id: Option<String>,
     /// Path to an `ee.query.v1` JSON query document.
     #[arg(long, value_name = "PATH")]
     pub query_file: PathBuf,
@@ -3838,7 +3949,8 @@ pub struct PackBuildArgs {
     #[arg(long)]
     pub candidate_pool: Option<u32>,
 
-    /// Minimum score (0.0..=1.0) for a search hit before packing; defaults to 0.0.
+    /// Caller relevance cutoff (0.0..=1.0) before packing; 0 disables adaptive admission.
+    /// When omitted, uncalibrated local candidates use a query-relative cutoff.
     #[arg(long, value_name = "FLOAT", value_parser = parse_relevance_floor_arg)]
     pub relevance_floor: Option<f32>,
 
@@ -3862,6 +3974,19 @@ pub struct PackBuildArgs {
     /// Fail closed when relevant evidence exists outside the requested memory scope.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_scope: bool,
+
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when the requested read fence cannot be satisfied before packing.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
 
     /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
     #[arg(long, short = 'p')]
@@ -3995,6 +4120,7 @@ impl PackArgs {
 
         Ok(PackBuildArgs {
             task_paths: self.task_paths.clone(),
+            bead_id: self.bead_id.clone(),
             query_file,
             use_daemon: self.use_daemon,
             daemon_socket: self.daemon_socket.clone(),
@@ -4007,6 +4133,8 @@ impl PackArgs {
             strict_source_mode: self.strict_source_mode,
             memory_scope: self.memory_scope,
             strict_scope: self.strict_scope,
+            read_fence: self.read_fence,
+            strict_read_fence: self.strict_read_fence,
             profile: self.profile.clone(),
             pack_profile: self.pack_profile,
             resource_profile: self.resource_profile,
@@ -5533,8 +5661,8 @@ pub struct GraphDiffArgs {
     pub to: Option<String>,
 
     /// RFC3339 timestamp: use the nearest snapshot at or before it as `from`.
-    #[arg(long, value_name = "RFC3339", conflicts_with_all = ["from", "to"])]
-    pub since: Option<String>,
+    #[arg(long, value_name = "RFC3339", value_parser = parse_rfc3339_arg, conflicts_with_all = ["from", "to"])]
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Arguments for `ee graph suggest-links` (ADR 0066 / bd-3a1op.3).
@@ -5935,6 +6063,36 @@ pub enum IndexCommand {
     Vacuum(IndexVacuumArgs),
     /// Derive tags for historical tag-less memories so `--tag` recall can reach them.
     BackfillTags(IndexBackfillTagsArgs),
+    /// Preview or attach code anchors derived from existing memories.
+    BackfillAnchors(IndexBackfillAnchorsArgs),
+}
+
+/// Arguments for `ee index backfill-anchors`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct IndexBackfillAnchorsArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Attach the proposed anchors. Without this flag, only preview the page.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub apply: bool,
+
+    /// Preview without writing (the default). Conflicts with --apply.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "apply")]
+    pub dry_run: bool,
+
+    /// Maximum live memories to examine in this page; use nextAfter to continue.
+    #[arg(long, value_name = "N", default_value_t = 100)]
+    pub limit: usize,
+
+    /// Continue after this memory ID, returned as nextAfter by the previous page.
+    #[arg(long, value_name = "MEMORY_ID")]
+    pub after: Option<String>,
+
+    /// Actor recorded in the audit trail.
+    #[arg(long, value_name = "NAME")]
+    pub actor: Option<String>,
 }
 
 /// Arguments for `ee index backfill-tags`.
@@ -6200,9 +6358,32 @@ pub struct HandoffCompletionAuditArgs {
     pub evidence_json: Option<PathBuf>,
 }
 
+/// Snapshot inputs shared by handoff capture and resume.
+#[derive(Clone, Debug, Default, Eq, clap::Args, PartialEq)]
+pub struct HandoffAgentMailArgs {
+    /// Validated redacted snapshot; defaults to <workspace>/.ee/agent-mail-snapshot.json.
+    #[arg(long, value_name = "PATH")]
+    pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// Expected sha256:<digest> identity for an explicitly bound shared Agent Mail project.
+    #[arg(long, value_name = "SHA256")]
+    pub agent_mail_project_key: Option<String>,
+}
+
+impl HandoffAgentMailArgs {
+    fn collect_options(&self) -> crate::core::handoff::HandoffAgentMailOptions {
+        crate::core::handoff::HandoffAgentMailOptions {
+            snapshot: self.agent_mail_snapshot.clone(),
+            project_key: self.agent_mail_project_key.clone(),
+        }
+    }
+}
+
 /// Arguments for `ee handoff preview`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct HandoffPreviewArgs {
+    #[command(flatten)]
+    pub agent_mail: HandoffAgentMailArgs,
     /// Filter evidence since this time or run ID.
     #[arg(long, value_name = "REF")]
     pub since: Option<String>,
@@ -6223,6 +6404,8 @@ pub struct HandoffPreviewArgs {
 /// Arguments for `ee handoff create`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct HandoffCreateArgs {
+    #[command(flatten)]
+    pub agent_mail: HandoffAgentMailArgs,
     /// Output path for the capsule.
     #[arg(long, short = 'o', value_name = "PATH")]
     pub out: PathBuf,
@@ -6271,6 +6454,8 @@ pub struct HandoffInspectArgs {
 /// Arguments for `ee handoff resume`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct HandoffResumeArgs {
+    #[command(flatten)]
+    pub agent_mail: HandoffAgentMailArgs,
     /// Path to the capsule file, or "latest".
     #[arg(value_name = "PATH")]
     pub path: String,
@@ -8498,6 +8683,20 @@ pub struct ConfigSetArgs {
     pub key: String,
 
     /// New scalar value.
+    ///
+    /// `allow_negative_numbers` so a negative value reaches the config
+    /// validator instead of dying in the parser. Without it
+    /// `ee config set graph.pack_dna.max_items -1` fails with "unexpected
+    /// argument '-1' found", wrapped in ee's own error envelope, and the
+    /// product's own refusal -- "Invalid value `-1` for
+    /// `graph.pack_dna.max_items`; expected a non-negative integer."
+    /// (src/core/config_surface.rs:1206) -- is unreachable from the CLI, so no
+    /// negative value can be set OR be properly rejected.
+    ///
+    /// `allow_negative_numbers` rather than `allow_hyphen_values`: the latter
+    /// would also let this positional swallow a following `--dry-run` as its
+    /// value, while this accepts only tokens that parse as negative numbers.
+    #[arg(allow_negative_numbers = true)]
     pub value: String,
 
     /// Config path to update. Defaults to <workspace>/.ee/config.toml.
@@ -9499,6 +9698,25 @@ pub struct SearchArgs {
     /// continuation cursor (ADR 0063 §3, bd-7lvbg.3).
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
+
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    ///
+    /// ADR 0059 requires the fence to reach the RETRIEVAL surfaces, not only
+    /// `ee diag store-integrity` (bd-1n0np.8.13). `eventual` is the existing
+    /// behaviour and costs nothing: the gate returns before opening a store, so
+    /// a caller that does not ask for a fence is byte-for-byte unaffected.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when --read-fence observes a derived asset trailing the
+    /// database, rather than serving rows that may be stale.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
 }
 
 /// Arguments for `ee similar`.
@@ -9725,9 +9943,19 @@ pub struct DoctorArgs {
     /// Run only the named failure-mode detector (FM-style stable code,
     /// e.g. `state_files_orphaned_sock`, `workspace_config_malformed_toml`).
     /// May be repeated to filter to a subset. Mutually exclusive with
-    /// the report-only modes. Currently advisory — detector wiring
-    /// honoring the filter lands alongside the per-FM detectors that
-    /// compose with bd-tu4s8.
+    /// the report-only modes.
+    ///
+    /// NOT HONORED YET: the value is parsed and nothing reads it, so the
+    /// report you get back is the UNFILTERED one. Tracked by bd-nj49t, which
+    /// owns the choice between implementing the filter and rejecting the flag.
+    ///
+    /// This note used to defer to "the per-FM detectors that compose with
+    /// bd-tu4s8". That bead has since CLOSED, so the sentence told a reader who
+    /// checked it that the wiring had landed. It had not — `DoctorArgs::only`
+    /// has no reader anywhere in the tree. Pointing a deferral at a bead that
+    /// can close without the deferred work being done is how a stale promise
+    /// outlives its cause, so this one names the bead that owns the decision
+    /// instead.
     #[arg(
         long = "only",
         value_name = "FM_CODE",
@@ -9874,7 +10102,8 @@ pub struct InitArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub force: bool,
 
-    /// Allow workspace paths that traverse symlinks (default: deny).
+    /// Allow initialization through a symlinked workspace root (init only).
+    /// Other commands resolve existing roots; store paths still reject symlinks.
     #[arg(long, action = ArgAction::SetTrue)]
     pub allow_symlink: bool,
 
@@ -10026,6 +10255,10 @@ pub struct WorkflowCreateArgs {
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct RememberArgs {
     /// Memory content to store. Required unless --batch --stdin or a git capture source is given.
+    ///
+    /// Explicit inline code anchors use ee-anchor:path:src/lib.rs and
+    /// ee-anchor:symbol:Store::open. To annotate an existing memory while
+    /// preserving its content and provenance, use `ee memory anchors <id>`.
     #[arg(value_name = "CONTENT")]
     pub content: Option<String>,
 
@@ -10382,7 +10615,7 @@ pub struct CurateAutoPromoteArgs {
     pub min_confidence_semantic: f32,
 
     /// Maximum number of promotions to propose (or apply) per run.
-    #[arg(long = "max-per-run", default_value_t = 10)]
+    #[arg(long = "max-per-run", default_value_t = default_curation_auto_promote_max_per_run())]
     pub max_per_run: u32,
 
     /// Force dry-run regardless of `--apply`. Default behavior is
@@ -10401,6 +10634,40 @@ pub struct CurateAutoPromoteArgs {
     /// and never writes a memory.level_transition audit row.
     #[arg(long, action = ArgAction::SetTrue)]
     pub apply: bool,
+}
+
+/// Default for `--max-per-run`, honouring `EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN`.
+///
+/// `docs/env_vars.md` documents that variable as "Override the maximum curation
+/// candidates auto-promotion may accept per run" with a default of `10`, and
+/// `ee capabilities` publishes it in `envOverrides` as a variable ee honours,
+/// carrying that description as its `controls` string. Nothing read it. The
+/// registry entry, the documented row, the advertised capability and the CLI
+/// flag all existed; only the wire between them was missing, so the override
+/// did nothing.
+///
+/// Resolved as the clap DEFAULT rather than inside the handler, because that is
+/// what produces the precedence `docs/env_vars.md` states for this family --
+/// "explicit CLI flags remain higher precedence". clap applies a default only
+/// when the flag is absent, so an explicit `--max-per-run` wins, an absent flag
+/// falls back to the variable, and an unset variable falls back to 10.
+/// Resolving in the handler could not express that: `default_value_t = 10`
+/// leaves an explicit `--max-per-run 10` indistinguishable from a defaulted
+/// one, so the handler would have to override the user's own flag.
+///
+/// `--help` is unaffected while the variable is unset, which is how the command
+/// goldens are captured; it renders `[default: 10]` exactly as before.
+///
+/// An unparseable value falls back to 10 rather than failing the command. That
+/// is a deliberate choice for a tuning knob and the only one available here --
+/// a clap default resolver returns a value, not a `Result` -- and it is not
+/// silent: `ee capabilities` reports the effective value, and validating
+/// malformed settings is bd-2vq2z.15's remit (`ee config explain` /
+/// `doctor config-lint`).
+fn default_curation_auto_promote_max_per_run() -> u32 {
+    EnvVar::CurationAutoPromoteMaxPerRun
+        .parse_into::<u32>()
+        .unwrap_or(10)
 }
 
 /// Arguments for `ee curate propose-derived` (bd-kxm0c).
@@ -10478,6 +10745,10 @@ pub struct CurateCandidatesArgs {
     /// Optional candidate action type: consolidate, promote, deprecate, supersede, tombstone, merge, split, retract, or rule.
     #[arg(long = "type", value_name = "TYPE")]
     pub candidate_type: Option<String>,
+
+    /// Persist discovered paraphrase_dedup_proposal candidates; otherwise preview them without writing.
+    #[arg(long, action = ArgAction::SetTrue, requires = "candidate_type")]
+    pub propose: bool,
 
     /// Optional status filter. Defaults to pending unless --all is set.
     #[arg(long)]
@@ -11263,18 +11534,45 @@ pub struct WhyArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+
+    /// Read-fence mode: eventual, latest, or snapshot:<generation>.
+    ///
+    /// The third surface ADR 0059 names (bd-1n0np.8.13). `ee why` explains a
+    /// decision from derived state, so a stale asset here yields a confident
+    /// explanation of something that is no longer true. `eventual` is the
+    /// existing behaviour and opens no store.
+    #[arg(
+        long,
+        value_parser = parse_read_fence_arg,
+        default_value = "eventual",
+        value_name = "MODE"
+    )]
+    pub read_fence: crate::core::read_fence::ReadFence,
+
+    /// Fail closed when --read-fence observes a derived asset trailing the
+    /// database, rather than explaining from state that may be stale.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_read_fence: bool,
 }
 
 /// Arguments for `ee why-not` — the counterfactual reverse of `ee why`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct WhyNotArgs {
-    /// Memory ID to explain the exclusion of.
-    #[arg(value_name = "MEMORY_ID", required_unless_present = "gaps")]
+    /// Memory, procedural rule, or evidence-span ID to explain (mem_, rule_, ev_).
+    #[arg(value_name = "ENTITY_ID", required_unless_present = "gaps")]
     pub memory_id: Option<String>,
 
     /// Task/query the context pack would be built for.
     #[arg(long, value_name = "TASK")]
     pub task: String,
+
+    /// Literal workspace-relative task target for a directory/file-scoped rule; repeatable.
+    #[arg(long = "task-path", value_name = "PATH", action = ArgAction::Append)]
+    pub task_paths: Vec<String>,
+
+    /// Use the same local bead affinity as a context or pack request.
+    #[arg(long = "bead-id", value_name = "ID")]
+    pub bead_id: Option<String>,
 
     /// Report task-specific capture-demand gaps instead of a single memory exclusion.
     #[arg(long = "gaps", action = ArgAction::SetTrue)]
@@ -11295,6 +11593,10 @@ pub struct WhyNotArgs {
     /// Candidate pool size for retrieval.
     #[arg(long, value_name = "N")]
     pub candidate_pool: Option<u32>,
+
+    /// Maximum selected items across memories, rules and evidence.
+    #[arg(long, value_name = "N")]
+    pub max_results: Option<u32>,
 
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
@@ -11356,6 +11658,10 @@ pub struct CassImportArgs {
     /// Query CASS and render the import plan without writing storage.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Propose reviewable lessons from imported sessions; validation and application remain explicit.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "no_spans")]
+    pub propose: bool,
 
     /// Skip first-window evidence span capture through `cass view`.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -12223,6 +12529,8 @@ pub struct ReviewWorkspaceArgs {
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum MemoryCommand {
+    /// List or attach path/symbol anchors without revising the memory.
+    Anchors(MemoryAnchorsArgs),
     /// Expire a memory by writing an audited tombstone.
     Expire(MemoryExpireArgs),
     /// Report read-only provenance drift for memories.
@@ -12250,6 +12558,34 @@ pub enum MemoryCommand {
     /// Record helpful/harmful feedback on a user-global memory with origin
     /// backflow (bd-1bfwa.2 engine, wired per the epic's feedback story).
     OutcomeGlobal(MemoryOutcomeGlobalArgs),
+}
+
+/// Arguments for `ee memory anchors`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryAnchorsArgs {
+    /// Existing memory to annotate. With no --path or --symbol, list its anchors.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Attach a workspace-relative code path. Repeat to attach multiple paths.
+    #[arg(long, value_name = "PATH", action = ArgAction::Append)]
+    pub path: Vec<String>,
+
+    /// Attach an exact code identifier. Repeat to attach multiple symbols.
+    #[arg(long, value_name = "SYMBOL", action = ArgAction::Append)]
+    pub symbol: Vec<String>,
+
+    /// Validate and preview the attachment without changing durable state.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Actor recorded in the audit trail.
+    #[arg(long, value_name = "NAME")]
+    pub actor: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee memory promote-global` (bd-1bfwa.3).
@@ -12754,7 +13090,8 @@ pub struct MemoryReviseArgs {
     #[arg(value_name = "MEMORY_ID")]
     pub memory_id: String,
 
-    /// Replacement memory content.
+    /// Replacement memory content. To attach code anchors without replacing
+    /// content or creating a revision, use `ee memory anchors <id>` instead.
     #[arg(long, value_name = "TEXT")]
     pub content: Option<String>,
 
@@ -13120,7 +13457,9 @@ pub struct SwarmBriefArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_rch: bool,
 
-    /// Redacted Agent Mail snapshot JSON to include. No live Agent Mail mutation is performed.
+    /// Redacted Agent Mail snapshot JSON to include. Defaults to
+    /// <workspace>/.ee/agent-mail-snapshot.json when that file exists. No live
+    /// Agent Mail mutation is performed.
     #[arg(long, value_name = "PATH")]
     pub agent_mail_snapshot: Option<PathBuf>,
 
@@ -13596,9 +13935,12 @@ where
     let parser_metadata_only = cli.schema
         || cli.help_json
         || cli.agent_docs
-        || matches!(&cli.command, Some(Command::Introspect));
+        || matches!(
+            &cli.command,
+            None | Some(Command::Help(_) | Command::AgentDocs(_) | Command::Introspect)
+        );
     if !parser_metadata_only {
-        resolve_workspace_alias_global(&mut cli);
+        resolve_workspace_inputs_global(&mut cli);
     }
     ACTIVE_RESPONSE_SCHEMA_VERSION.with(|version| {
         version.set(cli.response_schema_version());
@@ -13624,8 +13966,7 @@ where
                 params_hash: output::governor::hash_invocation_params(governor_params_for_hash(
                     &args,
                 )),
-                workspace_root: (!parser_metadata_only)
-                    .then(|| resolve_workspace_for_cli(cli.workspace.as_deref()).0),
+                workspace_root: (!parser_metadata_only).then(|| cli.resolve_workspace()),
                 resume_cursor: None,
             });
     });
@@ -14311,6 +14652,7 @@ where
                     include_estimates: args.estimates,
                     task_frame_id: None,
                     command_timeout_ms: args.command_timeout_ms,
+                    agent_mail: args.agent_mail.collect_options(),
                 };
                 match preview_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -14356,6 +14698,7 @@ where
                     machine_salt_path: None,
                     redaction_level: redaction.level,
                     command_timeout_ms: args.command_timeout_ms,
+                    agent_mail: args.agent_mail.collect_options(),
                 };
                 match create_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -14432,6 +14775,7 @@ where
                     require_fresh: args.require_fresh,
                     insecure_skip_hmac: args.insecure_skip_hmac,
                     machine_salt_path: None,
+                    agent_mail: args.agent_mail.collect_options(),
                 };
                 match resume_handoff(&options) {
                     Ok(report) => match cli.renderer() {
@@ -14705,6 +15049,9 @@ where
                 }
             }
         }
+        Some(Command::Memory(MemoryCommand::Anchors(ref args))) => {
+            handle_memory_anchors(&cli, args, stdout, stderr)
+        }
         Some(Command::Memory(MemoryCommand::Expire(ref args))) => {
             handle_memory_expire(&cli, args, stdout, stderr)
         }
@@ -14769,6 +15116,9 @@ where
         }
         Some(Command::Index(IndexCommand::BackfillTags(ref args))) => {
             handle_index_backfill_tags(&cli, args, stdout, stderr)
+        }
+        Some(Command::Index(IndexCommand::BackfillAnchors(ref args))) => {
+            handle_index_backfill_anchors(&cli, args, stdout, stderr)
         }
         Some(Command::Journal(JournalCommand::Append(ref args))) => {
             handle_journal_append(&cli, args, stdout, stderr)
@@ -15226,7 +15576,26 @@ where
         }
         Some(Command::Impact(ref args)) => handle_impact(&cli, args, stdout, stderr),
         Some(Command::Search(ref args)) => {
-            handle_search(process, &cli, args, invocation_started, stdout, stderr)
+            // The fence is evaluated HERE rather than inside handle_search,
+            // because handle_search fans out to handle_search_family and
+            // handle_search_all_workspaces as well, and a fence that only
+            // covered the plain path would be a fence with two holes in it
+            // (bd-1n0np.8.13).
+            if let Some(exit) = read_fence_preflight(
+                || IndexStatusOptions {
+                    workspace_path: cli.resolve_workspace(),
+                    database_path: args.database.clone(),
+                    index_dir: args.index_dir.clone(),
+                },
+                "search",
+                args.read_fence,
+                args.strict_read_fence,
+                stdout,
+            ) {
+                exit
+            } else {
+                handle_search(process, &cli, args, invocation_started, stdout, stderr)
+            }
         }
         Some(Command::Similar(ref args)) => handle_similar(&cli, args, stdout, stderr),
         Some(Command::Sentinel(ref command)) => handle_sentinel(&cli, command, stdout, stderr),
@@ -15261,6 +15630,7 @@ where
             handle_situation_explain(&cli, args, stdout, stderr)
         }
         Some(Command::Decide(ref command)) => handle_decide(&cli, command, stdout, stderr),
+        Some(Command::Evidence(ref command)) => evidence::handle(&cli, command, stdout, stderr),
         Some(Command::Status(ref args)) => {
             if let Some(exit_code) =
                 reject_unsupported_mermaid_format(&cli, "status", stdout, stderr)
@@ -15268,8 +15638,7 @@ where
                 return exit_code;
             }
             let timing_capture = crate::models::TimingCapture::start();
-            let (workspace_path, workspace_source) =
-                resolve_workspace_for_cli(cli.workspace.as_deref());
+            let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
             if args.skyline {
                 let workspace_for_skyline = if workspace_source == WorkspaceSource::Cwd
                     && !workspace_path.join(".ee").is_dir()
@@ -15478,7 +15847,23 @@ where
             }
         }
         Some(Command::Update(ref args)) => handle_update(&cli, args, stdout, stderr),
-        Some(Command::Why(ref args)) => handle_why(&cli, args, stdout, stderr),
+        Some(Command::Why(ref args)) => {
+            if let Some(exit) = read_fence_preflight(
+                || IndexStatusOptions {
+                    workspace_path: cli.resolve_workspace(),
+                    database_path: args.database.clone(),
+                    index_dir: None,
+                },
+                "why",
+                args.read_fence,
+                args.strict_read_fence,
+                stdout,
+            ) {
+                exit
+            } else {
+                handle_why(&cli, args, stdout, stderr)
+            }
+        }
         Some(Command::WhyNot(ref args)) => handle_why_not(&cli, args, stdout, stderr),
     }
 }
@@ -17228,6 +17613,7 @@ fn pack_quality_actuals_for_cases(
         let (source_mode, strict_source_mode) = pack_quality_step_source_mode(&step.argv)?;
         let mut options = crate::core::context::ContextPackOptions {
             task_paths: Vec::new(),
+            bead_id: None,
             workspace_path: workspace_path.clone(),
             database_path: Some(database_path),
             index_dir: Some(index_dir.clone()),
@@ -18556,8 +18942,7 @@ where
 {
     use crate::core::resume::{ResumeOptions, build_resume_report};
 
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -18821,6 +19206,38 @@ where
     };
 
     let database_path = workspace.join(".ee").join("ee.db");
+    if args.propose {
+        let report = match crate::core::curate::propose_conflict_resolution(
+            workspace,
+            Some(&database_path),
+            &request,
+            args.actor.as_deref(),
+        ) {
+            Ok(report) => report,
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        };
+        return match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let mut text = format!(
+                    "Conflict proposal {} ({})\n",
+                    report.candidate_id, report.candidate_status
+                );
+                for command in &report.next_commands {
+                    text.push_str(&format!("  {command}\n"));
+                }
+                write_stdout(stdout, &text)
+            }
+            _ => write_stdout(
+                stdout,
+                &(serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2, "success": true,
+                    "data": report, "degraded": [],
+                })
+                .to_string()
+                    + "\n"),
+            ),
+        };
+    }
     let mut results: Option<Vec<conflict::ResolutionActionResult>> = None;
     let mut status = "planned";
     if args.apply {
@@ -19201,21 +19618,6 @@ fn init_degraded_json(report: &InitReport) -> Vec<serde_json::Value> {
         "repair": INIT_WORKSPACE_SYMLINK_REFUSED_REPAIR,
         "sources": ["init"]
     })]
-}
-
-fn aggregate_why_degraded_json(
-    source: &'static str,
-    degraded: &[crate::core::why::WhyDegradation],
-) -> Vec<serde_json::Value> {
-    aggregate_cli_degraded_json(degraded.iter().map(|entry| {
-        DegradationAggregationInput::new(
-            source,
-            entry.code,
-            entry.severity,
-            entry.message.as_str(),
-            entry.repair.as_deref().unwrap_or_default(),
-        )
-    }))
 }
 
 fn aggregate_drift_degraded_json(
@@ -21974,7 +22376,7 @@ where
                 target: args.target.clone(),
                 registry_path: None,
             };
-            match workspace_core::resolve_workspace_report(&options) {
+            match workspace_core::resolve_workspace_report_for_resolved_workspace(&options) {
                 Ok(report) => render_workspace_resolve(cli, &report, stdout),
                 Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
@@ -22007,7 +22409,7 @@ where
                 Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
             };
             let options = workspace_core::WorkspaceAliasOptions {
-                workspace_path: cli.workspace.clone(),
+                workspace_path: Some(cli.resolve_workspace()),
                 pick: args.pick.clone(),
                 alias,
                 clear: args.clear,
@@ -22682,13 +23084,30 @@ where
     write_stdout(stdout, rendered)
 }
 
-fn resolve_workspace_alias_global(cli: &mut Cli) {
-    let Some(raw) = cli.workspace.as_deref() else {
+fn resolve_workspace_inputs_global(cli: &mut Cli) {
+    if cli.workspace_resolution.is_some() {
         return;
-    };
-    if let Some(path) = workspace_core::resolve_workspace_alias_for_cli(raw) {
-        cli.workspace = Some(path);
     }
+    let (path, source) = cli
+        .workspace
+        .as_deref()
+        .and_then(workspace_core::resolve_workspace_alias_for_cli)
+        .map_or_else(
+            || discover_workspace_input_for_cli(cli.workspace.as_deref()),
+            |path| (path, WorkspaceSource::Flag),
+        );
+    let path = if matches!(&cli.command, Some(Command::Init(_))) {
+        path
+    } else {
+        canonical_workspace_root_for_cli(path)
+    };
+    // Some handlers consume the explicit field directly. Give them the same
+    // physical root as resolve_workspace(), without turning an implicit
+    // workspace into an explicit flag or changing source diagnostics.
+    if cli.workspace.is_some() {
+        cli.workspace = Some(path.clone());
+    }
+    cli.workspace_resolution = Some((path, source));
 }
 
 fn write_help<W>(stdout: &mut W) -> ProcessExitCode
@@ -24318,21 +24737,31 @@ where
 
     match import_cass_sessions(&cass_client, &options) {
         Ok(mut report) => {
-            let degradation = reconcile_cass_import_index(&mut report);
+            let review = args.propose.then(|| review_imported_sessions(&report));
+            // Proposals advance the workspace generation, including when a
+            // repeat import reused every source and queued no new index jobs.
+            let degradation = reconcile_cass_import_index(
+                &mut report,
+                review
+                    .as_ref()
+                    .is_some_and(|review| review.durable_mutation),
+            );
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => write_stdout(
                     stdout,
-                    &report.human_summary_with_degradation(degradation.as_ref()),
+                    &cass_import_human_summary(&report, degradation.as_ref(), review.as_ref()),
                 ),
                 output::Renderer::Toon => {
-                    let json = cass_import_response_v2(&report, degradation.as_ref());
+                    let json =
+                        cass_import_response_v2(&report, degradation.as_ref(), review.as_ref());
                     write_stdout(stdout, &output::render_toon_from_json(&json.to_string()))
                 }
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => {
-                    let json = cass_import_response_v2(&report, degradation.as_ref());
+                    let json =
+                        cass_import_response_v2(&report, degradation.as_ref(), review.as_ref());
                     write_stdout(stdout, &(json.to_string() + "\n"))
                 }
             }
@@ -24347,23 +24776,56 @@ where
 fn cass_import_response_v2(
     report: &CassImportReport,
     degradation: Option<&CassImportDegradation>,
+    review: Option<&CassImportReviewReport>,
 ) -> serde_json::Value {
     let history = report.history_degradation();
+    let review_degradations = review
+        .map(CassImportReviewReport::degradations)
+        .unwrap_or_default();
     let degraded = history
         .iter()
         .chain(degradation)
+        .chain(&review_degradations)
         .map(CassImportDegradation::data_json)
         .collect::<Vec<_>>();
+    let mut data = report.data_json();
+    if let Some(review) = review {
+        data["review"] = review.data_json();
+    }
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
-        "data": report.data_json(),
+        "data": data,
         "degraded": degraded,
     })
 }
 
-fn reconcile_cass_import_index(report: &mut CassImportReport) -> Option<CassImportDegradation> {
-    if report.dry_run || report.index_jobs_queued == 0 {
+fn cass_import_human_summary(
+    report: &CassImportReport,
+    degradation: Option<&CassImportDegradation>,
+    review: Option<&CassImportReviewReport>,
+) -> String {
+    let mut summary = report.human_summary_with_degradation(degradation);
+    if let Some(review) = review {
+        summary.push_str(&review.human_summary());
+        for degradation in review.degradations() {
+            summary.push_str(&format!(
+                "  Degraded:\n    - {}: {} Repair: {}\n",
+                degradation.code, degradation.message, degradation.repair
+            ));
+        }
+    }
+    summary
+}
+
+fn reconcile_cass_import_index(
+    report: &mut CassImportReport,
+    proposal_mutation: bool,
+) -> Option<CassImportDegradation> {
+    // A proposal-only backfill still needs a generation check. If no queued
+    // job can publish that generation, keep an explicit rebuild repair rather
+    // than describing the previous index as ready.
+    if report.dry_run || (report.index_jobs_queued == 0 && !proposal_mutation) {
         return None;
     }
 
@@ -24679,6 +25141,7 @@ where
 
 fn write_index_rebuild_error<W, E>(
     error: &IndexRebuildError,
+    budget: Option<&CancelledCommandBudget>,
     mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
@@ -24689,7 +25152,7 @@ where
 {
     let mode = mode.into();
     if let IndexRebuildError::Cancelled(reason) = error {
-        return write_cancelled_error(reason, mode, stdout, stderr);
+        return write_cancelled_error_with_budget(reason, budget, mode, stdout, stderr);
     }
 
     if mode != ErrorRenderMode::Human
@@ -24938,7 +25401,19 @@ where
                 _ => write_status,
             }
         }
-        Err(error) => write_index_rebuild_error(&error, cli.renderer(), stdout, stderr),
+        Err(error) => write_index_rebuild_error(
+            &error,
+            Some(&CancelledCommandBudget::index_maintenance(
+                "rebuild",
+                &options.workspace_path,
+                options.database_path.as_deref(),
+                options.index_dir.as_deref(),
+                options.dry_run,
+            )),
+            cli.renderer(),
+            stdout,
+            stderr,
+        ),
     }
 }
 
@@ -25023,7 +25498,19 @@ where
                 _ => write_status,
             }
         }
-        Err(error) => write_index_rebuild_error(&error, cli.renderer(), stdout, stderr),
+        Err(error) => write_index_rebuild_error(
+            &error,
+            Some(&CancelledCommandBudget::index_maintenance(
+                "reembed",
+                &options.workspace_path,
+                options.database_path.as_deref(),
+                options.index_dir.as_deref(),
+                options.dry_run,
+            )),
+            cli.renderer(),
+            stdout,
+            stderr,
+        ),
     }
 }
 
@@ -25178,6 +25665,118 @@ where
             };
             write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
+    }
+}
+
+fn handle_index_backfill_anchors<W, E>(
+    cli: &Cli,
+    args: &IndexBackfillAnchorsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::anchors::{BackfillAnchorsOptions, backfill_anchors};
+
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+    let report = match backfill_anchors(&BackfillAnchorsOptions {
+        workspace_path: &workspace,
+        database_path: &database_path,
+        apply: args.apply,
+        limit: args.limit,
+        after: args.after.as_deref(),
+        actor: args.actor.as_deref(),
+    }) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut text = format!(
+                "anchor backfill: {} ({} memories examined)\nproposed: {} memories, {} anchors\napplied: {} memories, {} anchors\nskipped: {} memories\n",
+                if report.dry_run { "preview" } else { "applied" },
+                report.scanned_memory_count,
+                report.proposed_memory_count,
+                report.proposed_anchor_count,
+                report.applied_memory_count,
+                report.applied_anchor_count,
+                report.skipped_memory_count,
+            );
+            for proposal in &report.proposals {
+                text.push_str(&format!(
+                    "  {}: {} ({} anchors)\n",
+                    proposal.memory_id, proposal.status, proposal.added_anchor_count,
+                ));
+                for anchor in &proposal.anchors {
+                    text.push_str(&format!(
+                        "    {} {}\n",
+                        anchor.anchor_kind,
+                        anchor
+                            .locator
+                            .as_deref()
+                            .unwrap_or(&anchor.redacted_anchor_value),
+                    ));
+                }
+            }
+            for skipped in &report.skipped_memories {
+                text.push_str(&format!(
+                    "  skipped {}: {} ({} candidate anchors; limit {})\n",
+                    skipped.memory_id,
+                    skipped.reason,
+                    skipped.candidate_anchor_count,
+                    skipped.anchor_limit,
+                ));
+            }
+            if !report.skipped_memories.is_empty() {
+                text.push_str(
+                    "Use ee memory anchors to attach selected, reviewed locators from skipped memories.\n",
+                );
+            }
+            if let Some(after) = &report.next_after {
+                text.push_str(&format!("next page: --after {after}\n"));
+            }
+            if report.dry_run {
+                text.push_str(
+                    "Review this page, then repeat with --apply to attach its anchors.\n",
+                );
+            }
+            write_stdout(stdout, &text)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "INDEX_BACKFILL_ANCHORS|{}|{}|{}|{}|{}\n",
+                report.dry_run,
+                report.scanned_memory_count,
+                report.proposed_anchor_count,
+                report.applied_anchor_count,
+                report.next_after.as_deref().unwrap_or_default(),
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "command": "index backfill-anchors",
+                "degraded": [],
+                "data": report,
+            })
+            .to_string()
+                + "\n"),
+        ),
     }
 }
 
@@ -25345,9 +25944,7 @@ where
 // ============================================================================
 
 fn lab_workspace(cli: &Cli) -> PathBuf {
-    cli.workspace
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    cli.resolve_workspace()
 }
 
 fn write_lab_capture_report<W>(
@@ -27992,8 +28589,7 @@ fn append_perf_next_commands(out: &mut String, next_commands: &[String]) {
 }
 
 fn runtime_config_bool_enabled(cli: &Cli, key: &str) -> Result<bool, ConfigSurfaceError> {
-    let workspace_root =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_root = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = ConfigSurfaceOptions {
         workspace_root,
         config_path: None,
@@ -28023,8 +28619,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_root =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_root = resolve_cli_workspace_path(&cli.resolve_workspace());
     match command {
         ConfigCommand::Show(args) => {
             let options = ConfigSurfaceOptions {
@@ -28338,8 +28933,7 @@ struct ResolvedPackTaskLens {
 }
 
 fn load_task_lens_catalog(cli: &Cli) -> Result<(PathBuf, TaskLensCatalog), DomainError> {
-    let workspace_root =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_root = resolve_cli_workspace_path(&cli.resolve_workspace());
     let catalog = task_lens_catalog_for_workspace(&workspace_root)?;
     Ok((workspace_root, catalog))
 }
@@ -28869,9 +29463,7 @@ where
 {
     match command {
         ProfileCommand::Config(ProfileConfigCommand::Plan(args)) => {
-            let workspace_root = resolve_cli_workspace_path(
-                cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
-            );
+            let workspace_root = resolve_cli_workspace_path(&cli.resolve_workspace());
             let options = ProfileConfigOptions {
                 workspace_root,
                 config_path: args.config.clone(),
@@ -28887,9 +29479,7 @@ where
             }
         }
         ProfileCommand::Config(ProfileConfigCommand::Apply(args)) => {
-            let workspace_root = resolve_cli_workspace_path(
-                cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
-            );
+            let workspace_root = resolve_cli_workspace_path(&cli.resolve_workspace());
             let options = ProfileConfigOptions {
                 workspace_root,
                 config_path: args.config.clone(),
@@ -29065,8 +29655,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureProposeOptions {
         workspace: workspace_path,
         title: args.title.clone(),
@@ -29117,8 +29706,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureShowOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
@@ -29165,8 +29753,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureListOptions {
         workspace: workspace_path,
         status_filter: args.status.clone(),
@@ -29213,8 +29800,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureExportOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
@@ -29263,8 +29849,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedurePromoteOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
@@ -29315,8 +29900,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureRetireOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
@@ -29369,8 +29953,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let options = crate::core::procedure::ProcedureVerifyOptions {
         workspace: workspace_path,
         procedure_id: args.procedure_id.clone(),
@@ -29434,8 +30017,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let evidence = match parse_procedure_drift_evidence_inputs(&args.evidence) {
         Ok(evidence) => evidence,
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
@@ -31144,7 +31726,7 @@ fn handle_diag_disk_pressure<W>(
 where
     W: Write,
 {
-    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
     let report = gather_disk_pressure_report(&DiskPressureOptions {
         workspace: workspace_path,
         workspace_source: workspace_source.as_str(),
@@ -31190,7 +31772,7 @@ fn handle_diag_host_profile<W>(
 where
     W: Write,
 {
-    let (workspace_path, _workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, _workspace_source) = cli.resolve_workspace_with_source();
     let report = HostResourceProbeReport::gather_for_workspace_with_options(
         &workspace_path,
         &HostProfileProbeOptions {
@@ -31233,7 +31815,7 @@ fn handle_diag_artifacts<W>(cli: &Cli, args: &DiagArtifactsArgs, stdout: &mut W)
 where
     W: Write,
 {
-    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
     let report = gather_artifact_retention_report(&ArtifactRetentionOptions {
         workspace: workspace_path,
         workspace_source: workspace_source.as_str(),
@@ -31285,7 +31867,7 @@ fn handle_diag_build_admission<W>(
 where
     W: Write,
 {
-    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
     let report = gather_build_admission_report(&BuildAdmissionOptions {
         workspace: workspace_path,
         workspace_source: workspace_source.as_str(),
@@ -32453,13 +33035,8 @@ struct ObservedStoreGenerations {
 /// workspace that has no store, so every failure path yields `None` and the
 /// caller falls back to the supplied flags. `None` is reported as
 /// `GenerationSource::Unavailable` and never as a fresh store.
-fn observed_store_generations(workspace_root: &Path) -> Option<ObservedStoreGenerations> {
-    let status = get_index_status(&IndexStatusOptions {
-        workspace_path: workspace_root.to_path_buf(),
-        database_path: None,
-        index_dir: None,
-    })
-    .ok()?;
+fn observed_store_generations(options: &IndexStatusOptions) -> Option<ObservedStoreGenerations> {
+    let status = get_index_status(options).ok()?;
     // The search index is the only derived asset with a generation reader
     // today. The graph asset is deliberately OMITTED rather than reported at
     // the database generation: an absent asset is invisible to the read
@@ -32480,9 +33057,142 @@ fn observed_store_generations(workspace_root: &Path) -> Option<ObservedStoreGene
 ///
 /// An explicit flag always wins over an observation, so the deterministic
 /// pure-calculation mode stays available for replaying a captured incident.
+/// Pre-flight read fence for a retrieval surface (ADR 0059, bd-1n0np.8.13).
+///
+/// ADR 0059 advertises a read fence that "can fail closed", and until now the
+/// only surface that evaluated one was `ee diag store-integrity` -- a REPORTING
+/// command. A report an operator has to remember to run is not a fence: the
+/// retrieval surfaces would still serve rows from a derived asset trailing the
+/// database, silently, which is the exact condition the fence exists to refuse.
+/// `src/core/read_fence.rs` had the evaluator and `store_integrity.rs` had the
+/// report builder; neither was reachable from a read path.
+///
+/// Returns `Some(exit)` when the caller asked for a fence the store cannot
+/// honour, and `None` when the read should proceed.
+///
+/// IT COSTS NOTHING ON THE DEFAULT PATH, deliberately. `eventual` without
+/// `--strict-read-fence` returns before resolving generations, so no store is
+/// opened, no output changes, and no existing caller or golden moves. The whole
+/// behaviour is opt-in, which is why this could land without regenerating a
+/// single snapshot -- and on this host regenerated goldens cannot be retrieved
+/// from a worker at all, so a change that churned them would be unlandable.
+///
+/// FAILING CLOSED IS AN EXIT CODE, NOT A PANIC: `UnsatisfiedDegradedMode`,
+/// matching what `handle_diag_store_integrity` already returns for
+/// `strict_failed`, so the two surfaces cannot disagree about what a failed
+/// fence means. The payload carries the whole read-fence report rather than a
+/// bare message, because "stale" without the generations is not actionable.
+fn read_fence_preflight<W>(
+    store_options: impl FnOnce() -> IndexStatusOptions,
+    command: &str,
+    read_fence: crate::core::read_fence::ReadFence,
+    strict_read_fence: bool,
+    stdout: &mut W,
+) -> Option<ProcessExitCode>
+where
+    W: Write,
+{
+    // The default asks nothing of the store. Return before any side effect.
+    if read_fence == crate::core::read_fence::ReadFence::Eventual && !strict_read_fence {
+        return None;
+    }
+
+    // None/None means "observe the store", which is what a reader wants: it has
+    // no generations of its own to pin.
+    let (db_generation, asset_generations, generation_source) =
+        resolve_store_integrity_generations(&store_options(), None, None);
+    let generations_unavailable =
+        generation_source == crate::core::store_integrity::GenerationSource::Unavailable;
+
+    let report = crate::core::store_integrity::run_store_integrity_report(
+        crate::core::store_integrity::StoreIntegrityOptions {
+            read_fence,
+            db_generation,
+            asset_generations,
+            strict_read_fence,
+            generation_source,
+            // A reader supplies no write observations, so the write-immune half
+            // of the report is empty by construction. The defaults are passed
+            // explicitly rather than left implicit so this cannot drift from the
+            // diag surface's configuration without someone noticing.
+            write_stream_config: crate::core::write_owner::WriteStreamStatsConfig::new(
+                0,
+                crate::core::write_owner::DEFAULT_WRITE_STREAM_WINDOW_MS,
+                crate::core::write_owner::DEFAULT_WRITE_STREAM_NEAR_DUPLICATE_HAMMING,
+            ),
+            write_observations: Vec::new(),
+            quarantine_config: crate::core::write_owner::WriteImmuneQuarantineConfig::default(),
+        },
+    );
+
+    if !report.read_fence.strict_failed {
+        return None;
+    }
+
+    let (code, message, repair) =
+        if generations_unavailable {
+            (
+                "read_fence_generation_unavailable",
+                format!(
+                    "{command} refused to serve rows: database and search-index generations \
+                 could not both be observed under the requested read fence"
+                ),
+                crate::core::store_integrity::READ_FENCE_GENERATION_UNAVAILABLE_REPAIR.to_owned(),
+            )
+        } else {
+            (
+                "read_fence_stale_derived_asset",
+                format!(
+                    "{command} refused to serve rows: a derived asset trails the \
+                 database under the requested read fence"
+                ),
+                report.read_fence.repair.clone().unwrap_or_else(|| {
+                    crate::core::read_fence::READ_FENCE_GENERIC_REPAIR.to_owned()
+                }),
+            )
+        };
+    let degraded = serde_json::json!([{
+        "code": code,
+        "severity": "high",
+        "message": message,
+        "repair": repair,
+    }]);
+    let write_exit = write_stdout(
+        stdout,
+        &(serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": false,
+            "data": {
+                "schema": crate::core::store_integrity::STORE_INTEGRITY_READ_FENCE_SCHEMA_V1,
+                "command": command,
+                "readFence": report.read_fence,
+            },
+            "degraded": degraded,
+        })
+        .to_string()
+            + "\n"),
+    );
+    // A failed write outranks the fence verdict, the same way
+    // handle_diag_store_integrity orders them: reporting an exit code for a
+    // payload that never reached the caller would be a lie about what happened.
+    if write_exit == ProcessExitCode::Success {
+        Some(ProcessExitCode::UnsatisfiedDegradedMode)
+    } else {
+        Some(write_exit)
+    }
+}
+
+/// Resolve the generations a store-integrity verdict is computed from.
+///
+/// Takes the two optional inputs rather than a `DiagStoreIntegrityArgs`, because
+/// `ee diag store-integrity` is no longer the only caller: the retrieval
+/// surfaces gate on the same verdict and have no such args struct to offer
+/// (bd-1n0np.8.13). `None` for both means "observe the store", which is exactly
+/// what a retrieval caller wants.
 fn resolve_store_integrity_generations(
-    cli: &Cli,
-    args: &DiagStoreIntegrityArgs,
+    options: &IndexStatusOptions,
+    supplied_db: Option<u64>,
+    supplied_assets: Option<Vec<(String, u64)>>,
 ) -> (
     u64,
     Vec<(String, u64)>,
@@ -32490,17 +33200,13 @@ fn resolve_store_integrity_generations(
 ) {
     use crate::core::store_integrity::GenerationSource;
 
-    let supplied_db = args.db_generation;
-    let supplied_assets =
-        (!args.asset_generations.is_empty()).then(|| args.asset_generations.clone());
-
     // Both inputs pinned: there is nothing to observe, and opening a store
     // would be a side effect with no effect on the answer.
     if let (Some(db_generation), Some(asset_generations)) = (supplied_db, supplied_assets.clone()) {
         return (db_generation, asset_generations, GenerationSource::Supplied);
     }
 
-    let Some(observed) = observed_store_generations(&cli.resolve_workspace()) else {
+    let Some(observed) = observed_store_generations(options) else {
         return (
             supplied_db.unwrap_or(0),
             supplied_assets.unwrap_or_default(),
@@ -32513,6 +33219,12 @@ fn resolve_store_integrity_generations(
     let assets_supplied = supplied_assets.is_some();
     let db_from_store = supplied_db.is_none() && observed.db_generation.is_some();
     let assets_from_store = !assets_supplied && !observed.asset_generations.is_empty();
+    // A known database generation cannot establish index freshness when no
+    // index generation exists, nor can an orphan index establish database
+    // freshness. Keep the observations, but never label an incomplete fence
+    // as a measured coherent store.
+    let generations_complete = (supplied_db.is_some() || observed.db_generation.is_some())
+        && (assets_supplied || !observed.asset_generations.is_empty());
     let db_generation = supplied_db.or(observed.db_generation).unwrap_or(0);
     let asset_generations = supplied_assets.unwrap_or(observed.asset_generations);
 
@@ -32522,10 +33234,11 @@ fn resolve_store_integrity_generations(
     // we asked of it is `Unavailable`, not a store reporting zero.
     let any_observed = db_from_store || assets_from_store;
     let any_supplied = supplied_db.is_some() || assets_supplied;
-    let generation_source = match (any_observed, any_supplied) {
-        (true, true) => GenerationSource::Mixed,
-        (true, false) => GenerationSource::Observed,
-        (false, _) => GenerationSource::Unavailable,
+    let generation_source = match (generations_complete, any_observed, any_supplied) {
+        (false, _, _) => GenerationSource::Unavailable,
+        (true, true, true) => GenerationSource::Mixed,
+        (true, true, false) => GenerationSource::Observed,
+        (true, false, _) => GenerationSource::Unavailable,
     };
 
     (db_generation, asset_generations, generation_source)
@@ -32583,8 +33296,15 @@ where
     // Explicit flags still win, which preserves the deterministic
     // pure-calculation mode that `tests/store_integrity_surface.rs` drives
     // and keeps this command usable for replaying a captured incident.
-    let (db_generation, asset_generations, generation_source) =
-        resolve_store_integrity_generations(cli, args);
+    let (db_generation, asset_generations, generation_source) = resolve_store_integrity_generations(
+        &IndexStatusOptions {
+            workspace_path: cli.resolve_workspace(),
+            database_path: None,
+            index_dir: None,
+        },
+        args.db_generation,
+        (!args.asset_generations.is_empty()).then(|| args.asset_generations.clone()),
+    );
 
     let report = crate::core::store_integrity::run_store_integrity_report(
         crate::core::store_integrity::StoreIntegrityOptions {
@@ -33438,8 +34158,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -33826,8 +34545,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -33949,8 +34667,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let source_database_path = args
         .database
         .clone()
@@ -34168,8 +34885,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -34323,8 +35039,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -34464,8 +35179,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -34683,8 +35397,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -34848,8 +35561,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -34951,8 +35663,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -35214,8 +35925,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -35598,8 +36308,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let mut report =
         crate::core::quarantine::QuarantineReport::gather_for_workspace(&workspace_path);
 
@@ -35633,8 +36342,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let canonical_path = match workspace_path.canonicalize() {
         Ok(path) => path,
         Err(error) => {
@@ -36547,8 +37255,7 @@ where
 
         // Retrieval-affinity edges from the latest projection snapshot
         // (honestly omitted when cold).
-        let workspace_path =
-            resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+        let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
         let workspace_id = match bound_cli_workspace_id(&conn, &workspace_path) {
             Ok(workspace_id) => workspace_id,
             Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
@@ -37024,6 +37731,88 @@ fn graph_algorithm_input(
             })?;
     }
 
+    // bd-3tofq: project typed-field edges beside the explicit memory_links.
+    // The derivation already existed and is unit-tested
+    // (projection_derives_decision_supersedes_typed_edge), but only
+    // `build_memory_graph` called it and none of THESE surfaces do, so
+    // `ee graph path` answered `no_path` for a decision's `supersedes` edge
+    // that the store had in fact recorded.
+    //
+    // Three semantics are matched to the graph module's own projection rather
+    // than invented here:
+    //   * an EXPLICIT link wins. `add_typed_projection_edge` skips a pair the
+    //     graph already holds, so this does too, and a derived edge never
+    //     overwrites a curated link's attributes.
+    //   * attributes come from `typed_projection_edge_attrs`, so a typed edge
+    //     is marked `source = "typed_fields"` wherever it is projected.
+    //   * min_weight / min_confidence apply exactly as they do to links. The
+    //     mesh-visibility check does NOT, because a typed edge is derived
+    //     locally from a memory's own fields and carries no mesh metadata.
+    //
+    // Tombstones differ, in the safe direction: the typed-edge row query
+    // filters `tombstoned_at IS NULL` unconditionally, so --include-tombstoned
+    // widens LINKS only and can never resurrect a tombstoned memory here.
+    let typed_edges = crate::graph::typed_memory_graph_edges(&conn, None).map_err(|error| {
+        DomainError::Graph {
+            message: format!("Failed to derive typed-field graph edges: {error}"),
+            repair: Some("Inspect typed memory fields with `ee doctor --json`.".to_string()),
+        }
+    })?;
+    for edge in &typed_edges {
+        if options
+            .min_weight
+            .is_some_and(|min_weight| edge.weight < f64::from(min_weight))
+            || options
+                .min_confidence
+                .is_some_and(|min_confidence| edge.confidence < f64::from(min_confidence))
+        {
+            continue;
+        }
+        let attrs = crate::graph::typed_projection_edge_attrs(edge);
+        if !directed.has_edge(&edge.src_memory_id, &edge.dst_memory_id) {
+            directed
+                .add_edge_with_attrs(
+                    edge.src_memory_id.clone(),
+                    edge.dst_memory_id.clone(),
+                    attrs.clone(),
+                )
+                .map_err(|error| DomainError::Graph {
+                    message: format!("Failed to build typed graph projection: {error}"),
+                    repair: Some(
+                        "Inspect typed memory fields with `ee doctor --json`.".to_string(),
+                    ),
+                })?;
+        }
+        if !edge.directed && !directed.has_edge(&edge.dst_memory_id, &edge.src_memory_id) {
+            directed
+                .add_edge_with_attrs(
+                    edge.dst_memory_id.clone(),
+                    edge.src_memory_id.clone(),
+                    attrs.clone(),
+                )
+                .map_err(|error| DomainError::Graph {
+                    message: format!("Failed to build reciprocal typed projection: {error}"),
+                    repair: Some(
+                        "Inspect typed memory fields with `ee doctor --json`.".to_string(),
+                    ),
+                })?;
+        }
+        if !undirected.has_edge(&edge.src_memory_id, &edge.dst_memory_id) {
+            undirected
+                .add_edge_with_attrs(
+                    edge.src_memory_id.clone(),
+                    edge.dst_memory_id.clone(),
+                    attrs,
+                )
+                .map_err(|error| DomainError::Graph {
+                    message: format!("Failed to build undirected typed projection: {error}"),
+                    repair: Some(
+                        "Inspect typed memory fields with `ee doctor --json`.".to_string(),
+                    ),
+                })?;
+        }
+    }
+
     fn graph_link_attrs(link: &crate::db::StoredMemoryLink) -> AttrMap {
         let mut attrs = AttrMap::new();
         attrs.insert(
@@ -37098,8 +37887,7 @@ fn graph_database_path(
     cli: &Cli,
     explicit_database: Option<&Path>,
 ) -> Result<PathBuf, DomainError> {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = explicit_database
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
@@ -37411,8 +38199,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
 
     let database_path = args
         .database
@@ -37488,8 +38275,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
 
     let database_path = args
         .database
@@ -37617,7 +38403,7 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::graph_diff::{diff_snapshots, parse_snapshot_graph};
+    use crate::core::graph_diff::{diff_snapshots, parse_snapshot_graph, snapshot_at_or_before};
 
     let graph_type = match args.graph.parse::<crate::db::GraphSnapshotType>() {
         Ok(graph_type) => graph_type,
@@ -37633,8 +38419,7 @@ where
         }
     };
 
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -37699,10 +38484,18 @@ where
         };
         (from_row, to_row)
     } else if let Some(since) = &args.since {
-        // RFC3339 UTC timestamps compare lexically; nearest ≤ since.
-        let from_row = snapshots
-            .iter()
-            .find(|row| row.created_at.as_str() <= since.as_str());
+        let from_row =
+            match snapshot_at_or_before(snapshots.iter().map(|row| row.created_at.as_str()), since)
+            {
+                Ok(index) => index.and_then(|index| snapshots.get(index)),
+                Err(message) => {
+                    let domain_error = DomainError::Storage {
+                        message,
+                        repair: Some("ee graph snapshot refresh --workspace . --json".to_owned()),
+                    };
+                    return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
+                }
+            };
         (from_row, snapshots.first())
     } else {
         (snapshots.get(1), snapshots.first())
@@ -37713,7 +38506,7 @@ where
             .from
             .clone()
             .or_else(|| args.to.clone())
-            .or_else(|| args.since.clone())
+            .or_else(|| args.since.as_ref().map(chrono::DateTime::to_rfc3339))
             .unwrap_or_else(|| "latest two".to_owned());
         let envelope = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
@@ -37816,8 +38609,7 @@ where
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -38347,8 +39139,7 @@ where
         }
     }
 
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -38654,8 +39445,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -38814,8 +39604,7 @@ where
     W: Write,
     E: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = args
         .database
         .clone()
@@ -39792,6 +40581,82 @@ where
     }
 }
 
+fn handle_memory_anchors<W, E>(
+    cli: &Cli,
+    args: &MemoryAnchorsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::anchors::{AttachAnchorsOptions, attach_anchors};
+
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+    let report = match attach_anchors(&AttachAnchorsOptions {
+        workspace_path: &workspace,
+        database_path: &database_path,
+        memory_id: &args.memory_id,
+        paths: &args.path,
+        symbols: &args.symbol,
+        dry_run: args.dry_run,
+        actor: args.actor.as_deref(),
+    }) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut text = format!(
+                "memory anchors: {}\nmemory: {}\nnew anchors: {}\n",
+                report.status, report.memory_id, report.added_anchor_count,
+            );
+            for anchor in &report.anchors {
+                text.push_str(&format!(
+                    "  {} {} ({})\n",
+                    anchor.anchor_kind,
+                    anchor
+                        .locator
+                        .as_deref()
+                        .unwrap_or(&anchor.redacted_anchor_value),
+                    anchor.source,
+                ));
+            }
+            write_stdout(stdout, &text)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "MEMORY_ANCHORS|{}|{}|{}|{}\n",
+                report.memory_id, report.status, report.dry_run, report.added_anchor_count,
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(
+            stdout,
+            &(serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "command": "memory anchors",
+                "degraded": [],
+                "data": report,
+            })
+            .to_string()
+                + "\n"),
+        ),
+    }
+}
+
 fn handle_memory_revise<W, E>(
     cli: &Cli,
     args: &MemoryReviseArgs,
@@ -40247,7 +41112,7 @@ where
         };
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
-    let human = format!(
+    let mut human = format!(
         "Global promotion\n  Memory: {}\n  Executed: {}\n  Global memory: {}\n  Already promoted: {}\n  Index status: {}\n",
         args.memory_id,
         report.executed,
@@ -40255,6 +41120,15 @@ where
         report.already_promoted,
         report.index_status,
     );
+    if let Some(candidate) = &report.merge_candidate_id {
+        human.push_str(&format!("  Merge proposal: {candidate}\n"));
+        if !report.already_promoted {
+            human.push_str("  Global content awaits review.\n");
+        }
+        if let Some(command) = &report.review_command {
+            human.push_str(&format!("  Review: {command}\n"));
+        }
+    }
     render_global_lane_report(
         cli,
         "memory promote-global",
@@ -41527,6 +42401,7 @@ fn context_json_cache_enabled(cli: &Cli, args: &ContextArgs, deprecated_alias: b
         && !args.explain_gaps
         && !args.stream
         && args.task_paths.is_empty()
+        && args.bead_id.is_none()
         && args.since.is_none()
         && args.mesh_mode == MeshCommandMode::Off
         && args.changed_symbols.is_empty()
@@ -42171,6 +43046,7 @@ where
                 .with_resource_profile(PackResourceProfile::Standard);
         let pack_options = ContextPackOptions {
             task_paths: Vec::new(),
+            bead_id: None,
             workspace_path: workspace_path.clone(),
             database_path: Some(addressed_database_path.clone()),
             index_dir: Some(addressed_index_dir.clone()),
@@ -42399,6 +43275,7 @@ fn orient_learn_gaps_value(
             let top_gaps = report
                 .gaps
                 .iter()
+                .filter(|gap| gap.status == "open")
                 .map(|gap| {
                     serde_json::json!({
                         "clusterId": &gap.cluster_id,
@@ -42409,11 +43286,13 @@ fn orient_learn_gaps_value(
                     })
                 })
                 .collect::<Vec<_>>();
+            // clusterCount preserves the demand history. Capture suggestions
+            // describe only work that remains open in the current source view.
             serde_json::json!({
                 "schema": "ee.orient.learn_gaps.v1",
-                "status": if report.cluster_count > 0 { "present" } else { "empty" },
+                "status": if top_gaps.is_empty() { "empty" } else { "present" },
                 "clusterCount": report.cluster_count,
-                "returned": report.gaps.len(),
+                "returned": top_gaps.len(),
                 "scannedMissCount": report.scanned_miss_count,
                 "retentionDays": report.retention_days,
                 "degraded": report.degraded,
@@ -42981,6 +43860,22 @@ where
     W: Write,
     E: Write,
 {
+    // Canonical `pack <task>` calls this handler directly, as does the
+    // deprecated context alias. Keep admission before every output/cache/
+    // streaming path so neither entry point can bypass the requested fence.
+    if let Some(exit) = read_fence_preflight(
+        || IndexStatusOptions {
+            workspace_path: cli.resolve_workspace(),
+            database_path: args.database.clone(),
+            index_dir: args.index_dir.clone(),
+        },
+        command,
+        args.read_fence,
+        args.strict_read_fence,
+        stdout,
+    ) {
+        return exit;
+    }
     if let Some(output_path) = args.output.as_deref()
         && let Err(error) = validate_output_parent(output_path)
     {
@@ -43014,10 +43909,6 @@ where
     };
     let advisory_workspace_id =
         crate::core::workspace::bound_workspace_id_from_path(&workspace_path);
-    let database_path_for_pack_dna = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     let output_options = resolve_context_output_options(
         // bd-pack-compact-mode-ibksx: `--compact` resolves to Lean here.
         args.resolved_pack_profile(),
@@ -43028,6 +43919,7 @@ where
         args.no_meta,
         args.include_non_affecting_degradations,
     )
+    .with_pack_dna(args.explain && !args.no_pack_dna)
     .with_cache_json_response(context_json_cache_enabled(cli, args, deprecated_alias));
     let redaction = effective_redaction_level(
         &workspace_path,
@@ -43043,6 +43935,7 @@ where
     let options = ContextPackOptions {
         task_paths: args.task_paths.clone(),
         workspace_path: workspace_path.clone(),
+        bead_id: args.bead_id.clone(),
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
         query: args.query.clone(),
@@ -43169,9 +44062,6 @@ where
             });
             response.data.degraded.push(entry);
         }
-        if args.explain && !args.no_pack_dna {
-            attach_pack_dna_to_context_response(&database_path_for_pack_dna, &mut response);
-        }
         attach_revisable_pack_metadata(&mut response, args.mesh_mode, command);
         let render_options = output::ContextJsonRenderOptions::from(output_options);
         let mut delta_sink = io::sink();
@@ -43243,9 +44133,6 @@ where
                     stdout,
                     stderr,
                 );
-            }
-            if args.explain && !args.no_pack_dna {
-                attach_pack_dna_to_context_response(&database_path_for_pack_dna, &mut response);
             }
             attach_revisable_pack_metadata(&mut response, args.mesh_mode, command);
             let render_options = output::ContextJsonRenderOptions::from(output_options);
@@ -46459,6 +47346,7 @@ where
         };
         let context_args = ContextArgs {
             task_paths: args.task_paths.clone(),
+            bead_id: args.bead_id.clone(),
             use_daemon: args.use_daemon,
             daemon_socket: args.daemon_socket.clone(),
             query,
@@ -46524,6 +47412,8 @@ where
             include_stale: args.include_stale,
             relevance_floor: args.relevance_floor,
             mesh_mode: args.mesh_mode,
+            read_fence: args.read_fence,
+            strict_read_fence: args.strict_read_fence,
             memory_scope: args
                 .memory_scope
                 .or(lens_memory_scope)
@@ -46535,14 +47425,10 @@ where
                 .as_ref()
                 .map(|resolved| resolved.task_lens.clone()),
             max_results: lens_overlay.and_then(|overlay| overlay.max_results),
-            // bd-7lvbg.6 supersedes the bd-1es1m scoping: the pack shim
-            // forwards --since/--task-key/--no-baseline-write so the headline
-            // surface gets baseline ergonomics; --max-delta-bytes stays a
-            // context-only tuning knob.
             since: args.since.clone(),
             task_key: args.task_key.clone(),
             no_baseline_write: args.no_baseline_write,
-            max_delta_bytes: None,
+            max_delta_bytes: args.max_delta_bytes,
         };
         return handle_context_pack_query(
             process,
@@ -46606,8 +47492,24 @@ where
         .workspace
         .clone()
         .or_else(|| request.workspace_path.take())
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(|| cli.resolve_workspace());
     let workspace_root = resolve_cli_workspace_path(&workspace_path);
+
+    // A query document may address a different workspace than the process
+    // cwd. Observe the same store that this build will actually retrieve.
+    if let Some(exit) = read_fence_preflight(
+        || IndexStatusOptions {
+            workspace_path: workspace_root.clone(),
+            database_path: args.database.clone(),
+            index_dir: args.index_dir.clone(),
+        },
+        PACK_COMMAND,
+        args.read_fence,
+        args.strict_read_fence,
+        stdout,
+    ) {
+        return exit;
+    }
 
     match error_recall_query_seed(
         &workspace_root,
@@ -46661,7 +47563,8 @@ where
         args.no_skipped,
         args.no_meta,
         args.include_non_affecting_degradations,
-    );
+    )
+    .with_pack_dna(args.explain);
 
     let pagination = if request.pagination.is_empty() {
         None
@@ -46730,6 +47633,7 @@ where
         task_paths: args.task_paths.clone(),
         workspace_path,
         database_path: args.database.clone(),
+        bead_id: args.bead_id.clone(),
         index_dir: args.index_dir.clone(),
         query: request.query,
         speed: args.speed.unwrap_or(request.speed),
@@ -46824,13 +47728,6 @@ where
                     stderr,
                 );
             }
-            if args.explain {
-                let database_path_for_pack_dna = options
-                    .database_path
-                    .clone()
-                    .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
-                attach_pack_dna_to_context_response(&database_path_for_pack_dna, &mut response);
-            }
             attach_revisable_pack_metadata(&mut response, args.mesh_mode, "pack");
             let advisory_workspace_path = resolve_cli_workspace_path(&options.workspace_path);
             let advisory_workspace_id =
@@ -46870,22 +47767,24 @@ fn error_recall_query_seed(
         return Ok(None);
     };
     let error_log = error_log_text(error_log)?;
-    // Native logs must use the same key as the CASS failure-arc extractor.
-    // Otherwise an imported EE/RCH repair can never match this public reader.
-    let canonical = crate::core::cass_error_recall::structured_error_diagnostics(&error_log)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| {
-            let redacted_message = crate::policy::redact_secret_like_content(&error_log).content;
-            let code = rustc_code_from_message(&error_log);
-            crate::core::error_recall::from_rustc(code.as_deref(), &redacted_message)
-        });
+    // Native logs must use the same keys as the CASS failure-arc extractor.
+    // A later diagnostic may have the applicable repair even when the first
+    // class is unseen. The shared reader deduplicates and bounds the expansion.
+    let mut diagnostics = crate::core::cass_error_recall::structured_error_diagnostics(&error_log);
+    if diagnostics.is_empty() {
+        let redacted_message = crate::policy::redact_secret_like_content(&error_log).content;
+        let code = rustc_code_from_message(&error_log);
+        diagnostics.push(crate::core::error_recall::from_rustc(
+            code.as_deref(),
+            &redacted_message,
+        ));
+    }
     let connection = open_attest_database_for_workspace(workspace, database)?;
     let workspace_id = bound_cli_workspace_id(&connection, workspace)?;
-    let seed = crate::core::error_diagnosis::pack_error_recall_query_seed(
+    let seed = crate::core::error_diagnosis::pack_error_recall_query_seed_for_diagnostics(
         &connection,
         &workspace_id,
-        &canonical,
+        &diagnostics,
     )
     .map_err(|error| DomainError::Storage {
         message: format!("Failed to recall repair evidence for the pack: {error}"),
@@ -46921,13 +47820,7 @@ struct PackDiffItem {
 
 fn pack_database_path(cli: &Cli, database: Option<&Path>) -> PathBuf {
     database.map_or_else(
-        || {
-            cli.workspace
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ee")
-                .join("ee.db")
-        },
+        || cli.resolve_workspace().join(".ee").join("ee.db"),
         Path::to_path_buf,
     )
 }
@@ -55446,7 +56339,7 @@ where
                 let domain_error = DomainError::Usage {
                     message,
                     repair: Some(
-                        "ee why-not <memory-id> --task \"<task>\" --profile balanced".to_string(),
+                        "ee why-not <entity-id> --task \"<task>\" --profile balanced".to_string(),
                     ),
                 };
                 return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
@@ -55456,9 +56349,10 @@ where
     };
 
     let options = ContextPackOptions {
-        task_paths: Vec::new(),
+        task_paths: args.task_paths.clone(),
         workspace_path,
         database_path: Some(database_path),
+        bead_id: args.bead_id.clone(),
         index_dir: None,
         query: args.task.clone(),
         speed: crate::search::SpeedMode::default(),
@@ -55468,7 +56362,7 @@ where
         profile,
         max_tokens: args.max_tokens,
         candidate_pool: args.candidate_pool,
-        max_results: None,
+        max_results: args.max_results,
         include_tombstoned: false,
         as_of: None,
         include_expired: false,
@@ -55514,20 +56408,41 @@ where
 
     let Some(memory_id_raw) = args.memory_id.as_deref() else {
         let domain_error = DomainError::Usage {
-            message: "Memory id is required unless --gaps is supplied.".to_string(),
-            repair: Some("Use `ee why-not <memory-id> --task \"<task>\" --json`, or `ee why-not --task \"<task>\" --gaps --json`.".to_string()),
+            message: "A memory, rule, or evidence-span id is required unless --gaps is supplied.".to_string(),
+            repair: Some("Use `ee why-not <entity-id> --task \"<task>\" --json`, or `ee why-not --task \"<task>\" --gaps --json`.".to_string()),
         };
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     };
-    let memory_id = match memory_id_raw.parse::<crate::models::MemoryId>() {
+    let entity = match crate::core::context::parse_why_not_entity(memory_id_raw) {
         Ok(id) => id,
-        Err(_) => {
+        Err(message) => {
             let domain_error = DomainError::Usage {
-                message: format!("Invalid memory id: {memory_id_raw}"),
-                repair: Some("ee memory list --workspace . --json".to_string()),
+                message,
+                repair: Some(
+                    "Use a mem_, rule_, or ev_ identifier from ee search --json.".to_string(),
+                ),
             };
             return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
+    };
+
+    let crate::pack::PackEntityRef::Memory(memory_id) = entity else {
+        let report = match crate::core::context::explain_why_not_entity_default(&options, entity) {
+            Ok(report) => report,
+            Err(error) => return write_context_pack_error(&error, cli.renderer(), stdout, stderr),
+        };
+        let rendered = match cli.renderer() {
+            output::Renderer::Human => format_typed_why_not(&report, false),
+            output::Renderer::Markdown => format_typed_why_not(&report, true),
+            output::Renderer::Toon => {
+                output::render_toon_from_json(&format_why_not_json(&report)) + "\n"
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => format_why_not_json(&report) + "\n",
+        };
+        return write_stdout(stdout, &rendered);
     };
 
     let report = match explain_why_not_default(&options, memory_id) {
@@ -55551,9 +56466,9 @@ where
     }
 }
 
-/// Render a `WhyNotSelectedReport` as an `ee.response.v2` envelope whose
-/// `data` is the `ee.why_not_selected.v1` report (camelCase fields).
-fn format_why_not_json(report: &crate::pack::WhyNotSelectedReport) -> String {
+/// Render a memory v1 or native-entity v2 why-not report inside the shared
+/// `ee.response.v2` envelope, retaining the report's own schema and identity.
+fn format_why_not_json(report: &impl serde::Serialize) -> String {
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
@@ -55561,6 +56476,55 @@ fn format_why_not_json(report: &crate::pack::WhyNotSelectedReport) -> String {
         "data": report,
     })
     .to_string()
+}
+
+fn format_typed_why_not(
+    report: &crate::core::context::TypedWhyNotSelectedReport,
+    markdown: bool,
+) -> String {
+    let mut out = if markdown {
+        format!("# Why not: {}\n\n", report.entity.id)
+    } else {
+        format!("why-not {}\n", report.entity.id)
+    };
+    let prefix = if markdown { "- " } else { "  " };
+    out.push_str(&format!("{prefix}kind: {}\n", report.entity.kind));
+    out.push_str(&format!(
+        "{prefix}selected: {} ({}, source={})\n",
+        report.selected, report.primary_reason, report.reason_source
+    ));
+    out.push_str(&format!(
+        "{prefix}stage reached: {}\n",
+        report.retrieval_stage_reached
+    ));
+    out.push_str(&format!("{prefix}{}\n", report.message));
+    if let Some(representative) = &report.represented_by {
+        out.push_str(&format!(
+            "{prefix}represented by: {} ({})\n",
+            representative.id, representative.kind
+        ));
+        if let Some(selected) = report.representative_selected {
+            out.push_str(&format!("{prefix}representative selected: {selected}\n"));
+        }
+    }
+    if let Some(scores) = &report.scores {
+        out.push_str(&format!(
+            "{prefix}scores: relevance {:.4}, utility {:.4}\n",
+            scores.target_relevance, scores.target_utility
+        ));
+    }
+    let frontier = &report.token_budget_frontier;
+    out.push_str(&format!(
+        "{prefix}tokens: {} used / {} max\n",
+        frontier.used_tokens, frontier.max_tokens
+    ));
+    if let Some(tokens) = frontier.target_estimated_tokens {
+        out.push_str(&format!("{prefix}target needs: {tokens} tokens\n"));
+    }
+    for hint in &report.counterfactual_hints {
+        out.push_str(&format!("{prefix}hint: {}\n", hint.action));
+    }
+    out
 }
 
 fn format_why_not_markdown(report: &crate::pack::WhyNotSelectedReport) -> String {
@@ -56409,459 +57373,25 @@ fn format_why_json_with_sentinel(
 }
 
 fn format_why_json(report: &crate::core::why::WhyReport) -> String {
-    let storage = report.storage.as_ref().map(|s| {
-        serde_json::json!({
-            "origin": s.origin,
-            "trustClass": s.trust_class,
-            "trustSubclass": s.trust_subclass,
-            "provenanceUri": s.provenance_uri,
-            "workflowId": s.workflow_id,
-            "createdAt": s.created_at,
-            "validFrom": s.valid_from,
-            "validTo": s.valid_to,
-            "validityStatus": s.validity_status,
-            "validityWindowKind": s.validity_window_kind,
-        })
-    });
-
-    let retrieval = report.retrieval.as_ref().map(|r| {
-        serde_json::json!({
-            "confidence": score_json_value(r.confidence),
-            "utility": score_json_value(r.utility),
-            "importance": score_json_value(r.importance),
-            "tags": r.tags,
-            "level": r.level,
-            "kind": r.kind,
-        })
-    });
-
-    let graph_retrieval = report.graph_retrieval.as_ref().map(|graph| {
-        let snapshot = graph.source.snapshot.as_ref().map(|snapshot| {
-            serde_json::json!({
-                "id": snapshot.id,
-                "schemaVersion": snapshot.schema_version,
-                "snapshotVersion": snapshot.snapshot_version,
-                "sourceGeneration": snapshot.source_generation,
-                "status": snapshot.status,
-                "contentHash": snapshot.content_hash,
-                "createdAt": snapshot.created_at,
-            })
-        });
-        let degraded = aggregate_why_degraded_json("why_graph_retrieval", &graph.degraded);
-        let hits = graph.hits.as_ref().map(|hits| {
-            serde_json::json!({
-                "schema": hits.schema,
-                "authority": {
-                    "raw": graph_score_json_value(hits.authority.raw),
-                    "normalized": graph_score_json_value(hits.authority.normalized),
-                    "rank": hits.authority.rank,
-                    "percentile": hits.authority.percentile.map(graph_score_json_value),
-                },
-                "hub": {
-                    "raw": graph_score_json_value(hits.hub.raw),
-                    "normalized": graph_score_json_value(hits.hub.normalized),
-                    "rank": hits.hub.rank,
-                    "percentile": hits.hub.percentile.map(graph_score_json_value),
-                },
-                "roleLabel": hits.role_label,
-                "roleRationale": hits.role_rationale,
-            })
-        });
-
-        serde_json::json!({
-            "status": graph.status,
-            "source": {
-                "kind": graph.source.kind,
-                "workspaceId": graph.source.workspace_id,
-                "graphType": graph.source.graph_type,
-                "snapshot": snapshot,
-            },
-            "centralityScore": graph_score_json_value(graph.centrality_score),
-            "authorityScore": graph_score_json_value(graph.authority_score),
-            "hubScore": graph_score_json_value(graph.hub_score),
-            "hits": hits,
-            "communityId": graph.community_id,
-            "distanceToQuerySeed": graph.distance_to_query_seed,
-            "sameClusterAsTopResult": graph.same_cluster_as_top_result,
-            "evidenceSupportCount": graph.evidence_support_count,
-            "contradictionCount": graph.contradiction_count,
-            "orphanPenalty": graph_score_json_value(graph.orphan_penalty),
-            "staleBridgePenalty": graph_score_json_value(graph.stale_bridge_penalty),
-            "pagerank": {
-                "raw": graph_score_json_value(graph.pagerank.raw),
-                "normalized": graph_score_json_value(graph.pagerank.normalized),
-                "rank": graph.pagerank.rank,
-                "weight": graph_score_json_value(graph.pagerank.weight),
-                "contribution": graph_score_json_value(graph.pagerank.contribution),
-                "formula": graph.pagerank.formula,
-            },
-            "betweenness": {
-                "raw": graph_score_json_value(graph.betweenness.raw),
-                "normalized": graph_score_json_value(graph.betweenness.normalized),
-                "rank": graph.betweenness.rank,
-                "weight": graph_score_json_value(graph.betweenness.weight),
-                "contribution": graph_score_json_value(graph.betweenness.contribution),
-                "formula": graph.betweenness.formula,
-            },
-            "labels": graph.labels,
-            "reasons": graph.reasons,
-            "centralityFormula": graph.centrality_formula,
-            "orphanPenaltyFormula": graph.orphan_penalty_formula,
-            "staleBridgePenaltyFormula": graph.stale_bridge_penalty_formula,
-            "degraded": degraded,
-        })
-    });
-
-    let selection = report.selection.as_ref().map(|s| {
-        let pack = s.latest_pack_selection.as_ref().map(|pack| {
-            let mut value = serde_json::json!({
-                "packId": pack.pack_id,
-                "query": pack.query,
-                "profile": pack.profile,
-                "rank": pack.rank,
-                "section": pack.section,
-                "estimatedTokens": pack.estimated_tokens,
-                "relevance": score_json_value(pack.relevance),
-                "utility": score_json_value(pack.utility),
-                "why": pack.why,
-                "packHash": pack.pack_hash,
-                "ledgerHash": pack.ledger_hash,
-                "ledgerStatus": pack.ledger_status,
-                "ledgerStorage": pack.ledger_storage,
-                "selectedAt": pack.selected_at,
-            });
-            if let Some(snapshot) = &pack.attempt_family_multiplicity
-                && let Some(object) = value.as_object_mut()
-            {
-                object.insert("attemptFamilyMultiplicity".to_owned(), snapshot.clone());
-            }
-            value
-        });
-
-        serde_json::json!({
-            "selectionScore": score_json_value(s.selection_score),
-            "aboveConfidenceThreshold": s.above_confidence_threshold,
-            "isActive": s.is_active,
-            "scoreBreakdown": s.score_breakdown,
-            "latestPackSelection": pack,
-        })
-    });
-
-    let lifecycle = report.lifecycle.as_ref().map(|lifecycle| {
-        serde_json::json!({
-            "status": lifecycle.status,
-            "tombstoned_at": lifecycle.tombstoned_at,
-            "tombstoned_reason": lifecycle.tombstoned_reason,
-        })
-    });
-
-    let agent_profile = report.agent_profile.as_ref().map(|profile| {
-        serde_json::json!({
-            "schema": profile.schema,
-            "agentName": profile.agent_name,
-            "agentNameHash": profile.agent_name_hash,
-            "helpfulCount": profile.helpful_count,
-            "harmfulCount": profile.harmful_count,
-            "ignoredCount": profile.ignored_count,
-            "observedOutcomes": profile.observed_outcomes,
-            "bias": graph_score_json_value(profile.bias),
-            "maxBiasMagnitude": graph_score_json_value(profile.max_bias_magnitude),
-            "coldStart": profile.cold_start,
-            "coldStartThreshold": profile.cold_start_threshold,
-            "lastSeenAt": profile.last_seen_at,
-        })
-    });
-
-    let bayes_posterior = report.bayes_posterior.as_ref().map(|posterior| {
-        serde_json::json!({
-            "schema": "ee.bayes.posterior.v1",
-            "alpha": posterior_json_value(posterior.alpha),
-            "beta": posterior_json_value(posterior.beta),
-            "mean": posterior_json_value(posterior.mean),
-            "effectiveSampleSize": posterior_json_value(posterior.effective_sample_size),
-            "credibleInterval90": posterior_interval_json_value(posterior.credible_interval_90, 0.90),
-            "credibleInterval50": posterior_interval_json_value(posterior.credible_interval_50, 0.50),
-        })
-    });
-    let confidence_intervals = report.confidence_intervals.as_ref().map(|intervals| {
-        let prediction_set = intervals
-            .prediction_set
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "memoryId": &entry.memory_id,
-                    "rank": entry.rank,
-                    "source": &entry.source,
-                    "score": score_json_value(entry.score),
-                    "nonconformityScore": score_json_value(entry.nonconformity_score),
-                    "included": entry.included,
-                })
-            })
-            .collect::<Vec<_>>();
-        serde_json::json!({
-            "schema": intervals.schema,
-            "method": intervals.method,
-            "coverageGuarantee": score_json_value(intervals.coverage_guarantee),
-            "alpha": score_json_value(intervals.alpha),
-            "targetMemoryId": &intervals.target_memory_id,
-            "scoreInterval": [
-                score_json_value(intervals.score_interval[0]),
-                score_json_value(intervals.score_interval[1]),
-            ],
-            "nonconformityQuantile": score_json_value(intervals.nonconformity_quantile),
-            "calibrationSampleCount": intervals.calibration_sample_count,
-            "calibrationStatus": intervals.calibration_status,
-            "predictionSet": prediction_set,
-        })
-    });
-    let counterfactual_influence = report.counterfactual_influence.as_ref().map(|influence| {
-        let top_positive = influence
-            .top_positive
-            .iter()
-            .map(why_influence_entry_json)
-            .collect::<Vec<_>>();
-        let top_negative = influence
-            .top_negative
-            .iter()
-            .map(why_influence_entry_json)
-            .collect::<Vec<_>>();
-        let entries = influence
-            .entries
-            .iter()
-            .map(why_influence_entry_json)
-            .collect::<Vec<_>>();
-        serde_json::json!({
-            "schema": influence.schema,
-            "method": influence.method,
-            "targetMemoryId": &influence.target_memory_id,
-            "baselineTopScore": score_json_value(influence.baseline_top_score),
-            "approximationErrorRatio": score_json_value(influence.approximation_error_ratio),
-            "totalAbsoluteInfluence": score_json_value(influence.total_absolute_influence),
-            "topPositive": top_positive,
-            "topNegative": top_negative,
-            "entries": entries,
-        })
-    });
-
-    let degraded = aggregate_why_degraded_json("why", &report.degraded);
-
-    let contradictions: Vec<serde_json::Value> = report
-        .contradictions
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "eventId": c.event_id,
-                "weight": score_json_value(c.weight),
-                "sourceType": c.source_type,
-                "reason": c.reason,
-                "createdAt": c.created_at,
-                "applied": c.applied,
-            })
-        })
-        .collect();
-
-    let links: Vec<serde_json::Value> = report
-        .links
-        .iter()
-        .map(|link| {
-            serde_json::json!({
-                "linkId": link.link_id,
-                "linkedMemoryId": link.linked_memory_id,
-                "relation": link.relation,
-                "direction": link.direction,
-                "confidence": score_json_value(link.confidence),
-                "weight": score_json_value(link.weight),
-                "evidenceCount": link.evidence_count,
-                "source": link.source,
-                "createdAt": link.created_at,
-            })
-        })
-        .collect();
-
-    let history = report.history.as_ref().map(|history| {
-        let entries: Vec<serde_json::Value> = history
-            .entries
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "auditId": entry.audit_id,
-                    "timestamp": entry.timestamp,
-                    "actor": entry.actor,
-                    "action": entry.action,
-                    "details": entry.details,
-                })
-            })
-            .collect();
-
-        serde_json::json!({
-            "entries": entries,
-            "totalCount": history.total_count,
-            "truncated": history.truncated,
-        })
-    });
-
-    let verification_evidence = serde_json::to_value(&report.verification_evidence)
-        .unwrap_or_else(|_| serde_json::json!([]));
-    let coordination_fallback_evidence: Vec<serde_json::Value> = report
-        .coordination_fallback_evidence
-        .iter()
-        .map(|evidence| {
-            serde_json::json!({
-                "sourceSchema": evidence.source_schema,
-                "evidenceId": &evidence.evidence_id,
-                "status": &evidence.status,
-                "sourceKind": &evidence.source_kind,
-                "reasonCode": &evidence.reason_code,
-                "capturedAt": &evidence.captured_at,
-                "contentHash": &evidence.content_hash,
-                "linkedBeadIds": &evidence.linked_bead_ids,
-                "linkedVerificationIds": &evidence.linked_verification_ids,
-                "linkedSupportBundleIds": &evidence.linked_support_bundle_ids,
-            })
-        })
-        .collect();
-    let load_bearing = report.load_bearing.as_ref().map(|load_bearing| {
-        let citing_rules = load_bearing
-            .citing_rules
-            .iter()
-            .map(|rule| {
-                serde_json::json!({
-                    "ruleId": &rule.rule_id,
-                    "relation": rule.relation,
-                })
-            })
-            .collect::<Vec<_>>();
-        serde_json::json!({
-            "isLoadBearing": load_bearing.is_load_bearing,
-            "loadBearingScore": load_bearing
-                .load_bearing_score
-                .map(graph_score_json_value)
-                .unwrap_or(serde_json::Value::Null),
-            "authorityRank": load_bearing.authority_rank,
-            "citingRuleCount": load_bearing.citing_rule_count,
-            "citingRules": citing_rules,
-            "interpretation": load_bearing.interpretation,
-            "evidence": {
-                "schema": load_bearing.evidence.schema,
-                "algorithm": load_bearing.evidence.algorithm,
-                "projection": load_bearing.evidence.projection,
-                "snapshotVersion": load_bearing.evidence.snapshot_version,
-            },
-            "rationale": &load_bearing.rationale,
-        })
-    });
-
-    let mut json = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V2,
-        "success": true,
-        "data": {
-            "command": "why",
-            "version": report.version,
-            "memoryId": report.entity.is_none().then_some(&report.memory_id),
-            "found": report.found,
-            "content": report.content,
-            "storage": storage,
-            "retrieval": retrieval,
-            "graphRetrievalFeatures": graph_retrieval,
-            "selection": selection,
-            "agentProfile": agent_profile,
-            "bayesPosterior": bayes_posterior,
-            "lifecycle": lifecycle,
-            "contradictions": contradictions,
-            "links": links,
-            "history": history,
-            "verificationEvidence": verification_evidence,
-            "coordinationFallbackEvidence": coordination_fallback_evidence,
-            "attestationBundle": report.attestation_manifest.clone(),
-            "degraded": degraded.clone(),
-        },
-        "degraded": degraded,
-    });
-    if let Some(entity) = &report.entity
-        && let Some(data) = json
-            .get_mut("data")
-            .and_then(serde_json::Value::as_object_mut)
-    {
-        data.insert(
-            "entity".to_owned(),
-            serde_json::json!({
-                "kind": &entity.kind,
-                "id": &entity.id,
-                "revision": &entity.revision,
-                "details": &entity.details,
-            }),
-        );
-    }
-    if let Some(load_bearing) = load_bearing
-        && let Some(data) = json
-            .get_mut("data")
-            .and_then(serde_json::Value::as_object_mut)
-    {
-        data.insert(
-            "graph".to_owned(),
-            serde_json::json!({
-                "loadBearing": load_bearing,
-            }),
-        );
-    }
-    if let Some(causal_explanation) = &report.causal_explanation {
-        if let Some(data) = json
-            .get_mut("data")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            data.insert("causalExplanation".to_owned(), causal_explanation.clone());
-        }
-    }
-    if let Some(revision_lineage) = &report.revision_lineage {
-        if let Some(data) = json
-            .get_mut("data")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            data.insert("revisionLineage".to_owned(), revision_lineage.clone());
-        }
-    }
-    if let Some(seal) = &report.seal {
-        if let Some(data) = json
-            .get_mut("data")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            data.insert("seal".to_owned(), seal.clone());
-        }
-    }
-    if let Some(confidence_intervals) = confidence_intervals
-        && let Some(data) = json
-            .get_mut("data")
-            .and_then(serde_json::Value::as_object_mut)
-    {
-        data.insert("confidenceIntervals".to_owned(), confidence_intervals);
-    }
-    if let Some(counterfactual_influence) = counterfactual_influence
-        && let Some(data) = json
-            .get_mut("data")
-            .and_then(serde_json::Value::as_object_mut)
-    {
-        data.insert(
-            "counterfactualInfluence".to_owned(),
-            counterfactual_influence,
-        );
-    }
-
-    json.to_string()
-}
-
-fn why_influence_entry_json(
-    entry: &crate::core::influence::WhyInfluenceEntry,
-) -> serde_json::Value {
-    serde_json::json!({
-        "memoryId": &entry.memory_id,
-        "rank": entry.rank,
-        "relation": &entry.relation,
-        "baselineScore": score_json_value(entry.baseline_score),
-        "leaveOneOutScore": score_json_value(entry.leave_one_out_score),
-        "influenceDelta": score_json_value(entry.influence_delta),
-        "absoluteInfluence": score_json_value(entry.absolute_influence),
-        "direction": entry.direction,
-    })
+    // One renderer, not two. This was a 484-line duplicate of
+    // crate::output::render_why_json (the serve adapter's renderer), measured
+    // identical at 172 json! keys in the same INSERTION ORDER -- which is the
+    // load-bearing check, because serde_json runs with preserve_order here, so
+    // order decides the bytes -- with its three score helpers byte-identical
+    // to their why_-prefixed twins and its degraded aggregation calling the
+    // same aggregate_degraded_entries with the same five keys.
+    //
+    // The duplication was a defect generator rather than untidiness: bd-maisx
+    // exists because `ee why --json` lacked a graph.hits block that the serve
+    // surface emitted, and neither file looked wrong on its own.
+    //
+    // Collapsing ADDS teamProvenance and elevation to `ee why --json` -- the
+    // two keys the serve renderer inserted and this one did not. That is an
+    // intended CLI contract addition, stated rather than absorbed into a
+    // refactor; both are conditional on the report carrying the data and no
+    // fixture under tests/ populates either, so no golden output moves. The
+    // sentinel stays CLI-only in format_why_json_with_sentinel. bd-wn3oy.
+    crate::output::render_why_json(report)
 }
 
 fn score_json_value(value: f32) -> serde_json::Value {
@@ -56876,26 +57406,6 @@ fn graph_score_json_value(value: f64) -> serde_json::Value {
         return serde_json::Value::Null;
     };
     serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
-}
-
-fn posterior_json_value(value: f64) -> serde_json::Value {
-    let rounded = if value.is_finite() {
-        (value * 1_000_000.0).round() / 1_000_000.0
-    } else {
-        return serde_json::Value::Null;
-    };
-    serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
-}
-
-fn posterior_interval_json_value(interval: Option<(f64, f64)>, level: f64) -> serde_json::Value {
-    let Some((lower, upper)) = interval else {
-        return serde_json::Value::Null;
-    };
-    serde_json::json!({
-        "lower": posterior_json_value(lower),
-        "upper": posterior_json_value(upper),
-        "level": posterior_json_value(level),
-    })
 }
 
 fn read_completion_audit_objective(
@@ -56996,11 +57506,84 @@ where
     W: Write,
     E: Write,
 {
+    write_cancelled_error_with_budget(reason, None, mode, stdout, stderr)
+}
+
+/// The operator-tunable wall-clock budget a command ran under, so a deadline
+/// cancellation can name the knob that raises it.
+struct CancelledCommandBudget {
+    env_var: &'static str,
+    seconds: u64,
+    max_seconds: u64,
+    /// The command to rerun, without the environment prefix.
+    rerun: String,
+}
+
+impl CancelledCommandBudget {
+    /// GH#78: `ee index rebuild` and `ee index reembed` (and their
+    /// `--dry-run` plans) run under `EE_INDEX_REBUILD_TIMEOUT_SECONDS`.
+    /// The rerun keeps an explicit `--database` and `--index-dir`, so the
+    /// repair raises the budget for the store that ran out of it rather than
+    /// rebuilding the workspace's default store.
+    fn index_maintenance(
+        operation: &'static str,
+        workspace: &Path,
+        database: Option<&Path>,
+        index_dir: Option<&Path>,
+        dry_run: bool,
+    ) -> Self {
+        let quoted = |path: &Path| shell_quote_cli_arg(&path.display().to_string());
+        let mut rerun = format!("ee --workspace {} index {operation}", quoted(workspace));
+        if let Some(database) = database {
+            rerun.push_str(&format!(" --database {}", quoted(database)));
+        }
+        if let Some(index_dir) = index_dir {
+            rerun.push_str(&format!(" --index-dir {}", quoted(index_dir)));
+        }
+        if dry_run {
+            rerun.push_str(" --dry-run");
+        }
+        rerun.push_str(" --json");
+        Self {
+            env_var: "EE_INDEX_REBUILD_TIMEOUT_SECONDS",
+            seconds: crate::core::index::index_rebuild_timeout().as_secs(),
+            max_seconds: crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS,
+            rerun,
+        }
+    }
+
+    /// A copy-pasteable rerun with four times the budget, and never less
+    /// than the default budget (a budget lowered below it would otherwise
+    /// take several reruns to recover), capped at the accepted maximum.
+    fn repair(&self) -> String {
+        let raised = self
+            .seconds
+            .saturating_mul(4)
+            .max(crate::core::index::DEFAULT_INDEX_REBUILD_TIMEOUT_SECS)
+            .min(self.max_seconds);
+        format!("{}={raised} {}", self.env_var, self.rerun)
+    }
+}
+
+/// A cancellation envelope. A deadline that `budget` governs also carries a
+/// repair raising that budget; any other cancellation is reported unchanged.
+fn write_cancelled_error_with_budget<W, E>(
+    reason: &CancelReason,
+    budget: Option<&CancelledCommandBudget>,
+    mode: impl Into<ErrorRenderMode>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
     let kind = cancel_kind_code(reason.kind);
     let message = cancel_message(reason);
     let mode = mode.into();
+    let budget = budget.filter(|_| reason.kind == asupersync::CancelKind::Deadline);
     if mode != ErrorRenderMode::Human {
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": {
                 "code": "cancelled",
@@ -57012,11 +57595,28 @@ where
                 }
             }
         });
+        if let Some(budget) = budget {
+            let repair = budget.repair();
+            json["error"]["repairKind"] =
+                serde_json::json!(output::repair_command_kind_name(&repair));
+            json["error"]["repair"] = serde_json::json!(repair);
+            json["error"]["details"]["budgetEnv"] = serde_json::json!(budget.env_var);
+            json["error"]["details"]["budgetSeconds"] = serde_json::json!(budget.seconds);
+            json["error"]["details"]["maxBudgetSeconds"] = serde_json::json!(budget.max_seconds);
+        }
         write_machine_error_payload(mode, &json, stdout);
     } else {
-        let rendered = output::redact_mesh_approval_bearers(&format!(
-            "error: cancelled ({kind}): {message}\n"
-        ));
+        let mut rendered = format!("error: cancelled ({kind}): {message}\n");
+        if let Some(budget) = budget {
+            rendered.push_str(&format!(
+                "\nThe {}s wall-clock budget ran out; {} raises it (at most {}s).\n\nNext:\n  {}\n",
+                budget.seconds,
+                budget.env_var,
+                budget.max_seconds,
+                budget.repair()
+            ));
+        }
+        let rendered = output::redact_mesh_approval_bearers(&rendered);
         let _ = stderr.write_all(rendered.as_bytes());
     }
     ProcessExitCode::Cancelled
@@ -58833,51 +59433,16 @@ fn validate_remember_git_capture_args<'a>(
     Ok(Some(selection))
 }
 
-fn persist_remember_sentinels(
-    args: &RememberArgs,
-    report: &RememberMemoryReport,
-) -> Result<(), DomainError> {
-    if (args.sentinels.is_empty() && args.revive_when.is_empty()) || report.dry_run {
-        return Ok(());
+fn remember_creation_companions_from_args<'a>(
+    args: &'a RememberArgs,
+    seal: Option<RememberSealInput<'a>>,
+) -> RememberCreationCompanions<'a> {
+    RememberCreationCompanions {
+        sentinels: &args.sentinels,
+        revive_when: &args.revive_when,
+        stale_threshold_seconds: args.sentinel_stale_threshold_seconds,
+        seal,
     }
-    let specs = args
-        .sentinels
-        .iter()
-        .map(|raw| (raw, MemorySentinelPolarity::Gate, "ee remember --sentinel"))
-        .chain(args.revive_when.iter().map(|raw| {
-            (
-                raw,
-                MemorySentinelPolarity::Revive,
-                "ee remember --revive-when",
-            )
-        }))
-        .map(|(raw, polarity, provenance)| {
-            MemorySentinelSpec::from_raw(
-                &report.memory_id.to_string(),
-                raw,
-                polarity,
-                None,
-                provenance,
-                args.sentinel_stale_threshold_seconds,
-            )
-            .map_err(memory_sentinel_validation_to_domain)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let connection =
-        DbConnection::open_file(&report.database_path).map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to open database {} for sentinel metadata: {error}",
-                report.database_path.display()
-            ),
-            repair: Some("ee doctor --workspace . --json".to_string()),
-        })?;
-    connection
-        .upsert_memory_sentinel_specs(&specs)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to persist memory sentinel metadata: {error}"),
-            repair: Some("ee doctor --workspace . --json".to_string()),
-        })
-        .map(|_| ())
 }
 
 fn remember_attempt_family_from_args(
@@ -59020,22 +59585,23 @@ fn handle_remember(
             idempotency_key: args.idempotency_key.as_deref(),
             defer_index_processing: false,
         };
+        let creation_companions = remember_creation_companions_from_args(args, None);
         let outcome = if args.global {
-            remember_global_memory_with_controls_and_typed_fields(
+            remember_global_memory_with_creation_companions(
                 &options,
                 &controls,
                 &args.typed_field_assignments,
+                creation_companions,
             )
         } else {
-            remember_memory_with_controls_and_typed_fields(
+            remember_memory_with_creation_companions(
                 &options,
                 &controls,
                 &args.typed_field_assignments,
+                None,
+                creation_companions,
             )
         }?;
-        if let RememberOutcome::Created(ref report) = outcome {
-            persist_remember_sentinels(args, report)?;
-        }
         return Ok((outcome, None));
     }
     let Some(content) = args.content.as_deref() else {
@@ -59064,6 +59630,16 @@ fn handle_remember(
     } else {
         content
     };
+    let sealed_at = seal_commitment
+        .as_ref()
+        .map(|_| chrono::Utc::now().to_rfc3339());
+    let seal = seal_commitment.as_deref().zip(sealed_at.as_deref()).map(
+        |(content_commitment, sealed_at)| RememberSealInput {
+            content_commitment,
+            sealed_at,
+        },
+    );
+    let creation_companions = remember_creation_companions_from_args(args, seal);
     let options = RememberMemoryOptions {
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
@@ -59087,66 +59663,41 @@ fn handle_remember(
         defer_index_processing: false,
     };
     let outcome = if args.global {
-        remember_global_memory_with_controls_and_typed_fields(
+        remember_global_memory_with_creation_companions(
             &options,
             &controls,
             &args.typed_field_assignments,
+            creation_companions,
         )
     } else {
-        crate::core::memory::remember_memory_with_controls_typed_fields_and_family(
+        remember_memory_with_creation_companions(
             &options,
             &controls,
             &args.typed_field_assignments,
             attempt_family.as_ref(),
+            creation_companions,
         )
     }?;
     let RememberOutcome::Created(ref report) = outcome else {
         return Ok((outcome, None));
     };
-    persist_remember_sentinels(args, report)?;
-    let seal_value = match seal_commitment {
-        Some(commitment) => Some(persist_remember_seal(report, &commitment)?),
-        None => None,
-    };
+    let seal_value = seal.map(|seal| remember_seal_report(report, seal));
     Ok((outcome, seal_value))
 }
 
-/// Persist the seal row for a freshly created sealed memory and return the
-/// seal object surfaced in the report (bd-sealed-preregistration-memory-b67be).
-/// Dry runs return the would-be seal without touching storage.
-fn persist_remember_seal(
+/// Render the seal already included in the memory's source transaction, or
+/// the same prepared seal for a dry-run preview.
+fn remember_seal_report(
     report: &RememberMemoryReport,
-    content_commitment: &str,
-) -> Result<serde_json::Value, DomainError> {
-    let sealed_at = chrono::Utc::now().to_rfc3339();
-    if !report.dry_run {
-        let connection = DbConnection::open_file(&report.database_path).map_err(|error| {
-            DomainError::Storage {
-                message: format!(
-                    "Failed to open database {} for seal metadata: {error}",
-                    report.database_path.display()
-                ),
-                repair: Some("ee doctor --workspace . --json".to_string()),
-            }
-        })?;
-        connection
-            .insert_memory_seal(
-                &report.memory_id.to_string(),
-                content_commitment,
-                &sealed_at,
-            )
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to persist memory seal: {error}"),
-                repair: Some("ee doctor --workspace . --json".to_string()),
-            })?;
-    }
-    Ok(serde_json::json!({
+    seal: RememberSealInput<'_>,
+) -> serde_json::Value {
+    serde_json::json!({
         "schema": crate::models::MEMORY_SEAL_SCHEMA_V1,
-        "contentCommitment": content_commitment,
-        "sealedAt": sealed_at,
+        "contentCommitment": seal.content_commitment,
+        "sealedAt": seal.sealed_at,
         "revealed": false,
         "revealCommand": format!("ee memory reveal {} --content-file <path> --json", report.memory_id),
-    }))
+    })
 }
 
 /// Render one bd-1pi9m.4 remember outcome with the active renderer. A sealed
@@ -59441,6 +59992,7 @@ where
         workspace_path: &workspace_path,
         database_path: args.database.as_deref(),
         candidate_type: args.candidate_type.as_deref(),
+        propose: args.propose,
         status,
         target_memory_id: args.target_memory_id.as_deref(),
         limit: args.limit,
@@ -61898,8 +62450,7 @@ fn resolve_certificate_store_source(
         return CertificateStoreSource::Manifest(manifest_path.to_path_buf());
     }
 
-    let workspace_path =
-        resolve_cli_workspace_path(&resolve_workspace_for_cli(cli.workspace.as_deref()).0);
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let manifest_path = workspace_path.join(CERTIFICATE_DEFAULT_MANIFEST_FILE);
     if manifest_path.exists() {
         CertificateStoreSource::Manifest(manifest_path)
@@ -62655,11 +63206,19 @@ fn open_causal_database(cli: &Cli) -> Result<(crate::db::DbConnection, String), 
             repair: Some("ee doctor --json".to_owned()),
         }
     })?;
-    conn.migrate()
-        .map_err(|error| DomainError::MigrationRequired {
-            message: format!("Failed to migrate causal evidence database: {error}"),
-            repair: Some("ee init --workspace .".to_owned()),
-        })?;
+    conn.migrate().map_err(|error| {
+        // bd-12ybp: see db_failure_or_storage_panic — a recovered panic must
+        // not be reported as "migration required" (exit 8).
+        let message = format!("Failed to migrate causal evidence database: {error}");
+        crate::core::db_failure_or_storage_panic(
+            &error,
+            message.clone(),
+            DomainError::MigrationRequired {
+                message,
+                repair: Some("ee init --workspace .".to_owned()),
+            },
+        )
+    })?;
     let workspace_id = stable_causal_workspace_id(&workspace_path);
     Ok((conn, workspace_id))
 }
@@ -62729,9 +63288,7 @@ where
     E: Write,
 {
     let options = crate::core::claims::ClaimListOptions {
-        workspace_path: resolve_cli_workspace_path(
-            cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
-        ),
+        workspace_path: resolve_cli_workspace_path(&cli.resolve_workspace()),
         claims_file: args.claims_file.clone(),
         status: args.status.clone(),
         frequency: args.frequency.clone(),
@@ -62755,9 +63312,7 @@ where
     E: Write,
 {
     let options = crate::core::claims::ClaimShowOptions {
-        workspace_path: resolve_cli_workspace_path(
-            cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
-        ),
+        workspace_path: resolve_cli_workspace_path(&cli.resolve_workspace()),
         claims_file: args.claims_file.clone(),
         claim_id: args.claim_id.clone(),
         include_manifest: args.include_manifest,
@@ -62782,9 +63337,7 @@ where
 {
     let claim_id = args.id.clone().unwrap_or_else(|| args.claim_id.clone());
     let options = crate::core::claims::ClaimVerifyOptions {
-        workspace_path: resolve_cli_workspace_path(
-            cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")),
-        ),
+        workspace_path: resolve_cli_workspace_path(&cli.resolve_workspace()),
         claims_file: args.claims_file.clone(),
         artifacts_dir: args.artifacts_dir.clone(),
         claim_id,
@@ -64637,8 +65190,6 @@ where
     };
     let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ee"));
     let kind = crate::daemon::service_install::current_service_kind();
-    let mut plan =
-        crate::daemon::service_install::plan_daemon_service(command, kind, &home, &binary, confirm);
     if kind == crate::daemon::service_install::DaemonServiceKind::Unsupported {
         return write_domain_error(
             &DomainError::Configuration {
@@ -64650,6 +65201,13 @@ where
             stderr,
         );
     }
+    let workspace = match daemon_service_workspace(&cli.resolve_workspace(), !uninstall) {
+        Ok(workspace) => workspace,
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+    };
+    let mut plan = crate::daemon::service_install::plan_daemon_service_for_workspace(
+        command, kind, &home, &binary, &workspace, confirm,
+    );
     if confirm {
         if uninstall {
             if let Err(error) = crate::daemon::service_install::deactivate_daemon_service(kind) {
@@ -64734,6 +65292,22 @@ where
         ),
         stdout,
     )
+}
+
+/// Workspace root a supervised steward unit pins (GH#81).
+///
+/// A supervisor starts the unit in its own working directory (`$HOME` for
+/// systemd and launchd), where discovery would find whatever `.ee/` sits
+/// there. The unit therefore carries the workspace this command resolved, as
+/// an absolute canonical root. Installing also requires that root to hold a
+/// store: a steward pinned to a storeless directory reports successful ticks
+/// that do nothing. Uninstalling only renders the plan, so it skips that check.
+fn daemon_service_workspace(resolved: &Path, require_store: bool) -> Result<PathBuf, DomainError> {
+    let workspace = resolve_cli_workspace_path(resolved);
+    if require_store {
+        crate::core::ensure_addressed_database_exists(&workspace.join(".ee").join("ee.db"))?;
+    }
+    Ok(workspace)
 }
 
 fn write_team_like_json<W, T>(
@@ -65888,7 +66462,7 @@ where
     W: Write,
     E: Write,
 {
-    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
     let selected_workspace = selected_maintenance_workspace_path(
         workspace_path,
         workspace_source,
@@ -66230,8 +66804,7 @@ fn handle_maintenance_graph_witnesses_prune<W>(
 where
     W: Write,
 {
-    let workspace =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = match graph_database_path(cli, args.database.as_deref()) {
         Ok(path) => path,
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, &mut io::sink()),
@@ -66389,12 +66962,19 @@ fn run_maintenance_job<W>(
 where
     W: Write,
 {
-    let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
+    let (workspace_path, workspace_source) = cli.resolve_workspace_with_source();
     let selected_workspace = selected_maintenance_workspace_path(
         workspace_path,
         workspace_source,
         request.database.is_some(),
     );
+    let explicit_database = request
+        .database
+        .map(PathBuf::as_path)
+        .map(absolute_path_or_lexical);
+    let history_path = selected_workspace.as_deref().map(|workspace_path| {
+        maintenance_job_history_path(workspace_path, explicit_database.as_deref())
+    });
     let lock_holder = format!(
         "ee-{}-{}",
         request.command.replace(' ', "_"),
@@ -66423,7 +67003,9 @@ where
                         "job": null,
                         "history": {
                             "persisted": false,
-                            "path": maintenance_job_history_path(workspace_path).display().to_string(),
+                            "path": history_path
+                                .as_deref()
+                                .map(|path| path.display().to_string()),
                         },
                         "results": [],
                         "degraded": [error.data_json()],
@@ -66490,31 +67072,42 @@ where
 
     let mut runner = crate::steward::ManualRunner::new(runner_options);
     let mut degraded = Vec::new();
-    let result = runner.run_job_type(
+    // A fresh runner numbers its jobs from `job-000001`, so the job gets an ID
+    // that stays unique across runs; the history row reuses it.
+    let result = runner.run_job_type_with_id(
+        format!("job_{}", uuid::Uuid::now_v7().simple()),
         request.job_type,
         Some(format!("{} {}", request.command, request.job_type.as_str())),
     );
     let result_json = result.data_json();
+    let database_path = runner
+        .database_path()
+        .map(|path| absolute_path_or_lexical(&path));
     let row = maintenance_job_history_row(
         request.command,
         request.job_type,
         selected_workspace.as_deref(),
+        database_path.as_deref(),
         &result,
     );
     let mut history = serde_json::json!({
         "persisted": false,
-        "path": selected_workspace
-            .as_deref()
-            .map(|workspace_path| maintenance_job_history_path(workspace_path).display().to_string()),
+        "path": history_path.as_deref().map(|path| path.display().to_string()),
     });
 
     if !request.dry_run
-        && let Some(workspace_path) = selected_workspace.as_ref()
+        && let Some(history_path) = history_path.as_deref()
     {
-        match append_maintenance_job_history(workspace_path, &row) {
-            Ok(path) => {
+        // Only the workspace's own `.ee` may be created here. An explicitly
+        // selected store directory that does not exist means the database
+        // path was wrong, and the job has already failed on it.
+        let create_store_dir = explicit_database
+            .as_deref()
+            .and_then(crate::config::workspace::standard_store_dir)
+            .is_none();
+        match append_maintenance_job_history(history_path, &row, create_store_dir) {
+            Ok(()) => {
                 history["persisted"] = serde_json::json!(true);
-                history["path"] = serde_json::json!(path.display().to_string());
                 history["rowId"] = row["id"].clone();
             }
             Err(message) => degraded.push(serde_json::json!({
@@ -66869,7 +67462,8 @@ where
             })))
             .collect::<Vec<_>>(),
         "historyPath": maintenance_job_history_path(
-            &cli.resolve_workspace()
+            &cli.resolve_workspace(),
+            None,
         ).display().to_string(),
         "next": "ee job run decay_sweep --json"
     });
@@ -66881,6 +67475,13 @@ where
     W: Write,
 {
     let workspace_path = cli.resolve_workspace();
+    let history_path = maintenance_job_history_path(
+        &workspace_path,
+        args.database
+            .as_deref()
+            .map(absolute_path_or_lexical)
+            .as_deref(),
+    );
     let since = match parse_job_history_since(args.since.as_deref()) {
         Ok(since) => since,
         Err(message) => {
@@ -66899,7 +67500,7 @@ where
             );
         }
     };
-    let mut rows = match load_maintenance_job_history(&workspace_path) {
+    let mut rows = match load_maintenance_job_history(&history_path) {
         Ok(rows) => rows,
         Err(message) => {
             return write_maintenance_response(
@@ -66939,7 +67540,7 @@ where
         "schema": MAINTENANCE_JOB_LIST_SCHEMA_V1,
         "command": "job list",
         "workspace": workspace_path.display().to_string(),
-        "historyPath": maintenance_job_history_path(&workspace_path).display().to_string(),
+        "historyPath": history_path.display().to_string(),
         "filters": {
             "kind": args.kind.map(JobType::as_str),
             "since": args.since,
@@ -66956,7 +67557,14 @@ where
     W: Write,
 {
     let workspace_path = cli.resolve_workspace();
-    let mut rows = match load_maintenance_job_history(&workspace_path) {
+    let history_path = maintenance_job_history_path(
+        &workspace_path,
+        args.database
+            .as_deref()
+            .map(absolute_path_or_lexical)
+            .as_deref(),
+    );
+    let mut rows = match load_maintenance_job_history(&history_path) {
         Ok(rows) => rows,
         Err(message) => {
             return write_maintenance_response(
@@ -66987,7 +67595,7 @@ where
             "schema": MAINTENANCE_JOB_SHOW_SCHEMA_V1,
             "command": "job show",
             "workspace": workspace_path.display().to_string(),
-            "historyPath": maintenance_job_history_path(&workspace_path).display().to_string(),
+            "historyPath": history_path.display().to_string(),
             "job": row,
             "linkedAuditEntries": [],
         });
@@ -67014,19 +67622,21 @@ fn maintenance_job_history_row(
     command: &str,
     job_type: JobType,
     workspace_path: Option<&Path>,
+    database_path: Option<&Path>,
     result: &crate::steward::JobRunResult,
 ) -> serde_json::Value {
     let result_json = result.data_json();
     let now = chrono::Utc::now().to_rfc3339();
     serde_json::json!({
         "schema": MAINTENANCE_JOB_ROW_SCHEMA_V1,
-        "id": format!("job_{}", uuid::Uuid::now_v7().simple()),
+        "id": result.job_id.as_str(),
         "runnerJobId": result.job_id.as_str(),
         "jobId": result.job_id.as_str(),
         "jobType": job_type.as_str(),
         "requestedJob": job_type.as_str(),
         "command": command,
         "workspace": workspace_path.map(|path| path.display().to_string()),
+        "databasePath": database_path.map(|path| path.display().to_string()),
         "recordedAt": now,
         "completedAt": now,
         "outcome": result.outcome.as_str(),
@@ -67042,8 +67652,21 @@ fn maintenance_job_history_row(
     })
 }
 
-fn maintenance_job_history_path(workspace_path: &Path) -> PathBuf {
-    workspace_path.join(".ee").join("maintenance-jobs.jsonl")
+/// The maintenance job history of the store a job runs against. A database
+/// in a standard store layout (`.ee/ee.db` or `.ee-campaign/ee.db`, the rule
+/// that also places its index) keeps its history next to it; any other
+/// database, or none, uses the workspace's `.ee/maintenance-jobs.jsonl`.
+fn maintenance_job_history_path(workspace_path: &Path, database_path: Option<&Path>) -> PathBuf {
+    database_path
+        .and_then(crate::config::workspace::standard_store_dir)
+        .map_or_else(|| workspace_path.join(".ee"), Path::to_path_buf)
+        .join("maintenance-jobs.jsonl")
+}
+
+/// `path` made absolute against the current directory without touching the
+/// filesystem, so a relative `--database` names the file the job opens.
+fn absolute_path_or_lexical(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Hard cap on `.ee/maintenance-jobs.jsonl` reads in
@@ -67068,29 +67691,40 @@ fn maintenance_job_history_path(workspace_path: &Path) -> PathBuf {
 const MAINTENANCE_JOB_HISTORY_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 fn append_maintenance_job_history(
-    workspace_path: &Path,
+    path: &Path,
     row: &serde_json::Value,
-) -> Result<PathBuf, String> {
-    let path = maintenance_job_history_path(workspace_path);
+    create_store_dir: bool,
+) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Could not resolve parent directory for {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
-    let encoded = serde_json::to_string(row)
+    if create_store_dir {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    } else if !parent.is_dir() {
+        return Err(format!(
+            "Cannot write job history: store directory {} does not exist",
+            parent.display()
+        ));
+    }
+    let mut line = serde_json::to_string(row)
         .map_err(|error| format!("Failed to encode maintenance job row: {error}"))?;
+    line.push('\n');
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
-    writeln!(file, "{encoded}")
-        .map_err(|error| format!("Failed to append {}: {error}", path.display()))?;
-    Ok(path)
+    // Runs in other workspaces append to a store's history under their own
+    // workspace's maintenance lock, not this store's, so appends to one file
+    // can race. Write the row and its newline in one call: an append-mode
+    // write lands whole at the end of the file, whereas `writeln!` issues the
+    // row and the newline as two writes that another run can split.
+    file.write_all(line.as_bytes())
+        .map_err(|error| format!("Failed to append {}: {error}", path.display()))
 }
 
-fn load_maintenance_job_history(workspace_path: &Path) -> Result<Vec<serde_json::Value>, String> {
-    let path = maintenance_job_history_path(workspace_path);
+fn load_maintenance_job_history(path: &Path) -> Result<Vec<serde_json::Value>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -67920,10 +68554,7 @@ where
 {
     use crate::core::support_bundle::{BundleOptions, create_bundle, plan_bundle};
 
-    let workspace_path = args
-        .workspace
-        .clone()
-        .unwrap_or_else(|| cli.resolve_workspace());
+    let (workspace_path, _) = resolve_local_workspace_for_cli(cli, args.workspace.as_deref());
     let redaction = effective_redaction_level(
         &workspace_path,
         args.redaction,
@@ -68079,7 +68710,10 @@ where
     options.max_recent_commits = args.max_recent_commits;
     options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
     options.enabled_sources = enabled_sources;
-    options.agent_mail_snapshot_path = args.agent_mail_snapshot.clone();
+    options.agent_mail_snapshot_path = args
+        .agent_mail_snapshot
+        .clone()
+        .or_else(|| crate::core::swarm_brief::default_agent_mail_snapshot_path(&options.workspace));
     options.agent_inventory_only_connectors = args
         .agent_inventory_only
         .as_deref()
@@ -69500,8 +70134,7 @@ where
 }
 
 fn economy_paths(cli: &Cli, database: Option<&Path>) -> Result<(PathBuf, PathBuf), DomainError> {
-    let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = database
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
@@ -69746,7 +70379,14 @@ const HANDOFF_SUBCOMMANDS: &[&str] = &[
     "rotate-key",
 ];
 const IMPORT_SUBCOMMANDS: &[&str] = &["cass", "jsonl", "eidetic-legacy"];
-const INDEX_SUBCOMMANDS: &[&str] = &["rebuild", "reembed", "status"];
+const INDEX_SUBCOMMANDS: &[&str] = &[
+    "rebuild",
+    "reembed",
+    "status",
+    "vacuum",
+    "backfill-tags",
+    "backfill-anchors",
+];
 const INSTALL_SUBCOMMANDS: &[&str] = &["check", "plan"];
 const LAB_SUBCOMMANDS: &[&str] = &["capture", "replay", "counterfactual"];
 const LEARN_SUBCOMMANDS: &[&str] = &[
@@ -69771,6 +70411,7 @@ const MAINTENANCE_SUBCOMMANDS: &[&str] = &[
 // `ee memory link list <id>` doubly opaque: the word `list` was swallowed as
 // a positional MEMORY_ID and did-you-mean had nothing to suggest.
 const MEMORY_SUBCOMMANDS: &[&str] = &[
+    "anchors",
     "expire",
     "drift",
     "level",
@@ -70007,12 +70648,18 @@ impl NormalizedInvocation {
                     DecideCommand::List(_) => "decide list".to_string(),
                     DecideCommand::Revisit(_) => "decide revisit".to_string(),
                 },
+                Command::Evidence(evidence::EvidenceCommand::Withdraw(_)) => {
+                    "evidence withdraw".to_string()
+                }
                 Command::Migrate(migrate) => match migrate {
                     MigrateCommand::Status(_) => "migrate status".to_string(),
                     MigrateCommand::Run(_) => "migrate run".to_string(),
                     MigrateCommand::ShardFanout(_) => "migrate shard-fanout".to_string(),
                 },
                 Command::Curate(curate) => match curate {
+                    CurateCommand::Candidates(args) if args.propose => {
+                        "curate candidates --propose".to_string()
+                    }
                     CurateCommand::Candidates(_) => "curate candidates".to_string(),
                     CurateCommand::Doctor(_) => "curate doctor".to_string(),
                     CurateCommand::Show(_) => "curate show".to_string(),
@@ -70161,6 +70808,7 @@ impl NormalizedInvocation {
                     IndexCommand::Status(_) => "index status".to_string(),
                     IndexCommand::Vacuum(_) => "index vacuum".to_string(),
                     IndexCommand::BackfillTags(_) => "index backfill-tags".to_string(),
+                    IndexCommand::BackfillAnchors(_) => "index backfill-anchors".to_string(),
                 },
                 Command::Introspect => "introspect".to_string(),
                 Command::Primer(_) => "primer".to_string(),
@@ -70200,6 +70848,7 @@ impl NormalizedInvocation {
                     LensCommand::Explain(_) => "lens explain".to_string(),
                 },
                 Command::Memory(mem) => match mem {
+                    MemoryCommand::Anchors(_) => "memory anchors".to_string(),
                     MemoryCommand::Expire(_) => "memory expire".to_string(),
                     MemoryCommand::Drift(_) => "memory drift".to_string(),
                     MemoryCommand::Level(_) => "memory level".to_string(),
@@ -71654,6 +72303,142 @@ mod tests {
     use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsTopic};
     use crate::core::init::{InitOptions, init_workspace};
 
+    #[test]
+    fn pack_error_log_recalls_later_native_diagnostic_from_text_and_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::core::error_diagnosis::{ErrorRepairLinkRecording, record_error_repair_links};
+        use crate::db::{
+            CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
+            EvidenceProducerKind,
+        };
+
+        let directory = tempfile::tempdir()?;
+        let workspace = directory.path().canonicalize()?;
+        let database = workspace.join("multi-error.db");
+        let connection = DbConnection::open_file(&database)?;
+        connection.migrate()?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )?;
+        let session = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(930)).to_string();
+        connection.insert_session(
+            &session,
+            &CreateSessionInput {
+                workspace_id: workspace_id.to_owned(),
+                cass_session_id: "/sessions/multi-error.jsonl".to_owned(),
+                source_path: None,
+                agent_name: Some("claude_code".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 0,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(b"multi-error-session").to_hex()),
+                metadata_json: None,
+            },
+        )?;
+        let evidence = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(930)).to_string();
+        let excerpt = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": "LATER_NATIVE_REPAIR implements the missing serialization trait."
+                }]
+            }
+        })
+        .to_string();
+        connection.insert_evidence_span(
+            &evidence,
+            &CreateEvidenceSpanInput {
+                workspace_id: workspace_id.to_owned(),
+                session_id: session.clone(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::CassImport,
+                cass_span_id: format!("{session}:1"),
+                span_kind: "message".to_owned(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: None,
+                end_byte: None,
+                role: Some("assistant".to_owned()),
+                content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+                excerpt,
+                metadata_json: None,
+                inherited_redaction_classes: Vec::new(),
+            },
+        )?;
+        record_error_repair_links(
+            &connection,
+            workspace_id,
+            &crate::core::error_recall::from_rustc(Some("E0277"), "trait bound is not satisfied"),
+            &ErrorRepairLinkRecording {
+                helpful_repairs: vec![evidence],
+                ..ErrorRepairLinkRecording::default()
+            },
+        )?;
+        let mut log = ["E0308", "E0277"]
+            .into_iter()
+            .map(|code| {
+                serde_json::json!({
+                    "reason": "compiler-message",
+                    "message": {
+                        "$message_type": "diagnostic",
+                        "message": "compiler diagnostic",
+                        "code": {"code": code},
+                        "level": "error",
+                        "spans": [],
+                        "children": []
+                    }
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        log.push_str("\n{\"reason\":\"build-finished\",\"success\":false}\n");
+        assert_eq!(
+            crate::core::cass_error_recall::structured_error_diagnostics(&log).len(),
+            2
+        );
+        let seed = super::error_recall_query_seed(&workspace, Some(&database), Some(&log))?
+            .ok_or("missing multi-error query seed")?;
+        assert!(seed.contains("unseen fingerprint:rustc:E0308"));
+        assert!(seed.contains("known fingerprint:rustc:E0277"));
+        assert!(seed.contains("LATER_NATIVE_REPAIR"));
+        let log_path = workspace.join("failure.jsonl");
+        std::fs::write(&log_path, &log)?;
+        assert_eq!(
+            Some(seed),
+            super::error_recall_query_seed(
+                &workspace,
+                Some(&database),
+                Some(log_path.to_str().ok_or("non-UTF-8 fixture path")?),
+            )?
+        );
+
+        let free_text = "build output: error[E0277]: trait bound is not satisfied";
+        assert!(crate::core::cass_error_recall::structured_error_diagnostics(free_text).is_empty());
+        let fallback =
+            super::error_recall_query_seed(&workspace, Some(&database), Some(free_text))?
+                .ok_or("missing free-text fallback")?;
+        assert_eq!(
+            fallback,
+            crate::core::error_diagnosis::pack_error_recall_query_seed(
+                &connection,
+                workspace_id,
+                &crate::core::error_recall::from_rustc(Some("E0277"), free_text),
+            )?
+        );
+        assert!(super::error_recall_query_seed(&workspace, Some(&database), None)?.is_none());
+        Ok(())
+    }
+
     /// GH#26: `ee model status` must mirror high-severity
     /// `modelLifecycle.degraded[]` entries into the top-level envelope instead
     /// of pinning `degraded: []`.
@@ -71744,8 +72529,8 @@ mod tests {
     use crate::cass::CassImportError;
     use crate::config::MeshCommandMode;
     use crate::core::impact::{
-        IMPACT_SCHEMA_V1, ImpactFallbackStatus, ImpactMatchType, ImpactMemorySummary, ImpactReport,
-        ImpactResolvedSurface, ImpactResult,
+        IMPACT_SCHEMA_V1, ImpactFallbackStatus, ImpactGraphPhase, ImpactMatchType,
+        ImpactMemorySummary, ImpactReport, ImpactResolvedSurface, ImpactResult,
     };
     use crate::core::index::IndexRebuildError;
     use crate::core::lab::{InterventionType, SwapRevisionMode};
@@ -72353,6 +73138,7 @@ mod tests {
     fn stream_header_test_options(workspace_path: PathBuf) -> ContextPackOptions {
         ContextPackOptions {
             task_paths: Vec::new(),
+            bead_id: None,
             workspace_path,
             database_path: None,
             index_dir: None,
@@ -74025,6 +74811,14 @@ mod tests {
     }
 
     #[test]
+    fn index_coalesce_failure_repair_hint_uses_current_public_surface() -> TestResult {
+        ensure_repair_command_parses(
+            crate::steward::INDEX_COALESCE_REPAIR_COMMAND,
+            "index_coalesce_failed repair command",
+        )
+    }
+
+    #[test]
     fn parser_accepts_global_json_before_or_after_command() -> TestResult {
         let before = Cli::try_parse_from(["ee", "--json", "status"])
             .map(|cli| (cli.json, cli.command))
@@ -75618,6 +76412,71 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_pack_delta_byte_budget_and_preserves_uncapped_default() -> TestResult {
+        for (raw, expected) in [("0", 0), ("4096", 4096), ("18446744073709551615", u64::MAX)] {
+            let parsed = Cli::try_parse_from([
+                "ee",
+                "pack",
+                "release",
+                "--since",
+                "blake3:prior-pack",
+                "--max-delta-bytes",
+                raw,
+                "--json",
+            ])
+            .map_err(|error| format!("pack delta byte-budget parse failed: {error}"))?;
+            let Some(Command::Pack(args)) = parsed.command else {
+                return Err("expected pack command".to_owned());
+            };
+            ensure_equal(
+                &args.max_delta_bytes,
+                &Some(expected),
+                "pack delta byte budget",
+            )?;
+            ensure_equal(
+                &args.since.as_deref(),
+                &Some("blake3:prior-pack"),
+                "pack delta baseline",
+            )?;
+        }
+
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "release",
+            "--since",
+            "blake3:prior-pack",
+            "--json",
+        ])
+        .map_err(|error| format!("uncapped pack delta parse failed: {error}"))?;
+        let Some(Command::Pack(args)) = parsed.command else {
+            return Err("expected pack command".to_owned());
+        };
+        ensure_equal(&args.max_delta_bytes, &None, "default delta byte budget")
+    }
+
+    #[test]
+    fn parser_rejects_invalid_pack_delta_byte_budgets() -> TestResult {
+        for invalid in ["-1", "1.5", "18446744073709551616", "unlimited"] {
+            let argument = format!("--max-delta-bytes={invalid}");
+            ensure(
+                Cli::try_parse_from([
+                    "ee",
+                    "pack",
+                    "release",
+                    "--since",
+                    "last",
+                    argument.as_str(),
+                    "--json",
+                ])
+                .is_err(),
+                format!("invalid byte budget {invalid:?} must be rejected"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn parser_accepts_explain_performance_on_context_pack_and_search() -> TestResult {
         let pack_error_log = Cli::try_parse_from([
             "ee",
@@ -75889,6 +76748,205 @@ mod tests {
             }
             other => Err(format!("expected search command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn orient_learn_gaps_retires_covered_suggestions_without_hiding_open_demand() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let connection =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("orient-gap-demand".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (query_hash, misses) in [
+            ("hash_open_demand", 3),
+            ("hash_covered_alpha", 6),
+            ("hash_covered_beta", 7),
+            ("hash_covered_gamma", 8),
+        ] {
+            for _ in 0..misses {
+                connection
+                    .insert_audit(
+                        &crate::db::generate_audit_id(),
+                        &crate::db::CreateAuditInput {
+                            workspace_id: Some(workspace_id.clone()),
+                            actor: None,
+                            action: crate::db::audit_actions::SEARCH_MISS_RECORDED.to_owned(),
+                            target_type: Some("query_hash".to_owned()),
+                            target_id: Some(query_hash.to_owned()),
+                            details: Some(
+                                serde_json::json!({
+                                    "schema": "ee.search.query_miss.v1",
+                                    "queryHash": query_hash,
+                                    "reason": "no_relevant_results",
+                                    "queryTextStored": false,
+                                    "queryVectorStored": false,
+                                })
+                                .to_string(),
+                            ),
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        let options = crate::core::learn::LearnGapsOptions {
+            workspace: workspace.to_path_buf(),
+            since: None,
+            limit: 10,
+        };
+        let before = crate::core::learn::show_gaps(&options).map_err(|error| error.to_string())?;
+        ensure_equal(&before.cluster_count, &4, "four repeated demand clusters")?;
+        let open_gap = before
+            .gaps
+            .iter()
+            .find(|gap| gap.query_hash == "hash_open_demand")
+            .ok_or_else(|| "lower-demand open cluster missing".to_owned())?;
+        let record_answer =
+            |index: usize, gap: &crate::core::learn::LearnGapCluster| -> Result<String, String> {
+                let memory_id = format!("mem_{index:026}");
+                connection
+                    .insert_memory(
+                        &memory_id,
+                        &crate::db::CreateMemoryInput {
+                            workspace_id: workspace_id.clone(),
+                            level: "procedural".to_owned(),
+                            kind: "rule".to_owned(),
+                            content: format!("Recorded answer for {}.", gap.query_hash),
+                            workflow_id: None,
+                            confidence: 0.8,
+                            utility: 0.5,
+                            importance: 0.5,
+                            provenance_uri: None,
+                            trust_class: "human_explicit".to_owned(),
+                            trust_subclass: None,
+                            tags: vec![format!("knowledge-gap:{}", gap.cluster_id)],
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(memory_id)
+            };
+        for (index, gap) in before
+            .gaps
+            .iter()
+            .filter(|gap| gap.query_hash != open_gap.query_hash)
+            .enumerate()
+        {
+            record_answer(index + 1, gap)?;
+        }
+
+        let history = crate::core::learn::show_gaps(&options).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &history.gaps.len(),
+            &4,
+            "covered gap history remains accessible",
+        )?;
+        ensure_equal(
+            &history
+                .gaps
+                .iter()
+                .filter(|gap| gap.status == "likely_covered")
+                .count(),
+            &3,
+            "three live answers close their explicit gaps",
+        )?;
+        let limited = crate::core::learn::show_gaps(&crate::core::learn::LearnGapsOptions {
+            limit: 1,
+            ..options.clone()
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &limited.gaps.first().map(|gap| gap.cluster_id.as_str()),
+            &Some(open_gap.cluster_id.as_str()),
+            "covered high-demand history must not crowd out open work",
+        )?;
+        let repeat = crate::core::learn::show_gaps(&options).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &history.gaps,
+            &repeat.gaps,
+            "gap ordering remains deterministic",
+        )?;
+
+        let mut degraded = Vec::new();
+        let summary = super::orient_learn_gaps_value(workspace, &mut degraded);
+        ensure(degraded.is_empty(), "learning summary remains available")?;
+        ensure_equal(
+            &summary["status"],
+            &serde_json::json!("present"),
+            "open demand status",
+        )?;
+        ensure_equal(
+            &summary["returned"],
+            &serde_json::json!(1),
+            "one open capture suggestion",
+        )?;
+        ensure_equal(
+            &summary["clusterCount"],
+            &serde_json::json!(4),
+            "history count is preserved",
+        )?;
+        ensure_equal(
+            &summary["topGaps"][0]["clusterId"],
+            &serde_json::json!(open_gap.cluster_id),
+            "orientation suggests the remaining open cluster",
+        )?;
+        ensure(
+            summary["topGaps"][0]["suggestedCommand"]
+                .as_str()
+                .is_some_and(|command| command.contains(&open_gap.cluster_id)),
+            "suggested capture retains its explicit coverage binding",
+        )?;
+
+        let final_answer = record_answer(4, open_gap)?;
+        let all_covered = super::orient_learn_gaps_value(workspace, &mut degraded);
+        ensure_equal(
+            &all_covered["status"],
+            &serde_json::json!("empty"),
+            "no unmet demand",
+        )?;
+        ensure_equal(
+            &all_covered["returned"],
+            &serde_json::json!(0),
+            "covered work is not re-proposed",
+        )?;
+        ensure_equal(
+            &all_covered["topGaps"],
+            &serde_json::json!([]),
+            "no duplicate capture prompts",
+        )?;
+        ensure_equal(
+            &all_covered["clusterCount"],
+            &serde_json::json!(4),
+            "covered history retained",
+        )?;
+
+        connection
+            .tombstone_memory(&final_answer)
+            .map_err(|error| error.to_string())?;
+        let reopened = super::orient_learn_gaps_value(workspace, &mut degraded);
+        ensure_equal(
+            &reopened["returned"],
+            &serde_json::json!(1),
+            "lost coverage reopens demand",
+        )?;
+        ensure_equal(
+            &reopened["topGaps"][0]["clusterId"],
+            &serde_json::json!(open_gap.cluster_id),
+            "withdrawn answer restores the same capture target",
+        )?;
+        ensure(degraded.is_empty(), "gap lifecycle reads remain healthy")
     }
 
     #[test]
@@ -80371,6 +81429,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn graph_diff_since_validates_and_normalizes_rfc3339() -> TestResult {
+        for invalid in ["not-a-time", "2026-08-01", "2026-08-01T25:00:00Z"] {
+            ensure(
+                super::Cli::try_parse_from(["ee", "graph", "diff", "--since", invalid]).is_err(),
+                "invalid graph-diff timestamp must be a usage error",
+            )?;
+        }
+        let cli = super::Cli::try_parse_from([
+            "ee",
+            "graph",
+            "diff",
+            "--since",
+            "2026-08-01T02:00:00.123456789+02:00",
+        ])
+        .map_err(|error| error.to_string())?;
+        let Some(super::Command::Graph(super::GraphCommand::Diff(args))) = cli.command else {
+            return Err("expected graph diff arguments".to_owned());
+        };
+        ensure_equal(
+            &args
+                .since
+                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+            &Some("2026-08-01T00:00:00.123456789Z".to_owned()),
+            "graph diff must preserve the RFC3339 instant and fractional precision",
+        )
+    }
+
     #[cfg(feature = "graph")]
     #[test]
     fn graph_suggest_links_absent_and_valid_affinity_preserve_real_suggestions() -> TestResult {
@@ -81299,6 +82385,23 @@ mod tests {
 
         let curate_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         seed_legacy_v011_database(curate_dir.path())?;
+        let database_path = curate_dir.path().join(".ee").join("ee.db");
+        let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
+        let shm_path = PathBuf::from(format!("{}-shm", database_path.display()));
+        let paths = [&database_path, &wal_path, &shm_path];
+        let snapshot = || {
+            paths
+                .iter()
+                .map(|path| {
+                    if path.exists() {
+                        fs::read(path).map(Some).map_err(|error| error.to_string())
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()
+        };
+        let before = snapshot()?;
         let curate_workspace = curate_dir.path().to_string_lossy().into_owned();
         let (curate_exit, curate_stdout, curate_stderr) = invoke(&[
             "ee",
@@ -81311,8 +82414,53 @@ mod tests {
         ]);
         ensure_equal(
             &curate_exit,
+            &ProcessExitCode::MigrationRequired,
+            "read-only curate candidates migration-required exit",
+        )?;
+        ensure(
+            curate_stderr.is_empty(),
+            "curate candidates JSON stderr clean",
+        )?;
+        let curate_json: serde_json::Value =
+            serde_json::from_str(&curate_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &curate_json["error"]["code"],
+            &serde_json::json!("migration_required"),
+            "curate candidates require explicit migration",
+        )?;
+        ensure_equal(
+            &snapshot()?,
+            &before,
+            "read-only candidates must not alter the database or WAL sidecars",
+        )?;
+
+        let (migration_exit, _, migration_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &curate_workspace,
+            "--json",
+            "migrate",
+            "run",
+        ]);
+        ensure_equal(
+            &migration_exit,
             &ProcessExitCode::Success,
-            "curate candidates exit",
+            "explicit migration exit",
+        )?;
+        ensure(migration_stderr.is_empty(), "migration JSON stderr clean")?;
+        let (curate_exit, curate_stdout, curate_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &curate_workspace,
+            "--json",
+            "curate",
+            "candidates",
+            "--all",
+        ]);
+        ensure_equal(
+            &curate_exit,
+            &ProcessExitCode::Success,
+            "curate candidates exit after explicit migration",
         )?;
         ensure(
             curate_stderr.is_empty(),
@@ -82059,6 +83207,27 @@ mod tests {
         )
     }
 
+    /// `situation compare` DELIBERATELY NO LONGER DENIES A NON-DRY-RUN CALL, so
+    /// there is no refusal to assert here (bd-0rkti).
+    ///
+    /// I restored `situation_compare_without_dry_run_is_policy_error` on
+    /// 2026-10-25 and was wrong to. The evidence was a probe of the INSTALLED
+    /// binary, which reports 0.14.2 against this tree's 0.18.0 -- four minor
+    /// versions stale, and the behaviour changed inside that gap. At HEAD
+    /// `handle_situation_compare` returns `ProcessExitCode::Success`
+    /// unconditionally and never reads `args.dry_run`, whose own doc comment
+    /// states the reason: "Explicitly request a preview; comparisons never
+    /// persist changes." A compare cannot persist, so requiring the flag was
+    /// pointless and was removed; the flag survives as an explicit no-op.
+    ///
+    /// So 90bf87b89 did not lose that test, it retired its premise. The name is
+    /// recorded `retired` in scripts/vanished-tests-dispositions.txt with this
+    /// reason, which is what that file is for.
+    ///
+    /// The lesson, left here because this file is where the mistake landed: a
+    /// probe of the installed `ee` is a probe of 0.14.2. There is no runnable
+    /// 0.18.0 binary on this Mac -- both binaries under CARGO_TARGET_DIR are
+    /// ELF x86-64 from remote builds. Read the source, or dispatch.
     #[test]
     fn situation_link_dry_run_json_returns_link_plan() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[
@@ -82253,6 +83422,154 @@ mod tests {
             ))),
             "maintenance wal-checkpoint command",
         )
+    }
+
+    /// A store's job history takes rows from runs in other workspaces
+    /// (`ee job run --database <store>/.ee/ee.db`), and each run holds only
+    /// its own workspace's maintenance lock. Concurrent appends must still
+    /// leave one whole row per line, or the next `ee job list` fails to parse
+    /// the file.
+    #[test]
+    fn maintenance_job_history_concurrent_appends_keep_whole_rows() -> TestResult {
+        // Large rows keep each write busy long enough for the other writers
+        // to queue behind it; the barrier makes them all start together.
+        // 8 x 48 rows of ~32 KiB stays under MAINTENANCE_JOB_HISTORY_MAX_BYTES.
+        const WRITERS: usize = 8;
+        const ROWS_PER_WRITER: usize = 48;
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let history = directory.path().join("maintenance-jobs.jsonl");
+        let padding = "x".repeat(32 * 1024);
+        let start = std::sync::Barrier::new(WRITERS);
+        let results = std::thread::scope(|scope| {
+            let handles = (0..WRITERS)
+                .map(|writer| {
+                    let history = &history;
+                    let padding = &padding;
+                    let start = &start;
+                    scope.spawn(move || -> TestResult {
+                        start.wait();
+                        for index in 0..ROWS_PER_WRITER {
+                            let row = serde_json::json!({
+                                "id": format!("job_writer{writer}_row{index}"),
+                                "details": { "padding": padding },
+                            });
+                            super::append_maintenance_job_history(history, &row, false)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err("history writer panicked".to_owned()))
+                })
+                .collect::<Vec<_>>()
+        });
+        for result in results {
+            result?;
+        }
+        let rows = super::load_maintenance_job_history(&history)?;
+        ensure_equal(
+            &rows.len(),
+            &(WRITERS * ROWS_PER_WRITER),
+            "every concurrently appended history row parses as its own line",
+        )
+    }
+
+    /// Set by `maintenance_job_history_cross_process_appends_keep_whole_rows`
+    /// on the child processes it starts: the history file to append to.
+    const JOB_HISTORY_CHILD_PATH: &str = "EE_TEST_JOB_HISTORY_APPEND_PATH";
+    /// The child's writer number, used in its row IDs.
+    const JOB_HISTORY_CHILD_WRITER: &str = "EE_TEST_JOB_HISTORY_APPEND_WRITER";
+    const JOB_HISTORY_CHILD_ROWS: usize = 48;
+
+    /// The runs that share a store's history are separate `ee` processes, so
+    /// nothing in-process (a mutex, a shared handle) can keep their rows
+    /// whole. Each child process here appends through
+    /// `append_maintenance_job_history` exactly as a run does.
+    #[test]
+    fn maintenance_job_history_cross_process_appends_keep_whole_rows() -> TestResult {
+        const WRITERS: usize = 6;
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let history = directory.path().join("maintenance-jobs.jsonl");
+        let start = directory.path().join("start");
+        let test_binary = std::env::current_exe().map_err(|error| error.to_string())?;
+        let mut children = Vec::with_capacity(WRITERS);
+        for writer in 0..WRITERS {
+            let child = std::process::Command::new(&test_binary)
+                .args([
+                    "--exact",
+                    "cli::tests::maintenance_job_history_append_child_process",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(JOB_HISTORY_CHILD_PATH, &history)
+                .env(JOB_HISTORY_CHILD_WRITER, writer.to_string())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|error| format!("start history writer {writer}: {error}"))?;
+            children.push(child);
+        }
+        // Release every writer at once.
+        fs::write(&start, b"go").map_err(|error| error.to_string())?;
+        let mut failures = Vec::new();
+        for (writer, child) in children.into_iter().enumerate() {
+            let output = child
+                .wait_with_output()
+                .map_err(|error| format!("wait for history writer {writer}: {error}"))?;
+            if !output.status.success() {
+                failures.push(format!(
+                    "writer {writer}: {}\n{}\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ));
+            }
+        }
+        if !failures.is_empty() {
+            return Err(failures.join("\n"));
+        }
+        let rows = super::load_maintenance_job_history(&history)?;
+        ensure_equal(
+            &rows.len(),
+            &(WRITERS * JOB_HISTORY_CHILD_ROWS),
+            "every history row appended by concurrent processes parses as its own line",
+        )
+    }
+
+    /// Child half of `maintenance_job_history_cross_process_appends_keep_whole_rows`;
+    /// does nothing unless that test started this process.
+    #[test]
+    fn maintenance_job_history_append_child_process() -> TestResult {
+        let Some(history) = std::env::var_os(JOB_HISTORY_CHILD_PATH) else {
+            return Ok(());
+        };
+        let history = PathBuf::from(history);
+        let writer = std::env::var_os(JOB_HISTORY_CHILD_WRITER)
+            .map(|writer| writer.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let start = history.with_file_name("start");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !start.exists() {
+            if std::time::Instant::now() > deadline {
+                return Err("history writer was never released".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let padding = "x".repeat(32 * 1024);
+        for index in 0..JOB_HISTORY_CHILD_ROWS {
+            let row = serde_json::json!({
+                "id": format!("job_process{writer}_row{index}"),
+                "details": { "padding": padding },
+            });
+            super::append_maintenance_job_history(&history, &row, false)?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -84835,6 +86152,41 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .and_then(|options| options.iter().find(|option| option["id"] == id))
             .ok_or_else(|| format!("missing help option {id}"))
+    }
+
+    #[test]
+    fn static_help_routes_do_not_bind_workspace_governor_state() -> TestResult {
+        for route in [&[][..], &["help", "memory"][..], &["agent-docs"][..]] {
+            let mut args = vec![
+                "ee",
+                "--workspace",
+                "unresolved-metadata-alias",
+                "--max-output-tokens",
+                "2000000",
+            ];
+            args.extend_from_slice(route);
+            let (exit, stdout, stderr) = invoke(&args);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Success,
+                "static help route succeeds",
+            )?;
+            ensure(
+                !stdout.is_empty(),
+                "static help route emits its documentation",
+            )?;
+            ensure(stderr.is_empty(), "static help route leaves stderr clean")?;
+            ensure(
+                super::ACTIVE_OUTPUT_GOVERNOR.with(|state| {
+                    state
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|active| active.workspace_root.is_none())
+                }),
+                "static help does not resolve a filesystem root for the governor",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -91042,6 +92394,197 @@ mod tests {
     }
 
     #[test]
+    fn swarm_brief_reads_the_default_agent_mail_snapshot() -> TestResult {
+        // GH#80: `swarm brief` documented `.ee/agent-mail-snapshot.json` as its
+        // default snapshot, yet reported Agent Mail `not_configured` with one
+        // sitting there.
+        fn write_snapshot(path: &Path, project_key: &str) -> Result<(), String> {
+            let schema: serde_json::Value = serde_json::from_str(include_str!(
+                "../../docs/schemas/swarm/ee.agent_mail.snapshot.v1.json"
+            ))
+            .map_err(|error| error.to_string())?;
+            let mut value = schema
+                .pointer("/examples/0")
+                .cloned()
+                .ok_or("the snapshot schema keeps its v1 example")?;
+            let now = chrono::Utc::now();
+            value["generated_at"] = serde_json::json!(now.to_rfc3339());
+            value["project_key"] = serde_json::json!(project_key);
+            value["file_reservations"][0]["expires_ts"] =
+                serde_json::json!((now + chrono::Duration::hours(1)).to_rfc3339());
+            std::fs::create_dir_all(path.parent().ok_or("snapshot parent")?)
+                .map_err(|error| error.to_string())?;
+            std::fs::write(
+                path,
+                serde_json::to_vec(&value).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())
+        }
+
+        fn agent_mail_status(stdout: &str) -> Result<String, String> {
+            let value: serde_json::Value =
+                serde_json::from_str(stdout).map_err(|error| format!("{error}: {stdout}"))?;
+            value["data"]["sources"]
+                .as_array()
+                .and_then(|sources| {
+                    sources
+                        .iter()
+                        .find(|source| source["source"] == "agent_mail")
+                })
+                .and_then(|source| source["status"].as_str())
+                .map(str::to_owned)
+                .ok_or_else(|| format!("no agent_mail source in {stdout}"))
+        }
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("checkout");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace_text = workspace.display().to_string();
+        let args = [
+            "ee",
+            "--workspace",
+            workspace_text.as_str(),
+            "--json",
+            "swarm",
+            "brief",
+            "--sources",
+            "agent-mail",
+        ];
+
+        let (_, stdout, _) = invoke(&args);
+        ensure_equal(
+            &agent_mail_status(&stdout)?,
+            &"not_configured".to_owned(),
+            "no snapshot has been produced",
+        )?;
+
+        let project_key =
+            crate::core::swarm_brief::agent_mail_snapshot_project_key_for_workspace(&workspace)?;
+        write_snapshot(
+            &workspace.join(".ee").join("agent-mail-snapshot.json"),
+            &project_key,
+        )?;
+        let (exit, stdout, _) = invoke(&args);
+        ensure_equal(&exit, &ProcessExitCode::Success, "swarm brief exit")?;
+        ensure_equal(
+            &agent_mail_status(&stdout)?,
+            &"ready".to_owned(),
+            "the default snapshot is read",
+        )
+    }
+
+    #[test]
+    fn daemon_service_workspace_is_absolute_and_install_requires_a_store() -> TestResult {
+        use super::daemon_service_workspace;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("ws");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let canonical = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+
+        // A `.ee/` directory without a database is not an initialized store.
+        match daemon_service_workspace(&workspace, true) {
+            Err(DomainError::WorkspaceStoreMissing { message, .. }) => ensure(
+                message.contains("ee.db"),
+                "store-missing refusal names the looked-for database",
+            )?,
+            other => return Err(format!("expected workspace_store_missing, got {other:?}")),
+        }
+        // Uninstall only renders a plan and must not require a store.
+        ensure_equal(
+            &daemon_service_workspace(&workspace, false).map_err(|error| error.to_string())?,
+            &canonical,
+            "uninstall workspace",
+        )?;
+
+        std::fs::write(workspace.join(".ee").join("ee.db"), b"")
+            .map_err(|error| error.to_string())?;
+        let pinned =
+            daemon_service_workspace(&workspace, true).map_err(|error| error.to_string())?;
+        ensure_equal(&pinned, &canonical, "install workspace")?;
+        ensure(pinned.is_absolute(), "pinned workspace is absolute")
+    }
+
+    #[test]
+    fn daemon_install_dry_run_pins_the_resolved_workspace_not_home() -> TestResult {
+        // GH#81: the rendered unit pinned $HOME (and before that, nothing, so
+        // the supervisor's working directory decided) instead of the
+        // workspace `daemon install` resolved.
+        let home = crate::daemon::service_install::resolve_user_home()
+            .ok_or("this test needs HOME or USERPROFILE, as `ee daemon install` does")?;
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("pinned ws");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let workspace_text = workspace.display().to_string();
+
+        let (exit, stdout, _) = invoke(&[
+            "ee",
+            "--workspace",
+            workspace_text.as_str(),
+            "--json",
+            "daemon",
+            "install",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::WorkspaceStoreMissing,
+            "install refuses a storeless workspace",
+        )?;
+        ensure(
+            stdout.contains("workspace_store_missing"),
+            "install refusal carries the store-missing code",
+        )?;
+
+        std::fs::write(workspace.join(".ee").join("ee.db"), b"")
+            .map_err(|error| error.to_string())?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            workspace_text.as_str(),
+            "--json",
+            "daemon",
+            "install",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "install dry run")?;
+        ensure(stderr.is_empty(), "install dry run writes no stderr")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["data"]["written"],
+            &serde_json::json!(false),
+            "dry run writes no unit",
+        )?;
+        let body = value["data"]["unitBody"]
+            .as_str()
+            .ok_or("dry run reports the unit body")?;
+        let canonical = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let canonical_text = canonical.display().to_string();
+        let home_text = home.display().to_string();
+        let pinned = match crate::daemon::service_install::current_service_kind() {
+            crate::daemon::service_install::DaemonServiceKind::SystemdUser => {
+                format!("--workspace \"{canonical_text}\"")
+            }
+            crate::daemon::service_install::DaemonServiceKind::Launchd => {
+                format!("<string>--workspace</string>\n    <string>{canonical_text}</string>")
+            }
+            _ => canonical_text.clone(),
+        };
+        ensure(
+            body.contains(&pinned),
+            &format!("unit pins the resolved workspace: {body}"),
+        )?;
+        ensure(
+            !body.contains(&format!("--workspace \"{home_text}\""))
+                && !body.contains(&format!("<string>{home_text}</string>")),
+            &format!("unit must not pin HOME: {body}"),
+        )
+    }
+
+    #[test]
     fn serve_foreground_command_parses() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "serve", "--foreground", "--json"])
             .map_err(|e| format!("failed to parse serve foreground: {:?}", e.kind()))?;
@@ -91708,6 +93251,14 @@ mod tests {
                     &super::context_json_cache_enabled(&cli, &explain_gaps, false),
                     &false,
                     "coverage-gap postprocessing requires the structured fresh pack",
+                )?;
+
+                let mut bead_scoped = args.clone();
+                bead_scoped.bead_id = Some("bd-release".to_owned());
+                ensure_equal(
+                    &super::context_json_cache_enabled(&cli, &bead_scoped, false),
+                    &false,
+                    "mutable bead context requires a fresh structured pack",
                 )?;
 
                 let mut since = args.clone();
@@ -93138,6 +94689,228 @@ mod tests {
         )?;
         ensure_ends_with(&stdout, '\n', "context json trailing newline")?;
         ensure(stderr.is_empty(), "context json stderr must be empty")
+    }
+
+    #[test]
+    fn bead_affinity_rejects_envelope_cursors_on_pack_entry_points() -> TestResult {
+        for command in [
+            vec!["ee", "pack", "release"],
+            vec!["ee", "pack", "build", "--query-file", "query.json"],
+            vec!["ee", "pack", "--query-file", "query.json"],
+        ] {
+            let mut args = command;
+            args.extend_from_slice(&["--bead-id", "bd-release", "--cursor", "prior-page"]);
+            let error = Cli::try_parse_from(args)
+                .expect_err("bead context cannot reuse an unbound envelope cursor");
+            ensure_equal(
+                &error.kind(),
+                &clap::error::ErrorKind::ArgumentConflict,
+                "bead and cursor flags conflict before file or database access",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "lexical-bm25"))]
+    #[test]
+    fn bead_affinity_cli_entry_points_use_the_addressed_tracker_and_reject_pagination() -> TestResult
+    {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let initialized = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: workspace.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        ensure(
+            !matches!(initialized.status, crate::core::init::InitStatus::Failed),
+            format!("initialize bead fixture: {:?}", initialized.action_errors),
+        )?;
+        let database = workspace.join(".ee/ee.db");
+        let connection =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_id = connection
+            .get_workspace_by_path(&workspace.to_string_lossy())
+            .map_err(|error| error.to_string())?
+            .ok_or("initialized bead fixture workspace missing")?
+            .id;
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0xbee01));
+        connection
+            .insert_memory(
+                &memory_id.to_string(),
+                &crate::db::CreateMemoryInput {
+                    workspace_id,
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Emberstone release stores verified storage checksums.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("manual://bead-cli-fixture".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["storage".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let indexed = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &indexed.status,
+            &crate::core::index::IndexRebuildStatus::Success,
+            "bead fixture index built",
+        )?;
+        fs::create_dir(workspace.join(".beads")).map_err(|error| error.to_string())?;
+        fs::write(
+            workspace.join(".beads/issues.jsonl"),
+            "{\"id\":\"bd-cli-addressed\",\"labels\":[\"storage\"]}\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let query_path = directory.path().join("bead-query.json");
+        let mut query_document = serde_json::json!({
+            "version": "ee.query.v1",
+            "workspace": workspace,
+            "query": {"text": "emberstone release"},
+            "budget": {"maxTokens": 800, "candidatePool": 10, "maxResults": 1},
+        });
+        fs::write(&query_path, query_document.to_string()).map_err(|error| error.to_string())?;
+        let workspace_arg = workspace.to_str().ok_or("UTF-8 fixture workspace")?;
+        let query_arg = query_path.to_str().ok_or("UTF-8 fixture query path")?;
+        // Query-file entry points deliberately omit --workspace: the document
+        // must select its own tracker rather than borrowing the process cwd.
+        let surfaces = [
+            (
+                "context",
+                vec![
+                    "--workspace",
+                    workspace_arg,
+                    "context",
+                    "emberstone release",
+                ],
+            ),
+            (
+                "direct pack",
+                vec!["--workspace", workspace_arg, "pack", "emberstone release"],
+            ),
+            (
+                "pack build",
+                vec!["pack", "build", "--query-file", query_arg],
+            ),
+            ("legacy query-file", vec!["pack", "--query-file", query_arg]),
+        ];
+        let invoke_surface = |command: &[&str], with_bead: bool| {
+            let mut args = vec!["ee", "--json"];
+            args.extend_from_slice(command);
+            args.extend_from_slice(&[
+                "--source-mode",
+                "lexical-only",
+                "--speed",
+                "instant",
+                "--memory-scope",
+                "workspace",
+                "--read-only",
+                "--no-lod",
+                "--as-of",
+                "2030-01-01T00:00:00Z",
+            ]);
+            if with_bead {
+                args.extend_from_slice(&["--bead-id", "bd-cli-addressed"]);
+            }
+            invoke(&args)
+        };
+        for (surface, command) in &surfaces {
+            for with_bead in [false, true] {
+                let (exit, stdout, stderr) = invoke_surface(command, with_bead);
+                ensure_equal(
+                    &exit,
+                    &ProcessExitCode::Success,
+                    &format!("{surface}, bead={with_bead}: {stdout} {stderr}"),
+                )?;
+                ensure(
+                    stderr.is_empty(),
+                    format!("{surface}: JSON stderr is empty"),
+                )?;
+                let response: serde_json::Value = serde_json::from_str(&stdout)
+                    .map_err(|error| format!("{surface}: response must parse: {error}"))?;
+                let affinity = response.pointer("/data/pack/beadAffinity");
+                if with_bead {
+                    let affinity =
+                        affinity.ok_or_else(|| format!("{surface}: bead affinity missing"))?;
+                    ensure_equal(
+                        &affinity["beadId"],
+                        &serde_json::json!("bd-cli-addressed"),
+                        "bead selector reaches the shared core",
+                    )?;
+                    ensure_equal(
+                        &affinity["schema"],
+                        &serde_json::json!("ee.context.bead_affinity.v1"),
+                        "live bead summary schema",
+                    )?;
+                    ensure(
+                        affinity["memoryBiasApplied"]
+                            .as_u64()
+                            .is_some_and(|count| count > 0),
+                        format!("{surface}: addressed tracker and live memory tags affect ranking"),
+                    )?;
+                    ensure_equal(
+                        &affinity["coldStart"],
+                        &serde_json::json!(false),
+                        "observed overlap",
+                    )?;
+                } else {
+                    ensure(
+                        affinity.is_none(),
+                        format!("{surface}: default output has no bead block"),
+                    )?;
+                }
+                ensure(
+                    response["data"]["pack"]["items"]
+                        .to_string()
+                        .contains(&memory_id.to_string()),
+                    format!("{surface}: the addressed memory reaches the pack"),
+                )?;
+            }
+        }
+
+        query_document["pagination"] = serde_json::json!({"limit": 1});
+        fs::write(&query_path, query_document.to_string()).map_err(|error| error.to_string())?;
+        for (surface, command) in surfaces.iter().skip(2) {
+            let (exit, stdout, stderr) = invoke_surface(command, true);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Usage,
+                "bead query pagination is rejected",
+            )?;
+            ensure(
+                stderr.is_empty(),
+                "pagination rejection keeps JSON stderr empty",
+            )?;
+            let response: serde_json::Value = serde_json::from_str(&stdout)
+                .map_err(|error| format!("{surface}: pagination error must parse: {error}"))?;
+            ensure(
+                response
+                    .to_string()
+                    .contains("--bead-id cannot be combined with candidate pagination"),
+                format!("{surface}: rejection explains the incompatible bead input"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -94797,11 +96570,20 @@ mod tests {
                 },
                 anchor: None,
                 fallback_hit: None,
+                graph_path: None,
             }],
             exact_anchor_count: 1,
             fallback_count: 0,
             fallback_status: ImpactFallbackStatus::SkippedLimitFilled,
             fallback_report: None,
+            graph_phase: ImpactGraphPhase {
+                status: "skipped_limit_filled",
+                reason: None,
+                result_count: 0,
+                source_rows: 0,
+                paths_examined: 0,
+                truncated: false,
+            },
             scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
             elapsed_ms: 1.0,
         };
@@ -94839,7 +96621,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        let exit = write_index_rebuild_error(&error, true, &mut stdout, &mut stderr);
+        let exit = write_index_rebuild_error(&error, None, true, &mut stdout, &mut stderr);
 
         let stdout = String::from_utf8(stdout).map_err(|error| error.to_string())?;
         let stderr = String::from_utf8(stderr).map_err(|error| error.to_string())?;
@@ -94865,6 +96647,151 @@ mod tests {
             "contention holder id",
         )?;
         ensure(stderr.is_empty(), "contention json stderr must be empty")
+    }
+
+    #[test]
+    fn index_maintenance_deadline_names_the_budget_that_raises_it() -> TestResult {
+        // GH#78: a rebuild cancelled by its own budget reported only
+        // "Deadline exceeded.", so the knob that raises the budget went unfound.
+        let workspace = Path::new("/tmp/ee gh78 workspace");
+        let seconds = crate::core::index::index_rebuild_timeout().as_secs();
+        let raised = seconds.saturating_mul(4).clamp(
+            crate::core::index::DEFAULT_INDEX_REBUILD_TIMEOUT_SECS,
+            crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS,
+        );
+        // An explicit store is part of "the same command": without it the
+        // repair would rebuild the workspace's default store instead.
+        let database = Path::new("/srv/ee stores/ee.db");
+        let index_dir = Path::new("/srv/ee stores/index");
+        for (operation, database, index_dir, dry_run, rerun) in [
+            (
+                "rebuild",
+                None,
+                None,
+                false,
+                "ee --workspace '/tmp/ee gh78 workspace' index rebuild --json",
+            ),
+            (
+                "reembed",
+                None,
+                None,
+                true,
+                "ee --workspace '/tmp/ee gh78 workspace' index reembed --dry-run --json",
+            ),
+            (
+                "rebuild",
+                Some(database),
+                Some(index_dir),
+                true,
+                "ee --workspace '/tmp/ee gh78 workspace' index rebuild --database '/srv/ee stores/ee.db' --index-dir '/srv/ee stores/index' --dry-run --json",
+            ),
+            (
+                "reembed",
+                Some(database),
+                None,
+                false,
+                "ee --workspace '/tmp/ee gh78 workspace' index reembed --database '/srv/ee stores/ee.db' --json",
+            ),
+        ] {
+            let budget = super::CancelledCommandBudget::index_maintenance(
+                operation, workspace, database, index_dir, dry_run,
+            );
+            let error = IndexRebuildError::Cancelled(CancelReason::deadline());
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit =
+                write_index_rebuild_error(&error, Some(&budget), true, &mut stdout, &mut stderr);
+            let payload: serde_json::Value = serde_json::from_slice(&stdout)
+                .map_err(|error| format!("deadline JSON parse failed: {error}"))?;
+            ensure_equal(&exit, &ProcessExitCode::Cancelled, "deadline exit")?;
+            ensure_equal(
+                &payload["error"]["code"],
+                &serde_json::json!("cancelled"),
+                "deadline code",
+            )?;
+            ensure_equal(
+                &payload["error"]["details"]["cancelKind"],
+                &serde_json::json!("deadline"),
+                "deadline kind",
+            )?;
+            ensure_equal(
+                &payload["error"]["details"]["budgetEnv"],
+                &serde_json::json!("EE_INDEX_REBUILD_TIMEOUT_SECONDS"),
+                "budget env",
+            )?;
+            ensure_equal(
+                &payload["error"]["details"]["budgetSeconds"],
+                &serde_json::json!(seconds),
+                "budget seconds",
+            )?;
+            ensure_equal(
+                &payload["error"]["details"]["maxBudgetSeconds"],
+                &serde_json::json!(crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS),
+                "max budget seconds",
+            )?;
+            ensure_equal(
+                &payload["error"]["repair"],
+                &serde_json::json!(format!("EE_INDEX_REBUILD_TIMEOUT_SECONDS={raised} {rerun}")),
+                "repair raises the budget and reruns the same command",
+            )?;
+            ensure_equal(
+                &payload["error"]["repairKind"],
+                &serde_json::json!("actionable"),
+                "the budget repair runs as written",
+            )?;
+            // A budget lowered far below the default is raised to at least
+            // the default, so one rerun suffices; the cap still holds.
+            for (budget_seconds, expected) in [
+                (1, crate::core::index::DEFAULT_INDEX_REBUILD_TIMEOUT_SECS),
+                (
+                    crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS,
+                    crate::core::index::MAX_INDEX_REBUILD_TIMEOUT_SECS,
+                ),
+            ] {
+                let lowered = super::CancelledCommandBudget {
+                    seconds: budget_seconds,
+                    ..super::CancelledCommandBudget::index_maintenance(
+                        operation, workspace, database, index_dir, dry_run,
+                    )
+                };
+                ensure_equal(
+                    &lowered.repair(),
+                    &format!("EE_INDEX_REBUILD_TIMEOUT_SECONDS={expected} {rerun}"),
+                    "the raised budget is at least the default and at most the cap",
+                )?;
+            }
+            ensure(stderr.is_empty(), "deadline json stderr must be empty")?;
+
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            write_index_rebuild_error(&error, Some(&budget), false, &mut stdout, &mut stderr);
+            let human = String::from_utf8(stderr).map_err(|error| error.to_string())?;
+            ensure_contains(
+                &human,
+                "EE_INDEX_REBUILD_TIMEOUT_SECONDS raises it",
+                "human knob",
+            )?;
+            ensure_contains(&human, &budget.repair(), "human repair")?;
+            ensure(stdout.is_empty(), "human deadline stdout must be empty")?;
+
+            // Any other cancellation was not caused by this budget, so the
+            // envelope must not blame it.
+            let error = IndexRebuildError::Cancelled(CancelReason::user("operator interrupt"));
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            write_index_rebuild_error(&error, Some(&budget), true, &mut stdout, &mut stderr);
+            let payload: serde_json::Value = serde_json::from_slice(&stdout)
+                .map_err(|error| format!("user-cancel JSON parse failed: {error}"))?;
+            ensure(
+                payload["error"].get("repair").is_none(),
+                "a non-deadline cancellation carries no budget repair",
+            )?;
+            ensure(
+                payload["error"]["details"].get("budgetEnv").is_none(),
+                "a non-deadline cancellation names no budget",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -95822,6 +97749,39 @@ demos:
             &serde_json::json!("mem_release_policy"),
             "why-not data memory id",
         )
+    }
+
+    #[test]
+    fn why_not_cli_accepts_native_ids_and_mixed_selection_options() -> TestResult {
+        for kind in ["rule", "ev"] {
+            let id = format!("{kind}_00000000-0000-0000-0000-000000000701");
+            let parsed = Cli::try_parse_from([
+                "ee",
+                "why-not",
+                id.as_str(),
+                "--task",
+                "verify release",
+                "--task-path",
+                "src/lib.rs",
+                "--task-path",
+                "src/main.rs",
+                "--max-results",
+                "2",
+                "--json",
+            ])
+            .map_err(|error| error.to_string())?;
+            let Some(Command::WhyNot(args)) = parsed.command else {
+                return Err("expected why-not command".to_owned());
+            };
+            ensure_equal(&args.memory_id, &Some(id), "native positional identity")?;
+            ensure_equal(
+                &args.task_paths,
+                &vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()],
+                "literal task targets",
+            )?;
+            ensure_equal(&args.max_results, &Some(2), "mixed result cap")?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -97082,6 +99042,7 @@ demos:
                 ensure_equal(&args.limit, &25, "limit")?;
                 ensure_equal(&args.offset, &5, "offset")?;
                 ensure_equal(&args.all, &false, "all statuses")?;
+                ensure_equal(&args.propose, &false, "proposal persistence is opt-in")?;
                 ensure_equal(&args.sort, &"review_state".to_string(), "default sort")?;
                 ensure_equal(&args.group_duplicates, &false, "default duplicate grouping")
             }
@@ -97114,6 +99075,65 @@ demos:
             }
             _ => Err("expected Curate Candidates command".to_string()),
         }
+    }
+
+    #[test]
+    fn curate_candidates_proposal_persistence_is_explicit() -> TestResult {
+        ensure(
+            Cli::try_parse_from(["ee", "curate", "candidates", "--propose"]).is_err(),
+            "--propose requires an explicit candidate type",
+        )?;
+        let manifest = crate::core::effect::EffectManifest::build();
+        for (argv, expected_path, mutates) in [
+            (
+                vec!["ee", "curate", "candidates"],
+                "curate candidates",
+                false,
+            ),
+            (
+                vec![
+                    "ee",
+                    "curate",
+                    "candidates",
+                    "--type",
+                    "paraphrase_dedup_proposal",
+                ],
+                "curate candidates",
+                false,
+            ),
+            (
+                vec![
+                    "ee",
+                    "curate",
+                    "candidates",
+                    "--type",
+                    "paraphrase_dedup_proposal",
+                    "--propose",
+                ],
+                "curate candidates --propose",
+                true,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .map_err(|error| format!("parse {argv:?}: {error}"))?;
+            let Some(Command::Curate(CurateCommand::Candidates(options))) = cli.command.as_ref()
+            else {
+                return Err("expected curation candidate arguments".to_owned());
+            };
+            ensure_equal(&options.propose, &mutates, "candidate propose flag")?;
+            let args = argv.iter().map(OsString::from).collect::<Vec<_>>();
+            let path = super::NormalizedInvocation::from_cli(&cli, &args).command_path;
+            ensure_equal(&path.as_str(), &expected_path, "candidate invocation")?;
+            let effect = manifest
+                .get(&path)
+                .ok_or_else(|| format!("missing effect for {path}"))?;
+            ensure_equal(
+                &effect.default_effect.is_mutating(),
+                &mutates,
+                "candidate effect matches explicit persistence",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -100523,6 +102543,166 @@ demos:
         ensure(
             source == super::WorkspaceSource::Flag,
             format!("expected Flag source, got {source:?}"),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_workspace_binding_resolves_physical_roots_once_across_commands() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let physical = parent.join("physical-$HOME");
+        let linked = parent.join("workspace-link");
+        fs::create_dir(&physical).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&physical, &linked).map_err(|error| error.to_string())?;
+
+        let commands: &[&[&str]] = &[
+            &["status"],
+            &["capabilities"],
+            &["doctor"],
+            &["index", "status"],
+            &["memory", "list"],
+            &["pack", "release readiness"],
+            &["workspace", "resolve"],
+        ];
+        for command in commands {
+            let mut args = vec![OsString::from("ee"), OsString::from("--workspace")];
+            args.push(linked.as_os_str().to_owned());
+            args.extend(command.iter().map(OsString::from));
+            let mut cli = super::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+            super::resolve_workspace_inputs_global(&mut cli);
+
+            ensure_equal(
+                &cli.workspace,
+                &Some(physical.clone()),
+                &format!("{command:?} receives the physical root in its explicit field"),
+            )?;
+            ensure_equal(
+                &cli.resolve_workspace_with_source(),
+                &(physical.clone(), super::WorkspaceSource::Flag),
+                "resolved root preserves its original source and literal dollar characters",
+            )?;
+            ensure_equal(
+                &super::resolve_local_workspace_for_cli(&cli, None),
+                &(physical.clone(), super::WorkspaceSource::Flag),
+                "local fallback reuses the invocation's resolved root",
+            )?;
+            super::resolve_workspace_inputs_global(&mut cli);
+            ensure_equal(
+                &cli.resolve_workspace(),
+                &physical,
+                "repeated preparation must not expand the physical path again",
+            )?;
+        }
+        ensure(
+            !physical.join(".ee").exists(),
+            "resolving a workspace does not initialize a store",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_workspace_binding_preserves_init_policy_and_local_override() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let physical = parent.join("physical");
+        let linked = parent.join("workspace-link");
+        fs::create_dir(&physical).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&physical, &linked).map_err(|error| error.to_string())?;
+
+        for command in [&["init"][..], &["init", "--allow-symlink"][..]] {
+            let mut args = vec![OsString::from("ee"), OsString::from("--workspace")];
+            args.push(linked.as_os_str().to_owned());
+            args.extend(command.iter().map(OsString::from));
+            let mut cli = super::Cli::try_parse_from(args).map_err(|error| error.to_string())?;
+            super::resolve_workspace_inputs_global(&mut cli);
+            ensure_equal(
+                &cli.resolve_workspace(),
+                &linked,
+                "init must inspect the original symlink before applying its creation policy",
+            )?;
+        }
+
+        let mut cli = super::Cli::try_parse_from([
+            OsString::from("ee"),
+            OsString::from("--workspace"),
+            parent.as_os_str().to_owned(),
+            OsString::from("status"),
+        ])
+        .map_err(|error| error.to_string())?;
+        super::resolve_workspace_inputs_global(&mut cli);
+        ensure_equal(
+            &super::resolve_local_workspace_for_cli(&cli, Some(&linked)),
+            &(physical, super::WorkspaceSource::Flag),
+            "a local override resolves its own physical root and outranks the global root",
+        )?;
+        ensure_equal(
+            &cli.resolve_workspace(),
+            &parent,
+            "a local override does not change the invocation's global root",
+        )
+    }
+
+    #[test]
+    fn cli_workspace_binding_keeps_implicit_source_for_store_helpers() -> TestResult {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let physical = directory
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        for source in [super::WorkspaceSource::Env, super::WorkspaceSource::WalkUp] {
+            let mut cli =
+                super::Cli::try_parse_from(["ee", "status"]).map_err(|error| error.to_string())?;
+            cli.workspace_resolution = Some((physical.clone(), source));
+            super::resolve_workspace_inputs_global(&mut cli);
+            ensure(
+                cli.workspace.is_none(),
+                "discovery must not manufacture an explicit flag",
+            )?;
+            ensure_equal(
+                &cli.resolve_workspace_with_source(),
+                &(physical.clone(), source),
+                "the original implicit source remains available to diagnostics",
+            )?;
+            ensure_equal(
+                &super::lab_workspace(&cli),
+                &physical,
+                "lab commands use the selected implicit workspace",
+            )?;
+            ensure_equal(
+                &super::pack_database_path(&cli, None),
+                &physical.join(".ee/ee.db"),
+                "pack ledger commands use the selected implicit workspace",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cli_workspace_binding_preserves_missing_relative_paths_without_creation() -> TestResult {
+        let missing = PathBuf::from(format!("ee-missing-workspace-{}", uuid::Uuid::now_v7()));
+        let mut cli = super::Cli::try_parse_from([
+            OsString::from("ee"),
+            OsString::from("--workspace"),
+            missing.as_os_str().to_owned(),
+            OsString::from("status"),
+        ])
+        .map_err(|error| error.to_string())?;
+        super::resolve_workspace_inputs_global(&mut cli);
+        ensure_equal(
+            &cli.resolve_workspace_with_source(),
+            &(missing.clone(), super::WorkspaceSource::Flag),
+            "missing roots retain the caller's path for normal command diagnostics",
+        )?;
+        ensure(
+            !missing.exists(),
+            "path resolution must never create missing roots",
         )
     }
 

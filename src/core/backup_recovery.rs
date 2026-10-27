@@ -33,6 +33,7 @@ const REQUIRED_TABLES: &[(&str, &str, &str)] = &[
     ("workspaces", "maintain", "authenticated_manifest"),
     ("memories", "retrieve", "records_jsonl"),
     ("memory_tags", "retrieve", "records_jsonl"),
+    ("memory_code_anchor_sources", "retrieve", "records_jsonl"),
     ("memory_links", "retrieve", "records_jsonl"),
     ("attempt_families", "learn", "records_jsonl"),
     ("attempt_family_members", "learn", "records_jsonl"),
@@ -165,6 +166,8 @@ fn absent_from_source_schema(table: &str, source_version: Option<u32>) -> bool {
     match table {
         "pack_rule_items" => source_version
             .is_some_and(|version| version < crate::db::V128_PACK_RULE_ITEMS.version()),
+        "memory_code_anchor_sources" => source_version
+            .is_some_and(|version| version < crate::db::V133_MEMORY_CODE_ANCHOR_SOURCES.version()),
         _ => false,
     }
 }
@@ -182,12 +185,13 @@ impl RestoreInventory {
             .get("recoveryInventory")
             .filter(|value| value.is_object())
             .ok_or_else(|| recovery_error("Backup is missing its durable recovery inventory"))?;
-        if inventory.get("schema").and_then(Value::as_str)
-            != Some("ee.backup.recovery_inventory.v1")
-            || inventory
-                .get("schemaCoverageComplete")
-                .and_then(Value::as_bool)
-                != Some(true)
+        if !matches!(
+            inventory.get("schema").and_then(Value::as_str),
+            Some("ee.backup.recovery_inventory.v1" | "ee.backup.recovery_inventory.v2")
+        ) || inventory
+            .get("schemaCoverageComplete")
+            .and_then(Value::as_bool)
+            != Some(true)
             || inventory
                 .get("snapshotCoverageComplete")
                 .and_then(Value::as_bool)
@@ -204,6 +208,7 @@ impl RestoreInventory {
                 "Backup does not declare a complete, supported durable recovery inventory",
             ));
         }
+        let _ = super::evidence_export::summary_from_manifest(manifest).map_err(recovery_error)?;
         let source_version = source_schema_version(manifest)?;
         let rows = inventory
             .get("tables")
@@ -506,7 +511,7 @@ mod tests {
     #[test]
     fn schema_upgrade_cannot_excuse_any_other_missing_durable_family() {
         for &(table, _, _) in REQUIRED_TABLES {
-            if table == "pack_rule_items" {
+            if matches!(table, "pack_rule_items" | "memory_code_anchor_sources") {
                 continue;
             }
             let mut value = manifest();
@@ -515,6 +520,19 @@ mod tests {
             omit_table(&mut value, table);
             assert!(RestoreInventory::from_manifest(&value).is_err(), "{table}");
         }
+    }
+
+    #[test]
+    fn code_anchor_inventory_allows_only_a_proven_pre_v133_empty_source() {
+        let mut value = manifest();
+        omit_table(&mut value, "memory_code_anchor_sources");
+        assert!(RestoreInventory::from_manifest(&value).is_err());
+        value["graphCache"] = json!({"schemaVersion": 132});
+        let plan = RestoreInventory::from_manifest(&value).unwrap();
+        assert_eq!(plan.expected.get("memory_code_anchor_sources"), Some(&0));
+        value["graphCache"]["schemaVersion"] =
+            json!(crate::db::V133_MEMORY_CODE_ANCHOR_SOURCES.version());
+        assert!(RestoreInventory::from_manifest(&value).is_err());
     }
 
     #[test]
@@ -611,6 +629,21 @@ mod tests {
             assert_eq!(policy.coverage, coverage);
         }
         assert!(RestoreInventory::from_manifest(&manifest()).is_ok());
+    }
+
+    #[test]
+    fn v2_restore_requires_measured_evidence_while_legacy_inventory_stays_readable() {
+        let legacy = manifest();
+        assert!(RestoreInventory::from_manifest(&legacy).is_ok());
+        let mut current = legacy.clone();
+        current["recoveryInventory"]["schema"] = json!("ee.backup.recovery_inventory.v2");
+        current["recoveryInventory"]["rowCountBasis"] = json!("source_snapshot");
+        current["recoveryInventory"]["evidenceAdmission"] =
+            json!(super::super::BackupEvidenceAdmissionSummary::default());
+        assert!(RestoreInventory::from_manifest(&current).is_ok());
+        current["recoveryInventory"]["evidenceAdmission"] = Value::Null;
+        assert!(RestoreInventory::from_manifest(&current).is_err());
+        assert!(RestoreInventory::from_manifest(&legacy).is_ok());
     }
 
     #[test]

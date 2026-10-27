@@ -235,7 +235,7 @@ expression: canonical_json_text(value)
           "action": "search.returned_mem",
           "actor": null,
           "auditId": "[AUDIT_ID]",
-          "details": "{\"queryHash\":\"blake3:e7a628a91b8c840c\",\"rank\":1,\"score\":1.0,\"relevanceScore\":1.0,\"scoreKind\":\"query_relative_pool_minmax\",\"calibrationId\":\"blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1\",\"source\":\"lexical\"}",
+          "details": "{\"queryHash\":\"blake3:e7a628a91b8c840c\",\"rank\":1,\"score\":1.0,\"relevanceScore\":1.0,\"scoreKind\":\"query_relative_pool_minmax\",\"calibrationId\":\"blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22\",\"source\":\"lexical\"}",
           "timestamp": "[TIMESTAMP]"
         }
       ],
@@ -281,6 +281,7 @@ expression: canonical_json_text(value)
       "sourceSchema": "ee.memory.impact_analysis.v1",
       "validationStatus": "disabled"
     },
+    "schema": "ee.why.v1",
     "selection": {
       "aboveConfidenceThreshold": true,
       "isActive": true,

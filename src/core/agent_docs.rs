@@ -1,4 +1,5 @@
 use crate::config::EnvVar;
+use crate::core::anchors::{ANCHOR_BACKFILL_SCHEMA_V1, MEMORY_ANCHORS_SCHEMA_V1};
 use crate::core::decide::{
     DECIDE_LIST_SCHEMA_V1, DECIDE_RECORD_SCHEMA_V1, DECIDE_REVISIT_SCHEMA_V1,
 };
@@ -534,6 +535,18 @@ pub const CONTRACTS: &[ContractEntry] = &[
         stability: "stable",
     },
     ContractEntry {
+        name: "memory_anchors",
+        schema: MEMORY_ANCHORS_SCHEMA_V1,
+        description: "Redaction-safe code-anchor listing, preview, and additive attachment preserving the existing memory's content and source provenance",
+        stability: "stable",
+    },
+    ContractEntry {
+        name: "anchor_backfill",
+        schema: ANCHOR_BACKFILL_SCHEMA_V1,
+        description: "Bounded workspace code-anchor backfill; preview by default, explicit --apply for mutation, nextAfter for continuation",
+        stability: "stable",
+    },
+    ContractEntry {
         name: "typed_memory_fields",
         schema: TYPED_MEMORY_FIELDS_SCHEMA_V2,
         description: "Canonical typed sidecar envelope for registry-backed memory kinds; v1 sidecars validate unchanged and canonicalize to v2",
@@ -608,6 +621,24 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         title: "Store a procedural rule",
         description: "Remember a learned best practice",
         command: "ee remember --level procedural --kind rule \"Run cargo fmt before commit\" --json",
+        category: "memory",
+    },
+    ExampleEntry {
+        title: "Create a memory with code anchors",
+        description: "Capture exact inline path and symbol anchors during creation, then recall with --path src/db/mod.rs or --symbol DbConnection::open_memory",
+        command: "ee remember 'Review storage changes. ee-anchor:path:src/db/mod.rs ee-anchor:symbol:DbConnection::open_memory' --level procedural --kind rule --workspace . --json",
+        category: "memory",
+    },
+    ExampleEntry {
+        title: "Attach code anchors to an existing memory",
+        description: "Preview additive path and symbol anchors without rewriting memory content or source provenance; remove --dry-run to apply",
+        command: "ee memory anchors <memory-id> --path src/db/mod.rs --symbol DbConnection::open_memory --dry-run --workspace . --json",
+        category: "memory",
+    },
+    ExampleEntry {
+        title: "Backfill existing code references",
+        description: "Preview a bounded page of eligible memories; use --apply after review and --after with nextAfter to continue",
+        command: "ee index backfill-anchors --dry-run --limit 100 --workspace . --json",
         category: "memory",
     },
     ExampleEntry {
@@ -907,12 +938,12 @@ pub const IMPACT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
 
 pub const RECALL_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
-        condition: "no anchors have been indexed for the workspace",
+        condition: "the workspace has no stored path or symbol anchors to rebuild",
         jq: r#".degraded[]? | select(.code == "anchor_index_empty")"#,
-        next_action: "Continue without injected recall context; create anchored memories naturally, or run `ee index rebuild --workspace .` after memories exist.",
+        next_action: "Preview `ee index backfill-anchors --workspace . --dry-run --json`, then apply reviewed candidates with --apply; or attach an exact anchor using `ee memory anchors <memory-id> --path <path> --workspace . --json`. Rebuilding an index cannot create missing source anchors.",
     },
     FailureBranchEntry {
-        condition: "anchor reverse index is stale",
+        condition: "anchor reverse index is stale or empty despite existing source code anchors",
         jq: r#".degraded[]? | select(.code == "anchor_index_stale")"#,
         next_action: "Run `ee index rebuild --workspace .`, then retry the same recall selector.",
     },
@@ -920,6 +951,30 @@ pub const RECALL_RECIPE_FAILURES: &[FailureBranchEntry] = &[
         condition: "git diff selector could not be read",
         jq: r#".degraded[]? | select(.code == "recall_git_unavailable")"#,
         next_action: "Retry with explicit `--path` selectors; recall must not block the edit path.",
+    },
+];
+
+pub const ANCHOR_ATTACH_RECIPE_FAILURES: &[FailureBranchEntry] = &[FailureBranchEntry {
+    condition: "the anchor or owning memory is invalid for this workspace",
+    jq: r#".error | {code, message, repair}"#,
+    next_action: "Use a current memory from the selected workspace and a normalized workspace-relative path or exact symbol; follow the error's repair without replacing the memory content.",
+}];
+
+pub const ANCHOR_BACKFILL_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "the scan has more pages, even if this page proposes no changes",
+        jq: r#".data | select(.nextAfter != null) | {nextAfter, scannedMemoryCount, proposedAnchorCount}"#,
+        next_action: "Review and apply this page with the same --after boundary, then continue using --after <nextAfter>. --limit bounds scanned memories rather than just proposed changes.",
+    },
+    FailureBranchEntry {
+        condition: "a memory exceeds the per-memory candidate limit",
+        jq: r#".data.skippedMemories[]? | select(.reason == "anchor_limit_exceeded")"#,
+        next_action: "The memory was skipped in full. Review its content and attach selected locators with `ee memory anchors <memory-id> --path <path> --workspace . --json`; continue scanning using nextAfter.",
+    },
+    FailureBranchEntry {
+        condition: "the final page proposes no new anchors and has no oversized memories",
+        jq: r#".data | select(.nextAfter == null and .proposedAnchorCount == 0 and ((.skippedMemories // []) | length) == 0)"#,
+        next_action: "Existing anchors may already be complete. If recall is still empty, check the workspace and selectors, then attach a known missing relationship with `ee memory anchors <memory-id> --path <path> --workspace . --json`. Rebuild only when recall reports a stale projection.",
     },
 ];
 
@@ -1168,6 +1223,26 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#".data.recall.items[]? | {memoryId, freshnessState, kind, level, anchor, repair}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true and .data.recall.schema == "ee.recall.v1""#,
         failure_branches: RECALL_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "attach-code-anchors",
+        title: "Attach code anchors without revising a memory",
+        description: "Preview validated additive anchors, then remove --dry-run to apply. Omit --path and --symbol to list existing code anchors. Content and source provenance remain unchanged.",
+        category: "memory",
+        command: "ee memory anchors <memory-id> --path src/db/mod.rs --symbol DbConnection::open_memory --dry-run --workspace . --json",
+        jq: r#".data | {memoryId, status, dryRun, persisted, changed, addedAnchorCount, anchors, auditId, indexJobId}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.memory.anchors.v1""#,
+        failure_branches: ANCHOR_ATTACH_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "backfill-code-anchors",
+        title: "Backfill code references in existing memories",
+        description: "Preview eligible stored references without writing; use --apply to attach anchors and --after <nextAfter> to continue bounded pages in the same workspace.",
+        category: "memory",
+        command: "ee index backfill-anchors --workspace . --dry-run --limit 100 --json",
+        jq: r#".data | {dryRun, scannedMemoryCount, proposedMemoryCount, proposedAnchorCount, appliedAnchorCount, skippedMemories, nextAfter, proposals}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.index.backfill_anchors.v1""#,
+        failure_branches: ANCHOR_BACKFILL_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "typed-memory-search",

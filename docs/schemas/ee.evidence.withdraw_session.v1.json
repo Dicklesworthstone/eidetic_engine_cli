@@ -1,0 +1,423 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.evidence.withdraw_session.v1.json",
+  "title": "ee.evidence.withdraw_session.v1",
+  "description": "Metadata-only receipt for ee evidence withdraw --session. Withdraws currently retained CASS sources atomically; does not disable future imports. Other producers and original source bytes are retained. Queued means index publication is pending.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "version",
+    "workspaceId",
+    "sessionId",
+    "scope",
+    "futureImports",
+    "status",
+    "dryRun",
+    "persisted",
+    "changed",
+    "wouldChange",
+    "retainedEvidenceCount",
+    "cassEvidenceCount",
+    "excludedProducerCount",
+    "alreadyWithdrawnCount",
+    "wouldWithdrawCount",
+    "withdrawnCount",
+    "auditId",
+    "indexJobId",
+    "indexStatus"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ee.evidence.withdraw_session.v1",
+      "type": "string"
+    },
+    "command": {
+      "const": "evidence withdraw",
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope": {
+      "const": "retained_sources",
+      "type": "string"
+    },
+    "futureImports": {
+      "const": "unchanged",
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "would_withdraw",
+        "withdrawn",
+        "already_withdrawn",
+        "no_cass_sources"
+      ]
+    },
+    "dryRun": {
+      "type": "boolean"
+    },
+    "persisted": {
+      "type": "boolean"
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "wouldChange": {
+      "type": "boolean"
+    },
+    "retainedEvidenceCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cassEvidenceCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "excludedProducerCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "alreadyWithdrawnCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "wouldWithdrawCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "withdrawnCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "auditId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "indexJobId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "indexStatus": {
+      "type": "string",
+      "enum": [
+        "dry_run_not_queued",
+        "queued",
+        "not_scheduled"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "status": {
+          "const": "would_withdraw"
+        },
+        "dryRun": {
+          "const": true
+        },
+        "persisted": {
+          "const": false
+        },
+        "changed": {
+          "const": false
+        },
+        "wouldChange": {
+          "const": true
+        },
+        "cassEvidenceCount": {
+          "minimum": 1
+        },
+        "wouldWithdrawCount": {
+          "minimum": 1
+        },
+        "withdrawnCount": {
+          "const": 0
+        },
+        "auditId": {
+          "const": null
+        },
+        "indexJobId": {
+          "const": null
+        },
+        "indexStatus": {
+          "const": "dry_run_not_queued"
+        }
+      }
+    },
+    {
+      "properties": {
+        "status": {
+          "const": "withdrawn"
+        },
+        "dryRun": {
+          "const": false
+        },
+        "persisted": {
+          "const": true
+        },
+        "changed": {
+          "const": true
+        },
+        "wouldChange": {
+          "const": true
+        },
+        "cassEvidenceCount": {
+          "minimum": 1
+        },
+        "wouldWithdrawCount": {
+          "minimum": 1
+        },
+        "withdrawnCount": {
+          "minimum": 1
+        },
+        "auditId": {
+          "type": "string"
+        },
+        "indexJobId": {
+          "type": "string"
+        },
+        "indexStatus": {
+          "const": "queued"
+        }
+      }
+    },
+    {
+      "properties": {
+        "status": {
+          "const": "already_withdrawn"
+        },
+        "persisted": {
+          "const": false
+        },
+        "changed": {
+          "const": false
+        },
+        "wouldChange": {
+          "const": false
+        },
+        "cassEvidenceCount": {
+          "minimum": 1
+        },
+        "wouldWithdrawCount": {
+          "const": 0
+        },
+        "withdrawnCount": {
+          "const": 0
+        },
+        "auditId": {
+          "const": null
+        },
+        "indexJobId": {
+          "const": null
+        },
+        "indexStatus": {
+          "const": "not_scheduled"
+        }
+      }
+    },
+    {
+      "properties": {
+        "status": {
+          "const": "no_cass_sources"
+        },
+        "persisted": {
+          "const": false
+        },
+        "changed": {
+          "const": false
+        },
+        "wouldChange": {
+          "const": false
+        },
+        "cassEvidenceCount": {
+          "const": 0
+        },
+        "alreadyWithdrawnCount": {
+          "const": 0
+        },
+        "wouldWithdrawCount": {
+          "const": 0
+        },
+        "withdrawnCount": {
+          "const": 0
+        },
+        "auditId": {
+          "const": null
+        },
+        "indexJobId": {
+          "const": null
+        },
+        "indexStatus": {
+          "const": "not_scheduled"
+        }
+      }
+    }
+  ],
+  "field_presets": {
+    "minimal": [
+      "schema",
+      "sessionId",
+      "status",
+      "dryRun",
+      "persisted",
+      "wouldWithdrawCount",
+      "withdrawnCount",
+      "indexStatus"
+    ],
+    "summary": [
+      "schema",
+      "sessionId",
+      "scope",
+      "futureImports",
+      "status",
+      "dryRun",
+      "persisted",
+      "changed",
+      "wouldChange",
+      "cassEvidenceCount",
+      "excludedProducerCount",
+      "alreadyWithdrawnCount",
+      "wouldWithdrawCount",
+      "withdrawnCount",
+      "indexStatus"
+    ],
+    "standard": [
+      "schema",
+      "command",
+      "version",
+      "workspaceId",
+      "sessionId",
+      "scope",
+      "futureImports",
+      "status",
+      "dryRun",
+      "persisted",
+      "changed",
+      "wouldChange",
+      "retainedEvidenceCount",
+      "cassEvidenceCount",
+      "excludedProducerCount",
+      "alreadyWithdrawnCount",
+      "wouldWithdrawCount",
+      "withdrawnCount",
+      "auditId",
+      "indexJobId",
+      "indexStatus"
+    ],
+    "full": [
+      "*"
+    ]
+  },
+  "examples": [
+    {
+      "schema": "ee.evidence.withdraw_session.v1",
+      "command": "evidence withdraw",
+      "version": "0.18.0",
+      "workspaceId": "wsp_01234567890123456789012345",
+      "sessionId": "sess_00000000000000000000000001",
+      "scope": "retained_sources",
+      "futureImports": "unchanged",
+      "status": "would_withdraw",
+      "dryRun": true,
+      "persisted": false,
+      "changed": false,
+      "wouldChange": true,
+      "retainedEvidenceCount": 3,
+      "cassEvidenceCount": 2,
+      "excludedProducerCount": 1,
+      "alreadyWithdrawnCount": 0,
+      "wouldWithdrawCount": 2,
+      "withdrawnCount": 0,
+      "auditId": null,
+      "indexJobId": null,
+      "indexStatus": "dry_run_not_queued"
+    },
+    {
+      "schema": "ee.evidence.withdraw_session.v1",
+      "command": "evidence withdraw",
+      "version": "0.18.0",
+      "workspaceId": "wsp_01234567890123456789012345",
+      "sessionId": "sess_00000000000000000000000001",
+      "scope": "retained_sources",
+      "futureImports": "unchanged",
+      "status": "withdrawn",
+      "dryRun": false,
+      "persisted": true,
+      "changed": true,
+      "wouldChange": true,
+      "retainedEvidenceCount": 3,
+      "cassEvidenceCount": 2,
+      "excludedProducerCount": 1,
+      "alreadyWithdrawnCount": 0,
+      "wouldWithdrawCount": 2,
+      "withdrawnCount": 2,
+      "auditId": "audit_example",
+      "indexJobId": "sidx_example",
+      "indexStatus": "queued"
+    },
+    {
+      "schema": "ee.evidence.withdraw_session.v1",
+      "command": "evidence withdraw",
+      "version": "0.18.0",
+      "workspaceId": "wsp_01234567890123456789012345",
+      "sessionId": "sess_00000000000000000000000001",
+      "scope": "retained_sources",
+      "futureImports": "unchanged",
+      "status": "already_withdrawn",
+      "dryRun": false,
+      "persisted": false,
+      "changed": false,
+      "wouldChange": false,
+      "retainedEvidenceCount": 3,
+      "cassEvidenceCount": 2,
+      "excludedProducerCount": 1,
+      "alreadyWithdrawnCount": 2,
+      "wouldWithdrawCount": 0,
+      "withdrawnCount": 0,
+      "auditId": null,
+      "indexJobId": null,
+      "indexStatus": "not_scheduled"
+    },
+    {
+      "schema": "ee.evidence.withdraw_session.v1",
+      "command": "evidence withdraw",
+      "version": "0.18.0",
+      "workspaceId": "wsp_01234567890123456789012345",
+      "sessionId": "sess_00000000000000000000000001",
+      "scope": "retained_sources",
+      "futureImports": "unchanged",
+      "status": "no_cass_sources",
+      "dryRun": true,
+      "persisted": false,
+      "changed": false,
+      "wouldChange": false,
+      "retainedEvidenceCount": 1,
+      "cassEvidenceCount": 0,
+      "excludedProducerCount": 1,
+      "alreadyWithdrawnCount": 0,
+      "wouldWithdrawCount": 0,
+      "withdrawnCount": 0,
+      "auditId": null,
+      "indexJobId": null,
+      "indexStatus": "not_scheduled"
+    }
+  ]
+}

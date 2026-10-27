@@ -38,6 +38,9 @@ use crate::models::DomainError;
 #[path = "focus_suggest_cass.rs"]
 mod cass_topics;
 
+#[path = "focus_suggest_admission.rs"]
+mod admission;
+
 /// Schema id pinned in `docs/schemas/ee.focus.suggest.v1.json`.
 pub const FOCUS_SUGGEST_SCHEMA_V1: &str = "ee.focus.suggest.v1";
 
@@ -120,16 +123,19 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
         }
     })?;
 
-    let workspace_id = resolve_workspace_id(&connection, &options.workspace_path)?;
+    admission::with_snapshot(&connection, || {
+        suggest_in_snapshot(options, &connection, degraded)
+    })
+}
 
-    let memories = connection
-        .list_memories(&workspace_id, None, false)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list memories: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?;
-
+fn suggest_in_snapshot(
+    options: &FocusSuggestOptions,
+    connection: &DbConnection,
+    mut degraded: Vec<FocusSuggestDegradation>,
+) -> Result<FocusSuggestReport, DomainError> {
+    let workspace_id = resolve_workspace_id(connection, &options.workspace_path)?;
     let now = Utc::now();
+    let memories = admission::memories(connection, &workspace_id, now)?;
     // Use `checked_sub_signed` rather than `now - Duration::hours(...)`:
     // `recent_hours: u32` accepts values up to ~4.3 billion hours
     // (~489_957 years), and chrono's `DateTime<Utc>` is bounded to
@@ -285,19 +291,26 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
     }
 
     let spans = if options.from_cass {
-        match connection.list_search_admitted_evidence_spans_for_workspace(&workspace_id) {
-            Ok((rows, _admission)) => rows
-                .into_iter()
-                // Transcript activity only; derived incident cards restate it.
-                .filter(|span| !span.is_derived_incident_card())
-                .filter(|span| {
-                    DateTime::parse_from_rfc3339(&span.created_at)
+        let mut rows = Vec::new();
+        let read = connection.visit_search_admitted_evidence_spans_in_current_snapshot(
+            &workspace_id,
+            |span| {
+                // Use the same pinned view as native admission and ranking.
+                // A late source failure discards this entire staged lane.
+                if !span.is_derived_incident_card()
+                    && DateTime::parse_from_rfc3339(&span.created_at)
                         .ok()
-                        .map(|ts| ts.with_timezone(&Utc))
-                        .is_some_and(|ts| ts >= cutoff)
-                })
-                .collect::<Vec<StoredEvidenceSpan>>(),
-            Err(error) => {
+                        .map(|at| at.with_timezone(&Utc))
+                        .is_some_and(|at| at >= cutoff && at <= now)
+                {
+                    rows.push(span);
+                }
+                Ok(())
+            },
+        );
+        match read {
+            Ok(_) => rows,
+            Err(_) => {
                 // Severity `medium` matches the canonical catalog entry
                 // at `tests/fixtures/failure_modes/cass_unavailable.json`
                 // (introduced by bd-17c65.10.6). Surfaces that emit a
@@ -306,7 +319,7 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
                 degraded.push(FocusSuggestDegradation {
                     code: "cass_unavailable".to_owned(),
                     severity: "medium".to_owned(),
-                    message: format!("Failed to list evidence spans for from-cass pass: {error}"),
+                    message: "Could not verify complete CASS focus evidence; no transcript contribution was used.".to_owned(),
                     repair: Some("ee doctor".to_owned()),
                 });
                 Vec::new()
@@ -322,7 +335,7 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
     let pagerank = if scoped.is_empty() {
         BTreeMap::new()
     } else {
-        compute_pagerank_scores(&connection, &mut degraded)
+        compute_pagerank_scores(connection, &scoped, &mut degraded)
     };
 
     let recommendations = score_and_emit_topics(&scoped, &spans, &pagerank, now, options);
@@ -413,11 +426,19 @@ fn load_task_frame_evidence(
 #[cfg(feature = "graph")]
 fn compute_pagerank_scores(
     connection: &DbConnection,
+    memories: &[StoredMemory],
     degraded: &mut Vec<FocusSuggestDegradation>,
 ) -> BTreeMap<String, f64> {
     use crate::graph::{ProjectionOptions, build_memory_graph, compute_pagerank};
 
-    match build_memory_graph(connection, &ProjectionOptions::default()) {
+    // Prune before the algorithm, not after scores have incorporated private,
+    // foreign or out-of-scope neighbors. Keep native typed and directed edges.
+    let projection =
+        build_memory_graph(connection, &ProjectionOptions::default()).map(|mut graph| {
+            admission::restrict_graph(&mut graph, memories);
+            graph
+        });
+    match projection {
         Ok(projection) if projection.node_count > 0 => match compute_pagerank(&projection) {
             Ok(result) => result
                 .scores
@@ -432,15 +453,14 @@ fn compute_pagerank_scores(
                 .filter(|score| score.score.is_finite() && score.score >= 0.0)
                 .map(|score| (score.node, score.score))
                 .collect(),
-            Err(error) => {
+            Err(_error) => {
                 degraded.push(FocusSuggestDegradation {
-                        code: "graph_pagerank_failed".to_owned(),
-                        severity: "warning".to_owned(),
-                        message: format!(
-                            "PageRank computation failed: {error}; falling back to recency-only scoring."
-                        ),
-                        repair: None,
-                    });
+                    code: "graph_pagerank_failed".to_owned(),
+                    severity: "warning".to_owned(),
+                    message: "PageRank computation failed; falling back to recency-only scoring."
+                        .to_owned(),
+                    repair: None,
+                });
                 BTreeMap::new()
             }
         },
@@ -453,13 +473,11 @@ fn compute_pagerank_scores(
             });
             BTreeMap::new()
         }
-        Err(error) => {
+        Err(_) => {
             degraded.push(FocusSuggestDegradation {
                 code: "graph_projection_failed".to_owned(),
                 severity: "warning".to_owned(),
-                message: format!(
-                    "Failed to build memory graph projection: {error}; falling back to recency-only scoring."
-                ),
+                message: "Could not build the admitted focus graph; falling back to recency-only scoring.".to_owned(),
                 repair: None,
             });
             BTreeMap::new()
@@ -470,6 +488,7 @@ fn compute_pagerank_scores(
 #[cfg(not(feature = "graph"))]
 fn compute_pagerank_scores(
     _connection: &DbConnection,
+    _memories: &[StoredMemory],
     degraded: &mut Vec<FocusSuggestDegradation>,
 ) -> BTreeMap<String, f64> {
     // Severity `medium` matches the canonical catalog entry at

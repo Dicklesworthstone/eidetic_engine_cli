@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use asupersync::Cx;
 use frankensearch::SearchError;
+use frankensearch::core::generation::EmbeddingIdentityBundleV1;
+use frankensearch::core::traits::IdentityBoundEmbedding;
 
 use crate::db::DbConnection;
 use crate::models::DomainError;
@@ -42,8 +44,10 @@ enum SemanticFailure {
 /// Missing, rejected, failed, or malformed models fall back to the complete
 /// lexical evaluation with `semantic_degraded = true`. Cancellation withholds
 /// the operation instead of being turned into an ordinary corpus miss.
-/// Query and span batches must retain one reported model identity and vector
-/// dimension; a detected change discards all intermediate semantic scores.
+/// Query and span outputs must retain one complete immutable embedding
+/// identity, not just a model name and dimension. A detected change discards
+/// all intermediate semantic scores. Batching is used only when the producer
+/// guarantees that its batch and single-output identity contracts agree.
 pub fn evaluate_ask_with_local_model(
     connection: &DbConnection,
     workspace_id: &str,
@@ -69,7 +73,13 @@ pub fn evaluate_ask_with_local_model(
     if caller_cx.as_ref().is_some_and(|cx| checkpoint(cx).is_err()) {
         return finish_evaluation(request, candidates, Err(SemanticFailure::Cancelled));
     }
-    let embedder = match crate::core::index::local_read_only_embedder(connection, workspace_id) {
+    let selected = crate::core::index::local_read_only_embedder(connection, workspace_id);
+    // A cancelled model load must not become a successful lexical answer just
+    // because model selection returned unavailable rather than an embedder.
+    if caller_cx.as_ref().is_some_and(|cx| checkpoint(cx).is_err()) {
+        return finish_evaluation(request, candidates, Err(SemanticFailure::Cancelled));
+    }
+    let embedder = match selected {
         Ok(Some(embedder)) => embedder,
         Ok(None) | Err(_) => return Ok(evaluate_ask(request, candidates)),
     };
@@ -122,41 +132,116 @@ fn finish_evaluation(
     }
 }
 
-/// Freeze the selected producer's reported vector space for one evaluation.
-/// Equal dimensions alone cannot make vectors from different models comparable.
-/// These checks supplement local-model admission; they are not a substitute for
-/// its artifact attestation and cannot detect an unreported change of weights.
+/// Freeze the complete producer, space, input and storage contract. Keep the
+/// descriptor checks too, but never manufacture compatibility from names or
+/// dimensions. These checks supplement local artifact admission; an embedder
+/// that lies about its own immutable identity still violates that boundary.
 struct SemanticSpace {
+    identity: EmbeddingIdentityBundleV1,
     id: String,
     model_name: String,
     dimension: usize,
 }
 
 impl SemanticSpace {
-    fn capture(embedder: &dyn Embedder) -> Result<Self, SemanticFailure> {
+    fn capture(cx: &Cx, embedder: &dyn Embedder) -> Result<Self, SemanticFailure> {
+        let identity = embedder.identity().cloned();
+        checkpoint(cx)?;
+        let identity = identity.map_err(|_| SemanticFailure::Unavailable)?;
+        identity
+            .validate()
+            .map_err(|_| SemanticFailure::Unavailable)?;
         let space = Self {
+            identity,
             id: embedder.id().to_owned(),
             model_name: embedder.model_name().to_owned(),
             dimension: embedder.dimension(),
         };
-        space.check(embedder)?;
+        space.check(cx, embedder)?;
         Ok(space)
     }
 
-    fn check(&self, embedder: &dyn Embedder) -> Result<(), SemanticFailure> {
-        if self.id.trim().is_empty()
-            || self.dimension == 0
-            || !embedder.is_semantic()
-            || embedder.dimension() != self.dimension
-            || embedder.id() != self.id.as_str()
-            || embedder.model_name() != self.model_name.as_str()
-        {
-            // Model descriptors can contain private local paths. Do not put
-            // either the frozen or changed values in reports or diagnostics.
+    fn check(&self, cx: &Cx, embedder: &dyn Embedder) -> Result<(), SemanticFailure> {
+        let consistent = !self.id.trim().is_empty()
+            && self.dimension != 0
+            && embedder.is_semantic()
+            && embedder.dimension() == self.dimension
+            && embedder.id() == self.id.as_str()
+            && embedder.model_name() == self.model_name.as_str()
+            && usize::try_from(self.identity.space.dimension).ok() == Some(self.dimension)
+            && embedder
+                .identity()
+                .is_ok_and(|identity| identity == &self.identity);
+        // Identity-aware adapters may discover cancellation while checking
+        // their state. Preserve it even when that check reports another error.
+        checkpoint(cx)?;
+        if !consistent {
+            // Descriptors and identity fields can contain private paths. Do
+            // not expose either frozen/changed values or provider errors.
             return Err(SemanticFailure::Unavailable);
         }
         Ok(())
     }
+
+    fn validate_output(&self, output: &IdentityBoundEmbedding) -> Result<(), SemanticFailure> {
+        // A custom bound implementation can override the default trait guard.
+        // Validate its actual response before any cosine comparison or reuse.
+        if output.identity != self.identity {
+            return Err(SemanticFailure::Unavailable);
+        }
+        output.validate().map_err(|_| SemanticFailure::Unavailable)
+    }
+}
+
+async fn embed_one(
+    cx: &Cx,
+    embedder: &dyn Embedder,
+    space: &SemanticSpace,
+    text: &str,
+) -> Result<Vec<f32>, SemanticFailure> {
+    space.check(cx, embedder)?;
+    let outcome = embedder.embed_bound(cx, text).await;
+    checkpoint(cx)?;
+    let output = outcome.map_err(|error| inference_failure(cx, &error))?;
+    space.check(cx, embedder)?;
+    space.validate_output(&output)?;
+    Ok(output.values)
+}
+
+/// Preserve the producer's single-output semantics unless it explicitly
+/// guarantees native bound-batch equivalence. Move validated value buffers;
+/// retain no duplicate coordinate matrix or identity metadata in the scorer.
+async fn embed_spans(
+    cx: &Cx,
+    embedder: &dyn Embedder,
+    space: &SemanticSpace,
+    texts: &[&str],
+) -> Result<Vec<Vec<f32>>, SemanticFailure> {
+    space.check(cx, embedder)?;
+    let native_batch = embedder.bound_batch_is_native();
+    checkpoint(cx)?;
+    if !native_batch {
+        let mut values = Vec::with_capacity(texts.len());
+        for text in texts {
+            values.push(embed_one(cx, embedder, space, text).await?);
+        }
+        return Ok(values);
+    }
+    let outcome = embedder.embed_batch_bound(cx, texts).await;
+    checkpoint(cx)?;
+    let outputs = outcome.map_err(|error| inference_failure(cx, &error))?;
+    space.check(cx, embedder)?;
+    if outputs.len() != texts.len() {
+        return Err(SemanticFailure::Unavailable);
+    }
+    outputs
+        .into_iter()
+        .map(|output| {
+            checkpoint(cx)?;
+            space.validate_output(&output)?;
+            Ok(output.values)
+        })
+        .collect()
 }
 
 /// Borrow the admitted bytes. Retain scalars, not a corpus-sized vector matrix.
@@ -174,13 +259,8 @@ impl<'a> SemanticScores<'a> {
         embedder: &dyn Embedder,
     ) -> Result<Self, SemanticFailure> {
         checkpoint(cx)?;
-        let space = SemanticSpace::capture(embedder)?;
-        let query = embedder
-            .embed(cx, question)
-            .await
-            .map_err(|error| inference_failure(cx, &error))?;
-        checkpoint(cx)?;
-        space.check(embedder)?;
+        let space = SemanticSpace::capture(cx, embedder)?;
+        let query = embed_one(cx, embedder, &space, question).await?;
         let query_norm = vector_norm_squared(&query, space.dimension)
             .filter(|norm| *norm > 0.0)
             .ok_or(SemanticFailure::Unavailable)?;
@@ -199,20 +279,10 @@ impl<'a> SemanticScores<'a> {
         let texts: Vec<_> = texts.into_iter().collect();
         let mut by_text = BTreeMap::new();
         for batch in texts.chunks(EMBEDDING_BATCH_SIZE) {
-            checkpoint(cx)?;
-            space.check(embedder)?;
-            let vectors = embedder
-                .embed_batch(cx, batch)
-                .await
-                .map_err(|error| inference_failure(cx, &error))?;
-            checkpoint(cx)?;
-            // Cancellation wins over descriptor drift. A same-size model
-            // switch must discard earlier scalars too, not mix vector spaces.
-            space.check(embedder)?;
+            let vectors = embed_spans(cx, embedder, &space, batch).await?;
             append_batch(&mut by_text, batch, &vectors, &query, query_norm)?;
         }
-        checkpoint(cx)?;
-        space.check(embedder)?;
+        space.check(cx, embedder)?;
         Ok(Self { by_text })
     }
 
@@ -351,6 +421,12 @@ mod runtime_tests {
             })
         }
 
+        fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+            self.hash.identity()
+        }
+        fn bound_batch_is_native(&self) -> bool {
+            true
+        }
         fn dimension(&self) -> usize {
             self.hash.dimension()
         }
@@ -442,6 +518,12 @@ mod runtime_tests {
             })
         }
 
+        fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+            self.hash.identity()
+        }
+        fn bound_batch_is_native(&self) -> bool {
+            true
+        }
         fn dimension(&self) -> usize {
             self.hash.dimension()
         }
@@ -635,6 +717,7 @@ mod runtime_tests {
         let text = output.to_string();
         assert!(!text.contains("PRIVATE-MODEL-ID-CANARY"));
         assert!(!text.contains("PRIVATE-MODEL-NAME-CANARY"));
+        assert!(!text.contains("PRIVATE-IDENTITY"));
     }
 
     #[test]
@@ -735,6 +818,314 @@ mod runtime_tests {
             let expected_batches = if stage == SpaceChange::Query { 0 } else { 2 };
             assert_eq!(model.query_calls.load(Ordering::SeqCst), 1);
             assert_eq!(model.batch_calls.load(Ordering::SeqCst), expected_batches);
+        }
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum IdentityFault {
+        None,
+        Missing,
+        Invalid,
+        MismatchedDimension,
+        Changed(SpaceChange),
+        ForeignOutput(SpaceChange),
+        ShortBatch,
+        ExtraBatch,
+        NonfiniteBatch,
+        WrongDimensionBatch,
+    }
+
+    // Successful vectors come from the real hash provider. Faults affect only
+    // contracts or selected response validation; this is not neural-quality
+    // evidence. Raw entry points deliberately panic: no bound override may be
+    // bypassed by ask, including a producer that cannot attest batch equivalence.
+    struct BoundProbe {
+        hash: crate::search::HashEmbedder,
+        alternate: EmbeddingIdentityBundleV1,
+        fault: IdentityFault,
+        native_batch: bool,
+        cancel_at: SpaceChange,
+        changed: AtomicBool,
+        single_calls: AtomicUsize,
+        batch_calls: AtomicUsize,
+    }
+
+    impl BoundProbe {
+        fn new(fault: IdentityFault, native_batch: bool) -> Self {
+            let hash = crate::search::HashEmbedder::default_256();
+            let mut alternate = hash.identity().unwrap().clone();
+            alternate.storage.format = "in-memory-PRIVATE-IDENTITY-CANARY".to_owned();
+            alternate.validate().unwrap();
+            if fault == IdentityFault::Invalid {
+                alternate.space.dimension = 0;
+            }
+            Self {
+                hash,
+                alternate,
+                fault,
+                native_batch,
+                cancel_at: SpaceChange::Never,
+                changed: AtomicBool::new(false),
+                single_calls: AtomicUsize::new(0),
+                batch_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn finish(&self, cx: &Cx, stage: SpaceChange, output: &mut IdentityBoundEmbedding) {
+            if self.fault == IdentityFault::Changed(stage) {
+                self.changed.store(true, Ordering::SeqCst);
+            }
+            if self.fault == IdentityFault::ForeignOutput(stage) {
+                output.identity = self.alternate.clone();
+                // The regression is incompatible valid identity, not simply
+                // a malformed descriptor or an invalid vector dimension.
+                output.validate().unwrap();
+            }
+            if self.cancel_at == stage {
+                cx.set_cancel_reason(asupersync::CancelReason::user(
+                    "PRIVATE-IDENTITY-CANCEL-CANARY",
+                ));
+            }
+        }
+    }
+
+    impl Embedder for BoundProbe {
+        fn embed<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _text: &'a str,
+        ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+            panic!("ask must call the identity-bound single-output entry point")
+        }
+
+        fn embed_batch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _texts: &'a [&'a str],
+        ) -> frankensearch::SearchFuture<'a, Vec<Vec<f32>>> {
+            panic!("ask must never bypass a bound producer with raw batch inference")
+        }
+
+        fn embed_bound<'a>(
+            &'a self,
+            cx: &'a Cx,
+            text: &'a str,
+        ) -> frankensearch::SearchFuture<'a, IdentityBoundEmbedding> {
+            Box::pin(async move {
+                let call = self.single_calls.fetch_add(1, Ordering::SeqCst);
+                let stage = if call == 0 {
+                    SpaceChange::Query
+                } else {
+                    // In the non-native lane, Batch(n) selects the nth span.
+                    SpaceChange::Batch(call)
+                };
+                let mut output = self.hash.embed_bound(cx, text).await?;
+                self.finish(cx, stage, &mut output);
+                Ok(output)
+            })
+        }
+
+        fn embed_batch_bound<'a>(
+            &'a self,
+            cx: &'a Cx,
+            texts: &'a [&'a str],
+        ) -> frankensearch::SearchFuture<'a, Vec<IdentityBoundEmbedding>> {
+            assert!(self.native_batch, "unattested batch semantics must not run");
+            Box::pin(async move {
+                let batch = self.batch_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut outputs = self.hash.embed_batch_bound(cx, texts).await?;
+                if let Some(last) = outputs.last_mut() {
+                    self.finish(cx, SpaceChange::Batch(batch), last);
+                    match self.fault {
+                        IdentityFault::NonfiniteBatch => last.values[0] = f32::NAN,
+                        IdentityFault::WrongDimensionBatch => {
+                            let _ = last.values.pop();
+                        }
+                        _ => {}
+                    }
+                }
+                match self.fault {
+                    IdentityFault::ShortBatch => {
+                        let _ = outputs.pop();
+                    }
+                    IdentityFault::ExtraBatch => {
+                        let extra = outputs[0].clone();
+                        outputs.push(extra);
+                    }
+                    _ => {}
+                }
+                Ok(outputs)
+            })
+        }
+
+        fn identity(&self) -> frankensearch::SearchResult<&EmbeddingIdentityBundleV1> {
+            if self.fault == IdentityFault::Missing {
+                return Err(SearchError::InvalidConfig {
+                    field: "PRIVATE-IDENTITY-CANARY".to_owned(),
+                    value: "PRIVATE-IDENTITY-CANARY".to_owned(),
+                    reason: "PRIVATE-IDENTITY-CANARY".to_owned(),
+                });
+            }
+            if self.fault == IdentityFault::Invalid || self.changed.load(Ordering::SeqCst) {
+                Ok(&self.alternate)
+            } else {
+                self.hash.identity()
+            }
+        }
+        fn bound_batch_is_native(&self) -> bool {
+            self.native_batch
+        }
+        fn dimension(&self) -> usize {
+            self.hash.dimension() + usize::from(self.fault == IdentityFault::MismatchedDimension)
+        }
+        fn id(&self) -> &str {
+            self.hash.id()
+        }
+        fn model_name(&self) -> &str {
+            self.hash.model_name()
+        }
+        fn is_semantic(&self) -> bool {
+            true
+        }
+        fn category(&self) -> frankensearch::ModelCategory {
+            self.hash.category()
+        }
+    }
+
+    #[test]
+    fn bound_single_and_native_batch_paths_preserve_identical_semantic_answers() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = multi_batch_fixture();
+        let reference = RuntimeProbe::new(false);
+        let expected = evaluate_with_prepared_model(&request, &rows, &reference, None).unwrap();
+        for native in [false, true] {
+            let model = BoundProbe::new(IdentityFault::None, native);
+            let actual = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+            assert!(!actual.semantic_degraded);
+            assert_eq!(
+                super::super::ask_data_json(&actual),
+                super::super::ask_data_json(&expected)
+            );
+            assert_eq!(
+                model.batch_calls.load(Ordering::SeqCst),
+                if native { 3 } else { 0 }
+            );
+            assert_eq!(
+                model.single_calls.load(Ordering::SeqCst),
+                if native { 1 } else { rows.len() + 1 }
+            );
+        }
+        assert!(Cx::current().is_none());
+    }
+
+    #[test]
+    fn full_identity_is_required_before_even_query_inference() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = fixture();
+        for fault in [
+            IdentityFault::Missing,
+            IdentityFault::Invalid,
+            IdentityFault::MismatchedDimension,
+        ] {
+            let model = BoundProbe::new(fault, true);
+            let actual = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+            assert_complete_lexical_fallback(&request, &rows, &actual);
+            assert_eq!(model.single_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(model.batch_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn identical_descriptors_cannot_hide_full_identity_or_bound_output_drift() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = multi_batch_fixture();
+        for stage in [
+            SpaceChange::Query,
+            SpaceChange::Batch(1),
+            SpaceChange::Batch(2),
+            SpaceChange::Batch(3),
+        ] {
+            for fault in [
+                IdentityFault::Changed(stage),
+                IdentityFault::ForeignOutput(stage),
+            ] {
+                let model = BoundProbe::new(fault, true);
+                let before = (
+                    model.id().to_owned(),
+                    model.model_name().to_owned(),
+                    model.dimension(),
+                );
+                let actual = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+                assert_complete_lexical_fallback(&request, &rows, &actual);
+                assert_eq!(
+                    before,
+                    (
+                        model.id().to_owned(),
+                        model.model_name().to_owned(),
+                        model.dimension()
+                    )
+                );
+                assert_eq!(model.single_calls.load(Ordering::SeqCst), 1);
+                let batches = match stage {
+                    SpaceChange::Batch(n) => n,
+                    _ => 0,
+                };
+                assert_eq!(model.batch_calls.load(Ordering::SeqCst), batches);
+            }
+        }
+    }
+
+    #[test]
+    fn single_bound_fault_stops_before_the_next_span_without_native_batching() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = multi_batch_fixture();
+        for fault in [
+            IdentityFault::Changed(SpaceChange::Batch(2)),
+            IdentityFault::ForeignOutput(SpaceChange::Batch(2)),
+        ] {
+            let model = BoundProbe::new(fault, false);
+            let actual = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+            assert_complete_lexical_fallback(&request, &rows, &actual);
+            assert_eq!(model.single_calls.load(Ordering::SeqCst), 3);
+            assert_eq!(model.batch_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn custom_bound_batches_cannot_publish_malformed_values_or_partial_coverage() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = multi_batch_fixture();
+        for fault in [
+            IdentityFault::ShortBatch,
+            IdentityFault::ExtraBatch,
+            IdentityFault::NonfiniteBatch,
+            IdentityFault::WrongDimensionBatch,
+        ] {
+            let model = BoundProbe::new(fault, true);
+            let actual = evaluate_with_prepared_model(&request, &rows, &model, None).unwrap();
+            assert_complete_lexical_fallback(&request, &rows, &actual);
+            assert_eq!(model.single_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(model.batch_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn cancellation_wins_over_foreign_bound_output_in_both_inference_lanes() {
+        let _ambient = Cx::set_current(None);
+        let (request, rows) = multi_batch_fixture();
+        for native in [false, true] {
+            for stage in [SpaceChange::Query, SpaceChange::Batch(2)] {
+                let mut model = BoundProbe::new(IdentityFault::ForeignOutput(stage), native);
+                model.cancel_at = stage;
+                let caller = Cx::for_testing();
+                let error =
+                    evaluate_with_prepared_model(&request, &rows, &model, Some(caller.clone()))
+                        .unwrap_err();
+                assert!(caller.checkpoint().is_err());
+                assert!(error.to_string().contains("cancelled"));
+                assert!(!error.to_string().contains("PRIVATE-IDENTITY"));
+                assert!(Cx::current().is_none());
+            }
         }
     }
 }

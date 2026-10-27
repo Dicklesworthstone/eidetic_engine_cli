@@ -177,11 +177,46 @@ impl RerankModelManifest {
         {
             return Err("rerank model manifest inference dimensions are incomplete".to_string());
         }
-        if self.signed_attestation.sigstore_bundle.trim().is_empty()
-            || self.signed_attestation.signer_identity.trim().is_empty()
-            || self.signed_attestation.signed_at.trim().is_empty()
-        {
-            return Err("rerank model manifest signed_attestation is incomplete".to_string());
+        match self.signed_attestation.status.as_str() {
+            "verified" => {
+                let complete = self
+                    .signed_attestation
+                    .sigstore_bundle
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && self
+                        .signed_attestation
+                        .signer_identity
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    && self
+                        .signed_attestation
+                        .signed_at
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty());
+                if !complete {
+                    return Err(
+                        "verified rerank model attestation is missing provenance fields"
+                            .to_string(),
+                    );
+                }
+            }
+            "unavailable" => {
+                if self.signed_attestation.sigstore_bundle.is_some()
+                    || self.signed_attestation.signer_identity.is_some()
+                    || self.signed_attestation.signed_at.is_some()
+                {
+                    return Err(
+                        "unavailable rerank model attestation must not claim provenance fields"
+                            .to_string(),
+                    );
+                }
+            }
+            _ => {
+                return Err(
+                    "rerank model attestation status must be verified or unavailable".to_string(),
+                );
+            }
         }
         Ok(())
     }
@@ -207,6 +242,7 @@ impl RerankModelManifest {
                 "outputDimension": self.inference_dimensions.output_dimension,
             },
             "signedAttestation": {
+                "status": self.signed_attestation.status,
                 "sigstoreBundle": self.signed_attestation.sigstore_bundle,
                 "signerIdentity": self.signed_attestation.signer_identity,
                 "signedAt": self.signed_attestation.signed_at,
@@ -225,9 +261,10 @@ pub struct RerankModelInferenceDimensions {
 /// Sigstore provenance pointer declared by the rerank model manifest.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RerankModelSignedAttestation {
-    pub sigstore_bundle: String,
-    pub signer_identity: String,
-    pub signed_at: String,
+    pub status: String,
+    pub sigstore_bundle: Option<String>,
+    pub signer_identity: Option<String>,
+    pub signed_at: Option<String>,
 }
 
 /// Single registry entry shaped for public output.

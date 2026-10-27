@@ -50,7 +50,7 @@ fn javascript_repair_requires_every_failed_subject_to_actually_pass() {
 }
 
 #[test]
-fn javascript_retry_inventory_is_exact_and_preserves_component_boundaries() {
+fn javascript_retry_preserves_original_inventory_and_component_boundaries() {
     let failure = two_tests("failed");
     let mut renamed = two_tests("passed");
     renamed["testResults"][0]["assertionResults"][0]["title"] = json!("different test");
@@ -82,7 +82,7 @@ fn javascript_retry_inventory_is_exact_and_preserves_component_boundaries() {
     reordered["testResults"][0]["startTime"] = json!(9001);
     reordered["testResults"][0]["endTime"] = json!(9002);
     assert!(verifies(failure, reordered));
-    assert!(!verifies(report("failed"), two_tests("passed")));
+    assert!(verifies(report("failed"), two_tests("passed")));
 }
 
 #[test]
@@ -364,3 +364,6 @@ fn javascript_sessions_preserve_invocation_and_whole_source_safety_gates() -> Te
     assert_eq!(result.resolved_failures, 0);
     Ok(())
 }
+
+#[path = "cass_error_recall_js_growth_tests.rs"]
+mod growth;

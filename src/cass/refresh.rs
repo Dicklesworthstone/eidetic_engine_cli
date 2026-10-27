@@ -26,6 +26,8 @@ const CHECKPOINT_SCHEMA: &str = "ee.cass.session_checkpoint.v1";
 #[path = "refresh_batch.rs"]
 mod batch;
 
+pub(super) use batch::insert_initial_spans;
+
 type SessionMetadata = serde_json::Map<String, serde_json::Value>;
 
 struct MetadataRefresh {
@@ -61,22 +63,35 @@ pub(super) fn reconcile_session_publication(
     session_id: &str,
 ) -> Result<Option<String>, DbError> {
     with_import_session_transaction(connection, || {
-        let stored = connection
-            .get_session(session_id)?
-            .ok_or_else(|| refusal("cass_refresh_session_missing"))?;
-        if stored.workspace_id != workspace_id {
-            return Err(refusal("cass_refresh_scope_mismatch"));
-        }
-        let mut metadata = metadata_object(stored.metadata_json.as_deref())?;
-        let checkpoint = take_checkpoint(&mut metadata, workspace_id, session_id)?;
-        let job_id = checkpoint.map_or_else(
-            || stable_search_index_job_id(workspace_id, session_id),
-            |saved| saved.index_job_id,
-        );
+        let job_id = committed_session_publication_id(connection, workspace_id, session_id)?;
         // A missing derived queue row is repairable from this durable identity.
         // Never change the evidence, checkpoint, or a live publisher's lease.
         pending_job(connection, workspace_id, session_id, &job_id, true)
     })
+}
+
+/// Identify the last committed import snapshot without scanning its evidence.
+/// The original import has a stable job identity; every refresh checkpoint
+/// binds a new publication identity to its predecessor and complete snapshot.
+/// Callers that record completed derived work must read this before processing
+/// evidence and revalidate it under their final writer transaction.
+pub(super) fn committed_session_publication_id(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+) -> Result<String, DbError> {
+    let stored = connection
+        .get_session(session_id)?
+        .ok_or_else(|| refusal("cass_refresh_session_missing"))?;
+    if stored.workspace_id != workspace_id {
+        return Err(refusal("cass_refresh_scope_mismatch"));
+    }
+    let mut metadata = metadata_object(stored.metadata_json.as_deref())?;
+    let checkpoint = take_checkpoint(&mut metadata, workspace_id, session_id)?;
+    Ok(checkpoint.map_or_else(
+        || stable_search_index_job_id(workspace_id, session_id),
+        |saved| saved.index_job_id,
+    ))
 }
 
 /// The caller obtained a complete bounded `cass view` snapshot before entering
@@ -110,7 +125,7 @@ pub(super) fn refresh_session(
             // checkpoint, even when a future caller bypasses the view parser.
             if span.start_line == 0
                 || span.source_bytes == 0
-                || span.source_bytes > super::CASS_STDOUT_LINE_MAX_BYTES
+                || span.source_bytes > super::CASS_VIEW_STDOUT_LINE_MAX_BYTES
                 || span.end_line != span.start_line
                 || span.cass_span_id != format!("{}:{}", discovered.source_path, span.start_line)
                 || span.content_hash
@@ -649,7 +664,9 @@ fn snapshot_revision(
     format!("blake3:{}", hash.finalize().to_hex())
 }
 
-fn pending_job(
+/// Reconcile one validated session publication without changing an existing
+/// job's status or lease. The caller must hold the database writer fence.
+pub(super) fn pending_job(
     connection: &DbConnection,
     workspace_id: &str,
     session_id: &str,
@@ -839,9 +856,15 @@ mod canonical_reference_tests {
         let (db, workspace, id, session) = fixture("/private/denied-session.jsonl", 1);
         let first = span(&session, 1);
         let first_id = stable_evidence_id(&id, &first.cass_span_id);
-        db.execute_raw(
-            "UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied'",
-        )
+        db.with_transaction_error(|| {
+            db.withdraw_cass_evidence_in_current_snapshot(
+                &workspace,
+                &first_id,
+                "Withdraw this source before importing later transcript lines.",
+                Some("withdrawal-refresh-test"),
+                false,
+            )
+        })
         .unwrap();
         let denied = db.get_evidence_span(&first_id).unwrap().unwrap();
         let incoming = vec![first, span(&session, 2)];

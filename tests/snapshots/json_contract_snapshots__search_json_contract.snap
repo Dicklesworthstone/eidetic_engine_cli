@@ -207,7 +207,7 @@ expression: canonical_json_text(value)
               "beadAffinity": 0.0,
               "confidence": 0.92,
               "finalScore": 0.9936001,
-              "freshnessDrift": 0,
+              "freshnessDrift": "[FRESHNESS]",
               "graphCentrality": 1.0,
               "harmfulPenalty": 1.0,
               "maturity": 1.0,
@@ -220,6 +220,9 @@ expression: canonical_json_text(value)
             "inputs": {
               "ageDays": 0.0,
               "anchorMatch": null,
+              "anchorMatchCapped": null,
+              "anchorMatchExactMatches": null,
+              "anchorMatchSource": null,
               "beadAffinity": null,
               "confidence": 0.92,
               "freshnessDrift": null,
@@ -244,7 +247,7 @@ expression: canonical_json_text(value)
               "utility": true
             },
             "policyHash": "[HASH]",
-            "rankingBound": 1.2,
+            "rankingBound": 1.8000001,
             "referenceTime": "[TIMESTAMP]",
             "schema": "ee.search.quality_scoring.v1"
           },

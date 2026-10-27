@@ -138,3 +138,40 @@ fn source_binding(span: &StoredEvidenceSpan) -> String {
     );
     format!("blake3:{}", hasher.finalize().to_hex())
 }
+
+impl StoredEvidenceSpan {
+    /// Identify a native locator after ingestion has replaced the upstream
+    /// text with its commitment. Recognition is not admission or proof; either
+    /// matching field keeps a damaged card from reentering as plain evidence.
+    pub(crate) fn has_screened_upstream_reference(&self, upstream: &str) -> bool {
+        let expected = super::canonical_evidence_hash(upstream);
+        self.cass_span_id == expected || self.upstream_ref_hash.as_deref() == Some(&expected)
+    }
+
+    /// Compare a freshly derived input with the bytes the real ingestion
+    /// boundary would store. Reuse screening, metadata commitments and locator
+    /// hashing without writing a row, initializing a store or granting live
+    /// admission. The caller owns native identity and its source snapshot.
+    pub(crate) fn matches_screened_input(
+        &self,
+        input: &super::CreateEvidenceSpanInput,
+    ) -> super::Result<bool> {
+        let prepared = super::prepare_evidence_security(input)?;
+        Ok(self.workspace_id == input.workspace_id
+            && self.session_id == input.session_id
+            && self.memory_id == input.memory_id
+            && self.producer_kind == prepared.producer_kind.as_str()
+            && self.span_kind == input.span_kind
+            && self.start_line == input.start_line
+            && self.end_line == input.end_line
+            && self.start_byte == input.start_byte
+            && self.end_byte == input.end_byte
+            && self.role == input.role
+            && self.cass_span_id == prepared.upstream_ref_hash
+            && self.upstream_ref_hash.as_deref() == Some(&prepared.upstream_ref_hash)
+            && self.excerpt == prepared.excerpt
+            && self.content_hash == prepared.canonical_excerpt_hash
+            && self.canonical_excerpt_hash.as_deref() == Some(&prepared.canonical_excerpt_hash)
+            && self.metadata_json.as_deref() == Some(&prepared.safe_metadata_json))
+    }
+}

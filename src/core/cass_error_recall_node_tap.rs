@@ -36,7 +36,13 @@ impl Execution {
     pub(super) fn verified_by(&self, proof: &Self) -> bool {
         self.has_known_failures()
             && proof.complete
-            && self.inventory == proof.inventory
+            && proof.failed.is_empty()
+            // Adding regressions is normal repair work. Keep every original
+            // hierarchical subject and its test/suite kind, not equal counts.
+            && self.inventory.is_subset(&proof.inventory)
+            // TAP inventory includes SKIP/TODO rows. Presence alone cannot
+            // prove that previously passing control tests still ran.
+            && self.passed.is_subset(&proof.passed)
             && self.failed.is_subset(&proof.passed)
     }
 }
@@ -573,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn skipped_todo_removed_renamed_or_extra_tests_cannot_prove_the_failure() {
+    fn skipped_todo_removed_renamed_or_failing_extra_tests_cannot_prove_the_failure() {
         let failed = report(&[("repair", Status::Failed), ("control", Status::Passed)]);
         let requirement = Requirement::capture(&observed(&failed), true);
         assert!(requirement.is_guarded());
@@ -587,7 +593,7 @@ mod tests {
             vec![
                 ("repair", Status::Passed),
                 ("control", Status::Passed),
-                ("extra", Status::Passed),
+                ("extra", Status::Failed),
             ],
         ] {
             let proof = Proof::capture(&observed(&report(&tests)));

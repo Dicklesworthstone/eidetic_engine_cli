@@ -1,0 +1,15 @@
+name: Typed graph delivery 20261015 (retired)
+
+# No Actions run was created for this one-time transport. Its graph patches
+# were not applied by this workflow; the retained conversation bundle and
+# immutable Git blobs preserve them separately from committed product code.
+# Retired without deletion: no push trigger, write permission or delivery code.
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  retired:
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'This delivery is retired without execution.'

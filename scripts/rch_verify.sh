@@ -742,7 +742,16 @@ import re
 
 raw = os.environ.get("LOCAL_CARGO_PROCESSES_OUTPUT", "")
 exit_code = int(os.environ.get("LOCAL_CARGO_PROCESSES_EXIT_CODE") or "0")
-user_path = re.compile(r"/Users/[^\\s\"'`,;:]+")
+# `[^/\s...]`, NOT `[^\\s...]`. In a RAW string `\\s` inside a character class
+# is not the whitespace class -- it is the two literal characters `\` and `s`.
+# So the old class excluded the LETTER s and did not exclude `/`, which broke
+# redaction three ways (measured 2026-10-19):
+#   /Users/sam/x       -> /Users/sam/x            NOT REDACTED AT ALL
+#   /Users/jessica/w   -> /Users/<r>ssica/w       username partly leaked
+#   /Users/bob/notes   -> /Users/<r>s             path eaten past the user
+# A username that merely STARTS with `s` was published verbatim. The correct
+# form is already used three times in this same file (:945, :1215, :5615).
+user_path = re.compile(r"/Users/[^/\s\"'`,;:]+")
 
 def redact_local_paths(value):
     if isinstance(value, str):
@@ -3086,15 +3095,14 @@ PY
     PINNED_BUNDLE_CONTENT_HASH="$observed_content_hash"
 }
 
-materialize_committed_tree() {
-    local commit export_base export_root project_parent short_commit
-    commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
-    if [ -z "$commit" ]; then
-        echo "rch_verify: committed-tree materialization missing resolved commit" >&2
-        return 1
-    fi
+# Where committed-tree exports are materialized, as an absolute resolved path.
+#
+# Extracted from materialize_committed_tree so the AppleDouble guard below can
+# ask the same question the exporter will answer, rather than re-deriving the
+# base and drifting from it.
+resolve_committed_tree_export_base() {
+    local export_base project_parent
 
-    short_commit="${commit:0:12}"
     if [ -n "${RCH_VERIFY_COMMITTED_TREE_BASE:-}" ]; then
         export_base="$RCH_VERIFY_COMMITTED_TREE_BASE"
     elif [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
@@ -3107,10 +3115,141 @@ materialize_committed_tree() {
         export_base="${TMPDIR:-/tmp}/ee-rch-committed-tree"
     fi
     mkdir -p "$export_base"
-    COMMITTED_TREE_EXPORT_BASE="$(
+    (
         cd "$export_base"
         pwd -P
-    )"
+    )
+}
+
+# Refuse before exporting when the export base shims extended attributes into
+# AppleDouble `._*` sidecars (bd-r4iwj).
+#
+# WHAT THIS PREVENTS. rch's dependency-closure preflight globs required package
+# source entrypoints out of the LOCAL export and demands them on the worker,
+# while `.rchignore:203-206` deliberately excludes `._*` from the transfer
+# (vendored C crates compile a `._foo.c` sibling and poison the build,
+# bd-1h8ji.4). Both halves are derived locally, so when the export carries
+# sidecars NO worker can satisfy the closure: every dispatch dies
+#
+#   [RCH-E410] missing source_entrypoint .../benches/._adaptive_budget.rs
+#
+# after ~4 minutes of export and ~29 seconds of preflight, and rch labels that
+# refusal `— retryable`. It is not retryable on any worker.
+#
+# WHY A GUARD AND NOT JUST THE RECIPE IN CLAUDE.md. The documented fix is to
+# point RCH_VERIFY_COMMITTED_TREE_BASE at a sparse APFS image, which has to be
+# re-attached after a reboot. If it is not attached, this script happily
+# `mkdir -p`s the path on whatever filesystem the mount point's parent is --
+# which is the ExFAT volume -- and the lane silently returns to the broken
+# state with nothing saying the arrangement lapsed. That is the failure this
+# guard exists to make loud.
+#
+# SCOPE IS DELIBERATELY NARROW, not an oversight: pinned dispatches only. The
+# tar extraction is the same on the plain `--committed-tree` path, but the E410
+# closure refusal has only been measured on the pinned rail, and the plain
+# path's default base is `${TMPDIR:-/tmp}/...` -- which on this host IS the
+# ExFAT volume, by AGENTS.md's per-invocation TMPDIR rule. Refusing there would
+# break a rail nobody has shown to be broken. Widening this needs a measurement
+# on that rail first.
+#
+# Indeterminate probes do NOT refuse; see the probe's own header for why.
+assert_committed_tree_base_stores_xattrs() {
+    [ "$PINNED_FRANKEN_STACK" -eq 1 ] || return 0
+    [ "$(uname -s 2>/dev/null || printf unknown)" = "Darwin" ] || return 0
+
+    . "$SCRIPT_DIR/lib/appledouble_sidecar_probe.sh" 2>/dev/null || return 0
+
+    local base base_origin
+    base="$(resolve_committed_tree_export_base)" || return 0
+
+    # Name WHERE the value came from. On this host RCH_VERIFY_COMMITTED_TREE_BASE
+    # is exported from ~/.zshenv, so the operator who reads this refusal did not
+    # type the path and will not find it on their command line. "Point
+    # RCH_VERIFY_COMMITTED_TREE_BASE somewhere else" is unactionable advice to
+    # someone who does not know it is already set.
+    if [ -n "${RCH_VERIFY_COMMITTED_TREE_BASE:-}" ]; then
+        base_origin="from RCH_VERIFY_COMMITTED_TREE_BASE in the environment, which on this host is exported by the shell profile rather than passed on the command line"
+    else
+        base_origin="derived by this script, since RCH_VERIFY_COMMITTED_TREE_BASE is unset"
+    fi
+
+    if ee_dir_creates_appledouble_sidecars "$base"; then
+        RCH_INVOCATION=()
+        emit_json true 1 0 \
+            "committed-tree export base is on a filesystem that shims extended attributes into AppleDouble ._* sidecar files: $base ($base_origin). rch's dependency-closure preflight requires every globbed source entrypoint on the worker while .rchignore excludes ._* from the transfer, so every dispatch from this base is refused with [RCH-E410] missing source_entrypoint on every worker. Point RCH_VERIFY_COMMITTED_TREE_BASE at an xattr-native path -- on this host a sparse APFS image, created and attached per the recipe in CLAUDE.md -- and re-run. If that image is configured already, it is not currently attached." \
+            "" \
+            "rch_verify_committed_tree_base_appledouble_shim"
+        exit 1
+    fi
+}
+
+# Stamp the candidate binary with the commit it is built from (bd-reality-core-
+# convergence-1azkt.10 acceptance bullet 2).
+#
+# WHAT WAS ALREADY BUILT, AND WHAT WAS MISSING. `build.rs:76` passes
+# VERGEN_GIT_SHA / VERGEN_GIT_DESCRIBE / VERGEN_GIT_DIRTY through to rustc with
+# `rerun-if-env-changed` on each, `ee version --json` reports them at
+# `data.source.{gitCommit,gitTag,gitDirty}`, and TWO consumers already depend on
+# them: tests/retrieval_index_regression_oracle.rs refuses a candidate reporting
+# `gitCommit=null` under ORACLE_REQUIRE_ATTESTATION=1, and
+# tests/e2e_artifact_manifest_contract.rs:116 asserts
+# `/data/source/gitCommit == source_commit`.
+#
+# Nothing populated them. Measured 2026-10-26: the only setter anywhere in the
+# tree is `.github/workflows/macos-ee-artifact.yml:52`, and Actions is disabled
+# repo-wide (bd-actions-disabled-repo-wide-33mfm). The installed binary reports
+# `{"gitCommit":null,"gitTag":null,"gitDirty":null,"state":"unavailable"}`. The
+# oracle's own refusal text says this script "sets no VERGEN_* of its own, so
+# the forwarding above is still required there" -- so the acceptance bullet that
+# demands an attested candidate, through the runner bullet 1 mandates, could not
+# be met without hand-assembling the variables on every dispatch.
+#
+# WHY IT IS HONEST HERE AND ONLY HERE. On the committed-tree path the export is
+# `git archive` of exactly this commit, so the tree IS that commit and
+# `DIRTY=false` is true by construction. On the live-working-tree path it would
+# be a claim about a tree nobody checked, which is why this is scoped to
+# COMMITTED_TREE and must stay scoped.
+#
+# AN EXPLICIT --env ALWAYS WINS. If the caller passed any VERGEN_GIT_* override,
+# none are added: a caller stamping deliberately -- the oracle recipe, a
+# reproduction of a historical build -- must not have it silently rewritten.
+#
+# THE GOLDEN THIS APPEARS TO CONFLICT WITH DOES NOT ASSERT IT. build.rs:51 says
+# the null state is "precisely what tests/fixtures/golden/version/version.golden
+# has always asserted". It is not: that fixture's only consumer is
+# `golden_version_fixture_is_valid_json` (src/output/mod.rs:26586), which checks
+# that it parses and that `schema == ee.response.v2` and compares nothing to
+# live output. Its own `"version"` field reads 0.13.1 against a 0.18.0 tree,
+# which is what five minor versions of unasserted drift looks like. Checked by
+# reading the test rather than the comment next to it.
+stamp_committed_tree_build_provenance() {
+    local commit override
+    commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
+    [ -n "$commit" ] || return 0
+
+    for override in "${ENV_OVERRIDES[@]+"${ENV_OVERRIDES[@]}"}"; do
+        case "$override" in
+            VERGEN_GIT_*) return 0 ;;
+        esac
+    done
+
+    ENV_OVERRIDES+=(
+        "VERGEN_GIT_SHA=$commit"
+        "VERGEN_GIT_DESCRIBE=rch-verify-$commit"
+        "VERGEN_GIT_DIRTY=false"
+    )
+}
+
+materialize_committed_tree() {
+    local commit export_base export_root short_commit
+    commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
+    if [ -z "$commit" ]; then
+        echo "rch_verify: committed-tree materialization missing resolved commit" >&2
+        return 1
+    fi
+
+    short_commit="${commit:0:12}"
+    COMMITTED_TREE_EXPORT_BASE="$(resolve_committed_tree_export_base)" || return 1
     export_base="$COMMITTED_TREE_EXPORT_BASE"
     if [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
         local bundle_cache_root bundle_index bundle_root
@@ -5125,7 +5264,11 @@ def redact(text):
         return None
     text = str(text)
     text = re.sub(r"\x1b\[[0-9;]*m", "", text)
-    text = re.sub(r"/Users/[^\\s\"'`,;:]+", "/Users/<redacted>", text)
+    # See the note at the `user_path` compile earlier in this file: `\\s` in a
+    # raw character class excludes the LETTER s, not whitespace, and omitting
+    # `/` lets the match run past the username. `/Users/sam/x` was emitted
+    # unredacted by this exact line.
+    text = re.sub(r"/Users/[^/\s\"'`,;:]+", "/Users/<redacted>", text)
     return text
 
 def probe(name, argv, env_var, timeout_var):
@@ -5366,7 +5509,39 @@ elif selected_worker and not degraded:
 else:
     status = "blocked"
 
+# bd-a62vq: A BLOCKED VERDICT MUST NAME A REASON.
+#
+# `blocked` is the else-branch above, so it is reached whenever no worker was
+# selected and no per-worker diagnostic row matched any of the four classified
+# shapes (active_project_exclusion, permission_denied, missing_root,
+# outer_workspace_shadowed). The most common blocking condition on this fleet
+# today -- every candidate worker denied admission -- matches none of them, so
+# the payload came back `status: "blocked"` with `degraded_codes: []`.
+#
+# That is indistinguishable from a HEALTHY canary, which also emits an empty
+# list. A consumer switching on `degraded_codes` to decide whether to act
+# cannot tell "nothing wrong" from "everything wrong, unnamed", and has to fall
+# back to parsing `workers[].final_reason`, which is free prose and not a
+# contract. Measured 2026-10-19: status blocked, degraded_codes [],
+# repair_actions [], while workers[0].final_reason carried the actual cause
+# ("requested cores N exceed total slots 0").
+#
+# The invariant holds BY CONSTRUCTION rather than by assertion: this block
+# always appends exactly one code when the list would otherwise be empty, so
+# `status == "blocked" and not degraded` is unreachable below. An assertion
+# here would risk suppressing the very JSON a reader needs.
+if status == "blocked" and not degraded:
+    if not selected_worker:
+        degraded.append("rch_worker_root_canary_no_admissible_worker")
+    else:
+        degraded.append("rch_worker_root_canary_blocked_unclassified")
+    degraded = sorted(dict.fromkeys(degraded))
+
 repair_actions = []
+if "rch_worker_root_canary_no_admissible_worker" in degraded:
+    repair_actions.append({"kind": "operator", "command": "rch diagnose -- cargo check --locked --lib", "summary": "No worker was admissible; rch diagnose prints the per-worker exclusion tally (critical_pressure / insufficient_total_slots / os_gate_excluded) that this canary does not."})
+if "rch_worker_root_canary_blocked_unclassified" in degraded:
+    repair_actions.append({"kind": "operator", "command": "scripts/rch_verify.sh --worker-root-canary --json", "summary": "A worker WAS selected yet the canary blocked with no classified cause; read workers[].final_reason in this payload and add the missing shape to the classifier."})
 if "rch_worker_root_canary_missing_root" in degraded:
     repair_actions.append({"kind": "operator", "command": "rch workers probe --all", "summary": "Confirm worker root inventory before retrying remote proof."})
 if "rch_worker_root_canary_outer_workspace_shadowed" in degraded:
@@ -5391,8 +5566,28 @@ if "rch_worker_root_canary_timeout" in degraded:
 # success from the exit code rather than asserting it. The literal form is the
 # easier half to spot and the harder half to notice in review, because there is
 # no wrong question being asked -- there is no question at all.
+# SCHEMA ID IS DELIBERATELY NOT `ee.rch.worker_root_canary.v1` (bd-ldypi).
+#
+# scripts/rch_lane_doctor.sh --worker-canary emits THAT id, and the two shapes
+# share 2 keys out of 26: this one is snake_case with `success`/`generated_at`
+# (ISO)/`required_roots`, lane_doctor's is camelCase with no `success` at all
+# and `generatedAtMs` as an integer. Worse, the one shared payload field,
+# `status`, carried two vocabularies -- `missing_root`,
+# `outer_workspace_shadowed` and `permission_denied` are TOP-LEVEL statuses in
+# lane_doctor and DEGRADED CODES here, beneath a top-level `blocked`. A
+# consumer dispatching on the schema id, which is what a schema id is for, got
+# one of two incompatible objects with no field telling it which.
+#
+# lane_doctor owns the original id: the product names its command in a
+# constant (src/core/support_bundle.rs:182
+# RCH_WORKER_ROOT_CANARY_COMMAND) and emits it to agents as a recommended next
+# command, four docs reference it, and it asserts the id against its own output
+# twice. Nothing outside this file invokes `--worker-root-canary`, nothing reads
+# this payload's `.schema`, and no test or golden pins it -- measured 2026-10-19
+# by enumerating every occurrence of the id and its stem across sh/py/rs/yml/
+# md/toml/json. So renaming this side is the no-consumer side.
 payload = {
-    "schema": "ee.rch.worker_root_canary.v1",
+    "schema": "ee.rch_verify.worker_root_canary.v1",
     "success": status == "healthy",
     "generated_at": now,
     "status": status,
@@ -6032,7 +6227,9 @@ def remediation_guidance_for(blocker_kind):
         "cargo_path_dependency_version": {
             "unmapped_reason": "The historical workspace-sync implementation is closed; a current dependency-version mismatch needs its own manifest and pin diagnosis.",
         },
-        "client_daemon_version_skew": {"bead": "bd-k2fkz"},
+        "client_daemon_version_skew": {
+            "unmapped_reason": "The historical 2.0.0-client against 1.0.64-daemon skew is closed; both are 2.1.34 as of 2026-10-15. A NEW skew is a different condition with a different owner, so read the two version strings from rch --version and rchd --version and name the pair before selecting remediation.",
+        },
         "remote_checkout_incomplete": {
             "unmapped_reason": "The historical dependency-closure implementation is closed; identify the missing remote checkout before selecting remediation.",
         },
@@ -6572,6 +6769,16 @@ elif (
     status = "build_admission_refused"
 elif (
     "rch_verify_dirty_tree_refused" in degraded
+    # Grouped with the dirty-tree refusal for the same reason the build-admission
+    # pair above is grouped: this is a refusal to materialize the source AT ALL,
+    # taken locally before any export exists. Unmapped it fell through to
+    # `remote_failure`, which is the misattribution that comment warns about in
+    # its worst form -- a reader following CLAUDE.md's "read `status` first" would
+    # have read a filesystem misconfiguration on this Mac as a failing test on a
+    # worker. It must also stay OUT of `rch_environment_failure`, which this file
+    # marks retryable: no worker can satisfy an AppleDouble-bearing closure, so a
+    # retry is guaranteed waste.
+    or "rch_verify_committed_tree_base_appledouble_shim" in degraded
     or any(code.startswith("rch_verify_franken_stack_") for code in degraded)
 ):
     status = "source_state_refused"
@@ -7101,7 +7308,63 @@ if [ "$COMMITTED_TREE" -eq 1 ]; then
         emit_json true 1 0 "committed-tree preflight computed source manifest but cannot safely materialize it for RCH" "" "${source_degraded_array[@]}"
         exit 1
     fi
+    assert_committed_tree_base_stores_xattrs
     materialize_committed_tree
+    stamp_committed_tree_build_provenance
+    # THE EXPORT BASE IS NOT WIRED INTO BUILD ADMISSION, AND THAT IS NOT AN
+    # OVERSIGHT -- it was tried and measured first (bd-to1fr).
+    #
+    # The gap is real: `ee diag build-admission` checks free space, this script
+    # forwards every `--artifact-destination` it is given, and
+    # BUILD_ADMISSION_ARTIFACT_DESTINATIONS starts EMPTY -- so the committed-tree
+    # export base, the one path this script writes gigabytes to, is checked by
+    # nothing. A pinned proof's `build_admission.checks[]` carries
+    # workspace_root, cargo_build_target and temporary_directory and no entry
+    # for it.
+    #
+    # BUT ADDING IT BRICKS THE LANE TODAY. Measured 2026-10-25 against the
+    # installed binary with the APFS export image as the destination:
+    #
+    #     label  artifact_destination   role  artifact_sync_down_destination
+    #     bytesAvailable 250502467584   minFreeBytes 5368709120
+    #     required false                admitted FALSE
+    #     externalRequired true         external FALSE
+    #
+    # 250 GB free against a 5 GiB minimum and still refused. THE CAUSE IS A
+    # LEXICAL PREFIX, not a property of the device -- read from the source at
+    # HEAD, after a first reading that blamed disk images and was wrong:
+    #
+    #   src/core/disk_pressure.rs:23    EXTERNAL_BUILD_ROOT =
+    #                                     "/Volumes/USBNVME16TB/temp_agent_space"
+    #   src/core/disk_pressure.rs:2021  trusted_external_path = starts_with(root)
+    #                                     && no `..` component
+    #                                     && no symlink component
+    #
+    # The APFS image mounts at /Volumes/EERCHExport, which is outside that one
+    # hardcoded prefix, so `external` is false. Confirmed by probing a directory
+    # that differs ONLY in the prefix: a path under the external root reports
+    # `external: true, admitted: true`.
+    #
+    # `required: false` does not save it, and the reason is specific rather than
+    # a bug: build_admission_check_admitted is
+    # `(!required || has_space) && !untrusted && (!external_required || external)`
+    # -- `required` gates the CAPACITY arm only, and the external arm has no
+    # `required` term at all. On this lane an unadmitted check is
+    # `rch_verify_pinned_build_admission_verdict_required`, exit 1, every
+    # dispatch.
+    #
+    # SO THERE IS A FIX WITH NO CODE CHANGE: attach the sparse image at a
+    # mountpoint UNDER the external root, e.g.
+    #   hdiutil attach -mountpoint \
+    #     /Volumes/USBNVME16TB/temp_agent_space/ee-rch-export <image>
+    # which is both xattr-native (no RCH-E410) and inside the prefix (admission
+    # passes). That is an environment change on a path CLAUDE.md names in
+    # several places, and detaching a volume mid-dispatch would break another
+    # agent's run, so it is written down rather than done unilaterally.
+    #
+    # Tracked on bd-build-admission-external-predicate-rejects-image-5bfb4.
+    # Until the base moves, this is one `+=` here, and one line that must not
+    # be written.
 fi
 
 FRANKEN_STACK_JSON="$(compute_franken_stack_json)"

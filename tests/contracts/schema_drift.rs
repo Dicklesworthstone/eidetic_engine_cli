@@ -1878,6 +1878,8 @@ mod tests {
         "memories",
         "memory_anchor_index",
         "memory_anchors",
+        // V133: validated path/symbol code anchors kept beside memory rows.
+        "memory_code_anchor_sources",
         "memory_links",
         "memory_seals",
         "memory_sentinel_results",

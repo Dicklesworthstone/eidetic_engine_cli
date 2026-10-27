@@ -18,6 +18,7 @@ the Rust constant, and the shell list together.
 | `audit_ts` | Per-write timestamp | v0.1 | Audit chain event time. |
 | `elapsedMs` / `elapsed_ms` | Wall-clock elapsed time | v0.1 | Performance-only measurement. |
 | `elapsedMsBucket` / `durationMs` / `wallClockMs` | Wall-clock elapsed time | v0.3 | Bucketed or alternate spellings used by perf, verification, and workload surfaces. |
+| `leaseHeldMs` | Age of a read snapshot's lease | v0.18 | `src/core/context.rs` sets it from `snapshot.age()`, so it reports how long the lease had been held when the pack was assembled, not anything about the pack. Emitted at `data.dbReads.readSnapshot.leaseHeldMs` by `ee pack --explain-performance`. It was the sole reason that surface hashed differently on three consecutive runs (measured 2026-10-24); every other differing key was already registered. |
 | `startedAt` / `started_at` | Wall-clock start time | v0.1 | Maintenance jobs and long-running operations. |
 | `endedAt` / `ended_at` | Wall-clock end time | v0.1 | Maintenance jobs and long-running operations. |
 | `ts` / `timestamp` | Generic wall-clock timestamp | v0.1 | Log envelopes and event records. |

@@ -23,8 +23,11 @@
 //! - Symlinks in the path chain are resolved to detect potential leakage
 //! - A per-installation salt ensures the same path produces different
 //!   hashes on different machines (privacy protection)
-//! - By default, workspaces are rejected if the input path differs from
-//!   the canonical path due to symlinks (prevents cross-workspace leaks)
+//! - Callers choose whether to admit symlinks when resolving the workspace root.
+//!   The CLI addresses existing workspaces through their physical root; `init`
+//!   separately guards creation and requires opt-in for a symlinked final root.
+//! - Resolving a workspace root never resolves or authorizes symlinks inside
+//!   `.ee/`; the storage layer still rejects those paths.
 
 use std::env;
 use std::ffi::OsString;
@@ -128,7 +131,7 @@ pub enum SymlinkPolicy {
     /// Reject workspaces where input path differs from canonical due to symlinks.
     #[default]
     Deny,
-    /// Allow symlinks (user opted in with --allow-symlink).
+    /// Resolve symlinks when addressing an existing workspace root.
     Allow,
 }
 
@@ -264,23 +267,7 @@ pub fn canonicalize_workspace_path(
     salt: &[u8],
     policy: SymlinkPolicy,
 ) -> Result<CanonicalWorkspace, CanonicalizationError> {
-    let canonical_path =
-        input_path
-            .canonicalize()
-            .map_err(|source| CanonicalizationError::CanonicalizeFailure {
-                path: input_path.to_path_buf(),
-                source,
-            })?;
-
-    let symlink_chain = detect_symlinks(input_path, &canonical_path);
-
-    if policy == SymlinkPolicy::Deny && !symlink_chain.is_empty() && input_path != canonical_path {
-        return Err(CanonicalizationError::SymlinkBlocked {
-            input_path: input_path.to_path_buf(),
-            canonical_path,
-            symlink_chain,
-        });
-    }
+    let (canonical_path, symlink_chain) = canonicalize_workspace_location(input_path, policy)?;
 
     let platform_case_handling = PlatformCaseHandling::current_platform();
     let salted_hash = compute_salted_workspace_hash(&canonical_path, salt, platform_case_handling);
@@ -299,6 +286,34 @@ pub fn canonicalize_workspace_path(
         worktree,
         fork,
     })
+}
+
+/// Resolve only the workspace root, without loading a salt, hashing an
+/// identity, inspecting Git metadata, or touching any store beneath it.
+/// Both CLI addressing and full identity construction use this policy boundary.
+pub(crate) fn canonicalize_workspace_location(
+    input_path: &Path,
+    policy: SymlinkPolicy,
+) -> Result<(PathBuf, Vec<SymlinkTraversal>), CanonicalizationError> {
+    let canonical_path =
+        input_path
+            .canonicalize()
+            .map_err(|source| CanonicalizationError::CanonicalizeFailure {
+                path: input_path.to_path_buf(),
+                source,
+            })?;
+
+    let symlink_chain = detect_symlinks(input_path, &canonical_path);
+
+    if policy == SymlinkPolicy::Deny && !symlink_chain.is_empty() && input_path != canonical_path {
+        return Err(CanonicalizationError::SymlinkBlocked {
+            input_path: input_path.to_path_buf(),
+            canonical_path,
+            symlink_chain,
+        });
+    }
+
+    Ok((canonical_path, symlink_chain))
 }
 
 /// Detect symlinks by comparing input path components to canonical path.
@@ -1065,12 +1080,37 @@ pub fn resolve_workspace(
     })
 }
 
+/// Resolve a workspace whose explicit input is already a filesystem path.
+///
+/// CLI expansion and canonicalization can produce literal `$` or `~` characters.
+/// Consumers of that resolved path must not interpret them as another expression.
+/// Environment fallback and discovery retain their normal behavior.
+pub(crate) fn resolve_workspace_with_expanded_explicit_path(
+    request: &WorkspaceResolutionRequest,
+) -> Result<WorkspaceResolution, WorkspaceError> {
+    let Some(path) = request.explicit_workspace.as_ref() else {
+        return resolve_workspace(request);
+    };
+    resolve_selected_location(
+        request,
+        lexical_absolute(&request.current_dir, path),
+        WorkspaceResolutionSource::Explicit,
+    )
+}
+
 fn resolve_selected_root(
     request: &WorkspaceResolutionRequest,
     raw: &Path,
     source: WorkspaceResolutionSource,
 ) -> Result<WorkspaceResolution, WorkspaceError> {
-    let root = selected_root(request, raw);
+    resolve_selected_location(request, selected_root(request, raw), source)
+}
+
+fn resolve_selected_location(
+    request: &WorkspaceResolutionRequest,
+    root: PathBuf,
+    source: WorkspaceResolutionSource,
+) -> Result<WorkspaceResolution, WorkspaceError> {
     let location = WorkspaceLocation::new(root);
     if request.mode == WorkspaceResolutionMode::ExistingOnly && !location.config_dir.is_dir() {
         return Err(WorkspaceError::MissingMarker {
@@ -1112,7 +1152,11 @@ pub fn diagnose_workspace_resolution(
         request.explicit_workspace.as_ref(),
         request.environment_workspace.as_ref(),
     ) {
-        let explicit_root = selected_root(request, explicit);
+        let explicit_root = if resolution.source == WorkspaceResolutionSource::Explicit {
+            resolution.location.root.clone()
+        } else {
+            selected_root(request, explicit)
+        };
         let environment_root = selected_root(request, environment);
         if roots_differ(&explicit_root, &environment_root) {
             diagnostics.push(WorkspaceDiagnostic::source_conflict(
@@ -1240,20 +1284,30 @@ pub fn resolve_store_index_dir(
     if let Some(index_dir) = index_dir {
         return index_dir.to_path_buf();
     }
-    if let Some(database_path) = database_path
-        && database_path
-            .file_name()
-            .is_some_and(|name| name == "ee.db")
-        && let Some(store_dir) = database_path.parent()
-        && store_dir
-            .file_name()
-            .is_some_and(|name| name == WORKSPACE_MARKER || name == ".ee-campaign")
-    {
+    if let Some(store_dir) = database_path.and_then(standard_store_dir) {
         return store_dir.join("index");
     }
     canonical_workspace_root_or_lexical(workspace_path)
         .join(WORKSPACE_MARKER)
         .join("index")
+}
+
+/// The store directory of a database in a standard store layout: `ee.db`
+/// directly inside a `.ee` or `.ee-campaign` directory. Other layouts have
+/// no store directory of their own and return `None`.
+///
+/// The result stays lexical, like [`resolve_store_index_dir`], which uses
+/// the same rule to place an explicitly selected store's index.
+#[must_use]
+pub fn standard_store_dir(database_path: &Path) -> Option<&Path> {
+    let store_dir = database_path.parent()?;
+    let standard = database_path
+        .file_name()
+        .is_some_and(|name| name == "ee.db")
+        && store_dir
+            .file_name()
+            .is_some_and(|name| name == WORKSPACE_MARKER || name == ".ee-campaign");
+    standard.then_some(store_dir)
 }
 
 /// Compute a stable workspace fingerprint from a canonical root path.
@@ -1435,7 +1489,21 @@ mod tests {
                 default_index,
                 "unrecognized database layout {database} must retain the workspace default"
             );
+            assert_eq!(super::standard_store_dir(Path::new(database)), None);
         }
+    }
+
+    #[test]
+    fn standard_store_dir_is_the_parent_of_a_standard_store_database() {
+        for store in [".ee", ".ee-campaign"] {
+            let database = Path::new("selected-root").join(store).join("ee.db");
+            assert_eq!(
+                super::standard_store_dir(&database),
+                Some(Path::new("selected-root").join(store).as_path())
+            );
+        }
+        assert_eq!(super::standard_store_dir(Path::new("ee.db")), None);
+        assert_eq!(super::standard_store_dir(Path::new(".ee")), None);
     }
 
     #[cfg(unix)]
@@ -1712,6 +1780,61 @@ mod tests {
         assert_eq!(
             resolved.location.config_dir,
             explicit.join(WORKSPACE_MARKER)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_explicit_workspace_keeps_literal_path_and_diagnostic_identity() -> TestResult {
+        let scratch = ScratchDir::new("resolve-literal-explicit")?;
+        let cwd = scratch.make_dir("current")?;
+        let explicit = scratch.make_dir("physical-$HOME")?;
+        scratch.make_dir("physical-$HOME/.ee")?;
+        let environment = scratch.make_dir("environment")?;
+        let request = WorkspaceResolutionRequest::new(cwd, WorkspaceResolutionMode::ExistingOnly)
+            .with_explicit_workspace(explicit.clone())
+            .with_environment_workspace(environment.clone());
+
+        let resolved = super::resolve_workspace_with_expanded_explicit_path(&request)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(resolved.location.root, explicit);
+        assert!(resolved.marker_present);
+        let diagnostics = super::diagnose_workspace_resolution(&request, &resolved);
+        let conflict = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "workspace_explicit_environment_conflict")
+            .ok_or_else(|| "missing explicit/environment conflict diagnostic".to_string())?;
+        assert_eq!(conflict.selected_root, Some(explicit));
+        assert_eq!(conflict.conflicting_root, Some(environment));
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_explicit_workspace_still_requires_marker_and_preserves_fallback() -> TestResult {
+        let scratch = ScratchDir::new("resolve-literal-marker")?;
+        let cwd = scratch.make_dir("current")?;
+        let explicit = scratch.make_dir("physical-$HOME")?;
+        let request =
+            WorkspaceResolutionRequest::new(cwd.clone(), WorkspaceResolutionMode::ExistingOnly)
+                .with_explicit_workspace(explicit.clone());
+        match super::resolve_workspace_with_expanded_explicit_path(&request) {
+            Err(WorkspaceError::MissingMarker { source, root }) => {
+                assert_eq!(source, WorkspaceResolutionSource::Explicit);
+                assert_eq!(root, explicit);
+            }
+            other => return Err(format!("expected MissingMarker, got {other:?}")),
+        }
+        assert!(!explicit.join(WORKSPACE_MARKER).exists());
+
+        let environment = scratch.make_dir("environment")?;
+        scratch.make_dir("environment/.ee")?;
+        let request = WorkspaceResolutionRequest::new(cwd, WorkspaceResolutionMode::ExistingOnly)
+            .with_environment_workspace(environment);
+        let resolved = super::resolve_workspace_with_expanded_explicit_path(&request)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            resolved,
+            resolve_workspace(&request).map_err(|error| error.to_string())?
         );
         Ok(())
     }

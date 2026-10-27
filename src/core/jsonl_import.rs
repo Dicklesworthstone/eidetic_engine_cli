@@ -626,6 +626,7 @@ struct PreparedMemory {
     /// the pointer columns and the family ledger after the memory row lands.
     attempt_family: Option<crate::models::ExportAttemptFamilyRecord>,
     typed_fields_json: Option<String>,
+    code_anchors: Vec<crate::models::ExtractedAnchorSurface>,
     details: String,
     tag_count: u32,
 }
@@ -635,6 +636,7 @@ struct PreparedMemory {
 struct ValidatedMemory<'a> {
     record: &'a ExportMemoryRecord,
     typed_fields_json: Option<String>,
+    code_anchors: Vec<crate::models::ExtractedAnchorSurface>,
     workflow_id: Option<String>,
     id: String,
     logical_id: String,
@@ -991,6 +993,7 @@ fn import_jsonl_records_with_policy(
                     skipped_duplicate = skipped_duplicate.saturating_add(1);
                     if let Some(issue) = reimport_conflict_issue(&existing, &memory)
                         .or(typed_fields_conflict_issue(&connection, &memory)?)
+                        .or(code_anchor_conflict_issue(&connection, &memory)?)
                     {
                         report.issues.push(issue);
                         conflicting_memory_ids.insert(memory.id.clone());
@@ -1022,6 +1025,13 @@ fn import_jsonl_records_with_policy(
                         message: "imported memory could not retain its typed fields".to_owned(),
                     });
                 }
+            }
+            if !memory.code_anchors.is_empty() {
+                connection.attach_memory_code_anchor_sources(
+                    &memory.input.workspace_id,
+                    &memory.id,
+                    &memory.code_anchors,
+                )?;
             }
             if let Some(at) = &memory.superseded_at {
                 if !connection.restore_imported_memory_supersession(&memory.id, at)? {
@@ -1413,7 +1423,8 @@ fn destination_lineage_issues(
         let chain_changed = existing_logical_id.as_deref() != Some(memory.logical_id.as_str());
         let fields_changed = revision_roots.contains(memory.logical_id.as_str())
             && (reimport_conflict_issue(&existing, memory).is_some()
-                || typed_fields_conflict_issue(connection, memory)?.is_some());
+                || typed_fields_conflict_issue(connection, memory)?.is_some()
+                || code_anchor_conflict_issue(connection, memory)?.is_some());
         let supersession_changed = if memory.supersession_known || memory.superseded_at.is_some() {
             connection.get_memory_superseded_at(&memory.id)? != memory.superseded_at
         } else {
@@ -1468,6 +1479,39 @@ fn typed_fields_conflict_issue(
             "existing memory differs on typed_fields; the existing row is preserved",
         )
     }))
+}
+
+fn code_anchor_conflict_issue(
+    connection: &DbConnection,
+    memory: &PreparedMemory,
+) -> Result<Option<JsonlImportIssue>, DbError> {
+    fn bindings(
+        surfaces: &[crate::models::ExtractedAnchorSurface],
+    ) -> Vec<(String, String, String, String)> {
+        let mut values = surfaces
+            .iter()
+            .map(|surface| {
+                (
+                    surface.anchor.anchor_kind.as_str().to_owned(),
+                    surface.normalized_value.clone(),
+                    surface.anchor.source.as_str().to_owned(),
+                    surface.anchor.provenance.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        values
+    }
+    let actual = connection.list_memory_code_anchor_sources(&memory.id)?;
+    Ok(
+        (bindings(&actual) != bindings(&memory.code_anchors)).then(|| {
+            JsonlImportIssue::warning(
+                None,
+                "reimport_divergent_existing_row",
+                "existing memory differs on code_anchors; the existing row is preserved",
+            )
+        }),
+    )
 }
 
 fn reimport_conflict_issue(
@@ -1776,10 +1820,13 @@ fn parse_memory_record(
             }
             parsed.memories.push(memory);
         }
-        Err(error) => parsed.issues.push(JsonlImportIssue::error(
+        // Deserializer errors can quote rejected values and unknown field
+        // names, including inside source sidecars. Keep the line and stable
+        // code, but never echo unvalidated memory material.
+        Err(_) => parsed.issues.push(JsonlImportIssue::error(
             Some(line_number),
             "invalid_memory",
-            error.to_string(),
+            "memory record does not match the export memory schema",
         )),
     }
 }
@@ -2298,6 +2345,43 @@ fn validate_memory(
             "workflow id contains secrets; redact before import",
         ));
     }
+    if !memory.code_anchors.is_empty()
+        && content.as_str() == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+    {
+        return Err(JsonlImportIssue::error(
+            None,
+            "invalid_memory_code_anchors",
+            "sealed memory must not carry readable code-anchor source bindings",
+        ));
+    }
+    let mut code_anchors = BTreeMap::new();
+    for anchor in &memory.code_anchors {
+        if !crate::models::memory_anchor::code_anchor_locator_is_public(&anchor.value)
+            || crate::policy::redact_public_replay_text(&anchor.provenance).redacted
+        {
+            return Err(JsonlImportIssue::error(
+                None,
+                "memory_code_anchors_contain_secret",
+                "code-anchor source bindings contain private material; redact before import",
+            ));
+        }
+        let surface = anchor.to_surface(&id).ok_or_else(|| JsonlImportIssue::error(
+            None,
+            "invalid_memory_code_anchors",
+            "code anchors require normalized relative paths or symbols and valid source metadata",
+        ))?;
+        let key = (
+            surface.anchor.anchor_kind,
+            surface.anchor.anchor_value_hash.clone(),
+        );
+        if code_anchors.insert(key, surface).is_some() {
+            return Err(JsonlImportIssue::error(
+                None,
+                "invalid_memory_code_anchors",
+                "duplicate code-anchor source bindings are not permitted",
+            ));
+        }
+    }
     let bayes_posterior = exported_bayes_posterior(memory)?;
     for (field, value) in [
         ("created_at", Some(memory.created_at.as_str())),
@@ -2328,6 +2412,7 @@ fn validate_memory(
     Ok(ValidatedMemory {
         record: memory,
         typed_fields_json,
+        code_anchors: code_anchors.into_values().collect(),
         workflow_id,
         logical_id: id.clone(),
         id,
@@ -2480,6 +2565,7 @@ fn prepare_memory(
         bayes_posterior: validated.bayes_posterior,
         attempt_family: memory.attempt_family.clone(),
         typed_fields_json: validated.typed_fields_json,
+        code_anchors: validated.code_anchors,
         details: json!({
             "schema": IMPORT_JSONL_SCHEMA_V1,
             "sourceMemoryId": memory.memory_id,
@@ -2494,6 +2580,7 @@ fn prepare_memory(
             "redacted": memory.redacted,
             "redactionReason": memory.redaction_reason,
             "sourceGraphFields": source_graph_fields_json(memory),
+            "sourceCodeAnchorCount": memory.code_anchors.len(),
         })
         .to_string(),
         tag_count,
@@ -3097,6 +3184,214 @@ mod tests {
             .map(JsonValue::to_string)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn code_anchor_jsonl_import_restores_locators_and_detects_sidecar_only_conflicts() -> TestResult
+    {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let base = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace = base.join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let mut records = sample_jsonl()
+            .lines()
+            .map(serde_json::from_str::<JsonValue>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        records[1]["code_anchors"] = json!([
+            {"kind":"path","value":"src/imported.rs","source":"explicit","provenance":"memory.anchors"},
+            {"kind":"symbol","value":"Import::restore","source":"index_rebuild","provenance":"memory.content"}
+        ]);
+        let source = base.join("source.jsonl");
+        fs::write(&source, jsonl_values_text(&records)).map_err(|error| error.to_string())?;
+        let options = JsonlImportOptions {
+            workspace_path: workspace,
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        };
+        let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        assert_eq!(report.status, "completed", "{:?}", report.issues);
+        assert_eq!(report.memories_imported, 1);
+        let id = records[1]["memory_id"].as_str().ok_or("memory id")?;
+        let db =
+            DbConnection::open_file(database_path(&options)).map_err(|error| error.to_string())?;
+        let stored = db
+            .get_memory(id)
+            .map_err(|error| error.to_string())?
+            .ok_or("imported memory")?;
+        let bindings = db
+            .list_memory_code_anchor_sources(id)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(stored.content, "Run cargo fmt --check before release.");
+        assert_eq!(
+            stored.provenance_uri.as_deref(),
+            Some("ee-export://fixture")
+        );
+        let recalled = crate::core::recall::run_recall(
+            &db,
+            &stored.workspace_id,
+            &crate::core::recall::RecallQuery {
+                paths: vec!["src/imported.rs".to_owned()],
+                ..Default::default()
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(recalled.items.len(), 1);
+        assert_eq!(recalled.items[0].memory_id, id);
+        let job_count = db
+            .count_table_rows("search_index_jobs")
+            .map_err(|error| error.to_string())?;
+        db.close().map_err(|error| error.to_string())?;
+        let repeat = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        assert_eq!(repeat.memories_imported, 0);
+        assert!(
+            !repeat
+                .issues
+                .iter()
+                .any(|issue| issue.code == "reimport_divergent_existing_row")
+        );
+
+        let mut changed = records.clone();
+        changed[1]["code_anchors"][0]["value"] = json!("src/changed.rs");
+        fs::write(&options.source_path, jsonl_values_text(&changed))
+            .map_err(|error| error.to_string())?;
+        let repeat = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        assert_eq!(repeat.memories_imported, 0);
+        assert!(
+            repeat
+                .issues
+                .iter()
+                .any(|issue| issue.code == "reimport_divergent_existing_row"
+                    && issue.message.contains("code_anchors"))
+        );
+        let db =
+            DbConnection::open_file(database_path(&options)).map_err(|error| error.to_string())?;
+        assert_eq!(
+            db.get_memory(id).map_err(|error| error.to_string())?,
+            Some(stored)
+        );
+        assert_eq!(
+            db.list_memory_code_anchor_sources(id)
+                .map_err(|error| error.to_string())?,
+            bindings
+        );
+        assert_eq!(
+            db.count_table_rows("search_index_jobs")
+                .map_err(|error| error.to_string())?,
+            job_count
+        );
+        db.close().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn code_anchor_jsonl_import_validates_before_creating_a_destination() -> TestResult {
+        for invalid in [
+            json!([{"kind":"path","value":"../escape.rs","source":"explicit","provenance":"memory.anchors"}]),
+            json!([{"kind":"path","value":"src/app/page.tsx","source":"explicit","provenance":"memory.anchors"}]),
+            json!([{"kind":"path","value":"src/home/a.rs","source":"explicit","provenance":"memory.anchors"}]),
+            json!([{"kind":"path","value":"./src/noncanonical.rs","source":"explicit","provenance":"memory.anchors"}]),
+            json!([{"kind":"command","value":"cargo build","source":"explicit","provenance":"memory.anchors"}]),
+            json!([{"kind":"symbol","value":"not a symbol","source":"explicit","provenance":"memory.anchors"}]),
+            json!([{"kind":"path","value":format!("src/ghp_{}.rs", "a".repeat(36)),"source":"explicit","provenance":"memory.anchors"}]),
+            json!([{"kind":"path","value":"src/safe.rs","source":"explicit","provenance":"api_key=ANCHOR_PRIVATE_CANARY"}]),
+            json!([{"kind":"path","value":"src/safe.rs","source":"explicit","provenance":"a".repeat(513)}]),
+            json!([
+                {"kind":"path","value":"src/safe.rs","source":"explicit","provenance":"memory.anchors"},
+                {"kind":"path","value":"src/safe.rs","source":"explicit","provenance":"memory.anchors"}
+            ]),
+        ] {
+            let mut records = sample_jsonl()
+                .lines()
+                .map(serde_json::from_str::<JsonValue>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            records[1]["code_anchors"] = invalid;
+            for dry_run in [true, false] {
+                let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+                let base = root
+                    .path()
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                let source = base.join("source.jsonl");
+                fs::write(&source, jsonl_values_text(&records))
+                    .map_err(|error| error.to_string())?;
+                let options = JsonlImportOptions {
+                    workspace_path: base.clone(),
+                    database_path: Some(base.join("destination/ee.db")),
+                    source_path: source,
+                    dry_run,
+                };
+                let report = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+                assert_eq!(report.status, "rejected");
+                assert!(
+                    report
+                        .issues
+                        .iter()
+                        .any(|issue| issue.code == "invalid_memory_code_anchors"
+                            || issue.code == "memory_code_anchors_contain_secret")
+                );
+                assert!(!format!("{:?}", report.issues).contains("ANCHOR_PRIVATE_CANARY"));
+                assert!(!base.join("destination").exists());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn code_anchor_jsonl_malformed_carriers_do_not_echo_values_or_field_names() -> TestResult {
+        let private_value = "sk-live-ANCHOR_PRIVATE_VALUE_CANARY";
+        let private_key = "ANCHOR_PRIVATE_FIELD_CANARY";
+        let mut unknown_field = json!({
+            "kind": "path", "value": "src/safe.rs",
+            "source": "explicit", "provenance": "memory.anchors"
+        });
+        unknown_field[private_key] = json!(private_value);
+        for carrier in [
+            json!(private_value),
+            json!([private_value]),
+            json!([unknown_field]),
+        ] {
+            let mut records = sample_jsonl()
+                .lines()
+                .map(serde_json::from_str::<JsonValue>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            records[1]["code_anchors"] = carrier;
+            for dry_run in [true, false] {
+                let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+                let base = root
+                    .path()
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                let source = base.join("malformed.jsonl");
+                fs::write(&source, jsonl_values_text(&records))
+                    .map_err(|error| error.to_string())?;
+                let report = import_jsonl_records(&JsonlImportOptions {
+                    workspace_path: base.clone(),
+                    database_path: Some(base.join("destination/ee.db")),
+                    source_path: source,
+                    dry_run,
+                })
+                .map_err(|error| error.to_string())?;
+                assert_eq!(report.status, "rejected");
+                assert!(report.issues.iter().any(|issue| {
+                    issue.code == "invalid_memory"
+                        && issue.line == Some(2)
+                        && issue.message == "memory record does not match the export memory schema"
+                }));
+                let diagnostics = format!("{:?}", report);
+                assert!(!diagnostics.contains(private_value));
+                assert!(!diagnostics.contains(private_key));
+                assert!(!base.join("destination").exists());
+            }
+        }
+        Ok(())
     }
 
     fn revision_jsonl_values() -> Result<Vec<JsonValue>, String> {

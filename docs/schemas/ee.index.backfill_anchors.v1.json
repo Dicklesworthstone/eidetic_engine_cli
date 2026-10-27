@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.index.backfill_anchors.v1.json",
+  "title": "ee.index.backfill_anchors.v1",
+  "description": "Bounded, workspace-scoped preview or application of code-anchor backfill from eligible existing memory content. Preview is the default; --apply explicitly opts into additive attachment. Carried under ee.response.v2 data.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "dryRun", "scannedMemoryCount", "proposedMemoryCount",
+    "proposedAnchorCount", "appliedMemoryCount", "appliedAnchorCount",
+    "skippedMemoryCount", "nextAfter", "proposals"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.index.backfill_anchors.v1" },
+    "version": { "type": "string" },
+    "dryRun": { "type": "boolean" },
+    "scannedMemoryCount": { "type": "integer", "minimum": 0 },
+    "proposedMemoryCount": { "type": "integer", "minimum": 0 },
+    "proposedAnchorCount": { "type": "integer", "minimum": 0 },
+    "appliedMemoryCount": { "type": "integer", "minimum": 0 },
+    "appliedAnchorCount": { "type": "integer", "minimum": 0 },
+    "skippedMemoryCount": { "type": "integer", "minimum": 0 },
+    "skippedMemories": {
+      "type": "array",
+      "description": "Present when memories are skipped by the per-memory candidate safety limit. Each memory is skipped in full before planning or attachment; other memories and pagination continue normally. These entries are included in skippedMemoryCount and are not proposals.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["memoryId", "reason", "candidateAnchorCount", "anchorLimit"],
+        "properties": {
+          "memoryId": { "type": "string" },
+          "reason": { "type": "string", "const": "anchor_limit_exceeded" },
+          "candidateAnchorCount": { "type": "integer", "minimum": 257 },
+          "anchorLimit": { "type": "integer", "const": 256 }
+        }
+      }
+    },
+    "nextAfter": {
+      "type": ["string", "null"],
+      "description": "Pass this memory ID to --after to scan the next bounded page; null means the scan is complete. Continue even when the current page proposes no anchors."
+    },
+    "proposals": {
+      "type": "array",
+      "items": { "$ref": "ee.memory.anchors.v1.json" },
+      "description": "Redaction-safe per-memory attachment reports. Each anchor retains its hash and may include a screened normalized locator for reviewing the proposed relationship. No raw memory content or source provenance is returned."
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "dryRun", "proposedAnchorCount", "appliedAnchorCount", "nextAfter"],
+    "summary": ["schema", "version", "dryRun", "scannedMemoryCount", "proposedMemoryCount", "proposedAnchorCount", "appliedMemoryCount", "appliedAnchorCount", "skippedMemoryCount", "nextAfter"],
+    "standard": ["*"],
+    "full": ["*"]
+  }
+}

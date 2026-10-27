@@ -144,7 +144,11 @@ impl Execution {
     }
 
     pub(super) fn verified_by(&self, proof: &Self) -> bool {
-        if !self.has_known_failures() || !proof.complete || self.root != proof.root {
+        if !self.has_known_failures()
+            || !proof.complete
+            || !proof.failed.is_empty()
+            || self.root != proof.root
+        {
             return false;
         }
         if self.collection_only {
@@ -153,7 +157,13 @@ impl Execution {
             // own a normally passing descendant in the clean retry instead.
             self.failed_collectors.is_subset(&proof.executed_collectors)
         } else {
-            self.inventory == proof.inventory && self.failed.is_subset(&proof.passed)
+            // Node IDs include the file, class and parameter identity. A fix
+            // may add regression tests without losing coverage of the original
+            // run. Inventory also includes skips and expected outcomes; only
+            // a normal pass preserves a previously executed control.
+            self.inventory.is_subset(&proof.inventory)
+                && self.failed.is_subset(&proof.passed)
+                && self.passed.is_subset(&proof.passed)
         }
     }
 }
@@ -426,3 +436,11 @@ mod native_tests;
 #[cfg(test)]
 #[path = "cass_error_recall_pytest_collection_tests.rs"]
 mod collection_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_pytest_growth_tests.rs"]
+mod growth_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_python_controls_tests.rs"]
+mod controls_tests;

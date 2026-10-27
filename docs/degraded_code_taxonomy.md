@@ -424,6 +424,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `index_corrupt` | high | bd-17c65.2.1 (B1) |
 | `index_missing` | medium | bd-17c65.2.1 (B1) |
 | `index_stale` | high | bd-17c65.2.1 (B1) |
+| `read_fence_generation_unavailable` | high | bd-1n0np.8.13 (ADR 0059) |
+| `read_fence_stale_derived_asset` | high | bd-1n0np.8.13 (ADR 0059) |
 | `evidence_live_admission_filtered` | warning | bd-4frzq (P0) |
 | `rule_live_admission_filtered` | low | bd-vp087 |
 | `low_recall_after_floor` | info | bd-17c65.2.1 (B1) |
@@ -468,6 +470,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `ask_semantic_degraded` | info | bd-169v0.5 (QA) |
 | `cass_limited` | info | bd-1et0v.14 (doctor-health) |
 | `graph_ppr_upstream_unavailable` | medium | bd-reality-core-convergence-1azkt.15 (G) |
+| `graph_remote_projection_stale` | medium | bd-nnheo — emitted at src/graph/mod.rs:4493 when `stale_edge_count > 0`, and src/graph/mod.rs:9949 already asserts it reaches `remoteGraph.degradedCodes[0]`, so this is a live user-visible code rather than a declaration. Severity DERIVED, not invented, from two independent readings that agree: the closest functional analogue is `search_index_stale` (medium) — a query surface served from a stale index — and medium is also the mode of the classified `graph_*` family. |
 | `graph_witness_unparseable_recorded_at` | medium | bd-bife.25 (G) |
 | `import_index_publish_failed` | warning | bd-index-auto-freshness-m5kwf (I) |
 | `mesh_frame_auth_failed` | high | bd-tc-epic-qzk7o.3.2 (TC) |
@@ -485,7 +488,9 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `scale_probe_budget_exceeded` | warning | bd-ssoco.1 (scale-envelope) |
 | `search_index_large_gap` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `cass_import_index_publish_failed` | medium | bd-index-auto-freshness-m5kwf (I) |
-| `cass_import_history_refused` | high | gh-66 (I): response-time refusal preserves unverifiable or changed historical evidence while later sessions import |
+| `cass_import_history_refused` | high | gh-66, gh-82 (I): response-time refusal preserves oversized, unstable, unverifiable or changed session history while later sessions import |
+| `cass_import_review_partial` | warning | CASS import-to-review (I): response-time proposal failure or degraded review; committed source import and independently completed proposals remain intact |
+| `cass_import_review_deferred` | info | CASS import-to-review (I): response-time proposal session budget leaves additional imported sessions available for explicit review |
 | `search_index_degraded` | medium | bd-17c65.10.6 (J6) |
 | `search_live_snapshot_lexical` | warning | bd-l2271 — a stale persisted generation was replaced for this request by complete current-source lexical retrieval; no source/index writes or semantic credit |
 | `search_live_snapshot_unavailable` | warning | bd-l2271 — complete current-source retrieval exceeded its bound or could not run; newly committed content may be absent and persisted-index staleness remains explicit |
@@ -515,6 +520,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `mesh_peer_key_rotation_invalid_key` | medium | bd-1x87h (SRR6.24) |
 | `mesh_peer_key_rotation_revoked` | medium | bd-1x87h (SRR6.24) |
 | `mesh_peer_key_rotation_unchanged` | info | bd-1x87h (SRR6.24) |
+| `mesh_peer_randomness_unavailable` | medium | bd-nnheo — `ee mesh peer add` denied at `src/mesh/peer.rs:524` because `generate_peer_id()` could not obtain OS cryptographic randomness; severity matches the SRR6.24 denial family above, every member of which denies the same command |
 | `lane_grant_preview_peer_not_in_group` | info | bd-36bbk.1.17 |
 | `lane_grant_preview_lane_already_granted` | info | bd-36bbk.1.17 |
 | `share_preview_peer_unknown` | warning | bd-tc-epic-qzk7o.2.7 |
@@ -686,8 +692,8 @@ that helper is the thing to change.
 #### Code-anchored recall (4)
 | Code | Severity | Bead |
 |------|----------|------|
-| `anchor_index_empty` | info | bd-u875s.2 — ADR 0064 §5: the anchor reverse index has no rows for this workspace (nothing anchored yet); never a hard error |
-| `anchor_index_stale` | low | bd-u875s.2 — ADR 0064 §5: reverse-index generation < DB generation; repair `ee index rebuild --workspace .` |
+| `anchor_index_empty` | info | bd-u875s.2 / issue #84 — ADR 0064 §5: no indexed or stored code anchors on non-tombstoned memories in this workspace; preview `ee index backfill-anchors --workspace . --dry-run --json` or attach known anchors |
+| `anchor_index_stale` | low | bd-u875s.2 / issue #84 — ADR 0064 §5: reverse-index generation < DB generation, or source code anchors exist but their projection is empty; repair `ee index rebuild --workspace .` |
 | `recall_filtered_empty` | info | bd-u875s.2 — ADR 0064 §5: anchored rows matched the surface but `--kind`/`--level`/`--stale` filters removed them all (distinct from empty-index so hook authors can tell the difference) |
 | `recall_git_unavailable` | warning | bd-u875s.3 — ADR 0064 §2 `git_unavailable`-family: the read-only `git diff` shell-out behind `--diff`/`--diff-staged` failed; the diff selector degrades to an empty path set and recall continues (never blocks an edit) |
 
@@ -820,6 +826,7 @@ that helper is the thing to change.
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
 | `graph_skyline_disabled` | info | bd-reality-core-convergence-1azkt.31 — config-time: `[graph.feature.skyline] enabled = false` on a graph-enabled build; do not confuse with the build-time codes above |
+| `graph_skyline_flag_unreadable` | medium | bd-l7t9x — the workspace config could not be READ, so the flag's value is unknown; distinct from `graph_skyline_disabled`, which asserts the operator turned the section off. Previously folded into the same `None` as "no workspace" and emitted nothing, so an empty skyline came back with `success: true` and no signal |
 | `insights_section_unavailable` | info | bd-113r0, retired by bd-2pos6.4 — historical registered `ee insights` metadata-only builder code |
 | `singleflight_follower_timeout` | medium | bd-gni47.3 (SF3) |
 | `singleflight_leader_failed` | medium | bd-gni47.3 (SF3) |
@@ -1075,9 +1082,9 @@ the closed daemon hot-mode surface.
 | Code | Severity | Bead |
 |------|----------|------|
 | `shard_fanout_apply_plan_blocked` | high | bd-nnheo (classified); src/db/migrate.rs refuses the shard fan-out migration when the planner reports blockers |
-| `handoff_capsule_machine_mismatch` | high | bd-17c65.13.6 (M5) |
-| `handoff_capsule_tampered` | high | bd-17c65.13.6 (M5) |
-| `handoff_hmac_missing` | high | bd-17c65.13.6 (M5) |
+| `handoff_capsule_machine_mismatch` | critical | bd-17c65.13.6 (M5) |
+| `handoff_capsule_tampered` | critical | bd-17c65.13.6 (M5) |
+| `handoff_hmac_missing` | critical | bd-17c65.13.6 (M5) |
 | `handoff_hmac_skipped` | high | bd-17c65.13.6 (M5) |
 | `handoff_snapshot_stale` | medium | bd-17c65.13.5 (M4) |
 | `integrity_database_missing` | high | bd-17c65.12.2 (L1) |
@@ -1088,7 +1095,7 @@ the closed daemon hot-mode surface.
 | `integrity_schema_check_unavailable` | medium | bd-17c65.12.2 (L1) |
 | `integrity_schema_migration_required` | high | bd-17c65.12.5 (L4) |
 | `stale_schema_version` | high | bd-17c65.12.5 (L4) |
-| `strict_mode_no_salt_file` | high | bd-17c65.13.6 (M5) |
+| `strict_mode_no_salt_file` | critical | bd-17c65.13.6 (M5) |
 | `tampered_hash` | critical | bd-17c65.13.6 (M5) |
 
 #### Maintenance jobs (5)
@@ -1165,11 +1172,12 @@ the closed daemon hot-mode surface.
 | `clustering_no_candidates` | info | bd-17c65.7.5 (G5) |
 | `clustering_no_embeddings` | info | bd-17c65.7.5 (G5) |
 
-#### Miscellaneous (43)
+#### Miscellaneous (44)
 | Code | Severity | Bead |
 |------|----------|------|
 | `action_override_not_actionable` | low | (TBD) |
 | `advisory_memory` | info | (TBD) — advisory-memory presence marker |
+| `backup_evidence_admission_reduced` | warning | bd-reality-core-convergence-1azkt.13 — export privacy redaction reduces persisted evidence eligibility; measured source and artifact counts remain distinct |
 | `backup_schema_coverage_incomplete` | warning | bd-reality-core-convergence-1azkt.13 — required table family has no portable typed coverage |
 | `backup_source_rows_not_covered` | high | bd-reality-core-convergence-1azkt.13 — the exported snapshot contains non-empty required rows that restore cannot rehydrate |
 | `backup_table_inventory_unclassified` | high | bd-reality-core-convergence-1azkt.13 — a migrated table has no explicit recovery disposition |
@@ -1206,6 +1214,7 @@ the closed daemon hot-mode surface.
 | `unsupported_condition` | warning | bd-17c65.10.6 (J6) |
 | `unsupported_schema` | high | bd-17c65.10.6 (J6) |
 | `windows_appdata_unavailable` | medium | bd-3usjw.68 |
+| `unix_xdg_data_unavailable` | medium | bd-nnheo — platform twin of `windows_appdata_unavailable`: both are the `code` field of the same `PlatformDataDirError` (src/config/path_resolver.rs), so the severity is inherited rather than invented. Kept adjacent deliberately, because classifying one platform and not the other is how this gap arose. |
 | `workspace_nested_markers` | warning | bd-17c65.12.2 (L1) |
 | `workspace_symlink_refused` | medium | bd-2bbtw |
 | `ambiguous_containing_symbols` | warning | (TBD) |

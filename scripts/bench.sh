@@ -198,15 +198,15 @@ else
     echo "[*] Building benchmarks..." >&2
     case "$PROFILE" in
         ci-smoke)
-            cargo build --release --bench status >&2
+            cargo build --locked --release --bench status >&2
             ;;
         daemon-search-slo|daemon-search-slo-observation)
-            cargo build --release --bench daemon_round_trip >&2
-            cargo build --release --bin ee >&2
+            cargo build --locked --release --bench daemon_round_trip >&2
+            cargo build --locked --release --bin ee >&2
             ;;
         *)
-            cargo build --release --benches >&2
-            cargo build --release --bin ee >&2
+            cargo build --locked --release --benches >&2
+            cargo build --locked --release --bin ee >&2
             ;;
     esac
 
@@ -457,7 +457,7 @@ workload_json() {
 }
 
 run_status_smoke() {
-    if output=$(cargo bench --bench status -- --quick --advisory); then
+    if output=$(cargo bench --locked --bench status -- --quick --advisory); then
         printf '%s\n' "$output" >&2
         if command -v jq >/dev/null 2>&1; then
             p50_ms=$(printf '%s\n' "$output" | jq -r '.aggregate_p50_ms // null')
@@ -481,7 +481,7 @@ run_primer_smoke() {
     echo "" >&2
     echo "[*] Primer latency smoke (bd-39tzu.5: cold assemble + warm cache hit)..." >&2
     for op in ee_primer_cold_assemble ee_primer_warm_cache_hit; do
-        if output=$(cargo bench --bench primer -- "$op" --warm-up-time 0.5 --measurement-time 1 --sample-size 10 2>&1); then
+        if output=$(cargo bench --locked --bench primer -- "$op" --warm-up-time 0.5 --measurement-time 1 --sample-size 10 2>&1); then
             time_line=$(parse_time_value "$output")
             if [ -n "$time_line" ]; then
                 value=${time_line% *}
@@ -514,13 +514,13 @@ run_criterion_bench() {
     # BENCH_ARGS intentionally expands into separate Criterion CLI arguments.
     # shellcheck disable=SC2086
     if [ "$compare_only" = "true" ]; then
-        if output=$(EE_BENCH_COMPARE_ONLY=1 cargo bench --bench "$bench" -- $BENCH_ARGS 2>&1); then
+        if output=$(EE_BENCH_COMPARE_ONLY=1 cargo bench --locked --bench "$bench" -- $BENCH_ARGS 2>&1); then
             status=0
         else
             status=$?
         fi
     else
-        if output=$(cargo bench --bench "$bench" -- $BENCH_ARGS 2>&1); then
+        if output=$(cargo bench --locked --bench "$bench" -- $BENCH_ARGS 2>&1); then
             status=0
         else
             status=$?
@@ -584,7 +584,7 @@ run_daemon_search_slo() {
         return
     fi
 
-    if output=$(EE_EMBED_DOWNLOAD=off EE_EMBED_MODEL_FIXTURE_DIR="$EE_EMBED_MODEL_FIXTURE_DIR" cargo bench --bench daemon_round_trip -- "$DAEMON_SEARCH_BENCH_ARG" 2>&1); then
+    if output=$(EE_EMBED_DOWNLOAD=off EE_EMBED_MODEL_FIXTURE_DIR="$EE_EMBED_MODEL_FIXTURE_DIR" cargo bench --locked --bench daemon_round_trip -- "$DAEMON_SEARCH_BENCH_ARG" 2>&1); then
         status=0
     else
         status=$?
@@ -696,7 +696,7 @@ run_context_l2_warm_bench() {
     echo "[*] Benchmark: context_l2_warm" >&2
     # BENCH_ARGS intentionally expands into separate Criterion CLI arguments.
     # shellcheck disable=SC2086
-    if output=$(cargo bench --bench "$bench" -- ee_context_pack_l2_warm $BENCH_ARGS 2>&1); then
+    if output=$(cargo bench --locked --bench "$bench" -- ee_context_pack_l2_warm $BENCH_ARGS 2>&1); then
         status=0
     else
         status=$?
@@ -731,7 +731,7 @@ run_context_arena_mode_bench() {
     echo "    filter: $filter" >&2
     # BENCH_ARGS intentionally expands into separate Criterion CLI arguments.
     # shellcheck disable=SC2086
-    if output=$(cargo bench --bench "$bench" -- "$filter" $BENCH_ARGS 2>&1); then
+    if output=$(cargo bench --locked --bench "$bench" -- "$filter" $BENCH_ARGS 2>&1); then
         status=0
     else
         status=$?
@@ -783,7 +783,7 @@ run_pack_replay_freshness_smoke() {
     fi
 
     echo "[*] Building ee binary for smoke workload..." >&2
-    if ! cargo build --release --bin ee >&2; then
+    if ! cargo build --locked --release --bin ee >&2; then
         echo "[-] ee binary build failed" >&2
         for op in \
             ee_context_pack_assembly_no_ledger \
@@ -1004,7 +1004,7 @@ run_ask_fixture_smoke() {
 
     if [ ! -x "$EE_BIN" ]; then
         echo "[*] Building ee binary for ask smoke workload..." >&2
-        if ! cargo build --release --bin ee >&2; then
+        if ! cargo build --locked --release --bin ee >&2; then
             echo "[-] ee binary build failed" >&2
             append_smoke_failure "ee_ask_v1_answerable"
             append_smoke_failure "ee_ask_v1_abstention"
@@ -1132,7 +1132,7 @@ run_journal_capture_smoke() {
 
     if [ ! -x "$EE_BIN" ]; then
         echo "[*] Building ee binary for journal capture smoke workload..." >&2
-        if ! cargo build --release --bin ee >&2; then
+        if ! cargo build --locked --release --bin ee >&2; then
             echo "[-] ee binary build failed" >&2
             append_smoke_failure "ee_journal_append_single"
             append_smoke_failure "ee_journal_append_batch_50"

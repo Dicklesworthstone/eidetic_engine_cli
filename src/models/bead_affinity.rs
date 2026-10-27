@@ -11,11 +11,10 @@
 //! This module is a strict pure-policy module — callers supply already
 //! redacted token sets and link-target ids, and receive a deterministic
 //! [`BeadAffinityExplanation`] capped at [`BEAD_AFFINITY_BIAS_CAP`]. No file
-//! I/O, database access, or environment reads happen here. Caller
-//! wiring into `ee context`, `ee search`, `ee why`, and `ee pack build`
-//! is left to follow-up child slices; this slice ships the scoring
-//! contract plus the closed-set vocabulary the schema and `ee why`
-//! renderer consume.
+//! I/O, database access, or environment reads happen here. The shared
+//! context/pack caller in `core::context` supplies admitted local memory
+//! content and live tags for opt-in `--bead-id` requests. Search, standalone
+//! why, and family-link inference remain separate future consumers.
 
 use std::collections::{BTreeMap, BTreeSet};
 

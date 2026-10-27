@@ -86,11 +86,20 @@ cat >"$SNAPSHOT" <<'JSON'
 }
 JSON
 
+# bd-v918u: `ee` writes ee.error.v2 to STDOUT, so a bare capture takes the
+# diagnostic into CONTEXT_JSON and `set -e` discards it at the assignment --
+# nonzero exit, zero bytes, nothing to triage. Guarded, the envelope is still
+# in the capture, because the assignment completes and only the status is
+# non-zero.
 CONTEXT_JSON="$("$EE_BINARY" context "coordinate shared pack" \
     --workspace "$WORKSPACE" \
     --coordination-snapshot "$SNAPSHOT" \
     --max-tokens 1500 \
-    --format json)"
+    --format json)" || {
+    printf 'coordination_snapshot: `ee context` failed for the live snapshot. ee writes ee.error.v2 to STDOUT, so the envelope is what the capture holds:\n%s\n' \
+        "$CONTEXT_JSON" >&2
+    exit 1
+}
 
 assert_jq() {
     local filter="$1"
@@ -114,10 +123,34 @@ UNAVAILABLE_JSON="$("$EE_BINARY" context "coordinate shared pack" \
     --workspace "$WORKSPACE" \
     --coordination-snapshot "$REPO_ROOT/tests/fixtures/coordination_snapshots/coordination_source_unavailable.json" \
     --max-tokens 1500 \
-    --format json)"
+    --format json)" || {
+    printf 'coordination_snapshot: `ee context` failed for the source-unavailable fixture. ee writes ee.error.v2 to STDOUT, so the envelope is what the capture holds:\n%s\n' \
+        "$UNAVAILABLE_JSON" >&2
+    exit 1
+}
 
 got="$(printf '%s' "$UNAVAILABLE_JSON" | jq -r '.data.pack.coordination.summary.unavailableSourceCount')"
 if [ "$got" != "1" ]; then
+    # bd-ikz0g: this assertion reported `null` once and the run was
+    # untriagable, because the message carried the VALUE and not the REASON.
+    #
+    # A `null` here has two very different causes and the payload already
+    # distinguishes them:
+    #   - the snapshot never loaded, in which case `ee` emitted the degraded
+    #     code `coordination_snapshot_unavailable` with a message naming the
+    #     path and the parse error (src/core/context.rs:7564,7575);
+    #   - the shape moved, in which case `.data.pack.coordination` is present
+    #     but the field is not where this filter looks.
+    #
+    # Printing `degraded[]` and the coordination object separates those in one
+    # read. Measured 2026-10-19 on ee 0.14.2: this exact filter returns 1, so
+    # a null is a change rather than a standing defect, and knowing WHICH is
+    # the whole question.
     echo "coordination_snapshot: unavailable fixture count was '$got', wanted '1'" >&2
+    echo "coordination_snapshot: degraded[] from that response:" >&2
+    printf '%s' "$UNAVAILABLE_JSON" | jq -c '.degraded // .data.degraded // "<no degraded array>"' >&2
+    echo "coordination_snapshot: .data.pack.coordination was:" >&2
+    printf '%s' "$UNAVAILABLE_JSON" \
+        | jq -c '.data.pack.coordination // "<absent: snapshot did not load>"' >&2
     exit 1
 fi

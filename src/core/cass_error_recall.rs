@@ -42,12 +42,38 @@ mod compiler;
 #[path = "cass_error_recall_test_coverage.rs"]
 mod test_coverage;
 
+#[path = "cass_error_recall_typescript.rs"]
+mod typescript;
+
+#[path = "cass_error_recall_cargo_text.rs"]
+mod cargo_text;
+
+#[path = "cass_error_recall_python_traceback.rs"]
+mod traceback;
+
 /// Actor recorded on CASS-derived repair links.
 pub const CASS_ERROR_RECALL_ACTOR: &str = "ee import cass";
 /// Version of failure extraction, independent of the incident-card renderer.
-/// V9 adds hierarchical Node TAP coverage, including nested suites and subtests,
-/// reconsidering already imported sessions without changing their source rows.
-pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v9";
+/// V11 makes streamed output independent of poll boundaries and requires a
+/// completed failed invocation before a later retry can verify its repair.
+/// Imports reconsider older derivations without changing source identities.
+/// V12 admits uniquely attributable libtest suite growth while retaining every
+/// prior selected subject and requiring prior executed subjects to pass.
+/// V13 reconsiders native Go streams whose fractional Elapsed fields were
+/// rejected by untagged buffering under arbitrary-precision JSON.
+/// V14 mines native TypeScript diagnostics using the same error class for
+/// imported failures and later interactive diagnosis.
+/// V15 reconsiders TypeScript color/context reports and complete summaries
+/// previously missed by the plain-only decoder, preserving source/card IDs.
+/// V16 also derives code-less Cargo/build/linker failures from native reports,
+/// retaining cause-specific templates and the existing exact retry proof gate.
+/// V17 refreshes final streamed diagnostic snapshots and withholds repair
+/// credit when a formerly valid prefix ends in a malformed native report.
+/// V18 mines complete Python script tracebacks and syntax reports while
+/// refusing partial chains as repair proof, without changing source identity.
+/// V19 validates standalone native rustc reports, including terminal styling
+/// and warning preludes, instead of salvaging raw error-looking substrings.
+pub const CASS_ERROR_RECALL_DERIVATION: &str = "cass_error_recall.v19";
 
 /// Tool output beyond this many bytes is not scanned for diagnostics.
 const MAX_SCANNED_OUTPUT_BYTES: usize = 64 * 1024;
@@ -99,6 +125,10 @@ pub fn record_session_error_recall(
     if arcs.is_empty() {
         return Ok(report);
     }
+    // One card can use the allocation-free linear path. Multiple incidents
+    // share a lazy borrowed index instead of rescanning every source per facet.
+    let card_sources =
+        (arcs.len() > 1).then(|| crate::core::incident_card::IncidentCardSources::new(&spans));
     connection.with_transaction(|| {
         for arc in &arcs {
             report.failures_seen = report.failures_seen.saturating_add(1);
@@ -116,12 +146,16 @@ pub fn record_session_error_recall(
                     .repair_links_recorded
                     .saturating_add(u32::try_from(receipt.links_submitted).unwrap_or(u32::MAX));
             }
-            let Some(card) = crate::core::incident_card::draft_incident_card(
-                workspace_id,
-                session_id,
-                &spans,
-                arc,
-            ) else {
+            let card = match &card_sources {
+                Some(sources) => sources.draft(workspace_id, session_id, arc),
+                None => crate::core::incident_card::draft_incident_card(
+                    workspace_id,
+                    session_id,
+                    &spans,
+                    arc,
+                ),
+            };
+            let Some(card) = card else {
                 continue;
             };
             if connection.get_evidence_span(&card.id)?.is_none() {
@@ -192,6 +226,9 @@ impl FailureArc {
 
 struct PendingFailure {
     index: usize,
+    /// The failed process has finished with its whole output retained. Early
+    /// fingerprints are useful, but cannot yet authorize a repair or card.
+    complete: bool,
     failure_id: String,
     attempt_id: String,
     family: CommandFamily,
@@ -201,6 +238,28 @@ struct PendingFailure {
 }
 
 impl PendingFailure {
+    fn refresh(
+        &mut self,
+        observation: &InvocationObservation,
+        index: usize,
+        diagnostics: &[CanonicalDiagnostic],
+    ) {
+        self.test_requirement
+            .refresh(&observation.output, observation.complete);
+        // A valid prefix cannot certify the complete failed run when later
+        // bytes invalidate its native report. Retain that observation only as
+        // an unresolved fingerprint; a later retry cannot turn it into proof.
+        self.complete = observation.complete && !diagnostics.is_empty();
+        self.index = index;
+        if !diagnostics.is_empty() {
+            // Polls may add error codes or finish a message/cause chain. The
+            // complete snapshot must agree with a later interactive diagnosis.
+            // Keep the original failure and attempt IDs as provenance anchors.
+            self.diagnostics = diagnostics.to_vec();
+            self.symptom = symptom_line(&observation.output);
+        }
+    }
+
     fn into_arc(self, resolution: Option<Resolution>) -> FailureArc {
         FailureArc {
             failure_id: self.failure_id,
@@ -229,29 +288,34 @@ struct InFlightInvocation {
 
 impl InFlightInvocation {
     fn append(&mut self, chunk: ToolOutput) {
+        // Once bytes have been omitted, do not splice a later poll into the
+        // retained prefix (including a gap left by a truncated UTF-8 scalar).
+        let remaining = if self.output_truncated {
+            0
+        } else {
+            MAX_SCANNED_OUTPUT_BYTES.saturating_sub(self.output.text.len())
+        };
         let overflow =
             self.output.text.len().saturating_add(chunk.text.len()) > MAX_SCANNED_OUTPUT_BYTES;
         self.output_truncated |= overflow;
-        let previous_failure = self.output.failed();
-        let mut end = chunk
-            .text
-            .len()
-            .min(MAX_SCANNED_OUTPUT_BYTES.saturating_sub(self.output.text.len()));
+        // A poll boundary is not a record or line boundary. In particular,
+        // "Exit code " is not a malformed terminal status until the process
+        // finishes, and a chunk beginning inside JSON/TAP/nextest captured
+        // output cannot be interpreted as standalone shell stderr. Latch
+        // only independent metadata; the retained complete byte stream owns
+        // diagnostic and completion interpretation at each observation.
+        let previous_failure = self.output.metadata_failed();
+        let mut end = chunk.text.len().min(remaining);
         while !chunk.text.is_char_boundary(end) {
             end -= 1;
         }
         // Chunks are contiguous stdout/stderr, not separate messages. Inserting
         // a newline could conceal a failure/instruction split across reads.
         self.output.text.push_str(&chunk.text[..end]);
-        // A chunk may begin inside TAP's quoted diagnostics, including an
-        // expected TODO failure. Select the family after joining the prefix
-        // (the header itself can span polls), not from an isolated chunk.
-        let chunk_failed = if self.output.text.trim_start().starts_with("TAP version") {
-            chunk.metadata_failed()
-        } else {
-            chunk.failed()
-        };
-        let veto = previous_failure || chunk_failed || overflow;
+        // Real nonzero exits and tool-level errors cannot be undone by a
+        // later optimistic poll. Text failures remain in the buffer and must
+        // pass the existing whole-report validators before any repair credit.
+        let veto = previous_failure || chunk.metadata_failed() || overflow;
         self.output.is_error = if veto { Some(true) } else { chunk.is_error };
         self.output.exit_code = chunk.exit_code;
     }
@@ -547,27 +611,15 @@ pub(crate) fn session_failure_arcs(
             ) else {
                 continue;
             };
-            // A running failure can reveal more failed subjects on later polls.
-            // Refresh coverage even after its first diagnostics were recorded;
-            // the final output, not the four-diagnostic cap, defines the proof.
+            // The final output, not the first useful poll, owns both the
+            // diagnostic snapshot and the complete failure's proof boundary.
+            let diagnostics = failure_diagnostics(&observed.output);
             for failure in pending
                 .iter_mut()
                 .filter(|failure| failure.attempt_id == spans[observed.call_index].id)
             {
-                failure
-                    .test_requirement
-                    .refresh(&observed.output, observed.complete);
-                if failure.test_requirement.is_guarded() {
-                    // Do not credit a retry launched before the failed
-                    // invocation's final observation, or narration before it.
-                    failure.index = index;
-                }
+                failure.refresh(&observed, index, &diagnostics);
             }
-            let diagnostics = if observed.new_failure {
-                failure_diagnostics(&observed.output)
-            } else {
-                Vec::new()
-            };
             if diagnostics.is_empty() {
                 if observed.complete && observed.output.succeeded() {
                     resolve_pending(
@@ -585,11 +637,16 @@ pub(crate) fn session_failure_arcs(
                 }
                 continue;
             }
+            if !observed.new_failure {
+                // Refresh the existing incident, never create one per poll.
+                continue;
+            }
             if pending.len() == MAX_PENDING_FAILURES {
                 arcs.push(pending.remove(0).into_arc(None));
             }
             pending.push(PendingFailure {
                 index,
+                complete: observed.complete,
                 failure_id: span.id.clone(),
                 attempt_id: spans[observed.call_index].id.clone(),
                 symptom: symptom_line(&observed.output),
@@ -630,7 +687,8 @@ fn resolve_pending(
     };
     let mut still_pending = Vec::with_capacity(pending.len());
     for failure in pending.drain(..) {
-        if !family.verifies(&failure.family)
+        if !failure.complete
+            || !family.verifies(&failure.family)
             || !failure.test_requirement.is_verified_by(&test_proof)
         {
             still_pending.push(failure);
@@ -890,10 +948,20 @@ impl ToolOutput {
 
     /// Failure and completion are distinct: unrecognized stdout is neither.
     fn failed(&self) -> bool {
+        match test_coverage::nextest::decode(&self.text) {
+            Ok(Some(decoded)) => return self.metadata_failed() || decoded.failed,
+            Err(()) => return self.metadata_failed(),
+            Ok(None) => {}
+        }
         match test_coverage::node::decode(&self.text) {
             Ok(Some(decoded)) => return self.metadata_failed() || decoded.output.failed,
             // A partial native diagnostic is data, not generic shell stderr.
             // Completion still fails closed until the whole report validates.
+            Err(()) => return self.metadata_failed(),
+            Ok(None) => {}
+        }
+        match typescript::decode(&self.text) {
+            Ok(Some(_)) => return true,
             Err(()) => return self.metadata_failed(),
             Ok(None) => {}
         }
@@ -903,6 +971,16 @@ impl ToolOutput {
     }
 
     fn succeeded(&self) -> bool {
+        match test_coverage::nextest::decode(&self.text) {
+            Ok(Some(decoded)) => {
+                // Captured test stdout cannot supply the process exit.
+                return decoded.allows_completion
+                    && (self.is_error == Some(false) || self.exit_code == Some(0))
+                    && outcome::succeeded(self);
+            }
+            Err(()) => return false,
+            Ok(None) => {}
+        }
         match test_coverage::node::decode(&self.text) {
             Ok(Some(decoded)) => {
                 // Exit-looking lines inside TAP comments/YAML cannot supply
@@ -1111,6 +1189,16 @@ fn content_text(value: &Value) -> Option<String> {
 /// class and record nothing. Messages are secret-redacted before they are
 /// canonicalized, and only masked signatures are ever stored.
 pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnostic> {
+    match traceback::decode(&output.text) {
+        Ok(Some(diagnostics)) => return diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
+    match test_coverage::nextest::decode(&output.text) {
+        Ok(Some(decoded)) => return decoded.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     match test_coverage::node::decode(&output.text) {
         Ok(Some(decoded)) => return decoded.output.diagnostics,
         Err(()) => return Vec::new(),
@@ -1118,6 +1206,16 @@ pub(crate) fn failure_diagnostics(output: &ToolOutput) -> Vec<CanonicalDiagnosti
     }
     match test_coverage::python::decode(&output.text) {
         Ok(Some(decoded)) => return decoded.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
+    match typescript::decode(&output.text) {
+        Ok(Some(diagnostics)) => return diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
+    match cargo_text::decode(&output.text) {
+        Ok(Some(diagnostics)) => return diagnostics,
         Err(()) => return Vec::new(),
         Ok(None) => {}
     }
@@ -1206,6 +1304,16 @@ fn stable_error_code(code: &str) -> bool {
 /// diagnostic that CASS import records. Public readers can reuse this before
 /// their free-text fallback, so imported errors and later logs share a key.
 pub(crate) fn structured_error_diagnostics(text: &str) -> Vec<CanonicalDiagnostic> {
+    match traceback::decode(text) {
+        Ok(Some(diagnostics)) => return diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
+    match test_coverage::nextest::decode(text) {
+        Ok(Some(decoded)) => return decoded.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
     match test_coverage::node::decode(text) {
         Ok(Some(decoded)) => return decoded.output.diagnostics,
         Err(()) => return Vec::new(),
@@ -1213,6 +1321,16 @@ pub(crate) fn structured_error_diagnostics(text: &str) -> Vec<CanonicalDiagnosti
     }
     match test_coverage::python::decode(text) {
         Ok(Some(decoded)) => return decoded.diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
+    match typescript::decode(text) {
+        Ok(Some(diagnostics)) => return diagnostics,
+        Err(()) => return Vec::new(),
+        Ok(None) => {}
+    }
+    match cargo_text::decode(text) {
+        Ok(Some(diagnostics)) => return diagnostics,
         Err(()) => return Vec::new(),
         Ok(None) => {}
     }
@@ -1333,6 +1451,11 @@ fn structured_error_reports_failure(text: &str) -> bool {
 /// completion at the end of an invocation without latching an incomplete JSON
 /// chunk as failure while more bytes are still arriving.
 fn structured_output_allows_completion(text: &str) -> bool {
+    // A malformed native report is not a clean run, even when its wrapper
+    // claims exit zero. Quiet stdout still requires independent completion.
+    if !matches!(typescript::decode(text), Ok(None)) {
+        return false;
+    }
     let start = text.trim_start();
     if !start.starts_with(['{', '[']) {
         return true;
@@ -1408,6 +1531,25 @@ fn structured_output_allows_completion(text: &str) -> bool {
 /// error (with the `-->` location that follows it), else the first failing
 /// test or panic. Secret-redacted; never the whole log.
 fn symptom_line(output: &ToolOutput) -> Option<String> {
+    match traceback::decode(&output.text) {
+        Ok(Some(diagnostics)) => {
+            return diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.message_template.clone());
+        }
+        Err(()) => return None,
+        Ok(None) => {}
+    }
+    match test_coverage::nextest::decode(&output.text) {
+        Ok(Some(decoded)) => {
+            return decoded
+                .diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.message_template.clone());
+        }
+        Err(()) => return None,
+        Ok(None) => {}
+    }
     match test_coverage::node::decode(&output.text) {
         Ok(Some(decoded)) => {
             return decoded
@@ -1421,6 +1563,28 @@ fn symptom_line(output: &ToolOutput) -> Option<String> {
     }
     match test_coverage::python::decode(&output.text) {
         Ok(Some(decoded)) => return decoded.symptom,
+        Err(()) => return None,
+        Ok(None) => {}
+    }
+    match typescript::decode(&output.text) {
+        Ok(Some(diagnostics)) => {
+            return diagnostics.first().map(|diagnostic| {
+                format!(
+                    "{}: {}",
+                    diagnostic.layered_key().key,
+                    diagnostic.message_template
+                )
+            });
+        }
+        Err(()) => return None,
+        Ok(None) => {}
+    }
+    match cargo_text::decode(&output.text) {
+        Ok(Some(diagnostics)) => {
+            return diagnostics
+                .first()
+                .and_then(|diagnostic| cargo_text::symptom(&output.text, diagnostic));
+        }
         Err(()) => return None,
         Ok(None) => {}
     }
@@ -1499,3 +1663,135 @@ mod write_tests;
 #[cfg(test)]
 #[path = "cass_error_recall_libtest_store_tests.rs"]
 mod libtest_store_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_stream_tests.rs"]
+mod stream_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_stream_store_tests.rs"]
+mod stream_store_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_typescript_store_tests.rs"]
+mod typescript_store_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_cargo_store_tests.rs"]
+mod cargo_store_tests;
+
+#[cfg(test)]
+mod source_index_intake_tests {
+    use super::*;
+    use crate::core::incident_card::proof;
+    use crate::core::incident_card::proof::tests::{Fixture, TestResult, WS};
+    use crate::db::{CreateEvidenceSpanInput, CreateSessionInput, EvidenceProducerKind};
+    use crate::models::{EvidenceId, SessionId};
+
+    #[test]
+    fn multiple_incidents_share_source_lookup_and_keep_idempotent_proofs() -> TestResult {
+        let fixture = Fixture::new_public(true)?;
+        let templates = fixture
+            .db
+            .list_evidence_spans_for_session(&fixture.session)?;
+        assert_eq!(templates.len(), 5);
+        let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(0x17600)).to_string();
+        fixture.db.insert_session(
+            &session_id,
+            &CreateSessionInput {
+                workspace_id: WS.to_owned(),
+                cass_session_id: "/sessions/indexed-incidents.jsonl".to_owned(),
+                source_path: None,
+                agent_name: Some("claude_code".to_owned()),
+                model: None,
+                started_at: None,
+                ended_at: None,
+                message_count: 20,
+                token_count: None,
+                content_hash: format!("blake3:{}", blake3::hash(b"indexed-incidents").to_hex()),
+                metadata_json: None,
+            },
+        )?;
+        for episode in 0_u32..4 {
+            for (offset, template) in templates.iter().enumerate() {
+                let line = episode * 5 + u32::try_from(offset)? + 1;
+                let mut record: Value = serde_json::from_str(&template.excerpt)?;
+                let block = &mut record["message"]["content"][0];
+                for key in ["id", "tool_use_id"] {
+                    if let Some(original) = block.get(key).and_then(Value::as_str) {
+                        block[key] = Value::String(format!("{original}-{episode}"));
+                    }
+                }
+                let excerpt = record.to_string();
+                let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(0x18000 + u128::from(line)))
+                    .to_string();
+                fixture.db.insert_evidence_span(
+                    &id,
+                    &CreateEvidenceSpanInput {
+                        workspace_id: WS.to_owned(),
+                        session_id: session_id.clone(),
+                        memory_id: None,
+                        producer_kind: EvidenceProducerKind::CassImport,
+                        cass_span_id: format!("{session_id}:{line}"),
+                        span_kind: template.span_kind.clone(),
+                        start_line: line,
+                        end_line: line,
+                        start_byte: None,
+                        end_byte: None,
+                        role: template.role.clone(),
+                        content_hash: format!(
+                            "blake3:{}",
+                            blake3::hash(excerpt.as_bytes()).to_hex()
+                        ),
+                        excerpt,
+                        metadata_json: None,
+                        inherited_redaction_classes: Vec::new(),
+                    },
+                )?;
+            }
+        }
+        let before = fixture.db.list_evidence_spans_for_session(&session_id)?;
+        let session = fixture.db.get_session(&session_id)?.ok_or("session")?;
+        let arcs = session_failure_arcs(WS, &session, &before);
+        assert_eq!(arcs.len(), 4);
+        assert!(arcs.iter().all(|arc| arc.resolution.is_some()));
+        let first = record_session_error_recall(&fixture.db, WS, &session_id)?;
+        assert_eq!(first.failures_seen, 4);
+        assert_eq!(first.resolved_failures, 4);
+        assert_eq!(first.incident_cards_recorded, 4);
+        let second = record_session_error_recall(&fixture.db, WS, &session_id)?;
+        assert_eq!(second.failures_seen, first.failures_seen);
+        assert_eq!(second.resolved_failures, first.resolved_failures);
+        assert_eq!(second.incident_cards_recorded, 0);
+        let proofs = proof::session_proofs(&fixture.db, WS, None, &session_id)?;
+        for arc in &arcs {
+            let expected =
+                crate::core::incident_card::draft_incident_card(WS, &session_id, &before, arc)
+                    .ok_or("linear card")?;
+            let stored = fixture
+                .db
+                .get_evidence_span(&expected.id)?
+                .ok_or("stored card")?;
+            assert!(stored.matches_screened_input(&expected.input)?);
+            assert!(proofs.claims.contains(&proof::Claim {
+                failure: arc.failure_id.clone(),
+                target: expected.id,
+                card: true,
+            }));
+        }
+        let after = fixture.db.list_evidence_spans_for_session(&session_id)?;
+        assert_eq!(after.len(), before.len() + 4);
+        for original in &before {
+            let current = after
+                .iter()
+                .find(|span| span.id == original.id)
+                .ok_or("source")?;
+            assert_eq!(current.excerpt, original.excerpt);
+            assert_eq!(current.content_hash, original.content_hash);
+            assert_eq!(current.metadata_json, original.metadata_json);
+            assert_eq!(current.start_line, original.start_line);
+            assert_eq!(current.end_line, original.end_line);
+        }
+        Ok(())
+    }
+}

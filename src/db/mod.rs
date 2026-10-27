@@ -46,12 +46,14 @@ use crate::models::{
 use crate::models::{MemorySeal, validate_attestation_seal_fields};
 
 mod evidence_admission_counts;
+mod evidence_lifecycle;
 mod evidence_reader_projection;
 mod memory_temporal;
 pub mod migrate;
 pub mod read_pool;
 pub mod shard;
 
+pub(crate) use evidence_lifecycle::{CassEvidenceWithdrawal, CassEvidenceWithdrawalError};
 pub use evidence_reader_projection::EvidenceReaderProjection;
 
 pub const SUBSYSTEM: &str = "db";
@@ -131,6 +133,9 @@ pub mod audit_actions {
     /// reason codes, and the resulting admission class; raw evidence content
     /// and upstream references are never copied into the audit chain.
     pub const EVIDENCE_SECURITY_RESCREEN: &str = "evidence.security_rescreen";
+    /// An operator withdrew one CASS source from future retrieval and derivation.
+    /// Source bytes and historical packs are retained.
+    pub const EVIDENCE_WITHDRAW: &str = "evidence.withdraw";
 
     /// Beta-Bernoulli posterior updated on a feedback/outcome event
     /// (N7.1 / ADR 0032). Details carry prior (alpha, beta), event
@@ -605,6 +610,21 @@ fn lock_write_owner_gate<'a>(
         _lock_file: lock_file,
         active: true,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// SQL text `query_for` ran on this thread while a capture is active.
+    static QUERY_SQL_LOG: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// Run `f` and return the SQL text of every query it issued on this thread.
+#[cfg(test)]
+pub(crate) fn capture_query_sql_for_test<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    QUERY_SQL_LOG.with(|log| *log.borrow_mut() = Some(Vec::new()));
+    let value = f();
+    let captured = QUERY_SQL_LOG.with(|log| log.borrow_mut().take().unwrap_or_default());
+    (value, captured)
 }
 
 #[cfg(test)]
@@ -2427,6 +2447,12 @@ impl DbConnection {
     }
 
     fn query_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
+        #[cfg(test)]
+        QUERY_SQL_LOG.with(|log| {
+            if let Some(log) = log.borrow_mut().as_mut() {
+                log.push(sql.to_owned());
+            }
+        });
         let run = || {
             guard_storage_panic(operation, || {
                 self.inner
@@ -3121,6 +3147,27 @@ impl DbError {
             | Self::StoragePanic { .. }
             | Self::ReadSnapshotUnavailable { .. } => None,
         }
+    }
+
+    /// Whether this is a RECOVERED PANIC rather than an ordinary storage
+    /// failure.
+    ///
+    /// [`guard_storage_panic`] turns a frankensqlite panic into
+    /// [`Self::StoragePanic`] so it flows through the normal error path, and
+    /// its contract is that callers render it as `DomainError::Storage`, which
+    /// exits 3. Callers that map a `DbError` onto a DIFFERENT domain variant
+    /// for domain reasons — an import, a migration — need this to carve the
+    /// panic back out, because a panic is a storage fault whatever operation
+    /// provoked it and the domain repair advice for it is actively wrong.
+    ///
+    /// bd-12ybp: `src/core/backup.rs` mapped `connection.migrate()` failures
+    /// during a task-episode restore to `DomainError::Import` (exit 5) with
+    /// the repair "retry restore with a fresh --side-path". That is right for a
+    /// corrupt restored database and wrong for a panic, which a fresh
+    /// side-path reproduces.
+    #[must_use]
+    pub const fn is_storage_panic(&self) -> bool {
+        matches!(self, Self::StoragePanic { .. })
     }
 
     /// Another writer holds the store's lock: the flock gate gave up on a
@@ -11019,11 +11066,22 @@ CREATE INDEX idx_memories_workspace_content_simhash
 /// what this did instead of taking it on faith. Expect all zeros on a store that
 /// has never expired, revised, or imported a memory.
 ///
-/// VERSION NOTE: the dueling-wizards manifest reserves version 124 for
+/// VERSION NOTE, updated 2026-10-21: this slot's collision is RESOLVED and the
+/// note below is kept because the reasoning still explains why.
+///
+/// The dueling-wizards manifest used to reserve version 124 for
 /// `V124_SOURCE_WRITE_STATS` (bd-1n0np.8.5). Compiled migrations must stay
-/// contiguous, so this repair could not take 125 and leave 124 free. That makes
-/// three reserved slots consumed by unrelated work (122, 123, 124); see
-/// bd-zs76e, which owns renumbering the planned allocations.
+/// contiguous, so this repair could not take 125 and leave 124 free, which made
+/// three reserved slots consumed by unrelated work (122, 123, 124). bd-zs76e
+/// owned the renumbering and is now closed: the manifest allocates that work
+/// version 135 as `V135_SOURCE_WRITE_STATS`, so nothing is double-booked.
+///
+/// Still PLANNED, not shipped: allocation 135 has `"status": "planned"` and
+/// `"tables": ["source_write_stats"]`, and shipped migrations currently reach
+/// 132. The `source_write_stats` table therefore does not exist, which is why
+/// the write-immune evaluator in core/write_owner.rs has no production
+/// observation feed -- see bd-1n0np.8.13. Do not read this note as evidence
+/// that the table ships.
 pub const V124_TIMESTAMP_SPELLING_REPAIR: Migration = Migration::new(
     124,
     "timestamp_spelling_repair",
@@ -11937,6 +11995,106 @@ END;
     "blake3:v131_evidence_admission_counts_2026_10_08",
 );
 
+/// Admit learned anti-pattern rules in the reserved failure section without
+/// changing their native identity or any historical pack and replay bytes.
+/// The pack-history backup asset carries these same rows through recovery.
+pub const V132_PACK_RULE_FAILURE_SECTIONS: Migration = Migration::new(
+    132,
+    "pack_rule_failure_sections",
+    r#"
+CREATE TABLE pack_rule_items_v132_new (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    rule_id TEXT NOT NULL REFERENCES procedural_rules(id) ON DELETE RESTRICT
+        CHECK (rule_id GLOB 'rule_*' AND length(rule_id) = 31),
+    entity_revision TEXT NOT NULL CHECK (
+        length(entity_revision) = 71 AND substr(entity_revision, 1, 7) = 'blake3:'
+    ),
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    section TEXT NOT NULL CHECK (section IN ('procedural_rules', 'failures')),
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    relevance REAL NOT NULL CHECK (relevance >= 0.0 AND relevance <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    why TEXT NOT NULL CHECK (length(trim(why)) > 0),
+    provenance_json TEXT NOT NULL CHECK (length(trim(provenance_json)) > 0),
+    trust_class TEXT NOT NULL CHECK (length(trim(trust_class)) > 0),
+    trust_subclass TEXT,
+    PRIMARY KEY (pack_id, rule_id),
+    UNIQUE (pack_id, rank)
+);
+
+INSERT INTO pack_rule_items_v132_new (
+    pack_id, rule_id, entity_revision, rank, section, estimated_tokens,
+    relevance, utility, why, provenance_json, trust_class, trust_subclass
+)
+SELECT pack_id, rule_id, entity_revision, rank, section, estimated_tokens,
+       relevance, utility, why, provenance_json, trust_class, trust_subclass
+FROM pack_rule_items ORDER BY rowid;
+
+DROP TABLE pack_rule_items;
+ALTER TABLE pack_rule_items_v132_new RENAME TO pack_rule_items;
+CREATE INDEX idx_pack_rule_items_rule ON pack_rule_items(rule_id);
+
+CREATE TRIGGER pack_rule_items_workspace_insert
+BEFORE INSERT ON pack_rule_items
+WHEN NOT coalesce(
+    (SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)
+BEGIN
+    SELECT RAISE(ABORT, 'pack rule must belong to the pack workspace');
+END;
+
+CREATE TRIGGER pack_rule_items_workspace_update
+BEFORE UPDATE OF pack_id, rule_id ON pack_rule_items
+WHEN NOT coalesce(
+    (SELECT workspace_id FROM procedural_rules WHERE id = NEW.rule_id)
+        = (SELECT workspace_id FROM pack_records WHERE id = NEW.pack_id),
+    0)
+BEGIN
+    SELECT RAISE(ABORT, 'pack rule must belong to the pack workspace');
+END;
+"#,
+    "blake3:v132_pack_rule_failure_sections_2026_10_17",
+);
+
+/// Durable validated path/symbol bindings for additive anchor management.
+/// These source rows are independent of memory bodies and derived indexes.
+pub const V133_MEMORY_CODE_ANCHOR_SOURCES: Migration = Migration::new(
+    133,
+    "memory_code_anchor_sources",
+    r#"
+CREATE TABLE memory_code_anchor_sources (
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    anchor_kind TEXT NOT NULL CHECK (anchor_kind IN ('path', 'symbol')),
+    anchor_value_hash TEXT NOT NULL CHECK (
+        length(anchor_value_hash) = 71 AND substr(anchor_value_hash, 1, 7) = 'blake3:'
+    ),
+    normalized_value TEXT NOT NULL CHECK (length(normalized_value) BETWEEN 1 AND 1024),
+    source TEXT NOT NULL CHECK (source IN ('explicit', 'index_rebuild')),
+    provenance TEXT NOT NULL CHECK (length(trim(provenance)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (memory_id, anchor_kind, anchor_value_hash)
+);
+CREATE TRIGGER trg_workspace_generations_code_anchor_insert
+AFTER INSERT ON memory_code_anchor_sources
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.created_at
+     WHERE workspace_id = (SELECT workspace_id FROM memories WHERE id = NEW.memory_id);
+END;
+CREATE TRIGGER trg_workspace_generations_code_anchor_delete
+AFTER DELETE ON memory_code_anchor_sources
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = (SELECT workspace_id FROM memories WHERE id = OLD.memory_id);
+END;
+"#,
+    "blake3:v133_memory_code_anchor_sources_2026_10_23",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -12070,6 +12228,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V129_PACK_GUARD_TRIGGERS_WITHOUT_JOINS,
     V130_EVIDENCE_READER_PROJECTIONS,
     V131_EVIDENCE_ADMISSION_COUNTS,
+    V132_PACK_RULE_FAILURE_SECTIONS,
+    V133_MEMORY_CODE_ANCHOR_SOURCES,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -12185,7 +12345,8 @@ impl DbConnection {
                 || migration.version == V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST.version
                 || migration.version == V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version
                 || migration.version == V096_MEMORY_SENTINEL_POLARITY.version
-                || migration.version == V121_EVIDENCE_FEEDBACK_TARGETS.version;
+                || migration.version == V121_EVIDENCE_FEEDBACK_TARGETS.version
+                || migration.version == V132_PACK_RULE_FAILURE_SECTIONS.version;
             let outcome =
                 if rebuilds_existing_table && matches!(&self.location, DatabaseLocation::File(_)) {
                     self.apply_file_schema_rebuild_migration(migration, &now)?
@@ -14888,7 +15049,11 @@ pub const EVIDENCE_SCREENING_VERSION: u32 = 1;
 pub const EVIDENCE_SECURITY_POLICY_EPOCH: u32 = 1;
 pub const EVIDENCE_CANONICAL_PROVENANCE_REVISION: u32 = 1;
 pub(crate) const CASS_SOURCE_COMMITMENT_SCHEMA_V1: &str = "ee.cass.source.v1";
-const CASS_SOURCE_COMMITMENT_MAX_BYTES: u64 = 1024 * 1024;
+// Complete transcripts above the 1 MiB screening budget are quarantined, but
+// their hashes and lengths must survive import and refresh. This finite bound
+// matches the 8 MiB CASS view capture budget; it never authorizes retaining the
+// original oversized content in an evidence excerpt.
+const CASS_SOURCE_COMMITMENT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A commitment captured from a complete CASS source line before screening.
 ///
@@ -14955,7 +15120,7 @@ where
 /// classification, reader projection, ingestion screening or any admission
 /// clause changes meaning: every recorded verdict then stops matching, rows
 /// revalidate in full, and the next write-side backfill records fresh verdicts.
-pub const EVIDENCE_ADMISSION_VERDICT_REVISION: u32 = 3;
+pub const EVIDENCE_ADMISSION_VERDICT_REVISION: u32 = 4;
 
 /// Closed producer vocabulary for the shared evidence table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15098,6 +15263,69 @@ pub(crate) struct SessionReadScan {
 /// exactly the Rust predicate.
 pub(crate) const EVIDENCE_SEARCH_CANDIDATE_PREDICATE: &str =
     "e.producer_kind = 'cass_import' AND e.search_eligibility = 'admitted'";
+
+/// One persisted reader projection by its evidence id: a primary-key seek.
+const READER_PROJECTION_BY_EVIDENCE_ID_SQL: &str = "SELECT evidence_span_id, projection_version, source_binding, reader_body, reader_text, egress_safe, integrity_binding FROM evidence_reader_projections WHERE evidence_span_id = ?1";
+
+/// One session row by id: a primary-key seek.
+const SESSION_BY_ID_SQL: &str = "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE id = ?1";
+
+/// One recorded admission verdict by its evidence id: a primary-key seek.
+const RECORDED_ADMISSION_VERDICT_SQL: &str = "SELECT evidence_span_id, verdict_binding FROM evidence_admission_verdicts WHERE evidence_span_id = ?1";
+
+/// The two column values [`EVIDENCE_SEARCH_CANDIDATE_PREDICATE`] compares,
+/// for filtering rows that were read without it.
+const EVIDENCE_SEARCH_CANDIDATE_PRODUCER: &str = "cass_import";
+const EVIDENCE_SEARCH_CANDIDATE_ELIGIBILITY: &str = "admitted";
+
+/// Columns of an index-order evidence page: the evidence row in
+/// `evidence_spans_from_rows` order, then its rowid.
+const INDEX_EVIDENCE_PAGE_COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at, e.rowid";
+const INDEX_EVIDENCE_WORKSPACE_COLUMN: usize = 1;
+const INDEX_EVIDENCE_PRODUCER_COLUMN: usize = 14;
+const INDEX_EVIDENCE_ELIGIBILITY_COLUMN: usize = 19;
+const INDEX_EVIDENCE_ROWID_COLUMN: usize = 27;
+
+/// One index-order page read by `read_index_evidence_page`.
+struct IndexEvidencePage {
+    /// This workspace's search candidates among the rows read, hydrated.
+    rows: Vec<EvidenceSearchReadRow>,
+    /// The last rowid read, the next page's exclusive lower bound.
+    last_rowid: Option<i64>,
+    /// How many table rows the query read; fewer than a full page means the
+    /// table has no more rows after `last_rowid`.
+    table_rows: usize,
+}
+
+/// The next page of `evidence_spans` in rowid order after `cursor`, with no
+/// other predicate so the access path is the rowid seek (GH#78).
+fn index_evidence_page_query(cursor: Option<i64>) -> (String, Vec<Value>) {
+    let limit = Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE));
+    match cursor {
+        None => (
+            format!(
+                "SELECT {INDEX_EVIDENCE_PAGE_COLUMNS} FROM evidence_spans e ORDER BY e.rowid ASC LIMIT ?1"
+            ),
+            vec![limit],
+        ),
+        Some(rowid) => (
+            format!(
+                "SELECT {INDEX_EVIDENCE_PAGE_COLUMNS} FROM evidence_spans e WHERE e.rowid > ?1 ORDER BY e.rowid ASC LIMIT ?2"
+            ),
+            vec![Value::BigInt(rowid), limit],
+        ),
+    }
+}
+
+/// Whether a row read by [`index_evidence_page_query`] belongs to
+/// `workspace_id` and satisfies [`EVIDENCE_SEARCH_CANDIDATE_PREDICATE`].
+/// Like the SQL comparison, a NULL or non-text value never matches.
+fn index_evidence_row_is_candidate(row: &Row, workspace_id: &str) -> bool {
+    let text = |column: usize| row.get(column).and_then(Value::as_str);
+    text(INDEX_EVIDENCE_WORKSPACE_COLUMN) == Some(workspace_id)
+        && text(INDEX_EVIDENCE_PRODUCER_COLUMN) == Some(EVIDENCE_SEARCH_CANDIDATE_PRODUCER)
+        && text(INDEX_EVIDENCE_ELIGIBILITY_COLUMN) == Some(EVIDENCE_SEARCH_CANDIDATE_ELIGIBILITY)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EvidenceSearchReadCursor {
@@ -15434,7 +15662,8 @@ impl StoredEvidenceSpan {
     /// by bd-reality-core-convergence-1azkt.45/.46/.59/.60): their text was
     /// secret-screened at ingest. A record quarantined for instruction risk
     /// (class B), a stale screening revision or a drifted hash never
-    /// qualifies, and neither does anything outside the live session join.
+    /// qualifies, and neither does an explicitly denied CASS source or
+    /// anything outside the live session join.
     #[must_use]
     pub fn is_class_a_derivation_readable(
         &self,
@@ -15444,6 +15673,8 @@ impl StoredEvidenceSpan {
         if !self.is_bound_to_session(expected_workspace_id, session)
             || EvidenceProducerKind::parse(&self.producer_kind)
                 != Some(EvidenceProducerKind::CassImport)
+            || self.search_eligibility == "denied"
+            || self.pack_eligibility == "denied"
             || self.screening_version != EVIDENCE_SCREENING_VERSION
             || self.security_policy_epoch != EVIDENCE_SECURITY_POLICY_EPOCH
             || self.canonical_provenance_revision != EVIDENCE_CANONICAL_PROVENANCE_REVISION
@@ -16530,71 +16761,61 @@ impl DbConnection {
         Ok(present)
     }
 
-    /// Attach validated persisted projections with primary-key batch lookups.
+    /// Attach validated persisted projections, one primary-key lookup per
+    /// span: `evidence_span_id IN (...)` batches are planned as full scans of
+    /// the projection table (see `recorded_admission_verdicts`, GH#78).
     /// Missing, corrupt or stale entries are computed once in memory. Return
     /// their positions so write-side backfill can persist only the repairs.
     fn hydrate_evidence_reader_projections(
         &self,
         spans: &mut [StoredEvidenceSpan],
     ) -> Result<Vec<usize>> {
-        const CHUNK: usize = 128;
         let available = !spans.is_empty() && self.reader_projections_available()?;
         let mut missing = Vec::new();
-        for (chunk_number, chunk) in spans.chunks_mut(CHUNK).enumerate() {
-            let mut projections = std::collections::HashMap::with_capacity(chunk.len());
-            if available {
-                let placeholders = (1..=chunk.len())
-                    .map(|index| format!("?{index}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let params = chunk
-                    .iter()
-                    .map(|span| Value::Text(span.id.clone()))
-                    .collect::<Vec<_>>();
-                let rows = self.query_for(
+        for (index, span) in spans.iter_mut().enumerate() {
+            let row = if available {
+                self.query_for(
                     DbOperation::Query,
-                    &format!(
-                        "SELECT evidence_span_id, projection_version, source_binding, reader_body, reader_text, egress_safe, integrity_binding FROM evidence_reader_projections WHERE evidence_span_id IN ({placeholders})"
-                    ),
-                    &params,
-                )?;
-                for row in rows {
-                    if let Ok(id) = required_text(&row, 0, DbOperation::Query, "evidence_span_id") {
-                        projections.insert(id.to_owned(), row);
-                    }
-                }
-            }
-            for (index, span) in chunk.iter_mut().enumerate() {
-                let persisted = projections.remove(&span.id).and_then(|row| {
-                    let version =
-                        required_u32(&row, 1, DbOperation::Query, "projection_version").ok()?;
-                    let source_binding =
-                        required_text(&row, 2, DbOperation::Query, "source_binding").ok()?;
-                    let body = required_text(&row, 3, DbOperation::Query, "reader_body").ok()?;
-                    let text = required_text(&row, 4, DbOperation::Query, "reader_text").ok()?;
-                    let egress_safe =
-                        match required_i64(&row, 5, DbOperation::Query, "egress_safe").ok()? {
-                            0 => false,
-                            1 => true,
-                            _ => return None,
-                        };
-                    let integrity_binding =
-                        required_text(&row, 6, DbOperation::Query, "integrity_binding").ok()?;
-                    EvidenceReaderProjection::from_storage(
-                        span,
-                        version,
-                        source_binding.to_owned(),
-                        body.to_owned(),
-                        text.to_owned(),
-                        egress_safe,
-                        integrity_binding.to_owned(),
-                    )
-                });
-                span.reader_projection = Some(persisted.unwrap_or_else(|| {
-                    missing.push(chunk_number * CHUNK + index);
-                    EvidenceReaderProjection::derive(span)
-                }));
-            }
+                    READER_PROJECTION_BY_EVIDENCE_ID_SQL,
+                    &[Value::Text(span.id.clone())],
+                )?
+                .into_iter()
+                .find(|row| {
+                    required_text(row, 0, DbOperation::Query, "evidence_span_id")
+                        .is_ok_and(|id| id == span.id)
+                })
+            } else {
+                None
+            };
+            let persisted = row.and_then(|row| {
+                let version =
+                    required_u32(&row, 1, DbOperation::Query, "projection_version").ok()?;
+                let source_binding =
+                    required_text(&row, 2, DbOperation::Query, "source_binding").ok()?;
+                let body = required_text(&row, 3, DbOperation::Query, "reader_body").ok()?;
+                let text = required_text(&row, 4, DbOperation::Query, "reader_text").ok()?;
+                let egress_safe =
+                    match required_i64(&row, 5, DbOperation::Query, "egress_safe").ok()? {
+                        0 => false,
+                        1 => true,
+                        _ => return None,
+                    };
+                let integrity_binding =
+                    required_text(&row, 6, DbOperation::Query, "integrity_binding").ok()?;
+                EvidenceReaderProjection::from_storage(
+                    span,
+                    version,
+                    source_binding.to_owned(),
+                    body.to_owned(),
+                    text.to_owned(),
+                    egress_safe,
+                    integrity_binding.to_owned(),
+                )
+            });
+            span.reader_projection = Some(persisted.unwrap_or_else(|| {
+                missing.push(index);
+                EvidenceReaderProjection::derive(span)
+            }));
         }
         Ok(missing)
     }
@@ -16735,26 +16956,14 @@ impl DbConnection {
         &self,
         ids: &[&str],
     ) -> Result<std::collections::HashMap<String, StoredSession>> {
-        const CHUNK: usize = 128;
+        // One primary-key lookup per id: the engine plans `id IN (...)` as a
+        // full scan of `sessions` (see `recorded_admission_verdicts`, GH#78).
         let mut sessions = std::collections::HashMap::with_capacity(ids.len());
-        for chunk in ids.chunks(CHUNK) {
-            if chunk.is_empty() {
-                continue;
-            }
-            let placeholders = (1..=chunk.len())
-                .map(|index| format!("?{index}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let params = chunk
-                .iter()
-                .map(|id| Value::Text((*id).to_owned()))
-                .collect::<Vec<_>>();
+        for id in ids {
             let rows = self.query_for(
                 DbOperation::Query,
-                &format!(
-                    "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE id IN ({placeholders})"
-                ),
-                &params,
+                SESSION_BY_ID_SQL,
+                &[Value::Text((*id).to_owned())],
             )?;
             for row in &rows {
                 let session = stored_session_from_row(row)?;
@@ -16768,30 +16977,26 @@ impl DbConnection {
     /// lookup. Deliberately a separate query rather than a third JOIN: the
     /// engine evaluates joins as nested loops, and a verdict join multiplied
     /// every evidence page by the verdict table's size.
+    ///
+    /// One equality lookup per id, not `evidence_span_id IN (...)` batches
+    /// (GH#78). The pinned engine plans such a batch as a full scan of
+    /// `evidence_admission_verdicts`, so every 128 evidence rows re-read the
+    /// whole verdict table and an admission scan cost O(N^2): about 160
+    /// whole-table scans for a 20,000-row import. An equality on the primary
+    /// key is an index seek.
     fn recorded_admission_verdicts(
         &self,
         ids: &[&str],
     ) -> Result<std::collections::HashMap<String, String>> {
-        const CHUNK: usize = 128;
         let mut recorded = std::collections::HashMap::with_capacity(ids.len());
         if ids.is_empty() || !self.admission_verdicts_available()? {
             return Ok(recorded);
         }
-        for chunk in ids.chunks(CHUNK) {
-            let placeholders = (1..=chunk.len())
-                .map(|index| format!("?{index}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let params = chunk
-                .iter()
-                .map(|id| Value::Text((*id).to_owned()))
-                .collect::<Vec<_>>();
+        for id in ids {
             let rows = self.query_for(
                 DbOperation::Query,
-                &format!(
-                    "SELECT evidence_span_id, verdict_binding FROM evidence_admission_verdicts WHERE evidence_span_id IN ({placeholders})"
-                ),
-                &params,
+                RECORDED_ADMISSION_VERDICT_SQL,
+                &[Value::Text((*id).to_owned())],
             )?;
             for row in &rows {
                 recorded.insert(
@@ -17575,23 +17780,28 @@ impl DbConnection {
         let mut session_cache = std::collections::HashMap::new();
         loop {
             checkpoint_retry_cx(DbOperation::Query, cx.as_ref())?;
-            let page = if index_order {
-                let (page, last_rowid) =
+            // Rows the page query read, which decides whether the table has
+            // more. An index-order page reads table rows and returns only
+            // this workspace's candidates, so it can return fewer.
+            let (page, rows_scanned) = if index_order {
+                let page =
                     self.read_index_evidence_page(workspace_id, rowid_cursor, &mut session_cache)?;
-                rowid_cursor = last_rowid;
-                page
+                rowid_cursor = page.last_rowid;
+                (page.rows, page.table_rows)
             } else {
-                self.read_evidence_search_page(
+                let page = self.read_evidence_search_page(
                     workspace_id,
                     session_id,
                     cursor.as_ref(),
                     &mut session_cache,
-                )?
+                )?;
+                let len = page.len();
+                (page, len)
             };
-            let page_len = page.len();
-            if page_len == 0 {
+            if rows_scanned == 0 {
                 break;
             }
+            let page_len = page.len();
             scan.pages_read = scan.pages_read.saturating_add(1);
             scan.rows_read = scan
                 .rows_read
@@ -17624,7 +17834,8 @@ impl DbConnection {
                     visitor(row.span)?;
                 }
             }
-            if page_len < usize::try_from(EVIDENCE_SOURCE_READ_PAGE_SIZE).unwrap_or(usize::MAX) {
+            if rows_scanned < usize::try_from(EVIDENCE_SOURCE_READ_PAGE_SIZE).unwrap_or(usize::MAX)
+            {
                 break;
             }
         }
@@ -17692,37 +17903,48 @@ impl DbConnection {
         self.evidence_search_rows(&rows, session_cache)
     }
 
+    /// One index-order page: the next [`EVIDENCE_SOURCE_READ_PAGE_SIZE`]
+    /// table rows after `cursor` in rowid order, of which only this
+    /// workspace's search candidates are hydrated and returned.
+    ///
+    /// The SQL deliberately has no workspace or candidate predicate (GH#78).
+    /// With them, the planner chose the `(workspace_id, search_eligibility,
+    /// producer_kind, session_id)` index, whose order is not rowid order, so
+    /// every page re-read and sorted every remaining candidate row, excerpts
+    /// included, and the page reads alone grew quadratically with the corpus.
+    /// A bare rowid seek reads each table row once. Other workspaces' rows and this
+    /// workspace's non-candidates are skipped before decoding, exactly as the
+    /// SQL predicate excluded them; `count_non_candidate_evidence` accounts
+    /// for the latter.
     fn read_index_evidence_page(
         &self,
         workspace_id: &str,
         cursor: Option<i64>,
         session_cache: &mut std::collections::HashMap<String, Option<Arc<StoredSession>>>,
-    ) -> Result<(Vec<EvidenceSearchReadRow>, Option<i64>)> {
-        const COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at";
-        let (seek, params) = match cursor {
-            None => (
-                "",
-                vec![
-                    Value::Text(workspace_id.to_owned()),
-                    Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE)),
-                ],
-            ),
-            Some(rowid) => (
-                "AND e.rowid > ?2",
-                vec![
-                    Value::Text(workspace_id.to_owned()),
-                    Value::BigInt(rowid),
-                    Value::BigInt(i64::from(EVIDENCE_SOURCE_READ_PAGE_SIZE)),
-                ],
-            ),
-        };
-        let rows = self.query_for(DbOperation::Query, &format!(
-            "SELECT {COLUMNS}, e.rowid FROM evidence_spans e WHERE e.workspace_id = ?1 {seek} AND {EVIDENCE_SEARCH_CANDIDATE_PREDICATE} ORDER BY e.rowid ASC LIMIT ?{}", params.len()), &params)?;
+    ) -> Result<IndexEvidencePage> {
+        let (sql, params) = index_evidence_page_query(cursor);
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        let table_rows = rows.len();
         let last_rowid = rows
             .last()
-            .map(|row| required_i64(row, 27, DbOperation::Query, "rowid"))
+            .map(|row| {
+                required_i64(
+                    row,
+                    INDEX_EVIDENCE_ROWID_COLUMN,
+                    DbOperation::Query,
+                    "rowid",
+                )
+            })
             .transpose()?;
-        Ok((self.evidence_search_rows(&rows, session_cache)?, last_rowid))
+        let candidates = rows
+            .into_iter()
+            .filter(|row| index_evidence_row_is_candidate(row, workspace_id))
+            .collect::<Vec<_>>();
+        Ok(IndexEvidencePage {
+            rows: self.evidence_search_rows(&candidates, session_cache)?,
+            last_rowid,
+            table_rows,
+        })
     }
 
     fn evidence_search_rows(
@@ -23569,6 +23791,29 @@ impl DbConnection {
             .transpose()
     }
 
+    /// Find the quarantine reservation for a globally unique feedback event ID.
+    /// Callers that may insert the event must retain the write-owner fence
+    /// through lookup and commit. Older stores can contain duplicate proposals;
+    /// refuse an ambiguous identity rather than choosing a review decision.
+    pub(crate) fn get_feedback_quarantine_by_proposed_event_id(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<StoredFeedbackQuarantine>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, source_id, target_type, target_id, signal, weight, source_type, proposed_event_id, recorded_at, reason, event_reason, evidence_json, session_id, raw_event_hash, status, reviewed_at, reviewed_by, released_feedback_event_id FROM feedback_quarantine WHERE proposed_event_id = ?1 LIMIT 2",
+            &[Value::Text(event_id.to_owned())],
+        )?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [row] => stored_feedback_quarantine_from_row(row).map(Some),
+            _ => Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "feedback event ID has multiple quarantine reservations".to_owned(),
+            }),
+        }
+    }
+
     /// List feedback quarantine rows for one workspace in deterministic order.
     pub fn list_feedback_quarantine(
         &self,
@@ -23610,6 +23855,29 @@ impl DbConnection {
             ],
         )?;
         Ok(affected > 0)
+    }
+
+    /// Finish a claimed release after its feedback event has been inserted.
+    /// The claim, event effects and this attachment share the caller's review
+    /// transaction; a failed attachment must roll the entire release back.
+    pub(crate) fn attach_released_feedback_quarantine_event_in_txn(
+        &self,
+        id: &str,
+        event_id: &str,
+    ) -> Result<()> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE feedback_quarantine SET released_feedback_event_id = ?1 WHERE id = ?2 AND status = 'released' AND released_feedback_event_id IS NULL",
+            &[Value::Text(event_id.to_owned()), Value::Text(id.to_owned())],
+        )?;
+        if affected != 1 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "feedback quarantine release no longer owns its unlinked review claim"
+                    .to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// Insert a feedback event and audit entry in one transaction (EE-083).
@@ -25096,6 +25364,21 @@ pub struct StoredMemory {
     pub valid_to: Option<String>,
 }
 
+pub(crate) const MEMORY_INDEX_METADATA_BATCH_SIZE: usize = 128;
+
+/// Source sidecars for a memory already admitted to an index snapshot.
+#[derive(Debug, Default)]
+pub(crate) struct MemoryIndexMetadata {
+    pub anchors: Vec<StoredMemoryAnchor>,
+    pub typed_fields_json: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MemoryIndexMetadataBatch {
+    pub by_memory_id: BTreeMap<String, MemoryIndexMetadata>,
+    pub query_count: usize,
+}
+
 /// Attempt-family multiplicity sidecar on a memory row
 /// (bd-multiplicity-aware-trust-p0u7g): the stable family identity a finding
 /// was selected from and the declared number of sibling attempts.
@@ -25948,6 +26231,52 @@ impl DbConnection {
         Ok(attempted)
     }
 
+    /// Restore only missing canonical identities. Rebuild must never reset a
+    /// surviving anchor's capture provenance, freshness, generation or clocks.
+    fn insert_missing_memory_anchor_batch(
+        &self,
+        anchors: &[CreateMemoryAnchorInput],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        for chunk in anchors.chunks(64) {
+            let slots = (0..chunk.len())
+                .map(|row| {
+                    let columns = (1..=12)
+                        .map(|column| format!("?{}", row * 12 + column))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("({columns})")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let parameters = chunk
+                .iter()
+                .flat_map(|anchor| {
+                    [
+                        Value::Text(anchor.memory_id.clone()),
+                        Value::Text(anchor.anchor_kind.as_str().to_owned()),
+                        Value::Text(anchor.anchor_value_hash.clone()),
+                        Value::Text(anchor.redacted_anchor_value.clone()),
+                        Value::Float(anchor.confidence),
+                        Value::Text(anchor.source.as_str().to_owned()),
+                        Value::Text(anchor.provenance.clone()),
+                        Value::Text(anchor.captured_span_hash.clone()),
+                        Value::Text(anchor.freshness_state.as_str().to_owned()),
+                        Value::BigInt(anchor.generation),
+                        Value::Text(now.clone()),
+                        Value::Text(now.clone()),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            self.execute_for(
+                DbOperation::Execute,
+                &format!("INSERT INTO memory_anchors (memory_id, anchor_kind, anchor_value_hash, redacted_anchor_value, confidence, source, provenance, captured_span_hash, freshness_state, generation, created_at, updated_at) VALUES {slots} ON CONFLICT(memory_id, anchor_kind, anchor_value_hash) DO NOTHING"),
+                &parameters,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Rebuild anchors for one memory from index-rebuild material.
     pub fn refresh_memory_anchors_for_memory(&self, memory_id: &str, content: &str) -> Result<u64> {
         let anchors = extract_precision_memory_anchors(
@@ -25957,6 +26286,292 @@ impl DbConnection {
             Some("index_rebuild"),
         );
         self.upsert_memory_anchors(&anchors)
+    }
+
+    /// Load durable, validated code locators, preserving canonical freshness
+    /// metadata when present. Source bindings survive deletion/rebuild of both
+    /// derived anchor tables. This reader does not mutate an older schema.
+    pub fn list_memory_code_anchor_sources(
+        &self,
+        memory_id: &str,
+    ) -> Result<Vec<ExtractedAnchorSurface>> {
+        if self.schema_version()?.unwrap_or(0) < V133_MEMORY_CODE_ANCHOR_SOURCES.version() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .code_anchor_sources_for_memories(&[memory_id])?
+            .remove(memory_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(surface, _, _)| surface)
+            .collect())
+    }
+
+    /// One bounded source query also loads canonical freshness, without turning
+    /// index rebuild into one metadata lookup per memory. The boolean records
+    /// whether the canonical row exists; source provenance stays independent.
+    fn code_anchor_sources_for_memories(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<BTreeMap<String, Vec<(ExtractedAnchorSurface, String, bool)>>> {
+        if memory_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = (1..=memory_ids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rows = self.query_for(DbOperation::Query,
+            &format!("SELECT s.memory_id, s.anchor_kind, s.anchor_value_hash, s.normalized_value, s.source, s.provenance, s.created_at, a.confidence, a.captured_span_hash, a.freshness_state, a.generation FROM memory_code_anchor_sources s LEFT JOIN memory_anchors a ON a.memory_id = s.memory_id AND a.anchor_kind = s.anchor_kind AND a.anchor_value_hash = s.anchor_value_hash WHERE s.memory_id IN ({placeholders}) ORDER BY s.memory_id, s.anchor_kind, s.anchor_value_hash"),
+            &memory_ids.iter().map(|id| Value::Text((*id).to_owned())).collect::<Vec<_>>(),
+        )?;
+        let mut by_memory = BTreeMap::<String, Vec<(ExtractedAnchorSurface, String, bool)>>::new();
+        for row in &rows {
+            let memory_id = required_text(row, 0, DbOperation::Query, "memory_id")?;
+            let kind = parse_memory_anchor_kind(required_text(
+                row,
+                1,
+                DbOperation::Query,
+                "anchor_kind",
+            )?)?;
+            let hash = required_text(row, 2, DbOperation::Query, "anchor_value_hash")?;
+            let normalized = required_text(row, 3, DbOperation::Query, "normalized_value")?;
+            let source =
+                parse_memory_anchor_source(required_text(row, 4, DbOperation::Query, "source")?)?;
+            let provenance = required_text(row, 5, DbOperation::Query, "provenance")?;
+            let created_at = required_text(row, 6, DbOperation::Query, "created_at")?.to_owned();
+            let Some(mut surface) = CreateMemoryAnchorInput::from_stored_code_surface(
+                memory_id, kind, normalized, source, provenance,
+            ) else {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "Invalid stored code-anchor source.".to_owned(),
+                });
+            };
+            if surface.anchor.anchor_value_hash != hash
+                || crate::policy::redact_public_replay_text(normalized).redacted
+                || crate::policy::redact_public_replay_text(provenance).redacted
+            {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "Stored code-anchor source hash does not match its value.".to_owned(),
+                });
+            }
+            let canonical = !matches!(row.get(7), Some(Value::Null));
+            if canonical {
+                surface.anchor.confidence = required_f32(row, 7, DbOperation::Query, "confidence")?;
+                surface.anchor.captured_span_hash =
+                    required_text(row, 8, DbOperation::Query, "captured_span_hash")?.to_owned();
+                surface.anchor.freshness_state = parse_memory_anchor_freshness(required_text(
+                    row,
+                    9,
+                    DbOperation::Query,
+                    "freshness_state",
+                )?)?;
+                surface.anchor.generation =
+                    required_i64(row, 10, DbOperation::Query, "generation")?;
+            }
+            by_memory
+                .entry(memory_id.to_owned())
+                .or_default()
+                .push((surface, created_at, canonical));
+        }
+        Ok(by_memory)
+    }
+
+    /// Whether this exact canonical anchor is represented in the reverse index.
+    pub(crate) fn has_memory_code_anchor_projection(
+        &self,
+        workspace_id: &str,
+        surface: &ExtractedAnchorSurface,
+    ) -> Result<bool> {
+        let anchor = &surface.anchor;
+        let (path, symbol) = match anchor.anchor_kind {
+            MemoryAnchorKind::Path => (Some(surface.normalized_value.as_str()), None),
+            MemoryAnchorKind::Symbol => (None, Some(surface.normalized_value.as_str())),
+            _ => return Ok(false),
+        };
+        Ok(!self.query_for(DbOperation::Query,
+            "SELECT memory_id FROM memory_anchor_index WHERE workspace_id = ?1 AND memory_id = ?2 AND anchor_kind = ?3 AND anchor_value_hash = ?4 AND normalized_path IS ?5 AND symbol IS ?6 LIMIT 1",
+            &[Value::Text(workspace_id.to_owned()), Value::Text(anchor.memory_id.clone()), Value::Text(anchor.anchor_kind.as_str().to_owned()), Value::Text(anchor.anchor_value_hash.clone()), optional_text_value(path), optional_text_value(symbol)],
+        )?.is_empty())
+    }
+
+    /// Add validated durable code-locator bindings and their projections.
+    /// The caller owns the transaction and audit/search-job scheduling. Existing
+    /// canonical anchor provenance, freshness and timestamps are never reset.
+    pub fn attach_memory_code_anchor_sources(
+        &self,
+        workspace_id: &str,
+        memory_id: &str,
+        surfaces: &[ExtractedAnchorSurface],
+    ) -> Result<usize> {
+        self.attach_memory_code_anchor_sources_internal(workspace_id, memory_id, surfaces, false)
+    }
+
+    // Only immutable revision carry may preserve private-path bindings already
+    // stored on its validated original. Public attachment and transport never
+    // use that exception; secret, syntax and identity checks still apply here.
+    fn attach_memory_code_anchor_sources_internal(
+        &self,
+        workspace_id: &str,
+        memory_id: &str,
+        surfaces: &[ExtractedAnchorSurface],
+        allow_legacy_private_locators: bool,
+    ) -> Result<usize> {
+        if self
+            .get_memory(memory_id)?
+            .is_none_or(|memory| memory.workspace_id != workspace_id)
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "Code-anchor memory does not belong to this workspace.".to_owned(),
+            });
+        }
+        // Public storage callers cannot supply raw text in fields whose names
+        // promise hashes/redaction. Validate the whole batch before any write
+        // and derive those fields again from the validated locator.
+        let mut validated_surfaces = Vec::with_capacity(surfaces.len());
+        for surface in surfaces {
+            let anchor = &surface.anchor;
+            let rebuilt = CreateMemoryAnchorInput::from_stored_code_surface(
+                memory_id,
+                anchor.anchor_kind,
+                &surface.normalized_value,
+                anchor.source,
+                &anchor.provenance,
+            );
+            if anchor.memory_id != memory_id
+                || !matches!(
+                    anchor.source,
+                    MemoryAnchorSource::Explicit | MemoryAnchorSource::IndexRebuild
+                )
+                || anchor.provenance.trim().is_empty()
+                || anchor.provenance.len() > 512
+                || (!allow_legacy_private_locators
+                    && !crate::models::memory_anchor::code_anchor_locator_is_public(
+                        &surface.normalized_value,
+                    ))
+                || crate::policy::redact_public_replay_text(&surface.normalized_value).redacted
+                || crate::policy::redact_public_replay_text(&anchor.provenance).redacted
+                || rebuilt.as_ref().is_none_or(|value| {
+                    value.anchor.anchor_value_hash != anchor.anchor_value_hash
+                        || value.anchor.redacted_anchor_value != anchor.redacted_anchor_value
+                })
+            {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "Invalid code-anchor binding.".to_owned(),
+                });
+            }
+            let mut validated = surface.clone();
+            if let Some(rebuilt) = rebuilt {
+                validated.anchor.redacted_anchor_value = rebuilt.anchor.redacted_anchor_value;
+                validated.anchor.captured_span_hash = rebuilt.anchor.captured_span_hash;
+            }
+            validated_surfaces.push(validated);
+        }
+        let existing_sources = self.list_memory_code_anchor_sources(memory_id)?;
+        let mut source_keys = existing_sources
+            .iter()
+            .map(|source| {
+                (
+                    source.anchor.anchor_kind,
+                    source.anchor.anchor_value_hash.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let existing_anchors = self.list_memory_anchors(memory_id)?;
+        let mut added = 0;
+        let now = Utc::now().to_rfc3339();
+        for surface in &validated_surfaces {
+            let anchor = &surface.anchor;
+            if !source_keys.insert((anchor.anchor_kind, anchor.anchor_value_hash.clone())) {
+                continue;
+            }
+            self.execute_for(DbOperation::Execute,
+                "INSERT INTO memory_code_anchor_sources (memory_id, anchor_kind, anchor_value_hash, normalized_value, source, provenance, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(memory_id, anchor_kind, anchor_value_hash) DO NOTHING",
+                &[Value::Text(memory_id.to_owned()), Value::Text(anchor.anchor_kind.as_str().to_owned()), Value::Text(anchor.anchor_value_hash.clone()), Value::Text(surface.normalized_value.clone()), Value::Text(anchor.source.as_str().to_owned()), Value::Text(anchor.provenance.clone()), Value::Text(now.clone())],
+            )?;
+            added += 1;
+        }
+        let generation = i64::try_from(self.get_workspace_generation(workspace_id)?.unwrap_or(0))
+            .unwrap_or(i64::MAX);
+        let mut projected_keys = BTreeSet::new();
+        for surface in &validated_surfaces {
+            if !projected_keys.insert((
+                surface.anchor.anchor_kind,
+                surface.anchor.anchor_value_hash.clone(),
+            )) {
+                continue;
+            }
+            let mut projected = surface.clone();
+            if let Some(existing) = existing_anchors.iter().find(|anchor| {
+                anchor.anchor_kind == projected.anchor.anchor_kind
+                    && anchor.anchor_value_hash == projected.anchor.anchor_value_hash
+            }) {
+                projected.anchor.freshness_state = existing.freshness_state;
+                projected.anchor.generation = existing.generation;
+            } else {
+                projected.anchor.generation = generation;
+                self.upsert_memory_anchors(&[projected.anchor.clone()])?;
+            }
+            if !self.has_memory_code_anchor_projection(workspace_id, &projected)? {
+                // A malformed derived row must not defeat repair by claiming
+                // a future generation. Only this validated identity is replaced.
+                self.execute_for(DbOperation::Execute,
+                    "DELETE FROM memory_anchor_index WHERE memory_id = ?1 AND anchor_kind = ?2 AND anchor_value_hash = ?3",
+                    &[Value::Text(memory_id.to_owned()), Value::Text(projected.anchor.anchor_kind.as_str().to_owned()), Value::Text(projected.anchor.anchor_value_hash.clone())],
+                )?;
+            }
+            self.upsert_memory_anchor_index_surfaces(workspace_id, &[projected])?;
+        }
+        Ok(added)
+    }
+
+    /// Carry additive bindings across the canonical immutable revision path.
+    pub(crate) fn carry_memory_code_anchor_sources(
+        &self,
+        original_id: &str,
+        new_id: &str,
+        workspace_id: &str,
+    ) -> Result<()> {
+        for id in [original_id, new_id] {
+            if self
+                .get_memory(id)?
+                .is_none_or(|memory| memory.workspace_id != workspace_id)
+            {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "Code-anchor revision endpoints must belong to the same workspace."
+                        .to_owned(),
+                });
+            }
+        }
+        let mut surfaces = self.list_memory_code_anchor_sources(original_id)?;
+        if surfaces.is_empty() {
+            return Ok(());
+        }
+        for surface in &mut surfaces {
+            surface.anchor.memory_id = new_id.to_owned();
+        }
+        self.attach_memory_code_anchor_sources_internal(workspace_id, new_id, &surfaces, true)?;
+        Ok(())
+    }
+
+    /// Bounded stable page for code-anchor backfill; includes only current,
+    /// untombstoned revision heads belonging to the addressed workspace.
+    pub(crate) fn memory_code_anchor_backfill_page(
+        &self,
+        workspace_id: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<StoredMemory>> {
+        let rows = self.query_for(DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND superseded_at IS NULL AND id > ?2 ORDER BY id ASC LIMIT ?3",
+            &[Value::Text(workspace_id.to_owned()), Value::Text(after.unwrap_or("").to_owned()), Value::BigInt(i64::try_from(limit).unwrap_or(i64::MAX))],
+        )?;
+        rows.iter().map(stored_memory_from_row).collect()
     }
 
     /// Rebuild the ADR 0064 reverse-index rows for one memory from the shared
@@ -25970,24 +26585,218 @@ impl DbConnection {
         memory_id: &str,
         content: &str,
     ) -> Result<u64> {
-        let surfaces = extract_memory_anchor_surfaces(
-            memory_id,
-            content,
-            MemoryAnchorSource::IndexRebuild,
-            Some("index_rebuild"),
-        );
+        self.refresh_memory_anchor_index_batch(&[(workspace_id, memory_id, content)])
+    }
+
+    /// Refresh derived reverse-index rows without one generation query and
+    /// delete statement per memory. The caller owns the source transaction;
+    /// globally scoped memories retain their originating workspace generation.
+    pub(crate) fn refresh_memory_anchor_index_for_memories(
+        &self,
+        memories: &[&StoredMemory],
+    ) -> Result<u64> {
+        let sources = memories
+            .iter()
+            .map(|memory| {
+                (
+                    memory.workspace_id.as_str(),
+                    memory.id.as_str(),
+                    memory.content.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.refresh_memory_anchor_index_batch(&sources)
+    }
+
+    fn refresh_memory_anchor_index_batch(&self, sources: &[(&str, &str, &str)]) -> Result<u64> {
+        // Ten parameters per row stay below the conservative SQLite bind limit.
+        const INSERT_BATCH_SIZE: usize = 64;
+        let mut generations = BTreeMap::new();
+        let mut written = 0_u64;
+        let now = Utc::now().to_rfc3339();
+        let has_sources =
+            self.schema_version()?.unwrap_or(0) >= V133_MEMORY_CODE_ANCHOR_SOURCES.version();
+        for chunk in sources.chunks(MEMORY_INDEX_METADATA_BATCH_SIZE) {
+            let mut bindings = if has_sources {
+                self.code_anchor_sources_for_memories(
+                    &chunk.iter().map(|(_, id, _)| *id).collect::<Vec<_>>(),
+                )?
+            } else {
+                BTreeMap::new()
+            };
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let parameters = chunk
+                .iter()
+                .map(|(_, memory_id, _)| Value::Text((*memory_id).to_owned()))
+                .collect::<Vec<_>>();
+            let live_rows = self.query_for(
+                DbOperation::Query,
+                &format!(
+                    "SELECT id, workspace_id, content FROM memories WHERE id IN ({placeholders})"
+                ),
+                &parameters,
+            )?;
+            let live_sources = live_rows
+                .iter()
+                .map(|row| {
+                    Ok((
+                        required_text(row, 0, DbOperation::Query, "id")?.to_owned(),
+                        (
+                            required_text(row, 1, DbOperation::Query, "workspace_id")?.to_owned(),
+                            required_text(row, 2, DbOperation::Query, "content")?.to_owned(),
+                        ),
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            let canonical_rows = self.query_for(
+                DbOperation::Query,
+                &format!("SELECT memory_id, anchor_kind, anchor_value_hash, redacted_anchor_value, confidence, source, provenance, captured_span_hash, freshness_state, generation, created_at, updated_at FROM memory_anchors WHERE memory_id IN ({placeholders})"),
+                &parameters,
+            )?;
+            let canonical = canonical_rows
+                .iter()
+                .map(|row| {
+                    let anchor = stored_memory_anchor_from_row(row)?;
+                    Ok((
+                        (
+                            anchor.memory_id.clone(),
+                            anchor.anchor_kind,
+                            anchor.anchor_value_hash.clone(),
+                        ),
+                        anchor,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            self.execute_for(
+                DbOperation::Execute,
+                &format!("DELETE FROM memory_anchor_index WHERE memory_id IN ({placeholders})"),
+                &parameters,
+            )?;
+            let mut rows = Vec::with_capacity(INSERT_BATCH_SIZE);
+            let mut missing_anchors = Vec::with_capacity(INSERT_BATCH_SIZE);
+            for &(workspace_id, memory_id, content) in chunk {
+                // A low-level caller may refresh a historical derived view.
+                // Only the actual source in this workspace can authorize new
+                // canonical identities; caller-supplied text cannot do so.
+                let canonical_source = live_sources
+                    .get(memory_id)
+                    .is_some_and(|(owner, body)| owner == workspace_id && body == content);
+                let generation = if let Some(generation) = generations.get(workspace_id) {
+                    *generation
+                } else {
+                    let generation =
+                        i64::try_from(self.get_workspace_generation(workspace_id)?.unwrap_or(0))
+                            .unwrap_or(i64::MAX);
+                    generations.insert(workspace_id, generation);
+                    generation
+                };
+                let mut surfaces = extract_memory_anchor_surfaces(
+                    memory_id,
+                    content,
+                    MemoryAnchorSource::IndexRebuild,
+                    Some("index_rebuild"),
+                )
+                .into_iter()
+                .map(|surface| {
+                    (
+                        (
+                            surface.anchor.anchor_kind,
+                            surface.anchor.anchor_value_hash.clone(),
+                        ),
+                        surface,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+                let durable = bindings.remove(memory_id).unwrap_or_default();
+                // A durable capture takes precedence when it names the same
+                // identity as text extraction. Existing canonical metadata is
+                // still authoritative for every surviving anchor.
+                for (surface, _, _) in durable {
+                    surfaces.insert(
+                        (
+                            surface.anchor.anchor_kind,
+                            surface.anchor.anchor_value_hash.clone(),
+                        ),
+                        surface,
+                    );
+                }
+                for mut surface in surfaces.into_values() {
+                    let key = (
+                        memory_id.to_owned(),
+                        surface.anchor.anchor_kind,
+                        surface.anchor.anchor_value_hash.clone(),
+                    );
+                    if let Some(existing) = canonical.get(&key) {
+                        surface.anchor.freshness_state = existing.freshness_state;
+                    } else if canonical_source {
+                        missing_anchors.push(surface.anchor.clone());
+                        if missing_anchors.len() == INSERT_BATCH_SIZE {
+                            self.insert_missing_memory_anchor_batch(&missing_anchors)?;
+                            missing_anchors.clear();
+                        }
+                    }
+                    let (normalized_path, symbol) = match surface.anchor.anchor_kind {
+                        MemoryAnchorKind::Path => (Some(surface.normalized_value), None),
+                        MemoryAnchorKind::Symbol => (None, Some(surface.normalized_value)),
+                        _ => continue,
+                    };
+                    rows.push([
+                        Value::Text(workspace_id.to_owned()),
+                        Value::Text(memory_id.to_owned()),
+                        Value::Text(surface.anchor.anchor_kind.as_str().to_owned()),
+                        Value::Text(surface.anchor.anchor_value_hash),
+                        normalized_path.map_or(Value::Null, Value::Text),
+                        symbol.map_or(Value::Null, Value::Text),
+                        Value::Text(surface.anchor.freshness_state.as_str().to_owned()),
+                        Value::BigInt(generation),
+                        Value::Text(now.clone()),
+                        Value::Text(now.clone()),
+                    ]);
+                    if rows.len() == INSERT_BATCH_SIZE {
+                        self.insert_missing_memory_anchor_batch(&missing_anchors)?;
+                        missing_anchors.clear();
+                        self.insert_memory_anchor_index_batch(&rows)?;
+                        written = written.saturating_add(rows.len() as u64);
+                        rows.clear();
+                    }
+                }
+            }
+            self.insert_missing_memory_anchor_batch(&missing_anchors)?;
+            if !rows.is_empty() {
+                self.insert_memory_anchor_index_batch(&rows)?;
+                written = written.saturating_add(rows.len() as u64);
+            }
+        }
+        Ok(written)
+    }
+
+    fn insert_memory_anchor_index_batch(&self, rows: &[[Value; 10]]) -> Result<()> {
+        let values = (0..rows.len())
+            .map(|row| {
+                let parameters = (1..=10)
+                    .map(|column| format!("?{}", row * 10 + column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({parameters})")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         self.execute_for(
             DbOperation::Execute,
-            "DELETE FROM memory_anchor_index WHERE memory_id = ?1",
-            &[Value::Text(memory_id.to_string())],
+            &format!(
+                "INSERT INTO memory_anchor_index (workspace_id, memory_id, anchor_kind, anchor_value_hash, normalized_path, symbol, freshness_state, generation, created_at, updated_at) VALUES {values} ON CONFLICT(memory_id, anchor_kind, anchor_value_hash) DO UPDATE SET workspace_id = excluded.workspace_id, normalized_path = excluded.normalized_path, symbol = excluded.symbol, freshness_state = excluded.freshness_state, generation = excluded.generation, updated_at = excluded.updated_at WHERE excluded.generation >= memory_anchor_index.generation"
+            ),
+            &rows.iter().flatten().cloned().collect::<Vec<_>>(),
         )?;
-        self.upsert_memory_anchor_index_surfaces(workspace_id, &surfaces)
+        Ok(())
     }
 
     /// Upsert reverse-index rows for already-extracted anchor surfaces.
-    /// Shared by `insert_memory` (fresh rows) and the rebuild path (after a
-    /// wholesale delete). Non-path/non-symbol surfaces are skipped. Older
-    /// generations cannot overwrite newer rows.
+    /// Used by `insert_memory` for fresh rows. Non-path/non-symbol surfaces are
+    /// skipped, and older generations cannot overwrite newer rows.
     fn upsert_memory_anchor_index_surfaces(
         &self,
         workspace_id: &str,
@@ -26025,7 +26834,8 @@ impl DbConnection {
     }
 
     /// `MAX(generation)` over a workspace's reverse-index rows; `None` when
-    /// the index has no rows (the `anchor_index_empty` case).
+    /// the projection has no rows. Inspect canonical code anchors separately
+    /// to distinguish missing source anchors from a lost projection.
     pub fn memory_anchor_index_generation(&self, workspace_id: &str) -> Result<Option<i64>> {
         let rows = self.query_for(
             DbOperation::Query,
@@ -26040,6 +26850,34 @@ impl DbConnection {
                 _ => Ok(None),
             },
         }
+    }
+
+    /// Whether this workspace has canonical path or symbol anchors or durable
+    /// code bindings belonging to non-tombstoned memories. This is a
+    /// projection-health check only:
+    /// recall still applies live source, seal and validity admission before
+    /// returning any memory. Configuration and other non-code anchors do not
+    /// make an empty path/symbol projection repairable by an index rebuild.
+    pub fn has_workspace_code_anchors(&self, workspace_id: &str) -> Result<bool> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT a.memory_id FROM memory_anchors a JOIN memories m ON m.id = a.memory_id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND a.anchor_kind IN ('path', 'symbol') LIMIT 1",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        if !rows.is_empty() {
+            return Ok(true);
+        }
+        if self.schema_version()?.unwrap_or(0) < V133_MEMORY_CODE_ANCHOR_SOURCES.version() {
+            return Ok(false);
+        }
+        // Explicit/backfilled bindings can restore both projections after
+        // their rows are lost. Do not misclassify that repair as capture.
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT a.memory_id FROM memory_code_anchor_sources a JOIN memories m ON m.id = a.memory_id WHERE m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND a.anchor_kind IN ('path', 'symbol') LIMIT 1",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        Ok(!rows.is_empty())
     }
 
     /// Reverse-index path candidates for recall (ADR 0064), joined with the
@@ -26142,6 +26980,41 @@ impl DbConnection {
             &[Value::Text(memory_id.to_string())],
         )?;
         rows.first().map(stored_memory_seal_from_row).transpose()
+    }
+
+    /// Read seal authority for candidate memories in bounded pages. Missing
+    /// rows mean unsealed only when the complete read succeeds; storage and
+    /// malformed-row failures remain errors, as with [`Self::get_memory_seal`].
+    /// The caller owns any snapshot spanning this read and memory hydration.
+    pub fn get_memory_seals_batch(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<BTreeMap<String, MemorySeal>> {
+        let ids: Vec<_> = memory_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut seals = BTreeMap::new();
+        for page in ids.chunks(256) {
+            let placeholders = (1..=page.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT memory_id, content_commitment, sealed_at, revealed_at, reveal_verified FROM memory_seals WHERE memory_id IN ({placeholders}) ORDER BY memory_id ASC"
+            );
+            let params: Vec<_> = page
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect();
+            for row in self.query_for(DbOperation::Query, &sql, &params)? {
+                let seal = stored_memory_seal_from_row(&row)?;
+                seals.insert(seal.memory_id.clone(), seal);
+            }
+        }
+        Ok(seals)
     }
 
     /// Include sealed and revealed history, including tombstoned memories.
@@ -26272,6 +27145,150 @@ impl DbConnection {
             &[Value::Text(memory_id.to_string())],
         )?;
         rows.iter().map(stored_memory_anchor_from_row).collect()
+    }
+
+    /// Load index-source sidecars in bounded ID batches inside the caller's
+    /// snapshot. Keep typed fields separate from the anchor join so a large
+    /// sidecar is never duplicated once per anchor. Existing anchor order and
+    /// provenance are identical to the scalar readers.
+    pub(crate) fn memory_index_metadata_in_current_snapshot(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<MemoryIndexMetadataBatch> {
+        let memory_ids = memory_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut batch = MemoryIndexMetadataBatch::default();
+        if memory_ids.is_empty() {
+            return Ok(batch);
+        }
+        let has_sources =
+            self.schema_version()?.unwrap_or(0) >= V133_MEMORY_CODE_ANCHOR_SOURCES.version();
+        batch.query_count += 1;
+        for chunk in memory_ids.chunks(MEMORY_INDEX_METADATA_BATCH_SIZE) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let parameters = chunk
+                .iter()
+                .map(|memory_id| Value::Text((*memory_id).to_owned()))
+                .collect::<Vec<_>>();
+            let rows = self.query_for(
+                DbOperation::Query,
+                &format!(
+                    "SELECT id, typed_fields_json, content FROM memories WHERE id IN ({placeholders}) ORDER BY id ASC"
+                ),
+                &parameters,
+            )?;
+            batch.query_count += 1;
+            let mut extracted = BTreeMap::new();
+            for row in &rows {
+                let memory_id = required_text(row, 0, DbOperation::Query, "id")?.to_owned();
+                extracted.insert(
+                    memory_id.clone(),
+                    extract_precision_memory_anchors(
+                        &memory_id,
+                        required_text(row, 2, DbOperation::Query, "content")?,
+                        MemoryAnchorSource::IndexRebuild,
+                        Some("index_rebuild"),
+                    ),
+                );
+                batch.by_memory_id.insert(
+                    memory_id,
+                    MemoryIndexMetadata {
+                        anchors: Vec::new(),
+                        typed_fields_json: optional_text(row, 1)?.map(str::to_owned),
+                    },
+                );
+            }
+            let rows = self.query_for(
+                DbOperation::Query,
+                &format!(
+                    "SELECT memory_id, anchor_kind, anchor_value_hash, redacted_anchor_value, confidence, source, provenance, captured_span_hash, freshness_state, generation, created_at, updated_at FROM memory_anchors WHERE memory_id IN ({placeholders}) ORDER BY memory_id ASC, anchor_kind ASC, anchor_value_hash ASC"
+                ),
+                &parameters,
+            )?;
+            batch.query_count += 1;
+            for row in &rows {
+                let anchor = stored_memory_anchor_from_row(row)?;
+                batch
+                    .by_memory_id
+                    .entry(anchor.memory_id.clone())
+                    .or_default()
+                    .anchors
+                    .push(anchor);
+            }
+            if has_sources {
+                let bindings = self.code_anchor_sources_for_memories(chunk)?;
+                batch.query_count += 1;
+                for (memory_id, sources) in bindings {
+                    let metadata = batch.by_memory_id.entry(memory_id).or_default();
+                    for (surface, created_at, canonical) in sources {
+                        if canonical {
+                            continue;
+                        }
+                        let anchor = surface.anchor;
+                        metadata.anchors.push(StoredMemoryAnchor {
+                            memory_id: anchor.memory_id,
+                            anchor_kind: anchor.anchor_kind,
+                            anchor_value_hash: anchor.anchor_value_hash,
+                            redacted_anchor_value: anchor.redacted_anchor_value,
+                            confidence: anchor.confidence,
+                            source: anchor.source,
+                            provenance: anchor.provenance,
+                            captured_span_hash: anchor.captured_span_hash,
+                            freshness_state: anchor.freshness_state,
+                            generation: anchor.generation,
+                            created_at: created_at.clone(),
+                            updated_at: created_at,
+                        });
+                    }
+                }
+            }
+            // A surviving config anchor or manual binding must not suppress
+            // missing text-derived anchors. Search documents are built before
+            // the reverse-index refresh; project the same union here so the
+            // first rebuild (and read-only fallback) already sees every source.
+            for (memory_id, anchors) in extracted {
+                let metadata = batch.by_memory_id.entry(memory_id).or_default();
+                let mut identities = metadata
+                    .anchors
+                    .iter()
+                    .map(|anchor| (anchor.anchor_kind, anchor.anchor_value_hash.clone()))
+                    .collect::<BTreeSet<_>>();
+                for anchor in anchors {
+                    if !identities.insert((anchor.anchor_kind, anchor.anchor_value_hash.clone())) {
+                        continue;
+                    }
+                    metadata.anchors.push(StoredMemoryAnchor {
+                        memory_id: anchor.memory_id,
+                        anchor_kind: anchor.anchor_kind,
+                        anchor_value_hash: anchor.anchor_value_hash,
+                        redacted_anchor_value: anchor.redacted_anchor_value,
+                        confidence: anchor.confidence,
+                        source: anchor.source,
+                        provenance: anchor.provenance,
+                        captured_span_hash: anchor.captured_span_hash,
+                        freshness_state: anchor.freshness_state,
+                        generation: anchor.generation,
+                        // Inferred metadata is not a new capture timestamp.
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                    });
+                }
+                metadata.anchors.sort_by(|left, right| {
+                    left.anchor_kind
+                        .as_str()
+                        .cmp(right.anchor_kind.as_str())
+                        .then_with(|| left.anchor_value_hash.cmp(&right.anchor_value_hash))
+                });
+            }
+        }
+        Ok(batch)
     }
 
     /// Query memories by a typed anchor hash.
@@ -26771,6 +27788,10 @@ impl DbConnection {
     /// Targets over 128 bytes become empty invalid hints. Smaller targets are
     /// preserved exactly, including embedded NUL, so projection cannot turn a
     /// malformed target into an unrelated canonical evidence or memory id.
+    ///
+    /// Test-only: production recall pages helpful targets through
+    /// `core::error_recall_feedback`; tests keep this reader as a reference.
+    #[cfg(test)]
     pub(crate) fn list_helpful_error_repair_target_ids(
         &self,
         workspace_id: &str,
@@ -30565,6 +31586,11 @@ impl DbConnection {
                 details: Some(input.details.clone()),
             },
         )?;
+        // The UPDATE above bumped the workspace generation and rewrote the
+        // provenance hash and verification status that the indexed document
+        // carries. Without queued work the persisted index stays stale until
+        // a manual rebuild, and every search falls back to lexical-only (#83).
+        self.enqueue_memory_reindex_job(&input.workspace_id, memory_id)?;
 
         Ok(Some(audit_id))
     }
@@ -30647,6 +31673,9 @@ impl DbConnection {
             previous_trust_class: None,
             new_trust_class: None,
         })?;
+        // `level` is indexed document metadata; reindex like every other
+        // level transition does.
+        self.enqueue_memory_reindex_job(&input.workspace_id, memory_id)?;
 
         Ok(Some(audit_id))
     }
@@ -30701,6 +31730,8 @@ impl DbConnection {
                     previous_trust_class: None,
                     new_trust_class: None,
                 })?;
+            // Drop the tombstoned document from the persisted index.
+            self.enqueue_memory_reindex_job(workspace_id, memory_id)?;
 
             Ok(Some(audit_id))
         })
@@ -30801,28 +31832,7 @@ impl DbConnection {
             // `with_transaction`, which makes the enqueue part of the promotion's
             // all-or-nothing unit: if this insert fails, the UPDATE and the audit roll back
             // with it rather than leaving a promoted memory that is never reindexed.
-            //
-            // The id mirrors generate_search_index_job_id (src/core/memory.rs:5410) rather
-            // than calling it, because that helper is private to core and db must not
-            // depend upward on core. The schema requires `id GLOB 'sidx_*' AND
-            // length(id) = 31`, which `sidx_` plus the 26-character Crockford payload of a
-            // fresh id satisfies exactly (src/models/id.rs: ENCODED_LEN = 26).
-            let index_job_id = format!(
-                "sidx_{}",
-                crate::models::MemoryId::now()
-                    .to_string()
-                    .trim_start_matches("mem_")
-            );
-            self.insert_search_index_job(
-                &index_job_id,
-                &CreateSearchIndexJobInput {
-                    workspace_id: workspace_id.to_string(),
-                    job_type: SearchIndexJobType::SingleDocument,
-                    document_source: Some("memory".to_string()),
-                    document_id: Some(memory.id.clone()),
-                    documents_total: 1,
-                },
-            )?;
+            self.enqueue_memory_reindex_job(workspace_id, &memory.id)?;
 
             promotions.push(WorkflowMemoryPromotion {
                 memory_id: memory.id,
@@ -30831,6 +31841,42 @@ impl DbConnection {
         }
 
         Ok(promotions)
+    }
+
+    /// Queue a single-document reindex for one memory inside the caller's
+    /// transaction.
+    ///
+    /// Every `UPDATE memories` bumps the workspace generation, so a write path
+    /// that changes a memory without queuing index work leaves the persisted
+    /// index permanently stale: nothing schedules `index_coalesce`, and search
+    /// degrades to the lexical live snapshot until a manual rebuild. Callers
+    /// invoke this only after a row actually changed, so a no-op enqueues
+    /// nothing, and inside their transaction, so a failed insert rolls the
+    /// mutation back instead of leaving it unindexed.
+    ///
+    /// The id mirrors `generate_search_index_job_id` in `src/core/memory.rs`
+    /// rather than calling it, because that helper is private to core and db
+    /// must not depend upward on core. The schema requires `id GLOB 'sidx_*'
+    /// AND length(id) = 31`, which `sidx_` plus the 26-character Crockford
+    /// payload of a fresh id satisfies exactly (`src/models/id.rs`:
+    /// `ENCODED_LEN = 26`).
+    fn enqueue_memory_reindex_job(&self, workspace_id: &str, memory_id: &str) -> Result<()> {
+        let index_job_id = format!(
+            "sidx_{}",
+            crate::models::MemoryId::now()
+                .to_string()
+                .trim_start_matches("mem_")
+        );
+        self.insert_search_index_job(
+            &index_job_id,
+            &CreateSearchIndexJobInput {
+                workspace_id: workspace_id.to_string(),
+                job_type: SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_string()),
+                document_id: Some(memory_id.to_string()),
+                documents_total: 1,
+            },
+        )
     }
 
     /// Insert a procedural rule and its evidence/tag junction rows.
@@ -30962,6 +32008,41 @@ impl DbConnection {
         rows.first()
             .map(stored_procedural_rule_from_row)
             .transpose()
+    }
+
+    /// Batch-load the exact native rule rows requested by a candidate set.
+    /// Duplicate IDs are coalesced, statements stay below the bind limit,
+    /// and the same row validation as the point getter applies. This method
+    /// does not acquire or release the caller's source snapshot.
+    pub fn get_procedural_rules_batch(
+        &self,
+        rule_ids: &[&str],
+    ) -> Result<BTreeMap<String, StoredProceduralRule>> {
+        let ids: Vec<_> = rule_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut rules = BTreeMap::new();
+        for page in ids.chunks(256) {
+            let placeholders = (1..=page.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, positive_feedback_count, negative_feedback_count, validation_passes, validation_contradictions, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE id IN ({placeholders}) ORDER BY id ASC"
+            );
+            let params: Vec<_> = page
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect();
+            for row in self.query_for(DbOperation::Query, &sql, &params)? {
+                let rule = stored_procedural_rule_from_row(&row)?;
+                rules.insert(rule.id.clone(), rule);
+            }
+        }
+        Ok(rules)
     }
 
     /// List procedural rules in stable order, optionally filtering by maturity,
@@ -32286,11 +33367,17 @@ impl DbConnection {
         reason: Option<&str>,
     ) -> Result<Option<String>> {
         self.with_transaction(|| {
-            self.tombstone_memory_audited_inner(memory_id, workspace_id, actor, reason)
+            self.tombstone_memory_audited_in_current_transaction(
+                memory_id,
+                workspace_id,
+                actor,
+                reason,
+            )
         })
     }
 
-    fn tombstone_memory_audited_inner(
+    /// Reuse the audited tombstone lifecycle inside a caller-owned transaction.
+    pub(crate) fn tombstone_memory_audited_in_current_transaction(
         &self,
         memory_id: &str,
         workspace_id: &str,
@@ -32309,7 +33396,7 @@ impl DbConnection {
         }
 
         let audit_id = generate_audit_id();
-        let details = reason.map(|r| format!(r#"{{"reason":"{}"}}"#, r));
+        let details = reason.map(|reason| serde_json::json!({ "reason": reason }).to_string());
 
         self.insert_audit(
             &audit_id,
@@ -32385,11 +33472,17 @@ impl DbConnection {
         actor: Option<&str>,
     ) -> Result<String> {
         self.with_transaction(|| {
-            self.add_memory_tags_audited_inner(memory_id, workspace_id, tags, actor)
+            self.add_memory_tags_audited_in_current_transaction(
+                memory_id,
+                workspace_id,
+                tags,
+                actor,
+            )
         })
     }
 
-    fn add_memory_tags_audited_inner(
+    /// Reuse tag mutation and its audit inside a caller-owned transaction.
+    pub(crate) fn add_memory_tags_audited_in_current_transaction(
         &self,
         memory_id: &str,
         workspace_id: &str,
@@ -34846,7 +35939,7 @@ fn validate_pack_record_input(
             item.pack_id != id
                 || !is_canonical_rule_id(&item.rule_id)
                 || !is_canonical_blake3_hash(&item.entity_revision)
-                || item.section != "procedural_rules"
+                || !matches!(item.section.as_str(), "procedural_rules" | "failures")
                 || item.estimated_tokens == 0
                 || !item.relevance.is_finite()
                 || !(0.0..=1.0).contains(&item.relevance)
@@ -34860,7 +35953,7 @@ fn validate_pack_record_input(
     {
         return Err(DbError::MalformedRow {
             operation: DbOperation::Execute,
-            message: "pack rule items require unique canonical identities, revisions, the procedural_rules section, advisory rule trust, and provenance".to_owned(),
+            message: "pack rule items require unique canonical identities, revisions, a procedural_rules or failures section, advisory rule trust, and provenance".to_owned(),
         });
     }
     if omissions.iter().any(|omission| omission.pack_id != id) {
@@ -37447,7 +38540,7 @@ fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> 
                     && item.evidence_span_id.is_empty()
                     && is_canonical_rule_id(&item.entity_id)
                     && is_canonical_blake3_hash(&item.entity_revision)
-                    && item.section == "procedural_rules"
+                    && matches!(item.section.as_str(), "procedural_rules" | "failures")
                     && item.trust_subclass.as_deref() == Some("procedural_rule")
             }
             _ => false,
@@ -42234,6 +43327,408 @@ pub fn rch_verify_run_id(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod code_anchor_recovery_tests {
+    use super::*;
+    use crate::core::recall::{RecallQuery, run_recall};
+
+    const WORKSPACE: &str = "wsp_00000000000000000000000851";
+    const MEMORY: &str = "mem_00000000000000000000000851";
+    const BODY: &str = "Original guidance. ee-anchor:path:src/inline.rs ee-anchor:symbol:Inline::run ee-anchor:config_key:search.limit";
+
+    fn fixture() -> (DbConnection, StoredMemory) {
+        let db = DbConnection::open_memory().unwrap();
+        db.migrate().unwrap();
+        db.insert_workspace(
+            WORKSPACE,
+            &CreateWorkspaceInput {
+                path: "/code-anchor-recovery".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        db.insert_memory(
+            MEMORY,
+            &CreateMemoryInput {
+                workspace_id: WORKSPACE.to_owned(),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                content: BODY.to_owned(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                provenance_uri: Some("manual://source-observation".to_owned()),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .unwrap();
+        let sources = [
+            (MemoryAnchorKind::Path, "src/manual.rs"),
+            (MemoryAnchorKind::Symbol, "Manual::run"),
+        ]
+        .into_iter()
+        .map(|(kind, value)| {
+            CreateMemoryAnchorInput::from_stored_code_surface(
+                MEMORY,
+                kind,
+                value,
+                MemoryAnchorSource::Explicit,
+                "memory.anchors",
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+        db.with_transaction(|| db.attach_memory_code_anchor_sources(WORKSPACE, MEMORY, &sources))
+            .unwrap();
+        let memory = db.get_memory(MEMORY).unwrap().unwrap();
+        (db, memory)
+    }
+
+    fn path_query(path: &str) -> RecallQuery {
+        RecallQuery {
+            paths: vec![path.to_owned()],
+            ..Default::default()
+        }
+    }
+
+    fn restore(db: &DbConnection, memory: &StoredMemory) {
+        db.with_transaction(|| db.refresh_memory_anchor_index_for_memories(&[memory]))
+            .unwrap();
+    }
+
+    #[test]
+    fn mixed_sources_restore_all_canonical_anchors_before_first_recall() {
+        let (db, memory) = fixture();
+        db.execute_raw("DELETE FROM memory_anchors; DELETE FROM memory_anchor_index;")
+            .unwrap();
+        let query = path_query("src/inline.rs");
+        let missing = run_recall(&db, WORKSPACE, &query).unwrap();
+        assert!(missing.items.is_empty());
+        assert!(
+            missing
+                .degraded
+                .iter()
+                .any(|entry| entry.code == crate::core::recall::ANCHOR_INDEX_STALE_CODE)
+        );
+
+        db.begin_read_snapshot().unwrap();
+        let metadata = db
+            .memory_index_metadata_in_current_snapshot(&[MEMORY])
+            .unwrap();
+        db.commit_read_snapshot().unwrap();
+        let projected = &metadata.by_memory_id[MEMORY].anchors;
+        assert_eq!(
+            projected.len(),
+            5,
+            "manual bindings cannot suppress inline/config sources"
+        );
+        assert!(
+            db.list_memory_anchors(MEMORY).unwrap().is_empty(),
+            "metadata projection stays read-only"
+        );
+
+        restore(&db, &memory);
+        let restored = db.list_memory_anchors(MEMORY).unwrap();
+        assert_eq!(restored.len(), 5);
+        for anchor in projected {
+            let actual = restored
+                .iter()
+                .find(|actual| {
+                    actual.anchor_kind == anchor.anchor_kind
+                        && actual.anchor_value_hash == anchor.anchor_value_hash
+                })
+                .unwrap();
+            assert_eq!(actual.source, anchor.source);
+            assert_eq!(actual.provenance, anchor.provenance);
+            assert_eq!(actual.freshness_state, anchor.freshness_state);
+        }
+        for query in [
+            path_query("src/inline.rs"),
+            path_query("src/manual.rs"),
+            RecallQuery {
+                symbols: vec!["Inline::run".to_owned()],
+                ..Default::default()
+            },
+            RecallQuery {
+                symbols: vec!["Manual::run()".to_owned()],
+                ..Default::default()
+            },
+        ] {
+            let report = run_recall(&db, WORKSPACE, &query).unwrap();
+            assert_eq!(report.items.len(), 1, "{query:?}");
+            assert_eq!(report.items[0].memory_id, MEMORY);
+            assert!(report.degraded.is_empty(), "{:?}", report.degraded);
+        }
+        let sources = db.list_memory_code_anchor_sources(MEMORY).unwrap();
+        assert_eq!(sources.len(), 2);
+        assert!(sources.iter().all(
+            |source| source.anchor.source == MemoryAnchorSource::Explicit
+                && source.anchor.provenance == "memory.anchors"
+        ));
+        restore(&db, &memory);
+        assert_eq!(
+            db.list_memory_anchors(MEMORY).unwrap(),
+            restored,
+            "repeated rebuild preserves capture metadata"
+        );
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
+
+    #[test]
+    fn partial_recovery_preserves_existing_capture_metadata_and_freshness() {
+        let (db, memory) = fixture();
+        let mut stale = CreateMemoryAnchorInput::from_raw(
+            MEMORY,
+            MemoryAnchorKind::Path,
+            "src/inline.rs",
+            0.73,
+            MemoryAnchorSource::Remember,
+            "manual://original-capture",
+            999,
+        )
+        .unwrap();
+        stale.freshness_state = MemoryAnchorFreshnessState::Stale;
+        db.upsert_memory_anchors(&[stale]).unwrap();
+        db.execute_raw("DELETE FROM memory_anchors WHERE anchor_kind = 'symbol'; DELETE FROM memory_anchor_index;").unwrap();
+        let surviving = db.list_memory_anchors(MEMORY).unwrap();
+        let before = db
+            .memory_index_metadata_in_current_snapshot(&[MEMORY])
+            .unwrap();
+        assert_eq!(before.by_memory_id[MEMORY].anchors.len(), 5);
+        restore(&db, &memory);
+        let restored = db.list_memory_anchors(MEMORY).unwrap();
+        assert_eq!(restored.len(), 5);
+        for anchor in surviving {
+            assert!(
+                restored.contains(&anchor),
+                "existing canonical capture must remain byte-identical"
+            );
+        }
+        let projected = db
+            .query_anchor_index_path_candidates(WORKSPACE, Some(&["src/inline.rs".to_owned()]), 10)
+            .unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(
+            projected[0].freshness_state,
+            MemoryAnchorFreshnessState::Stale
+        );
+        let report = run_recall(
+            &db,
+            WORKSPACE,
+            &RecallQuery {
+                stale_only: true,
+                ..path_query("src/inline.rs")
+            },
+        )
+        .unwrap();
+        assert_eq!(report.items.len(), 1);
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
+
+    #[test]
+    fn private_relative_code_anchors_are_rejected_before_any_storage_write() {
+        let (db, memory) = fixture();
+        let before = db.list_memory_anchors(MEMORY).unwrap();
+        let sources = db.list_memory_code_anchor_sources(MEMORY).unwrap();
+        let generation = db.get_workspace_generation(WORKSPACE).unwrap();
+        for private in ["src/app/page.tsx", "src/home/a.rs"] {
+            let inputs = ["src/new.rs", private]
+                .into_iter()
+                .map(|value| {
+                    CreateMemoryAnchorInput::from_stored_code_surface(
+                        MEMORY,
+                        MemoryAnchorKind::Path,
+                        value,
+                        MemoryAnchorSource::Explicit,
+                        "memory.anchors",
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let error = db
+                .attach_memory_code_anchor_sources(WORKSPACE, MEMORY, &inputs)
+                .unwrap_err();
+            assert!(!error.to_string().contains(private));
+            assert_eq!(db.list_memory_anchors(MEMORY).unwrap(), before);
+            assert_eq!(db.list_memory_code_anchor_sources(MEMORY).unwrap(), sources);
+            assert_eq!(db.get_workspace_generation(WORKSPACE).unwrap(), generation);
+            assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+        }
+    }
+
+    #[test]
+    fn revision_carry_preserves_legacy_private_binding_without_publishing_it() {
+        let (db, memory) = fixture();
+        let private = "src/home/a.rs";
+        let legacy = CreateMemoryAnchorInput::from_stored_code_surface(
+            MEMORY,
+            MemoryAnchorKind::Path,
+            private,
+            MemoryAnchorSource::Explicit,
+            "memory.anchors",
+        )
+        .unwrap();
+        // Simulate a source binding accepted before the stricter public ingress
+        // rule. The compatibility path must require a genuinely stored source.
+        db.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO memory_code_anchor_sources (memory_id, anchor_kind, anchor_value_hash, normalized_value, source, provenance, created_at) VALUES (?1, 'path', ?2, ?3, 'explicit', 'memory.anchors', ?4)",
+            &[Value::Text(MEMORY.to_owned()), Value::Text(legacy.anchor.anchor_value_hash.clone()), Value::Text(private.to_owned()), Value::Text(memory.created_at.clone())],
+        ).unwrap();
+        assert!(
+            db.attach_memory_code_anchor_sources(WORKSPACE, MEMORY, &[legacy])
+                .is_err()
+        );
+        let original_sources = db.list_memory_code_anchor_sources(MEMORY).unwrap();
+        let original_anchors = db.list_memory_anchors(MEMORY).unwrap();
+
+        let target = "mem_00000000000000000000000853";
+        let foreign = "mem_00000000000000000000000854";
+        let other_workspace = "wsp_00000000000000000000000854";
+        db.insert_workspace(
+            other_workspace,
+            &CreateWorkspaceInput {
+                path: "/other-code-anchor-revision".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        for (id, workspace) in [(target, WORKSPACE), (foreign, other_workspace)] {
+            db.insert_memory(
+                id,
+                &CreateMemoryInput {
+                    workspace_id: workspace.to_owned(),
+                    level: memory.level.clone(),
+                    kind: memory.kind.clone(),
+                    content: memory.content.clone(),
+                    workflow_id: memory.workflow_id.clone(),
+                    confidence: memory.confidence,
+                    utility: memory.utility,
+                    importance: memory.importance,
+                    provenance_uri: memory.provenance_uri.clone(),
+                    trust_class: memory.trust_class.clone(),
+                    trust_subclass: memory.trust_subclass.clone(),
+                    tags: Vec::new(),
+                    valid_from: memory.valid_from.clone(),
+                    valid_to: memory.valid_to.clone(),
+                },
+            )
+            .unwrap();
+        }
+        let target_before = db.get_memory(target).unwrap();
+        let local_generation = db.get_workspace_generation(WORKSPACE).unwrap();
+        let foreign_generation = db.get_workspace_generation(other_workspace).unwrap();
+        for (destination, claimed_workspace) in [(foreign, WORKSPACE), (target, other_workspace)] {
+            assert!(
+                db.carry_memory_code_anchor_sources(MEMORY, destination, claimed_workspace)
+                    .is_err()
+            );
+            assert!(
+                db.list_memory_code_anchor_sources(destination)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                db.get_workspace_generation(WORKSPACE).unwrap(),
+                local_generation
+            );
+            assert_eq!(
+                db.get_workspace_generation(other_workspace).unwrap(),
+                foreign_generation
+            );
+        }
+
+        db.with_transaction(|| db.carry_memory_code_anchor_sources(MEMORY, target, WORKSPACE))
+            .unwrap();
+        let copied = db.list_memory_code_anchor_sources(target).unwrap();
+        assert_eq!(copied.len(), original_sources.len());
+        assert!(
+            copied
+                .iter()
+                .any(|surface| surface.normalized_value == private
+                    && surface.anchor.source == MemoryAnchorSource::Explicit
+                    && surface.anchor.provenance == "memory.anchors")
+        );
+        assert_eq!(
+            db.list_memory_code_anchor_sources(MEMORY).unwrap(),
+            original_sources
+        );
+        assert_eq!(db.list_memory_anchors(MEMORY).unwrap(), original_anchors);
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+        assert_eq!(db.get_memory(target).unwrap(), target_before);
+        let report = run_recall(&db, WORKSPACE, &path_query(private)).unwrap();
+        assert!(report.items.is_empty());
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "recall_source_filtered"
+                    && entry.message.contains("private_anchor"))
+        );
+    }
+
+    #[test]
+    fn historical_or_misbound_refresh_cannot_create_canonical_authority() {
+        let (db, memory) = fixture();
+        db.execute_raw("DELETE FROM memory_anchors; DELETE FROM memory_anchor_index;")
+            .unwrap();
+        db.refresh_memory_anchor_index_for_memory(
+            WORKSPACE,
+            MEMORY,
+            "ee-anchor:path:src/forged.rs",
+        )
+        .unwrap();
+        assert!(db.list_memory_anchors(MEMORY).unwrap().is_empty());
+        assert!(
+            run_recall(&db, WORKSPACE, &path_query("src/forged.rs"))
+                .unwrap()
+                .items
+                .is_empty()
+        );
+
+        let other = "wsp_00000000000000000000000852";
+        db.insert_workspace(
+            other,
+            &CreateWorkspaceInput {
+                path: "/other-code-anchor-recovery".to_owned(),
+                name: None,
+            },
+        )
+        .unwrap();
+        db.refresh_memory_anchor_index_for_memory(other, MEMORY, BODY)
+            .unwrap();
+        assert!(db.list_memory_anchors(MEMORY).unwrap().is_empty());
+        assert!(
+            run_recall(&db, other, &path_query("src/inline.rs"))
+                .unwrap()
+                .items
+                .is_empty()
+        );
+
+        restore(&db, &memory);
+        assert_eq!(
+            run_recall(&db, WORKSPACE, &path_query("src/inline.rs"))
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        assert!(
+            run_recall(&db, WORKSPACE, &path_query("src/forged.rs"))
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(db.get_memory(MEMORY).unwrap().unwrap(), memory);
+    }
+}
+
+#[cfg(test)]
 // DB tests use unwrap/expect only as fixture assertions around in-memory stores.
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -43950,6 +45445,70 @@ mod tests {
                 .insert_memory_seal(&memory_id, "blake3:short", "2026-08-08T09:00:00Z")
                 .is_err(),
             "malformed commitments must be rejected before SQL",
+        )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_seal_batch_pages_ids_and_distinguishes_absence_from_failure() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 98)?;
+        setup_workspace(&connection)?;
+        let ids: Vec<_> = (0..257).map(|index| format!("mem_{index:026}")).collect();
+        let commitment = crate::models::memory_seal_commitment(b"batched seal authority");
+        for id in [&ids[0], &ids[1], &ids[256]] {
+            connection.insert_memory(
+                id,
+                &test_memory_input(
+                    "wsp_01234567890123456789012345",
+                    crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+                ),
+            )?;
+        }
+        for id in [&ids[0], &ids[256]] {
+            connection.insert_memory_seal(id, &commitment, "2026-08-08T06:00:00Z")?;
+        }
+        connection.mark_memory_seal_revealed(&ids[256], "2026-08-08T07:00:00Z")?;
+        let mut requested: Vec<_> = ids.iter().rev().map(String::as_str).collect();
+        requested.extend([ids[0].as_str(), ids[256].as_str()]);
+        let (seals, queries) =
+            super::capture_query_sql_for_test(|| connection.get_memory_seals_batch(&requested));
+        let seals = seals?;
+        ensure_equal(
+            &queries.len(),
+            &2,
+            "257 distinct IDs require two bounded reads",
+        )?;
+        ensure(
+            queries
+                .iter()
+                .all(|sql| sql.contains("WHERE memory_id IN (") && !sql.contains("?257")),
+            "seal reads must use bounded candidate-ID pages",
+        )?;
+        ensure_equal(&seals.len(), &2, "missing and unsealed rows stay absent")?;
+        for id in [&ids[0], &ids[256]] {
+            ensure_equal(
+                &seals.get(id),
+                &connection.get_memory_seal(id)?.as_ref(),
+                "batch and point seal authority must agree",
+            )?;
+        }
+        ensure(seals[&ids[0]].is_sealed(), "closed seal remains closed")?;
+        ensure(
+            !seals[&ids[256]].is_sealed(),
+            "verified reveal remains revealed",
+        )?;
+        connection.execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_batch_seals")?;
+        ensure(
+            connection.get_memory_seals_batch(&requested).is_err(),
+            "unreadable authority must never become an empty successful batch",
+        )?;
+        let (empty, queries) =
+            super::capture_query_sql_for_test(|| connection.get_memory_seals_batch(&[]));
+        ensure(
+            empty?.is_empty() && queries.is_empty(),
+            "empty requests do not query storage",
         )?;
         connection.close()?;
         Ok(())
@@ -53706,6 +55265,26 @@ UPDATE memories
     }
 
     #[test]
+    fn cass_source_commitment_bounds_quarantined_transcript_lengths() {
+        let mut source = super::CassSourceCommitment {
+            schema: super::CASS_SOURCE_COMMITMENT_SCHEMA_V1.to_owned(),
+            content_hash: super::canonical_evidence_hash("quarantined source"),
+            byte_length: 1,
+            excerpt_producer_version: 1,
+        };
+        for (byte_length, valid) in [
+            (0, false),
+            (1_136_663, true),
+            (8 * 1024 * 1024, true),
+            (8 * 1024 * 1024 + 1, false),
+            (u64::MAX, false),
+        ] {
+            source.byte_length = byte_length;
+            assert_eq!(source.is_valid(), valid, "source byte length {byte_length}");
+        }
+    }
+
+    #[test]
     fn cass_source_commitment_rejects_malformed_and_foreign_claims_before_writes() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -53737,7 +55316,10 @@ UPDATE memories
             ),
             ("byteLength", serde_json::json!(0)),
             ("byteLength", serde_json::json!(-1)),
-            ("byteLength", serde_json::json!(1_048_577)),
+            (
+                "byteLength",
+                serde_json::json!(super::CASS_SOURCE_COMMITMENT_MAX_BYTES + 1),
+            ),
             ("byteLength", serde_json::json!(1.5)),
             ("excerptProducerVersion", serde_json::json!(0)),
             (
@@ -53969,6 +55551,176 @@ UPDATE memories
                 .is_empty(),
             "a deleted span leaves no verdict behind",
         )
+    }
+
+    #[test]
+    fn credential_placeholder_policy_invalidates_old_positive_verdicts_and_reader_proofs()
+    -> TestResult {
+        const WORKSPACE: &str = "wsp_01234567890123456789012345";
+        const OLD_REVISION: u32 = 3;
+        const SAFE_BODY: &str = "password: [REDACTED:password] quartzmarkerrepair passed.";
+        const UNSAFE_BODY: &str =
+            "password: [REDACTED:password]violet-private-value quartzmarkerrepair passed.";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x8547_0201)).to_string();
+        connection.insert_session(&session_id, &session_input("placeholder-verdict-session"))?;
+        let session = connection
+            .get_session(&session_id)?
+            .ok_or_else(|| TestFailure::new("placeholder verdict session missing"))?;
+        let mut safe_id = None;
+
+        for (offset, body, expected) in [(2_u32, SAFE_BODY, true), (3, UNSAFE_BODY, false)] {
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x8547_0200 + u128::from(offset),
+            ))
+            .to_string();
+            let mut input = evidence_span_input(&session_id, &id, offset);
+            input.excerpt =
+                serde_json::json!({"role": "assistant", "content": SAFE_BODY}).to_string();
+            input.content_hash = super::canonical_evidence_hash(&input.excerpt);
+            connection.insert_evidence_span(&id, &input)?;
+            let mut historical = connection
+                .get_evidence_span(&id)?
+                .ok_or_else(|| TestFailure::new("placeholder verdict evidence missing"))?;
+            historical.excerpt =
+                serde_json::json!({"role": "assistant", "content": body}).to_string();
+            historical.content_hash = super::canonical_evidence_hash(&historical.excerpt);
+            historical.canonical_excerpt_hash = Some(historical.content_hash.clone());
+            let mut metadata: serde_json::Value = serde_json::from_str(
+                historical
+                    .metadata_json
+                    .as_deref()
+                    .ok_or_else(|| TestFailure::new("placeholder security metadata missing"))?,
+            )
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+            metadata["canonicalExcerptHash"] = serde_json::json!(historical.content_hash);
+            historical.metadata_json = Some(metadata.to_string());
+            connection.execute_for(
+                DbOperation::Execute,
+                "UPDATE evidence_spans SET excerpt = ?1, content_hash = ?2, canonical_excerpt_hash = ?2, metadata_json = ?3 WHERE id = ?4",
+                &[Value::Text(historical.excerpt.clone()), Value::Text(historical.content_hash.clone()), Value::Text(metadata.to_string()), Value::Text(id.clone())],
+            )?;
+
+            // Model the prior policy's positive cache for this exact source,
+            // including valid metadata/hashes and its independently bound
+            // reader bytes. Only the policy revision may invalidate it.
+            let old_binding = super::admission_verdict_binding(
+                historical.admission_verdict_hasher(OLD_REVISION),
+                true,
+            );
+            connection.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO evidence_admission_verdicts (evidence_span_id, verdict, verdict_binding, verdict_revision, decided_at) VALUES (?1, 'admitted', ?2, ?3, ?4) ON CONFLICT(evidence_span_id) DO UPDATE SET verdict = excluded.verdict, verdict_binding = excluded.verdict_binding, verdict_revision = excluded.verdict_revision, decided_at = excluded.decided_at",
+                &[Value::Text(id.clone()), Value::Text(old_binding.clone()), Value::BigInt(i64::from(OLD_REVISION)), Value::Text(historical.updated_at.clone())],
+            )?;
+            let projection_version = crate::cass::transcript::TRANSCRIPT_PROJECTION_VERSION;
+            let mut source_hasher = blake3::Hasher::new();
+            source_hasher.update(b"ee.evidence.reader_projection.source.v1");
+            source_hasher.update(&projection_version.to_le_bytes());
+            source_hasher.update(
+                historical
+                    .admission_verdict_hasher(OLD_REVISION)
+                    .finalize()
+                    .as_bytes(),
+            );
+            let source_binding = format!("blake3:{}", source_hasher.finalize().to_hex());
+            let reader_text = format!("assistant: {body}");
+            let mut integrity_hasher = blake3::Hasher::new();
+            integrity_hasher.update(b"ee.evidence.reader_projection.content.v1");
+            integrity_hasher.update(&projection_version.to_le_bytes());
+            integrity_hasher.update(&[1]);
+            for field in [source_binding.as_str(), body, reader_text.as_str()] {
+                integrity_hasher.update(&(field.len() as u64).to_le_bytes());
+                integrity_hasher.update(field.as_bytes());
+            }
+            let integrity_binding = format!("blake3:{}", integrity_hasher.finalize().to_hex());
+            connection.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO evidence_reader_projections (evidence_span_id, projection_version, source_binding, reader_body, reader_text, egress_safe, integrity_binding, projected_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7) ON CONFLICT(evidence_span_id) DO UPDATE SET projection_version = excluded.projection_version, source_binding = excluded.source_binding, reader_body = excluded.reader_body, reader_text = excluded.reader_text, egress_safe = excluded.egress_safe, integrity_binding = excluded.integrity_binding, projected_at = excluded.projected_at",
+                &[Value::Text(id.clone()), Value::BigInt(i64::from(projection_version)), Value::Text(source_binding), Value::Text(body.to_owned()), Value::Text(reader_text), Value::Text(integrity_binding), Value::Text(historical.updated_at.clone())],
+            )?;
+
+            let loaded = connection
+                .get_evidence_span(&id)?
+                .ok_or_else(|| TestFailure::new("historical placeholder evidence missing"))?;
+            ensure_equal(
+                &loaded.excerpt,
+                &historical.excerpt,
+                "history remains untouched",
+            )?;
+            ensure(
+                loaded
+                    .recorded_admission_verdict(Some(&old_binding))
+                    .is_none(),
+                "the old positive verdict cannot authorize the current policy",
+            )?;
+            ensure_equal(
+                &loaded.cached_reader_egress_safe(),
+                &Some(expected),
+                "old reader egress proof revalidates under the current policy",
+            )?;
+            ensure_equal(
+                &loaded.is_search_admitted_with_recorded_verdict(
+                    WORKSPACE,
+                    &session,
+                    Some(&old_binding),
+                ),
+                &expected,
+                "search rechecks credentials behind an old positive verdict",
+            )?;
+            ensure_equal(
+                &loaded.is_derivation_admitted_with_recorded_verdict(
+                    WORKSPACE,
+                    &session,
+                    Some(&old_binding),
+                ),
+                &expected,
+                "derivation rechecks credentials behind an old positive verdict",
+            )?;
+            ensure_equal(
+                &loaded.is_direct_pack_admitted_for_session(WORKSPACE, &session),
+                &expected,
+                "pack admission rejects unsafe historical reader bytes",
+            )?;
+            if expected {
+                ensure(
+                    loaded.reader_text().contains("quartzmarkerrepair passed."),
+                    "exact sanitized markers remain readable",
+                )?;
+                safe_id = Some(id);
+            } else {
+                ensure(
+                    loaded.reader_text().is_empty(),
+                    "the unsafe historical projection cannot expose its cached text",
+                )?;
+            }
+        }
+        let (admitted, _) =
+            connection.list_search_admitted_evidence_spans_for_workspace(WORKSPACE)?;
+        ensure_equal(
+            &admitted.len(),
+            &1_usize,
+            "only the sanitized control remains admitted",
+        )?;
+        ensure_equal(
+            &Some(admitted[0].id.clone()),
+            &safe_id,
+            "the correct row remains admitted",
+        )?;
+        ensure_equal(
+            &connection.backfill_evidence_reader_projections(Some(WORKSPACE))?,
+            &2_u64,
+            "both historical reader proofs need the current policy binding",
+        )?;
+        ensure_equal(
+            &connection.backfill_evidence_admission_verdicts(Some(WORKSPACE))?,
+            &2_u64,
+            "both historical verdicts need the current policy binding",
+        )?;
+        Ok(())
     }
 
     /// A connection on a schema before V127 records and reuses no verdicts,
@@ -54575,6 +56327,328 @@ UPDATE memories
             &admitted,
             "cached admission and live projection checks agree",
         )
+    }
+
+    #[test]
+    fn index_order_evidence_scan_reads_each_table_row_once_across_workspaces() -> TestResult {
+        // GH#78: index-order pages now read the table in rowid order and keep
+        // only this workspace's candidates. A full page holding none of them
+        // must not end the scan, other workspaces' rows must never leak in,
+        // and the admission report must match the transcript-order scan.
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_a = "wsp_01234567890123456789012345";
+        let workspace_b = "wsp_01234567890123456789012399";
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012399', '/tmp/test-b', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+        let session_a =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x780_a00)).to_string();
+        let session_b =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x780_b00)).to_string();
+        connection.insert_session(&session_a, &session_input("gh78-session-a"))?;
+        let mut input_b = session_input("gh78-session-b");
+        input_b.workspace_id = workspace_b.to_owned();
+        connection.insert_session(&session_b, &input_b)?;
+
+        let page = super::EVIDENCE_SOURCE_READ_PAGE_SIZE;
+        let mut next_id = 0_u128;
+        let mut insert = |session: &str, workspace: &str, line: u32, candidate: bool| {
+            next_id += 1;
+            let id =
+                crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x780_c000 + next_id))
+                    .to_string();
+            let mut input = evidence_span_input(session, &format!("gh78-span-{next_id}"), line);
+            input.workspace_id = workspace.to_owned();
+            if !candidate {
+                input.producer_kind = super::EvidenceProducerKind::DocsBootstrap;
+                input.role = Some("docs_bootstrap".to_owned());
+                input.span_kind = "file".to_owned();
+            }
+            connection.insert_evidence_span(&id, &input)
+        };
+        // Rowids 1..=10 are A's; then more than two pages of B's, so one
+        // whole page has no A row; then an A non-candidate and five more A
+        // candidates on the final, partial page.
+        for line in 1..=10 {
+            insert(&session_a, workspace_a, line * 10, true)?;
+        }
+        let b_rows = 2 * page + 5;
+        for line in 1..=b_rows {
+            insert(&session_b, workspace_b, line * 10, true)?;
+        }
+        insert(&session_a, workspace_a, 1_000, false)?;
+        for line in 101..=105 {
+            insert(&session_a, workspace_a, line * 10, true)?;
+        }
+        let table_rows = 10 + b_rows + 1 + 5;
+
+        for (workspace, candidates) in [(workspace_a, 15_u32), (workspace_b, b_rows)] {
+            let mut visited = Vec::new();
+            let index_scan = connection.visit_index_evidence_for_workspace(workspace, |span| {
+                visited.push(span);
+                Ok(())
+            })?;
+            ensure(
+                visited.iter().all(|span| span.workspace_id == workspace),
+                "no other workspace's evidence leaks into an index-order scan",
+            )?;
+            ensure_equal(
+                &u32::try_from(visited.len()).unwrap_or(u32::MAX),
+                &candidates,
+                "every candidate is visited, including those after a page without one",
+            )?;
+            let (mut transcript, report) =
+                connection.list_search_admitted_evidence_spans_for_workspace(workspace)?;
+            let key = |span: &super::StoredEvidenceSpan| span.id.clone();
+            visited.sort_by_key(key);
+            transcript.sort_by_key(key);
+            ensure_equal(
+                &visited,
+                &transcript,
+                "index order admits the transcript set",
+            )?;
+            ensure_equal(
+                &index_scan.admission,
+                &report,
+                "index order preserves every admission bucket",
+            )?;
+            ensure_equal(
+                &index_scan.pages_read,
+                &table_rows.div_ceil(page),
+                "pages follow table rows, not this workspace's candidates",
+            )?;
+            ensure(
+                index_scan.max_page_rows <= page,
+                "no page returns more than the fixed bound",
+            )?;
+        }
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn index_order_evidence_scan_alternating_workspaces_on_exact_page_multiple() -> TestResult {
+        // GH#78 rowid pages: two workspaces alternate row by row and the
+        // table holds exactly two pages, so every page mixes both, and the
+        // scan ends on an empty read after a full page. Each workspace must
+        // visit every one of its candidates exactly once.
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_a = "wsp_01234567890123456789012345";
+        let workspace_b = "wsp_01234567890123456789012398";
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012398', '/tmp/test-alt-b', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+        let session_a =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x781_a00)).to_string();
+        let session_b =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x781_b00)).to_string();
+        connection.insert_session(&session_a, &session_input("gh78-alt-session-a"))?;
+        let mut input_b = session_input("gh78-alt-session-b");
+        input_b.workspace_id = workspace_b.to_owned();
+        connection.insert_session(&session_b, &input_b)?;
+
+        let page = super::EVIDENCE_SOURCE_READ_PAGE_SIZE;
+        let table_rows = 2 * page;
+        let mut expected = [0_u32; 2];
+        for row in 0..table_rows {
+            let side = usize::try_from(row % 2).unwrap_or(0);
+            let (session, workspace) = if side == 0 {
+                (&session_a, workspace_a)
+            } else {
+                (&session_b, workspace_b)
+            };
+            // Every seventh row of each workspace is a non-candidate.
+            let candidate = (row / 2) % 7 != 3;
+            let id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x781_c000 + u128::from(row),
+            ))
+            .to_string();
+            let mut input =
+                evidence_span_input(session, &format!("gh78-alt-span-{row}"), (row / 2) * 10 + 1);
+            input.workspace_id = workspace.to_owned();
+            if candidate {
+                expected[side] += 1;
+            } else {
+                input.producer_kind = super::EvidenceProducerKind::DocsBootstrap;
+                input.role = Some("docs_bootstrap".to_owned());
+                input.span_kind = "file".to_owned();
+            }
+            connection.insert_evidence_span(&id, &input)?;
+        }
+
+        for (workspace, candidates) in [(workspace_a, expected[0]), (workspace_b, expected[1])] {
+            let mut visited = Vec::new();
+            let index_scan = connection.visit_index_evidence_for_workspace(workspace, |span| {
+                visited.push(span);
+                Ok(())
+            })?;
+            let mut ids = visited
+                .iter()
+                .map(|span| span.id.clone())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids.dedup();
+            ensure_equal(
+                &ids.len(),
+                &visited.len(),
+                "no row is visited twice across page boundaries",
+            )?;
+            ensure(
+                visited.iter().all(|span| span.workspace_id == workspace),
+                "no other workspace's evidence leaks into an index-order scan",
+            )?;
+            ensure_equal(
+                &u32::try_from(visited.len()).unwrap_or(u32::MAX),
+                &candidates,
+                "every candidate is visited once",
+            )?;
+            let (mut transcript, report) =
+                connection.list_search_admitted_evidence_spans_for_workspace(workspace)?;
+            let key = |span: &super::StoredEvidenceSpan| span.id.clone();
+            visited.sort_by_key(key);
+            transcript.sort_by_key(key);
+            ensure_equal(
+                &visited,
+                &transcript,
+                "index order admits the transcript set",
+            )?;
+            ensure_equal(
+                &index_scan.admission,
+                &report,
+                "index order preserves every admission bucket",
+            )?;
+            ensure_equal(
+                &index_scan.pages_read,
+                &2,
+                "an exact multiple reads two full pages and stops on the empty read",
+            )?;
+        }
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_candidate_row_filter_matches_the_sql_predicate() -> TestResult {
+        ensure_equal(
+            &super::EVIDENCE_SEARCH_CANDIDATE_PREDICATE.to_owned(),
+            &format!(
+                "e.producer_kind = '{}' AND e.search_eligibility = '{}'",
+                super::EVIDENCE_SEARCH_CANDIDATE_PRODUCER,
+                super::EVIDENCE_SEARCH_CANDIDATE_ELIGIBILITY
+            ),
+            "the Rust row filter compares the same values as the SQL predicate",
+        )
+    }
+
+    #[test]
+    fn index_order_admission_scan_issues_no_whole_table_read_per_page() -> TestResult {
+        // GH#78: a full admission scan (index rebuild, its dry run, index
+        // status) cost O(N^2). Every 128 rows fetched their recorded verdicts
+        // and reader projections with `evidence_span_id IN (...)`, which the
+        // engine plans as a scan of the whole table, and every page filtered
+        // by workspace and candidacy in SQL, which made the planner choose an
+        // index not in rowid order and sort every remaining row. On the
+        // statements a real scan issues, require every verdict, projection
+        // and session lookup to seek its primary key and every page to be a
+        // bare rowid seek. (EXPLAIN QUERY PLAN reports that sort as a plain
+        // SCAN either way, so the page check reads the statement itself.)
+        fn query_plan(connection: &DbConnection, sql: &str) -> Result<String, String> {
+            let params = (0..sql.matches('?').count())
+                .map(|_| Value::Text("ev_plan_probe".to_owned()))
+                .collect::<Vec<_>>();
+            let rows = connection
+                .query(&format!("EXPLAIN QUERY PLAN {sql}"), &params)
+                .map_err(|error| error.to_string())?;
+            Ok(rows
+                .iter()
+                .filter_map(|row| row.get(3).and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" | "))
+        }
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x780_d00)).to_string();
+        connection.insert_session(&session_id, &session_input("gh78-plan-session"))?;
+        let total = super::EVIDENCE_SOURCE_READ_PAGE_SIZE.saturating_add(3);
+        for index in 0..total {
+            let evidence_id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x780_e000 + u128::from(index),
+            ))
+            .to_string();
+            let input =
+                evidence_span_input(&session_id, &format!("gh78-plan-{index}"), index * 10 + 1);
+            connection.insert_evidence_span(&evidence_id, &input)?;
+        }
+
+        let (scan, statements) = super::capture_query_sql_for_test(|| {
+            connection.visit_index_evidence_for_workspace(workspace_id, |_| Ok(()))
+        });
+        let scan = scan?;
+        ensure_equal(
+            &scan
+                .admission
+                .by_producer
+                .get("cass_import")
+                .map(|counts| counts.admitted),
+            &Some(total),
+            "every row is admitted through its recorded verdict",
+        )?;
+
+        for table in [
+            "evidence_admission_verdicts",
+            "evidence_reader_projections",
+            "sessions",
+        ] {
+            let lookups = statements
+                .iter()
+                .filter(|sql| sql.contains(&format!("FROM {table} ")))
+                .collect::<BTreeSet<_>>();
+            ensure(
+                !lookups.is_empty(),
+                format!("the scan looks up {table} for its rows"),
+            )?;
+            for sql in lookups {
+                let plan = query_plan(&connection, sql)?;
+                ensure(
+                    plan.contains(&format!("SEARCH {table}"))
+                        && !plan.contains(&format!("SCAN {table}")),
+                    format!(
+                        "a {table} lookup must seek the primary key, not scan: {plan} <- {sql}"
+                    ),
+                )?;
+            }
+        }
+
+        let page_reads = statements
+            .iter()
+            .filter(|sql| sql.contains("FROM evidence_spans e") && sql.contains("ORDER BY e.rowid"))
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &page_reads.len(),
+            &2,
+            "the scan reads exactly two rowid-ordered pages",
+        )?;
+        for sql in page_reads {
+            let predicate = sql
+                .split_once(" FROM evidence_spans e")
+                .map_or("", |(_, rest)| rest);
+            ensure(
+                !predicate.contains("workspace_id")
+                    && !predicate.contains("producer_kind")
+                    && !predicate.contains("search_eligibility"),
+                format!("an index-order page must be a bare rowid seek: {sql}"),
+            )?;
+        }
+        connection.close()?;
+        Ok(())
     }
 
     #[test]
@@ -58433,6 +60507,140 @@ UPDATE memories
                 "same-connection get_memory must return updated confidence, got {:.6}",
                 after.confidence
             ),
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    /// Decay-sweep writes rewrite indexed memory metadata and bump the
+    /// workspace generation. Each must queue a single-document reindex in its
+    /// own transaction, or the persisted index stays stale until a manual
+    /// rebuild (#83). A write that changes nothing must queue nothing.
+    #[test]
+    fn decay_writes_queue_single_document_reindex_jobs() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let workspace_id = "wsp_01234567890123456789012345";
+        let memory_id = "mem_decayreindex00000000000001";
+        connection.insert_memory(
+            memory_id,
+            &super::CreateMemoryInput {
+                workspace_id: workspace_id.to_string(),
+                level: "semantic".to_string(),
+                kind: "fact".to_string(),
+                content: "Decay writes must keep the search index current.".to_string(),
+                workflow_id: None,
+                confidence: 0.9,
+                utility: 0.7,
+                importance: 0.8,
+                provenance_uri: Some("test://decay-reindex".to_string()),
+                trust_class: "agent_validated".to_string(),
+                trust_subclass: None,
+                tags: vec![],
+                valid_from: None,
+                valid_to: None,
+            },
+        )?;
+        let pending = |connection: &DbConnection| {
+            connection.list_pending_search_index_jobs(workspace_id, None)
+        };
+        ensure(
+            pending(&connection)?.is_empty(),
+            "a raw insert queues no index work",
+        )?;
+
+        let score_input = |confidence: f32| super::ApplyMemoryScoreUpdateInput {
+            workspace_id: workspace_id.to_string(),
+            confidence,
+            utility: 0.7,
+            importance: 0.8,
+            updated_at: "2026-10-29T23:00:00Z".to_string(),
+            actor: Some("db-test".to_string()),
+            details: "{\"schema\":\"ee.test.score_update.v1\"}".to_string(),
+            feedback_event_ids: vec![],
+        };
+        ensure(
+            connection
+                .apply_memory_score_update_audited(memory_id, &score_input(0.9))?
+                .is_none(),
+            "an unchanged score is a no-op",
+        )?;
+        ensure(
+            pending(&connection)?.is_empty(),
+            "a no-op score update queues nothing",
+        )?;
+
+        let generation_before = connection.get_workspace_generation(workspace_id)?;
+        ensure(
+            connection
+                .apply_memory_score_update_audited(memory_id, &score_input(0.76))?
+                .is_some(),
+            "a decayed score is applied",
+        )?;
+        ensure(
+            connection.get_workspace_generation(workspace_id)? > generation_before,
+            "the score update bumps the workspace generation",
+        )?;
+        let jobs = pending(&connection)?;
+        ensure(
+            jobs.len() == 1,
+            format!("one job after score decay: {jobs:?}"),
+        )?;
+        ensure(
+            jobs[0].job_type_enum() == Some(super::SearchIndexJobType::SingleDocument)
+                && jobs[0].document_source.as_deref() == Some("memory")
+                && jobs[0].document_id.as_deref() == Some(memory_id)
+                && jobs[0].documents_total == 1,
+            format!("score decay queues a single-document memory job: {jobs:?}"),
+        )?;
+
+        let demotion = super::ApplyMemoryDecayDemotionInput {
+            workspace_id: workspace_id.to_string(),
+            level: "episodic".to_string(),
+            importance: 0.3,
+            updated_at: "2026-10-29T23:00:01Z".to_string(),
+            actor: Some("db-test".to_string()),
+            details: "{\"schema\":\"ee.test.decay_demote.v1\"}".to_string(),
+        };
+        ensure(
+            connection
+                .apply_memory_decay_demotion_audited(memory_id, &demotion)?
+                .is_some(),
+            "the demotion is applied",
+        )?;
+        ensure(
+            connection
+                .apply_memory_decay_demotion_audited(memory_id, &demotion)?
+                .is_none(),
+            "a repeated demotion is a no-op",
+        )?;
+        ensure(
+            pending(&connection)?.len() == 2,
+            "the demotion queues exactly one more job",
+        )?;
+
+        ensure(
+            connection
+                .tombstone_memory_decay_audited(memory_id, workspace_id, Some("db-test"), "{}")?
+                .is_some(),
+            "the decay tombstone is applied",
+        )?;
+        ensure(
+            connection
+                .tombstone_memory_decay_audited(memory_id, workspace_id, Some("db-test"), "{}")?
+                .is_none(),
+            "a repeated tombstone is a no-op",
+        )?;
+        let jobs = pending(&connection)?;
+        ensure(
+            jobs.len() == 3
+                && jobs
+                    .iter()
+                    .all(|job| job.document_id.as_deref() == Some(memory_id)),
+            format!("the tombstone queues exactly one more memory job: {jobs:?}"),
         )?;
 
         connection.close()?;

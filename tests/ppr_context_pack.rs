@@ -1,10 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ee::core::context::{
-    ContextPackOptions, ContextPackOutputOptions, attach_pack_dna_to_context_response,
-    run_context_pack,
-};
+use ee::core::context::{ContextPackOptions, ContextPackOutputOptions, run_context_pack};
 use ee::core::init::{InitOptions, init_workspace};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::{
@@ -114,6 +111,7 @@ fn context_options(
     ppr_weight: Option<f32>,
 ) -> ContextPackOptions {
     ContextPackOptions {
+        bead_id: None,
         task_paths: Vec::new(),
         task_lens: None,
         workspace_path: workspace_path.to_path_buf(),
@@ -326,7 +324,9 @@ fn requested_pack_ppr_degrades_without_changing_textual_ranking() -> TestResult 
         "ppr_weight=0 should preserve textual seed ranking",
     )?;
 
-    let mut requested = run_context_pack(&context_options(workspace_path, &db_path, Some(1.0)))
+    let mut requested_options = context_options(workspace_path, &db_path, Some(1.0));
+    requested_options.output_options = requested_options.output_options.with_pack_dna(true);
+    let requested = run_context_pack(&requested_options)
         .map_err(|error| format!("requested-PPR context pack failed: {error:?}"))?;
     if pack_selection_signature(&requested) != pack_selection_signature(&zero_weight) {
         return Err(format!(
@@ -383,7 +383,6 @@ fn requested_pack_ppr_degrades_without_changing_textual_ranking() -> TestResult 
     }
     assert_no_context_ppr_artifacts(workspace_path, &db_path)?;
 
-    attach_pack_dna_to_context_response(&db_path, &mut requested);
     let pack_dna = requested
         .data
         .pack_dna

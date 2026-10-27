@@ -33,6 +33,13 @@
 //!      tombstone fixtures must render as historical, non-emitting
 //!      sections rather than live degraded codes.
 //!
+//!   6. `every_doc_trigger_line_is_rendered_from_a_fixture` — the doc's
+//!      PROSE must come from a fixture, both ways (bd-t6838). Arms 1-5
+//!      compare codes and headings, so a hand edit inside a section body
+//!      was invisible to all of them: a sentence added straight into the
+//!      generated doc read as correct until a regen deleted it under an
+//!      unrelated commit message.
+//!
 //! No `use ee::*` imports — the test runs purely off file contents
 //! and is independent of any lib state.
 
@@ -181,6 +188,124 @@ fn doc_section<'a>(doc_text: &'a str, code: &str) -> Option<&'a str> {
     let tail = &doc_text[start..];
     let end = tail.find("\n---\n").unwrap_or(tail.len());
     Some(&tail[..end])
+}
+
+/// Every `**Trigger.**` line in the doc is rendered from a fixture, and every
+/// fixture's is in the doc (bd-t6838).
+///
+/// THE DEFECT THIS CATCHES IS A HAND EDIT INSIDE A GENERATED FILE, and it is
+/// not hypothetical. `b6bcabf9f` ("fix(pack): preserve distinct evidence and
+/// same-code repairs") appended a clarifying clause -- "The historical
+/// diagnostic code is retained, but token overlap no longer proves
+/// equivalence" -- directly into docs/degraded_codes.md, where no generator
+/// input could see it. `5a0ca491a` ("fix(status): report an unreadable skyline
+/// flag instead of answering empty") then ran the regen as a side effect and
+/// deleted the sentence, under a commit message about something else entirely.
+/// It was gone from the whole tree until bd-t6838 recovered it from git and put
+/// it in the fixture, where regeneration preserves it.
+///
+/// THE OTHER FIVE ARMS CANNOT SEE THIS. They compare CODES and SECTION
+/// HEADINGS; a section can be present, correctly named and set-equal while its
+/// prose says whatever a person typed. Nothing compared the body text to the
+/// fixture it is supposed to come from.
+///
+/// RETROACTIVELY VALIDATED against the two commits above rather than a planted
+/// fixture, which is why it is trustworthy rather than merely green: run this
+/// predicate at `b6bcabf9f` and the inverse direction reports exactly one doc
+/// line matching no fixture, with the lost sentence as its tail. Run it at
+/// `5a0ca491a` and it is silent, because the doc and the fixture agreed again
+/// once the sentence had been deleted. So it fires at the moment the edit is
+/// made, which is the only moment the sentence is still recoverable without
+/// archaeology.
+///
+/// The emitted shape comes from scripts/build_degraded_codes_doc.sh:235 and
+/// :233 -- `**Trigger.** $desc` for a live code, `**Historical trigger.**
+/// $desc` for a retired one, with `(no description provided)` as the default
+/// when `.trigger.description` is absent.
+#[test]
+fn every_doc_trigger_line_is_rendered_from_a_fixture() -> TestResult {
+    const LIVE: &str = "**Trigger.** ";
+    const RETIRED: &str = "**Historical trigger.** ";
+    const NO_DESC: &str = "(no description provided)";
+
+    let dir = fixtures_dir();
+    let entries = fs::read_dir(&dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+    let mut expected: BTreeSet<String> = BTreeSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read entry under {}: {e}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let value = read_fixture_json(&path)?;
+        let description = value
+            .get("trigger")
+            .and_then(|trigger| trigger.get("description"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(NO_DESC);
+        let retired = value
+            .get("retired")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let prefix = if retired { RETIRED } else { LIVE };
+        expected.insert(format!("{prefix}{description}"));
+    }
+
+    // Empty-world guard. An unreadable fixture directory would make both
+    // directions below trivially satisfied.
+    if expected.len() < 100 {
+        return Err(format!(
+            "collected only {} trigger lines from {}; the fixture catalog holds \
+             hundreds, so this guard is measuring nothing",
+            expected.len(),
+            dir.display()
+        ));
+    }
+
+    let doc_text = fs::read_to_string(doc_path())
+        .map_err(|e| format!("read {}: {e}", doc_path().display()))?;
+    let rendered: BTreeSet<String> = doc_text
+        .lines()
+        .filter(|line| line.starts_with(LIVE) || line.starts_with(RETIRED))
+        .map(str::to_owned)
+        .collect();
+
+    // THE DIRECTION THAT CATCHES A HAND EDIT. A doc line no fixture produces
+    // cannot survive the next regeneration.
+    let orphans: Vec<&String> = rendered.difference(&expected).collect();
+    if !orphans.is_empty() {
+        return Err(format!(
+            "{} trigger line(s) in docs/degraded_codes.md are not rendered from any \
+             fixture, so the next `./scripts/build_degraded_codes_doc.sh` will DELETE \
+             them silently. Move the wording into the fixture's `.trigger.description` \
+             instead of editing the generated doc:\n{}",
+            orphans.len(),
+            orphans
+                .iter()
+                .take(5)
+                .map(|line| format!("  {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    // And the forward direction, which catches a stale doc.
+    let missing: Vec<&String> = expected.difference(&rendered).collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{} fixture trigger description(s) do not appear in docs/degraded_codes.md; \
+             the doc is stale. Run `./scripts/build_degraded_codes_doc.sh`:\n{}",
+            missing.len(),
+            missing
+                .iter()
+                .take(5)
+                .map(|line| format!("  {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    Ok(())
 }
 
 #[test]

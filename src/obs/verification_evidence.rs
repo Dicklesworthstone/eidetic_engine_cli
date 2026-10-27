@@ -195,6 +195,15 @@ const ENVIRONMENT_BLOCKER_DEGRADED_CODES: &[&str] = &[
     "rch_verify_remote_marker_missing",
     "rch_verify_committed_tree_path_deps_unsupported",
     "rch_verify_committed_tree_unsupported",
+    // bd-r4iwj. The committed-tree export base is on a filesystem that shims
+    // extended attributes into AppleDouble `._*` sidecars, which rch's
+    // dependency-closure preflight then requires on the worker while
+    // `.rchignore` excludes them from the transfer. It is an environment
+    // condition on the CLIENT, and absent from this list every consumer below
+    // -- support_bundle, handoff, swarm_next_action, verify_ledger,
+    // regression_causality -- would classify a local filesystem
+    // misconfiguration as a code failure in the tree under test.
+    "rch_verify_committed_tree_base_appledouble_shim",
     "rch_verify_dirty_tree_refused",
     "rch_verify_dirty_tracked_paths",
     "rch_verify_dirty_staged_paths",

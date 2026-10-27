@@ -20,6 +20,21 @@ pub(super) fn sequence_candidates(
 /// A failure and its repair may live in one imported CASS window. Keep the
 /// original evidence ID, hash, and complete locator: sentence boundaries in an
 /// excerpt are not transcript line boundaries and must not invent provenance.
+///
+/// Raw-span entry point, reached only by tests since 245e2cf3c. Production
+/// comes in through `inline_candidates_from_message`, which reuses the body
+/// sequence observation grouping already decoded rather than decoding the
+/// envelope a second time. Nothing was stranded by that move: the single
+/// production caller (`sequence.rs`) always passed
+/// `std::slice::from_ref(span)`, so this multi-span loop and the cross-span
+/// `seen_ids` set it maintains never saw more than one span. Both entry points
+/// share `append_inline_candidates`, so the behavior under test is the
+/// behavior that ships.
+///
+/// The gate is load-bearing, not decoration: without it the plain `--lib`
+/// target has no caller, and `cargo clippy --locked --all-targets -- -D
+/// warnings` fails the lint lane on `dead_code`.
+#[cfg(test)]
 pub(super) fn inline_candidates(
     workspace_id: &str,
     session: &StoredSession,
@@ -34,35 +49,77 @@ pub(super) fn inline_candidates(
         let Some(message) = text::message_text(&span.excerpt) else {
             continue;
         };
-        for (failure, repair) in inline_pairs(message.as_ref()) {
-            let mut failure_span = span.clone();
-            failure_span.excerpt = failure.to_owned();
-            let mut repair_span = span.clone();
-            repair_span.excerpt = repair.to_owned();
-            let topic = review_topic_key(&format!("{failure} {repair}"));
-            let pair = build_session_arc_candidate_pair(
-                workspace_id,
-                session,
-                &topic,
-                &failure_span,
-                &repair_span,
-            );
-            // Repeated observations (or equal compacted lesson content) must
-            // not persist duplicate IDs or leave only one reciprocal member.
-            // Keep the builder's content-bound identities and source package.
-            if pair
-                .iter()
-                .any(|candidate| seen_ids.contains(&candidate.candidate_id))
-            {
-                continue;
-            }
-            for candidate in pair {
-                seen_ids.insert(candidate.candidate_id.clone());
-                candidates.push(candidate);
-            }
-        }
+        append_inline_candidates(
+            workspace_id,
+            session,
+            span,
+            message.as_ref(),
+            &mut candidates,
+            &mut seen_ids,
+        );
     }
     candidates
+}
+
+/// Reuse the conversation body already admitted by sequence observation
+/// grouping. This private entry point must receive that exact projection,
+/// never arbitrary replacement text; durable provenance still comes from span.
+/// In particular, do not project the decoded text again as a JSON envelope.
+fn inline_candidates_from_message(
+    workspace_id: &str,
+    session: &StoredSession,
+    span: &StoredEvidenceSpan,
+    message: &str,
+) -> Vec<ReviewSessionCandidate> {
+    let mut candidates = Vec::new();
+    if span.workspace_id == workspace_id && span.session_id == session.id {
+        append_inline_candidates(
+            workspace_id,
+            session,
+            span,
+            message,
+            &mut candidates,
+            &mut BTreeSet::new(),
+        );
+    }
+    candidates
+}
+
+fn append_inline_candidates(
+    workspace_id: &str,
+    session: &StoredSession,
+    span: &StoredEvidenceSpan,
+    message: &str,
+    candidates: &mut Vec<ReviewSessionCandidate>,
+    seen_ids: &mut BTreeSet<String>,
+) {
+    for (failure, repair) in inline_pairs(message) {
+        let mut failure_span = span.clone();
+        failure_span.excerpt = failure.to_owned();
+        let mut repair_span = span.clone();
+        repair_span.excerpt = repair.to_owned();
+        let topic = review_topic_key(&format!("{failure} {repair}"));
+        let pair = build_session_arc_candidate_pair(
+            workspace_id,
+            session,
+            &topic,
+            &failure_span,
+            &repair_span,
+        );
+        // Repeated observations (or equal compacted lesson content) must
+        // not persist duplicate IDs or leave only one reciprocal member.
+        // Keep the builder's content-bound identities and source package.
+        if pair
+            .iter()
+            .any(|candidate| seen_ids.contains(&candidate.candidate_id))
+        {
+            continue;
+        }
+        for candidate in pair {
+            seen_ids.insert(candidate.candidate_id.clone());
+            candidates.push(candidate);
+        }
+    }
 }
 
 /// Walk the complete admitted message using the same subject identities as
@@ -561,7 +618,7 @@ mod counted_outcome_tests {
         ] {
             let outcome = outcome_signal_text(text);
             assert!(!outcome.has_process_failure, "{text}");
-            assert!(!outcome.has_unverified_process_outcome, "{text}");
+            assert!(!outcome.has_unverified_process_outcome);
             assert_eq!(outcome.text, text);
         }
         let source = "資料 café 🦀 Process exited with code -9";

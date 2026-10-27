@@ -164,7 +164,8 @@ e2e_orphans() {
         #     (measured: HAS_DOT_GIT=no), so without this flag every
         #     gitignored-but-synced directory becomes searchable there. The one
         #     that matters is beads_compliance_audit/ -- 8397 files on the
-        #     worker, gitignored at .gitignore:322, not excluded by .rchignore --
+        #     worker, gitignored by the `/beads_compliance_audit/` rule in
+        #     .gitignore, not excluded by .rchignore --
         #     whose bead JSON mentions script paths in TITLES:
         #
         #       {"title":"sandbox: e2e script scripts/e2e_sandbox.sh (...)"}
@@ -182,9 +183,36 @@ e2e_orphans() {
         #     the tree it happens to run in, which is the invariant that was
         #     missing. It changes nothing where .git exists, so the baseline
         #     stays valid.
+        # (e) A JUDGEMENT TABLE KEYED BY SCRIPT PATH IS DATA, NOT AN INVOKER --
+        #     the fifth spelling of (a), arriving through scripts/ rather than
+        #     tests/fixtures/. scripts/check-jq-vacuity.py holds a dict of
+        #     JUDGED jq-vacuity findings whose keys are (script, kind, snippet):
+        #
+        #       "scripts/e2e_overhaul/sx7_adaptive_budget.sh",   # :263
+        #
+        #     That is a Python string literal, so it is neither a `#` comment
+        #     nor a `//` one, and both existing filters pass it. The scanner
+        #     RECORDS a verdict about the script; it never runs it. The effect
+        #     was a STALE-baseline failure telling the operator to delete a
+        #     correct baseline line, which would have reclassified a genuine
+        #     orphan as wired.
+        #
+        #     Measured 2026-10-24 before changing the predicate, because a
+        #     class-based exclusion can hide real invokers: 10 scripts/check-*.py
+        #     exist, 4 use subprocess, and ZERO of those subprocess an e2e
+        #     script. Blast radius of this glob across all 212 e2e scripts is
+        #     EXACTLY ONE -- sx7_adaptive_budget.sh -- i.e. it reclassifies the
+        #     false positive and nothing else.
+        #
+        #     THE RISK, stated rather than discovered later: if a future
+        #     check-*.py ever does invoke an e2e script, this glob hides that
+        #     orphan. The rule being asserted is "a scanner describes, it does
+        #     not run"; a check-* that runs things has the wrong name, and the
+        #     blast-radius measurement above is the thing to re-run.
         if ! rg --no-require-git --no-heading -N "^[^#]*$(printf '%s' "$needle" | sed 's/\./\\./g')" "$root" \
             --glob '!target' --glob '!.git' --glob "!scripts/$base" \
             --glob '!**/tests/fixtures/**' \
+            --glob '!**/scripts/check-*.py' \
             --glob '!**/*.md' --glob '!**/docs/**' 2>/dev/null \
             | awk 'BEGIN { found = 0 }
                    { body = $0; sub(/^[^:]*:/, "", body)

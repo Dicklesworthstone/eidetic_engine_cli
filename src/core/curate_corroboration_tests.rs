@@ -556,6 +556,37 @@ fn complete_source_qualifications_and_refuted_or_withheld_sessions_do_not_corrob
 }
 
 #[test]
+fn unverifiable_anchor_abstains_instead_of_receiving_single_session_confidence() -> TestResult {
+    let fixture = review_session_fixture()?;
+    let anchor = source_session(
+        &fixture,
+        73_100,
+        "/tmp/cass/incomplete-anchor",
+        &[
+            "Observation alpha.".to_owned(),
+            format!("{LESSON}\n[TRUNCATED]"),
+        ],
+        "",
+    )?;
+
+    let report = propose(&fixture, &anchor, 0.0, false)?;
+    assert_eq!(report.candidate_count, 1);
+    assert_eq!(report.candidates[0].confidence, 0.0);
+    assert_eq!(report.candidates[0].proposed_confidence, 0.0);
+    assert!(
+        report.candidates[0]
+            .reason
+            .contains("Abstaining: the anchor session could not be verified")
+    );
+    assert_eq!(
+        propose(&fixture, &anchor, f32::EPSILON, false)?.candidate_count,
+        0,
+        "any positive confidence floor must reject an unverified anchor"
+    );
+    Ok(())
+}
+
+#[test]
 fn recorded_proof_binds_content_score_package_and_captured_source_history() -> TestResult {
     let fixture = review_session_fixture()?;
     let anchor = independent_session(&fixture, 74_001)?;

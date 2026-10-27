@@ -39,6 +39,33 @@ v0` or `--legacy-schema` to emit `ee.response.v0`:
 New integrations should consume the default v2 envelope and read structured
 recovery actions from `error.details.recovery[]`.
 
+## Backup Evidence Recovery Fidelity
+
+New backups emit `ee.backup.recovery_inventory.v2`. The explicit
+`rowCountBasis: "source_snapshot"` applies to every table entry, including
+derived admission caches. `evidenceAdmission` separately records
+`sourceSearch`, `exportedSearch`, `sourcePack`, and `exportedPack`, each with
+`admitted`, `quarantined`, and `denied` counts. All four histograms cover the
+same source snapshot; the exported histograms describe the evidence bytes in
+the artifact. These are persisted eligibility counts, not a promise that live
+provenance or policy checks will admit a span later.
+
+The default `minimal` redaction can remove evidence content or provenance and
+therefore change eligibility to denied. Create, inspect, verify, and restore
+now report `backup_evidence_admission_reduced` with the actual losses. This
+warning does not prevent restoring the remaining durable history. An index
+rebuild cannot undo those privacy denials. Use an explicit
+`ee backup create --workspace . --redaction none` for a private recovery copy
+that preserves persisted evidence eligibility, and protect the resulting
+unredacted artifact as source data. Source provenance and policy checks still
+apply when that evidence is read.
+
+Verification checks the v2 exported counts against the authenticated evidence
+files. Missing, malformed, promoted, or inconsistent counts fail verification
+and prevent restore publication. Existing v1 inventories remain supported;
+they predate this measurement and make no evidence-fidelity claim. The JSON
+response envelope and database schema are unchanged.
+
 ## Status Graph Fields
 
 `ee status --json` no longer reports the persisted graph cache as

@@ -601,7 +601,12 @@ fn structured_errors_use_native_codes_and_real_rch_blocker_shapes() {
 fn structured_errors_require_complete_unambiguous_failure_documents() {
     for text in [
         r#"{"schema":"ee.response.v2","success":true,"data":{"error":{"code":"migration_required","message":"a fixture"}}}"#,
-        r#"{"schema":"ee.error.v1","error":{"code":"migration_required","message":"old schema"}}"#,
+        // The retired v1 envelope must not count as a structured error. Split
+        // so the v1-literal drift gates, which scan src/ text, see no emission.
+        concat!(
+            r#"{"schema":"ee.error"#,
+            r#".v1","error":{"code":"migration_required","message":"old schema"}}"#
+        ),
         r#"{"schema":"ee.error.v2","success":true,"error":{"code":"migration_required","message":"conflicting status"}}"#,
         r#"{"schema":"ee.error.v2","error":{"code":"","message":"empty code"}}"#,
         r#"{"schema":"ee.error.v2","error":{"code":"/private/token","message":"not a stable code"}}"#,

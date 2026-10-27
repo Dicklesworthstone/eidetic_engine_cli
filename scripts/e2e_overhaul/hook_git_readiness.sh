@@ -138,6 +138,31 @@ if [ -z "$("$EE_BINARY" --version 2>/dev/null || true)" ]; then
     exit 2
 fi
 
+# REPO_ROOT MUST BE A GIT CHECKOUT, and this refuses in words rather than
+# letting git do it in exit 128 (bd-no12q).
+#
+# `repo_status_hash` at :149 runs `git -C "$REPO_ROOT" status | shasum | awk`,
+# and :217 calls it in a bare assignment. Under `set -euo pipefail` (:8) a
+# missing .git makes git exit 128, pipefail carries that out of the pipeline,
+# and the assignment aborts the whole suite -- which is the measured symptom:
+# rc=128 with `fatal: not a git repository`, immediately after the workspace
+# setup event reported ok.
+#
+# THIS IS NOT A HYPOTHETICAL HOST. The RCH clean-overlay tree is SYNCED rather
+# than cloned and has no .git at all, which is where the original failure was
+# observed via `rch exec --job`.
+#
+# A preflight refusal rather than a degraded run, because the suite's
+# caller_checkout assertion (:279-286) compares a BEFORE and AFTER status hash
+# to prove it did not mutate the caller's checkout. Without git that assertion
+# cannot be made, and two equal "unavailable" placeholders would compare equal
+# and PASS -- a vacuous green on the one property this suite guards.
+if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    emit_event "preflight" "setup" "blocked" 2 "git -C $REPO_ROOT rev-parse --git-dir" "$REPO_ROOT" "" "" "REPO_ROOT is not a git checkout, so the caller-checkout mutation assertion cannot be made; run this suite from a clone, not a synced overlay" '["repo_not_a_git_checkout"]'
+    printf 'hook_git_readiness: %s is not a git checkout; events=%s\n' "$REPO_ROOT" "$EVENT_LOG" >&2
+    exit 2
+fi
+
 WORK_ROOT="${EE_HOOK_GIT_READINESS_TMPROOT:-${TMPDIR:-/tmp}}"
 case "$WORK_ROOT" in
     /Volumes/*) WORK_ROOT="/tmp" ;;

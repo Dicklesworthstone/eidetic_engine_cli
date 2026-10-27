@@ -57,7 +57,7 @@ impl JsonContractFixture {
         let canonical_workspace = canonical_fixture_path(&workspace, "workspace")?;
         let canonical_database = canonical_fixture_path(&database, "database")?;
         let canonical_index_dir_input = canonical_workspace.join(".ee").join("index");
-        let binary = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+        let binary = ee_binary();
         let canonical_binary = canonical_fixture_path(&binary, "ee binary")?;
         build_search_index(
             &binary,
@@ -113,12 +113,71 @@ fn canonical_fixture_path(path: &Path, label: &str) -> Result<PathBuf, String> {
     })
 }
 
+/// True when `path` or any ancestor contains a `.git` entry.
+///
+/// bd-b3bhh: `ee status` reports `scopeKind: "subproject"` for a workspace
+/// nested inside a repository, and that answer is CORRECT. The status contract
+/// snapshot was recorded standalone, so the fixture has to sit outside any
+/// repository or the snapshot becomes a statement about where the suite ran.
+fn has_git_ancestor(path: &Path) -> bool {
+    path.ancestors()
+        .any(|ancestor| ancestor.join(".git").exists())
+}
+
+/// A base directory for fixture artifacts that is NOT inside a git repository.
+///
+/// The default temp dir is not safe to assume here. On the RCH lane `TMPDIR`
+/// points at `.rch-tmp/` INSIDE the synced checkout, so `tempfile` lands the
+/// fixture under a repository and `ee status` correctly switches to
+/// `subproject` scope, gains a `repositoryRoot`/`repositoryFingerprint`, and
+/// emits a `workspace_selected_differs_from_discovered` diagnostic. None of
+/// that is a product defect and none of it can be scrubbed away, because
+/// `scopeKind` legitimately changes VALUE and `diagnostics` legitimately gains
+/// an entry. The fixture's location is the thing that has to change.
+///
+/// Candidates are tried in order and the first one outside a repository wins.
+/// If every candidate is inside one, this FAILS LOUDLY rather than silently
+/// recording a nested shape: inverting the snapshot would simply move the bug
+/// onto anyone whose temp dir is outside a repository.
+fn repo_free_artifact_base() -> Result<PathBuf, String> {
+    let mut candidates = vec![std::env::temp_dir()];
+    for fallback in ["/tmp", "/var/tmp"] {
+        let path = PathBuf::from(fallback);
+        if path.is_dir() && !candidates.iter().any(|existing| existing == &path) {
+            candidates.push(path);
+        }
+    }
+
+    let mut rejected = Vec::new();
+    for candidate in candidates {
+        if has_git_ancestor(&candidate) {
+            rejected.push(candidate.display().to_string());
+        } else {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "every candidate artifact base is inside a git repository, so the status \
+         contract would record a `subproject` scope that belongs to this machine \
+         rather than to the product (bd-b3bhh). Rejected: {}. Point TMPDIR at a \
+         directory outside any checkout.",
+        rejected.join(", ")
+    ))
+}
+
 fn unique_artifact_dir(prefix: &str) -> Result<PathBuf, String> {
+    let base = repo_free_artifact_base()?;
     tempfile::Builder::new()
         .prefix(&format!("{prefix}-"))
-        .tempdir()
+        .tempdir_in(&base)
         .map(tempfile::TempDir::keep)
-        .map_err(|error| format!("failed to create {prefix} artifact directory: {error}"))
+        .map_err(|error| {
+            format!(
+                "failed to create {prefix} artifact directory under {}: {error}",
+                base.display()
+            )
+        })
 }
 
 fn assert_graph_surface_snapshot(name: &str, value: Value) {
@@ -460,9 +519,42 @@ fn build_search_index(
     Ok(())
 }
 
+/// The ONE place this suite names the ee binary (bd-9vkmt).
+///
+/// Every spawn in this file goes through `run_ee_at`, which IS isolated -- it
+/// sets `HOME` to a per-fixture `.home` for the bd-28kky reason documented at
+/// its call to `.env("HOME", ...)`. But `scripts/check-ee-spawn-isolation.py`
+/// counts FUNCTIONS CONTAINING the `CARGO_BIN_EXE_ee` token, not functions
+/// that spawn, so two call sites that merely built a `PathBuf` were each
+/// counted as an un-isolated spawn and the ratchet went 270 -> 272.
+///
+/// Consolidating the token here leaves exactly one counted site, which is what
+/// this file's baseline row has always allowed, without weakening anything:
+/// the isolation lives where the spawn lives, and path construction stops
+/// masquerading as a spawn. Do NOT inline this back into a caller -- the
+/// ratchet will go up again and the next reader will think a spawn regressed.
+fn ee_binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_ee"))
+}
+
 fn run_ee_at(binary: &Path, workspace: &Path, args: &[String]) -> Result<Output, String> {
     Command::new(binary)
         .args(args)
+        // bd-b3bhh, second half. Without this the child inherits cargo's
+        // working directory -- the repository -- and `ee` discovers the
+        // REPOSITORY's workspace from the cwd while `--workspace` selects the
+        // fixture's. That disagreement is reported honestly, as a
+        // `workspace_selected_differs_from_discovered` warning carrying
+        // `conflictingRoot: [REPO]`, and it landed in the committed contract
+        // as a diagnostics entry that exists only because of where the suite
+        // was launched.
+        //
+        // Moving the fixture out of the repository (see repo_free_artifact_base)
+        // fixed scopeKind, repositoryRoot and subprojectPath but NOT this: the
+        // cwd is a second, independent channel for the same class of defect.
+        // Running from inside the fixture makes selected and discovered agree
+        // by construction, on any machine.
+        .current_dir(workspace)
         .env("EE_EMBED_DOWNLOAD", "off")
         .env(
             "EE_EMBED_MODEL_DIR",
@@ -674,8 +766,21 @@ fn scrub_value_for_key(key: &str, value: &mut Value) {
         *value = serde_json::json!(0);
         return;
     }
+    // bd-yxpm9: freshness multipliers are clock-dependent, so they have to be
+    // redacted -- but the redaction has to be VISIBLE. This arm used to write
+    // the integer 0, which is indistinguishable from a real measurement and,
+    // for a MULTIPLICATIVE component, arithmetically impossible: the snapshot
+    // showed components.freshnessDrift = 0 beside finalScore = 0.9936, which
+    // cannot both hold. That reads as a product defect and was filed as one.
+    // It is not: the live path emits the float 1.0, measured on an RCH worker
+    // and unchanged under --as-of, under the portable operating profile, and
+    // across both writers, because SearchScoringSignals::new leaves the signal
+    // None and freshness_drift is therefore its map_or default. Nothing in the
+    // product emits a bare 0 here. So use the same self-identifying placeholder
+    // shape as every string arm above and let the next reader see a redaction
+    // instead of a value.
     if normalized.contains("freshness") && value.is_number() {
-        *value = serde_json::json!(0);
+        *value = Value::String("[FRESHNESS]".to_string());
     }
 }
 
@@ -790,7 +895,45 @@ fn is_timing_degradation(item: &Value) -> bool {
         .is_some_and(|code| TIMING_DEGRADED_CODES.contains(&code))
 }
 
+/// Replace the digit runs inside the WAL sidecar warning.
+///
+/// bd-b3bhh. `doctor_json_contract` committed a message of the form
+///
+///     "WAL sidecar is 5903992 bytes across 1433 frames, larger than the
+///      2510848-byte database it describes; every connection open replays it."
+///
+/// and a later run produced 6283032 / 1525 / 2596864. Those three numbers are
+/// a property of how much the fixture happened to write before the check ran,
+/// not of the surface under test, and they move every run. The WARNING is the
+/// contract -- that a WAL sidecar outgrew its database and will be replayed on
+/// every open -- and that survives this intact; only its digits are erased.
+///
+/// Scrubbed rather than dropped, deliberately: removing the degradation would
+/// also hide the case where the warning stops being emitted at all, which is a
+/// real regression this contract should still catch.
+fn normalize_wal_sidecar_counts(text: &str) -> String {
+    if !text.contains("WAL sidecar is") {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character.is_ascii_digit() {
+            while chars.peek().is_some_and(char::is_ascii_digit) {
+                chars.next();
+            }
+            out.push_str("[COUNT]");
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
 fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
+    if text.contains("WAL sidecar is") {
+        return normalize_wal_sidecar_counts(text);
+    }
     if text.starts_with("blake3:") || text.starts_with("sha256:") {
         return "[HASH]".to_string();
     }
@@ -950,8 +1093,35 @@ fn looks_like_rfc3339(text: &str) -> bool {
         && (text.ends_with('Z') || text.contains("+00:00"))
 }
 
+/// Compare one contract snapshot and RECORD the outcome instead of aborting.
+///
+/// bd-b3bhh, final acceptance bullet. `assert_contract_snapshot` asserts by
+/// panicking and this function asserts SEVEN contracts in sequence, each
+/// preceded by the command that produces it. A mismatch in the first therefore
+/// stopped the other six from being compared -- and, because the commands are
+/// interleaved with the assertions, from being RUN at all.
+///
+/// That is not a theoretical cost. `status_json_contract` is first, and while
+/// it encoded the recording machine's scope fields, `doctor_json_contract`'s
+/// unscrubbed volatile WAL byte and frame counts sat undetected behind it, as
+/// did every contract after that. One stale snapshot made six others
+/// permanently unmeasurable.
+///
+/// insta still prints its own diff for each mismatch, so nothing is hidden;
+/// the test now fails ONCE with the complete list rather than hiding
+/// everything after the first failure.
+fn record_contract_snapshot(name: &str, value: Value, failures: &mut Vec<String>) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_contract_snapshot(name, value);
+    }));
+    if outcome.is_err() {
+        failures.push(name.to_owned());
+    }
+}
+
 #[test]
 fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
+    let mut snapshot_failures: Vec<String> = Vec::new();
     let fixture = JsonContractFixture::new()?;
     let workspace = fixture.workspace_arg();
     let database = fixture.database_arg();
@@ -966,7 +1136,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "status".to_string(),
         ],
     )?;
-    assert_contract_snapshot("status_json_contract", status);
+    record_contract_snapshot("status_json_contract", status, &mut snapshot_failures);
 
     let doctor = run_json_command(
         &fixture,
@@ -980,7 +1150,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "--full".to_string(),
         ],
     )?;
-    assert_contract_snapshot("doctor_json_contract", doctor);
+    record_contract_snapshot("doctor_json_contract", doctor, &mut snapshot_failures);
 
     let search = run_json_command(
         &fixture,
@@ -998,7 +1168,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             index_dir.clone(),
         ],
     )?;
-    assert_contract_snapshot("search_json_contract", search);
+    record_contract_snapshot("search_json_contract", search, &mut snapshot_failures);
 
     let why = run_json_command(
         &fixture,
@@ -1012,7 +1182,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             database.clone(),
         ],
     )?;
-    assert_contract_snapshot("why_json_contract", why);
+    record_contract_snapshot("why_json_contract", why, &mut snapshot_failures);
 
     let context = run_json_command(
         &fixture,
@@ -1036,7 +1206,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "10".to_string(),
         ],
     )?;
-    assert_contract_snapshot("context_json_contract", context);
+    record_contract_snapshot("context_json_contract", context, &mut snapshot_failures);
 
     // Profile config plan contract - dry-run mode produces stable JSON showing
     // selected profile, budgets, planned TOML edits, and host probe summary.
@@ -1055,7 +1225,11 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             fixture.profile_config_arg(),
         ],
     )?;
-    assert_contract_snapshot("profile_config_plan_json_contract", profile_config_plan);
+    record_contract_snapshot(
+        "profile_config_plan_json_contract",
+        profile_config_plan,
+        &mut snapshot_failures,
+    );
 
     let missing_config_apply = run_profile_json_command(
         &fixture,
@@ -1114,7 +1288,21 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
         "missingConfigDryRun": missing_config_apply,
         "existingConfigDryRun": existing_config_apply,
     });
-    assert_contract_snapshot("profile_config_apply_json_contract", profile_config_apply);
+    record_contract_snapshot(
+        "profile_config_apply_json_contract",
+        profile_config_apply,
+        &mut snapshot_failures,
+    );
+
+    if !snapshot_failures.is_empty() {
+        return Err(format!(
+            "{} of 7 contract snapshots did not match: {}. Every diff is printed \
+             above -- all seven were compared, so this list is the COMPLETE set \
+             of drifted contracts rather than just the first one (bd-b3bhh).",
+            snapshot_failures.len(),
+            snapshot_failures.join(", ")
+        ));
+    }
 
     Ok(())
 }
@@ -1723,5 +1911,90 @@ fn live_package_version_assertion_rejects_a_foreign_version() -> TestResult {
         );
     }
     println!("foreign version correctly rejected");
+    Ok(())
+}
+
+/// Positive control for bd-b3bhh's relocation of the contract fixture.
+///
+/// `unique_artifact_dir` now refuses a base that sits inside a git repository,
+/// so `status_json_contract` records a STANDALONE workspace again. That fix
+/// would be indistinguishable from the product quietly losing subproject
+/// detection, and a snapshot cannot tell the difference: both show
+/// `scopeKind: "standalone"`.
+///
+/// So this asserts the other half directly. A workspace genuinely nested under
+/// a repository must still report `subproject`. If someone "fixes" a future
+/// scope red by weakening detection, the contract snapshot stays green and
+/// THIS goes red.
+#[test]
+fn nested_workspace_still_reports_subproject_scope() -> TestResult {
+    let base = repo_free_artifact_base()?;
+    let root = tempfile::Builder::new()
+        .prefix("json-contract-nested-control-")
+        .tempdir_in(&base)
+        .map(tempfile::TempDir::keep)
+        .map_err(|error| format!("failed to create nested control directory: {error}"))?;
+
+    // A bare `.git` directory is enough for upward discovery: the scope
+    // classifier asks whether a repository root was FOUND, not whether it is a
+    // healthy checkout (src/config/workspace.rs, workspace_scope_from_repository_root).
+    fs::create_dir_all(root.join(".git"))
+        .map_err(|error| format!("failed to create synthetic repository root: {error}"))?;
+
+    let workspace = root.join("nested").join("workspace");
+    fs::create_dir_all(workspace.join(".runtime"))
+        .map_err(|error| format!("failed to create nested workspace: {error}"))?;
+
+    // Guard the guard: if this directory is not actually inside a repository,
+    // the assertion below would pass for the wrong reason.
+    if !has_git_ancestor(&workspace) {
+        return Err(format!(
+            "nested control workspace {} has no git ancestor, so it cannot test \
+             subproject detection",
+            workspace.display()
+        ));
+    }
+
+    let binary = ee_binary();
+    let workspace_arg = workspace.display().to_string();
+
+    let init_args = vec![
+        "--json".to_string(),
+        "--workspace".to_string(),
+        workspace_arg.clone(),
+        "init".to_string(),
+    ];
+    parse_ee_json_output(run_ee_at(&binary, &workspace, &init_args)?, &init_args)?;
+
+    let status_args = vec![
+        "--json".to_string(),
+        "--workspace".to_string(),
+        workspace_arg,
+        "status".to_string(),
+    ];
+    let status = parse_ee_json_output(run_ee_at(&binary, &workspace, &status_args)?, &status_args)?;
+
+    let scope_kind = status
+        .pointer("/data/workspace/scopeKind")
+        .or_else(|| status.pointer("/data/scopeKind"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "status response carried no scopeKind; payload keys: {:?}",
+                status
+                    .get("data")
+                    .and_then(Value::as_object)
+                    .map(|map| map.keys().cloned().collect::<Vec<_>>())
+            )
+        })?;
+
+    if scope_kind != "subproject" {
+        return Err(format!(
+            "a workspace nested under a repository reported scopeKind {scope_kind:?}, \
+             expected \"subproject\"; subproject detection may have regressed"
+        ));
+    }
+
+    println!("nested workspace correctly reported subproject scope");
     Ok(())
 }

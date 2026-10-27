@@ -10,10 +10,17 @@
 //! still use the same private staging, tier finalization and publication fence.
 //! V3 inference scales with the corpus, not the legacy 256-document ceiling:
 //! bounded embedding/WAL batches can process a substantial import without
-//! re-embedding every unchanged survivor. The percentage, 8192-mutation and
-//! 32-MiB payload ceilings remain independent admission requirements.
+//! re-embedding every unchanged survivor. Mixed mutations retain independent
+//! percentage, 8192-mutation and 32-MiB payload ceilings. Growing imports may
+//! separate new inputs from bounded old-corpus changes, without using growth
+//! to dilute the retained-input rewrite percentage or re-embedding metadata.
+//! Non-growing bulk maintenance has the same stronger input-equality proof:
+//! metadata refreshes and withdrawals may share the bulk mutation budget only
+//! when every surviving identity and embedding input remain unchanged.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use crate::search::IndexableDocument;
 
@@ -21,6 +28,16 @@ use super::{
     Delta, EmbeddingReuse, IncrementalFallback, IncrementalFallbackReason, MAX_DELTA_PERCENT,
     document_digest, embedding_input_digest, incremental_fallback,
 };
+
+#[path = "index_delta_append.rs"]
+mod append;
+
+#[path = "index_delta_growth.rs"]
+mod growth;
+
+#[path = "index_delta_planning.rs"]
+mod planning;
+use planning::diff_with_digest;
 
 const MAX_LEXICAL_DELTA_DOCUMENTS: usize = 8192;
 const MAX_LEXICAL_DELTA_BYTES: usize = 32 * 1024 * 1024;
@@ -82,63 +99,19 @@ pub(super) fn diff(
     documents: &[IndexableDocument],
     identity: String,
 ) -> Result<Delta, IncrementalFallback> {
-    diff_with_digest(live, inputs, documents, identity, document_digest)
-}
-
-fn diff_with_digest(
-    live: &BTreeMap<String, String>,
-    inputs: &BTreeMap<String, String>,
-    documents: &[IndexableDocument],
-    identity: String,
-    mut digest: impl FnMut(&IndexableDocument) -> String,
-) -> Result<Delta, IncrementalFallback> {
-    let inference_limit = vector_delta_limit(live.len(), documents.len());
-    let mut inference_inputs = 0;
-    let mut lexical = LexicalBudget::default();
-    let mut current = BTreeSet::new();
-    let mut upserts = Vec::new();
-    let mut reusable = BTreeMap::new();
-    for document in documents {
-        if !current.insert(document.id.as_str()) {
-            return Err(incremental_fallback(
-                IncrementalFallbackReason::CorpusRevisionMismatch,
-                "source snapshot contains duplicate document identities",
-            ));
-        }
-        if live.get(&document.id) == Some(&digest(document)) {
-            continue;
-        }
-        lexical.admit(document_payload_bytes(document))?;
-        let input = embedding_input_digest(document);
-        if live.contains_key(&document.id) && inputs.get(&document.id) == Some(&input) {
-            reusable.insert(document.id.clone(), input);
-        } else {
-            if inference_inputs == inference_limit {
-                return Err(over_limit("vector delta exceeds the inference budget"));
+    match diff_with_digest(live, inputs, documents, identity.clone(), document_digest) {
+        Err(error) if error.reason == IncrementalFallbackReason::DeltaOverThreshold => {
+            // Thresholds are rewrite-cost heuristics, not proof that existing
+            // vectors need inference again. The fallback distinguishes growing
+            // intake from inference-free maintenance of a non-growing corpus.
+            // Both share bounded mutations and preserve use-time input checks.
+            match growth::try_plan(live, inputs, documents, identity)? {
+                Some(delta) => Ok(delta),
+                None => Err(error),
             }
-            inference_inputs += 1;
         }
-        upserts.push(document);
+        result => result,
     }
-    let mut removals = Vec::new();
-    for id in live.keys().filter(|id| !current.contains(id.as_str())) {
-        // No embedding is produced for a removal. Charging it as inference
-        // forced large session withdrawals to re-embed every surviving row.
-        // Still charge each operation and its complete ID before cloning it;
-        // deletions and upserts share one finite mutation allowance. The
-        // existing apply path finalizes each vector tier at most once, using
-        // vacuum for deletion-only work and compaction when upserts add WAL.
-        lexical.admit(id.len())?;
-        removals.push(id.clone());
-    }
-    Ok(Delta {
-        upserts: upserts.into_iter().cloned().collect(),
-        removals,
-        reuse: Some(EmbeddingReuse {
-            identity,
-            inputs: reusable,
-        }),
-    })
 }
 
 #[cfg(test)]
@@ -231,9 +204,7 @@ mod tests {
                 .len(),
             inference_limit
         );
-        changed[inference_limit]
-            .content
-            .push_str(" one too many");
+        changed[inference_limit].content.push_str(" one too many");
         assert_eq!(
             planned(&original, &changed)
                 .expect_err("inference budget")
@@ -297,7 +268,9 @@ mod tests {
         let delta = planned(&original, &current).map_err(|error| error.detail)?;
         assert_eq!(delta.upserts.len(), 1408);
         assert_eq!(delta.removals.len(), 128);
-        let vectors = delta.vector_upserts(IDENTITY).map_err(|error| error.detail)?;
+        let vectors = delta
+            .vector_upserts(IDENTITY)
+            .map_err(|error| error.detail)?;
         assert_eq!(vectors.len(), 1152);
         assert!(vectors.len() > MAX_DELTA_DOCUMENTS);
         let expected_vectors: BTreeSet<_> = current[..128]
@@ -326,16 +299,30 @@ mod tests {
     }
 
     #[test]
-    fn large_append_accepts_exact_percentage_and_refuses_the_next_input() -> TestResult {
+    fn large_append_uses_the_import_lane_after_the_ordinary_percentage_limit() -> TestResult {
         let original = documents(3072);
         let mut current = documents(4096);
         let delta = planned(&original, &current).map_err(|error| error.detail)?;
         assert_eq!(delta.upserts.len(), 1024);
         assert!(delta.removals.is_empty());
         current.push(IndexableDocument::new("mem_04096", "lesson 4096"));
-        let error = planned(&original, &current).expect_err("25% remains enforced");
+        let error = diff_with_digest(
+            &super::super::digest_map(&original),
+            &inputs(&original),
+            &current,
+            IDENTITY.to_owned(),
+            document_digest,
+        )
+        .expect_err("ordinary rewrite percentage remains enforced");
         assert_eq!(error.reason, IncrementalFallbackReason::DeltaOverThreshold);
         assert!(error.detail.contains("inference budget"));
+        let delta = planned(&original, &current).map_err(|error| error.detail)?;
+        assert_eq!(delta.upserts.len(), 1025);
+        assert!(delta.removals.is_empty());
+        assert_eq!(
+            super::super::digest_map(&delta.upserts),
+            super::super::digest_map(&current[3072..])
+        );
         Ok(())
     }
 
@@ -425,11 +412,27 @@ mod tests {
                 .is_empty()
         );
         retitle(&mut changed[MAX_LEXICAL_DELTA_DOCUMENTS..]);
+        // The ordinary mixed-mutation ceiling is unchanged. Only the stronger
+        // inference-free fallback can accept the complete metadata refresh.
         assert_eq!(
-            planned(&original, &changed)
-                .expect_err("lexical budget")
-                .reason,
+            diff_with_digest(
+                &super::super::digest_map(&original),
+                &inputs(&original),
+                &changed,
+                IDENTITY.to_owned(),
+                document_digest,
+            )
+            .expect_err("ordinary lexical budget")
+            .reason,
             IncrementalFallbackReason::DeltaOverThreshold
+        );
+        let maintenance = planned(&original, &changed).map_err(|error| error.detail)?;
+        assert_eq!(maintenance.upserts.len(), original.len());
+        assert!(
+            maintenance
+                .vector_upserts(IDENTITY)
+                .map_err(|error| error.detail)?
+                .is_empty()
         );
         Ok(())
     }
@@ -517,11 +520,15 @@ mod tests {
             2
         );
         changed.push(IndexableDocument::new("new_2", &original[0].content));
+        // Growth gets its own intake allowance; equal text still requires
+        // every new document identity to receive a vector.
+        let delta = planned(&original, &changed).map_err(|error| error.detail)?;
         assert_eq!(
-            planned(&original, &changed)
-                .expect_err("new IDs spend vector budget")
-                .reason,
-            IncrementalFallbackReason::DeltaOverThreshold
+            delta
+                .vector_upserts(IDENTITY)
+                .map_err(|error| error.detail)?
+                .len(),
+            3
         );
         Ok(())
     }
@@ -556,6 +563,7 @@ mod tests {
         for retained in [0, 1, 128, 768, 1024] {
             let delta = planned(&original, &original[..retained]).map_err(|error| error.detail)?;
             assert!(delta.upserts.is_empty());
+            assert_eq!(delta.removals.len(), original.len() - retained);
             assert_eq!(
                 delta.removals,
                 original[retained..]
@@ -578,7 +586,19 @@ mod tests {
         let original = documents(MAX_LEXICAL_DELTA_DOCUMENTS + 8);
         let delta = planned(&original, &original[..8]).map_err(|error| error.detail)?;
         assert_eq!(delta.removals.len(), MAX_LEXICAL_DELTA_DOCUMENTS);
-        assert!(planned(&original, &original[..7]).is_err());
+        assert!(
+            diff_with_digest(
+                &super::super::digest_map(&original),
+                &inputs(&original),
+                &original[..7],
+                IDENTITY.to_owned(),
+                document_digest,
+            )
+            .is_err()
+        );
+        let maintenance = planned(&original, &original[..7]).map_err(|error| error.detail)?;
+        assert_eq!(maintenance.removals.len(), MAX_LEXICAL_DELTA_DOCUMENTS + 1);
+        assert!(maintenance.upserts.is_empty());
 
         let mut changed = original[..9].to_vec();
         retitle(&mut changed[..1]);
@@ -587,10 +607,25 @@ mod tests {
         assert_eq!(delta.upserts.len(), 1);
         retitle(&mut changed[1..2]);
         assert_eq!(
-            planned(&original, &changed)
-                .expect_err("removals and upserts cannot each claim the whole budget")
-                .reason,
+            diff_with_digest(
+                &super::super::digest_map(&original),
+                &inputs(&original),
+                &changed,
+                IDENTITY.to_owned(),
+                document_digest,
+            )
+            .expect_err("removals and upserts share the ordinary mutation budget")
+            .reason,
             IncrementalFallbackReason::DeltaOverThreshold
+        );
+        let maintenance = planned(&original, &changed).map_err(|error| error.detail)?;
+        assert_eq!(maintenance.removals.len(), MAX_LEXICAL_DELTA_DOCUMENTS - 1);
+        assert_eq!(maintenance.upserts.len(), 2);
+        assert!(
+            maintenance
+                .vector_upserts(IDENTITY)
+                .map_err(|error| error.detail)?
+                .is_empty()
         );
         Ok(())
     }
@@ -866,9 +901,7 @@ mod tests {
         native_bulk_removal_case(0, 0)
     }
 
-    fn generation_files(
-        root: &Path,
-    ) -> Result<BTreeMap<std::path::PathBuf, Vec<u8>>, String> {
+    fn generation_files(root: &Path) -> Result<BTreeMap<std::path::PathBuf, Vec<u8>>, String> {
         let mut files = BTreeMap::new();
         let mut pending = vec![root.to_path_buf()];
         while let Some(directory) = pending.pop() {

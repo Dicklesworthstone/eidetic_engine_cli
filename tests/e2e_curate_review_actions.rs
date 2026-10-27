@@ -312,3 +312,301 @@ fn curate_retire_dry_run_returns_not_found_for_valid_format_but_missing_candidat
     )?;
     Ok(())
 }
+
+struct ConflictProposalFixture {
+    workspace: PathBuf,
+    memory_a: String,
+    memory_b: String,
+}
+
+impl ConflictProposalFixture {
+    fn new(name: &str) -> Result<Self, String> {
+        let workspace = unique_workspace(name)?
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let mut fixture = Self {
+            workspace,
+            memory_a: String::new(),
+            memory_b: String::new(),
+        };
+        fixture.success(&["init"])?;
+        for (first, content) in [
+            (true, "Production deployments require serial execution."),
+            (
+                false,
+                "Development deployments permit concurrent execution.",
+            ),
+        ] {
+            let response = fixture.success(&[
+                "remember",
+                content,
+                "--level",
+                "semantic",
+                "--kind",
+                "fact",
+                "--no-auto-link",
+                "--no-propose-candidates",
+            ])?;
+            let id = response["data"]["memoryId"]
+                .as_str()
+                .ok_or_else(|| format!("remember must return memoryId: {response}"))?
+                .to_owned();
+            if first {
+                fixture.memory_a = id;
+            } else {
+                fixture.memory_b = id;
+            }
+        }
+        fixture.success(&[
+            "memory",
+            "link",
+            &fixture.memory_a,
+            &fixture.memory_b,
+            "--relation",
+            "contradicts",
+        ])?;
+        Ok(fixture)
+    }
+
+    fn run(&self, args: &[&str]) -> Result<(Output, Value), String> {
+        let output =
+            crate::isolated_ee::isolated_ee_command(&self.workspace.join("isolated-runtime"))?
+                .arg("--workspace")
+                .arg(&self.workspace)
+                .arg("--json")
+                .args(args)
+                .output()
+                .map_err(|error| format!("run ee {args:?}: {error}"))?;
+        let parsed = serde_json::from_slice(&output.stdout).map_err(|error| {
+            format!(
+                "ee {args:?} returned invalid JSON: {error}; status={:?}; stdout={}; stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            )
+        })?;
+        Ok((output, parsed))
+    }
+
+    fn success(&self, args: &[&str]) -> Result<Value, String> {
+        let (output, parsed) = self.run(args)?;
+        ensure(
+            output.status.success() && parsed["success"] == true,
+            format!(
+                "ee {args:?} must succeed; status={:?}; stdout={parsed}; stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+        )?;
+        Ok(parsed)
+    }
+
+    fn database(&self) -> Result<ee::db::DbConnection, String> {
+        ee::db::DbConnection::open_file_read_only(self.workspace.join(".ee/ee.db"))
+            .map_err(|error| error.to_string())
+    }
+
+    fn propose(&self, verb: &str, extra: &[&str]) -> Result<Value, String> {
+        let mut args = vec![
+            "conflict",
+            "resolve",
+            self.memory_a.as_str(),
+            self.memory_b.as_str(),
+            "--verb",
+            verb,
+            "--propose",
+            "--reason",
+            "Each deployment statement has an explicit environment context.",
+        ];
+        args.extend_from_slice(extra);
+        self.success(&args)
+    }
+}
+
+#[test]
+fn queued_conflict_scope_split_preserves_both_memories_until_reviewed_apply() -> TestResult {
+    let fixture = ConflictProposalFixture::new("queued-conflict-scope-split")?;
+    let before = {
+        let db = fixture.database()?;
+        [&fixture.memory_a, &fixture.memory_b]
+            .into_iter()
+            .map(|id| {
+                db.get_memory(id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("missing remembered source {id}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let extra = [
+        "--scope-a-tags",
+        "production",
+        "--scope-b-tags",
+        "development",
+    ];
+    let proposed = fixture.propose("scope-split", &extra)?;
+    ensure(
+        proposed["data"]["status"] == "proposed"
+            && proposed["data"]["persisted"] == true
+            && proposed["data"]["dryRun"] == false,
+        format!("proposal must report a persisted queue entry: {proposed}"),
+    )?;
+    let candidate_id = proposed["data"]["candidateId"]
+        .as_str()
+        .ok_or_else(|| format!("proposal must return its candidateId: {proposed}"))?;
+    let replay = fixture.propose("scope-split", &extra)?;
+    ensure(
+        replay["data"]["candidateId"].as_str() == Some(candidate_id),
+        format!("repeating one proposal must reuse its candidate: {replay}"),
+    )?;
+    let (pending_output, pending_apply) = fixture.run(&["curate", "apply", candidate_id])?;
+    ensure(
+        pending_output.status.success(),
+        "blocked pending apply must return its structured report",
+    )?;
+    assert_blocked_conflict_apply(&pending_apply, "candidate_not_approved")?;
+    {
+        let db = fixture.database()?;
+        for original in &before {
+            let current = db
+                .get_memory(&original.id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("proposal lost source {}", original.id))?;
+            ensure(
+                current.content == original.content && current.tombstoned_at.is_none(),
+                "proposing a scope split must preserve both original memory bodies",
+            )?;
+            ensure(
+                db.get_memory_tags(&original.id)
+                    .map_err(|error| error.to_string())?
+                    .is_empty(),
+                "scope tags must not be applied before review",
+            )?;
+        }
+        let candidate = db
+            .get_curation_candidate(&before[0].workspace_id, candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "proposal was not durably queued".to_owned())?;
+        ensure(
+            candidate.status == "pending",
+            "new proposal must be pending",
+        )?;
+    }
+    let shown = fixture.success(&["curate", "show", candidate_id])?;
+    let receipt_text = shown["data"]["candidate"]["proposedContent"]
+        .as_str()
+        .ok_or_else(|| format!("show must preserve the complete review receipt: {shown}"))?;
+    let receipt: Value = serde_json::from_str(receipt_text)
+        .map_err(|error| format!("review receipt must be structured JSON: {error}"))?;
+    ensure(
+        receipt["plan"] == proposed["data"]["plan"],
+        format!("show must expose the exact resolution actions proposed for review: {shown}"),
+    )?;
+    fixture.success(&["curate", "validate", candidate_id, "--dry-run"])?;
+    fixture.success(&["curate", "accept", candidate_id])?;
+    let applied = fixture.success(&["curate", "apply", candidate_id])?;
+    ensure(
+        applied["data"]["mutation"]["persisted"] == true
+            && applied["data"]["mutation"]["toStatus"] == "applied",
+        format!("approved scope split must complete its queue entry: {applied}"),
+    )?;
+    let db = fixture.database()?;
+    for (original, scope, other_scope) in [
+        (&before[0], "production", "development"),
+        (&before[1], "development", "production"),
+    ] {
+        let current = db
+            .get_memory(&original.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("apply lost source {}", original.id))?;
+        let tags = db
+            .get_memory_tags(&original.id)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            current.content == original.content
+                && current.tombstoned_at.is_none()
+                && tags.iter().any(|tag| tag == scope)
+                && !tags.iter().any(|tag| tag == other_scope),
+            format!(
+                "scope split must preserve and correctly scope {}: {tags:?}",
+                original.id
+            ),
+        )?;
+    }
+    let candidate = db
+        .get_curation_candidate(&before[0].workspace_id, candidate_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "applied candidate disappeared".to_owned())?;
+    ensure(
+        candidate.status == "applied",
+        "candidate must remain applied",
+    )
+}
+
+fn assert_blocked_conflict_apply(response: &Value, code: &str) -> TestResult {
+    ensure(
+        response["success"] == false
+            && response["data"]["application"]["status"] == "blocked"
+            && response["data"]["mutation"]["persisted"] == false
+            && response["data"]["durableMutation"] == false
+            && response["data"]["application"]["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|issue| issue["code"] == code)),
+        format!("queued conflict apply must refuse with {code}: {response}"),
+    )
+}
+
+#[test]
+fn queued_conflict_apply_refuses_resolution_completed_after_approval() -> TestResult {
+    let fixture = ConflictProposalFixture::new("queued-conflict-stale")?;
+    let proposed = fixture.propose("supersede", &["--keep", &fixture.memory_a])?;
+    let candidate_id = proposed["data"]["candidateId"]
+        .as_str()
+        .ok_or_else(|| format!("proposal must return its candidateId: {proposed}"))?;
+    fixture.success(&["curate", "accept", candidate_id])?;
+    fixture.success(&[
+        "conflict",
+        "resolve",
+        &fixture.memory_a,
+        &fixture.memory_b,
+        "--verb",
+        "both-valid",
+        "--apply",
+    ])?;
+    let before = {
+        let db = fixture.database()?;
+        (
+            db.count_table_rows("memories")
+                .map_err(|error| error.to_string())?,
+            db.count_table_rows("audit_log")
+                .map_err(|error| error.to_string())?,
+        )
+    };
+    let (output, response) = fixture.run(&["curate", "apply", candidate_id])?;
+    ensure(
+        output.status.success(),
+        "blocked stale apply must return its structured report",
+    )?;
+    assert_blocked_conflict_apply(&response, "conflict_proposal_stale")?;
+    let db = fixture.database()?;
+    ensure(
+        db.count_table_rows("memories")
+            .map_err(|error| error.to_string())?
+            == before.0
+            && db
+                .count_table_rows("audit_log")
+                .map_err(|error| error.to_string())?
+                == before.1,
+        "a stale proposal must not create another decision or audit a partial resolution",
+    )?;
+    for id in [&fixture.memory_a, &fixture.memory_b] {
+        let memory = db
+            .get_memory(id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("stale application lost source {id}"))?;
+        ensure(
+            memory.tombstoned_at.is_none(),
+            "the stale supersede proposal must not override the later both-valid resolution",
+        )?;
+    }
+    Ok(())
+}

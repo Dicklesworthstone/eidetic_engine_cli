@@ -66,6 +66,8 @@ const MAX_RULE_CONTENT_BYTES: usize = 8192;
 const MAX_RULE_LIST_LIMIT: u32 = 1000;
 const MAX_PLAYBOOK_EXTRACT_LIMIT: u32 = 1000;
 const PLAYBOOK_MIN_EVIDENCE: usize = 3;
+const MAX_PLAYBOOK_SOURCE_BYTES: usize = 64 * 1024;
+const MAX_PLAYBOOK_LESSONS_PER_MEMORY: usize = 16;
 
 /// Options for creating a procedural rule through `ee rule add`.
 #[derive(Clone, Debug)]
@@ -923,6 +925,7 @@ pub struct PlaybookRuleCandidate {
     pub candidate_type: String,
     pub target_memory_id: String,
     pub proposed_content: String,
+    /// A command cited by the lesson, or empty for a prose-only directive.
     pub command_pattern: String,
     pub specificity_score: f32,
     pub confidence: f32,
@@ -2121,7 +2124,7 @@ pub fn extract_playbook_candidates(
     memories.truncate(limit);
 
     let scanned_memory_count = memories.len();
-    let groups = group_playbook_memories(&connection, memories)?;
+    let groups = group_playbook_memories(memories);
     let existing_contents = existing_rule_candidate_contents(&connection, &prepared.workspace_id)?;
 
     let mut candidates = Vec::new();
@@ -2135,28 +2138,24 @@ pub fn extract_playbook_candidates(
 
     for group in groups
         .into_values()
-        .filter(|group| group.memories.len() >= PLAYBOOK_MIN_EVIDENCE)
+        .filter(|group| group.source_memory_ids.len() >= PLAYBOOK_MIN_EVIDENCE)
     {
-        let source_memory_ids = group
-            .memories
-            .iter()
-            .map(|memory| memory.id.clone())
-            .collect::<Vec<_>>();
+        let source_memory_ids = group.source_memory_ids;
         let target_memory_id = source_memory_ids.first().cloned().ok_or_else(|| {
             rule_read_usage_error(
                 "playbook group had no evidence".to_owned(),
                 "ee playbook extract --help",
             )
         })?;
-        let proposed_content = proposed_playbook_rule(&group);
+        let proposed_content = group.proposed_content;
         let normalized = normalize_rule_text(&proposed_content);
         let duplicate = existing_contents.contains(&normalized);
         let specificity = specificity_score(&proposed_content).score;
         let confidence = playbook_candidate_confidence(source_memory_ids.len(), specificity);
         let reason = format!(
-            "playbook extract observed {} semantic memories repeating `{}`.",
+            "playbook extract observed {} semantic memories repeating the directive: {}",
             source_memory_ids.len(),
-            group.command_pattern
+            proposed_content
         );
         let mut candidate_id = None;
         let mut audit_id = None;
@@ -3050,7 +3049,13 @@ fn read_side_path_no_symlinks(path: &Path) -> Result<Vec<u8>, DomainError> {
 /// rule playbook while bounding worst-case allocation. Matches the
 /// `MAX_LAB_FILE_BYTES` cap in `src/core/lab.rs` and the handoff capsule
 /// cap in `src/core/handoff.rs` (6d8d00e5).
-const MAX_PLAYBOOK_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+/// RENAMED from `MAX_PLAYBOOK_SOURCE_BYTES`, which already existed at the top
+/// of this module as `usize = 64 * 1024` — a cap on in-memory content for
+/// lesson extraction, not on a file read. Two module-level consts of the same
+/// name is E0428, so the lib did not compile; the duplicate also produced two
+/// E0308s where this name resolved to the `usize` definition. The sibling cap
+/// this doc comment cites, `MAX_LAB_FILE_BYTES`, supplies the convention.
+const MAX_PLAYBOOK_SOURCE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 fn read_playbook_source_file_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
     // Bounded read with `take(CAP + 1)`. The caller
@@ -3070,13 +3075,13 @@ fn read_playbook_source_file_no_follow(path: &Path) -> std::io::Result<Vec<u8>> 
     // `read_claim_file_bytes_no_follow` in `src/core/claims.rs`.
     let file = open_playbook_source_file_for_read(path)?;
     let mut bytes = Vec::new();
-    file.take(MAX_PLAYBOOK_SOURCE_BYTES.saturating_add(1))
+    file.take(MAX_PLAYBOOK_SOURCE_FILE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PLAYBOOK_SOURCE_BYTES {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PLAYBOOK_SOURCE_FILE_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "playbook source `{}` exceeds the {MAX_PLAYBOOK_SOURCE_BYTES}-byte cap",
+                "playbook source `{}` exceeds the {MAX_PLAYBOOK_SOURCE_FILE_BYTES}-byte cap",
                 path.display()
             ),
         ));
@@ -3126,65 +3131,185 @@ fn hash_str(value: &str) -> String {
 #[derive(Clone, Debug)]
 struct PlaybookMemoryGroup {
     command_pattern: String,
-    memories: Vec<StoredMemory>,
-    tags: BTreeSet<String>,
-    release_signal: bool,
+    proposed_content: String,
+    source_memory_ids: Vec<String>,
 }
 
-fn group_playbook_memories(
-    connection: &DbConnection,
-    memories: Vec<StoredMemory>,
-) -> Result<BTreeMap<String, PlaybookMemoryGroup>, DomainError> {
+fn group_playbook_memories(memories: Vec<StoredMemory>) -> BTreeMap<String, PlaybookMemoryGroup> {
     let mut groups = BTreeMap::new();
     for memory in memories {
-        let Some(command_pattern) = extract_command_pattern(&memory.content) else {
-            continue;
-        };
-        let tags =
-            connection
-                .get_memory_tags(&memory.id)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to read tags for memory {}: {error}", memory.id),
-                    repair: Some(format!("ee memory show {} --json", memory.id)),
-                })?;
-        let release_signal = playbook_release_signal(&memory.content, &tags);
-        let entry = groups
-            .entry(command_pattern.clone())
-            .or_insert_with(|| PlaybookMemoryGroup {
-                command_pattern,
-                memories: Vec::new(),
-                tags: BTreeSet::new(),
-                release_signal: false,
-            });
-        entry.release_signal |= release_signal;
-        entry.tags.extend(tags);
-        entry.memories.push(memory);
+        // A memory gets one vote per complete directive, even when it repeats
+        // that lesson. Opposite directions or different qualifiers never
+        // borrow corroboration merely because they mention the same command.
+        for (proposed_content, command_pattern) in extract_playbook_lessons(&memory.content) {
+            let entry =
+                groups
+                    .entry(proposed_content.clone())
+                    .or_insert_with(|| PlaybookMemoryGroup {
+                        command_pattern,
+                        proposed_content,
+                        source_memory_ids: Vec::new(),
+                    });
+            entry.source_memory_ids.push(memory.id.clone());
+        }
     }
-    Ok(groups)
+    groups
+}
+
+/// Extract bounded source directives without inventing polarity or scope.
+/// Keys retain case, command arguments, conditions, and exceptions verbatim;
+/// labels and Markdown presentation are the only discarded source material.
+fn extract_playbook_lessons(content: &str) -> BTreeMap<String, String> {
+    let mut lessons = BTreeMap::new();
+    if content.len() > MAX_PLAYBOOK_SOURCE_BYTES {
+        return lessons;
+    }
+    // Sentence-local directives can depend on neighboring context such as
+    // "This applies only in CI." Retain the whole paragraph or list item.
+    // The shared parser flushes at skipped Markdown and blank lines; its
+    // line ranges and opening-list markers preserve those block boundaries.
+    let mut blocks = Vec::<(usize, String, bool)>::new();
+    for sentence in crate::core::agentsmd::markdown_prose_sentences(content, None, false) {
+        let statement = playbook_lesson_statement(&sentence.text);
+        let command_pattern = extract_command_pattern(statement).unwrap_or_default();
+        let is_directive = statement.chars().count() >= 12
+            && !statement.ends_with('?')
+            && (is_explicit_playbook_directive(statement)
+                || playbook_command_is_recommended(statement, &command_pattern));
+        if let Some((end_line, block, has_directive)) = blocks.last_mut()
+            && !sentence.opens_list_item
+            && sentence.start_line <= end_line.saturating_add(1)
+        {
+            block.push(' ');
+            block.push_str(&sentence.text);
+            *end_line = sentence.end_line;
+            *has_directive |= is_directive;
+        } else {
+            blocks.push((sentence.end_line, sentence.text, is_directive));
+        }
+    }
+    for (_, block, has_directive) in blocks {
+        let statement = playbook_lesson_statement(&block);
+        if !has_directive || statement.len() > MAX_RULE_CONTENT_BYTES {
+            continue;
+        }
+        let command_pattern = extract_command_pattern(statement).unwrap_or_default();
+        lessons
+            .entry(statement.to_owned())
+            .or_insert(command_pattern);
+        if lessons.len() == MAX_PLAYBOOK_LESSONS_PER_MEMORY {
+            break;
+        }
+    }
+    lessons
+}
+
+fn playbook_lesson_statement(sentence: &str) -> &str {
+    let statement = sentence.trim();
+    let Some((label, remainder)) = statement.split_once(':') else {
+        return statement;
+    };
+    let label = label.trim().to_ascii_lowercase();
+    let named_label = matches!(
+        label.as_str(),
+        "lesson"
+            | "lesson learned"
+            | "lessons learned"
+            | "release lesson"
+            | "rule"
+            | "rule of thumb"
+            | "takeaway"
+            | "key takeaway"
+            | "convention"
+            | "note to self"
+    );
+    let numbered_label = ["lesson ", "release lesson "].iter().any(|prefix| {
+        label.strip_prefix(*prefix).is_some_and(|number| {
+            !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
+        })
+    });
+    if named_label || numbered_label {
+        remainder.trim()
+    } else {
+        statement
+    }
+}
+
+fn playbook_context_prefix(lower: &str) -> bool {
+    [
+        "if ", "when ", "before ", "after ", "for ", "in ", "unless ", "during ", "on ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+}
+
+fn is_explicit_playbook_directive(statement: &str) -> bool {
+    let lower = statement.to_ascii_lowercase();
+    let clause = if playbook_context_prefix(&lower) {
+        lower
+            .split_once(',')
+            .map_or(lower.as_str(), |(_, clause)| clause.trim_start())
+    } else {
+        lower.as_str()
+    };
+    [
+        "always ",
+        "never ",
+        "prefer ",
+        "avoid ",
+        "make sure ",
+        "do not ",
+        "don't ",
+        "don’t ",
+        "must ",
+        "should ",
+    ]
+    .iter()
+    .any(|cue| clause.starts_with(cue))
+}
+
+fn playbook_command_is_recommended(statement: &str, command_pattern: &str) -> bool {
+    if command_pattern.is_empty() {
+        return false;
+    }
+    let lower = statement.to_ascii_lowercase();
+    let Some(command_start) = lower.find(&command_pattern.to_ascii_lowercase()) else {
+        return false;
+    };
+    let prefix = lower[..command_start]
+        .trim()
+        .trim_end_matches('`')
+        .trim_end();
+    let action = if playbook_context_prefix(prefix) {
+        prefix
+            .rsplit_once(',')
+            .map_or(prefix, |(_, clause)| clause.trim_start())
+    } else {
+        prefix
+    };
+    if !matches!(
+        action,
+        "run" | "run the" | "execute" | "execute the" | "invoke" | "use"
+    ) {
+        return false;
+    }
+    let suffix = lower[command_start + command_pattern.len()..]
+        .trim_start_matches('`')
+        .trim_start();
+    ![
+        "failed", "crashed", "panicked", "errored", "returned", "was",
+    ]
+    .iter()
+    .any(|verb| {
+        suffix
+            .strip_prefix(verb)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    })
 }
 
 fn extract_command_pattern(content: &str) -> Option<String> {
-    let lower = content.to_ascii_lowercase();
-    const KNOWN_COMMAND_PATTERNS: &[(&str, &str)] = &[
-        (
-            "cargo clippy --all-targets -- -d warnings",
-            "cargo clippy --all-targets -- -D warnings",
-        ),
-        ("cargo fmt --check", "cargo fmt --check"),
-        ("cargo check --all-targets", "cargo check --all-targets"),
-        ("cargo test", "cargo test"),
-        ("bv --robot-triage", "bv --robot-triage"),
-        ("bv --robot-next", "bv --robot-next"),
-        ("br ready --json", "br ready --json"),
-        ("br sync --flush-only", "br sync --flush-only"),
-        ("ubs", "ubs"),
-    ];
-    for (lower_pattern, original_pattern) in KNOWN_COMMAND_PATTERNS {
-        if lower.contains(*lower_pattern) {
-            return Some((*original_pattern).to_owned());
-        }
-    }
-
+    // Prefer the whole quoted invocation to a known command nested inside it
+    // (for example, `rch exec -- cargo test` must retain its execution wrapper).
     let mut in_backticks = false;
     let mut span = String::new();
     for ch in content.chars() {
@@ -3205,42 +3330,46 @@ fn extract_command_pattern(content: &str) -> Option<String> {
             span.push(ch);
         }
     }
+
+    let lower = content.to_ascii_lowercase();
+    const KNOWN_COMMAND_PATTERNS: &[(&str, &str)] = &[
+        (
+            "cargo clippy --all-targets -- -d warnings",
+            "cargo clippy --all-targets -- -D warnings",
+        ),
+        ("cargo fmt --check", "cargo fmt --check"),
+        ("cargo check --all-targets", "cargo check --all-targets"),
+        ("cargo test", "cargo test"),
+        ("bv --robot-triage", "bv --robot-triage"),
+        ("bv --robot-next", "bv --robot-next"),
+        ("br ready --json", "br ready --json"),
+        ("br sync --flush-only", "br sync --flush-only"),
+        ("ubs", "ubs"),
+    ];
+    for (lower_pattern, original_pattern) in KNOWN_COMMAND_PATTERNS {
+        if lower.match_indices(*lower_pattern).any(|(start, matched)| {
+            let is_word = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '-';
+            !lower[..start].chars().next_back().is_some_and(is_word)
+                && !lower[start + matched.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(is_word)
+        }) {
+            return Some((*original_pattern).to_owned());
+        }
+    }
     None
 }
 
 fn looks_like_command(value: &str) -> bool {
     let value = value.trim();
     const COMMAND_PREFIXES: &[&str] = &[
-        "cargo ", "ee ", "git ", "gh ", "br ", "bv ", "cass ", "rch ", "ubs",
+        "cargo ", "ee ", "git ", "gh ", "br ", "bv ", "cass ", "rch ", "ubs ",
     ];
-    COMMAND_PREFIXES
-        .iter()
-        .any(|prefix| value.starts_with(prefix))
-}
-
-fn playbook_release_signal(content: &str, tags: &[String]) -> bool {
-    let lower = content.to_ascii_lowercase();
-    lower.contains("release")
-        || tags.iter().any(|tag| {
-            matches!(
-                tag.as_str(),
-                "release" | "ci" | "verification" | "preflight"
-            )
-        })
-}
-
-fn proposed_playbook_rule(group: &PlaybookMemoryGroup) -> String {
-    if group.release_signal {
-        format!(
-            "Run `{}` from the workspace root before release work on main; if it fails, store the failure with `ee remember --kind failure`.",
-            group.command_pattern
-        )
-    } else {
-        format!(
-            "Run `{}` from the workspace root when the matching workflow applies; if it fails, store the failure with `ee remember --kind failure`.",
-            group.command_pattern
-        )
-    }
+    value == "ubs"
+        || COMMAND_PREFIXES
+            .iter()
+            .any(|prefix| value.starts_with(prefix))
 }
 
 fn playbook_candidate_confidence(source_memory_count: usize, specificity: f32) -> f32 {
@@ -5077,6 +5206,372 @@ mod tests {
     }
 
     #[test]
+    fn playbook_lessons_preserve_directives_scope_and_wrapped_commands() {
+        for (source, expected, command) in [
+            (
+                "Lesson learned: Never run `cargo test` locally; use `rch exec -- cargo test` from the workspace root.",
+                "Never run `cargo test` locally; use `rch exec -- cargo test` from the workspace root.",
+                "cargo test",
+            ),
+            (
+                "Prefer explicit SQLite transactions in `src/db/mod.rs` for migration batches of >=2 statements.",
+                "Prefer explicit SQLite transactions in `src/db/mod.rs` for migration batches of >=2 statements.",
+                "",
+            ),
+            (
+                "Avoid `git reset --hard` in shared workspaces.",
+                "Avoid `git reset --hard` in shared workspaces.",
+                "git reset --hard",
+            ),
+            (
+                "Always run `cargo fmt --check` before publishing schema changes on main.",
+                "Always run `cargo fmt --check` before publishing schema changes on main.",
+                "cargo fmt --check",
+            ),
+            (
+                "Make sure to validate JSON in `config.toml` before writing `ee.db`.",
+                "Make sure to validate JSON in `config.toml` before writing `ee.db`.",
+                "",
+            ),
+            (
+                "When editing `src/db/mod.rs`, prefer explicit SQLite transactions for migration batches of >=2 statements.",
+                "When editing `src/db/mod.rs`, prefer explicit SQLite transactions for migration batches of >=2 statements.",
+                "",
+            ),
+            (
+                "Run `rch exec -- cargo test --workspace` only in CI after changing `src/lib.rs`.",
+                "Run `rch exec -- cargo test --workspace` only in CI after changing `src/lib.rs`.",
+                "rch exec -- cargo test --workspace",
+            ),
+            (
+                "Before editing src/db/mod.rs:42, run `cargo test` unless the migration is documentation only.",
+                "Before editing src/db/mod.rs:42, run `cargo test` unless the migration is documentation only.",
+                "cargo test",
+            ),
+            (
+                "**Release lesson 12:** run `cargo fmt --check` before release.",
+                "run `cargo fmt --check` before release.",
+                "cargo fmt --check",
+            ),
+            (
+                "Run `cargo test` locally. This applies only inside disposable CI containers.",
+                "Run `cargo test` locally. This applies only inside disposable CI containers.",
+                "cargo test",
+            ),
+            (
+                "Only inside disposable CI containers.\nRun `cargo test` locally.",
+                "Only inside disposable CI containers. Run `cargo test` locally.",
+                "cargo test",
+            ),
+            (
+                "- Run `cargo test` locally.\n  This applies only inside disposable CI containers.",
+                "Run `cargo test` locally. This applies only inside disposable CI containers.",
+                "cargo test",
+            ),
+        ] {
+            let lessons = extract_playbook_lessons(source);
+            assert_eq!(lessons.len(), 1, "source: {source}; lessons: {lessons:?}");
+            assert_eq!(lessons.get(expected).map(String::as_str), Some(command));
+        }
+    }
+
+    #[test]
+    fn playbook_lessons_abstain_from_mentions_quotes_and_oversized_directives() {
+        for source in [
+            "We did not run `cargo test` because it would violate the workspace policy.",
+            "The log mentions cargo test as the command from the previous incident.",
+            "Run `cargo test` failed twice before the incident was resolved.",
+            "The pubsub cache failed during startup.",
+            "Run `cargo test` locally?",
+            "> Never run `cargo test` locally.",
+            "```text\nAlways run `cargo test` locally.\n```",
+        ] {
+            assert!(
+                extract_playbook_lessons(source).is_empty(),
+                "source: {source}"
+            );
+        }
+        let oversized = format!(
+            "Always run `cargo test` {} unless the workspace is shared.",
+            "only after review ".repeat(MAX_RULE_CONTENT_BYTES)
+        );
+        assert!(extract_playbook_lessons(&oversized).is_empty());
+        let long_directive = format!(
+            "Always run `cargo test` {} unless the workspace is shared.",
+            "only after review ".repeat(500)
+        );
+        assert!(long_directive.len() > MAX_RULE_CONTENT_BYTES);
+        assert!(long_directive.len() < MAX_PLAYBOOK_SOURCE_BYTES);
+        assert!(extract_playbook_lessons(&long_directive).is_empty());
+    }
+
+    #[test]
+    fn playbook_lessons_deduplicate_one_memory_without_merging_scopes() {
+        let local = "Never run `cargo test` locally; use `rch exec -- cargo test`.";
+        let release = "Run `cargo test` only before release.";
+        let migration = "Run `cargo test` only before SQLite migrations.";
+        let source = format!(
+            "- {local}\n- {local}\n- {release}\n- {migration}\n- Prefer explicit SQLite transactions\n  in `src/db/mod.rs` for migration batches of >=2 statements."
+        );
+        let lessons = extract_playbook_lessons(&source);
+        assert_eq!(lessons.len(), 4);
+        assert!(lessons.contains_key(local));
+        assert!(lessons.contains_key(release));
+        assert!(lessons.contains_key(migration));
+        assert!(lessons.contains_key(
+            "Prefer explicit SQLite transactions in `src/db/mod.rs` for migration batches of >=2 statements."
+        ));
+    }
+
+    #[test]
+    fn playbook_extract_previews_and_applies_literal_lessons_with_matching_evidence() -> TestResult
+    {
+        const NEGATIVE: &str =
+            "Never run `cargo test` locally; use `rch exec -- cargo test` from the workspace root.";
+        const POSITIVE: &str = "Run `cargo test` locally.";
+        const PREFERENCE: &str = "Prefer explicit SQLite transactions in `src/db/mod.rs` for migration batches of >=2 statements.";
+        const OPPOSING: &str = "Avoid explicit SQLite transactions in `src/db/mod.rs` for migration batches of >=2 statements.";
+        const REPEATED: &str =
+            "Make sure to validate JSON in `config.toml` before writing `ee.db`.";
+        const SCOPED: &str =
+            "Run `cargo test` locally. This applies only inside disposable CI containers.";
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let canonical_workspace = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_path = canonical_workspace.as_path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("literal-playbook-extract".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut expected_sources = BTreeMap::<String, Vec<String>>::new();
+        let mut stored_sources = Vec::new();
+        let mut seed = 100_u128;
+        for (directive, count) in [
+            (NEGATIVE, 3),
+            (POSITIVE, 2),
+            (PREFERENCE, 3),
+            (OPPOSING, 2),
+            (REPEATED, 1),
+            (SCOPED, 3),
+        ] {
+            for _ in 0..count {
+                let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(seed)).to_string();
+                let content = if directive == REPEATED {
+                    format!("{directive}\n\n{directive}\n\n{directive}")
+                } else {
+                    format!("Lesson {seed}: {directive}")
+                };
+                if count == PLAYBOOK_MIN_EVIDENCE {
+                    expected_sources
+                        .entry(directive.to_owned())
+                        .or_default()
+                        .push(memory_id.clone());
+                }
+                connection
+                    .insert_memory(
+                        &memory_id,
+                        &crate::db::CreateMemoryInput {
+                            workspace_id: workspace_id.clone(),
+                            level: "semantic".to_owned(),
+                            kind: "lesson".to_owned(),
+                            content: content.clone(),
+                            workflow_id: None,
+                            confidence: 0.70,
+                            utility: 0.60,
+                            importance: 0.55,
+                            provenance_uri: None,
+                            trust_class: "agent_assertion".to_owned(),
+                            trust_subclass: None,
+                            tags: vec!["release".to_owned()],
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                stored_sources.push((memory_id, content));
+                seed += 1;
+            }
+        }
+        for sources in expected_sources.values_mut() {
+            sources.sort();
+        }
+        connection.close().map_err(|error| error.to_string())?;
+        let mut options = PlaybookExtractOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            since: None,
+            limit: 100,
+            dry_run: true,
+            actor: Some("test"),
+        };
+        let preview = extract_playbook_candidates(&options).map_err(|error| error.message())?;
+        assert_eq!(preview.scanned_memory_count, 14);
+        assert_eq!(preview.candidate_count, 3);
+        assert_eq!(preview.persisted_count, 0);
+        assert!(!preview.durable_mutation);
+        for candidate in &preview.candidates {
+            let mut sources = candidate.source_memory_ids.clone();
+            sources.sort();
+            assert_eq!(
+                Some(&sources),
+                expected_sources.get(&candidate.proposed_content)
+            );
+            assert_eq!(sources.len(), 3);
+            assert!(candidate.candidate_id.is_none());
+            assert!(specificity_score(&candidate.proposed_content).passes_threshold);
+        }
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .list_curation_candidates(&workspace_id, Some("rule"), None, None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        assert!(
+            connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        connection.close().map_err(|error| error.to_string())?;
+
+        options.dry_run = false;
+        let extracted = extract_playbook_candidates(&options).map_err(|error| error.message())?;
+        assert_eq!(extracted.persisted_count, 3);
+        assert!(extracted.durable_mutation);
+        let replay = extract_playbook_candidates(&options).map_err(|error| error.message())?;
+        assert_eq!(replay.persisted_count, 0);
+        assert_eq!(replay.duplicate_count, 3);
+        let candidate_ids = extracted
+            .candidates
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .candidate_id
+                    .clone()
+                    .ok_or_else(|| "candidate id missing".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for candidate_id in &candidate_ids {
+            let validation = crate::core::curate::validate_curation_candidate(
+                &crate::core::curate::CurateValidateOptions {
+                    workspace_path,
+                    database_path: Some(&database_path),
+                    candidate_id,
+                    actor: Some("test"),
+                    dry_run: false,
+                },
+            )
+            .map_err(|error| error.message())?;
+            assert_eq!(
+                validation.validation.status, "passed",
+                "{:?}",
+                validation.validation.errors
+            );
+        }
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let audit_count = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len();
+        connection.close().map_err(|error| error.to_string())?;
+        for candidate_id in &candidate_ids {
+            let preview = crate::core::curate::apply_curation_candidate(
+                &crate::core::curate::CurateApplyOptions {
+                    workspace_path,
+                    database_path: Some(&database_path),
+                    candidate_id,
+                    actor: Some("test"),
+                    dry_run: true,
+                    allow_tombstone_load_bearing: false,
+                },
+            )
+            .map_err(|error| error.message())?;
+            assert_eq!(preview.application.decision, "create_rule");
+            assert!(!preview.durable_mutation);
+        }
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .list_procedural_rules(&workspace_id, None, None, false)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        assert_eq!(
+            connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            audit_count
+        );
+        assert_eq!(
+            connection
+                .list_curation_candidates(&workspace_id, Some("rule"), None, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            3
+        );
+        connection.close().map_err(|error| error.to_string())?;
+
+        for candidate_id in &candidate_ids {
+            let apply_options = crate::core::curate::CurateApplyOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id,
+                actor: Some("test"),
+                dry_run: false,
+                allow_tombstone_load_bearing: false,
+            };
+            let applied = crate::core::curate::apply_curation_candidate(&apply_options)
+                .map_err(|error| error.message())?;
+            assert_eq!(applied.application.decision, "create_rule");
+            assert!(applied.durable_mutation);
+            let replay = crate::core::curate::apply_curation_candidate(&apply_options)
+                .map_err(|error| error.message())?;
+            assert_eq!(replay.application.status, "already_applied");
+            assert!(!replay.durable_mutation);
+        }
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let rules = connection
+            .list_procedural_rules(&workspace_id, Some("candidate"), Some("workspace"), false)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(rules.len(), 3);
+        for rule in rules {
+            let sources = connection
+                .get_rule_source_memory_ids(&rule.id)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(Some(&sources), expected_sources.get(&rule.content));
+        }
+        for (memory_id, content) in stored_sources {
+            let memory = connection
+                .get_memory(&memory_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("source memory {memory_id} missing after apply"))?;
+            assert_eq!(memory.content, content);
+            assert_eq!(memory.level, "semantic");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn playbook_extract_creates_rule_candidate_and_apply_flow_preserves_evidence() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -5142,7 +5637,7 @@ mod tests {
         assert_eq!(report.duplicate_count, 0);
         assert_eq!(
             report.candidates[0].proposed_content,
-            "Run `cargo fmt --check` from the workspace root before release work on main; if it fails, store the failure with `ee remember --kind failure`."
+            "run `cargo fmt --check` before release."
         );
         assert_eq!(report.candidates[0].source_memory_ids.len(), 5);
         let candidate_id = report.candidates[0]
@@ -5185,10 +5680,7 @@ mod tests {
             .list_procedural_rules(&workspace_id, Some("candidate"), Some("workspace"), false)
             .map_err(|error| error.to_string())?;
         assert_eq!(rules.len(), 1);
-        assert_eq!(
-            rules[0].content,
-            "Run `cargo fmt --check` from the workspace root before release work on main; if it fails, store the failure with `ee remember --kind failure`."
-        );
+        assert_eq!(rules[0].content, "run `cargo fmt --check` before release.");
         let mut expected_sources = source_ids;
         expected_sources.sort();
         let actual_sources = connection

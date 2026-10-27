@@ -1,5 +1,5 @@
-//! Pack-lane coverage for derived incident cards (ADR 0091): a matched turn
-//! brings its covering card, while distinct facts and repairs remain eligible.
+//! Pack-lane coverage for derived incident cards (ADR 0091): a matched source
+//! brings its card, while interleaved facts and distinct repairs remain eligible.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
@@ -108,6 +108,16 @@ impl Fixture {
     /// One fixed compile error: call, failing result, explaining turn,
     /// verifying call and result. Returns (repair turn id, card id).
     fn incident(&self, seed: u128, explanation: &str) -> (String, String) {
+        let (repair, card, _) = self.incident_with_interleaved_turns(seed, explanation, &[]);
+        (repair, card)
+    }
+
+    fn incident_with_interleaved_turns(
+        &self,
+        seed: u128,
+        explanation: &str,
+        turns: &[(&str, &str)],
+    ) -> (String, String, Vec<String>) {
         let session_id = self.session(seed);
         self.line(
             &session_id,
@@ -128,9 +138,22 @@ impl Fixture {
                  "content": "error[E0277]: the trait bound `Widget: Serialize` is not satisfied"}
             ]}}),
         );
+        let mut interleaved = Vec::new();
+        for (index, &(role, text)) in turns.iter().enumerate() {
+            interleaved.push(self.line(
+                &session_id,
+                3 + u32::try_from(index).unwrap(),
+                "message",
+                role,
+                &json!({"type": role, "message": {"role": role, "content": [
+                    {"type": "text", "text": text}
+                ]}}),
+            ));
+        }
+        let repair_line = 3 + u32::try_from(turns.len()).unwrap();
         let repair = self.line(
             &session_id,
-            3,
+            repair_line,
             "message",
             "assistant",
             &json!({"type": "assistant", "message": {"role": "assistant", "content": [
@@ -139,7 +162,7 @@ impl Fixture {
         );
         self.line(
             &session_id,
-            4,
+            repair_line + 1,
             "tool_call",
             "assistant",
             &json!({"type": "assistant", "message": {"role": "assistant", "content": [
@@ -148,7 +171,7 @@ impl Fixture {
         );
         self.line(
             &session_id,
-            5,
+            repair_line + 2,
             "tool_result",
             "user",
             &json!({"type": "user", "message": {"role": "user", "content": [
@@ -166,6 +189,7 @@ impl Fixture {
         (
             repair,
             crate::core::incident_card::incident_card_id(&self.workspace_id, &failure),
+            interleaved,
         )
     }
 
@@ -264,6 +288,7 @@ fn matched_turns_keep_distinct_repairs_for_the_same_error_class() {
         &json!({"type": "user", "message": {"role": "user", "content": "Please serialize the widget cache too."}}),
     );
 
+    let mut preference_degraded = Vec::new();
     let preferred = prefer_incident_cards(
         &fixture.db,
         std::slice::from_ref(&fixture.workspace_id),
@@ -274,7 +299,9 @@ fn matched_turns_keep_distinct_repairs_for_the_same_error_class() {
             fixture.candidate(&unrelated, 0.7),
             fixture.candidate(&second_turn, 0.6),
         ],
+        &mut preference_degraded,
     );
+    assert!(preference_degraded.is_empty());
     let ids = preferred
         .iter()
         .map(|candidate| candidate.item.evidence_id.as_str())
@@ -342,10 +369,170 @@ fn matched_turns_keep_distinct_repairs_for_the_same_error_class() {
             fixture.candidate(&first_turn, 0.9),
             fixture.candidate(&first_card, 0.5),
         ],
+        &mut preference_degraded,
     );
+    assert!(preference_degraded.is_empty());
     assert_eq!(direct.len(), 1);
     assert_eq!(direct[0].item.evidence_id, first_card);
     assert_eq!(direct[0].item.relevance.into_inner(), 0.5);
+}
+
+#[test]
+fn incident_card_substitution_preserves_interleaved_user_and_assistant_facts() {
+    let fixture = Fixture::new();
+    let (repair_id, card_id, facts) = fixture.incident_with_interleaved_turns(
+        0x59_0601,
+        "Widget needs to derive Serialize because the store writes it. Added the derive in src/widget.rs.",
+        &[
+            ("user", "Retain invoice history for 90 days."),
+            ("assistant", "The billing archive contains invoice history for 90 days."),
+        ],
+    );
+    let card = fixture.db.get_evidence_span(&card_id).unwrap().unwrap();
+    assert_eq!((card.start_line, card.end_line), (1, 7));
+    let metadata: serde_json::Value =
+        serde_json::from_str(card.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["repairSpanIds"], json!([repair_id]));
+    assert!(!card.reader_text().contains("invoice"));
+
+    let user = fixture.candidate(&facts[0], 0.95);
+    let assistant = fixture.candidate(&facts[1], 0.85);
+    let mut degraded = Vec::new();
+    let preferred = prefer_incident_cards(
+        &fixture.db,
+        std::slice::from_ref(&fixture.workspace_id),
+        &crate::models::QueryFilters::default(),
+        "invoice history retention",
+        vec![
+            user.clone(),
+            fixture.candidate(&repair_id, 0.9),
+            assistant.clone(),
+        ],
+        &mut degraded,
+    );
+    assert!(degraded.is_empty());
+    assert_eq!(preferred.len(), 3);
+    assert_eq!(preferred[0].item, user.item);
+    assert_eq!(preferred[2].item, assistant.item);
+    assert_eq!(preferred[1].item.evidence_id, card_id);
+    assert_eq!(preferred[1].item.relevance.into_inner(), 0.9);
+    assert!(
+        preferred[1]
+            .item
+            .why
+            .contains(&format!("through its source turn {repair_id}"))
+    );
+
+    let request = ContextRequest::from_query("invoice history retention").unwrap();
+    let mut draft = crate::pack::assemble_draft(
+        request.query.clone(),
+        request.budget,
+        Vec::<PackCandidate>::new(),
+    )
+    .unwrap();
+    append_ranked_native_pack_items(
+        Vec::new(),
+        preferred,
+        &request,
+        None,
+        &mut draft,
+        &mut degraded,
+    );
+    assert!(degraded.is_empty());
+    assert_eq!(
+        draft
+            .evidence_items
+            .iter()
+            .map(|item| item.evidence_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![facts[0].as_str(), card_id.as_str(), facts[1].as_str()],
+    );
+    assert_eq!(draft.evidence_items[0].content, user.item.content);
+    assert_eq!(draft.evidence_items[2].content, assistant.item.content);
+    assert!(draft.used_tokens <= draft.budget.max_tokens());
+}
+
+#[test]
+fn directly_matched_incident_card_preserves_other_turns_inside_its_range() {
+    let fixture = Fixture::new();
+    let (repair_id, card_id, facts) = fixture.incident_with_interleaved_turns(
+        0x59_0602,
+        "Widget needs to derive Serialize because the store writes it. Added the derive in src/widget.rs.",
+        &[
+            ("user", "Retain invoice history for 90 days."),
+            ("assistant", "The billing archive contains invoice history for 90 days."),
+        ],
+    );
+    let user = fixture.candidate(&facts[0], 0.95);
+    let assistant = fixture.candidate(&facts[1], 0.85);
+    let direct_card = fixture.candidate(&card_id, 0.7);
+    let mut degraded = Vec::new();
+    let preferred = prefer_incident_cards(
+        &fixture.db,
+        std::slice::from_ref(&fixture.workspace_id),
+        &crate::models::QueryFilters::default(),
+        "invoice history retention",
+        vec![
+            user.clone(),
+            fixture.candidate(&repair_id, 0.9),
+            assistant.clone(),
+            direct_card.clone(),
+        ],
+        &mut degraded,
+    );
+    assert!(degraded.is_empty());
+    assert_eq!(preferred.len(), 3);
+    assert_eq!(preferred[0].item, user.item);
+    assert_eq!(preferred[1].item, assistant.item);
+    assert_eq!(preferred[2].item, direct_card.item);
+    assert!(
+        preferred
+            .iter()
+            .all(|candidate| candidate.item.evidence_id != repair_id)
+    );
+}
+
+#[test]
+fn altered_incident_card_source_membership_cannot_hide_interleaved_facts() {
+    let fixture = Fixture::new();
+    let (repair_id, card_id, facts) = fixture.incident_with_interleaved_turns(
+        0x59_0603,
+        "Widget needs to derive Serialize because the store writes it. Added the derive in src/widget.rs.",
+        &[("user", "Retain invoice history for 90 days.")],
+    );
+    let card = fixture.db.get_evidence_span(&card_id).unwrap().unwrap();
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(card.metadata_json.as_deref().unwrap()).unwrap();
+    metadata["repairSpanIds"] = json!([repair_id, facts[0]]);
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE evidence_spans SET metadata_json = '{metadata}' WHERE id = '{card_id}'",
+        ))
+        .unwrap();
+
+    let fact = fixture.candidate(&facts[0], 0.95);
+    let repair = fixture.candidate(&repair_id, 0.9);
+    let mut degraded = Vec::new();
+    let preferred = prefer_incident_cards(
+        &fixture.db,
+        std::slice::from_ref(&fixture.workspace_id),
+        &crate::models::QueryFilters::default(),
+        "invoice history retention",
+        vec![
+            fact.clone(),
+            fixture.candidate(&card_id, 0.92),
+            repair.clone(),
+        ],
+        &mut degraded,
+    );
+    assert_eq!(preferred.len(), 2);
+    assert_eq!(preferred[0].item, fact.item);
+    assert_eq!(preferred[1].item, repair.item);
+    assert!(degraded.iter().any(|entry| {
+        entry.code == "context_evidence_hit_unhydrated"
+            && entry.message.contains("current failure/repair/retry proof")
+    }));
 }
 
 #[test]
@@ -703,5 +890,87 @@ fn plain_reader_bodies_retain_their_original_source_roles_and_kinds() {
         degraded[0]
             .message
             .starts_with("1 imported evidence candidate(s)")
+    );
+}
+
+#[test]
+fn obsolete_incident_card_proof_is_withheld_without_hiding_the_observed_turn() {
+    let fixture = Fixture::new();
+    let (turn_id, card_id) = fixture.incident(
+        0x59_0501,
+        "Widget needs to derive Serialize because the store writes it. Added the derive in src/widget.rs.",
+    );
+    let card = fixture.db.get_evidence_span(&card_id).unwrap().unwrap();
+    let proof = fixture
+        .db
+        .list_evidence_spans_for_session(&card.session_id)
+        .unwrap()
+        .into_iter()
+        .find(|span| !span.is_derived_incident_card() && span.end_line == 5)
+        .expect("verifying result");
+    fixture
+        .db
+        .execute_raw(&format!(
+            "UPDATE evidence_spans SET excerpt = 'stale verification source' WHERE id = '{}'",
+            proof.id
+        ))
+        .unwrap();
+
+    let mut degraded = Vec::new();
+    let preferred = prefer_incident_cards(
+        &fixture.db,
+        std::slice::from_ref(&fixture.workspace_id),
+        &crate::models::QueryFilters::default(),
+        "widget serialize",
+        vec![
+            fixture.candidate(&card_id, 0.9),
+            fixture.candidate(&turn_id, 0.8),
+        ],
+        &mut degraded,
+    );
+    assert_eq!(preferred.len(), 1);
+    assert_eq!(preferred[0].item.evidence_id, turn_id);
+    assert!(!preferred[0].incident_card);
+    assert!(degraded.iter().any(|entry| {
+        entry.code == "context_evidence_hit_unhydrated"
+            && entry.message.contains("current failure/repair/retry proof")
+    }));
+}
+
+#[test]
+fn incident_card_lookup_failure_is_reported_and_keeps_original_transcript_candidate() {
+    let fixture = Fixture::new();
+    let (turn_id, _) = fixture.incident(
+        0x59_0502,
+        "Widget needs to derive Serialize because the store writes it. Added the derive in src/widget.rs.",
+    );
+    let turn = fixture.candidate(&turn_id, 0.8);
+    fixture
+        .db
+        .execute_raw("ALTER TABLE evidence_spans RENAME TO unavailable_incident_sources")
+        .unwrap();
+
+    let mut degraded = Vec::new();
+    let preferred = prefer_incident_cards(
+        &fixture.db,
+        std::slice::from_ref(&fixture.workspace_id),
+        &crate::models::QueryFilters::default(),
+        "widget serialize",
+        vec![turn],
+        &mut degraded,
+    );
+    assert_eq!(preferred.len(), 1);
+    assert_eq!(preferred[0].item.evidence_id, turn_id);
+    assert!(!preferred[0].incident_card);
+    assert!(degraded.iter().any(|entry| {
+        entry.code == "context_evidence_hit_unhydrated"
+            && entry
+                .message
+                .contains("original transcript candidates were retained")
+    }));
+    assert!(
+        degraded
+            .iter()
+            .all(|entry| !entry.message.contains("unavailable_incident_sources"))
     );
 }

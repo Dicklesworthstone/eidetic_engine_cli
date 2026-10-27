@@ -4,6 +4,11 @@
 //! Keep unknown, malformed, truncated and still-running outputs out of the
 //! helpful-repair store; any explicit failure overrides optimistic summaries.
 
+#[path = "cass_error_recall_execution.rs"]
+mod execution;
+
+use std::borrow::Cow;
+
 use serde_json::Value;
 
 use super::{MAX_SCANNED_OUTPUT_BYTES, ToolOutput, bounded, content_text};
@@ -51,10 +56,21 @@ fn exit_report(text: &str) -> ExitReport {
 
 pub(super) fn failed(output: &ToolOutput) -> bool {
     output.is_error == Some(true)
+        || matches!(super::traceback::decode(&output.text), Ok(Some(_)))
         || output.exit_code.is_some_and(|code| code != 0)
-        || exit_report(bounded(&output.text)) == ExitReport::Rejected
-        || super::structured_error_reports_failure(&output.text)
-        || bounded(&output.text).lines().any(|line| {
+        || match terminal_text(bounded(&output.text)) {
+            Ok(text) => text_failed(&text),
+            // Unknown terminal operations are not a declared command failure.
+            // Keep any raw failure evidence; completion separately refuses the
+            // uninterpretable output rather than treating it as clean stdout.
+            Err(()) => text_failed(bounded(&output.text)),
+        }
+}
+
+fn text_failed(text: &str) -> bool {
+    exit_report(text) == ExitReport::Rejected
+        || super::structured_error_reports_failure(text)
+        || text.lines().any(|line| {
             let line = line.trim().to_ascii_lowercase();
             line.starts_with("error:")
                 || line.starts_with("error[")
@@ -68,19 +84,178 @@ pub(super) fn failed(output: &ToolOutput) -> bool {
                         };
                         count.is_empty() || count.bytes().any(|byte| byte != b'0')
                     }))
+                || runner_report_failed(&line)
         })
 }
 
-pub(super) fn succeeded(output: &ToolOutput) -> bool {
-    // Diagnostic extraction may inspect a prefix, but that prefix can never
-    // certify success when a failure or final status could follow the bound.
-    if output.text.len() > MAX_SCANNED_OUTPUT_BYTES
-        || output.failed()
-        || !super::structured_output_allows_completion(&output.text)
+/// A bounded classification view, never a replacement for retained evidence.
+/// Remove only SGR styling and complete OSC-8 hyperlink control strings. Link
+/// targets are presentation metadata, not diagnostic text or exit authority.
+/// Carriage-return updates remain separate observations: a green redraw cannot
+/// erase an earlier failure. Do not emulate cursor motion, erasure or backspace.
+pub(super) fn terminal_text(text: &str) -> Result<Cow<'_, str>, ()> {
+    if !text
+        .chars()
+        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\t'))
     {
+        return Ok(Cow::Borrowed(text));
+    }
+    let mut visible = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\u{1b}' => match chars.next() {
+                Some('[') => loop {
+                    match chars.next() {
+                        Some('m') => break,
+                        Some('0'..='9' | ';' | ':') => {}
+                        _ => return Err(()),
+                    }
+                },
+                Some(']') => {
+                    if chars.next() != Some('8') || chars.next() != Some(';') {
+                        return Err(());
+                    }
+                    let mut separator = false;
+                    loop {
+                        match chars.next() {
+                            Some('\u{7}') if separator => break,
+                            Some('\u{1b}') if separator && chars.next() == Some('\\') => break,
+                            Some(';') => separator = true,
+                            Some(value) if !value.is_control() => {}
+                            _ => return Err(()),
+                        }
+                    }
+                }
+                _ => return Err(()),
+            },
+            '\r' => visible.push('\n'),
+            '\n' | '\t' => visible.push(ch),
+            value if value.is_control() => return Err(()),
+            value => visible.push(value),
+        }
+    }
+    Ok(Cow::Owned(visible))
+}
+
+/// A shell pipeline can exit zero after its test runner failed. Recognize
+/// complete runner reports rather than searching arbitrary prose for `failed`.
+/// This is a veto only: a passing summary never supplies completion authority.
+fn runner_report_failed(line: &str) -> bool {
+    let mut body = line.trim();
+    if body == "fail" || body.starts_with("fail\t") {
+        return true;
+    }
+    if let Some(rest) = body.strip_prefix("not ok ")
+        && rest.split_whitespace().next().is_some_and(decimal_count)
+    {
+        return true;
+    }
+    if let Some(fields) = body
+        .strip_prefix("failed (")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        return !fields.is_empty()
+            && fields.split(',').all(|field| {
+                field.trim().split_once('=').is_some_and(|(name, count)| {
+                    matches!(name.trim(), "failures" | "errors" | "skipped")
+                        && decimal_count(count.trim())
+                })
+            });
+    }
+    if body.starts_with("===") {
+        if !body.ends_with("===") {
+            return false;
+        }
+        body = body.trim_matches('=').trim();
+    }
+    for header in ["test suites", "test files", "snapshots", "tests"] {
+        if let Some(rest) = body.strip_prefix(header) {
+            if let Some(rest) = rest.strip_prefix(':') {
+                body = rest.trim();
+                break;
+            }
+            if rest.starts_with(char::is_whitespace) {
+                body = rest.trim();
+                break;
+            }
+        }
+    }
+    if let Some((counts, elapsed)) = body.rsplit_once(" in ") {
+        if !runner_duration(elapsed) {
+            return false;
+        }
+        body = counts.trim_end();
+    }
+    if let Some((counts, total)) = body.rsplit_once('(') {
+        if !total
+            .strip_suffix(')')
+            .is_some_and(|total| decimal_count(total.trim()))
+        {
+            return false;
+        }
+        body = counts.trim_end();
+    }
+    let mut failure = false;
+    for field in body.split([',', ';', '|']) {
+        let mut words = field.split_whitespace();
+        let Some(count) = words.next().filter(|count| decimal_count(count)) else {
+            return false;
+        };
+        let Some(outcome) = words.next() else {
+            return false;
+        };
+        let failed = match outcome {
+            "failed" | "failing" | "fail" | "failure" | "failures" | "error" | "errors" => true,
+            "passed" | "passing" | "pass" | "skipped" | "pending" | "todo" | "total"
+            | "ignored" | "deselected" | "warning" | "warnings" => false,
+            _ => return false,
+        };
+        if words.next().is_some() {
+            return false;
+        }
+        // Counts are decimal strings, not machine integers. Huge failure
+        // counters must not overflow into an absent or zero observation.
+        failure |= failed && count.bytes().any(|byte| byte != b'0');
+    }
+    failure
+}
+
+fn decimal_count(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn runner_duration(text: &str) -> bool {
+    let number = ["milliseconds", "seconds", "ms", "s"]
+        .iter()
+        .find_map(|unit| text.trim().strip_suffix(*unit).map(str::trim));
+    let Some(number) = number else {
+        return false;
+    };
+    let mut parts = number.split('.');
+    parts.next().is_some_and(decimal_count)
+        && parts.next().is_none_or(decimal_count)
+        && parts.next().is_none()
+}
+
+pub(super) fn succeeded(output: &ToolOutput) -> bool {
+    // A printed failure or an incomplete native traceback cannot certify a
+    // repair, even when an outer wrapper retained a zero exit status.
+    if !matches!(super::traceback::decode(&output.text), Ok(None)) {
         return false;
     }
-    let lower = output.text.to_ascii_lowercase();
+    // Diagnostic extraction may inspect a prefix, but that prefix can never
+    // certify success when a failure or final status could follow the bound.
+    if output.text.len() > MAX_SCANNED_OUTPUT_BYTES || output.failed() {
+        return false;
+    }
+    let Ok(text) = terminal_text(&output.text) else {
+        return false;
+    };
+    if !super::structured_output_allows_completion(&text) {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
     if [
         "process running with session id",
         "command running in background",
@@ -99,6 +274,9 @@ pub(super) fn succeeded(output: &ToolOutput) -> bool {
     // Claude's explicit is_error=false is a tool-level success observation,
     // including quiet commands. Codex instead carries an exit status, either
     // in metadata or in the execution wrapper. Bare stdout proves neither.
+    // In particular, presentation decoding is a veto path: it must not create
+    // a new positive execution observation. Only the original status fields
+    // or an original, unstyled execution trailer may establish completion.
     output.is_error == Some(false)
         || output.exit_code == Some(0)
         || exit_report(&output.text) == ExitReport::Success
@@ -115,7 +293,11 @@ pub(super) fn codex_output(raw: &Value) -> Option<ToolOutput> {
                 && structured.is_object()
                 && (structured.get("output").is_some() || structured.get("metadata").is_some())
             {
-                return structured_output(&structured);
+                let mut output = structured_output(&structured)?;
+                if !execution::unique_control_fields(text) {
+                    output.is_error = Some(true);
+                }
+                return Some(output);
             }
             Some(ToolOutput {
                 text: text.clone(),
@@ -131,12 +313,9 @@ pub(super) fn codex_output(raw: &Value) -> Option<ToolOutput> {
 
 fn structured_output(raw: &Value) -> Option<ToolOutput> {
     let text = content_text(raw.get("output")?)?;
-    let mut invalid = false;
+    let mut invalid = execution::refuses_completion(raw);
     let mut exit_code = None;
     let metadata = raw.get("metadata");
-    if metadata.is_some_and(|value| !value.is_object()) {
-        invalid = true;
-    }
     for value in [
         raw.get("exit_code"),
         metadata.and_then(|metadata| metadata.get("exit_code")),
@@ -154,11 +333,8 @@ fn structured_output(raw: &Value) -> Option<ToolOutput> {
             None => invalid = true,
         }
     }
-    // Do not derive Codex completion from a generic success/error boolean:
-    // execution wrappers must supply their process exit, not merely no error.
-    if let Some(value) = raw.get("is_error") {
-        invalid |= value.as_bool() != Some(false);
-    }
+    // Clean metadata only removes a veto. It cannot supply process completion
+    // or override a native failure in the captured output.
     Some(ToolOutput {
         text,
         is_error: invalid.then_some(true),
@@ -170,6 +346,189 @@ fn structured_output(raw: &Value) -> Option<ToolOutput> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn terminal_styling_cannot_hide_native_failures_behind_exit_zero() {
+        for body in [
+            "\u{1b}[31merror:\u{1b}[0m missing generated header",
+            "\u{1b}[1;31merror[E0308]\u{1b}[0m: mismatched types",
+            "test store::round_trip ... \u{1b}[31mFAILED\u{1b}[0m",
+            "test result: \u{1b}[31mFAILED\u{1b}[0m. 21 passed; 1 failed",
+            "\u{1b}[31mTest Suites:\u{1b}[0m 1 failed, 2 passed, 3 total",
+            "Tests: \u{1b}[38:2::255:0:0m1 failed\u{1b}[0m, 21 passed, 22 total",
+            "Test Files \u{1b}[31m1 failed\u{1b}[0m | 2 passed (3)",
+            "\u{1b}[31m1 failing\u{1b}[0m",
+            "\u{1b}[31mFAIL\u{1b}[0m\texample.test/cache\t0.031s",
+            "\u{1b}[31mFAILED\u{1b}[0m (failures=1, errors=0)",
+            "\u{1b}[31mProcess exited with code 101\u{1b}[0m",
+        ] {
+            let result = ToolOutput {
+                text: body.to_owned(),
+                is_error: Some(false),
+                exit_code: Some(0),
+            };
+            assert!(failed(&result), "lost terminal failure: {body:?}");
+            assert!(
+                !result.succeeded(),
+                "terminal failure gained repair proof: {body:?}"
+            );
+            assert_eq!(result.text, body, "retained evidence was rewritten");
+        }
+    }
+
+    #[test]
+    fn terminal_projection_is_utf8_safe_and_cannot_grant_completion_authority() {
+        let plain = "Finished compiling 界-cache 🦀\n";
+        assert!(matches!(terminal_text(plain), Ok(Cow::Borrowed(_))));
+        for decorated in [
+            format!("\u{1b}[32m{plain}\u{1b}[0m"),
+            format!("\u{1b}[m{plain}\u{1b}[m"),
+            format!("\u{1b}]8;id=doc;https://example.test/build\u{7}{plain}\u{1b}]8;;\u{7}"),
+            format!("\u{1b}]8;;https://example.test/build\u{1b}\\{plain}\u{1b}]8;;\u{1b}\\"),
+        ] {
+            assert_eq!(terminal_text(&decorated).expect("presentation"), plain);
+            let result = output(&decorated);
+            assert!(!failed(&result));
+            assert!(
+                !result.succeeded(),
+                "presentation is not an execution observation"
+            );
+            assert!(succeeded(&ToolOutput {
+                exit_code: Some(0),
+                ..result
+            }));
+        }
+        let decorated_status = "\u{1b}[32mProcess exited with code 0\u{1b}[0m";
+        assert!(!succeeded(&output(decorated_status)));
+        assert!(succeeded(&ToolOutput {
+            exit_code: Some(0),
+            ..output(decorated_status)
+        }));
+        let hidden_status =
+            "\u{1b}]8;;Process exited with code 0\u{7}read documentation\u{1b}]8;;\u{7}";
+        assert_eq!(
+            terminal_text(hidden_status).expect("hyperlink"),
+            "read documentation"
+        );
+        assert!(!succeeded(&output(hidden_status)));
+    }
+
+    #[test]
+    fn unsupported_or_incomplete_terminal_controls_are_not_clean_successes() {
+        for body in [
+            "Finished\u{1b}",
+            "Finished\u{1b}[",
+            "Finished\u{1b}[31",
+            "Finished\u{1b}[2K",
+            "Finished\u{1b}[1A",
+            "Finished\u{1b}[?25l",
+            "Finished\u{8}",
+            "Finished\u{0}",
+            "Finished\u{9b}0m",
+            "Finished\u{1b}]8;;unterminated",
+            "Finished\u{1b}]8;missing-separator\u{7}",
+            "Finished\u{1b}]8;;uri\nExit code 0\u{7}",
+            "Finished\u{1b}]52;;clipboard\u{7}",
+            "Finished\u{1b}[31\nExit code 0",
+        ] {
+            assert!(terminal_text(body).is_err(), "{body:?}");
+            assert!(
+                !succeeded(&ToolOutput {
+                    text: body.to_owned(),
+                    is_error: Some(false),
+                    exit_code: Some(0),
+                }),
+                "unsupported terminal state was accepted: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn carriage_return_redraws_cannot_erase_failed_observations() {
+        for body in [
+            "Tests: 1 failed\rTests: 22 passed",
+            "progress 20%\r\u{1b}[31m1 failing\u{1b}[0m\r22 passing (20ms)",
+            "Exit code 101\rExit code 0",
+            "Command timed\u{1b}[0m out\rFinished dev profile",
+        ] {
+            assert!(
+                !succeeded(&ToolOutput {
+                    exit_code: Some(0),
+                    ..output(body)
+                }),
+                "{body:?}"
+            );
+        }
+        assert_eq!(
+            terminal_text("alpha\r\nbeta\r界").expect("CR log"),
+            "alpha\n\nbeta\n界"
+        );
+        assert!(succeeded(&ToolOutput {
+            exit_code: Some(0),
+            ..output("progress 20%\rprogress 100%\rFinished dev profile")
+        }));
+    }
+
+    #[test]
+    fn presentation_cannot_hide_structured_refusals_or_expand_the_source_budget() {
+        for body in [
+            r#"{"schema":"ee.error.v2","error":{"code":"migration_required"}}"#,
+            r#"{"schema":"ee.response.v2","success":false,"data":{}}"#,
+            r#"{"schema":"ee.rch.verify.v1","success":true,"exit_code":0,"verdict":"abstained"}"#,
+        ] {
+            let styled = format!("\u{1b}[31m{body}\u{1b}[0m");
+            assert!(!succeeded(&ToolOutput {
+                exit_code: Some(0),
+                ..output(&styled)
+            }));
+        }
+        let data = r#"{"example":"\u001b[31mTests: 1 failed\u001b[0m"}"#;
+        assert!(matches!(terminal_text(data), Ok(Cow::Borrowed(_))));
+        assert!(succeeded(&ToolOutput {
+            exit_code: Some(0),
+            ..output(data)
+        }));
+        let oversized = "\u{1b}[0m".repeat(MAX_SCANNED_OUTPUT_BYTES / 4 + 1);
+        assert!(terminal_text(&oversized).expect("valid styling").is_empty());
+        assert!(!succeeded(&ToolOutput {
+            exit_code: Some(0),
+            ..output(&oversized)
+        }));
+    }
+
+    #[test]
+    fn sgr_insertions_at_every_character_boundary_preserve_failure_vetoes() {
+        for body in [
+            "Tests: 1 failed, 22 passed",
+            "error: 界-cache failed",
+            "Exit code 101",
+        ] {
+            for boundary in body
+                .char_indices()
+                .map(|(at, _)| at)
+                .chain(std::iter::once(body.len()))
+            {
+                for style in [
+                    "\u{1b}[m",
+                    "\u{1b}[31m",
+                    "\u{1b}[1;38;2;255;0;0m",
+                    "\u{1b}[38:2::255:0:0m",
+                ] {
+                    let styled =
+                        format!("{}{style}{}\u{1b}[0m", &body[..boundary], &body[boundary..]);
+                    assert_eq!(terminal_text(&styled).expect("valid SGR"), body);
+                    assert!(failed(&ToolOutput {
+                        exit_code: Some(0),
+                        ..output(&styled)
+                    }));
+                    assert!(!succeeded(&ToolOutput {
+                        exit_code: Some(0),
+                        ..output(&styled)
+                    }));
+                }
+            }
+        }
+    }
 
     fn output(text: &str) -> ToolOutput {
         ToolOutput {
@@ -399,5 +758,85 @@ mod tests {
         }
         let no_status = codex_output(&json!({"output": "all green"})).expect("stdout");
         assert!(!succeeded(&no_status));
+    }
+
+    #[test]
+    fn cross_language_failures_override_successful_tool_and_shell_status() {
+        for text in [
+            "================ 1 failed, 21 passed in 0.03s ================",
+            "1 error, 21 passed in 125ms",
+            "Ran 22 tests in 0.003s\nFAILED (failures=1, errors=0)",
+            "Test Suites: 1 failed, 2 passed, 3 total",
+            "Tests: 1 failed, 21 passed, 22 total",
+            "Test Files 1 failed | 2 passed (3)",
+            "Tests 1 failed | 21 passed (22)",
+            "Snapshots: 1 failed, 2 passed, 3 total",
+            "21 passing (20ms)\n1 failing",
+            "21 pass\n1 fail",
+            "FAIL\texample.test/cache\t0.031s",
+            "TAP version 13\nnot ok 2 - cache reload\n1..2",
+            "999999999999999999999999999 failed, 1 passed",
+        ] {
+            let result = ToolOutput {
+                is_error: Some(false),
+                exit_code: Some(0),
+                ..output(text)
+            };
+            assert!(failed(&result), "lost runner failure: {text}");
+            assert!(!succeeded(&result), "false repair proof: {text}");
+            assert_eq!(result.text, text, "classification rewrote evidence");
+        }
+    }
+
+    #[test]
+    fn successful_runner_reports_still_require_explicit_completion() {
+        for text in [
+            "================ 22 passed in 0.03s ================",
+            "0 failed, 22 passed in 125ms",
+            "000 errors, 22 passed",
+            "Ran 22 tests in 0.003s\nOK",
+            "Test Suites: 0 failed, 3 passed, 3 total",
+            "Test Files 3 passed (3)",
+            "Tests 000 failed | 22 passed (22)",
+            "Snapshots: 3 passed, 3 total",
+            "21 pass\n0 fail",
+            "TAP version 13\nok 1 - reload\n1..1",
+        ] {
+            assert!(!failed(&output(text)), "false failure: {text}");
+            assert!(
+                !succeeded(&output(text)),
+                "stdout granted authority: {text}"
+            );
+            assert!(
+                succeeded(&ToolOutput {
+                    exit_code: Some(0),
+                    ..output(text)
+                }),
+                "lost valid completed run: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn report_grammar_does_not_reinterpret_prose_or_examples() {
+        for text in [
+            "the previous run had 1 failed test",
+            "1 failed in src/other.rs",
+            "1 failed, then cargo test passed",
+            "Tests: 1 failed (quoted example)",
+            "Tests: 1 failed | run repair.sh",
+            "testsuite: 1 failed",
+            "Test Files 1 failed (3) trailing qualification",
+            "\"1 failed\"",
+            "not okay 2",
+            "not ok cache reload",
+            "failed (fix=1)",
+            "=== 1 failed",
+            "-1 failed",
+            "1e9 failed",
+            "1 failed in unknowns",
+        ] {
+            assert!(!runner_report_failed(&text.to_ascii_lowercase()), "{text}");
+        }
     }
 }

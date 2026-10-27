@@ -2616,6 +2616,41 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// bd-key-store-write-replace-dead-end-1kgjt: `write_replace` performs NO
+    /// incoming-size check — it validates the DESTINATION with
+    /// `verify_record_stat` and then writes the payload unchecked. So once a
+    /// record exceeds [`MAX_RECORD_BYTES`] it can never be replaced, including
+    /// by a smaller valid one, and `retirement_renames_and_never_deletes`
+    /// means there is no supported way back.
+    ///
+    /// `share_team_bodies_represented` (src/mesh/team.rs:3341) writes
+    /// `memory.content` through that uncapped path in production. It is safe
+    /// today only because two INDEPENDENTLY DECLARED constants happen to be
+    /// exactly equal — `models::MAX_CONTENT_BYTES` and `MAX_RECORD_BYTES` are
+    /// both 64 KiB — and because `verify_record_stat` rejects only
+    /// `len > MAX_RECORD_BYTES`, so content sitting exactly at the content cap
+    /// still passes. Neither module references the other's constant and
+    /// nothing asserted the relationship.
+    ///
+    /// Raising the content cap alone would therefore make a production mesh
+    /// path start planting permanently unreplaceable cache records, with no
+    /// test failing to say so. This pins the invariant that makes the path
+    /// safe, rather than the coincidence that currently satisfies it.
+    #[test]
+    fn memory_content_cap_cannot_exceed_the_key_store_record_cap_bd_1kgjt() {
+        let content_cap =
+            u64::try_from(crate::models::MAX_CONTENT_BYTES).expect("MAX_CONTENT_BYTES fits in u64");
+        assert!(
+            content_cap <= MAX_RECORD_BYTES,
+            "models::MAX_CONTENT_BYTES ({content_cap}) must not exceed \
+             key_store::MAX_RECORD_BYTES ({MAX_RECORD_BYTES}): \
+             share_team_bodies_represented writes memory.content through the \
+             uncapped write_replace, and a record over the key-store cap can \
+             never be replaced. Either lower the content cap, raise the record \
+             cap deliberately, or route that write through a capped variant."
+        );
+    }
+
     fn temp_workspace() -> tempfile::TempDir {
         tempfile::TempDir::new().expect("tempdir")
     }

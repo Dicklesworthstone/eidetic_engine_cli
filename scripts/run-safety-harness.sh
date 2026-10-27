@@ -61,6 +61,37 @@ FIXTURE_DIR="${EE_SAFETY_HARNESS_FIXTURE_DIR:-$REPO_ROOT/tests/doctor_fixtures}"
 EVENT_LOG="${EE_SAFETY_HARNESS_EVENT_LOG:-}"
 STRICT="${EE_SAFETY_HARNESS_STRICT:-0}"
 
+# EACH SUB-HARNESS GETS ITS OWN FIXTURE ROOT (bd-aqepm).
+#
+# Every sub-harness materializes the same per-FM fixtures and every corrupt.sh
+# REFUSES a non-empty target ("fixture requires an empty target"). Nothing
+# cleans up: verify-undo.sh has no trap, and this loop used to hand all five
+# the same root. So the first sub-harness populated it and the remaining four
+# could only skip -- which is why verify-idempotence, verify-crash-recovery,
+# verify-concurrency and verify-metamorphic had NEVER produced a verdict.
+#
+# Measured 2026-10-20 the first time verify-undo went green and the wrapper
+# reached the second sub-harness at all:
+#
+#   verify-undo:        COVERAGE passed=11 failed=0; GAP lost=0; skipped=0
+#   verify-idempotence: passed=0 failed=0 skipped=19;
+#                       (corrupt.sh broken -- refusing to declare success)
+#
+# The caller still owns the BASE, so an explicit EE_DOCTOR_FIXTURE_ROOT keeps
+# working and simply becomes the parent. Per-sub subdirectories are derived
+# from the sub-harness name, so they are stable and greppable rather than
+# randomised.
+#
+# NOTE ON COST, because this changes what a real run costs rather than what the
+# DEFAULT path costs: with no ee binary every sub-harness exits 3 in ~0s, which
+# is the tracked_red state verify.sh Gate 8.5 sits in today (bd-5l8yh), so this
+# is free there. Once a binary IS wired, four more sub-harnesses begin doing
+# real work -- one `ee init` per fixture per sub-harness. verify-undo alone
+# measured 2812s, so budget the honest run in hours. That tradeoff is bd-5l8yh's
+# and bd-2di61's to settle; it is not a reason to leave four checks unable to
+# run.
+SAFETY_FIXTURE_ROOT_BASE="${EE_DOCTOR_FIXTURE_ROOT:-${TMPDIR:-/tmp}/ee-doctor-fixtures}"
+
 SUB_HARNESSES=(
     "verify-undo.sh"
     "verify-idempotence.sh"
@@ -190,7 +221,8 @@ FAILED_HARNESS=""
 for sub in "${SUB_HARNESSES[@]}"; do
     phase="${sub%.sh}"
     emit_event "safety_harness_sub" "$phase" "running" "0" "" ""
-    if ! "$SCRIPT_DIR/$sub"; then
+    # Per-sub-harness root (bd-aqepm); see SAFETY_FIXTURE_ROOT_BASE above.
+    if ! EE_DOCTOR_FIXTURE_ROOT="$SAFETY_FIXTURE_ROOT_BASE/$phase" "$SCRIPT_DIR/$sub"; then
         FAILED_HARNESS="$sub"
         emit_event "safety_harness_sub" "$phase" "failed" "1" "safety_harness_sub_failed" ""
         break

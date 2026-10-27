@@ -1,17 +1,22 @@
 //! Batch hydration for complete error-recall evidence reports.
 //!
-//! The report may enumerate a long repair history, but each read owns at most
-//! 128 hydrated spans and their live sessions. Canonical target identities are
+//! The report may enumerate a long repair history. Final presentation hydrates
+//! at most 128 spans per batch. Canonical target identities are
 //! deduplicated before I/O. Repairs cross normal search admission; quarantined
 //! proof bodies are never rendered. Output is still complete, not silently
-//! truncated to the interactive pack limit.
+//! truncated to the interactive pack limit. Conflicted repairs are withheld
+//! before body hydration, without erasing their diagnostic history. One source
+//! snapshot covers feedback, CASS proof revalidation and final evidence hydration.
+//! Revalidation reads only the bounded source sessions behind selected claims.
 
 use std::collections::BTreeSet;
 
 use crate::db::{DbConnection, HydratedEvidenceSpan, Result};
 use crate::models::EvidenceId;
 
-use super::{ErrorRecallReport, RECALLED_REPAIR_TEXT_CHARS, RecalledRepairEvidence};
+use super::{
+    ErrorRecallReport, RECALLED_REPAIR_TEXT_CHARS, RecalledRepairEvidence, feedback, memory,
+};
 
 const HYDRATION_BATCH: usize = 128;
 
@@ -20,7 +25,7 @@ pub(super) fn read(
     workspace_id: &str,
     report: &ErrorRecallReport,
 ) -> Result<Vec<RecalledRepairEvidence>> {
-    read_with(workspace_id, report, |ids| {
+    read_with(connection, workspace_id, report, |ids| {
         connection.get_evidence_spans_with_sessions(ids)
     })
 }
@@ -38,12 +43,20 @@ fn canonical_evidence_targets(targets: &[String]) -> BTreeSet<&str> {
 }
 
 fn read_with(
+    connection: &DbConnection,
     workspace_id: &str,
     report: &ErrorRecallReport,
     mut hydrate: impl FnMut(&[&str]) -> Result<Vec<HydratedEvidenceSpan>>,
 ) -> Result<Vec<RecalledRepairEvidence>> {
-    let repairs = canonical_evidence_targets(&report.helpful_repairs);
+    let mut repairs = canonical_evidence_targets(&report.helpful_repairs);
+    let reported_harmful = canonical_evidence_targets(&report.harmful_repairs);
+    repairs.retain(|id| !reported_harmful.contains(id));
     let proofs = canonical_evidence_targets(&report.proof_links);
+    if repairs.is_empty() && proofs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let snapshot = memory::Snapshot::begin_or_borrow(connection)?;
+    let mut gate = feedback::Gate::new(connection, workspace_id, &report.fingerprint_key);
     let mut ids = repairs.union(&proofs).copied();
     let mut cards = Vec::new();
     let mut turns = Vec::new();
@@ -53,9 +66,27 @@ fn read_with(
         if batch.is_empty() {
             break;
         }
-        for row in hydrate(&batch)? {
+        let repair_ids: Vec<_> = batch
+            .iter()
+            .copied()
+            .filter(|id| repairs.contains(id))
+            .collect();
+        let withheld = gate.withheld(&repair_ids)?;
+        // An independent proof remains inspectable as a locator, never a
+        // positive repair body. Withheld targets do not enter final text hydration.
+        let admitted: Vec<_> = batch
+            .into_iter()
+            .filter(|id| !withheld.contains(*id) || proofs.contains(id))
+            .collect();
+        if admitted.is_empty() {
+            continue;
+        }
+        for row in hydrate(&admitted)? {
             let span = &row.span;
-            if repairs.contains(span.id.as_str()) && row.is_search_admitted(workspace_id) {
+            if repairs.contains(span.id.as_str())
+                && !withheld.contains(&span.id)
+                && row.is_search_admitted(workspace_id)
+            {
                 let is_card = span.is_derived_incident_card();
                 let text = span.reader_text();
                 let recalled = RecalledRepairEvidence {
@@ -99,6 +130,7 @@ fn read_with(
     }
     cards.append(&mut turns);
     cards.append(&mut proof_locators);
+    snapshot.finish()?;
     Ok(cards)
 }
 
@@ -111,11 +143,11 @@ mod tests {
         CreateEvidenceSpanInput, CreateSessionInput, CreateWorkspaceInput, EvidenceProducerKind,
     };
 
-    const WS: &str = "wsp_01234567890123456789012345";
-    const OTHER_WS: &str = "wsp_01234567890123456789012346";
-    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+    pub(super) const WS: &str = "wsp_01234567890123456789012345";
+    pub(super) const OTHER_WS: &str = "wsp_01234567890123456789012346";
+    pub(super) type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-    fn db() -> TestResult<DbConnection> {
+    pub(super) fn db() -> TestResult<DbConnection> {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         for (workspace, path) in [
@@ -133,7 +165,11 @@ mod tests {
         Ok(connection)
     }
 
-    fn session(connection: &DbConnection, workspace: &str, number: u128) -> TestResult<String> {
+    pub(super) fn session(
+        connection: &DbConnection,
+        workspace: &str,
+        number: u128,
+    ) -> TestResult<String> {
         let id = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
         connection.insert_session(
             &id,
@@ -154,7 +190,7 @@ mod tests {
         Ok(id)
     }
 
-    fn span(
+    pub(super) fn span(
         connection: &DbConnection,
         workspace: &str,
         session: &str,
@@ -196,7 +232,7 @@ mod tests {
         Ok(id)
     }
 
-    fn report() -> ErrorRecallReport {
+    pub(super) fn report() -> ErrorRecallReport {
         let fingerprint =
             ErrorFingerprint::from_canonical(&from_rustc(Some("E0277"), "trait bound failed"));
         ErrorRecallReport::from_outcome(
@@ -215,26 +251,28 @@ mod tests {
         let connection = db()?;
         let session = session(&connection, WS, 900)?;
         let mut report = report();
+        // Plain notes isolate the batching contract. Source-backed card
+        // preference and unproved-card refusal have separate real-arc tests.
         for number in 1..=130 {
             report
                 .helpful_repairs
-                .push(span(&connection, WS, &session, number, number == 130)?);
+                .push(span(&connection, WS, &session, number, false)?);
         }
-        let card = report.helpful_repairs[129].clone();
+        let last = report.helpful_repairs[129].clone();
         let first = report.helpful_repairs[0].clone();
         report.helpful_repairs.reverse();
         report.helpful_repairs.push(first.clone());
         report.proof_links = vec![first.clone(), first.clone()];
         let mut batches = Vec::new();
-        let actual = read_with(WS, &report, |ids| {
+        let actual = read_with(&connection, WS, &report, |ids| {
             batches.push(ids.len());
             connection.get_evidence_spans_with_sessions(ids)
         })?;
         assert_eq!(batches, [128, 2]);
         assert_eq!(actual.len(), 131);
-        assert_eq!(actual[0].evidence_id, card);
-        assert_eq!(actual[0].role, "incident_card");
-        assert_eq!(actual[1].evidence_id, first);
+        assert_eq!(actual[0].evidence_id, first);
+        assert_eq!(actual[0].role, "repair");
+        assert_eq!(actual[129].evidence_id, last);
         assert_eq!(actual[130].role, "proof");
         assert_eq!(actual[130].evidence_id, first);
         assert_eq!(actual[130].text, None);
@@ -267,7 +305,7 @@ mod tests {
             "mem_not_evidence".to_owned(),
         ];
         let mut calls = 0;
-        let empty = read_with(WS, &report, |ids| {
+        let empty = read_with(&connection, WS, &report, |ids| {
             calls += 1;
             connection.get_evidence_spans_with_sessions(ids)
         })?;
@@ -315,3 +353,11 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "error_recall_feedback_tests.rs"]
+mod feedback_tests;
+
+#[cfg(test)]
+#[path = "error_recall_pack_feedback_tests.rs"]
+mod pack_feedback_tests;

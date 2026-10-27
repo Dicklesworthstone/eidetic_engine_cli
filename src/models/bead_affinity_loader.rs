@@ -6,15 +6,14 @@
 //! and normalises the bead's `labels`, `title`, and `description`
 //! through the existing token normalisers in
 //! [`crate::models::bead_affinity`]. No file I/O happens here — the
-//! file read sits in the CLI layer so the loader stays pure and
+//! bounded file read sits in context orchestration so the loader stays pure and
 //! deterministic (same input string → byte-identical
 //! [`BeadAffinityBead`]).
 //!
 //! Family-link seeding (parent/child bead memory-id population for the
 //! `LinkPeer` component) is deliberately left to a follow-up slice; the
-//! `family_memory_ids` set is empty after this slice. The cold-start
-//! degraded code in the explainer surfaces the missing link path until
-//! the family-link seeder lands.
+//! `family_memory_ids` set remains empty. The context caller reports only
+//! observed label/title/description matches and does not invent link signals.
 
 use std::collections::BTreeSet;
 

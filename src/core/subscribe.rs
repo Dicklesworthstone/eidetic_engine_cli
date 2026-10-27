@@ -447,7 +447,9 @@ fn materialize_delta(raw: RawAuditDelta, tags: Vec<String>) -> MemoryDelta {
 pub fn classify_delta_kind(action: &str) -> &'static str {
     match action {
         audit_actions::MEMORY_CREATE => "created",
-        audit_actions::MEMORY_LEVEL_TRANSITION => "level_transitioned",
+        audit_actions::MEMORY_LEVEL_TRANSITION | audit_actions::MEMORY_DECAY_DEMOTE => {
+            "level_transitioned"
+        }
         audit_actions::MEMORY_EXPIRE => "expired",
         audit_actions::MEMORY_TOMBSTONE | audit_actions::MEMORY_DECAY_TOMBSTONE => "tombstoned",
         audit_actions::MEMORY_UNTOMBSTONE
@@ -457,7 +459,6 @@ pub fn classify_delta_kind(action: &str) -> &'static str {
         | audit_actions::MEMORY_TAG_REMOVE
         | audit_actions::MEMORY_TAG_SET
         | audit_actions::MEMORY_SCORE_DECAY
-        | audit_actions::MEMORY_DECAY_DEMOTE
         | audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED
         | audit_actions::OUTCOME_BAYES_UPDATE
         | audit_actions::TRUST_CLASS_TRANSITION => "updated",
@@ -493,7 +494,14 @@ pub fn classify_changed_fields(action: &str) -> Vec<String> {
         audit_actions::MEMORY_BAYES_POSTERIOR_UPDATED | audit_actions::OUTCOME_BAYES_UPDATE => {
             &["confidence", "trust_class"]
         }
-        audit_actions::TRUST_CLASS_TRANSITION => &["trust_class"],
+        audit_actions::TRUST_CLASS_TRANSITION | audit_actions::TRUST_CLASS_PROMOTION_OVERRIDE => {
+            &["trust_class"]
+        }
+        // These producers change metadata on the existing identity, not its
+        // body. Their durable audits must reach the corresponding field
+        // subscriptions instead of masquerading as content_hash updates.
+        audit_actions::MEMORY_REINFORCE => &["confidence"],
+        "memory.reveal" => &["seal_state"],
         audit_actions::MEMORY_REVISE | audit_actions::MEMORY_UPDATE => {
             &["content_hash", "confidence", "trust_class"]
         }
@@ -680,6 +688,40 @@ mod tests {
         let filter = parse_subscribe_filter(Some("TAG=release+missing,TAG_MODE=any"))
             .expect("filter parses");
         assert!(filter.matches_delta(&delta, None));
+    }
+
+    #[test]
+    fn noncontent_mutations_route_to_their_actual_fields() {
+        for (action, kind, fields) in [
+            (
+                audit_actions::MEMORY_REINFORCE,
+                "updated",
+                vec!["confidence"],
+            ),
+            ("memory.reveal", "updated", vec!["seal_state"]),
+            (
+                audit_actions::TRUST_CLASS_PROMOTION_OVERRIDE,
+                "updated",
+                vec!["trust_class"],
+            ),
+            (
+                audit_actions::MEMORY_DECAY_DEMOTE,
+                "level_transitioned",
+                vec!["level"],
+            ),
+        ] {
+            assert_eq!(classify_delta_kind(action), kind, "{action}");
+            assert_eq!(classify_changed_fields(action), fields, "{action}");
+            let mut delta = sample_delta();
+            delta.changed_fields = classify_changed_fields(action);
+            let matching =
+                parse_subscribe_filter(Some(&format!("CHANGED_FIELDS={}", fields.join("+"))))
+                    .expect("field filter");
+            assert!(matching.matches_delta(&delta, None), "{action}");
+            let content = parse_subscribe_filter(Some("CHANGED_FIELDS=content_hash"))
+                .expect("content filter");
+            assert!(!content.matches_delta(&delta, None), "{action}");
+        }
     }
 
     #[test]

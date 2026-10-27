@@ -21,6 +21,42 @@ fn ask_e2e_script_exercises_public_cli() {
     let log_dir = scratch.join("logs");
     fs::create_dir_all(&log_dir).expect("create retained ask e2e log directory");
 
+    // ISOLATE THE MODEL REGISTRY AND THE USER-GLOBAL STORE. Two separate things
+    // depend on this.
+    //
+    // FIRST, the script's own contract. scripts/e2e_ask.sh:173 asserts that
+    // `ee ask` reports `ask_semantic_degraded` with `_semanticDegraded == true`
+    // -- that semantic scoring was UNAVAILABLE -- and nothing in the script
+    // establishes that condition. It held only because the authoring host had
+    // no embedding model. On a host that has one, or that downloads it (a
+    // sibling test on this shard captured ee downloading
+    // potion-multilingual-128M, 506.4 MB, on a worker), semantic scoring works,
+    // no honesty row is emitted, and that assertion fails BECAUSE THE FEATURE
+    // WORKED. An empty registry plus EE_EMBED_DOWNLOAD=off makes the degraded
+    // path deliberate, so the assertion pins a contract instead of an accident
+    // of the machine. The rest of the script is written for the same world --
+    // its next step is titled "lexical release rule answers the question
+    // without semantic scoring".
+    //
+    // SECOND, isolation for its own sake. `ee` resolves its data dir from
+    // XDG_DATA_HOME, else HOME/.local/share, so without these the script read
+    // and wrote the user-global memory store of whoever ran the suite, and
+    // downloaded half a gigabyte into their model registry.
+    // tests/support/isolated_ee.rs exists for this, but `isolated_ee_command`
+    // builds a Command for the ee BINARY and this harness spawns a SHELL
+    // SCRIPT, so the env below is that helper's isolation surface applied to
+    // the shell, which the script and every `ee` it invokes then inherit.
+    let home = scratch.join("home");
+    let xdg_data = scratch.join("xdg-data");
+    let xdg_config = scratch.join("xdg-config");
+    let xdg_cache = scratch.join("xdg-cache");
+    let xdg_state = scratch.join("xdg-state");
+    for dir in [&home, &xdg_data, &xdg_config, &xdg_cache, &xdg_state] {
+        fs::create_dir_all(dir).unwrap_or_else(|error| {
+            panic!("create isolated dir {}: {error}", dir.display());
+        });
+    }
+
     let output = Command::new(repo.join("scripts/e2e_ask.sh"))
         .current_dir(&repo)
         .env("EE_BIN", &ee_bin)
@@ -29,6 +65,14 @@ fn ask_e2e_script_exercises_public_cli() {
         .env("EE_E2E_TMPDIR", &scratch)
         .env("LOG_DIR", &log_dir)
         .env("EE_TEST_LOG_PATH", log_dir.join("events.jsonl"))
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_CACHE_HOME", &xdg_cache)
+        .env("XDG_STATE_HOME", &xdg_state)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .expect("run scripts/e2e_ask.sh");
 

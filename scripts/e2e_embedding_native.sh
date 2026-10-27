@@ -663,7 +663,7 @@ assert_text_contains "${human_duplicate_file}" "Near duplicates:" "human remembe
 assert_text_contains "${human_duplicate_file}" "Next: review near_duplicates" "human remember gives near duplicate next step"
 
 run_ee_json_env "dedup_curate_candidates" "${DEDUP_ENV[@]}" -- \
-    curate candidates --workspace "${DEDUP_WS}" --type dedup --target-memory "${DEDUP_BASE_ID}" --json
+    curate candidates --workspace "${DEDUP_WS}" --type dedup --propose --target-memory "${DEDUP_BASE_ID}" --json
 dedup_candidates_file="${LAST_STDOUT_FILE}"
 assert_jq_file "${dedup_candidates_file}" '.schema == "ee.response.v2"' "curate candidates response schema"
 assert_jq_file "${dedup_candidates_file}" '.success == true' "curate candidates succeeds"

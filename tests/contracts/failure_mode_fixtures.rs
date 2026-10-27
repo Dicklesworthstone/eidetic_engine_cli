@@ -982,3 +982,402 @@ fn workspace_hygiene_degraded_codes_have_fixture_taxonomy_and_trigger_contract()
         ))
     }
 }
+
+fn mesh_dir() -> PathBuf {
+    src_dir().join("mesh")
+}
+
+/// Append every `.rs` file's contents under `dir`, recursively, to `out`.
+/// One pass so reference counting below is a substring scan rather than N
+/// grep spawns over the whole tree.
+fn append_rust_sources(dir: &Path, out: &mut String) -> Result<(), String> {
+    let entries =
+        fs::read_dir(dir).map_err(|error| format!("read dir {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read dir entry: {error}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            append_rust_sources(&path, out)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            out.push_str(
+                &fs::read_to_string(&path)
+                    .map_err(|error| format!("read {}: {error}", path.display()))?,
+            );
+            out.push('\n');
+        }
+    }
+    Ok(())
+}
+
+/// `(emitted, declaration_only)` as `(code_value, const_identifier)` pairs for
+/// every `*_CODE` constant declared under `src/mesh/`.
+///
+/// EMITTED means the constant's identifier occurs more than once across all of
+/// `src/` — once being its own declaration. That is the right predicate here
+/// because a fixture documents an EMISSION: a constant nothing references has
+/// no trigger to describe, and demanding a fixture for one would mean
+/// inventing a trigger and a repair that no code path can produce.
+fn collect_mesh_degraded_code_constants()
+-> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
+    let mut mesh_source = String::new();
+    append_rust_sources(&mesh_dir(), &mut mesh_source)?;
+
+    // `\s*` spans the line break, which matters: responder_broker.rs declares
+    // MESH_RESPONDER_IDENTITY_UPGRADE_REQUIRED_CODE with its value on the
+    // following line, and a single-line pattern would miss it.
+    const DECLARATION_PATTERN: &str = r#"pub const ([A-Z0-9_]+_CODE):\s*&str\s*=\s*"([a-z0-9_]+)""#;
+    let declaration = Regex::new(DECLARATION_PATTERN)
+        .map_err(|error| format!("compile mesh code declaration regex: {error}"))?;
+    let mut declared: Vec<(String, String)> = declaration
+        .captures_iter(&mesh_source)
+        .filter_map(|captures| {
+            let identifier = captures.get(1)?.as_str().to_owned();
+            let value = captures.get(2)?.as_str().to_owned();
+            Some((value, identifier))
+        })
+        .collect();
+    declared.sort();
+    declared.dedup();
+
+    let mut all_source = String::new();
+    append_rust_sources(&src_dir(), &mut all_source)?;
+
+    let mut emitted = Vec::new();
+    let mut declaration_only = Vec::new();
+    for (value, identifier) in declared {
+        if all_source.matches(identifier.as_str()).count() > 1 {
+            emitted.push((value, identifier));
+        } else {
+            declaration_only.push((value, identifier));
+        }
+    }
+    Ok((emitted, declaration_only))
+}
+
+/// Emitted mesh codes known to have no fixture, measured 2026-10-22. SHRINK
+/// ONLY: the test fails both when an emitted mesh code outside this list has
+/// no fixture AND when an entry here has since acquired one, so the list
+/// cannot quietly grow and cannot go stale. Same shape as
+/// no_silent_fallback_unclassified_baseline.txt.
+///
+/// Neither is a fixture I could write honestly today. `ee.failure_mode_fixture.v1`
+/// requires `trigger.invocation`, and all 606 existing fixtures carry one;
+/// these two emit on conditions no command produces — the operating system's
+/// cryptographic randomness being unavailable, and a responder peer requiring
+/// an identity upgrade mid-session. Writing a reproducible-looking trigger for
+/// either would put a false claim in the catalog, which is worse than the gap.
+const MESH_EMITTED_CODES_WITHOUT_FIXTURE: &[&str] = &[
+    // src/mesh/peer.rs:23 declares it, :524 returns it from `mesh peer add`
+    // when generate_peer_id() fails.
+    "mesh_peer_randomness_unavailable",
+    // src/mesh/responder_broker.rs:77 declares it, :1430 maps
+    // ResponderBrokerError::IdentityUpgradeRequired onto it.
+    "mesh_responder_identity_upgrade_required",
+];
+
+/// bd-31654: nothing required a MESH degraded code to enter the fixture
+/// catalog. The catalog's structural guards are guards over FIXTURES, so a
+/// code with no fixture is never walked and no property is ever checked about
+/// it — adding one left every existing gate green by construction. Sibling
+/// tests cover workspace-hygiene, doctor-dependency and git-hook-ahead-risk;
+/// before this, `mesh` appeared zero times in this file.
+///
+/// Measured 2026-10-22: 66 `*_CODE` constants under src/mesh/, 57 emitted and
+/// 9 declaration-only. The 9 are excluded BY THE PREDICATE rather than by a
+/// list, so wiring an emitter for any of them — the team_idp trio on
+/// bd-n8r09, four auto_enrollment codes, two mesh_audit_ledger codes —
+/// immediately requires its fixture without anyone editing this test.
+#[test]
+fn mesh_emitted_degraded_codes_have_fixtures_bd_31654() -> TestResult {
+    let (emitted, declaration_only) = collect_mesh_degraded_code_constants()?;
+
+    // EMPTY-WORLD GUARD plus a denominator. Every assertion below quantifies
+    // over `emitted`, so an empty or near-empty set would pass while checking
+    // nothing. 57 were measured; 40 leaves room for deliberate removals
+    // without letting the population silently collapse.
+    ensure(
+        emitted.len() >= 40,
+        format!(
+            "{}: expected at least 40 emitted mesh *_CODE constants, found {} (emitted) and {} (declaration-only); a collapsed population would make this test vacuous",
+            mesh_dir().display(),
+            emitted.len(),
+            declaration_only.len(),
+        ),
+    )?;
+
+    let mut errors = Vec::new();
+    let mut without_fixture = BTreeSet::new();
+    let mut with_fixture = 0usize;
+
+    for (code, identifier) in &emitted {
+        let fixture_path = fixtures_dir().join(format!("{code}.json"));
+        if !fixture_path.exists() {
+            without_fixture.insert(code.clone());
+            continue;
+        }
+        with_fixture += 1;
+
+        let fixture = match read_fixture(&fixture_path) {
+            Ok(fixture) => fixture,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        let ctx = fixture_path.display().to_string();
+        let fixture_code = fixture.pointer("/code").and_then(Value::as_str);
+        if fixture_code != Some(code.as_str()) {
+            errors.push(format!(
+                "{ctx}: fixture code {fixture_code:?} must match mesh constant {identifier} (`{code}`)"
+            ));
+        }
+        let severity = fixture
+            .pointer("/severity")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>");
+        let expected_severity = fixture
+            .pointer("/expected_emission/severity")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>");
+        if severity != expected_severity {
+            errors.push(format!(
+                "{ctx}: expected_emission.severity `{expected_severity}` must match fixture severity `{severity}`"
+            ));
+        }
+    }
+
+    // ARM 1: an emitted mesh code with no fixture that is not in the baseline.
+    for code in &without_fixture {
+        if !MESH_EMITTED_CODES_WITHOUT_FIXTURE.contains(&code.as_str()) {
+            errors.push(format!(
+                "{}: emitted mesh degraded code `{code}` has no fixture. Add one, or add it to MESH_EMITTED_CODES_WITHOUT_FIXTURE with the reason a trigger cannot be written.",
+                fixtures_dir().join(format!("{code}.json")).display()
+            ));
+        }
+    }
+
+    // ARM 2: a baseline entry that has since acquired a fixture. Without this
+    // the list would go stale and silently excuse a code that is now covered.
+    for baseline in MESH_EMITTED_CODES_WITHOUT_FIXTURE {
+        if !without_fixture.contains(*baseline) {
+            errors.push(format!(
+                "MESH_EMITTED_CODES_WITHOUT_FIXTURE lists `{baseline}`, but it now has a fixture or is no longer emitted. Remove it from the list — this baseline may only shrink."
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        ensure(
+            with_fixture >= 40,
+            format!(
+                "only {with_fixture} emitted mesh codes resolved to a fixture; expected at least 40"
+            ),
+        )
+    } else {
+        Err(format!(
+            "{} mesh degraded catalog error(s) over {} emitted code(s):\n  - {}",
+            errors.len(),
+            emitted.len(),
+            errors.join("\n  - "),
+        ))
+    }
+}
+
+/// bd-xqkoo: every other arm in this file compares a fixture to itself —
+/// `validate_fixture` asserts `expected_emission.severity` equals the
+/// top-level `severity` — so a declared severity can drift from the severity
+/// the product actually emits and no gate notices. `ee handoff resume` on a
+/// tampered capsule emitted `critical` against a catalog that declared
+/// `high`, and only an e2e script that had been dead for months caught it.
+///
+/// This arm closes the hole for the codes whose envelope severity is decided
+/// by the code string alone. It pins all four published declarations AND the
+/// severity a real error envelope carries, so the two cannot move apart: it
+/// fails when a code joins `CRITICAL_ERROR_CODES` without a catalog update,
+/// and equally when the catalog is edited away from the code.
+#[test]
+fn critical_error_codes_match_their_catalog_declaration_and_emission() -> TestResult {
+    use ee::models::DomainError;
+    use ee::output::{CRITICAL_ERROR_CODES, error_response_json};
+
+    ensure(
+        !CRITICAL_ERROR_CODES.is_empty(),
+        "CRITICAL_ERROR_CODES is empty, which would make every check below vacuous",
+    )?;
+
+    let taxonomy_path = docs_dir().join("degraded_code_taxonomy.md");
+    let generated_docs_path = docs_dir().join("degraded_codes.md");
+    let taxonomy = fs::read_to_string(&taxonomy_path)
+        .map_err(|error| format!("read {}: {error}", taxonomy_path.display()))?;
+    let generated_docs = fs::read_to_string(&generated_docs_path)
+        .map_err(|error| format!("read {}: {error}", generated_docs_path.display()))?;
+
+    let mut errors = Vec::new();
+    for &code in CRITICAL_ERROR_CODES {
+        // (1) What the product actually puts on the wire. The severity for
+        // these codes is keyed on `error.code()` ahead of any variant match,
+        // so any variant carrying the code reaches the same arm.
+        let envelope = error_response_json(&DomainError::UsageCodeWithDetails {
+            code,
+            message: "severity probe".to_owned(),
+            repair: Some("severity probe".to_owned()),
+            details_json: "{}".to_owned(),
+        });
+        match serde_json::from_str::<Value>(&envelope) {
+            Ok(parsed) => {
+                let emitted = parsed.pointer("/error/severity").and_then(Value::as_str);
+                if emitted != Some("critical") {
+                    errors.push(format!(
+                        "`{code}`: listed in CRITICAL_ERROR_CODES but the error envelope emitted {emitted:?}"
+                    ));
+                }
+            }
+            Err(error) => errors.push(format!("`{code}`: error envelope is not JSON: {error}")),
+        }
+
+        // (2) The fixture, both fields — this is what agents branch on.
+        let fixture_path = fixtures_dir().join(format!("{code}.json"));
+        if fixture_path.exists() {
+            match read_fixture(&fixture_path) {
+                Ok(fixture) => {
+                    for pointer in ["/severity", "/expected_emission/severity"] {
+                        let declared = fixture.pointer(pointer).and_then(Value::as_str);
+                        if declared != Some("critical") {
+                            errors.push(format!(
+                                "{}{pointer}: declares {declared:?} but the envelope emits `critical`",
+                                fixture_path.display()
+                            ));
+                        }
+                    }
+                }
+                Err(error) => errors.push(error),
+            }
+        } else {
+            errors.push(format!(
+                "{}: missing fixture for critical code `{code}`",
+                fixture_path.display()
+            ));
+        }
+
+        // (3) The two documents that publish the contract.
+        if !taxonomy_has_code_with_severity(&taxonomy, code, "critical") {
+            errors.push(format!(
+                "{}: `{code}` has no `critical` taxonomy row",
+                taxonomy_path.display()
+            ));
+        }
+        if !generated_docs.contains(&format!("## `{code}`\n\n**Severity:** critical")) {
+            errors.push(format!(
+                "{}: `{code}` section does not declare `**Severity:** critical`",
+                generated_docs_path.display()
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} critical-severity drift(s) across {} code(s):\n  - {}",
+            errors.len(),
+            CRITICAL_ERROR_CODES.len(),
+            errors.join("\n  - "),
+        ))
+    }
+}
+
+/// Codes in the `handoff_`/`strict_mode_` prefix family that are emitted ONLY
+/// as degradation entries, never as a `DomainError`, so `domain_error_severity`
+/// never decides their severity and the envelope rule below cannot apply.
+///
+/// `handoff_hmac_skipped` is pushed with a literal `.with_severity("high")` in
+/// src/core/handoff.rs, and scripts/e2e_overhaul/handoff_hmac.sh asserts
+/// exactly that value. `handoff_snapshot_stale` is pushed with
+/// `.with_severity(breach.severity)` — a value that varies per threshold
+/// breach, which one declared scalar cannot express at all.
+const PREFIX_FAMILY_DEGRADATION_ONLY_CODES: &[&str] =
+    &["handoff_hmac_skipped", "handoff_snapshot_stale"];
+
+/// The MIRROR of the arm above, and the reason it has to be a separate sweep:
+/// iterating `CRITICAL_ERROR_CODES` cannot notice a code LEAVING that list.
+/// Drop one and its envelope silently falls back to the `handoff_` prefix
+/// default of `high` while its fixture still declares `critical` — the same
+/// defect as bd-xqkoo, mirrored, and invisible to a list-driven check.
+///
+/// So this sweeps from the CATALOG side, over the one family whose severity
+/// `domain_error_severity` decides from the code string alone: a `handoff_` or
+/// `strict_mode_` code is `critical` when it is in `CRITICAL_ERROR_CODES` and
+/// `high` otherwise, with no dependence on the `DomainError` variant.
+#[test]
+fn handoff_prefix_family_fixtures_declare_the_severity_the_envelope_emits() -> TestResult {
+    use ee::output::CRITICAL_ERROR_CODES;
+
+    let excluded = PREFIX_FAMILY_DEGRADATION_ONLY_CODES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut errors = Vec::new();
+    let mut checked = 0usize;
+    let mut seen_excluded = BTreeSet::new();
+
+    for path in list_fixture_files(&fixtures_dir())? {
+        let fixture = match read_fixture(&path) {
+            Ok(fixture) => fixture,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        let Some(code) = fixture.pointer("/code").and_then(Value::as_str) else {
+            continue;
+        };
+        if !code.starts_with("handoff_") && !code.starts_with("strict_mode_") {
+            continue;
+        }
+        if excluded.contains(code) {
+            seen_excluded.insert(code.to_owned());
+            continue;
+        }
+        checked += 1;
+        let expected = if CRITICAL_ERROR_CODES.contains(&code) {
+            "critical"
+        } else {
+            "high"
+        };
+        for pointer in ["/severity", "/expected_emission/severity"] {
+            let declared = fixture.pointer(pointer).and_then(Value::as_str);
+            if declared != Some(expected) {
+                errors.push(format!(
+                    "{}{pointer}: declares {declared:?} but domain_error_severity emits `{expected}` for `{code}`",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    // An empty sweep would pass for the wrong reason, and the exclusion list
+    // must not outlive the codes it excuses.
+    if checked == 0 {
+        errors.push(
+            "no handoff_/strict_mode_ fixtures were checked; this sweep would pass vacuously"
+                .to_owned(),
+        );
+    }
+    for excused in &excluded {
+        if !seen_excluded.contains(*excused) {
+            errors.push(format!(
+                "PREFIX_FAMILY_DEGRADATION_ONLY_CODES excuses `{excused}`, but no fixture in the family carries that code; remove it"
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} prefix-family severity drift(s) over {checked} checked fixture(s):\n  - {}",
+            errors.len(),
+            errors.join("\n  - "),
+        ))
+    }
+}

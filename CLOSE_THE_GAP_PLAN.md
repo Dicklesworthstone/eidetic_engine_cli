@@ -1,4 +1,4 @@
-# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01)**
+# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revisions 2026-09-04, 2026-10-01, 2026-10-22)**
 
 > Track A: mesh / team-confederation acceptance reconciliation after the Unix
 > EE-to-EE campaign. Track B: core-product, durability, verification, and
@@ -9,7 +9,44 @@
 > revision required by `AGENTS.md` *Reality-Check Cadence*. Do not create a
 > second plan file at the repo root.
 >
-> **2026-10-01 real-data re-baseline (§16, read this first).** The shipped
+> **2026-10-22 re-baseline (§17, read this first; it supersedes the §16 header
+> below).** Track R worked. Measured black-box on the shipped `v0.18.0` against
+> the `.43` oracle corpus, five of the six headline 2026-10-01 failures are
+> fixed and two of the five outcome metrics now MEET their targets:
+> **UTR 1.0000** (was ~0.65, target ≥ 0.95) and **PAP precision 1.00 / recall
+> 0.83** (was 0/10, target ≥ 0.70). Search is **0.83 s** and pack **1.14 s** at
+> 4,009 spans (were 11.1 s / 8.7 s), import is **0.60 s per session** (was ~18 s),
+> retained generations are **2** (were one full copy per write, capped at 1,000),
+> and CASS evidence now reads as projected `assistant:` / `user:` text instead
+> of raw JSONL envelopes.
+>
+> Three things block the bridge, and the first two are new:
+> - **A fully populated store can return zero results while every health
+>   surface says it is fine.** With the default model-download policy, a
+>   CASS-imported store answers every query with 0 results and
+>   `index_incompatible`, while `ee index status` reports `ready`/no
+>   degradation, `ee status` reports `posture.overall = ok`, and **`ee doctor`
+>   reports `posture: ok` with zero non-ok checks**. The per-response repair
+>   (`ee index rebuild`) is correct and works; no health surface ever offers it.
+>   NO_BEAD at audit → `.66` (P0).
+> - **The instrument for every Track R metric cannot run on the developer's own
+>   platform.** `scripts/real_shape_corpus/probe.py` (`.63`) dies at import on
+>   macOS, reports an empty reason when it does, and its model passthrough sets
+>   a variable that is not in the env registry. Run as shipped it publishes
+>   UTR null, FAR null and **recall@5 = 0.0** against a product that retrieves
+>   correctly — a false-red gate. NO_BEAD at audit → `.67` (P0).
+> - **Hosted verification has been dark for 14 days.** GitHub Actions is
+>   `enabled: false` repo-wide; the last run of anything was 2026-10-08 and it
+>   failed on an **allowed-actions policy** ("all actions must be from a
+>   repository owned by Dicklesworthstone") that rejects `actions/checkout@v4`,
+>   `dtolnay/rust-toolchain@nightly` and `cargo-deny-action` — a configuration
+>   failure, not a code verdict. Owned by `bd-actions-disabled-repo-wide-33mfm`;
+>   the policy root cause is recorded there by this pass.
+>
+> `bd-3k1mg`, `bd-16imy` and `bd-3h6bz` — three named §15 archive criteria —
+> are now closed. §8 rows were revised in place; §17 carries the evidence.
+>
+> **2026-10-01 real-data re-baseline (§16, historical).** The shipped
 > `v0.16.0` now passes the small-store loop end to end: concurrent determinism,
 > complete fresh-store backup, and cited `ask`. On real Claude Code transcripts
 > it fails usefulness and scale:
@@ -1127,12 +1164,12 @@ candidate before `.2` changes the implementation.
 | 1 | Local-first single CLI; core commands need no daemon | **WORKING** | Real direct CLI paths and source-backed storage exist. |
 | 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean; custom BM25 is test-only and global recall plus weighted fusion/diagnostics use Frankensearch. Production pack PPR now degrades explicitly, but direct/exported local PPR and release/proof identity remain open. `.4`, `.18`; `.15` awaits focused runtime proof. |
 | 3 | Manual memory → DB → search → pack → why | **WORKING (bounded release proof)** | Fresh v0.14.4 isolated serial offline probe returns the exact memory, pack provenance, and persisted ledger through why. Current-source and concurrent acceptance remain `.10`, `.2`/`.3`. |
-| 4 | CASS import makes permitted prior incident content searchable and safely packable | **PARTIAL (plumbing WORKING; usefulness WRONG_APPROACH on real transcripts)** | 2026-10-01 (§16): the pinned fixture loop in §A still holds. On real Claude Code transcripts, though, `cass` at its standard path is refused by default and the documented `[cass].binary` opt-in is dead code (R1). Spans are raw JSONL envelopes, about 35% scaffolding (R2). Import takes about 18 s per session (R11). Search and pack slow to 9–11 s after 4.9k spans (R4). Owners: `.43`, `.44`, `.45`, `.47`, `.48`, `.64`. |
-| 5 | Hybrid BM25 + neural-local retrieval by default | **WORKING on small stores; REGRESSED at realistic evidence scale** | 2026-10-01: public v0.16.0 reports `rrf_fused`/`neural_local`, and 8/8 concurrent searches agree. With 4.9k CASS spans, search takes 11.1 s because of triple full admission scans plus N+1 hydration (§16 R4). Owners: `.64`, `.47`; whole-process concurrency still `.2`, `.3`. |
+| 4 | CASS import makes permitted prior incident content searchable and safely packable | **WORKING on the oracle corpus; first-run onboarding still fails** | 2026-10-22 (§17.2): on the `.43` oracle, v0.18.0 imports 308 sessions / 4,009 spans at 0.60 s per session, admits 988 and quarantines 3,021 by kind, and search/pack return **projected** `assistant:` / `user:` text at **UTR 1.0000**. The `[cass] binary` opt-in is live at all three former dead sites and executes. Remaining: a standard `~/.local/bin/cass` is still refused by default so README Quick Start step 2 exits 5 (the refusal is now actionable and names both opt-ins) — `.44`; and **N1**, where a CASS-populated store can return zero results under the default download policy — `.66`. Measured against the emulator, not real transcripts: this host has no cass index. |
+| 5 | Hybrid BM25 + neural-local retrieval by default | **WORKING at 4k spans; one default-policy path returns nothing (N1)** | 2026-10-22: at 4,009 spans search is 0.83–1.19 s and pack 1.14 s (were 11.1 s / 8.7 s), with `degraded: []` under a coherent neural index. The scale cliff is gone. But under the **default** model-download policy the same corpus answers every query with 0 results and `index_incompatible` while three health surfaces report healthy (§17.3 N1) — `.66`. Whole-process concurrency still `.2`, `.3`. |
 | 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **WORKING (bounded, released binary)** | 2026-10-01: v0.16.0 serial packs are byte-stable; 6/6 concurrent packs equal the serial hash; packs and searches racing a writer report one coherent stale-flagged snapshot (§16.2). The 100-run, linearizability and crash matrix remain `.3`. ADR 0087 identity slices remain `bd-pack-identity-*`. |
 | 7 | Retrieval scores and pack quality mean what their names claim | **PARTIAL / UNPROVEN** | Pure lexical pools now use Frankensearch min-max normalization and retain raw BM25, but the query-relative/calibration contract and every downstream admission/quality consumer remain unproven. `.11`, `.12`. |
 | 8 | Explainable packs with typed identity, provenance, freshness, trust, and score reasons | **PARTIAL** | Rendering is strong for admitted memories; rule/evidence v3 identity, calibration, and deterministic admission remain open. |
-| 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **WRONG_APPROACH on real transcripts** | 2026-10-01 (§16 R3, R7): `review session --propose` on a real session gave 6/10 raw-envelope template candidates at confidence 0.85. The session-arc path read "0 failed" as a failure. Sourceless native rules are searchable and cited by `ask` but cannot be packed (`ee.pack.v3` slice c unlanded). Owners: `.46`, `.59`, `.60`, `bd-vp087`, `bd-2vq2z.9`. |
+| 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **WORKING on the oracle; packable-rule identity still partial** | 2026-10-22 (§17.2): **PAP is precision 1.00 / recall 0.833** on the oracle (5 proposals, 0 polluted by any `must_not_propose` substring), against 0/10 on 2026-10-01 — target ≥ 0.70/0.70 **MET**. Rule hits now resolve into packs (`resolve_rule_hit` / `RuleHitResolution`, `src/core/context.rs:14188`) and README documents `entityKind: "rule"`. Remaining: typed `RuleId`/`EvidenceId` pack identity (`bd-vp087`, in progress; `ee.pack.v3` consumer sweep still pending at `src/pack/mod.rs:1247`), incident cards `.59`, fingerprints `.60`. |
 | 10 | Maintain loop links, decays, consolidates, validates, repairs, and converges | **PARTIAL / UNPROVEN** | Decay/machinery exist; public consolidate → apply → index → retrieve is `bd-1oep7`. |
 | 11 | Complete durable backup, verify, migration, restore, and rebuild | **WORKING on a fresh store; evolved-store proof open** | 2026-10-01: v0.16.0 `recoveryInventory` reports complete schema and snapshot coverage with 0 uncovered required tables; verify passes; side-path restore selects identical pack items (§16.2). `.13` is proof-owed (commented). Evolved, CASS-populated stores remain `.14`. |
 | 12 | Graceful offline degradation remains useful and truthful | **PARTIAL** | Honest fallback/abstention exists; released binary may instead return no result/error, and uncalibrated quality is misleading. |
@@ -1142,11 +1179,11 @@ candidate before `.2` changes the implementation.
 | 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL / UNPROVEN** | Core graph/team/serve/insight implementations are substantial. Several formerly placeholder insight sections now have real code and regression assertions; remaining acceptance is tracked by `bd-2pos6` and `.34`, not inferred from stale placeholder labels. `.9` owns stable claims. |
 | 17 | Multi-agent local writes preserve integrity and truthful freshness | **PARTIAL / UNPROVEN** | Strong tests exist; current full-suite proof is red and evidence/linkage/index generation gaps remain. |
 | 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists. The 2026-09-17 amendment, decided on delegated authority, resolves the two-human criterion mismatch (`.8`); this is not a new current-source runtime proof. |
-| 19 | Canonical readiness verification and green CI | **REGRESSED (main red) / UNPROVEN** | 2026-10-01: `CI Static` has been red on main since 2026-09-30 on four steps, including an 11-test file declared by no module whose companion source exists only in a delivery-workflow patch (§16 R6, `.41`). There is no test-id manifest, the proof capsule never populates, and 44 of 80 per-feature workflows publish to main (§16 R8; `.5`, `.58`, `bd-fy92m`). Full `CI` has been disabled since 2026-08-27. |
-| 20 | Reproducible performance and usable first-agent latency | **FAILING at realistic scale** | 2026-10-01: about 1.1 s of model cold start in every process (R14, `.61`). `remember` is O(corpus) because incremental intake became test-only on 2026-08-06 (R13, `.57`). Search, pack and status take 11 s / 8.7 s / 3 s after 4.9k spans, and the warm daemon does not help (R4, `.64`, `.47`). README rows remain historical; `.6` owns evidence. |
+| 19 | Canonical readiness verification and green CI | **REGRESSED (hosted verification dark) / UNPROVEN** | 2026-10-22 (§17.3 N3): **Actions is `enabled: false` repo-wide.** The last run of any workflow was 2026-10-08T22:58Z and it failed on an allowed-actions policy, not on code — `actions/checkout@v4`, `dtolnay/rust-toolchain@nightly` and `cargo-deny-action` are rejected because "all actions must be from a repository owned by Dicklesworthstone". ~994 non-tracker commits carry no hosted verdict. `.41` closed honestly on `CI Static` run 37056106739 (`c211215a7`, 2026-10-02); that green is now 20 days stale and cannot be re-established while the policy stands. Workflow files grew to 88, of which **47** publish to main (N8). Local static gates are all green and prove presence, not behavior — none of them sees N1. Owners: `bd-actions-disabled-repo-wide-33mfm`, `bd-479c6`, `.5`, `.58`, `bd-fy92m`. |
+| 20 | Reproducible performance and usable first-agent latency | **MEETING its targets at 4k spans; 50k and README rows still unproven** | 2026-10-22 (§17.2): at 4,009 spans search 0.83–1.19 s, pack 1.14 s, status 0.37 s, `ask` 0.89 s, import 0.60 s/session, `why` 0.079 s. `remember` is 0.92–1.07 s at 10 memories and 1.24–1.33 s at 4,009 spans, a log-log slope of ≈ 0.04 against the ≤ 0.15 WCS target. Caveats that keep this row open: the slope is a two-point estimate and the 50k point is unmeasured; `single_document_as_full_rebuild` is still the intake label (`src/core/index.rs:4485`) so `.57`'s wiring is unlanded and the risk is structural; `bd-xayfm` remains open with a colder cold-start basis (2.5–3 s, tokenizer build) than this host measured, and `.61` closed as a duplicate of it with no work done. README rows remain historical; `.6` owns evidence. |
 | 21 | Hermetic multi-platform release/install chain | **PARTIAL / UNPROVEN** | Current release has archives/checksums/installers but no candidate checks/provenance set; tag-only workflow inputs remain non-hermetic. `.7`, `.18`, `.20`, `.21`. |
 | 22 | Canonical walking skeleton proves init → remember → search → pack → why | **WORKING (released binary, serial)** | 2026-10-01: public v0.16.0 init → remember → search → pack → why → replay → outcome → ask passes black-box in an isolated store (§16.2). Readiness-gate wiring remains `.5`/`.17`. |
-| 23 | Recommended agent journey is coherent and fast without a daemon | **PARTIAL (fails once CASS history is imported)** | 2026-10-01: TTFUC is about 1.3 s on 10 memories but 8.7 s once 4.9k CASS spans are imported. The outcome metrics (UTR/TTFUC/PAP/FAR/WCS) and the hook budget are now defined in §16.5 and gated by `.50`. |
+| 23 | Recommended agent journey is coherent and fast without a daemon | **WORKING at 4k spans; the journey's own first step can still fail silently** | 2026-10-22: TTFUC is 1.14 s cold at 4,009 imported spans (was 8.7 s), inside the ≤ 2 s target, with no daemon. The journey's weak link is no longer latency but N1: a user who follows README Quick Start (`init` → `import cass` → `pack`) under the default download policy can reach a store that reports healthy and packs nothing. `.66` owns that; the metric program still runs through `.63`/`.50`, which `.67` must first make trustworthy. |
 | 24 | No-silent-mutation lifecycle, helpful/harmful feedback, decay/inversion | **PARTIAL / UNPROVEN** | Machinery exists; exact later-pack behavior, audit semantics, and docs wording need behavioral proof or maturity demotion. `.9`, `.17`, `bd-2mpct`. |
 
 ---
@@ -1891,3 +1928,1042 @@ child closes the real-data gap only if `.50`'s metrics are in ENFORCE mode
 and green on a candidate from a green main (`.41`/`.58` → `.19`). Bead count,
 report-mode numbers, or green unit tests on clean fixtures do not meet that
 bar. That is the exact failure this pass found.
+
+---
+
+## 17. 2026-10-22 reality check: Track R landed; the instruments did not
+
+**Verdict.** The real-data work of the last three weeks worked. On the data
+`ee` exists for, the shipped `v0.18.0` now does what the README says: it mines
+a CASS corpus, packs readable incident text inside a token budget, proposes
+usable rules, and answers with citations — fast, at 4k spans, with bounded
+disk. Five of the six headline 2026-10-01 failures are fixed and two of the
+five §16.5 outcome metrics meet their targets.
+
+What did not improve is the project's ability to *see* any of that. The gate
+that measures Track R cannot run on the developer's platform and reports zeros
+for a product that retrieves correctly. Hosted verification has produced no
+verdict in fourteen days and ~994 non-tracker commits, for a configuration
+reason nobody had diagnosed. And one new product defect lets a fully populated
+store answer every query with nothing while `status`, `index status` and
+`doctor` all report it healthy.
+
+That is a different failure shape again. 2026-08 was "the loops are open".
+2026-10-01 was "the loops break on real data". 2026-10-22 is **"the loops
+work and nothing can prove it"** — three independent measurement surfaces are
+broken, and each one fails in the direction that hides good news and would hide
+bad news equally.
+
+### 17.1 Evidence authority
+
+| Item | Value |
+| --- | --- |
+| Source HEAD | `2bad70949` (2026-10-22 22:51:50 -0400), `v0.18.0-940-g2bad70949`, package `0.18.0`. 1,892 commits since the 2026-10-01 pass (`552f7ba4f`), 994 of them not tracker syncs; top scopes `index` 76, `cass` 70, `e2e` 52, `ci` 44, `recall` 40, `learn` 37 |
+| Shipped binary | public `v0.18.0` `ee-aarch64-apple-darwin.tar.xz`, SHA-256 verified **OK** against its published `.sha256`. `ee version --json` attests clean `969f0cbf19a5fdaa367328350c937cf566063efc`, tag `v0.18.0`, release profile, `aarch64-apple-darwin`, and the full franken-stack version list |
+| Probe isolation | private `HOME` / `XDG_*` roots under `/private/tmp`. **Physical paths only**: on macOS `/var` and `/tmp` are symlinks and ee's CASS path guard correctly refuses a binary path with a symlink component |
+| CASS provisioning | the `.43` emulator (`scripts/real_shape_corpus/cass_fixture.py`, every line prefixed `stub`). **Real `cass` could not be used: this host has no cass index** — `cass sessions` exits 3 `missing-db`, "Run 'cass index --full'". So no claim here rests on real transcripts; it rests on the committed real-shape oracle |
+| Oracle corpus | `tests/fixtures/real_shape_cass`, 311 files, graded `judgments.json` with distractors, secret bait and injection bait. Served 308 sessions / 4,009 spans; ee admitted 988 and quarantined 3,021 (`tool_call` 1,434, `tool_result` 1,434, `metadata` 90, `record_projection:unavailable` 63) |
+| Tracker | 4,918 records: 4,611 closed, 255 open, 33 blocked, 16 in progress, 3 deferred. Bridge epic: 68 records — 18 closed, 40 open, 8 in progress, 2 blocked |
+| Hosted CI | **Actions is `enabled: false` repo-wide.** Last run of any workflow: 2026-10-08T22:58Z (`CI Static`, failure). 88 workflow files, 47 carrying `contents: write` or `git push`, 31 applying patches or asserting blob hashes at runtime |
+| Distribution | GitHub `v0.18.0` (2026-10-14), crates.io `0.18.0`, Homebrew formula `0.18.0` — all coherent. 7 `.minisig` signatures (v0.16.0 had none). No Sigstore, SLSA, or manifest asset. **No `release-probe-*.json` asset on v0.17.0 or v0.18.0**, although v0.16.0 published one |
+
+Static gates at HEAD, all green locally: `cargo fmt --check`; forbidden-deps
+(root and fuzz trees); vision coverage 144 surfaces, 0 stubbed, 0 missing, 0%
+gap; contract-drift radar ok (43 docs, 241 schemas, 606 documented codes
+against 608 fixtures, 0 violations); verification-drift 0; closure lint 231
+beads, 0 violations, 86 baseline matches; bridge staleness now names Part III
+correctly and emits one low `vision_coverage_gap_low`; plan drift 0 warnings.
+
+They still prove presence, not behavior — and §17.3 N1 is a defect that every
+one of them passes over.
+
+### 17.2 What works, measured on the shipped binary
+
+1. **Walking skeleton.** `init` (1.34 s) → `remember` ×10 → `search` → `pack`
+   → `why` → `status` → `index status` → `capabilities` → `doctor`, all exit 0
+   with v2 envelopes. `why` resolves the persisted pack selection in 0.079 s.
+2. **Two outcome metrics now meet their targets.**
+
+   | Metric | v0.16.0 (2026-10-01) | v0.18.0 (2026-10-22) | Target | Verdict |
+   | --- | --- | --- | --- | --- |
+   | **UTR** | ~0.65 | **1.0000** (29 evidence blocks, 5,255 content bytes, zero JSON keys / uuids / message ids / escapes) | ≥ 0.95 | **MET** |
+   | **PAP** | 0/10 | **precision 1.00, recall 0.833** (5 proposals, 0 polluted by `must_not_propose` substrings) | ≥ 0.70 / ≥ 0.70 | **MET** |
+   | **TTFUC** | 8.7 s at 4.9k spans | **1.14 s** pack at 4,009 spans (0.35 s p50 on the 123-record base corpus) | ≤ 2 s cold | **MET at this scale** |
+   | **WCS** | 2.0 s → 6.6 s for 10 → 983 docs | `remember` 0.92–1.07 s at 10 memories, **1.24–1.33 s at 4,009 spans** (log-log slope ≈ 0.04) | slope ≤ 0.15 | **MET at this scale; 50k point unmeasured** |
+   | **FAR** | 1/9, uncalibrated | **1/10, uncalibrated** | ≤ 0.05 at a calibrated floor | **unchanged — see N4** |
+
+3. **The CASS loop produces readable incidents.** Evidence now arrives as
+   projected transcript text, not envelopes: `assistant: Published vault 1.2.0.
+   Lesson for next time: bump the version in Cargo.toml and commit it before
+   running cargo publish; crates.io rejects a…`. A persisted `reader_text`
+   column, `src/db/evidence_reader_projection.rs`, and `TRANSCRIPT_PROJECTION_VERSION = 2`
+   back it; `src/search/mod.rs:1098` and `src/core/context.rs:15437` both
+   consume `span.reader_text()`. R2 is fixed in the surfaces that matter.
+4. **Scale cliff gone.** At 4,009 spans / 988 admitted evidence / 308 sessions:
+   search 0.83–1.19 s (was 11.1 s), pack 1.14 s (was 8.7 s), status 0.37 s (was
+   3.0 s), `ask` 0.89 s. Import 0.603 s per session (was ~18 s), about 30×.
+5. **Retention is bounded.** 2 retained generations after 11 writes, and still
+   2 after an explicit rebuild — against one full index copy per write and a
+   hard failure at 1,000 in v0.16.0. `index_retention_gc` keeps the newest 2
+   valid generations, `reclaim_after_publish` runs inside the exclusive
+   generation fence, and `ee index vacuum --apply` is audited. Store size 54 MB
+   for the 4k-span corpus.
+6. **CASS trust is wired and honest.** The `[cass] binary` override is live at
+   all three former dead sites (`src/cli/mod.rs:24501`, `src/core/status.rs:1395`,
+   and `src/output/mod.rs`, which no longer discovers on its own) and it
+   **executes**. A standard `~/.local/bin/cass` is still refused by default, but
+   the refusal now names the path, both opt-ins, and carries
+   `repairKind: "actionable"`.
+7. **`ask` is honest and useful.** A direct hit answers with the exact span
+   cited at confidence 0.678 and `confidenceCalibration.status =
+   "heuristic_uncalibrated"`, `calibrationId: null`. An unrelated question
+   abstains (`no_confident_answer`, confidence 0.218). Oracle rates:
+   negative-abstain 1.00, negative-query flag rate 1.00. A distractor search
+   returns results but flags `weak_query_recall`.
+8. **Three §15 archive criteria closed.** `bd-3k1mg`, `bd-16imy` and
+   `bd-3h6bz` are all closed. `.43` closed today on executed evidence with a
+   mutation control and a non-vacuous determinism verdict.
+
+### 17.3 What does not work
+
+| # | Finding (measured) | Status | Owner |
+| --- | --- | --- | --- |
+| **N1** | **A populated store returns zero results while every health surface reports it healthy.** Reproduced three times from a clean root: import the oracle under the **default** model-download policy, then `ee search` returns **0 results** with `index_incompatible` and `ee pack` **0 items**, while `ee index status` reports `health: ready`, `degradationCode: null`, 988 evidence + 308 session documents, equal generations (4368/4368) and equal corpus revision; `ee status` reports `posture.overall: ok`; and **`ee doctor` reports `posture: ok` with zero non-ok checks**. The search-side degraded entry is correct and actionable ("the stored vector producer identity cannot be verified against the active embedder", repair `ee index rebuild --workspace .`) and both `ee index reembed` and `ee index rebuild` restore full retrieval (10 results, `degraded: []`). The trigger is the documented default path: with no model present, `ee` builds the index with `deterministic_hash`, then acquires and verifies the real 507 MB model during the same run, after which the existing index is no longer compatible. Setting `EE_EMBED_DOWNLOAD=off` is coherent and returns results with an honest `embed_model_unavailable`; the **default** is the broken case. A memory-only store is unaffected, so this is specific to CASS-populated stores. Adjacent to closed `bd-fresh-workspace-hash-fallback-kvltg` and outside the coherence test `ready_index_posture_is_coherent_across_public_cli_surfaces` that closed §B. | **NEW — total retrieval loss, silent to every health surface** | NO_BEAD at audit → `.66` (P0) |
+| **N2** | **The Track R measuring instrument is broken three ways and publishes false reds.** `scripts/real_shape_corpus/probe.py` (`.63`): (a) it allocates its root with `tempfile.mkdtemp()`, which on macOS yields `/var/folders/…`; `/var` is a symlink, so ee's CASS path guard refuses the emulator and the probe dies at the import step — **the identical defect was diagnosed and fixed for `tests/no_mocks_e2e.rs` in §A on 2026-09-01 and not carried over**; (b) its harness reports only `stderr`, while `ee` writes error envelopes to **stdout**, so the failure message is the empty string `"ee import cass failed (5): "` and the real reason is only in `import.json`; (c) its model passthrough sets **`EE_MODEL_DIR`**, which appears **0 times** in `src/config/env_registry.rs` and `docs/env_vars.md` — the registered name is `EE_EMBED_MODEL_DIR`. Run as shipped against v0.18.0 it reports `UTR: null`, `FAR: null`, `recall_at_5: 0.0` across 40 judged queries and 0 packed items. With a physical `TMPDIR` and a real model dir the same binary and corpus return 10 results per query and UTR 1.0000. **Every Track R metric in §16.5 is gated on this script, which is why no Track R bead carries a before/after number three weeks on.** | **NEW — false-red gate; (c) is R1's dead-config shape reproduced inside the gate** | NO_BEAD at audit → `.67` (P0) |
+| **N3** | **Hosted verification has been dark for 14 days, for a configuration reason.** Actions is `enabled: false` repo-wide; the last run of anything was 2026-10-08T22:58Z and its root cause is **not** code: `##[error]The actions actions/checkout@v4, dtolnay/rust-toolchain@nightly, and embarkstudios/cargo-deny-action@… are not allowed … because all actions must be from a repository owned by Dicklesworthstone`. An allowed-actions policy restricted to owner-owned actions fails every job before checkout. ~994 non-tracker commits have landed with no hosted verdict. `.41` closed legitimately on a specific green (`CI Static` run 37056106739 on `c211215a7`, 2026-10-02) — that green is now 20 days and ~994 commits stale and cannot be re-established while the policy stands. | **NEW root cause on an owned gap** | `bd-actions-disabled-repo-wide-33mfm` (P0, open) + `bd-479c6`; policy cause recorded by this pass |
+| **N4** | **Relevance does not discriminate at the tail, so FAR cannot be fixed by a threshold.** "prepare release" on a 10-memory store packs **10/10** items, `omittedCount: 0`, at **4.2%** budget utilization — so nothing was forced in by budget pressure. The office-espresso distractor ranks **4th** with relevance **0.1906**, inside a band of 0.1743–0.1936 that also contains "clippy warnings are errors" (0.1848) and "forbidden dependencies" (0.1821). The separation between a distractor and a genuinely relevant rule is 0.006. `.11`'s conformal-risk plan chooses a threshold λ; **no λ separates that band**, so a discriminative score is a prerequisite, not a consequence, of calibration. | **UNCHANGED (1/10 vs 1/9), sharper diagnosis** | `.11`, `.12`; evidence comment added |
+| **N5** | **Published releases carry no black-box evidence.** `.7.1` closed 2026-09-23 delivering `scripts/release_binary_probe.sh`, and `ci-static.yml:515` runs it `--self-test`. v0.16.0 published a `release-probe-aarch64-apple-darwin.json` (12 checks, `verdict: pass`); **v0.17.0 and v0.18.0 publish none.** The gate exists and is self-tested; nothing in either release proves it ran against the artifact users install. | **NEW regression in release evidence** | NO_BEAD at audit → `.68` (P1) |
+| **N6** | **Two releases shipped past an open authorization boundary.** v0.17.0 (2026-10-03) and v0.18.0 (2026-10-14) were published while `.20` ("human-authorize publication only after verified private staging"), `.27` (signed/attested release) and `.65` (the 0.16.1 hotfix candidate those two overtook) are all still open. §13.5 says an open publication bead is not authorization. The releases are good — coherent across three channels, signed with minisign, self-attesting their commit — which is exactly why the gap is procedural rather than harmful, and why `.20`/`.27` need to be reconciled to what actually happens rather than left as unmet gates. | **NEW process gap** | `.20`, `.27`, `.65`; reconcile or demote |
+| **N7** | **ee discards a precise upstream repair.** When `cass sessions` fails with `kind: "missing-db"` and the upstream hint "Run 'cass index --full' to create the database", ee reports `repair: "run cass health --json"` with `repairKind: "unknown"`, dropping the one instruction that fixes it. The structured `subprocessDiagnostics` are good and the DB path is correctly redacted. | **NEW small truth defect** | NO_BEAD at audit → `.69` (P2) |
+| **N8** | **Delivery-lane topology grew.** 88 workflow files (was 80), **47** carrying `contents: write` or `git push` (was 44), 31 patching or hash-asserting at runtime (was 38). All 88 are currently inert because of N3, so `.58`'s "turn them into manifest-shard runners" cannot be validated until Actions returns. | **WORSE** | `.58`, `bd-fy92m`, `bd-5glwp` |
+| **N9** | **Unchanged small defects, each re-measured.** 414 leaked `.potion-multilingual-128M-download-*` staging dirs in the real model root — **exactly the 2026-10-01 count** (`.55`). `ee eval list` outside the repo still errors `Fixture directory does not exist: tests/fixtures/eval` with the repair "Ensure tests/fixtures/eval/ exists" (`.53`). `pack_assembly_elapsed_over_budget` still fires on an ordinary successful 29-item pack (`.56`, in progress). Local `cosine` still ranks semantic spans in `src/core/ask_semantic.rs:332`, local BFS still walks causal ancestry in `src/graph/causal.rs:390`, and PPR signals still surface through `graph suggest-links` (`.4`; `.15` remains blocked on upstream personalization). `single_document_as_full_rebuild` is still the label for single-document intake (`src/core/index.rs:4485`), so `.57`'s wiring is unlanded even though wall-clock write cost no longer scales with the corpus at this size. | **UNCHANGED** | `.53`–`.57`, `.4`, `.15` |
+
+### 17.4 Answers to the five reality-check questions
+
+1. **Working now:** everything in §17.2. Four of five outcome metrics meet
+   their targets at the measured scale, three §15 criteria closed, and the
+   product does the job the README advertises on the corpus it advertises.
+2. **Not working:** N1–N9. The decisive ones are N1 (a healthy-looking store
+   that answers nothing) and N2 (the gate that would have caught N1 reports
+   zeros for everything, so a real zero and a harness zero are indistinguishable).
+3. **Blocking:**
+   - **Measurement, not implementation.** Three independent surfaces that are
+     supposed to tell the truth about the product cannot: the Track R probe
+     (N2), hosted CI (N3), and `doctor`/`status`/`index status` for the N1
+     condition. The implementation outran all three.
+   - **No discriminative relevance.** N4 means `.11`/`.12` cannot be closed by
+     calibration alone.
+   - **The oracle is served by an emulator here.** The host has no cass index
+     (`cass sessions` → `missing-db`), so nothing in this pass measured real
+     transcripts. `.62`'s premise is now literal: the product's heaviest
+     potential user cannot use it without `cass index --full`.
+4. **Would closing every open bead close the gap? No.** N1, N2, N5 and N7 had
+   no owner at audit, and N1 is the kind of defect that would ship: it is
+   invisible to `fmt`, forbidden-deps, vision coverage (144/144, 0% gap),
+   contract-drift, closure lint, `status`, and `doctor`. N3's root cause was
+   unrecorded on its own P0 bead. §8 rows 4, 5, 9, 20 and 23 were also stale in
+   the pessimistic direction and are revised below.
+5. **Vision goals with no bead:** retrieval that is *provably* non-empty on a
+   store the product itself reports healthy (README *Graceful Degradation*:
+   "Each degradation surfaces in the JSON `degraded` array with a repair
+   command" — true per-response, false on the three health surfaces); and a
+   measurement instrument that fails closed rather than reporting zero
+   (AGENTS.md *Control Markers*, "constant-green, constant-red, and cannot-pass
+   assertions are the same defect"). Both are now `.66` and `.67`.
+
+### 17.5 Bridge delta — Track V (make the instruments tell the truth)
+
+New children of `bd-reality-core-convergence-1azkt`, all graph-reachable from
+`.22`. Existing owners keep their scope; no competing plan or epic was created.
+
+- **V0 `.70` (P0, the generalization).** Ambition round 1 asked what N1, N2 and
+  N3 have in common, and the answer is one defect in three subsystems: **every
+  verdict surface in this project can emit a value indistinguishable from the
+  healthy case without saying which.** `doctor` renders an unevaluated dimension
+  as `posture: ok`; the probe renders a dead harness as `recall_at_5: 0.0`; a CI
+  conclusion renders a policy refusal as `failure`. So the standing property is
+  a **tri-state verdict contract** — *measured healthy*, *measured unhealthy*,
+  *could not measure* — with a code-derived census of every health, gate and
+  metric surface, a declared third state for each, a cargo-free gate that fails
+  when a surface cannot express it, and a terminator classification for verdicts
+  that come from a subprocess or a remote lane. AGENTS.md already names the
+  class in the abstract (bd-2phcw: constant-green, constant-red and cannot-pass
+  are the same defect); this makes it enumerable. `.66` and `.67` land first and
+  become its positive control; its negative control is a legitimately two-state
+  surface that must NOT be flagged, so the gate cannot become noise and get
+  exempted wholesale. No new posture layer — the third state lives inside the
+  existing `posture` / `degraded[]` / capability contracts.
+- **V1 `.66` (P0, N1).** One coherent readiness answer, and a `doctor` check
+  that sees `index_incompatible`. `ee search`, `ee pack`, `ee index status`,
+  `ee status` and `ee doctor` must not be able to report mutually exclusive
+  readiness for one snapshot; the condition must appear as a non-ok `doctor`
+  check carrying the working `ee index rebuild` repair; and acquiring the model
+  mid-run must either re-stamp the index or declare the store degraded at every
+  surface. Acceptance is adversarial and non-vacuous: a positive control that
+  reproduces the zero-result state and fails before the fix, a negative control
+  on a memory-only store, and an explicit assertion that `doctor` has at least
+  one non-ok check whenever retrieval returns zero on a non-empty index.
+- **V2 `.67` (P0, N2).** Make the probe scaffold fail closed. Canonicalize its
+  root to a physical path (reuse the §A trusted-target-root resolution rather
+  than re-deriving it), report `stdout` envelopes in harness errors because
+  that is where `ee` writes them, use `EE_EMBED_MODEL_DIR`, and add a
+  self-test that asserts a *known-good* corpus produces non-zero recall — so a
+  harness fault can never be published as a product zero. `.63` depends on this.
+- **V3 `.68` (P1, N5).** Publish the release probe's capture as a release asset
+  for every tag, and make a missing capture fail the release rather than the
+  release succeed silently. Reuses `scripts/release_binary_probe.sh`.
+- **V4 `.69` (P2, N7).** Carry the upstream repair when a subprocess supplies
+  one, instead of substituting a generic hint.
+- **N3** is recorded on `bd-actions-disabled-repo-wide-33mfm` with the policy
+  error text and the three rejected actions; the fix is an allowed-actions
+  policy decision (allow the three, or vendor them), not code.
+- **N4** is recorded on `.11`/`.12` with the measured 0.1743–0.1936 band, and
+  ambition round 3 adds a **feasibility precondition** before any λ is fitted:
+  compute the ROC of the relevance projection over the `.43` oracle's judged
+  relevant-versus-distractor items and report AUC plus the *minimum achievable
+  FAR at the target recall*. If that minimum exceeds α, **no threshold
+  satisfies the target** and the work is upstream of calibration — better
+  features, a different fusion, or reranking — so the calibration step must
+  fail with that explicit reason instead of emitting a λ. The judgments,
+  distractor labels (`distract_espresso`, `distract_lunch`) and
+  `negative_queries` already exist in
+  `tests/fixtures/real_shape_cass/judgments.json`, so this is cheap and it turns
+  "calibration is pending" into a decidable question. Sequence the unsupervised
+  elbow fallback first: on the measured distribution the largest normalized gap
+  falls between rank 2 (0.3968) and rank 3 (0.1936), which cuts the "prepare
+  release" pack to exactly the two correct items.
+- **N6** is recorded on `.20`/`.27`: reconcile the authorization gate with the
+  hand-cut release practice, or demote the claim.
+
+### 17.6 Order and steering
+
+```
+.66 coherent readiness + doctor check ──┬─► .70 tri-state verdict census + gate ──┐
+.67 probe fails closed ─────────────────┴─► .63 report-mode baselines ─► .50 (ENFORCE) ──┤
+bd-actions-disabled-repo-wide-33mfm (policy decision) ──► .58 shard runners ──► .19 ─────┼─► .20/.27 ─► .21 ─► .22
+.11 ROC feasibility ─► .11 elbow ─► .11 λ ─► .12 quality thresholds ─────────────────────┘
+.68 release-probe asset ; .69 upstream repair ; .53–.57 any time
+```
+
+`.66` is deliberately **not** blocked on `.10`. Refinement pass 3 removed that
+edge: `.10` owns a general source-attested retrieval/index oracle, and gating a
+user-facing P0 behind it is the dependency deadlock this plan warns about (the
+same reason `.5` was allowed to proceed while the product was red). `.66`'s own
+acceptance requires a positive control that fails at the parent commit, which is
+the source attribution for this defect, and that control becomes an input to
+`.10` rather than waiting on it.
+
+### 17.7 Beads, ambition and refinement record
+
+The skill ran in its documented order, applied in place, with no competing plan
+or epic created. Both frozen prompts are retained verbatim on the root bead.
+
+- **Phase 3a.** `.66`–`.69` filed with blocking edges to `.22`, `.19` and `.63`.
+- **Phase 4, three ambition rounds.** Round 1 produced `.70` (the tri-state
+  verdict contract above). Round 2 hardened it with a code-derived enumeration,
+  an empty-world guard, and a negative control for legitimately two-state
+  surfaces. Round 3 produced the `.11`/`.12` ROC feasibility precondition.
+- **Phase 5, five refinement passes.**
+
+| Pass | Finding → change |
+| --- | --- |
+| 1 | `.66`'s own invariant was wrong as first written: "doctor must be non-ok whenever retrieval returns zero against a non-empty index" would fire on every legitimate no-match query and turn `doctor` red for any unanswerable question — the noise-then-blanket-exemption failure that `degraded[]` nearly suffered before E5. Narrowed to key on an index/embedder-caused degradation rather than on the absence of results. |
+| 2 | Both new E2E scripts must emit `ee.test_event.v1` per step with stdout/stderr separation, as every other E2E in §12 does; otherwise a future CI failure is as unreadable as the probe failure this pass fixed. |
+| 3 | Removed the `.66 → .10` edge as over-coupling (see §17.6). |
+| 4 | Paired every absence assertion with a presence assertion — the exact 988 admitted-evidence count and at least one exact span id — so an empty corpus or a dead harness cannot pass. That is precisely how N2 passed. |
+| 5 | Scope: no new posture layer, no new report family, and the honest `EE_EMBED_DOWNLOAD=off` degradation path explicitly preserved. No further material change; stop condition met. |
+
+**Final validation.** 4,923 tracker records. Five new children (`.66`–`.70`),
+all graph-reachable from `.22`. `br dep cycles` reports **0 active cycles**.
+`bv --robot-triage` completes and ranks `.5`, `.15` and `.18` as its top picks.
+Dated evidence comments were added to `.4`, `.11`, `.12`, `.20`, `.27`, `.42`,
+`.44`–`.48`, `.53`–`.57`, `.63`–`.65`, `bd-xayfm` and
+`bd-actions-disabled-repo-wide-33mfm`. **No pre-existing issue changed status
+and nothing was closed by this pass.** Cargo was not run locally (tripwire) and
+no RCH dispatch was launched; every product claim above is a black-box
+measurement of the published v0.18.0 archive.
+
+### 17.8 Steering
+
+Steering: **fix the two instruments before funding more product work.** N1 is
+the proof that the current gate set cannot see a total retrieval failure, and
+N2 is the proof that the one gate aimed at real data would have reported the
+same zeros whether the product worked or not. Both are small, bounded, and
+they are what makes every later number believable. The product work of the
+last three weeks does not need more ambition; it needs a measurement it can be
+graded by.
+
+## 18. 2026-10-23 execution pass: the instrument now works, and it found things
+
+Not a new reality check. This is the execution record for the steering in
+§17.8, kept here because §17's findings are only honest while their
+dispositions are visible beside them. Same evidence authority as §17.1 — the
+sha256-verified shipped v0.18.0 archive, black-box, isolated `HOME`/`XDG_*`
+roots on physical paths — plus, for the first time in this bridge, **numbers
+produced by the project's own instrument rather than by a hand-rolled probe**.
+
+### 18.1 N2 is closed, and the first real baselines exist
+
+`.67` closed on an execution at `ce034a12b`. `scripts/real_shape_corpus/probe.py`
+now carries all four required outcomes with both directions of every control:
+`--self-test` runs 24 binary-free arms and 28 with a binary. The repaired probe
+produced the oracle-scale v0.18.0 baselines `.63` had been blocked on for three
+weeks (308 sessions / 4,009 spans / 988 admitted / 3,021 quarantined):
+
+| §16.5 metric | measured | target | verdict |
+| --- | --- | --- | --- |
+| UTR | **0.9998** | ≥ 0.95 | MET |
+| TTFUC (pack p50) | **0.571 s** (max 0.759 s) | ≤ 2 s cold | MET |
+| PAP | **1.00 precision / 0.833 recall**, 5 proposals, 0 polluted | ≥ 0.70 both | MET |
+| FAR | **0.0** over 335 packed items | ≤ 0.05 | MET |
+| WCS slope | **0.437** over 502 → 4,009 records | ≤ 0.15 | **MISSED** |
+
+Supporting readings: search p50 0.253 s; import 0.171 s/session (but see the
+correction in §18.7 — the 30× import claim in §17.2 does NOT survive
+instrument measurement); negative-query
+flag rate 1.0; `ask` negative-abstain rate 1.0; `scenario_hit_at_5` 0.925.
+
+**WCS is the one new red, and it is the first measurement of invariant I-2 on
+real shape.** `remember` p50 went 0.372 s at 502 records to 0.923 s at 4,009 —
+an 8× corpus for a 2.5× write cost, slope 0.437 against a ≤ 0.15 target. Two
+points only, so the figure is directional rather than final; a third point is
+needed before it is quoted as the verdict. Note it supersedes nothing: §17's
+≈0.04 was measured from 10 memories to 4,009 spans, a range dominated by fixed
+cost, and over that range the slope genuinely is flat. The 502 → 4,009 band is
+where the growth lives.
+
+**Two readings on this corpus must never be quoted without their reason.**
+`recall_at_5` fell 0.4583 → 0.0375 → 0.0 across 502 → 4,009 → 12,009 records on
+a product that retrieved correctly the whole way up, because the oracle reaches
+scale by seeding copies of each judged scenario while judgments label only the
+authored core. `scenario_hit_at_5` is the scale-invariant form of the same
+question and stayed 1.0 / 0.925. **Anyone promoting `.50` to ENFORCE must gate
+on `scenario_hit_at_5`, not `recall_at_5`.** This cost a correction to the
+probe's own fail-closed guard (`cb246f91e`): as first shipped it keyed on
+`recall_at_5` and therefore false-fired at 12,009 records — the constant-red
+half of `bd-2phcw`, reintroduced inside the gate written against it. The arm
+that now pins it is a twin that must NOT fire.
+
+**And the honest limit on every number above: they are the LEXICAL
+configuration.** The default download policy cannot be measured, because it
+returns zero results (N1). The only embedding configuration in which ee's own
+outcome metrics can be measured today is the one that turns the model off.
+
+### 18.2 N1 is attributed to exact source, and deliberately not yet fixed
+
+Reproduced exactly — `init` → `import cass` → `search`, nothing written between,
+so all five surfaces observe one immutable snapshot: search 0 results with
+`index_incompatible`; `ee index status` health **READY**, `degradationCode`
+null, `repairHint` null, generations equal (139/139), 60 docs; `ee status`
+`posture.overall` **OK**; `ee doctor --full` **posture OK** with
+`search_index = ok "Search index is ready"`.
+
+The chain, with lines: a hash-tier build records `storedModelId`,
+`storedDimension`, `storedModelRevision` and `storedModelHash` as **null**;
+`embedding_space_compatibility_error` (`src/core/index.rs:5936`) opens
+`let (stored_model_id, stored_dimension) = stored?;` and so returns
+*compatible* whenever the stored side declares nothing — its doc comment states
+the assumption ("a lexical/hash-tier index legitimately carries no
+fingerprint") that frankensearch contradicts by binding a producer revision
+regardless of tier; `determine_health` therefore receives
+`compatibility_error = false`; and `check_search_index`
+(`src/core/doctor.rs:3616`) maps `IndexHealth` over only four states, so
+`Ready → CheckResult::ok` and doctor has no finding and no repair to offer. The
+decisive identity lives in frankensearch's own index header
+(`index.embedder_revision()` vs `query.identity_fingerprint()`), which **no
+readiness surface consults**.
+
+Two corrections to §17's N1 row. Doctor does not report "zero non-ok checks" —
+it reports posture OK with five warnings, and the relevant one,
+`embedding_posture`, **misdiagnoses** this store as a quality degradation
+("deterministic-hash fallback … Explicit memories remain available through
+lexical or anchored retrieval"). Zero are. So the condition is not merely
+unreported; it is reported as something an agent would reasonably act on
+differently.
+
+Recommended fix recorded on `.66`: resolve a **workspace-scoped** embedder stack
+in the readiness path and compare fingerprints, never touching the process
+global — the mechanism `src/core/index.rs:18557` already uses for exactly this
+divergence. Not implemented in this pass: it changes the readiness contract,
+needs a degraded-code fixture plus its `docs/degraded_code_taxonomy.md` row in
+the same commit, and will move goldens. None of that could be graded locally.
+
+### 18.3 The unification: one divergence, three symptoms
+
+N1 is not a reporting bug on its own. **Which embedder a process resolves
+depends on which code path asked first, and nothing binds the answer per
+snapshot.** Measured on one store at one instant: `index status` reports
+`semantic false / source frankensearch_hash_fallback / available_model_count 0`
+while a complete, `.verified` 489 MB potion model sits in the model root and
+`search`, in its own process, resolves a producer that rejects the stored
+vectors.
+
+Three symptoms, same fact:
+
+1. **`.66`** — the readiness surfaces resolve the non-semantic side, so they
+   see no conflict and report healthy.
+2. **`.56`** — the model-load subtraction added in `cf8c95030` (which **did**
+   ship in v0.18.0) reads the process-global `DEFAULT_SEARCH_EMBEDDER_LOAD`
+   OnceLock on both halves of its guard. On a store whose model comes from the
+   workspace registry that global is never initialised, so it subtracts **zero**
+   and `pack_assembly_elapsed_over_budget` still fires on **6 of 6** packs
+   (assembly 894/564/550/553/629/633 ms against a 500 ms threshold). The proof
+   is arithmetic: the cold pack paid ~330 ms more than the warm ones and its
+   reported assembly rose by the same ~330 ms, which cannot happen if the load
+   is being subtracted. Control: with the model absent the warning fires on
+   2 of 40, and 0 of 20 at 502 records — the threshold is not the problem.
+   Raised P3 → P2, not for latency (contents are unaffected and the message
+   says so) but because a warning on 100% of the primary command's invocations
+   trains agents to ignore `degraded[]`, which is the channel the honesty
+   contract runs on.
+3. **`bd-3k1mg` / `bd-qf3l4`** (closed) — the same divergence broke coalesced
+   drains with a `producer_revision` mismatch, and was repaired **pointwise** at
+   one call site rather than as a property.
+
+This already has an owning P0 — **`.2`, "make index publication and embedder
+selection deterministic across CLI processes"**, whose acceptance includes
+"equal snapshots choose one backend/model and semantic result across
+processes". No new bead was filed; the evidence went onto `.2` and `.66`/`.56`
+are linked to it as `related`. Its EVIDENCE STATUS block previously rested on a
+provenance-less 0.14.2 binary; the divergence now has a reproduction on a
+binary with a known commit plus two downstream symptoms carrying numbers.
+
+### 18.4 bd-betm5: the Learn loop's last link
+
+Three conjuncts govern gap coverage — not tombstoned, `created_at >
+cluster.last_seen_at`, and carrying the exact `knowledge-gap:<clusterId>` tag.
+Executed with the new third diagnostic in `scripts/e2e_memory_debt.sh`
+(27 steps, this bead's the only failure):
+
+- **tag conjunct: satisfied.** `coverTags` is literally
+  `["docking","knowledge-gap:gap_80bd12d26846daceb312"]` against a cluster
+  whose `clusterId` is `gap_80bd12d26846daceb312`.
+- **recency conjunct: satisfied, and the suspected mechanism is eliminated.**
+  The worry was that the second `ee learn gaps` re-observes the misses and
+  advances the window past the answer. It does not: `lastSeenAt` is
+  byte-identical before and after (`2026-10-23T05:11:53.826655000+00:00`) with
+  `scannedMissCount` 3 both times, and the remember landed ~1 s later.
+- **so the cause on that binary is that the predicate is not in it.**
+  `5c3392996` ("let hash-only gaps close via explicit coverage tags") landed
+  **2026-10-14 18:14, eight hours after the v0.18.0 release commit**, and
+  `GAP_COVERAGE_TAG_PREFIX` exists only in it and its test commit. The shipped
+  binary proves it from outside: its `suggestedCommand` carries **no `--tags`
+  at all**, so an agent following the product's own suggestion could not bind
+  an answer to a gap even in principle.
+
+**The trap that hid this, and it generalises.** The suite's staleness guard
+passed and printed `binary_version=0.18.0 source_version=0.18.0`, which reads
+like an attestation. It is semver equality, not commit identity, and the two
+sides differed by the one commit implementing the feature under test — exactly
+what its own header warns about (`bd-smxdr`). **Any measurement in this bridge
+must name the commit, not the version.**
+
+**The dispatched HEAD verdict came back and the pre-registered prediction held.
+`bd-betm5` is CLOSED.** Base `7f765483b`, `BUILD_EXIT=0`, `E2E_EXIT=0`, remote
+exit 0 in 32m25s, `remembered_demand_marks_cluster_covered: pass` with 12 of 12
+labels green, graded against a binary that job compiled. The pass predicate
+requires `status == "likely_covered"` **and** `coveredBy != null`, so the
+coverage link is established.
+
+So the shape of that bead was: real when filed against 0.17.0, fixed
+2026-10-14, open for nine days because no verdict existed. **The second instance
+of §18.5 confirmed by execution today.**
+
+`a55b8c75e` fixes the reason the literal `coveredBy` id was unavailable: the
+suite printed a rich diagnosis on the FAIL path and *nothing* on the PASS path,
+so the one value the bead's acceptance asked for was the one value no passing
+run emitted. A `[witness]` line now prints it beside the pass event — not
+through `event()`'s third argument, which lands in `first_failure_diagnosis`, a
+field other suites read as "why it failed". Both directions were observed before
+committing, since v0.18.0 cannot take the pass path locally.
+
+The `createdAt` hole is now **`bd-h1f81`** (P2) rather than a loose note: ee's
+own suggested command tells an agent to write a memory whose `created_at` must
+beat a timestamp ee publishes, and then does not report the `created_at` it
+wrote. Four validity-window fields are exposed and the row's own creation time
+is not.
+
+**One process lesson from the aborted first dispatch, which is mine and not the
+tooling's.** It synced `ce034a12b` and spent 33 minutes to report
+`BUILD_EXIT=101` with the `read_fence` duplicate-initializer errors — i.e. it
+rediscovered §18.5's broken-main window the expensive way. Two guards worth
+keeping: run `git merge-base --is-ancestor <last-compile-fix> HEAD` *before*
+dispatching, and never read a dispatch's fate from the wrapper's exit status —
+I ended the command with `; echo "dispatch exit=$?"`, which masked a remote
+exit of 90 as a local 0. Read `BUILD_EXIT`/`E2E_EXIT` out of the log.
+
+Smaller finding, separately actionable: `ee remember --json` returns 39 data
+fields — `audit_id`, `confidence`, `revision_number`, `valid_from`, `valid_to`,
+`version`, `tags` and more — and **no `createdAt` in either spelling**. So the
+timestamp the recency conjunct turns on is not observable from the write that
+is supposed to close the gap, and neither an agent nor a test can confirm that
+conjunct from outside the process.
+
+### 18.5 The pattern this pass exposes, which is bigger than any one bead
+
+Three of the beads examined today were **already fixed in source and still
+open**, because the only artifact anyone can measure is a published binary that
+predates the fix: `.56`'s subtraction shipped and is inert, `bd-betm5`'s
+predicate landed eight hours after the tag, and `.44`/R1's config override was
+fixed and verified only by source reading. With hosted Actions off
+(`bd-actions-disabled-repo-wide-33mfm`), cargo tripwired locally, and — until
+`ce034a12b` — the real-corpus probe constant-red, **the project's default
+outcome for a correct fix is that it stays open.** That is the same shape as
+§17's N1/N2 one level up: the work is not the bottleneck, the verdict is.
+
+Concretely, two cheap changes would move this more than any single product fix:
+decide the Actions allowed-actions policy (configuration, not code), and give
+the repaired probe a home in the gate set once `bd-2di61` settles the
+gated-stage exclusion. Until then every claim in this bridge rests on one
+developer's laptop and a hand-verified archive.
+
+### 18.6 Dispositions
+
+| §17 finding | 2026-10-23 disposition |
+| --- | --- |
+| N1 readiness incoherence | attributed to exact source; `.66` holds the recommended fix; linked to `.2` |
+| N2 probe false reds | **CLOSED** (`.67`, `ce034a12b`); baselines captured; guard sentinel corrected (`cb246f91e`) |
+| N3 Actions disabled | unchanged; now identified as the single highest-leverage non-code decision (§18.5) |
+| N4 FAR / relevance band | **FAR measured 0.0** over 335 items on the oracle; the λ-feasibility precondition on `.11`/`.12` stands |
+| N5 release-probe asset | unchanged (`.68`) |
+| N6 open beads across releases | sharpened: §18.5 explains the mechanism, not just the count |
+| N7 upstream repair hint | unchanged (`.69`) |
+| N8 workflow sprawl | unchanged |
+| N9 leaked staging dirs | unchanged; the probe no longer adds to it (controls use auto-cleaned roots) |
+
+### 18.7 One instrument, both releases — and a correction to §17.2
+
+With the probe repaired, **v0.16.0 and v0.18.0 were measured by the same
+instrument on the same corpus** (the `.43` oracle at 308 sessions / 4,009 spans,
+both archives sha256-verified against their published `.sha256`). Until now
+every Track R delta in this bridge compared a hand-measurement against a
+different hand-measurement. These are comparable:
+
+| metric | v0.16.0 | v0.18.0 | target |
+| --- | --- | --- | --- |
+| UTR | 0.4994 | **0.9998** | ≥ 0.95 |
+| TTFUC pack p50 | 4.102 s | **0.571 s** | ≤ 2 s |
+| pack max | 14.232 s | 0.759 s | — |
+| search p50 | 3.766 s | 0.253 s | — |
+| PAP precision / recall | 0.0 / 0.0 | **1.00 / 0.833** | ≥ 0.70 |
+| PAP proposals | 11, none acceptable | 5, all acceptable | — |
+| FAR | 0.0 | 0.0 | ≤ 0.05 |
+| packed items | 678 | 335 | — |
+| `ask` answered / cited-relevant | 0.0 / 0.0 | 0.625 / 0.625 | — |
+| negative-query flag rate | 0.333 | 1.0 | — |
+| `remember` p50 | 3.624 s | 0.923 s | — |
+| evidence admission | *surface absent* | 988 admitted / 3,021 quarantined | — |
+
+Two readings deserve stating. **Packed items halved while UTR doubled** — the
+pack got smaller and better at once, which is §16.5's thesis in two numbers. And
+**PAP improved by proposing less, not more**: eleven proposals none of which
+were acceptable became five that all were, across the same six judged arcs. The
+entire remaining 0.167 recall gap is one arc (`rustc-borrow-error`) that now
+yields no proposal at all. `ee ask` answering nothing at all on v0.16.0 was
+never previously quantified anywhere in this bridge.
+
+**THE CORRECTION.** §17.2 and the `ce034a12b` commit message report import at
+"~18 s/session → 0.603 s/session, about 30×". **That does not survive
+instrument measurement.** On this corpus the instrument puts v0.16.0 at
+0.213 s/session and v0.18.0 at 0.171 s/session — **1.25×, not 30×**. The two
+figures are not comparable rather than one being fabricated: the 18 s/session
+came from a configuration with the embedding model ACTIVE, where import pays
+per-span embedding cost, and both runs above have `EE_EMBED_DOWNLOAD=off`, which
+removes that cost from both sides. So the defensible claim is narrower, and it
+should replace the old one wherever quoted:
+
+> With embedding disabled, import throughput improved 1.25× between v0.16.0 and
+> v0.18.0. The large import speedup attributed to Track R is a property of the
+> **embedding** path and has **not** been reproduced by this instrument, because
+> the only configuration the instrument can measure is the one with embedding
+> off (`.66`).
+
+That is a genuine hole in the Track R evidence, not a bookkeeping nit: the
+headline import number cannot be re-derived until `.66` makes the default policy
+measurable. It is the second place in this bridge where `.66` is the thing
+standing between a claim and its proof, the first being every §16.5 metric in
+§18.1.
+
+`.63` is consequently **2 of 4 acceptance items done, 1 partial, 1 not done** —
+both published versions measured, HEAD not (no dispatch was launched for it),
+and the `real_corpus_cass_unavailable` code its self-test bullet names is not
+actually emitted by the probe, which is the same dead-code shape `.67` was filed
+for and must be either emitted or restated.
+
+### 18.8 The default backup level is not recovery-grade for evidence, and nothing says so
+
+**Heading corrected twice, and the second correction overturns my own
+conclusion.** This section first said "a restore reports success while denying
+95% of a store's evidence", then "the backup is written already 95% denied". The
+*measurements* in both were right. **Both attributions were wrong: the denial is
+intentional.** The settling evidence and the narrowed defects are at the end of
+this section — read that before quoting anything above it.
+
+`.13`'s ninth acceptance bullet asks to "replace planned-only coverage with
+executed current-candidate evidence". Executed today, create → verify → restore
+on the shipped v0.18.0, and it found a **data-safety defect in the recovery
+path**:
+
+| surface | source | restored |
+| --- | --- | --- |
+| `dbEvidenceCount` | 123 | 123 |
+| `dbEvidenceAdmittedCount` | **46** | **6** |
+| `dbEvidenceQuarantinedCount` | 77 | 0 |
+| `dbEvidenceDeniedCount` | 0 | **117** |
+| `indexDocumentCounts.evidence` | 46 | 6 |
+| `dbGeneration` | 139 | 139 |
+
+The restore reported `status: "completed"`, `degraded: []`, `issues: 0`,
+`cassSessionsRestored: 14`, `evidenceSpansRestored: 123`. So the span **count**
+round-trips perfectly and the admission **verdicts** do not. Two things make it
+worse than a count mismatch. It is a **severity escalation**: the source's 77
+*quarantined* spans return as *denied*, along with 40 of the 46 *admitted* —
+quarantine is reviewable, denied is terminal. And **it does not heal**: `search`,
+`pack` and a full `ee index rebuild` against the restored store leave it at
+6 admitted / 117 denied, so this is not a lazy rebuild catching up on first use.
+
+Control: the same procedure on a memory-only store restores 3 of 3 memories with
+full fidelity, so the defect is specific to evidence admission, not to restore.
+
+The manifest's own inventory shows the fault line. `evidence_spans` is
+`export_restore_required` and comes back intact; **every table that decides
+whether a span may be packed** — `evidence_reader_projections` (123 rows),
+`evidence_admission_verdicts` (46), `evidence_admission_counts` (2),
+`evidence_admission_count_state` (1) — is `derived_rebuildable /
+rebuild_on_restore`. Since R2 established that search and pack read
+`reader_text` from `evidence_reader_projections`, the likely chain is that those
+projections are not actually rebuilt, admission cannot read text it cannot
+project, and so it denies. The confirming measurement is the projection row
+count in the restored store, which this pass had no public surface for — so the
+mechanism is a hypothesis while the behaviour above is measured.
+
+**This is the same class as `.56` and `.66`:** something classified as
+rebuildable whose rebuild does not happen, with no surface reporting the gap. It
+is the third instance recorded on `.2` today, and the first where the
+consequence is lost user data rather than a wrong number.
+
+Also found, smaller: `counts.issues` does not reach `degraded[]` in either
+direction — the restore that lost nothing reported `issues: 3`, the restore that
+denied 117 spans reported `issues: 0`, and neither produced a degraded entry.
+
+**THE HYPOTHESIS ABOVE IS REFUTED, and the real finding is worse.** The
+pre-registered test — count the projections in the restored store — was run
+with `sqlite3 "file:<db>?immutable=1"`:
+
+```
+source    evidence_spans 123 | evidence_reader_projections 123 | verdicts 46
+restored  evidence_spans 123 | evidence_reader_projections 123 | verdicts  6
+```
+
+Projections are **123 in both**. They restore perfectly. So the loss is not a
+missing rebuild, and `pack_eligibility` is a column on `evidence_spans`, which
+is `export_restore_required` — carried by the artifact, not rebuilt. Reading the
+artifact itself:
+
+| | admitted | quarantined | denied |
+| --- | --- | --- | --- |
+| source DB `evidence_spans.pack_eligibility` | 46 | 77 | 0 |
+| exported `derived/cass/evidence-spans-0000.json` | **6** | — | **117** |
+| same manifest, `recoveryInventory` verdict rowCount | **46** | — | — |
+
+**One backup artifact contains two mutually inconsistent records of the same
+fact**, and the restore is faithful to the wrong one. Re-creating the backup
+from the unchanged store reproduces 6/117 exactly, so it is deterministic, not a
+timing artifact. The 6 it keeps are a true subset of the DB's 46, and the 46 are
+indistinguishable on `producer_kind` (`cass_import`), `instruction_risk`
+(`none`) and `search_eligibility` (`admitted`) — the one clean separator is the
+excerpt's shape: all 40 dropped spans begin `{"parentUuid":…` (ordinary
+conversation messages) while the 6 kept are summary/timestamp records. Note also
+that `evidence_admission_verdicts` has `CHECK (verdict IN ('admitted','denied'))`
+— **no `quarantined`** — so a three-state column is being round-tripped through
+a two-state channel, which accounts for the 77 exactly.
+
+So the correct framing is: **`ee backup create` writes a backup whose evidence
+is already 95% denied, and reports success.** The damage is baked into the
+artifact operators keep and ship, which is why nothing on the restore side could
+recover it. It is not confined to disaster recovery either — any handoff,
+migration or shared-corpus workflow that round-trips a store loses 95% of its
+packable evidence, at `--redaction minimal`, the gentlest setting.
+
+### 18.8.1 Settled: the denial is intentional, and two narrower defects remain
+
+**Both attributions above are wrong.** `redact_evidence`
+(`src/core/backup_evidence_export.rs:60-118`) returns early for
+`RedactionLevel::None` and otherwise ends:
+
+```rust
+if excerpt != row.excerpt || !provenance_admitted || auxiliary_changed {
+    …
+    row.search_eligibility = "denied".to_owned();
+    row.pack_eligibility  = "denied".to_owned();
+}
+```
+
+So **if the export redacted the excerpt, it denies the span** — defensible, since
+a redacted excerpt is not the evidence. Swept across all five levels on one
+store at one instant:
+
+| `--redaction` | artifact `packEligibility` | `secretRedactionStatus` |
+| --- | --- | --- |
+| `none` | **admitted 46 / quarantined 77** | redacted 109 / clean 14 |
+| `minimal` *(default)* | denied 117 / admitted 6 | redacted 117 / clean 6 |
+| `standard` | denied 117 / admitted 6 | redacted 117 / clean 6 |
+| `strict` | denied 123 | redacted 123 |
+| `paranoid` | denied 123 | redacted 123 |
+| *source DB* | *admitted 46 / quarantined 77* | — |
+
+`--redaction none` round-trips eligibility **exactly**, including the
+`quarantined` state — which also kills the "two-state channel" theory above
+(that was reasoning from the `evidence_admission_verdicts` CHECK constraint
+instead of measuring). Denial tracks redaction one-for-one at every level. And
+note the `none` row: 109 spans were *already* redacted upstream by import-time
+secret screening and keep their eligibility, so the export correctly
+distinguishes "redacted upstream" from "redacted by me".
+
+**What is still a defect, narrowed to three things:**
+
+1. **The manifest contradicts its own artifact.** At `minimal` the
+   `recoveryInventory` reports `evidence_admission_verdicts rowCount 46` while
+   the span artifact in the same file holds 6 admitted. One describes the source
+   store, the other what was exported, and nothing distinguishes them. Not a
+   design decision — an inconsistency inside a single file, detectable with no
+   second store.
+2. **Nothing says the backup is not recovery-grade for evidence.** At the
+   default level `backup create` reports `status: "completed"`, `degraded: []`,
+   `issues: 0`, and restore reports `evidenceSpansRestored: 123`. All true, all
+   reading as full fidelity, with no signal that 117 of 123 spans will be
+   unpackable and that `ee index rebuild` cannot recover them. `degraded[]`
+   exists for exactly this, and the response *was* affected.
+3. **The default is the lossy one.** `--redaction` defaults to `minimal` while
+   this bead's goal is "lossless, privacy-preserving recovery". Those are in
+   real tension for evidence excerpts and the default silently picks privacy;
+   the configuration that meets the goal is neither the default nor signposted.
+
+Cheapest arms: emit a degraded entry naming the counts and the
+`--redaction none` repair; assert the manifest's internal invariant; and pin
+both measured properties — that `none` reproduces the source histogram exactly,
+and that at `minimal` the denied count equals the redacted count, since that
+equality is what makes the denial defensible rather than arbitrary.
+
+**Method note on myself.** Three write-ups, two wrong attributions, and the same
+move corrected both: stop reasoning about the mechanism and measure one more
+variable. The projection count killed version 1; the five-level sweep killed
+version 2. Each was one command, and `--redaction` was visible in
+`backup create --help` the entire time. The instrument was fine here — the
+theory kept outrunning the data.
+
+What is genuinely good and retires part of `.13`'s PROBLEM statement: the
+dry-run non-mutation contract **passes**, measured with the control that makes
+it non-vacuous (two pure filesystem snapshots with nothing between are
+identical; a read-only `ee audit timeline` moves `.ee/ee.write.lock`; `backup
+create --dry-run` moves *nothing at all*, so it perturbs the store less than a
+read does). The `db.check_integrity` dry-run failure in the PROBLEM statement
+does not reproduce. The durable-vs-rebuildable inventory exists and is good —
+108 tables, each with `owner`, `disposition`, `coverage`, `rowCount` and
+`schemaCovered`. And export is understated rather than incomplete: all 14
+sessions and all 123 spans ship under `derived/`, not in `records.jsonl`.
+
+### 18.9 Two P0 test suites executed for the first time, and the runbook was inside the test
+
+The dispatch lane costs ~32 minutes and is idle most of the time, so the highest
+-leverage use of it is grading suites that nobody has ever run. Two P0 beads own
+test files named after themselves. Both files compile, both are mounted into
+live shard targets, and neither had a recorded execution.
+
+**Finding: the test target names are not the file names.** A first dispatch
+failed instantly with `error: no test target named 'index_retention_e2e' in
+default-run packages`. Files under `tests/` are `#[path]`-mounted into shard
+targets in `tests/suites/`, so a test's real id is `<file_stem>::<fn>` and the
+target is the shard. Six test files are named for still-open beads; all six need
+the shard+module-prefix form, not their own name.
+
+#### `.42` (retained index generations): 3/3 green, three of six acceptance bullets
+
+`--test integration_g_m -- index_retention_e2e::`, announced 3, passed 3,
+failed 0, reconciled, one `Running` line, one summary, 132.33s. The arms are
+real product behaviour, not self-tests: `vacuum` previews 5 planted stale
+copies and deletes none, `--apply` reclaims exactly those 5 and writes an audit
+row, a second `--apply` reclaims nothing, and 8 consecutive `remember` calls
+each hold retained ≤ 2 **while the live generation strictly advances** — that
+second conjunct is what stops the bound being satisfied by publications that
+stopped happening.
+
+Not proven, and not rounded up: the write count is 8, not the acceptance's
+1,100, so the allocator's 0..1000 ceiling — the bead's actual hard-failure mode
+— is untouched. The 28 inline GC unit tests, which are where every negative
+bullet lives (never reclaim the active generation, a leased one, live staging,
+or a rejected-quarantine dir), have also never been executed; they sit in the
+lib target, whose unfiltered run exits 101 on 11 chronic failures, so they need
+a module filter to be gradeable at all. And `scripts/e2e_index_retention.sh`,
+which the acceptance names, does not exist — it is the only item with nothing
+behind it, and also the only one that would produce the per-write BYTES series
+the disk-bound claim is about. The integration test counts directories.
+
+#### `.10` (source-attested retrieval oracle): the instrument passes its own calibration, and has never been pointed at anything
+
+`--test integration_n_r -- retrieval_index_regression_oracle::`, announced 55,
+passed 53, failed 0, **ignored 2**, reconciled. Read the 2:
+
+    concurrent_retrieval_over_one_generation_is_classified
+      ... ignored, "oracle: point it at a candidate deliberately"
+    read_only_window_attribution
+      ... ignored, "attribution probe for the durable-mutation red; run it deliberately"
+
+The 53 green are `classifier::*`, `attestation::*`, `build_environment::*`,
+`model_cell_controls::*` — the oracle's self-tests. They prove the instrument
+works, and the module header is explicit that this is deliberate: the live probe
+is `#[ignore]` because under swarm load `Inconclusive` is the likely outcome and
+a load-dependent red in a shared suite is the manufactured-wrong-answer failure
+the design exists to prevent. That reasoning is correct. The consequence is that
+the bead's decisive bullet — "reproduce or fail to reproduce the released-binary
+divergence; either outcome becomes the implementation baseline" — has no
+evidence either way, and a green on 53 calibration tests must not be read as
+one. That would be bd-2phcw's three-shapes defect from the other side: a
+verdict that does not vary with the property, because the property is never
+read.
+
+**The dispatch this bead needed was written into its own refusal path.**
+`tests/retrieval_index_regression_oracle.rs:756` — the message `attest_fields`
+emits when `ORACLE_REQUIRE_ATTESTATION=1` finds an unattested candidate — spells
+out the whole command: which `VERGEN_*` to forward, why `VERGEN_GIT_DIRTY=false`
+is honest only under a no-overlay baseline, and that `scripts/rch_verify.sh`
+spells the same thing `--treeish <sha> --committed-tree`. Somebody wrote the
+runbook into the error text and nobody ran it. Dispatched now on the pinned
+lane, which is acceptance bullet 1 verbatim, with `--event-log` for bullet 6 and
+a pre-registered reading of all four verdict classes recorded on the bead before
+the result returns.
+
+**Mechanical finding worth keeping: `rch exec --job` can never carry a committed
+baseline.** `--job` is mutually exclusive with `--clean-overlay` (exit 2) while
+`--base`/`--no-overlay` *require* `--clean-overlay` (exit 1). So the lane that
+gives you `--result-dir` and a shell body is working-tree-sync only, and cannot
+satisfy a source-attestation bullet at all. That is why the test prescribes a
+plain `rch exec`; it is not a flag combination to work around. The gradeable
+form of two ignored arms is one cargo invocation, because libtest accepts
+several filters after `--`.
+
+#### The pattern, now measured twice more
+
+§18.5 said the project's default outcome for a correct fix is that it stays
+open, because there is no local cargo, Actions is off repo-wide, and the probe
+is red. These two beads sharpen it: the code was written, the tests were
+written, the runbook was written, and the only missing step was somebody
+spending 32 minutes of an idle lane to turn any of it into a verdict. `.42` was
+already carrying two independent readings — a source audit on 2026-10-20 and a
+black-box measurement on the shipped v0.18.0 — and still needed a third before
+anyone would close it. Writing the test is not the expensive part here.
+
+### 18.10 The arithmetic behind §18.5, and the single action that answers it
+
+§18.5 described the pattern — a correct fix's default outcome here is that it
+stays open — as an observation. It is measurable, and the number is larger than
+the two beads §18.9 happened to find.
+
+**26 open beads have a test file that names them. Six are P0. The 38 citing
+files land in only 14 cargo test targets.** Measured at cf0df2719 by matching
+every open/in_progress/blocked bead id against the text of all 531 files under
+`tests/`, requiring the character after the id not to continue it — a bare
+substring test credits `…1azkt.1` for every citation by `.10`, `.11`, `.13` and
+`.18`. The targets concentrate hard: `integration_a_d` alone carries seven
+beads, `integration_g_m` five, `integration_s_z` five, `integration_n_r` four.
+
+So one dispatched `cargo test --locked --no-fail-fast --tests` run grades every
+one of them, for the price of one build.
+
+**The prior for what that run returns is already in the tracker, and it is
+emphatic.** bd-hwye2 enumerated 33 red rows in `integration_s_z`, split them by
+a two-host two-base intersection, and re-measured its 16-row Group B at HEAD on
+2026-10-17: **15 were already fixed; 1 was real.** Its author's own summary is
+"Group B is clear." A 94% stale-red rate in the only sample anybody has taken
+is the argument.
+
+Filed as **bd-z368i** (P1), `related` to bd-hwye2 (the prior), bd-lkizl (85
+closed beads citing a compile as behavioural proof — the same delivery
+mechanism), and to `.10` and `.42`.
+
+What the bead deliberately does NOT claim is that 26 beads become closeable. The
+counter-example is `.10` from §18.9: its named target ran, 53 passed, 0 failed,
+and the bead correctly stays open because the 53 are the instrument's own
+calibration and the two product-pointing arms are `#[ignore]`d. **A test file
+citing a bead is not a test proving it.** The deliverable is therefore a
+per-bead evidence table with ignored counts reported separately and never
+folded into passed, and "its test does not test it" admitted as a third
+legitimate outcome beside green and red.
+
+Two grading constraints are load-bearing rather than stylistic, and a
+multi-target run is more exposed to both than the single-target runs in §18.9.
+`--no-fail-fast` is mandatory, because cargo stops at the first failing target
+while the command still reads as the broader check. And `tail -1` is wrong by
+construction: several `ee` tests spawn children that emit their own complete
+libtest summaries onto the same stream, sometimes before the parent target
+finishes, so the summaries must be summed and reconciled against the `running N
+tests` announcements per target. `--lib` stays out of the same invocation
+entirely — its 11 chronic failures make the run's exit status uninterpretable,
+and it needs its own filtered dispatch.
+
+### 18.11 The oracle fired: RACE_REPRODUCED, and the cause is not what the shape suggests
+
+§18.9 reported that `.10`'s instrument had never been pointed at a candidate. It
+has now, and it returned a verdict: **`RACE_REPRODUCED`** on `pack.hash`, at an
+attested commit. This is the first product classification this bridge has for
+the retrieval/index divergence, and `.10`'s gate — "no code fix lands before
+this classification" — is discharged.
+
+    base          cf0df2719        gitDirty false   sourceState clean
+    target        x86_64-unknown-linux-gnu   profile debug   version 0.18.0
+    featureSet    embed-fast,fts5,graph,json,lexical-bm25
+    binarySha256  503054924fea…7e7bde2
+    franken-stack version-identical to franken-stack.lock, 9/9 declared
+                  families, 0 mismatches (checked, not assumed)
+    run           announced 2, 1 passed 1 failed, reconciled, one summary, 828s
+
+Pack only. Search was `RACE_ABSENT` in all three rounds with 8/8 probes agreeing
+and `results.order` byte-identical between the warm and cold serial reads;
+`indexInvisible: []` throughout, so the `.66`-shaped condition did not occur
+here. `read_only_window_attribution` PASSED, so the durable-mutation-under-
+read-only red does not reproduce either.
+
+**The whole run contains exactly two pack hashes**, and which windows got which
+is the finding:
+
+    serial baseline (serialIsFirstTouch)  65aac94e…
+    round 0, 8 concurrent probes          65aac94e…   agree
+    round 1, 8 concurrent probes          cd61f5a5…   diverge
+    round 2, 8 concurrent probes          cd61f5a5…   diverge
+
+So it is **not** a race among simultaneous readers — all eight concurrent probes
+agree with each other in both failing rounds — and it is **not**
+serial-vs-concurrent either, because round 0 was concurrent and agreed. The
+shape is **early vs late**: the first two pack windows produce one hash and
+every later one produces the other, stably. Filed as **bd-wubqf** (P0), since
+"same workspace → byte-identical context pack hash" is listed in AGENTS.md
+under Determinism (non-negotiable), and the failure is a function of how many
+packs a workspace has already served — which is how a test that passes in
+isolation fails in a suite and makes the suite look like the problem.
+
+**I nearly attributed this to the wrong bead, and the discipline that caught it
+was the one §18.8.1 cost three write-ups to learn.** `bd-ve7c6` ("pack hash
+binds live runtime measurements: `queue_depth` and `retry_after_ms` are
+interpolated into hash-bearing degradation prose") predicts this signature
+almost exactly, and it is filed twice over as "found by reading, not by
+execution" — so this run looked like its missing proof. The data refuses it: the
+hash-bearing degraded set is byte-equal on both sides of the divergence
+(`embed_model_unavailable,pack_assembly_elapsed_over_budget` on the serial
+baseline and on every concurrent probe), and neither code `bd-ve7c6` names fired
+anywhere. An identical canonical input cannot carry a hash difference. That
+negative result is recorded on `bd-ve7c6` itself, because the dangerous outcome
+was not being wrong for an hour — it was leaving a dispatch on the record that a
+later reader would cite as confirmation.
+
+**The cheap discriminator is pre-registered rather than theorised**: re-run the
+serial baseline *after* the concurrent rounds. If it reports `cd61f5a5`, the
+variable is accumulated state and "race" is the wrong frame entirely; if it
+reports `65aac94e`, the concurrent context really is the variable and round 0 is
+the anomaly. Nothing else in the captured evidence separates those, and they
+need opposite fixes. The oracle already takes a cold serial read and stamps
+`serialIsFirstTouch`; it simply never re-baselines at the end.
+
+**Two instrument defects, found by using the instrument.** The final verdict
+reports "round 3" and "round 5" when only rounds 0–2 ran — those are flat
+indices over the six (round, kind) windows, so a reader who trusts the verdict
+looks for rounds that do not exist. And the verdict diffs hashes without diffing
+selections: it captured `pack.selection` for the serial baseline and none for
+the concurrent probes, so it can say the hashes differ but not what differs,
+which is exactly what attribution needs next.
+
+**`.56` got independent confirmation for free**, and in the configuration that
+settles it: **25 of 25** pack invocations emitted
+`pack_assembly_elapsed_over_budget` — one serial plus 3 × 8 concurrent, at
+1.6–2.0 s against a 500 ms budget — while every probe ran
+`embed_backend: hash_fallback` with `embed_model_unavailable` and the index
+reported `embeddingMode: deterministic_hash`. There was no model to load, so the
+alternative story that the warning honestly reports a one-off model load is
+closed off: there is nothing to subtract and the warning is still universal.
+
+**`.10` is NOT closed, and that departs from what I pre-registered.** I wrote on
+the bead that a semantic red would close it as the baseline. Two acceptance
+bullets are unmet: the cold/warm MODEL cells were never exercised (`cell:
+"none"` throughout — `ORACLE_MODEL` was deliberately left unset because the
+model cells need worker network and "no network is INFRA_ERROR", which would
+have bought an unattributable non-verdict instead of this classification), and
+bullet 1's pinned-Franken-stack lane is blocked by **bd-zpr8x**. The
+franken-stack came back version-identical to the lock, but `rch exec` does not
+materialise siblings at lock *revisions*, so the revisions stay unattested.
+Saying so beats closing on partial acceptance, which is the pattern the
+honesty-only / implements-surface taxonomy exists to prevent.
+
+### 18.12 Correction to §18.11: the oracle had fired before, and the test written to catch it samples the wrong side of the split
+
+§18.11 says the oracle had never been pointed at a candidate. That is wrong, and
+the refutation was inside the bead §18.11 is about. `bd-reality-core-convergence-1azkt.10`'s
+own description, bullet B4, records it:
+
+> The live oracle HAS gone red before, organically: RACE_REPRODUCED at 294d9ca95
+> on 1azkt.2 (pack.hash, serial vs concurrent, stable across rounds 1/3/5).
+> Today packs agreed.
+
+There are at least four live runs on the record — 294d9ca95 RED, b0b011c8 GREEN,
+f1cbd63 GREEN, cf0df2719 RED — so yesterday's was the second red on this leaf,
+not the first run of the instrument. Every measurement in §18.11 stands; its
+framing as a first observation does not. Corrections are on `.10`, `bd-wubqf`
+and `bd-ve7c6`.
+
+**The September cause is ruled out for the October run, which matters because
+"it regressed" is the obvious wrong first guess.** The 2026-09-17 sequence on
+`bd-...1azkt.2` is a complete closed loop inside three hours: `RACE_REPRODUCED`
+at 18:51, an always-on sequential probe written at 19:02, a *vacuous miss* at
+19:49 (`cargo TESTNAME --exact` matched nothing, 649 filtered, zero tests ran —
+CLAUDE.md's trap 2, caught by its own author), the real signal at 20:06 (green
+on hash, **red on mutation**: the first `--read-only` pack created
+`.ee/pack-slots/standard-00.lock`), the fix at 897250ccd, and the concurrent
+oracle re-run `RACE_ABSENT` at 20:49. Yesterday's evidence records
+`workspaceFiles` 152 → 152 with `rowFindings: []`, so no lockfile was written by
+any of its 25 packs. Different mechanism, same leaf, five weeks later.
+
+**And the comparison refutes §18.11's "early vs late" reading.** September split
+at flat windows 1/3/5 — every concurrent round disagreed with the serial
+baseline, which is serial-vs-concurrent. October had flat window 1 *agree* and
+only 3 and 5 diverge, which is early-vs-late. One run each, pointing opposite
+ways, so neither concurrency nor accumulation is established and the
+discriminator is more necessary than when it was pre-registered. (Both runs
+print flat (round, kind) indices as round numbers, which is why September reads
+as "rounds 1/3/5" when only rounds 0–2 ran. That instrument defect has been
+misleading readers since September, not since yesterday.)
+
+#### The part worth more than either run
+
+`sequential_read_only_packs_are_byte_identical_and_do_not_mutate_the_workspace`
+is **not** `#[ignore]`d — it runs in the ordinary `integration_n_r` suite. It was
+written within the hour of the September red, explicitly to isolate this leaf.
+It takes **exactly two packs**.
+
+October's run locates the fork: packs 1–9 share one hash, packs 10–25 share the
+other, exactly two distinct values in 25 packs. A two-pack probe samples only the
+agreeing side, so it reports `ok.` whether or not the defect is present — and it
+did, staying green for the five weeks between the two red runs, on the one
+always-on target that would have caught this. That is bd-2phcw's constant-green
+case: the verdict does not vary with the property.
+
+It is also the cheapest repair in this document, because nothing had to be
+built. The harness, the tree digest, the mutation diff and the assertion all
+existed; only the call count was wrong. `SEQUENTIAL_PACK_CALLS = 12` crosses the
+measured boundary, the loop now reports every hash and the 1-based index of the
+first fork (which call diverges *is* the discriminator, and a message that omits
+it costs another dispatch), the per-call mutation diff is retained so the
+September lockfile symptom would still be caught and attributed, and a **negative
+control** is added that the two-pack version never had: after the twelve agreeing
+packs a second relevant rule enters the corpus, the index is rebuilt, and the hash
+is required to move. Without that arm, deleting inputs from the hash would satisfy
+every other assertion in the test.
+
+This runs with **no concurrency at all**, so it is a cleaner discriminator than
+the one pre-registered on `bd-wubqf` (re-baseline serially after the concurrent
+rounds), and that substitution is stated on the bead rather than made quietly.
+Both branches keep their pre-registered readings: a fork means accumulated state
+and "race" is the wrong frame; agreement means the concurrent context is the
+variable and round 0's September/October disagreement becomes the thing to
+explain.
+
+Unverified as of this entry: `cargo fmt --check` passes, so it parses, but cargo
+does not run locally and the in-flight 14-target `bd-z368i` dispatch froze its
+snapshot before the edit. No verdict on this change can be read off that run.

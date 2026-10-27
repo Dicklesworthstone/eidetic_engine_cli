@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::time::Instant;
 
 use chrono::{DateTime, TimeDelta, Utc};
-use sqlmodel_core::Value as SqlValue;
+use sqlmodel_core::{Row, Value as SqlValue};
 
 use super::{
     MAX_LIMIT, MemoryDelta, SUBSCRIBE_CURSOR_STALE, SUBSCRIBE_POLL_SCHEMA_V1, SubscribeDegradation,
@@ -28,6 +28,26 @@ pub use invalidation::{MEMORY_INVALIDATION_SCHEMA_V1, MemoryInvalidation};
 #[path = "subscribe_revision.rs"]
 mod revision;
 
+#[path = "subscribe_links.rs"]
+mod links;
+
+#[path = "subscribe_watermark.rs"]
+mod watermark;
+
+/// Read/access accounting and refused writes do not change memory state.
+/// Keep their audit rows and watermark progress, but never turn a subscriber's
+/// response to a notification into another notification. This is an exact
+/// exclusion, not a mutation whitelist: unknown actions still invalidate.
+const OBSERVATION_ONLY_ACTIONS: &[&str] = &[
+    audit_actions::MEMORY_SHOW,
+    audit_actions::SEARCH_RETURNED_MEM,
+    audit_actions::PACK_INCLUDED_MEM,
+    audit_actions::WHY_INSPECTED,
+    audit_actions::REDACT_AT_OUTPUT,
+    audit_actions::TRUST_CLASS_PROMOTION_BLOCKED,
+    "memory.reveal_failed",
+];
+
 fn storage_error(_: impl std::fmt::Display) -> DomainError {
     DomainError::Storage {
         message: "Could not read a consistent subscription page; no cursor was acknowledged"
@@ -39,9 +59,17 @@ fn storage_error(_: impl std::fmt::Display) -> DomainError {
     }
 }
 
+fn checkpoint() -> Result<(), DomainError> {
+    if let Some(cx) = asupersync::Cx::current() {
+        cx.checkpoint().map_err(storage_error)?;
+    }
+    Ok(())
+}
+
 pub(super) fn poll_memory_deltas(
     options: &SubscribePollOptions<'_>,
 ) -> Result<SubscribePollReport, DomainError> {
+    checkpoint()?;
     let started = Instant::now();
     let since_cutoff = subscription_cutoff(&options.filter, Utc::now())?;
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
@@ -167,6 +195,7 @@ struct SubscriptionSnapshot<'a> {
 
 impl<'a> SubscriptionSnapshot<'a> {
     fn begin(connection: &'a DbConnection) -> Result<Self, DomainError> {
+        checkpoint()?;
         connection.begin_read_snapshot().map_err(storage_error)?;
         Ok(Self {
             connection,
@@ -175,20 +204,96 @@ impl<'a> SubscriptionSnapshot<'a> {
     }
 
     fn high_watermark(&self, workspace_id: &str) -> Result<u64, DomainError> {
-        let rows = self
+        watermark::read(self.connection, workspace_id)
+    }
+
+    fn audit_window(
+        &self,
+        workspace_id: &str,
+        cursor: u64,
+        high_watermark: u64,
+        limit: usize,
+        after_bound: impl FnOnce() -> Result<(), DomainError>,
+    ) -> Result<Vec<Row>, DomainError> {
+        // Bound and legacy audits are disjoint indexed streams. A COALESCE
+        // workspace predicate makes other workspaces part of every replay
+        // scan. Select an explicit workspace first, then only unbound rows
+        // whose live memory grants that workspace, in the same source snapshot.
+        // Each lane needs at most the complete page plus one lookahead.
+        let retained = limit + 1;
+        // Exclude observations before LIMIT/lookahead, not after hydration.
+        // Otherwise a busy reader can consume every page and manufacture
+        // has_more even when there are no memory changes to deliver.
+        let observation_slots = (9..9 + OBSERVATION_ONLY_ACTIONS.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = |scope: &str| {
+            format!(
+                "SELECT a.rowid, a.id, COALESCE(a.workspace_id, m.workspace_id), \
+                    a.timestamp, a.actor, a.action, a.target_id, m.level, m.kind, m.trust_class, \
+                    CASE WHEN a.action = ?6 AND length(CAST(a.details AS BLOB)) <= ?7 \
+                         THEN a.details ELSE NULL END, a.target_type \
+             FROM audit_log a LEFT JOIN memories m ON m.id = a.target_id \
+             WHERE {scope} AND a.rowid > ?1 AND a.rowid <= ?4 \
+               AND (a.target_type = 'memory' \
+                    OR (a.target_type = 'memory_link' AND a.action = ?8) \
+                    OR (a.target_type IS NULL \
+                    AND (a.action LIKE 'memory.%' OR a.action = ?3))) \
+               AND a.target_id IS NOT NULL \
+               AND (m.id IS NULL OR m.workspace_id = ?5) \
+               AND a.action NOT IN ({observation_slots}) \
+             ORDER BY a.rowid ASC LIMIT ?2"
+            )
+        };
+        let mut parameters = vec![
+            cursor_sql_value(cursor),
+            SqlValue::BigInt(retained as i64),
+            SqlValue::Text(audit_actions::TRUST_CLASS_TRANSITION.to_owned()),
+            cursor_sql_value(high_watermark),
+            SqlValue::Text(workspace_id.to_owned()),
+            SqlValue::Text(audit_actions::MEMORY_REVISE.to_owned()),
+            SqlValue::BigInt(revision::MAX_DETAILS_BYTES as i64),
+            SqlValue::Text(audit_actions::MEMORY_LINK_CREATE.to_owned()),
+        ];
+        parameters.extend(
+            OBSERVATION_ONLY_ACTIONS
+                .iter()
+                .map(|action| SqlValue::Text((*action).to_owned())),
+        );
+        checkpoint()?;
+        let bound = self
+            .connection
+            .query(&query("a.workspace_id = ?5"), &parameters)
+            .map_err(storage_error)?;
+        checkpoint()?;
+        after_bound()?;
+        checkpoint()?;
+        let legacy = self
             .connection
             .query(
-                "SELECT COALESCE(MAX(a.rowid), 0) FROM audit_log a \
-             LEFT JOIN memories m ON m.id = a.target_id \
-             WHERE a.workspace_id = ?1 \
-                OR (a.workspace_id IS NULL AND m.workspace_id = ?1)",
-                &[SqlValue::Text(workspace_id.to_owned())],
+                &query("a.workspace_id IS NULL AND m.workspace_id = ?5"),
+                &parameters,
             )
             .map_err(storage_error)?;
-        rows.first()
-            .and_then(|row| row.get(0).and_then(|value| value.as_i64()))
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(|| malformed_row("workspace audit high watermark"))
+        checkpoint()?;
+        let mut merged = BTreeMap::new();
+        for row in bound.into_iter().chain(legacy) {
+            checkpoint()?;
+            let cursor = row
+                .get(0)
+                .and_then(SqlValue::as_i64)
+                .ok_or_else(|| malformed_row("audit row cursor"))?;
+            if merged.insert(cursor, row).is_some() {
+                return Err(malformed_row("disjoint audit cursor"));
+            }
+            if merged.len() > retained {
+                merged.pop_last();
+            }
+        }
+        // Do not hydrate tags or expand revisions/links until both lanes have
+        // completed. A failed/cancelled second read acknowledges no prefix.
+        Ok(merged.into_values().collect())
     }
 
     fn page(
@@ -201,32 +306,7 @@ impl<'a> SubscriptionSnapshot<'a> {
     ) -> Result<DeltaPage, DomainError> {
         let high_watermark = self.high_watermark(workspace_id)?;
         let limit = limit.clamp(1, MAX_LIMIT) as usize;
-        let rows = self
-            .connection
-            .query(
-                "SELECT a.rowid, a.id, COALESCE(a.workspace_id, m.workspace_id), \
-                    a.timestamp, a.actor, a.action, a.target_id, m.level, m.kind, m.trust_class, \
-                    CASE WHEN a.action = ?6 AND length(CAST(a.details AS BLOB)) <= ?7 \
-                         THEN a.details ELSE NULL END \
-             FROM audit_log a LEFT JOIN memories m ON m.id = a.target_id \
-             WHERE a.rowid > ?1 AND a.rowid <= ?4 \
-               AND (a.target_type = 'memory' OR (a.target_type IS NULL \
-                    AND (a.action LIKE 'memory.%' OR a.action = ?3))) \
-               AND a.target_id IS NOT NULL \
-               AND COALESCE(a.workspace_id, m.workspace_id) = ?5 \
-               AND (m.id IS NULL OR m.workspace_id = ?5) \
-             ORDER BY a.rowid ASC LIMIT ?2",
-                &[
-                    cursor_sql_value(cursor),
-                    SqlValue::BigInt((limit + 1) as i64),
-                    SqlValue::Text(audit_actions::TRUST_CLASS_TRANSITION.to_owned()),
-                    cursor_sql_value(high_watermark),
-                    SqlValue::Text(workspace_id.to_owned()),
-                    SqlValue::Text(audit_actions::MEMORY_REVISE.to_owned()),
-                    SqlValue::BigInt(revision::MAX_DETAILS_BYTES as i64),
-                ],
-            )
-            .map_err(storage_error)?;
+        let rows = self.audit_window(workspace_id, cursor, high_watermark, limit, || Ok(()))?;
         // One lookahead row proves whether the raw page is exhausted. Never
         // acknowledge that row: the next request still has to inspect it.
         let has_more = rows.len() > limit;
@@ -234,13 +314,24 @@ impl<'a> SubscriptionSnapshot<'a> {
         let mut deltas = Vec::new();
         let mut invalidations = Vec::new();
         let mut revisions = Vec::new();
+        let mut link_events = Vec::new();
         // Metadata-excluded events can still invalidate prior membership.
         // Only candidates eligible for a full delta need current tag reads.
         let mut metadata_filter = filter.clone();
         metadata_filter.tags.clear();
         for row in rows.into_iter().take(limit) {
+            checkpoint()?;
             let raw = raw_delta_from_row(&row)?;
             next_cursor = raw.cursor;
+            if raw.action == audit_actions::MEMORY_LINK_CREATE
+                && (matches!(row.get(11), Some(SqlValue::Null))
+                    || row.get(11).and_then(SqlValue::as_str) == Some("memory_link"))
+            {
+                // One edge changes both endpoint caches. Do not split the
+                // audit cursor into two independently acknowledged rows.
+                links::collect(raw, &mut link_events)?;
+                continue;
+            }
             // A batch/scope audit or a foreign native entity is not a memory
             // event merely because its action shares the memory prefix.
             if MemoryId::from_str(&raw.memory_id).is_err() {
@@ -263,6 +354,13 @@ impl<'a> SubscriptionSnapshot<'a> {
                 invalidations.push(notice);
             }
         }
+        invalidations.extend(links::notices(
+            self.connection,
+            workspace_id,
+            &link_events,
+            filter,
+            since_cutoff,
+        )?);
         invalidations.extend(revision::retirement_notices(
             self.connection,
             workspace_id,
@@ -271,6 +369,7 @@ impl<'a> SubscriptionSnapshot<'a> {
             since_cutoff,
         )?);
         self.hydrate_tags(&mut deltas)?;
+        checkpoint()?;
         deltas.retain(|delta| {
             if filter.matches_delta(delta, since_cutoff) {
                 true
@@ -295,6 +394,7 @@ impl<'a> SubscriptionSnapshot<'a> {
             // commits are above this watermark and remain visible next time.
             next_cursor = high_watermark;
         }
+        checkpoint()?;
         Ok(DeltaPage {
             high_watermark,
             next_cursor,
@@ -308,6 +408,15 @@ impl<'a> SubscriptionSnapshot<'a> {
     /// Repeated events retain their own cursors and complete canonical tags;
     /// lookahead and metadata-only invalidations never enter a batch.
     fn hydrate_tags(&self, deltas: &mut [MemoryDelta]) -> Result<(), DomainError> {
+        self.hydrate_tags_observed(deltas, || Ok(()))
+    }
+
+    fn hydrate_tags_observed(
+        &self,
+        deltas: &mut [MemoryDelta],
+        mut after_batch: impl FnMut() -> Result<(), DomainError>,
+    ) -> Result<(), DomainError> {
+        checkpoint()?;
         let ids: BTreeSet<&str> = deltas
             .iter()
             .map(|delta| delta.memory_id.as_str())
@@ -317,26 +426,31 @@ impl<'a> SubscriptionSnapshot<'a> {
         // At most 40 bulk-reader calls for the 10,000-event page limit.
         // Bound SQL parameters independently of repeated audit identities.
         for batch in ids.chunks(256) {
+            checkpoint()?;
             tags.extend(
                 self.connection
                     .get_memory_tags_batch(batch)
                     .map_err(storage_error)?,
             );
+            after_batch()?;
+            checkpoint()?;
         }
         for delta in deltas {
             delta.tags = tags.get(&delta.memory_id).cloned().unwrap_or_default();
             delta.tags.sort();
             delta.tags.dedup();
         }
+        checkpoint()?;
         Ok(())
     }
 
     fn finish(mut self) -> Result<(), DomainError> {
+        checkpoint()?;
         self.connection
             .commit_read_snapshot()
             .map_err(storage_error)?;
         self.active = false;
-        Ok(())
+        checkpoint()
     }
 }
 

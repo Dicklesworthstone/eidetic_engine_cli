@@ -1,0 +1,27 @@
+{
+  "surface": "curate_candidates",
+  "mcpTool": "ee_curate_candidates",
+  "cliArgs": [
+    "ee",
+    "--json",
+    "--workspace",
+    "__WORKSPACE__",
+    "curate",
+    "candidates",
+    "--type",
+    "promote",
+    "--target-memory",
+    "__MEMORY_ID__",
+    "--limit",
+    "1",
+    "--offset",
+    "0"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "type": "promote",
+    "targetMemoryId": "__MEMORY_ID__",
+    "limit": 1,
+    "offset": 0
+  }
+}

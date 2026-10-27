@@ -621,6 +621,40 @@ pub(crate) fn redact_recovery_identity(key: &str, level: RedactionLevel) -> Stri
     }
 }
 
+/// A complete export must retain usable source bindings, not replace locators
+/// with redaction placeholders and then claim they can be recovered. The
+/// public writer checks this before emitting the memory line; error text never
+/// echoes a rejected value.
+fn validate_code_anchor_records(record: &ExportMemoryRecord) -> io::Result<()> {
+    let mut identities = std::collections::BTreeSet::new();
+    if !record.code_anchors.is_empty()
+        && record.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sealed memory retains unexpected code-anchor source bindings",
+        ));
+    }
+    for anchor in &record.code_anchors {
+        let surface = anchor.to_surface(&record.memory_id);
+        if !crate::models::memory_anchor::code_anchor_locator_is_public(&anchor.value)
+            || crate::policy::redact_public_replay_text(&anchor.provenance).redacted
+            || surface.as_ref().is_none_or(|surface| {
+                !identities.insert((
+                    surface.anchor.anchor_kind,
+                    surface.anchor.anchor_value_hash.clone(),
+                ))
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "code-anchor source bindings are invalid or contain private material",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Apply redaction to an export memory record.
 #[must_use]
 pub fn redact_memory_record(
@@ -632,6 +666,10 @@ pub fn redact_memory_record(
     }
     if let Some(fields) = record.typed_fields.as_mut() {
         typed_fields::redact(fields, &record.kind, level);
+    }
+    for anchor in &mut record.code_anchors {
+        anchor.value = redact_content(&anchor.value, level);
+        anchor.provenance = redact_provenance_uri(&anchor.provenance, level);
     }
     if level == RedactionLevel::None {
         return record;
@@ -1110,7 +1148,17 @@ impl<W: Write> JsonlExporter<W> {
             }
             record.typed_fields = Some(typed_fields::canonical(&record.kind, fields)?);
         }
+        validate_code_anchor_records(&record)?;
+        let source_bindings = record.code_anchors.clone();
         let redacted = redact_memory_record(record, self.redaction_level);
+        if self.export_scope != ExportScope::MetadataOnly
+            && redacted.code_anchors != source_bindings
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "selected redaction level cannot preserve code-anchor source bindings; choose a compatible redaction level for a complete export",
+            ));
+        }
         if let Some(fields) = redacted.typed_fields.as_ref() {
             typed_fields::canonical(&redacted.kind, fields)?;
         }
@@ -1122,6 +1170,7 @@ impl<W: Write> JsonlExporter<W> {
             // Typed fields contain body-equivalent prose and commands. They
             // must not bypass an explicitly metadata-only export scope.
             meta_only.typed_fields = None;
+            meta_only.code_anchors.clear();
             serde_json::to_string(&meta_only)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         } else {
@@ -2057,6 +2106,77 @@ mod tests {
             .created_at("2026-04-30T12:00:00Z")
             .build()
             .expect("memory has required fields")
+    }
+
+    #[test]
+    fn code_anchor_export_preserves_bindings_or_refuses_incompatible_redaction() {
+        let mut memory = export_memory("mem-001", "Original observation without a code token.");
+        memory.code_anchors = vec![crate::models::ExportCodeAnchorRecord {
+            kind: "path".to_owned(),
+            value: "src/portable.rs".to_owned(),
+            source: "explicit".to_owned(),
+            provenance: "memory.anchors".to_owned(),
+        }];
+        for level in [
+            RedactionLevel::None,
+            RedactionLevel::Minimal,
+            RedactionLevel::Standard,
+            RedactionLevel::Strict,
+        ] {
+            let mut output = Vec::new();
+            JsonlExporter::new(&mut output, level, ExportScope::All)
+                .write_memory(memory.clone())
+                .expect("safe locators remain portable");
+            let written: ExportMemoryRecord = serde_json::from_slice(&output).expect("memory line");
+            assert_eq!(written.code_anchors, memory.code_anchors);
+        }
+        for level in [RedactionLevel::Paranoid, RedactionLevel::Full] {
+            let mut output = Vec::new();
+            let error = JsonlExporter::new(&mut output, level, ExportScope::All)
+                .write_memory(memory.clone())
+                .expect_err("unusable locators must not claim complete recovery");
+            assert!(error.to_string().contains("redaction level"));
+            assert!(output.is_empty());
+            let redacted = redact_memory_record(memory.clone(), level);
+            assert!(
+                !serde_json::to_string(&redacted)
+                    .unwrap()
+                    .contains("src/portable.rs")
+            );
+        }
+        let mut output = Vec::new();
+        JsonlExporter::new(&mut output, RedactionLevel::None, ExportScope::MetadataOnly)
+            .write_memory(memory)
+            .expect("metadata projection");
+        let written: serde_json::Value = serde_json::from_slice(&output).expect("metadata line");
+        assert!(written.get("code_anchors").is_none());
+    }
+
+    #[test]
+    fn code_anchor_export_rejects_malformed_or_private_source_bindings_without_bytes() {
+        let secret = format!("src/ghp_{}.rs", "a".repeat(36));
+        for value in [
+            "../outside.rs",
+            "src/app/page.tsx",
+            "src/home/a.rs",
+            "/tmp/outside.rs",
+            "src/*.rs",
+            secret.as_str(),
+        ] {
+            let mut memory = export_memory("mem-001", "Safe body.");
+            memory.code_anchors = vec![crate::models::ExportCodeAnchorRecord {
+                kind: "path".to_owned(),
+                value: value.to_owned(),
+                source: "explicit".to_owned(),
+                provenance: "memory.anchors".to_owned(),
+            }];
+            let mut output = Vec::new();
+            let error = JsonlExporter::new(&mut output, RedactionLevel::None, ExportScope::All)
+                .write_memory(memory)
+                .expect_err("bad bindings rejected even without redaction");
+            assert!(!error.to_string().contains(value));
+            assert!(output.is_empty());
+        }
     }
 
     fn records_root_over(memories: &[(&str, &str)]) -> ([u8; 32], u64) {

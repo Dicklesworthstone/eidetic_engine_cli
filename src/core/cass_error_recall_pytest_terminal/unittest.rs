@@ -3,6 +3,9 @@
 //! Tracebacks, captured output and descriptions are never diagnostic classes.
 //! Quiet reports can identify failures; only a complete verbose inventory can
 //! verify a retry. Producer summaries cannot replace process completion.
+//! Class/module fixtures are error holders, not tests. Setup failures retain
+//! diagnostics without inventing the tests they prevented from running;
+//! teardown repairs require the complete prior executed inventory to pass.
 
 use std::collections::BTreeMap;
 
@@ -46,7 +49,7 @@ impl Status {
 /// Accept a complete ordinary TestCase description, not a traceback or a
 /// suffix of a subtest. Keep the display identity verbatim: differences between
 /// Python versions may miss a match, but cannot invent test equivalence.
-fn test_identity(text: &str) -> Option<&str> {
+fn description_parts(text: &str) -> Option<(&str, &str)> {
     let (method, qualified) = text.split_once(" (")?;
     let qualified = qualified.strip_suffix(')')?;
     let identifier = |value: &str| {
@@ -56,13 +59,44 @@ fn test_identity(text: &str) -> Option<&str> {
             .is_some_and(|ch| ch.is_alphabetic() || ch == '_')
             && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
     };
-    (identifier(method) && qualified.contains('.') && qualified.split('.').all(identifier))
-        .then_some(text)
+    (identifier(method) && qualified.split('.').all(identifier)).then_some((method, qualified))
+}
+
+fn test_identity(text: &str) -> Option<&str> {
+    let (_, qualified) = description_parts(text)?;
+    (qualified.contains('.') && fixture_phase(text).is_none()).then_some(text)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FixturePhase {
+    Setup,
+    Teardown,
+}
+
+/// CPython's _ErrorHolder uses a class or module name, with no test-method
+/// suffix. A module can be a single identifier (including __main__). Keep the
+/// entire display identity for diagnostics; never guess a module/class split
+/// from the dotted name of a successful test.
+fn fixture_phase(text: &str) -> Option<FixturePhase> {
+    let (method, qualified) = description_parts(text)?;
+    match method {
+        "setUpClass" if qualified.contains('.') => Some(FixturePhase::Setup),
+        "tearDownClass" if qualified.contains('.') => Some(FixturePhase::Teardown),
+        "setUpModule" => Some(FixturePhase::Setup),
+        "tearDownModule" => Some(FixturePhase::Teardown),
+        _ => None,
+    }
+}
+
+fn node_identity(text: &str) -> Option<&str> {
+    fixture_phase(text)
+        .map(|_| text)
+        .or_else(|| test_identity(text))
 }
 
 fn progress(line: &str) -> Option<(&str, Status)> {
     let (description, status) = line.rsplit_once(" ... ")?;
-    let node = test_identity(description)?;
+    let node = node_identity(description)?;
     Some((node, progress_status(status)?))
 }
 
@@ -96,7 +130,7 @@ fn error_header(line: &str) -> Option<(&str, Status, bool)> {
         ("UNEXPECTED SUCCESS: ", Status::UnexpectedSuccess),
     ] {
         if let Some(description) = line.strip_prefix(prefix) {
-            if let Some(node) = test_identity(description) {
+            if let Some(node) = node_identity(description) {
                 return Some((node, status, true));
             }
             let boundary = description.find(") ")?;
@@ -243,6 +277,8 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     let mut ambiguous = false;
     let mut nodes = BTreeMap::<&str, Status>::new();
     let mut details = BTreeMap::<&str, Status>::new();
+    let mut fixture_progress = BTreeMap::<&str, u64>::new();
+    let mut fixture_details = BTreeMap::<&str, u64>::new();
     let mut observed = [0_u64; 6];
     let mut description = None;
     for (index, line) in lines.iter().enumerate() {
@@ -257,7 +293,9 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             if let Some(status) = displayed_status
                 && started_at + 1 == index
             {
-                if nodes.len() == MAX_TESTS || nodes.insert(node, status).is_some() {
+                if observed.iter().sum::<u64>() >= MAX_TESTS as u64
+                    || nodes.insert(node, status).is_some()
+                {
                     return Err(());
                 }
                 observed[status.index()] += 1;
@@ -289,8 +327,17 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         }
         if inventory_open && verbose {
             if let Some((node, status)) = progress(line) {
-                if nodes.len() == MAX_TESTS || nodes.insert(node, status).is_some() {
+                if observed.iter().sum::<u64>() >= MAX_TESTS as u64 {
                     return Err(());
+                }
+                let repeated_fixture = fixture_phase(node).is_some() && status == Status::Error;
+                if let Some(previous) = nodes.insert(node, status)
+                    && !(repeated_fixture && previous == Status::Error)
+                {
+                    return Err(());
+                }
+                if repeated_fixture {
+                    *fixture_progress.entry(node).or_default() += 1;
                 }
                 observed[status.index()] += 1;
             } else if let Some(node) = test_identity(line) {
@@ -308,9 +355,28 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             if details.len() == MAX_TESTS && !details.contains_key(node) {
                 return Err(());
             }
-            if details.insert(node, status).is_some() && complete_subject {
+            let repeated_fixture = fixture_phase(node).is_some() && status == Status::Error;
+            if let Some(previous) = details.insert(node, status)
+                && complete_subject
+                && !(repeated_fixture && previous == Status::Error)
+            {
                 return Err(());
             }
+            if repeated_fixture {
+                if fixture_details.values().sum::<u64>() >= MAX_TESTS as u64 {
+                    return Err(());
+                }
+                *fixture_details.entry(node).or_default() += 1;
+            }
+        }
+    }
+    // Each failed class cleanup can report the same _ErrorHolder again. Keep
+    // multiplicity for summary/proof checks but one diagnostic per identity.
+    // Test identities still cannot repeat. SkipTest is also a native fixture
+    // outcome (including teardown), but never supplies completion authority.
+    for (node, status) in nodes.iter().chain(details.iter()) {
+        if fixture_phase(node).is_some() && !matches!(status, Status::Error | Status::Skipped) {
+            return Err(());
         }
     }
     for (node, status) in &details {
@@ -325,14 +391,22 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         .filter(|(_, status)| status.failed())
         .map(|(node, status)| (*node, *status))
         .collect();
-    failures.extend(details);
+    failures.extend(details.iter().map(|(node, status)| (*node, *status)));
     if let Some(summary) = &summary {
         if summary.no_tests && ran_count != Some(0) {
             return Err(());
         }
         let mut known = [0_u64; 6];
-        for status in failures.values() {
-            known[status.index()] += 1;
+        for (node, status) in &failures {
+            // Progress and detail sections describe the same callbacks, not
+            // two independent failures. Neither may contradict the footer.
+            let occurrences = fixture_progress
+                .get(node)
+                .copied()
+                .unwrap_or(0)
+                .max(fixture_details.get(node).copied().unwrap_or(0))
+                .max(1);
+            known[status.index()] += occurrences;
         }
         if [1, 2, 5]
             .iter()
@@ -342,10 +416,27 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
         }
     }
     let mut execution = Execution::default();
+    let has_fixture = nodes.keys().any(|node| fixture_phase(node).is_some());
+    let fixture_withheld = nodes.iter().any(|(node, status)| {
+        fixture_phase(node)
+            .is_some_and(|phase| phase == FixturePhase::Setup || *status == Status::Skipped)
+    });
+    let teardown_failed = nodes.iter().any(|(node, status)| {
+        fixture_phase(node) == Some(FixturePhase::Teardown) && *status == Status::Error
+    });
+    let mut tests_run = 0_u64;
     for (node, status) in &nodes {
+        if fixture_phase(node).is_some() {
+            continue;
+        }
+        tests_run += 1;
         let name = subject(node);
         execution.inventory.insert(name);
-        if status.failed() {
+        if status.failed() || (teardown_failed && *status != Status::Skipped) {
+            // The private failed set is also a must-pass proof requirement.
+            // A teardown can affect any executed subject in this run. Require
+            // them all to pass on retry rather than inventing a fixture-test
+            // alias or guessing ownership from dotted class/module names.
             execution.failed.insert(name);
         } else if *status == Status::Passed {
             execution.passed.insert(name);
@@ -353,8 +444,15 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
     }
     execution.complete = verbose
         && !ambiguous
+        && !fixture_withheld
         && description.is_none()
-        && ran_count == Some(nodes.len() as u64)
+        && ran_count == Some(tests_run)
+        && (!has_fixture
+            || nodes.iter().all(|(node, status)| {
+                fixture_phase(node).is_none()
+                    || *status == Status::Skipped
+                    || fixture_progress.get(node) == fixture_details.get(node)
+            }))
         && summary
             .as_ref()
             .is_some_and(|summary| observed[1..] == summary.counts[1..]);
@@ -627,5 +725,279 @@ mod tests {
             let empty = format!("{RUN_SEPARATOR}\nRan 0 tests in 0.000s\n\n{result}\n");
             assert!(!decoded(&empty).allows_completion);
         }
+    }
+
+    // Native TextTestRunner _ErrorHolder shape: fixture errors contribute to
+    // errors=, but never to Ran N. No traceback content supplies a subject.
+    fn fixture_report(phase: &str, owner: &str, tests: &str, ran: u64) -> String {
+        let node = format!("{phase} ({owner})");
+        let progress = if phase.starts_with("setUp") {
+            format!("{node} ... ERROR\n{tests}")
+        } else {
+            format!("{tests}{node} ... ERROR\n")
+        };
+        let units = if ran == 1 { "test" } else { "tests" };
+        format!(
+            "{progress}\n{ERROR_SEPARATOR}\nERROR: {node}\n{RUN_SEPARATOR}\nTraceback (most recent call last):\nRuntimeError: private fixture body\n\n{RUN_SEPARATOR}\nRan {ran} {units} in 0.001s\n\nFAILED (errors=1)\n"
+        )
+    }
+
+    #[test]
+    fn setup_fixtures_are_recallable_without_inventing_unexecuted_test_inventory() {
+        for (phase, owner) in [
+            ("setUpClass", "tests.test_cache.CacheTests"),
+            ("setUpModule", "tests.test_cache"),
+            ("setUpModule", "__main__"),
+            ("setUpModule", "tests"),
+        ] {
+            let text = fixture_report(phase, owner, "", 0);
+            let failure = decoded(&text);
+            assert!(failure.failed, "{phase} ({owner})");
+            assert_eq!(failure.diagnostics.len(), 1);
+            assert!(!failure.allows_completion);
+            assert!(!failure.execution.has_known_failures());
+            assert!(failure.execution.inventory.is_empty());
+            assert!(
+                !failure
+                    .execution
+                    .verified_by(&decoded(&report("ok")).execution)
+            );
+            let output = ToolOutput {
+                text,
+                is_error: Some(false),
+                exit_code: Some(0),
+            };
+            assert!(output.failed());
+            assert!(!output.succeeded());
+            assert_eq!(failure_diagnostics(&output), failure.diagnostics);
+            assert_eq!(
+                structured_error_diagnostics(&output.text),
+                failure.diagnostics
+            );
+            assert!(!failure.symptom.unwrap().contains("private fixture body"));
+        }
+    }
+
+    #[test]
+    fn teardown_repairs_require_the_whole_executed_inventory_to_pass() {
+        let tests = format!("{CACHE} ... ok\n{CONTROL} ... ok\n");
+        for (phase, owner) in [
+            ("tearDownClass", "tests.test_cache.CacheTests"),
+            ("tearDownModule", "tests.test_cache"),
+            ("tearDownModule", "__main__"),
+        ] {
+            let failure = decoded(&fixture_report(phase, owner, &tests, 2));
+            assert!(failure.execution.has_known_failures());
+            assert_eq!(failure.execution.inventory.len(), 2);
+            assert_eq!(failure.execution.failed.len(), 2);
+            assert!(
+                failure
+                    .execution
+                    .verified_by(&decoded(&report("ok")).execution)
+            );
+            for retry in [
+                report("skipped 'not exercised'"),
+                report("expected failure"),
+                report("ok").replace(CACHE, "test_other (tests.test_cache.Other.test_other)"),
+                format!("{CONTROL} ... ok\n{RUN_SEPARATOR}\nRan 1 test in 0.001s\n\nOK\n"),
+                format!("..\n{RUN_SEPARATOR}\nRan 2 tests in 0.001s\n\nOK\n"),
+                format!("{RUN_SEPARATOR}\nRan 0 tests in 0.001s\n\nOK\n"),
+            ] {
+                assert!(
+                    !failure.execution.verified_by(&decoded(&retry).execution),
+                    "{retry}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_proof_uses_the_production_requirement_and_process_completion_gate() {
+        use crate::core::cass_error_recall::test_coverage::{Proof, Requirement};
+
+        let tests = format!("{CACHE} ... ok\n{CONTROL} ... ok\n");
+        let failure = ToolOutput {
+            text: fixture_report("tearDownClass", "tests.test_cache.CacheTests", &tests, 2),
+            is_error: Some(true),
+            exit_code: Some(1),
+        };
+        let required = Requirement::capture(&failure, true);
+        assert!(required.is_guarded());
+        for (is_error, exit_code, verified) in [
+            (None, None, false),
+            (Some(false), Some(1), false),
+            (Some(false), Some(0), true),
+        ] {
+            let proof = ToolOutput {
+                text: report("ok"),
+                is_error,
+                exit_code,
+            };
+            assert_eq!(required.is_verified_by(&Proof::capture(&proof)), verified);
+        }
+        let pending = Requirement::capture(&failure, false);
+        let proof = ToolOutput {
+            text: report("ok"),
+            is_error: Some(false),
+            exit_code: Some(0),
+        };
+        assert!(!pending.is_verified_by(&Proof::capture(&proof)));
+    }
+
+    #[test]
+    fn another_class_passing_does_not_prove_a_withheld_setup_was_repaired() {
+        let tests = format!("{CONTROL} ... ok\n");
+        let text = fixture_report("setUpClass", "tests.hidden.HiddenTests", &tests, 1);
+        let failure = decoded(&text);
+        assert!(failure.failed);
+        assert!(!failure.execution.has_known_failures());
+        assert!(
+            !failure
+                .execution
+                .verified_by(&decoded(&report("ok")).execution)
+        );
+        let skipped = format!(
+            "setUpModule (tests.hidden) ... skipped 'not available'\n{tests}\n{RUN_SEPARATOR}\nRan 1 test in 0.001s\n\nOK (skipped=1)\n"
+        );
+        assert!(!decoded(&skipped).allows_completion);
+    }
+
+    #[test]
+    fn fixture_count_mismatch_missing_details_and_impossible_statuses_refuse_proof() {
+        let tests = format!("{CACHE} ... ok\n{CONTROL} ... ok\n");
+        let text = fixture_report("tearDownModule", "tests.test_cache", &tests, 2);
+        for malformed in [
+            text.replace("Ran 2 tests", "Ran 3 tests"),
+            text.replace(
+                "ERROR: tearDownModule (tests.test_cache)",
+                "ERROR: tearDownModule (other)",
+            ),
+            text.replace(
+                "ERROR: tearDownModule (tests.test_cache)",
+                "an unrecognized detail",
+            ),
+            format!("{text}another command is still running\n"),
+            text.replace(" ... ERROR", " ... ok"),
+            text.replace("ERROR", "FAIL")
+                .replace("errors=1", "failures=1"),
+        ] {
+            assert!(
+                !matches!(super::super::decode(&malformed), Ok(Some(report)) if report.execution.has_known_failures() || report.allows_completion),
+                "{malformed}"
+            );
+        }
+        let duplicate = text.replacen(
+            "tearDownModule (tests.test_cache) ... ERROR\n",
+            "tearDownModule (tests.test_cache) ... ERROR\ntearDownModule (tests.test_cache) ... ERROR\n",
+            1,
+        );
+        assert!(super::super::decode(&duplicate).is_err());
+    }
+
+    #[test]
+    fn quiet_and_redacted_module_fixtures_supply_diagnostics_but_not_repair_authority() {
+        let text = fixture_report("setUpModule", "__main__", "", 0);
+        let quiet = text.replacen("setUpModule (__main__) ... ERROR", "E", 1);
+        let failure = decoded(&quiet);
+        assert_eq!(failure.diagnostics, decoded(&text).diagnostics);
+        assert!(!failure.execution.has_known_failures());
+        let credential = format!("ghp_{}", "Q".repeat(36));
+        let sensitive = decoded(&fixture_report("setUpModule", &credential, "", 0));
+        assert!(!sensitive.symptom.unwrap().contains(&credential));
+        assert!(sensitive.diagnostics.iter().all(|diagnostic| {
+            !diagnostic.message_template.contains(&credential)
+                && !diagnostic.message_template.contains("private fixture body")
+        }));
+    }
+
+    fn cleanup_detail(number: usize) -> String {
+        format!(
+            "{ERROR_SEPARATOR}\nERROR: tearDownClass (tests.test_cache.CacheTests)\n{RUN_SEPARATOR}\nTraceback (most recent call last):\nRuntimeError: private cleanup {number}\n\n"
+        )
+    }
+
+    fn repeated_cleanup_report() -> String {
+        let progress = "tearDownClass (tests.test_cache.CacheTests) ... ERROR\n";
+        format!(
+            "{CACHE} ... ok\n{CONTROL} ... ok\n{progress}{progress}\n{}{}{RUN_SEPARATOR}\nRan 2 tests in 0.001s\n\nFAILED (errors=2)\n",
+            cleanup_detail(0),
+            cleanup_detail(1),
+        )
+    }
+
+    #[test]
+    fn multiple_class_cleanup_errors_keep_one_class_and_require_all_executed_tests() {
+        let text = repeated_cleanup_report();
+        let failure = decoded(&text);
+        assert!(failure.failed);
+        assert!(failure.execution.has_known_failures());
+        assert_eq!(failure.execution.inventory.len(), 2);
+        assert_eq!(failure.execution.failed.len(), 2);
+        assert_eq!(failure.diagnostics.len(), 1);
+        let single = fixture_report(
+            "tearDownClass",
+            "tests.test_cache.CacheTests",
+            &format!("{CACHE} ... ok\n{CONTROL} ... ok\n"),
+            2,
+        );
+        assert_eq!(failure.diagnostics, decoded(&single).diagnostics);
+        assert!(
+            failure
+                .execution
+                .verified_by(&decoded(&report("ok")).execution)
+        );
+        assert!(!failure.symptom.unwrap().contains("private cleanup"));
+    }
+
+    #[test]
+    fn repeated_fixture_counts_do_not_relax_test_duplicates_or_detail_reconciliation() {
+        let text = repeated_cleanup_report();
+        assert!(super::super::decode(&text.replace("errors=2", "errors=1")).is_err());
+        let missing_detail = text.replace(&cleanup_detail(0), "");
+        let incomplete = decoded(&missing_detail);
+        assert!(incomplete.failed);
+        assert!(!incomplete.execution.has_known_failures());
+        let duplicate_test = text.replacen(
+            &format!("{CACHE} ... ok\n"),
+            &format!("{CACHE} ... ok\n{CACHE} ... ok\n"),
+            1,
+        );
+        assert!(super::super::decode(&duplicate_test).is_err());
+        let mixed = text.replacen(
+            "tearDownClass (tests.test_cache.CacheTests) ... ERROR",
+            "tearDownClass (tests.test_cache.CacheTests) ... skipped 'ambiguous callback'",
+            1,
+        );
+        assert!(super::super::decode(&mixed).is_err());
+    }
+
+    #[test]
+    fn a_skipped_teardown_retains_test_failures_but_never_certifies_completion() {
+        let skipped = "tearDownClass (tests.test_cache.CacheTests) ... skipped 'not completed'\n";
+        let text = report("FAIL")
+            .replacen(ERROR_SEPARATOR, &format!("{skipped}\n{ERROR_SEPARATOR}"), 1)
+            .replace("FAILED (failures=1)", "FAILED (failures=1, skipped=1)");
+        let failure = decoded(&text);
+        assert!(failure.failed);
+        assert_eq!(failure.diagnostics, decoded(&report("FAIL")).diagnostics);
+        assert!(!failure.execution.has_known_failures());
+        let passed = report("ok")
+            .replacen(RUN_SEPARATOR, &format!("{skipped}\n{RUN_SEPARATOR}"), 1)
+            .replace("\nOK\n", "\nOK (skipped=1)\n");
+        let proof = decoded(&passed);
+        assert!(!proof.failed);
+        assert!(!proof.allows_completion);
+    }
+
+    #[test]
+    fn repeated_cleanup_callbacks_are_bounded_even_under_one_unique_identity() {
+        let progress = "tearDownClass (m.C) ... ERROR\n".repeat(MAX_TESTS + 1);
+        let text = format!(
+            "{progress}\n{RUN_SEPARATOR}\nRan 0 tests in 0.001s\n\nFAILED (errors={})\n",
+            MAX_TESTS + 1,
+        );
+        assert!(text.len() < MAX_SCANNED_OUTPUT_BYTES);
+        assert!(text.lines().count() < MAX_LINES);
+        assert!(super::super::decode(&text).is_err());
     }
 }

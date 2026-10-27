@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.memory.anchors.v1.json",
+  "title": "ee.memory.anchors.v1",
+  "description": "Redaction-safe listing, preview, or additive attachment of validated path and symbol anchors to an existing memory. Carried under ee.response.v2 data; memory content and source provenance remain unchanged.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "memoryId", "workspaceId", "status", "dryRun",
+    "persisted", "changed", "anchors", "addedAnchorCount", "auditId", "indexJobId"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "ee.memory.anchors.v1" },
+    "version": { "type": "string" },
+    "memoryId": { "type": "string" },
+    "workspaceId": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["listed", "would_attach", "attached", "unchanged"]
+    },
+    "dryRun": { "type": "boolean" },
+    "persisted": { "type": "boolean" },
+    "changed": { "type": "boolean" },
+    "anchors": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/anchor" },
+      "description": "Deterministically ordered code-anchor descriptors. Hash identities are always included; an exact normalized locator is included only after the public recall redaction screen. Raw memory bodies and provenance are not returned."
+    },
+    "addedAnchorCount": { "type": "integer", "minimum": 0 },
+    "auditId": { "type": ["string", "null"] },
+    "indexJobId": { "type": ["string", "null"] }
+  },
+  "$defs": {
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchorKind", "anchorValueHash", "redactedAnchorValue", "source"],
+      "properties": {
+        "anchorKind": { "type": "string", "enum": ["path", "symbol"] },
+        "anchorValueHash": { "type": "string" },
+        "redactedAnchorValue": { "type": "string" },
+        "source": { "type": "string" },
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Exact normalized path or symbol admitted by the same public-locator screen as recall. Omitted when unsafe or unavailable; a redaction placeholder is never a locator."
+        }
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "memoryId", "status", "dryRun", "persisted", "changed", "addedAnchorCount"],
+    "summary": ["schema", "version", "memoryId", "workspaceId", "status", "dryRun", "persisted", "changed", "addedAnchorCount", "auditId", "indexJobId"],
+    "standard": ["*"],
+    "full": ["*"]
+  }
+}

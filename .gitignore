@@ -133,6 +133,27 @@ Cargo.lock.bak
 !tests/fixtures/agent_detect/remote_mirror/**/.codex/
 !tests/fixtures/agent_detect/remote_mirror/**/.codex/**
 
+# The real-shape CASS oracle corpus (bd-reality-core-convergence-1azkt.43).
+#
+# Its whole point is that the transcripts sit at the EXACT paths Claude Code and
+# Codex write -- `home/.claude/projects/<cwd-slug>/<uuid>.jsonl` and
+# `home/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl` -- so the `.claude/` and
+# `.codex/` rules above swallowed all 308 session files. `git status` showed
+# only manifest.json, judgments.json and SHAPES.md, which is almost certainly
+# why a generator that has existed since 2026-10-08 never had its output
+# committed: the corpus was generated, looked absent, and the gap read as
+# unstarted work.
+#
+# Same shape as the remote_mirror negations directly above, and for the same
+# reason: a fixture that mirrors a real dot-directory layout has to be exempted
+# explicitly or it cannot be a fixture.
+!tests/fixtures/real_shape_cass/
+!tests/fixtures/real_shape_cass/**
+!tests/fixtures/real_shape_cass/**/.claude/
+!tests/fixtures/real_shape_cass/**/.claude/**
+!tests/fixtures/real_shape_cass/**/.codex/
+!tests/fixtures/real_shape_cass/**/.codex/**
+
 # Python tooling caches (some helper scripts may run python)
 __pycache__/
 *.pyc
@@ -191,6 +212,20 @@ tests/logs/
 /pass*.jsonl
 /fix_*.sh
 /find_*.sh
+# rch dispatch landing zones. `rch exec --job --result-dir <DIR>` documents DIR
+# as "Repository-relative", so a dispatch that wants its logs back has no
+# choice but to drop a directory in the tree — pointing it at a scratchpad is
+# not available. Directory-only and depth-1 anchored, so a fixture FILE whose
+# name ends in _out stays visible. t_out/, e2e_out/ and partition_out/ all
+# arrived this way and then had nowhere to go, because Rule 1 forbids deleting
+# them.
+/*_out/
+# Ad-hoc rch probe scripts dropped at the root while triaging one bead, named
+# after the bead they were investigating. Scratch, like /fix_*.sh above.
+/.rch_*.sh
+# br's write-ahead-log index: a transient per-process working directory, not
+# tracker state. The authoritative export is .beads/issues.jsonl.
+.beads/.br-wal-index-*/
 /*-upgrade-progress.json
 
 # scripts/audit_install_pipeline.sh writes a timestamped JSON snapshot per

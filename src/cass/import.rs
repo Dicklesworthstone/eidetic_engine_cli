@@ -16,7 +16,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
-use super::process::{CASS_STDOUT_LINE_MAX_BYTES, CassStreamError};
+#[cfg(test)]
+use super::process::CASS_STDOUT_LINE_MAX_BYTES;
+use super::process::{CASS_VIEW_STDOUT_LINE_MAX_BYTES, CassStreamError};
 use super::{
     CassAgent, CassClient, CassError, CassExitClass, CassRole, CassSessionInfo, CassSpanKind,
     ImportCursor,
@@ -37,12 +39,12 @@ const PAGED_VIEW_CONTEXT: u32 = 64;
 const IMPORT_SOURCE_KIND: &str = "cass";
 const CASS_REDACTION_AUDIT_SCHEMA_V1: &str = "ee.cass.redaction_audit.v1";
 const CASS_REDACTION_AUDIT_ACTION: &str = "cass.evidence.redacted";
-const CASS_EXCERPT_PRODUCER_VERSION: u32 = 1;
+const CASS_EXCERPT_PRODUCER_VERSION: u32 = 4;
 const CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1: &str = "ee.cass.subprocess_diagnostics.v1";
 /// Upper bound on the total `cass view --json` stdout we will buffer before
 /// parsing. Real `cass` emits a single pretty-printed `{...,"lines":[...]}`
 /// envelope (see [`parse_view_json_envelope`]), so the per-line read limit
-/// (`CASS_STDOUT_LINE_MAX_BYTES`, enforced in `process.rs`) is not by itself a
+/// (`CASS_VIEW_STDOUT_LINE_MAX_BYTES`, enforced in `process.rs`) is not by itself a
 /// total bound — the whole object can span many lines. Mirror the buffered
 /// `run` path's 100 MiB pipe cap so a pathological session can't make us hold
 /// unbounded memory.
@@ -134,14 +136,16 @@ pub enum ImportSessionStatus {
     Refused(CassHistoryRefusal),
 }
 
-/// A history-integrity refusal is local to one session, not a storage outage.
-/// Keep this vocabulary closed so unrelated DB failures still abort the run.
+/// A capture or history-integrity refusal is local to one session, not a
+/// storage outage. Keep this vocabulary closed so unrelated failures still
+/// abort the run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CassHistoryRefusal {
     Changed,
     Missing,
     Unverifiable,
     Unstable,
+    Oversized,
 }
 
 impl CassHistoryRefusal {
@@ -152,6 +156,7 @@ impl CassHistoryRefusal {
             Self::Missing => "cass_refresh_history_missing",
             Self::Unverifiable => "cass_refresh_history_unverifiable",
             Self::Unstable => "cass_source_changed_during_import",
+            Self::Oversized => "cass_view_oversized",
         }
     }
 
@@ -166,6 +171,9 @@ impl CassHistoryRefusal {
             }
             Self::Unstable => {
                 "Retry after the live session stops changing. No evidence from this incomplete snapshot was written."
+            }
+            Self::Oversized => {
+                "Inspect the oversized CASS transcript before retrying this session. A stdout line exceeded the fixed 8 MiB capture limit; no evidence from this incomplete snapshot was written. Other sessions were still processed."
             }
         }
     }
@@ -235,7 +243,7 @@ impl CassImportReport {
             code: "cass_import_history_refused",
             severity: "high",
             message: format!(
-                "{refused} CASS sessions were refused because their source changed during capture, retained history changed, is missing, or cannot be verified across screening versions. Their evidence was preserved and other sessions were processed."
+                "{refused} CASS sessions were refused because their source exceeded the bounded capture limit, changed during capture, retained history changed, is missing, or cannot be verified across screening versions. Their evidence was preserved and other sessions were processed."
             ),
             repair: "Inspect sessions[].refusalCode and sessions[].repair; restore original source evidence before retrying refused sessions.".to_owned(),
         })
@@ -516,6 +524,9 @@ impl CassImportError {
     #[must_use]
     pub fn subprocess_diagnostics_json(&self) -> Option<JsonValue> {
         match self {
+            Self::Cass(CassError::StdoutLineTooLong { limit_bytes }) => {
+                Some(cass_stdout_line_cap_diagnostics_json(Some(*limit_bytes)))
+            }
             Self::Cass(CassError::Io { message }) => cass_io_subprocess_diagnostics_json(message),
             Self::CassCommand {
                 command,
@@ -595,6 +606,31 @@ impl From<DbError> for CassImportError {
     }
 }
 
+fn cass_stdout_line_cap_diagnostics_json(limit_bytes: Option<usize>) -> JsonValue {
+    json!({
+        "schema": CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1,
+        "outcome": "cap_error",
+        "command": null,
+        "cap": {
+            "stream": "stdout",
+            "kind": "line",
+            "limitBytes": limit_bytes,
+        },
+        "timeout": false,
+        "killAttempted": true,
+        "reapSucceeded": true,
+        "stderrCapture": {
+            "truncated": false,
+            "captureCapExceeded": false,
+        },
+        "peakStreamedStdoutLineBufferBytes": null,
+        "unavailable": {
+            "command": "cap error surfaced before the higher-level command wrapper was built",
+            "peakStreamedStdoutLineBufferBytes": "reader returned the cap error before a stream outcome was emitted",
+        },
+    })
+}
+
 fn cass_io_subprocess_diagnostics_json(message: &str) -> Option<JsonValue> {
     let lower = message.to_lowercase();
     if !lower.contains("cass subprocess") {
@@ -602,28 +638,9 @@ fn cass_io_subprocess_diagnostics_json(message: &str) -> Option<JsonValue> {
     }
 
     if lower.contains("stdout line exceeded") {
-        return Some(json!({
-            "schema": CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1,
-            "outcome": "cap_error",
-            "command": null,
-            "cap": {
-                "stream": "stdout",
-                "kind": "line",
-                "limitBytes": first_usize_in_text(message),
-            },
-            "timeout": false,
-            "killAttempted": true,
-            "reapSucceeded": true,
-            "stderrCapture": {
-                "truncated": false,
-                "captureCapExceeded": false,
-            },
-            "peakStreamedStdoutLineBufferBytes": null,
-            "unavailable": {
-                "command": "cap error surfaced before the higher-level command wrapper was built",
-                "peakStreamedStdoutLineBufferBytes": "reader returned the cap error before a stream outcome was emitted",
-            },
-        }));
+        return Some(cass_stdout_line_cap_diagnostics_json(first_usize_in_text(
+            message,
+        )));
     }
 
     if lower.contains("stdout line was not valid utf-8") {
@@ -829,7 +846,10 @@ pub fn import_cass_sessions(
             let spans = if options.include_spans {
                 match view_session_spans(client, &session.source_path) {
                     Ok(spans) => spans,
-                    Err(error) if is_unstable_view(&error) => {
+                    Err(error) => {
+                        let Some(reason) = view_session_refusal(&error) else {
+                            return Err(error);
+                        };
                         first_history_refusal.get_or_insert(error);
                         cursor.record_skipped();
                         skipped = skipped.saturating_add(1);
@@ -837,14 +857,13 @@ pub fn import_cass_sessions(
                             source_path: session.source_path,
                             session_id: None,
                             index_job_id: None,
-                            status: ImportSessionStatus::Refused(CassHistoryRefusal::Unstable),
+                            status: ImportSessionStatus::Refused(reason),
                             spans_imported: 0,
                             message_count: session.message_count,
                             missing_metadata: session.missing_metadata,
                         });
                         continue;
                     }
-                    Err(error) => return Err(error),
                 }
             } else {
                 Vec::new()
@@ -903,10 +922,16 @@ pub fn import_cass_sessions(
                             &session_id,
                         )?
                     };
+                    // A recovered derivation can add searchable evidence after
+                    // the source snapshot's job has already completed. Prefer
+                    // its publication obligation; the coalesced publisher also
+                    // drains any pending source jobs for this session.
+                    let index_job_id =
+                        derive_session_error_recall(&connection, &workspace_id, &session_id)
+                            .or(index_job_id);
                     if index_job_id.is_some() {
                         index_jobs_queued = index_jobs_queued.saturating_add(1);
                     }
-                    derive_session_error_recall(&connection, &workspace_id, &session_id, changed);
                     if changed {
                         cursor.record_imported(&session.source_path);
                         imported = imported.saturating_add(1);
@@ -941,7 +966,9 @@ pub fn import_cass_sessions(
                     }
                     let session_spans = saturating_len(spans.len());
                     spans_imported = spans_imported.saturating_add(session_spans);
-                    derive_session_error_recall(&connection, &workspace_id, &session_id, true);
+                    let index_job_id =
+                        derive_session_error_recall(&connection, &workspace_id, &session_id)
+                            .unwrap_or(index_job_id);
 
                     cursor.record_imported(&session.source_path);
                     imported = imported.saturating_add(1);
@@ -1046,27 +1073,12 @@ fn persist_session_import_if_absent(
                     message: "imported session row is missing inside its own transaction"
                         .to_owned(),
                 })?;
-        // One screened multi-row write per batch instead of one INSERT per
-        // span (bd-reality-core-convergence-1azkt.48).
-        let rows = spans
-            .iter()
-            .map(|span| {
-                (
-                    stable_evidence_id(&session_id, &span.cass_span_id),
-                    evidence_input(workspace_id, &session_id, span),
-                )
-            })
-            .collect::<Vec<_>>();
-        let admission = connection.insert_evidence_spans_in_session(&rows, &stored_session)?;
-        for span in spans {
-            let evidence_id = stable_evidence_id(&session_id, &span.cass_span_id);
-            if span.redacted {
-                connection.insert_audit(
-                    &stable_cass_redaction_audit_id(&evidence_id),
-                    &cass_redaction_audit_input(workspace_id, &session_id, &evidence_id, span),
-                )?;
-            }
-        }
+        // The complete source is retained for history checks, but preparing
+        // another session-sized copy (then another in the DB writer) defeats
+        // the streaming capture's memory bound. Initial and growing imports
+        // share bounded preparation inside this one session transaction.
+        let admission =
+            refresh::insert_initial_spans(connection, workspace_id, &stored_session, spans)?;
         connection.insert_search_index_job(
             &index_job_id,
             &search_index_job_input(workspace_id, &session_id),
@@ -1329,11 +1341,24 @@ fn invalid_view_page(message: &str) -> CassImportError {
 
 const UNSTABLE_VIEW_MESSAGE: &str = "view total_lines changed during import";
 
-// Only a changed endpoint is retryable. Malformed envelopes, missing lines,
-// subprocess failures and storage errors retain their batch-failure semantics.
-fn is_unstable_view(error: &CassImportError) -> bool {
-    matches!(error, CassImportError::InvalidJson { source: "view", message }
-        if message == UNSTABLE_VIEW_MESSAGE)
+// Refuse an incomplete snapshot before any session transaction. A physical
+// stdout line can be only part of a pretty-printed JSON record, so dropping or
+// truncating it cannot safely quarantine a span or prove its complete source.
+// Only the typed view-line limit and a changing endpoint are session-local;
+// malformed JSON/UTF-8, subprocess failures and storage errors still fail.
+fn view_session_refusal(error: &CassImportError) -> Option<CassHistoryRefusal> {
+    match error {
+        CassImportError::Cass(CassError::StdoutLineTooLong { limit_bytes })
+            if *limit_bytes == CASS_VIEW_STDOUT_LINE_MAX_BYTES =>
+        {
+            Some(CassHistoryRefusal::Oversized)
+        }
+        CassImportError::InvalidJson {
+            source: "view",
+            message,
+        } if message == UNSTABLE_VIEW_MESSAGE => Some(CassHistoryRefusal::Unstable),
+        _ => None,
+    }
 }
 
 fn cass_view_total_lines(input: &[u8]) -> Result<Option<u32>, CassImportError> {
@@ -1397,12 +1422,14 @@ fn read_cass_view_page(
     // (the first stdout line is just `{`), not a per-line `{"line",..}` JSONL
     // stream. So we cannot `serde_json::from_str` each line in isolation (the
     // bare `{` yields "EOF while parsing an object" and imports zero spans —
-    // issue #11). Instead, stream the stdout to keep the per-line 1 MiB read
-    // limit and bound total memory, accumulate the raw bytes, then hand the
+    // issue #11). Instead, stream stdout with a fixed 8 MiB view-line limit,
+    // accumulate the raw bytes within the total cap, then hand the
     // whole buffer to `parse_view_json`, which understands the real envelope
     // shape via `parse_view_json_envelope` (and still tolerates true JSONL).
+    // Complete content over the policy's 1 MiB scan budget is quarantined by
+    // parse_view_line_value without changing JSON or losing its source hash.
     let mut buffer = CassViewStdoutBuffer::default();
-    let outcome = match invocation.run_stdout_lines(|line| buffer.accept_line(&line)) {
+    let outcome = match invocation.run_view_stdout_lines(|line| buffer.accept_line(&line)) {
         Ok(outcome) => outcome,
         Err(CassStreamError::Cass(error)) => return Err(CassImportError::Cass(error)),
         Err(CassStreamError::Handler(error)) => return Err(error),
@@ -1422,7 +1449,7 @@ fn read_cass_view_page(
 /// Accumulates `cass view --json` stdout while streaming so the full envelope
 /// can be parsed in one pass (see [`view_session_spans`]). Preserves the
 /// streaming safety posture: each line is already bounded by the read-side
-/// `CASS_STDOUT_LINE_MAX_BYTES` limit, and the running total is capped here at
+/// `CASS_VIEW_STDOUT_LINE_MAX_BYTES` limit, and the running total is capped here at
 /// [`CASS_VIEW_STDOUT_TOTAL_MAX_BYTES`] so pathological output cannot pin
 /// unbounded memory.
 #[derive(Default)]
@@ -1799,6 +1826,9 @@ mod ingestion;
 #[allow(dead_code)]
 #[path = "backfill.rs"]
 mod backfill;
+#[cfg(test)]
+#[path = "recall_publication_tests.rs"]
+mod recall_publication_tests;
 #[path = "refresh.rs"]
 mod refresh;
 
@@ -1827,6 +1857,16 @@ fn parse_view_json(
         source: "view",
         message: error.to_string(),
     })?;
+    // The envelope fallback must enforce the same physical-line cap as JSONL,
+    // including direct parser/fuzz callers that bypass the subprocess reader.
+    if text
+        .lines()
+        .any(|line| line.len() > CASS_VIEW_STDOUT_LINE_MAX_BYTES)
+    {
+        return Err(invalid_view_page(&format!(
+            "view JSON line exceeds {CASS_VIEW_STDOUT_LINE_MAX_BYTES} byte limit"
+        )));
+    }
 
     match parse_view_json_lines(text, source_path) {
         Ok(spans) => Ok(spans),
@@ -1925,10 +1965,12 @@ impl CassViewLineCollector {
         if line.trim().is_empty() {
             return Ok(());
         }
-        if line.len() > CASS_STDOUT_LINE_MAX_BYTES {
+        if line.len() > CASS_VIEW_STDOUT_LINE_MAX_BYTES {
             return Err(CassImportError::InvalidJson {
                 source: "view",
-                message: format!("view JSON line exceeds {CASS_STDOUT_LINE_MAX_BYTES} byte limit"),
+                message: format!(
+                    "view JSON line exceeds {CASS_VIEW_STDOUT_LINE_MAX_BYTES} byte limit"
+                ),
             });
         }
         self.memory_sample.record_line(line.len());
@@ -2657,63 +2699,183 @@ fn stable_evidence_id(session_id: &str, span_id: &str) -> String {
 /// Record one session's failure->fix arcs in the error-fingerprint store
 /// (bd-reality-core-convergence-1azkt.60), once per derivation revision.
 ///
-/// The marker is a deterministic audit row, so the first import after an
-/// upgrade derives sessions imported earlier and later imports skip them; a
-/// session whose transcript changed is derived again. The transcript is
-/// already durable here, so a failure is logged and never fails the import.
+/// Successful derivation belongs to a committed import snapshot, not merely
+/// its session. A crash or failure after a growing refresh commits must leave
+/// that snapshot retryable even when an older snapshot was already derived.
+/// The transcript is already durable here, so failure never fails the import.
 fn derive_session_error_recall(
     connection: &DbConnection,
     workspace_id: &str,
     session_id: &str,
-    transcript_changed: bool,
-) {
-    let marker_id = stable_cass_error_recall_audit_id(session_id);
-    let result = (|| -> Result<(), DbError> {
-        let marked = connection.get_audit(&marker_id)?.is_some();
-        if marked && !transcript_changed {
-            return Ok(());
-        }
-        let report = crate::core::cass_error_recall::record_session_error_recall(
-            connection,
-            workspace_id,
-            session_id,
-        )?;
-        if !marked {
-            connection.insert_audit(
-                &marker_id,
-                &CreateAuditInput {
-                    workspace_id: Some(workspace_id.to_owned()),
-                    actor: Some(crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR.to_owned()),
-                    action: crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE.to_owned(),
-                    target_type: Some("session".to_owned()),
-                    target_id: Some(session_id.to_owned()),
-                    details: Some(
-                        json!({
-                            "failuresSeen": report.failures_seen,
-                            "resolvedFailures": report.resolved_failures,
-                            "fingerprintsRecorded": report.fingerprints_recorded,
-                            "repairLinksRecorded": report.repair_links_recorded,
-                            "incidentCardsRecorded": report.incident_cards_recorded,
-                            "incidentCardDerivation":
-                                crate::core::incident_card::INCIDENT_CARD_DERIVATION,
-                            "errorRecallDerivation":
-                                crate::core::cass_error_recall::CASS_ERROR_RECALL_DERIVATION,
-                        })
-                        .to_string(),
-                    ),
-                },
+) -> Option<String> {
+    // Hold the reentrant writer fence, without opening a transaction, across
+    // both transactions below. Otherwise two importers can pass the missing
+    // marker check, and the second recorder can advance the source generation
+    // after the first importer's derived publication has already completed.
+    let result = connection.with_write_owner_fence(
+        |error| error,
+        || {
+            // Capture the committed identity before the recorder reads any source.
+            // Reading a newer token afterwards could certify older evidence as the
+            // latest snapshot. The token requires only bounded session metadata.
+            let publication_id =
+                refresh::committed_session_publication_id(connection, workspace_id, session_id)?;
+            let marker_id = stable_cass_error_recall_snapshot_audit_id(session_id, &publication_id);
+            if let Some(marker) = connection.get_audit(&marker_id)? {
+                return reconcile_error_recall_publication(
+                    connection,
+                    workspace_id,
+                    session_id,
+                    &publication_id,
+                    &marker,
+                );
+            }
+            #[cfg(all(test, unix))]
+            recall_publication_tests::before_recorder();
+            let report = crate::core::cass_error_recall::record_session_error_recall(
+                connection,
+                workspace_id,
+                session_id,
             )?;
+            record_session_error_recall_completion(
+                connection,
+                workspace_id,
+                session_id,
+                &publication_id,
+                &report,
+            )
+        },
+    );
+    match result {
+        Ok(index_job_id) => index_job_id,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::cass::import",
+                session_id,
+                error = %error,
+                "deriving error recall from the imported session failed; the session itself is imported"
+            );
+            None
         }
-        Ok(())
-    })();
-    if let Err(error) = result {
-        tracing::warn!(
-            target: "ee::cass::import",
-            session_id,
-            error = %error,
-            "deriving error recall from the imported session failed; the session itself is imported"
-        );
     }
+}
+
+/// Recover the publication obligation from the durable completion marker.
+/// The caller holds the writer fence. Submission counts remain nonzero when a
+/// retry reuses cards committed before an earlier marker failure.
+fn reconcile_error_recall_publication(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+    publication_id: &str,
+    marker: &crate::db::StoredAuditEntry,
+) -> Result<Option<String>, DbError> {
+    let invalid_marker = || DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: "cass_error_recall_marker_invalid: cannot verify derived publication".to_owned(),
+    };
+    let details: JsonValue = marker
+        .details
+        .as_deref()
+        .and_then(|details| serde_json::from_str(details).ok())
+        .ok_or_else(invalid_marker)?;
+    if marker.workspace_id.as_deref() != Some(workspace_id)
+        || marker.action != crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE
+        || marker.target_type.as_deref() != Some("session")
+        || marker.target_id.as_deref() != Some(session_id)
+        || details["committedPublicationId"].as_str() != Some(publication_id)
+    {
+        return Err(invalid_marker());
+    }
+    let mut has_source_writes = false;
+    for counter in [
+        "fingerprintsRecorded",
+        "repairLinksRecorded",
+        "incidentCardsRecorded",
+    ] {
+        let count = details[counter].as_u64().ok_or_else(invalid_marker)?;
+        has_source_writes |= count > 0;
+    }
+    if !has_source_writes {
+        return Ok(None);
+    }
+    refresh::pending_job(
+        connection,
+        workspace_id,
+        session_id,
+        &stable_cass_error_recall_index_job_id(&marker.id),
+        true,
+    )
+}
+
+fn record_session_error_recall_completion(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+    publication_id: &str,
+    report: &crate::core::cass_error_recall::CassErrorRecallReport,
+) -> Result<Option<String>, DbError> {
+    // The recorder owns its transaction. This second transaction contains the
+    // final identity check and atomic publication obligation/success marker.
+    // A newer source snapshot stays unmarked for retry, never certified by
+    // older derived work.
+    let marker_id = stable_cass_error_recall_snapshot_audit_id(session_id, publication_id);
+    with_import_session_transaction(connection, || {
+        if refresh::committed_session_publication_id(connection, workspace_id, session_id)?
+            != publication_id
+        {
+            return Ok(None);
+        }
+        if let Some(marker) = connection.get_audit(&marker_id)? {
+            return reconcile_error_recall_publication(
+                connection,
+                workspace_id,
+                session_id,
+                publication_id,
+                &marker,
+            );
+        }
+        let index_job_id = if report.fingerprints_recorded > 0
+            || report.repair_links_recorded > 0
+            || report.incident_cards_recorded > 0
+        {
+            refresh::pending_job(
+                connection,
+                workspace_id,
+                session_id,
+                &stable_cass_error_recall_index_job_id(&marker_id),
+                true,
+            )?
+        } else {
+            None
+        };
+        connection.insert_audit(
+            &marker_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: Some(crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR.to_owned()),
+                action: crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE.to_owned(),
+                target_type: Some("session".to_owned()),
+                target_id: Some(session_id.to_owned()),
+                details: Some(
+                    json!({
+                        "committedPublicationId": publication_id,
+                        "failuresSeen": report.failures_seen,
+                        "resolvedFailures": report.resolved_failures,
+                        "fingerprintsRecorded": report.fingerprints_recorded,
+                        "repairLinksRecorded": report.repair_links_recorded,
+                        "incidentCardsRecorded": report.incident_cards_recorded,
+                        "incidentCardDerivation":
+                            crate::core::incident_card::INCIDENT_CARD_DERIVATION,
+                        "errorRecallDerivation":
+                            crate::core::cass_error_recall::CASS_ERROR_RECALL_DERIVATION,
+                    })
+                    .to_string(),
+                ),
+            },
+        )?;
+        Ok(index_job_id)
+    })
 }
 
 /// Recall extraction and card rendering evolve independently. A session
@@ -2727,6 +2889,22 @@ fn stable_cass_error_recall_audit_id(session_id: &str) -> String {
         crate::core::incident_card::INCIDENT_CARD_DERIVATION
     )))
     .to_string()
+}
+
+fn stable_cass_error_recall_snapshot_audit_id(session_id: &str, publication_id: &str) -> String {
+    AuditId::from_uuid(stable_uuid(&format!(
+        "audit:cass-error-recall-snapshot:{}:{publication_id}",
+        stable_cass_error_recall_audit_id(session_id),
+    )))
+    .to_string()
+}
+
+/// A derived publication is bound to the snapshot and both derivation
+/// revisions through its marker. It must never replace the source checkpoint:
+/// doing so would change the marker identity on every unchanged retry.
+fn stable_cass_error_recall_index_job_id(marker_id: &str) -> String {
+    let hash = blake3_hex(&format!("search-index-job:cass-error-recall:{marker_id}"));
+    format!("sidx_{}", &hash[..26])
 }
 
 fn stable_cass_redaction_audit_id(evidence_id: &str) -> String {
@@ -2924,32 +3102,38 @@ mod tests {
             crate::core::incident_card::INCIDENT_CARD_DERIVATION,
         )))
         .to_string();
-        db.insert_audit(
-            &old_marker,
-            &CreateAuditInput {
-                workspace_id: Some(workspace_id.clone()),
-                actor: Some(crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR.to_owned()),
-                action: crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE.to_owned(),
-                target_type: Some("session".to_owned()),
-                target_id: Some(session_id.clone()),
-                details: None,
-            },
-        )
-        .map_err(|error| error.to_string())?;
+        let legacy_session_marker = stable_cass_error_recall_audit_id(&session_id);
+        for marker in [&old_marker, &legacy_session_marker] {
+            db.insert_audit(
+                marker,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.clone()),
+                    actor: Some(crate::core::cass_error_recall::CASS_ERROR_RECALL_ACTOR.to_owned()),
+                    action: crate::db::audit_actions::CASS_ERROR_RECALL_DERIVE.to_owned(),
+                    target_type: Some("session".to_owned()),
+                    target_id: Some(session_id.clone()),
+                    details: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        }
 
-        derive_session_error_recall(&db, &workspace_id, &session_id, false);
+        let _ = derive_session_error_recall(&db, &workspace_id, &session_id);
         ensure(
             db.get_error_fingerprint(&workspace_id, "ee:migration_required")
                 .map_err(|error| error.to_string())?
                 .is_some(),
             "unchanged source must acquire newly supported error classes",
         )?;
-        let marker_id = stable_cass_error_recall_audit_id(&session_id);
+        let marker_id = stable_cass_error_recall_snapshot_audit_id(
+            &session_id,
+            &stable_search_index_job_id(&workspace_id, &session_id),
+        );
         let marker = db
             .get_audit(&marker_id)
             .map_err(|error| error.to_string())?
             .ok_or("upgraded derivation marker missing")?;
-        derive_session_error_recall(&db, &workspace_id, &session_id, false);
+        let _ = derive_session_error_recall(&db, &workspace_id, &session_id);
         ensure_equal(
             &db.get_audit(&marker_id)
                 .map_err(|error| error.to_string())?,
@@ -2961,7 +3145,350 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .is_some(),
             "upgrade preserves historical derivation audit",
+        )?;
+        ensure(
+            db.get_audit(&legacy_session_marker)
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            "snapshot recovery preserves the previous session-only marker",
         )
+    }
+
+    mod recall_snapshot_retries {
+        #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+        use super::*;
+
+        struct Fixture {
+            db: DbConnection,
+            workspace: String,
+            session_id: String,
+            session: CassSessionInfo,
+            spans: Vec<CassViewSpanForImport>,
+        }
+
+        impl Fixture {
+            fn new(initial_spans: usize) -> Self {
+                let db = DbConnection::open_memory().unwrap();
+                db.migrate().unwrap();
+                let workspace =
+                    ensure_workspace(&db, Path::new("/tmp/cass-recall-snapshot")).unwrap();
+                let mut session = CassSessionInfo::new("/sessions/recall-snapshot.jsonl")
+                    .with_agent(CassAgent::Codex);
+                session.message_count = Some(saturating_len(initial_spans));
+                let failure = json!({"schema":"ee.error.v2","error":{
+                    "code":"migration_required", "message":"Schema migration required"
+                }});
+                let records = [
+                    json!({"type":"assistant", "content":"Starting the release checks."}),
+                    json!({"type":"assistant", "message":{"role":"assistant", "content":[{
+                        "type":"tool_use", "id":"failed", "name":"Bash",
+                        "input":{"command":"ee search release --json"}
+                    }]}}),
+                    json!({"type":"user", "message":{"role":"user", "content":[{
+                        "type":"tool_result", "tool_use_id":"failed", "is_error":true,
+                        "content":failure.to_string()
+                    }]}}),
+                    json!({"type":"assistant", "message":{"role":"assistant", "content":[{
+                        "type":"text", "text":"Updated the workspace schema by applying the pending migrations, which fixes opening the evidence tables during search."
+                    }]}}),
+                    json!({"type":"assistant", "message":{"role":"assistant", "content":[{
+                        "type":"tool_use", "id":"verified", "name":"Bash",
+                        "input":{"command":"ee search release --json"}
+                    }]}}),
+                    json!({"type":"user", "message":{"role":"user", "content":[{
+                        "type":"tool_result", "tool_use_id":"verified", "is_error":false,
+                        "content":r#"{"schema":"ee.response.v2","success":true,"data":{"results":[]}}"#
+                    }]}}),
+                ];
+                let spans = records
+                    .iter()
+                    .enumerate()
+                    .map(|(index, record)| {
+                        parse_view_line_value(
+                            &json!({"line":index + 1, "content":record.to_string()}),
+                            &session.source_path,
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                assert!(matches!(
+                    persist_session_import_if_absent(
+                        &db,
+                        &workspace,
+                        &session,
+                        &spans[..initial_spans]
+                    )
+                    .unwrap(),
+                    SessionImportPersistResult::Imported { .. }
+                ));
+                let session_id = stable_session_id(&workspace, &session.source_path);
+                Self {
+                    db,
+                    workspace,
+                    session_id,
+                    session,
+                    spans,
+                }
+            }
+
+            fn derive(&self) {
+                let _ = derive_session_error_recall(&self.db, &self.workspace, &self.session_id);
+            }
+
+            fn publication_id(&self) -> String {
+                refresh::committed_session_publication_id(
+                    &self.db,
+                    &self.workspace,
+                    &self.session_id,
+                )
+                .unwrap()
+            }
+
+            fn marker_id(&self) -> String {
+                stable_cass_error_recall_snapshot_audit_id(&self.session_id, &self.publication_id())
+            }
+
+            fn refresh(&mut self) -> refresh::RefreshReport {
+                self.session.message_count = Some(saturating_len(self.spans.len()));
+                refresh::refresh_session(
+                    &self.db,
+                    &self.workspace,
+                    &self.session_id,
+                    &self.session,
+                    &self.spans,
+                )
+                .unwrap()
+            }
+
+            fn assert_derived(&self) {
+                assert!(
+                    self.db
+                        .get_error_fingerprint(&self.workspace, "ee:migration_required")
+                        .unwrap()
+                        .is_some()
+                );
+                let links = self
+                    .db
+                    .list_error_repair_links(&self.workspace, "ee:migration_required")
+                    .unwrap();
+                assert_eq!(
+                    links.len(),
+                    3,
+                    "repair, successful proof, and incident card"
+                );
+                let repair = stable_evidence_id(&self.session_id, &self.spans[3].cass_span_id);
+                let proof = stable_evidence_id(&self.session_id, &self.spans[5].cass_span_id);
+                assert!(links.iter().any(|link| link.target_id == repair));
+                assert!(links.iter().any(|link| link.target_id == proof));
+                assert!(self.db.get_audit(&self.marker_id()).unwrap().is_some());
+            }
+        }
+
+        #[test]
+        fn unchanged_retry_recovers_lost_or_failed_post_commit_derivation() {
+            for interruption in ["before_derivation", "during_derivation", "before_marker"] {
+                let mut fixture = Fixture::new(1);
+                fixture.derive();
+                let original_marker_id = fixture.marker_id();
+                let original_marker = fixture.db.get_audit(&original_marker_id).unwrap();
+                assert!(original_marker.is_some());
+                let first_source = fixture
+                    .db
+                    .list_evidence_spans_for_session(&fixture.session_id)
+                    .unwrap();
+                let refresh = fixture.refresh();
+                assert!(refresh.changed);
+                assert_eq!(refresh.added_lines.len(), 5);
+                let marker_id = fixture.marker_id();
+                assert_ne!(marker_id, original_marker_id);
+                if interruption != "before_derivation" {
+                    let trigger = if interruption == "during_derivation" {
+                        "CREATE TRIGGER reject_recall_snapshot BEFORE INSERT ON error_fingerprints BEGIN SELECT RAISE(ABORT, 'recall_snapshot_failure'); END;"
+                    } else {
+                        "CREATE TRIGGER reject_recall_snapshot BEFORE INSERT ON audit_log WHEN NEW.action = 'cass.error_recall_derive.v1' BEGIN SELECT RAISE(ABORT, 'recall_snapshot_marker_failure'); END;"
+                    };
+                    fixture.db.execute_raw(trigger).unwrap();
+                    fixture.derive();
+                    fixture
+                        .db
+                        .execute_raw("DROP TRIGGER reject_recall_snapshot")
+                        .unwrap();
+                }
+                assert!(fixture.db.get_audit(&marker_id).unwrap().is_none());
+                if interruption != "before_marker" {
+                    assert!(
+                        fixture
+                            .db
+                            .get_error_fingerprint(&fixture.workspace, "ee:migration_required")
+                            .unwrap()
+                            .is_none()
+                    );
+                }
+                fixture
+                    .db
+                    .execute_raw("UPDATE search_index_jobs SET status = 'completed'")
+                    .unwrap();
+                let retry = fixture.refresh();
+                assert!(!retry.changed);
+                assert!(retry.index_job_id.is_none());
+                fixture.derive();
+                fixture.assert_derived();
+                assert_eq!(
+                    fixture.db.get_audit(&original_marker_id).unwrap(),
+                    original_marker
+                );
+                let retained = fixture
+                    .db
+                    .list_evidence_spans_for_session(&fixture.session_id)
+                    .unwrap();
+                assert!(first_source.iter().all(|source| retained.contains(source)));
+                let fingerprint = fixture
+                    .db
+                    .get_error_fingerprint(&fixture.workspace, "ee:migration_required")
+                    .unwrap();
+                let links = fixture
+                    .db
+                    .list_error_repair_links(&fixture.workspace, "ee:migration_required")
+                    .unwrap();
+                let audits = fixture
+                    .db
+                    .list_audit_entries(Some(&fixture.workspace), None)
+                    .unwrap();
+                fixture.derive();
+                assert_eq!(
+                    fixture
+                        .db
+                        .list_evidence_spans_for_session(&fixture.session_id)
+                        .unwrap(),
+                    retained
+                );
+                assert_eq!(
+                    fixture
+                        .db
+                        .get_error_fingerprint(&fixture.workspace, "ee:migration_required")
+                        .unwrap(),
+                    fingerprint
+                );
+                assert_eq!(
+                    fixture
+                        .db
+                        .list_error_repair_links(&fixture.workspace, "ee:migration_required")
+                        .unwrap(),
+                    links
+                );
+                assert_eq!(
+                    fixture
+                        .db
+                        .list_audit_entries(Some(&fixture.workspace), None)
+                        .unwrap(),
+                    audits
+                );
+            }
+        }
+
+        #[test]
+        fn metadata_only_retry_recovers_a_previously_committed_backfill() {
+            let mut fixture = Fixture::new(0);
+            fixture.derive();
+            let empty_marker = fixture.marker_id();
+            assert!(fixture.db.get_audit(&empty_marker).unwrap().is_some());
+            let report = fixture.refresh();
+            assert_eq!(report.added_lines.len(), fixture.spans.len());
+            // Simulate interruption before derivation, followed by a run that
+            // does not capture spans. Publication reconciliation is unchanged.
+            assert_eq!(
+                refresh::reconcile_session_publication(
+                    &fixture.db,
+                    &fixture.workspace,
+                    &fixture.session_id
+                )
+                .unwrap(),
+                report.index_job_id
+            );
+            fixture.derive();
+            fixture.assert_derived();
+            assert_ne!(fixture.marker_id(), empty_marker);
+            assert!(fixture.db.get_audit(&empty_marker).unwrap().is_some());
+        }
+
+        #[test]
+        fn a_newer_committed_snapshot_cannot_be_certified_by_older_derived_work() {
+            let mut fixture = Fixture::new(1);
+            let original_publication = fixture.publication_id();
+            let report = crate::core::cass_error_recall::record_session_error_recall(
+                &fixture.db,
+                &fixture.workspace,
+                &fixture.session_id,
+            )
+            .unwrap();
+            assert_eq!(report.failures_seen, 0);
+            fixture.refresh();
+            let _ = record_session_error_recall_completion(
+                &fixture.db,
+                &fixture.workspace,
+                &fixture.session_id,
+                &original_publication,
+                &report,
+            )
+            .unwrap();
+            assert!(
+                fixture
+                    .db
+                    .get_audit(&fixture.marker_id())
+                    .unwrap()
+                    .is_none()
+            );
+            let original_marker = stable_cass_error_recall_snapshot_audit_id(
+                &fixture.session_id,
+                &original_publication,
+            );
+            assert!(fixture.db.get_audit(&original_marker).unwrap().is_none());
+            fixture.derive();
+            fixture.assert_derived();
+        }
+
+        #[test]
+        fn invalid_scope_or_checkpoint_cannot_authorize_a_derivation_marker() {
+            let fixture = Fixture::new(6);
+            let foreign =
+                ensure_workspace(&fixture.db, Path::new("/tmp/foreign-recall-snapshot")).unwrap();
+            let error = refresh::committed_session_publication_id(
+                &fixture.db,
+                &foreign,
+                &fixture.session_id,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("cass_refresh_scope_mismatch"));
+            let _ = derive_session_error_recall(&fixture.db, &foreign, &fixture.session_id);
+            fixture
+                .db
+                .execute_raw(
+                    "UPDATE sessions SET metadata_json = '{\"eeCassImportCheckpoint\":null}'",
+                )
+                .unwrap();
+            let error = refresh::committed_session_publication_id(
+                &fixture.db,
+                &fixture.workspace,
+                &fixture.session_id,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cass_refresh_checkpoint_invalid")
+            );
+            fixture.derive();
+            assert_eq!(
+                fixture.db.count_table_rows("error_fingerprints").unwrap(),
+                0
+            );
+            assert_eq!(
+                fixture.db.count_table_rows("error_repair_links").unwrap(),
+                0
+            );
+            assert_eq!(fixture.db.count_table_rows("audit_log").unwrap(), 0);
+        }
     }
 
     fn collect_view_fixture(
@@ -3088,7 +3615,7 @@ mod tests {
             ])
             .expect_err("changed endpoint must discard the complete snapshot");
             ensure(
-                is_unstable_view(&error),
+                view_session_refusal(&error) == Some(CassHistoryRefusal::Unstable),
                 "live growth or truncation is retryable",
             )?;
         }
@@ -3100,7 +3627,7 @@ mod tests {
             let error = collect_view_fixture(&[view_window_fixture(1, 5, 8), page])
                 .expect_err("malformed page");
             ensure(
-                !is_unstable_view(&error),
+                view_session_refusal(&error).is_none(),
                 "malformed source still fails the batch",
             )?;
         }
@@ -3338,11 +3865,36 @@ mod tests {
     }
 
     #[test]
+    fn only_typed_view_line_cap_is_a_recoverable_size_refusal() {
+        assert_eq!(
+            view_session_refusal(&CassImportError::Cass(CassError::StdoutLineTooLong {
+                limit_bytes: CASS_VIEW_STDOUT_LINE_MAX_BYTES,
+            })),
+            Some(CassHistoryRefusal::Oversized),
+        );
+        for error in [
+            CassImportError::Cass(CassError::StdoutLineTooLong {
+                limit_bytes: CASS_STDOUT_LINE_MAX_BYTES,
+            }),
+            CassImportError::Cass(CassError::Io {
+                message: format!(
+                    "cass subprocess stdout line exceeded {CASS_VIEW_STDOUT_LINE_MAX_BYTES} byte limit"
+                ),
+            }),
+            CassImportError::Cass(CassError::Io {
+                message: "cass subprocess stdout line was not valid UTF-8".to_owned(),
+            }),
+            invalid_view_page("view JSON output exceeds total session byte limit"),
+            invalid_view_page("view source locator does not match the requested session"),
+        ] {
+            assert_eq!(view_session_refusal(&error), None, "{error}");
+        }
+    }
+
+    #[test]
     fn subprocess_diagnostics_classifies_stdout_line_cap() -> TestResult {
-        let error = CassImportError::Cass(CassError::Io {
-            message: format!(
-                "cass subprocess stdout line exceeded {CASS_STDOUT_LINE_MAX_BYTES} byte limit"
-            ),
+        let error = CassImportError::Cass(CassError::StdoutLineTooLong {
+            limit_bytes: CASS_VIEW_STDOUT_LINE_MAX_BYTES,
         });
         let diagnostics = error
             .subprocess_diagnostics_json()
@@ -3364,6 +3916,11 @@ mod tests {
             "cap stream",
         )?;
         ensure_equal(&diagnostics["cap"]["kind"], &json!("line"), "cap kind")?;
+        ensure_equal(
+            &diagnostics["cap"]["limitBytes"],
+            &json!(CASS_VIEW_STDOUT_LINE_MAX_BYTES),
+            "typed view cap",
+        )?;
         ensure_equal(&diagnostics["timeout"], &json!(false), "timeout flag")?;
         ensure_equal(
             &diagnostics["killAttempted"],
@@ -4585,7 +5142,7 @@ mod tests {
 
     #[test]
     fn parse_view_jsonl_rejects_oversized_lines() -> TestResult {
-        let oversized_content = "x".repeat(CASS_STDOUT_LINE_MAX_BYTES);
+        let oversized_content = "x".repeat(CASS_VIEW_STDOUT_LINE_MAX_BYTES);
         let input = json!({
             "line": 1,
             "content": oversized_content,
@@ -4603,8 +5160,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_view_json_rejects_pretty_envelope_over_line_cap() -> TestResult {
+        let input = serde_json::to_string_pretty(&json!({
+            "lines": [{"line": 1, "content": "x".repeat(CASS_VIEW_STDOUT_LINE_MAX_BYTES)}],
+            "total_lines": 1,
+        }))
+        .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(
+                parse_view_json(input.as_bytes(), "/tmp/session.jsonl"),
+                Err(error) if cass_view_line_error_is_size_limit(&error)
+            ),
+            "pretty-printed envelopes must not bypass the physical-line limit",
+        )
+    }
+
+    #[test]
     fn parse_view_json_rejects_single_line_envelope_over_line_cap() -> TestResult {
-        let oversized_content = "x".repeat(CASS_STDOUT_LINE_MAX_BYTES);
+        let oversized_content = "x".repeat(CASS_VIEW_STDOUT_LINE_MAX_BYTES);
         let input = json!({
             "lines": [{
                 "line": 1,

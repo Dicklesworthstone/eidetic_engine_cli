@@ -69,8 +69,41 @@ assert_jq "$CREATE_JSON" '(.data.derived | map(.kind) | index("lab_episode") != 
 assert_jq "$CREATE_JSON" '(.data.derived | map(.kind) | index("wal_holds") != null)' \
     "true" "backup_derived_wal_holds_included"
 
-BACKUP_ID="$(printf '%s' "$CREATE_JSON" | jq -r '.data.backupId')"
-BACKUP_PATH="$(printf '%s' "$CREATE_JSON" | jq -r '.data.outputPath')"
+# bd-5h8lh: `.data.outputPath` is the WRONG FIELD, and it was wrong at BOTH
+# read sites, not just the second one.
+#
+# `ee backup create --json` emits `backupPath`. `outputPath` occurs exactly
+# once in src/cli/mod.rs, at the `"command": "export"` envelope -- a different
+# command. So this read has always produced jq's literal string "null", here as
+# well as at the corrupt-backup read further down; it simply was not fatal here,
+# because nothing writes to $BACKUP_PATH before the later site does.
+#
+# Measured 2026-10-19 by running the suite's own create invocation twice
+# against ee 0.14.2: both creates return `success: true`, no `outputPath` key
+# at all, and a populated `backupPath`. That contradicts this bead's reading
+# that the FIRST create succeeded and only the second returned nothing usable
+# -- both lacked the field, and the first read's null was simply harmless.
+#
+# jq_field refuses rather than returning the string "null", so a renamed or
+# relocated field names ITSELF instead of becoming a path. That is the half of
+# this bead that makes the other half self-diagnosing.
+jq_field() {
+    local json="$1"
+    local filter="$2"
+    local label="$3"
+    local value
+    value="$(printf '%s' "$json" | jq -r "$filter")"
+    if [ -z "$value" ] || [ "$value" = "null" ]; then
+        echo "backup_derived: $label: $filter was absent or null in the envelope." >&2
+        echo "backup_derived: the envelope's data keys were:" >&2
+        printf '%s' "$json" | jq -c '(.data // {}) | keys' >&2
+        exit 1
+    fi
+    printf '%s' "$value"
+}
+
+BACKUP_ID="$(jq_field "$CREATE_JSON" '.data.backupId' "first create backup id")"
+BACKUP_PATH="$(jq_field "$CREATE_JSON" '.data.backupPath' "first create backup path")"
 MANIFEST_PATH="$(printf '%s' "$CREATE_JSON" | jq -r '.data.manifestPath')"
 e2e_log_note "backup_create_derived_included backup_id=${BACKUP_ID} path=${BACKUP_PATH}"
 e2e_log_artifact_manifest "backup_create_derived" "$EE_BINARY" \
@@ -100,8 +133,10 @@ assert_jq "$RESTORE_JSON" \
 e2e_log_note "backup_restore_derived_validation backup_id=${BACKUP_ID}"
 
 CORRUPT_CREATE_JSON="$(create_backup_with_derived "derived-e2e-corrupt")"
-CORRUPT_BACKUP_ID="$(printf '%s' "$CORRUPT_CREATE_JSON" | jq -r '.data.backupId')"
-CORRUPT_BACKUP_PATH="$(printf '%s' "$CORRUPT_CREATE_JSON" | jq -r '.data.outputPath')"
+CORRUPT_BACKUP_ID="$(jq_field "$CORRUPT_CREATE_JSON" '.data.backupId' \
+    "corrupt create backup id")"
+CORRUPT_BACKUP_PATH="$(jq_field "$CORRUPT_CREATE_JSON" '.data.backupPath' \
+    "corrupt create backup path")"
 printf '%s\n' '{"schema":"tampered"}' > "$CORRUPT_BACKUP_PATH/derived/wal_holds.json"
 CORRUPT_VERIFY_JSON="$(ee_workspace backup verify "$CORRUPT_BACKUP_ID" \
     --output-dir "$BACKUP_ROOT" \

@@ -110,8 +110,8 @@ ee team steward once --workspace . --json
 ee mesh hello-responder run --workspace . --json
 ee team projects reconcile --workspace . --json
 ee team revoke --all-before-floor --workspace . --json
-ee daemon install --confirm --json          # write launchd / systemd --user unit
-ee daemon install --confirm --load --json   # also load the supervisor
+ee daemon install --workspace . --confirm --json          # write launchd / systemd --user unit
+ee daemon install --workspace . --confirm --load --json   # also load the supervisor
 ```
 
 ## Custom port and multi-user limits

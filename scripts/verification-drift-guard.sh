@@ -222,6 +222,27 @@ if [ "$JSON_OUTPUT" != true ]; then
     echo ""
 fi
 
+# An UNRECOGNIZED --gate name must fail, not report clean.
+#
+# bd-ry56h one keystroke further out. Every check is written as "return early
+# unless CHECK_GATE is mine", so a name matching no check leaves DRIFT_COUNT at
+# 0 and exits 0 -- and verify.sh's closure_lint_or_tracked_drift reads exactly
+# that 0 as "the closure linter's violations are tracked, continue". So
+# `--gate=closure_lint` with an underscore, or a gate later renamed in one file
+# and not the other, would silently excuse every closure violation forever,
+# with no output to notice it by.
+#
+# Measured before this check existed: `--gate=this-gate-does-not-exist --json`
+# exited 0 having written zero bytes -- byte-identical to the answer for a
+# genuinely tracked gate, which is the property that made it dangerous.
+case "$CHECK_GATE" in
+    "" | closure-lint | cargo-test | forbidden-deps) ;;
+    *)
+        guard_input_error \
+            "unknown --gate=$CHECK_GATE; known gates are closure-lint, cargo-test, forbidden-deps"
+        ;;
+esac
+
 check_closure_lint_drift
 check_test_drift
 # Skip forbidden-deps in normal runs (cargo tree is slow); enable via --gate=forbidden-deps

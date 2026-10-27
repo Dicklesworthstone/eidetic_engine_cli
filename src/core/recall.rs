@@ -35,11 +35,13 @@ pub const RECALL_SCHEMA_V1: &str = "ee.recall.v1";
 /// `ee.recall.cursor.v1` wire schema is superseded.
 pub const RECALL_CURSOR_SCHEMA_V1: &str = "ee.recall.cursor.v1";
 
-/// The reverse index has no rows for this workspace (nothing anchored yet).
+/// The workspace has no indexed path or symbol anchors and no canonical code
+/// anchors from which to rebuild the empty projection.
 /// Info-severity; never a hard error (ADR 0064 §5).
 pub const ANCHOR_INDEX_EMPTY_CODE: &str = "anchor_index_empty";
 
-/// Reverse-index generation is behind the DB generation.
+/// Reverse-index generation is behind the DB generation, or canonical code
+/// anchors exist but their reverse-index projection is empty.
 pub const ANCHOR_INDEX_STALE_CODE: &str = "anchor_index_stale";
 
 /// The index had anchored rows for the requested surface but `--kind`/
@@ -47,8 +49,11 @@ pub const ANCHOR_INDEX_STALE_CODE: &str = "anchor_index_stale";
 /// [`ANCHOR_INDEX_EMPTY_CODE`] so hook authors can tell the difference.
 pub const RECALL_FILTERED_EMPTY_CODE: &str = "recall_filtered_empty";
 
-/// Repair command for a stale or empty reverse index.
+/// Repair command for a stale or missing projection of existing code anchors.
 pub const ANCHOR_INDEX_REPAIR: &str = "ee index rebuild --workspace .";
+
+/// Read-only first step when the workspace has no source code anchors.
+pub const ANCHOR_CAPTURE_REPAIR: &str = "ee index backfill-anchors --workspace . --dry-run --json";
 
 /// Bounded candidate set (ADR 0064 §3). Production assembly applies source
 /// admission, selector matching and deduplication before retaining this many
@@ -313,13 +318,28 @@ fn match_char_class(pattern: &[char], open: usize, ch: char) -> Option<(bool, us
 }
 
 /// Normalize a caller-supplied path selector to the reverse index's
-/// normalized form: strip a leading `./`. Absolute selectors are returned
+/// normalized form: trim surrounding whitespace and strip a leading `./`.
+/// This matches additive code-anchor attachment. Absolute selectors are returned
 /// as-is and simply never match (normalized paths are workspace-relative by
 /// construction); rejecting them here would turn a no-op into an error on
 /// the hook path.
 #[must_use]
 pub fn normalize_recall_path_selector(selector: &str) -> String {
+    let selector = selector.trim();
     selector.strip_prefix("./").unwrap_or(selector).to_owned()
+}
+
+/// Match the accepted spelling of attached symbols to their stored identity.
+/// Legacy extracted symbols outside the attachment grammar retain their exact
+/// spelling; changing their interpretation would invalidate existing anchors.
+#[must_use]
+pub fn normalize_recall_symbol_selector(selector: &str) -> String {
+    crate::models::memory_anchor::normalize_code_anchor_value(
+        MemoryAnchorKind::Symbol,
+        selector,
+        None,
+    )
+    .unwrap_or_else(|| selector.to_owned())
 }
 
 fn diff_name_only_changed_paths(name_only_text: &str) -> Vec<String> {
@@ -513,7 +533,10 @@ fn encode_recall_cursor(
 ///
 /// `index_generation` is `MAX(generation)` over the workspace's reverse-index
 /// rows (`None` when the index is empty); `db_generation` is the live
-/// workspace generation. Determinism contract: identical inputs produce a
+/// workspace generation. An empty projection initially receives the capture
+/// hint; [`run_recall`] checks canonical sources in the same read snapshot and
+/// changes that to a rebuild hint when durable code anchors exist.
+/// Determinism contract: identical inputs produce a
 /// byte-identical report, ranking ties resolve by ascending memory id, and a
 /// smaller token budget yields a strict prefix of a larger budget's items.
 #[must_use]
@@ -529,9 +552,9 @@ pub fn evaluate_recall(
         None => degraded.push(RecallDegradation {
             code: ANCHOR_INDEX_EMPTY_CODE,
             severity: "info",
-            message: "anchor reverse index has no rows for this workspace; nothing is anchored yet"
+            message: "anchor reverse index has no rows for this workspace; no stored path or symbol anchors are available. Attach anchors with `ee memory anchors <memory-id> --path <path>` or preview backfill; index rebuild cannot create missing source anchors"
                 .to_owned(),
-            repair: Some(ANCHOR_INDEX_REPAIR.to_owned()),
+            repair: Some(ANCHOR_CAPTURE_REPAIR.to_owned()),
         }),
         Some(generation) if generation < db_generation => degraded.push(RecallDegradation {
             code: ANCHOR_INDEX_STALE_CODE,
@@ -554,8 +577,11 @@ pub fn evaluate_recall(
         .iter()
         .map(|selector| normalize_recall_path_selector(selector))
         .collect();
-    let symbol_set: std::collections::BTreeSet<&str> =
-        query.symbols.iter().map(String::as_str).collect();
+    let symbol_set: std::collections::BTreeSet<String> = query
+        .symbols
+        .iter()
+        .map(|selector| normalize_recall_symbol_selector(selector))
+        .collect();
 
     // Surface matching (OR across selector families), tombstone exclusion,
     // bounded scan, dedup by memory id keeping the freshest anchor.
@@ -773,6 +799,22 @@ fn run_recall_in_snapshot(
     // do not affect these results and must not trigger model loading or an
     // unrelated per-response degradation (including during daemon warm-up).
     let mut report = evaluate_recall(query, &scan.rows, index_generation, db_generation);
+    if index_generation.is_none() && connection.has_workspace_code_anchors(workspace_id)? {
+        // A lost projection and an absence of source anchors need different
+        // repairs. Read canonical existence in the same snapshot as the
+        // projection; non-code anchors must not turn capture into a rebuild.
+        for degradation in &mut report.degraded {
+            if degradation.code == ANCHOR_INDEX_EMPTY_CODE {
+                *degradation = RecallDegradation {
+                    code: ANCHOR_INDEX_STALE_CODE,
+                    severity: "low",
+                    message: "anchor reverse index has no rows for this workspace, but stored path or symbol anchors exist; results may miss recent memories. Rebuild the derived index from the existing anchors"
+                        .to_owned(),
+                    repair: Some(ANCHOR_INDEX_REPAIR.to_owned()),
+                };
+            }
+        }
+    }
     report.degraded.extend(scan.degraded);
     Ok(report)
 }
@@ -1704,11 +1746,43 @@ mod tests {
             normalize_recall_path_selector("src/db/mod.rs"),
             "src/db/mod.rs"
         );
+        assert_eq!(
+            normalize_recall_path_selector("  ./src/db/mod.rs  "),
+            "src/db/mod.rs"
+        );
         // Absolute selectors stay as-is and simply never match the
         // workspace-relative index.
         assert_eq!(normalize_recall_path_selector("/etc/passwd"), "/etc/passwd");
         let rows = vec![row("mem_a", Some("src/db/mod.rs"), None)];
         let report = evaluate_recall(&path_query(&["/src/db/mod.rs"]), &rows, Some(7), 7);
+        assert!(report.items.is_empty());
+    }
+
+    #[test]
+    fn symbol_selector_normalization_preserves_legacy_names_and_case() {
+        assert_eq!(
+            normalize_recall_symbol_selector(" Store::open() "),
+            "Store::open"
+        );
+        assert_eq!(
+            normalize_recall_symbol_selector("store.open()"),
+            "store.open"
+        );
+        assert_eq!(
+            normalize_recall_symbol_selector("Store<Widget>::open"),
+            "Store<Widget>::open"
+        );
+        assert_eq!(normalize_recall_symbol_selector("operator+"), "operator+");
+        let rows = vec![row("mem_a", None, Some("Store::open"))];
+        let report = evaluate_recall(
+            &RecallQuery {
+                symbols: vec![" store::open() ".to_owned()],
+                ..RecallQuery::default()
+            },
+            &rows,
+            Some(7),
+            7,
+        );
         assert!(report.items.is_empty());
     }
 
@@ -2004,7 +2078,7 @@ mod tests {
         assert_eq!(empty.degraded[0].severity, "info");
         assert_eq!(
             empty.degraded[0].repair,
-            Some(ANCHOR_INDEX_REPAIR.to_owned())
+            Some(ANCHOR_CAPTURE_REPAIR.to_owned())
         );
 
         let rows = vec![row("mem_a", Some("src/a.rs"), None)];
@@ -2365,6 +2439,86 @@ mod tests {
     }
 
     #[test]
+    fn attached_locator_spellings_recall_through_sql_and_scan_matching() {
+        let (root, connection, workspace_id) = wrapper_test_file_db();
+        let memory_id = format!("mem_{:026}", 23);
+        wrapper_insert_memory(
+            &connection,
+            &workspace_id,
+            &memory_id,
+            "Unchanged release guidance.",
+        );
+        let original = connection.get_memory(&memory_id).expect("read source");
+        let surfaces = [
+            (MemoryAnchorKind::Path, " ./src/Indexed.rs "),
+            (MemoryAnchorKind::Symbol, " Store::open() "),
+        ]
+        .into_iter()
+        .map(|(kind, value)| {
+            crate::models::CreateMemoryAnchorInput::from_code_surface(
+                &memory_id,
+                kind,
+                value,
+                root.path(),
+                "memory.anchors",
+            )
+            .expect("validated attachment")
+        })
+        .collect::<Vec<_>>();
+        connection
+            .with_transaction(|| {
+                connection.attach_memory_code_anchor_sources(&workspace_id, &memory_id, &surfaces)
+            })
+            .expect("attach source bindings");
+
+        let mut broad_symbols = (0..130)
+            .map(|index| format!("Other{index}::open()"))
+            .collect::<Vec<_>>();
+        broad_symbols.push(" Store::open() ".to_owned());
+        for query in [
+            path_query(&[" ./src/Indexed.rs "]),
+            path_query(&["src/Indexed.rs"]),
+            RecallQuery {
+                symbols: vec![" Store::open() ".to_owned()],
+                ..RecallQuery::default()
+            },
+            RecallQuery {
+                symbols: vec!["Store::open".to_owned()],
+                ..RecallQuery::default()
+            },
+            RecallQuery {
+                symbols: broad_symbols,
+                ..RecallQuery::default()
+            },
+        ] {
+            let report = run_recall(&connection, &workspace_id, &query).expect("recall attachment");
+            assert_eq!(report.items.len(), 1, "accepted spelling {query:?}");
+            assert_eq!(report.items[0].memory_id, memory_id);
+            assert!(report.degraded.is_empty(), "{:?}", report.degraded);
+        }
+        for query in [
+            path_query(&["src/indexed.rs"]),
+            RecallQuery {
+                symbols: vec!["store::open()".to_owned()],
+                ..RecallQuery::default()
+            },
+        ] {
+            assert!(
+                run_recall(&connection, &workspace_id, &query)
+                    .expect("case-sensitive recall")
+                    .items
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            connection
+                .get_memory(&memory_id)
+                .expect("read unchanged source"),
+            original
+        );
+    }
+
+    #[test]
     fn run_recall_without_embeddings_preserves_anchor_results_without_degradation() {
         let (_temp, connection, workspace_id) = wrapper_test_file_db();
         let memory_id = format!("mem_{:026}", 9);
@@ -2411,6 +2565,10 @@ mod tests {
         assert!(empty.items.is_empty());
         assert_eq!(empty.degraded.len(), 1);
         assert_eq!(empty.degraded[0].code, ANCHOR_INDEX_EMPTY_CODE);
+        assert_eq!(
+            empty.degraded[0].repair.as_deref(),
+            Some(ANCHOR_CAPTURE_REPAIR)
+        );
 
         // One anchored memory: fresh. A later anchorless write advances the
         // DB generation without touching the reverse index, so recall
@@ -2457,6 +2615,102 @@ mod tests {
             fresh.degraded
         );
         assert_eq!(fresh.items.len(), 1);
+    }
+
+    #[test]
+    fn config_only_anchors_do_not_send_empty_recall_into_a_rebuild_loop() {
+        let (connection, workspace_id) = wrapper_test_db();
+        let memory_id = format!("mem_{:026}", 20);
+        wrapper_insert_memory(
+            &connection,
+            &workspace_id,
+            &memory_id,
+            "Configuration advice. ee-anchor:config_key:search.limit",
+        );
+        let anchors = connection
+            .list_memory_anchors(&memory_id)
+            .expect("read anchors");
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].anchor_kind, MemoryAnchorKind::ConfigKey);
+
+        // A canonical code anchor in another workspace must not change the
+        // repair for this workspace's existing, config-only memories.
+        let other_workspace_id = format!("wsp_{:026}", 21);
+        connection
+            .insert_workspace(
+                &other_workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/other-anchor-workspace".to_owned(),
+                    name: None,
+                },
+            )
+            .expect("insert other workspace");
+        wrapper_insert_memory(
+            &connection,
+            &other_workspace_id,
+            &format!("mem_{:026}", 21),
+            "Foreign advice. ee-anchor:path:src/foreign.rs",
+        );
+
+        let report = run_recall(&connection, &workspace_id, &path_query(&["src/**"]))
+            .expect("recall config-only workspace");
+        assert!(report.items.is_empty());
+        assert_eq!(report.degraded.len(), 1);
+        assert_eq!(report.degraded[0].code, ANCHOR_INDEX_EMPTY_CODE);
+        assert_eq!(
+            report.degraded[0].repair.as_deref(),
+            Some(ANCHOR_CAPTURE_REPAIR)
+        );
+        assert!(
+            report.degraded[0]
+                .message
+                .contains("cannot create missing source anchors")
+        );
+        assert!(report.degraded[0].message.contains("ee memory anchors"));
+    }
+
+    #[test]
+    fn lost_projection_with_existing_code_anchors_is_stale_and_rebuildable() {
+        let (connection, workspace_id) = wrapper_test_db();
+        let memory_id = format!("mem_{:026}", 22);
+        let content = "Review before editing. ee-anchor:path:src/recovery.rs";
+        wrapper_insert_memory(&connection, &workspace_id, &memory_id, content);
+        connection
+            .execute_raw("DELETE FROM memory_anchor_index")
+            .expect("simulate lost derived projection");
+        let query = path_query(&["src/recovery.rs"]);
+        let missing = run_recall(&connection, &workspace_id, &query).expect("recall missing index");
+        assert!(missing.items.is_empty());
+        assert_eq!(missing.index_generation, None);
+        assert_eq!(missing.degraded.len(), 1);
+        assert_eq!(missing.degraded[0].code, ANCHOR_INDEX_STALE_CODE);
+        assert_eq!(
+            missing.degraded[0].repair.as_deref(),
+            Some(ANCHOR_INDEX_REPAIR)
+        );
+        assert!(
+            missing.degraded[0]
+                .message
+                .contains("stored path or symbol anchors exist")
+        );
+
+        connection
+            .refresh_memory_anchor_index_for_memory(&workspace_id, &memory_id, content)
+            .expect("rebuild projection from source anchors");
+        let recovered =
+            run_recall(&connection, &workspace_id, &query).expect("recall rebuilt index");
+        assert_eq!(recovered.items.len(), 1);
+        assert_eq!(recovered.items[0].memory_id, memory_id);
+        assert!(recovered.degraded.is_empty());
+
+        connection
+            .tombstone_memory(&memory_id)
+            .expect("retire memory");
+        connection
+            .execute_raw("DELETE FROM memory_anchor_index")
+            .expect("remove retired projection");
+        let retired = run_recall(&connection, &workspace_id, &query).expect("recall retired store");
+        assert_eq!(retired.degraded[0].code, ANCHOR_INDEX_EMPTY_CODE);
     }
 
     #[test]

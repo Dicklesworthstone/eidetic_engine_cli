@@ -15,9 +15,35 @@ use crate::models::degradation::{
 const KNOWN_REPAIR_COMMAND_PREFIXES: &[&str] = &["ee ", "cargo ", "cass ", "chmod ", "sqlite3 "];
 
 fn starts_with_known_repair_prefix(repair: &str) -> bool {
+    let command = command_after_ee_env_assignments(repair);
     KNOWN_REPAIR_COMMAND_PREFIXES
         .iter()
-        .any(|prefix| repair.starts_with(prefix))
+        .any(|prefix| command.starts_with(prefix))
+}
+
+/// A repair may set one of ee's own environment knobs for a single run, for
+/// example `EE_INDEX_REBUILD_TIMEOUT_SECONDS=14400 ee index rebuild --json`.
+/// Such a repair is classified by the command it runs: leading `EE_*=value`
+/// shell assignments whose value needs no quoting (or is empty, as in
+/// `EE_EMBED_MODEL_DIR= ee model fetch ...`) are skipped. Any other
+/// assignment stays in place, so the repair keeps an unknown prefix.
+fn command_after_ee_env_assignments(repair: &str) -> &str {
+    let mut rest = repair;
+    while let Some((word, tail)) = rest.split_once(' ')
+        && let Some((name, value)) = word.split_once('=')
+        && name.strip_prefix("EE_").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+        })
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        rest = tail;
+    }
+    rest
 }
 
 /// Result of a single honesty check.
@@ -106,6 +132,25 @@ impl HonestyReport {
 }
 
 /// Validate that a repair command looks actionable.
+///
+/// SCOPE (bd-ixdqd): this governs [`DegradationCode::repair`] -- the static
+/// matrix in `models::degradation`, authored once per code -- and nothing
+/// else. Its only enforced population is `ALL_DEGRADATION_CODES`, iterated by
+/// `degradation_matrix_repair_commands_are_valid` (tests/golden.rs) and by
+/// `run_honesty_checks` below. Every matrix entry satisfies the prefix rule.
+///
+/// It deliberately does NOT govern the `repair` field on runtime error
+/// surfaces -- `DomainError::WorkspaceStoreMissing { repair, .. }` and the
+/// `"repair"` key in cache/hotset's json payload -- which carry PROSE such as
+/// "Re-check --workspace addressing", ratified by committed goldens
+/// (tests/fixtures/golden/agent/search_unavailable.json.golden and two
+/// others). That is the honest content there: an addressing mistake has no
+/// single fix command, because only the operator knows which workspace they
+/// meant. Those values never reach this function, so the two conventions do
+/// not conflict -- one field NAME, two contracts.
+///
+/// Consumers that need to know whether a given repair string is runnable
+/// should ask [`classify_repair_command`] rather than require a prefix here.
 ///
 /// Repair commands should:
 /// - Start with a known command prefix (ee, cargo, cass, etc.)
@@ -1067,6 +1112,49 @@ mod tests {
             classify_repair_command("ee preflight check --cmd 'rm -rf target' --json"),
             RepairCommandKind::Actionable,
             "quoted concrete command -> Actionable",
+        )
+    }
+
+    #[test]
+    fn classify_repair_reads_through_ee_env_assignments_only() -> TestResult {
+        ensure(
+            classify_repair_command(
+                "EE_INDEX_REBUILD_TIMEOUT_SECONDS=14400 ee --workspace /tmp/ws index rebuild --json",
+            ),
+            RepairCommandKind::Actionable,
+            "an ee knob raised for one run of a concrete ee command -> Actionable",
+        )?;
+        ensure(
+            classify_repair_command("EE_A=1 EE_B_2=x.y ee status --json"),
+            RepairCommandKind::Actionable,
+            "several ee assignments -> Actionable",
+        )?;
+        ensure(
+            classify_repair_command(
+                "EE_EMBED_MODEL_DIR= ee model fetch potion-base-8m --workspace .",
+            ),
+            RepairCommandKind::Actionable,
+            "an ee knob cleared for one run -> Actionable",
+        )?;
+        ensure(
+            classify_repair_command("EE_INDEX_REBUILD_TIMEOUT_SECONDS=<seconds> ee index rebuild"),
+            RepairCommandKind::Unknown,
+            "an assignment whose value needs quoting is not skipped",
+        )?;
+        ensure(
+            classify_repair_command("LD_PRELOAD=/tmp/x.so ee status"),
+            RepairCommandKind::Unknown,
+            "a non-ee assignment is not skipped",
+        )?;
+        ensure(
+            classify_repair_command("EE_=1 ee status"),
+            RepairCommandKind::Unknown,
+            "a bare EE_ prefix is not an ee knob",
+        )?;
+        ensure(
+            classify_repair_command("EE_INDEX_REBUILD_TIMEOUT_SECONDS=14400 rm -rf target"),
+            RepairCommandKind::Unknown,
+            "the command after the assignment is still classified",
         )
     }
 

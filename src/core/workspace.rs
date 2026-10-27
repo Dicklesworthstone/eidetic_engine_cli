@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::config::workspace::resolve_workspace_with_expanded_explicit_path;
 use crate::config::{
     EnvVar, WORKSPACE_MARKER, WorkspaceDiagnostic, WorkspaceResolutionMode,
     WorkspaceResolutionRequest, WorkspaceResolutionSource, WorkspaceScope, derive_workspace_scope,
@@ -526,6 +527,21 @@ pub(crate) fn list_workspace_registry_with<T>(
 pub fn resolve_workspace_report(
     options: &WorkspaceResolveOptions,
 ) -> Result<WorkspaceResolveReport, DomainError> {
+    resolve_workspace_report_with_input_mode(options, false)
+}
+
+/// Resolve a workspace selected by the CLI without expanding its physical path
+/// again. A positional target is still an unexpanded user expression.
+pub(crate) fn resolve_workspace_report_for_resolved_workspace(
+    options: &WorkspaceResolveOptions,
+) -> Result<WorkspaceResolveReport, DomainError> {
+    resolve_workspace_report_with_input_mode(options, true)
+}
+
+fn resolve_workspace_report_with_input_mode(
+    options: &WorkspaceResolveOptions,
+    workspace_path_is_expanded: bool,
+) -> Result<WorkspaceResolveReport, DomainError> {
     let registry_path = registry_database_path_override(options.registry_path.as_deref());
     if let Some(target) = options.target.as_deref() {
         if !looks_like_path(Path::new(target)) {
@@ -540,10 +556,20 @@ pub fn resolve_workspace_report(
             return Ok(resolve_alias_row_report(&registry_path, target, row));
         }
 
-        return resolve_path_report(&registry_path, Some(target), Some(PathBuf::from(target)));
+        return resolve_path_report(
+            &registry_path,
+            Some(target),
+            Some(PathBuf::from(target)),
+            false,
+        );
     }
 
-    resolve_path_report(&registry_path, None, options.workspace_path.clone())
+    resolve_path_report(
+        &registry_path,
+        None,
+        options.workspace_path.clone(),
+        workspace_path_is_expanded,
+    )
 }
 
 pub const WORKSPACE_HYGIENE_SWARM_BRIEF_SUMMARY_SCHEMA_V1: &str =
@@ -2187,6 +2213,7 @@ fn resolve_path_report(
     registry_path: &Path,
     target: Option<&str>,
     workspace_path: Option<PathBuf>,
+    workspace_path_is_expanded: bool,
 ) -> Result<WorkspaceResolveReport, DomainError> {
     let request = WorkspaceResolutionRequest::from_process(
         workspace_path,
@@ -2196,7 +2223,12 @@ fn resolve_path_report(
         message: error.to_string(),
         repair: Some("Run from a readable directory or pass --workspace .".to_string()),
     })?;
-    let resolution = resolve_workspace(&request).map_err(|error| DomainError::Configuration {
+    let resolution = if workspace_path_is_expanded {
+        resolve_workspace_with_expanded_explicit_path(&request)
+    } else {
+        resolve_workspace(&request)
+    }
+    .map_err(|error| DomainError::Configuration {
         message: error.to_string(),
         repair: Some("ee init --workspace .".to_string()),
     })?;
@@ -2206,9 +2238,10 @@ fn resolve_path_report(
         .collect();
     let registry_alias = find_workspace_alias_read_only(registry_path, &resolution.location.root)?;
     let requested_id = stable_workspace_id(&resolution.canonical_root);
+    // Canonicalize only the workspace root. Storage still sees the original
+    // `.ee/ee.db` components and can refuse any symlink beneath that root.
     let database = resolution
-        .location
-        .root
+        .canonical_root
         .join(WORKSPACE_MARKER)
         .join("ee.db");
     let stored = if registry_file_exists(&database)? {
@@ -2235,7 +2268,7 @@ fn resolve_path_report(
                 )),
             });
         }
-        addressed_workspace_row(&connection, &resolution.location.root, &database)?
+        addressed_workspace_row(&connection, &resolution.canonical_root, &database)?
     } else {
         None
     };
@@ -3819,6 +3852,134 @@ mod tests {
             fs::read(&database).map_err(|error| error.to_string())?,
             before
         );
+        assert!(!registry.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_workspace_report_preserves_literal_environment_syntax_and_store_identity()
+    -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("literal-${PATH}");
+        fs::create_dir_all(workspace.join(WORKSPACE_MARKER)).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database = workspace.join(WORKSPACE_MARKER).join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_00000000000000000000000412";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("literal-root".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let registry = temp.path().join("absent-registry.db");
+
+        let report = resolve_workspace_report_for_resolved_workspace(&WorkspaceResolveOptions {
+            workspace_path: Some(workspace.clone()),
+            target: None,
+            registry_path: Some(registry.clone()),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(PathBuf::from(report.root), workspace);
+        assert_eq!(PathBuf::from(report.canonical_root), workspace);
+        assert_eq!(report.workspace_id, workspace_id);
+        assert_eq!(report.alias.as_deref(), Some("literal-root"));
+        assert!(report.marker_present);
+        assert_eq!(report.source, "explicit");
+        assert!(!registry.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_workspace_report_still_expands_raw_positional_target() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let raw_target = workspace.join("target-${PATH}").join("uninitialized");
+        let raw_target_text = raw_target
+            .to_str()
+            .ok_or_else(|| "workspace fixture path is not UTF-8".to_owned())?;
+        let expanded = crate::config::PathExpander::from_process_env()
+            .expand(raw_target_text)
+            .unwrap_or_else(|_| raw_target.clone());
+        let expected_root = lexical_absolute(&workspace, &expanded);
+        let registry = workspace.join("absent-registry.db");
+        let options = WorkspaceResolveOptions {
+            workspace_path: Some(workspace.clone()),
+            target: Some(raw_target_text.to_owned()),
+            registry_path: Some(registry.clone()),
+        };
+
+        let resolved = resolve_workspace_report_for_resolved_workspace(&options)
+            .map_err(|error| error.message())?;
+        let raw = resolve_workspace_report(&options).map_err(|error| error.message())?;
+
+        assert_eq!(PathBuf::from(&resolved.root), expected_root);
+        assert_ne!(PathBuf::from(&resolved.root), workspace);
+        assert_eq!(resolved.target.as_deref(), Some(raw_target_text));
+        assert_eq!(resolved.root, raw.root);
+        assert_eq!(resolved.workspace_id, raw.workspace_id);
+        assert!(!registry.exists());
+        assert!(!expected_root.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn positional_workspace_symlink_reads_physical_store_without_expanding_its_name() -> TestResult
+    {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let physical = root.join("physical-${PATH}");
+        fs::create_dir_all(physical.join(WORKSPACE_MARKER)).map_err(|error| error.to_string())?;
+        let database = physical.join(WORKSPACE_MARKER).join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_00000000000000000000000413";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: physical.display().to_string(),
+                    name: Some("physical-root".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let linked = root.join("linked-workspace");
+        std::os::unix::fs::symlink(&physical, &linked).map_err(|error| error.to_string())?;
+        let registry = root.join("absent-registry.db");
+        let options = WorkspaceResolveOptions {
+            workspace_path: Some(root.clone()),
+            target: Some(linked.display().to_string()),
+            registry_path: Some(registry.clone()),
+        };
+
+        let raw = resolve_workspace_report(&options).map_err(|error| error.message())?;
+        let resolved = resolve_workspace_report_for_resolved_workspace(&options)
+            .map_err(|error| error.message())?;
+
+        for report in [raw, resolved] {
+            assert_eq!(PathBuf::from(report.root), linked);
+            assert_eq!(PathBuf::from(report.canonical_root), physical);
+            assert_eq!(report.workspace_id, workspace_id);
+            assert_eq!(report.alias.as_deref(), Some("physical-root"));
+            assert!(report.marker_present);
+        }
         assert!(!registry.exists());
         Ok(())
     }

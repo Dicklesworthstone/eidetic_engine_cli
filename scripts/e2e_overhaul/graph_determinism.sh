@@ -70,6 +70,7 @@ VOLATILE_FIELD_NAMES=(
     elapsedMsBucket
     durationMs
     wallClockMs
+    leaseHeldMs
     nondeterministic
     projectionMs
     pagerankMs

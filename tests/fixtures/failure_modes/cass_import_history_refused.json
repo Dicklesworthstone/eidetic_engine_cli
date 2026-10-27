@@ -6,10 +6,10 @@
   "severity": "high",
   "repair_present": true,
   "trigger": {
-    "description": "A retained CASS source line changed or disappeared, or a legacy lossy excerpt cannot prove its complete source across screening versions. That session is preserved and later sessions continue importing.",
+    "description": "A CASS view line exceeds the fixed 8 MiB capture limit, a source changes during capture, a retained source line changed or disappeared, or a legacy lossy excerpt cannot prove its complete source across screening versions. That session is preserved and later sessions continue importing.",
     "setup_commands": [
       "ee import cass --workspace . --json",
-      "# Revisit an unverifiable v0.17.0 excerpt, or change a previously imported source line."
+      "# Revisit an unverifiable v0.17.0 excerpt, change a previously imported source line, or capture a transcript with a stdout line over 8 MiB."
     ],
     "invocation": "ee import cass --workspace . --json"
   },

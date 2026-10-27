@@ -14,6 +14,7 @@ use serde::Serialize;
 use sqlmodel_core::Value;
 
 use super::{RESUME_SESSION_CAP, RESUME_STORAGE_PAGE_SIZE, SESSION_ITEM_CAP};
+use crate::core::incident_card::proof::{CardChecks, requires_proof};
 use crate::db::{DbConnection, StoredEvidenceSpan, StoredMemory};
 use crate::models::{DomainError, EvidenceId, SessionId, TrustClass};
 
@@ -257,28 +258,33 @@ pub(super) fn load(
     let mut selected: BTreeMap<SessionRank, ResumeTranscriptSession> = BTreeMap::new();
     let limit = limit.min(RESUME_SESSION_CAP);
     let mut inconsistent_session = false;
-    connection
-        .visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |span| {
-            // A linked excerpt cannot resurrect a sealed, retired, foreign or
-            // otherwise excluded memory via a new evidence identity.
-            if span.workspace_id != workspace_id
-                || span
-                    .memory_id
-                    .as_deref()
-                    .is_some_and(|id| !admitted_memories.contains(id))
-            {
-                return Ok(());
+    // A linked excerpt cannot resurrect a sealed, retired, foreign or
+    // otherwise excluded memory via a new evidence identity.
+    let in_scope = |span: &StoredEvidenceSpan| {
+        span.workspace_id == workspace_id
+            && span
+                .memory_id
+                .as_deref()
+                .is_none_or(|id| admitted_memories.contains(id))
+    };
+    {
+        // Both ordinary sources and currently proved cards pass the same
+        // public-prefix policy and bounded reduction. Refused cards never
+        // affect counts, session selection, tail slots or truncation flags.
+        let mut retain = |span: &StoredEvidenceSpan| {
+            if !in_scope(span) {
+                return;
             }
-            let Some(item) = admitted_item(&span) else {
-                return Ok(());
+            let Some(item) = admitted_item(span) else {
+                return;
             };
             let Some(header) = headers.get(&span.session_id) else {
                 inconsistent_session = true;
-                return Ok(());
+                return;
             };
             *counts.entry(span.session_id.clone()).or_default() += 1;
             if limit == 0 {
-                return Ok(());
+                return;
             }
             let rank = (Reverse(header.activity()), span.session_id.clone());
             if !selected.contains_key(&rank) {
@@ -287,7 +293,7 @@ pub(super) fn load(
                         .last_key_value()
                         .is_some_and(|(worst, _)| &rank >= worst)
                     {
-                        return Ok(());
+                        return;
                     }
                     selected.pop_last();
                 }
@@ -299,9 +305,30 @@ pub(super) fn load(
             if let Some(session) = selected.get_mut(&rank) {
                 retain_tail(session, item);
             }
-            Ok(())
-        })
-        .map_err(|_| storage_error())?;
+        };
+        let mut cards = CardChecks::default();
+        connection
+            .visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |span| {
+                if !in_scope(&span) {
+                    return Ok(());
+                }
+                if requires_proof(&span) {
+                    // Retain only IDs and commitments while visiting sources.
+                    // Altered reserved locators cannot fall through as prose.
+                    cards.observe(&span)?;
+                } else {
+                    retain(&span);
+                }
+                Ok(())
+            })
+            .map_err(|_| storage_error())?;
+        cards
+            .visit_verified(connection, workspace_id, |span| {
+                retain(&span);
+                Ok(())
+            })
+            .map_err(|_| storage_error())?;
+    }
     if inconsistent_session {
         return Err(storage_error());
     }
@@ -321,4 +348,323 @@ pub(super) fn load(
         sessions_truncated: session_total > sessions.len(),
         sessions,
     })
+}
+
+#[cfg(test)]
+mod incident_proof_tests {
+    use super::*;
+    use crate::core::incident_card::proof::tests::{Fixture, TestResult, WS};
+    use crate::db::{CreateEvidenceSpanInput, CreateSessionInput, EvidenceProducerKind};
+
+    fn history(fixture: &Fixture, limit: usize) -> TestResult<ResumeTranscriptHistory> {
+        fixture.db.begin_read_snapshot()?;
+        let result = load(&fixture.db, WS, &[], limit);
+        // Successful and failed loaders must leave snapshot ownership here.
+        fixture.db.rollback_read_snapshot()?;
+        Ok(result?)
+    }
+
+    fn item_ids(history: &ResumeTranscriptHistory) -> BTreeSet<&str> {
+        history
+            .sessions
+            .iter()
+            .flat_map(|session| session.items.iter().map(|item| item.evidence_id.as_str()))
+            .collect()
+    }
+
+    fn assert_candidate(fixture: &Fixture, id: &str) -> TestResult {
+        let mut seen = false;
+        fixture.db.begin_read_snapshot()?;
+        let result = fixture
+            .db
+            .visit_search_admitted_evidence_spans_in_current_snapshot(WS, |span| {
+                if span.id == id {
+                    seen = true;
+                    assert!(
+                        admitted_item(&span).is_some(),
+                        "public reader candidate required"
+                    );
+                }
+                Ok(())
+            });
+        fixture.db.rollback_read_snapshot()?;
+        result?;
+        assert!(
+            seen,
+            "fixture must pass the original source-admission boundary"
+        );
+        Ok(())
+    }
+
+    fn insert_copy(
+        fixture: &Fixture,
+        card: &StoredEvidenceSpan,
+        number: u128,
+        session: &str,
+        line: u32,
+    ) -> TestResult<String> {
+        let id = EvidenceId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+        fixture.db.insert_evidence_span(
+            &id,
+            &CreateEvidenceSpanInput {
+                workspace_id: WS.to_owned(),
+                session_id: session.to_owned(),
+                memory_id: None,
+                producer_kind: EvidenceProducerKind::parse(&card.producer_kind)
+                    .ok_or("producer")?,
+                cass_span_id: format!("ee-incident-card:resume-test:{number}"),
+                span_kind: card.span_kind.clone(),
+                start_line: line,
+                end_line: line,
+                start_byte: None,
+                end_byte: None,
+                role: card.role.clone(),
+                content_hash: card.content_hash.clone(),
+                excerpt: card.excerpt.clone(),
+                metadata_json: card.metadata_json.clone(),
+                inherited_redaction_classes: Vec::new(),
+            },
+        )?;
+        Ok(id)
+    }
+
+    #[test]
+    fn historical_unproved_card_cannot_change_resume_counts_or_output() -> TestResult {
+        let fixture = Fixture::new(false)?;
+        let before = history(&fixture, RESUME_SESSION_CAP)?;
+        assert!(item_ids(&before).contains(fixture.repair.as_str()));
+        let id = fixture.old_card()?;
+        assert_candidate(&fixture, &id)?;
+        let card = fixture.db.get_evidence_span(&id)?.ok_or("card")?;
+        assert_eq!(history(&fixture, RESUME_SESSION_CAP)?, before);
+        let after = fixture
+            .db
+            .get_evidence_span(&id)?
+            .ok_or("history must remain stored")?;
+        assert_eq!(after.excerpt, card.excerpt);
+        assert_eq!(after.content_hash, card.content_hash);
+        assert_eq!(after.metadata_json, card.metadata_json);
+        assert_eq!(
+            after.canonical_provenance_uri(),
+            card.canonical_provenance_uri()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn valid_card_preserves_exact_admitted_item_and_is_counted_once() -> TestResult {
+        let fixture = Fixture::new_public(true)?;
+        let before = history(&fixture, RESUME_SESSION_CAP)?;
+        assert!(item_ids(&before).contains(fixture.repair.as_str()));
+        let card = fixture.current_card()?;
+        assert_candidate(&fixture, &card.id)?;
+        let expected = admitted_item(&card).ok_or("public current card")?;
+        let result = history(&fixture, RESUME_SESSION_CAP)?;
+        let items: Vec<_> = result
+            .sessions
+            .iter()
+            .flat_map(|session| &session.items)
+            .filter(|item| item.evidence_id == card.id)
+            .collect();
+        assert_eq!(items, vec![&expected]);
+        assert_eq!(result.evidence_total, before.evidence_total + 1);
+        assert_eq!(result.session_total, before.session_total);
+        assert_eq!(history(&fixture, RESUME_SESSION_CAP)?, result);
+        Ok(())
+    }
+
+    #[test]
+    fn changed_current_proof_withholds_derived_guidance_and_preserves_stored_card() -> TestResult {
+        let fixture = Fixture::new_public(true)?;
+        let before = history(&fixture, RESUME_SESSION_CAP)?;
+        let card = fixture.current_card()?;
+        assert!(item_ids(&history(&fixture, RESUME_SESSION_CAP)?).contains(card.id.as_str()));
+        fixture.db.execute_raw(&format!(
+            "UPDATE evidence_spans SET excerpt = 'No execution proof remains' WHERE id = '{}'",
+            fixture.proof,
+        ))?;
+        assert_candidate(&fixture, &card.id)?;
+        let result = history(&fixture, RESUME_SESSION_CAP)?;
+        assert!(!item_ids(&result).contains(card.id.as_str()));
+        assert!(item_ids(&result).contains(fixture.repair.as_str()));
+        assert!(result.evidence_total <= before.evidence_total);
+        // Revoke the already withheld card as an independent negative control.
+        // Mutating the proof source may also remove that original source row.
+        fixture.db.execute_raw(&format!(
+            "UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied' WHERE id = '{}'", card.id,
+        ))?;
+        assert_eq!(history(&fixture, RESUME_SESSION_CAP)?, result);
+        assert_eq!(
+            fixture
+                .db
+                .get_evidence_span(&card.id)?
+                .ok_or("card retained")?
+                .excerpt,
+            card.excerpt
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_tail_cards_cannot_crowd_valid_transcript_out_of_the_item_cap() -> TestResult {
+        let fixture = Fixture::new(false)?;
+        let before = history(&fixture, RESUME_SESSION_CAP)?;
+        assert!(!before.sessions.is_empty());
+        assert!(item_ids(&before).contains(fixture.repair.as_str()));
+        let id = fixture.old_card()?;
+        let card = fixture.db.get_evidence_span(&id)?.ok_or("card")?;
+        assert_candidate(&fixture, &id)?;
+        for number in 0..SESSION_ITEM_CAP + 2 {
+            let copy = insert_copy(
+                &fixture,
+                &card,
+                0x9000 + number as u128,
+                &fixture.session,
+                100 + u32::try_from(number)?,
+            )?;
+            assert_candidate(&fixture, &copy)?;
+        }
+        assert_eq!(history(&fixture, RESUME_SESSION_CAP)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn a_newer_session_containing_only_unproved_cards_cannot_consume_a_session_slot() -> TestResult
+    {
+        let fixture = Fixture::new(false)?;
+        let before = history(&fixture, 1)?;
+        assert_eq!(before.sessions.len(), 1);
+        let id = fixture.old_card()?;
+        let card = fixture.db.get_evidence_span(&id)?.ok_or("card")?;
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(0x9800)).to_string();
+        fixture.db.insert_session(
+            &session,
+            &CreateSessionInput {
+                workspace_id: WS.to_owned(),
+                cass_session_id: "newer-unproved-resume".to_owned(),
+                source_path: None,
+                agent_name: Some("claude_code".to_owned()),
+                model: None,
+                started_at: Some("2026-10-17T12:00:00Z".to_owned()),
+                ended_at: Some("2026-10-17T12:01:00Z".to_owned()),
+                message_count: 1,
+                token_count: None,
+                content_hash: card.content_hash.clone(),
+                metadata_json: None,
+            },
+        )?;
+        let copy = insert_copy(&fixture, &card, 0x9900, &session, 100)?;
+        assert_candidate(&fixture, &copy)?;
+        assert_eq!(history(&fixture, 1)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn zero_display_limit_still_counts_only_currently_proved_cards() -> TestResult {
+        for valid in [false, true] {
+            let fixture = Fixture::new_public(valid)?;
+            let before = history(&fixture, 0)?;
+            assert!(before.evidence_total > 0);
+            if valid {
+                fixture.current_card()?;
+            } else {
+                fixture.old_card()?;
+            }
+            let result = history(&fixture, 0)?;
+            assert!(result.sessions.is_empty());
+            assert_eq!(
+                result.evidence_total,
+                before.evidence_total + usize::from(valid)
+            );
+            assert_eq!(result.session_total, before.session_total);
+            assert!(result.sessions_truncated);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_current_proof_cannot_restore_a_card_with_denied_source_admission() -> TestResult {
+        let fixture = Fixture::new_public(true)?;
+        let before = history(&fixture, RESUME_SESSION_CAP)?;
+        let card = fixture.current_card()?;
+        assert_candidate(&fixture, &card.id)?;
+        fixture.db.execute_raw(&format!(
+            "UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied' WHERE id = '{}'",
+            card.id,
+        ))?;
+        // The historical execution remains proved, but that does not grant
+        // today's source-admission authority or public replay permission.
+        let proofs = crate::core::incident_card::proof::session_proofs(
+            &fixture.db,
+            WS,
+            None,
+            &fixture.session,
+        )?;
+        assert!(
+            proofs
+                .claims
+                .iter()
+                .any(|claim| claim.card && claim.target == card.id)
+        );
+        assert_eq!(history(&fixture, RESUME_SESSION_CAP)?, before);
+        let stored = fixture
+            .db
+            .get_evidence_span(&card.id)?
+            .ok_or("denied card retained")?;
+        assert_eq!(stored.excerpt, card.excerpt);
+        Ok(())
+    }
+
+    #[test]
+    fn over_budget_proof_keeps_ordinary_history_without_partial_card_admission() -> TestResult {
+        let fixture = Fixture::new_public(true)?;
+        let before = history(&fixture, RESUME_SESSION_CAP)?;
+        let card = fixture.current_card()?;
+        assert_candidate(&fixture, &card.id)?;
+        fixture.db.execute_raw(&format!(
+            "UPDATE evidence_spans SET metadata_json = '{}' WHERE id = '{}'",
+            serde_json::to_string(
+                &"x".repeat(crate::core::incident_card::proof::MAX_SOURCE_BYTES)
+            )?,
+            fixture.failure,
+        ))?;
+        let result = history(&fixture, RESUME_SESSION_CAP)?;
+        assert!(!item_ids(&result).contains(card.id.as_str()));
+        assert!(item_ids(&result).contains(fixture.repair.as_str()));
+        assert!(result.evidence_total <= before.evidence_total);
+        fixture.db.execute_raw(&format!(
+            "UPDATE evidence_spans SET search_eligibility = 'denied', pack_eligibility = 'denied' WHERE id = '{}'", card.id,
+        ))?;
+        assert_eq!(history(&fixture, RESUME_SESSION_CAP)?, result);
+        assert_eq!(
+            fixture
+                .db
+                .get_evidence_span(&card.id)?
+                .ok_or("card retained")?
+                .excerpt,
+            card.excerpt
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn valid_execution_proof_does_not_bypass_public_excerpt_policy() -> TestResult {
+        let fixture = Fixture::new(true)?;
+        let before = history(&fixture, RESUME_SESSION_CAP)?;
+        let card = fixture.current_card()?;
+        let mut checks = CardChecks::default();
+        checks.observe(&card)?;
+        assert!(checks.withheld(&fixture.db, WS)?.is_empty());
+        assert!(admitted_item(&card).is_none());
+        assert_eq!(history(&fixture, RESUME_SESSION_CAP)?, before);
+        assert_eq!(
+            fixture
+                .db
+                .get_evidence_span(&card.id)?
+                .ok_or("stored card")?
+                .excerpt,
+            card.excerpt
+        );
+        Ok(())
+    }
 }

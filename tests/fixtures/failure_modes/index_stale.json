@@ -9,7 +9,7 @@
   "severity": "high",
   "repair_present": true,
   "trigger": {
-    "description": "Memory database advanced beyond the search index generation. Reads can still return data but may miss recently-added memories until the index is rebuilt.",
+    "description": "The memory database advanced beyond the search index generation, or the persisted vector producer differs from the selected embedder. Producer changes require a rebuild even when the model label and vector dimension are unchanged. Reads can still return data through fallback retrieval until the index is rebuilt.",
     "setup_commands": [
       "ee init --workspace .",
       "ee remember --workspace . --level semantic --kind fact 'J6 stale index seed' --json",

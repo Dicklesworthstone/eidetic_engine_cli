@@ -131,7 +131,7 @@ fn graph_hits_benchmark_is_registered_and_budgeted() -> TestResult {
 
     for expected in [
         "[[bench]]\nname = \"graph_hits\"\nharness = false",
-        "BENCHMARKS=\"remember search context pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits curate_candidates\"",
+        "BENCHMARKS=\"remember search context tiered_recall pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits graph_full_stack curate_candidates graph_refresh_cooperative\"",
         "[operations.ee_graph_hits]",
         "p50_ms_max = 100.0",
         "p99_ms_max = 400.0",
@@ -172,10 +172,10 @@ fn adaptive_budget_benchmark_reports_percentiles_and_valid_scenarios() -> TestRe
         "fanout_just_below_cap",
         "fanout_at_cap",
         "fanout_just_above_cap",
-        "retrieval_scores_at_1000_elements",
-        "scores: skewed_scores(1_000)",
+        "large_retrieval_no_op_growth",
+        "scores: skewed_scores(10_000)",
         "let inputs = scenarios",
-        "classify_prebuilt_input(black_box(input))",
+        "classify_adaptive_budget(black_box(input))",
         "EE_ADAPTIVE_BUDGET_PERCENTILES",
     ] {
         if !bench_source.contains(expected) {

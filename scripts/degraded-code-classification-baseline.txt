@@ -1,0 +1,85 @@
+# Degraded codes DECLARED in src/ but absent from docs/degraded_code_taxonomy.md.
+#
+# Read by scripts/check-degraded-code-classified.py (bd-nnheo). Measured
+# 2026-10-18 at 2a1a21282: 324 `pub const *CODE*: &str` declarations in src/,
+# 321 distinct values, 289 classified, 32 not. Re-measured 2026-10-21 after
+# classifying mesh_peer_randomness_unavailable: 290 classified, 31 not.
+# Re-measured 2026-10-21 after classifying unix_xdg_data_unavailable, the
+# platform twin of the already-classified windows_appdata_unavailable:
+# 291 classified, 30 not.
+# Re-measured 2026-10-21 after classifying graph_remote_projection_stale, which
+# src/graph/mod.rs:9949 already proves reaches remoteGraph.degradedCodes:
+# 292 classified, 29 not.
+#
+# THIS IS A SHRINK-ONLY BASELINE, NOT AN IGNORE-LIST. The gate fails on a NEW
+# unclassified constant AND on any line here that has since been classified --
+# so a line cannot be left behind once the work is done. Deleting lines is the
+# only correct direction.
+#
+# WHY THESE ARE BASELINED RATHER THAN FIXED HERE. Classifying a code means
+# assigning it a severity and an OWNER, which is a judgment about user impact
+# that belongs with whoever owns the surface. Inventing 32 severities to make a
+# gate green would be the opposite of what the taxonomy is for. What this file
+# buys immediately is that the 33rd cannot ship unnoticed.
+#
+# WHY IT MATTERS BEYOND DOCUMENTATION. Gates derive their REQUIRED code set
+# FROM the taxonomy -- tests/auto_enroll_documentation_consistency.rs calls
+# taxonomy_codes_with_prefixes(&["tailscale_", "hello_responder_",
+# "discovery_policy_", "mesh_peer_"]) and demands each result be documented. A
+# code absent from the taxonomy is therefore invisible to every gate downstream
+# of it: the derived gate reads a shorter list and passes.
+# mesh_peer_randomness_unavailable was exactly that case and is how bd-nnheo
+# was found. It is now CLASSIFIED (medium) and documented, so it has left this
+# list -- and classifying it is what made the onboarding-doc gate start
+# demanding it, which is the chain working in the intended direction.
+#
+# Grouped by owning surface to make the classification work assignable.
+
+# src/models/bead_affinity.rs
+bead_affinity_capped
+bead_affinity_cold_start
+bead_affinity_lookup_failed
+bead_affinity_unavailable
+
+# src/core/cass_prefetch.rs
+cass_prefetch_history_oversized
+cass_prefetch_stale_corpus_revision
+cass_prefetch_stale_generation
+
+# src/daemon/server.rs -- seven request-validation and execution codes
+daemon_context_deadline_exceeded
+daemon_context_execution_failed
+daemon_context_params_invalid
+daemon_echo_disabled
+daemon_journal_params_invalid
+daemon_search_execution_failed
+daemon_search_params_invalid
+daemon_telemetry_encode_failed
+daemon_write_params_invalid
+
+# src/steward/spec_pack.rs
+cache_admission_denied
+qos_back_pressure
+ring_empty
+
+# src/core/memory.rs
+remember_idempotency_conflict
+remember_kind_is_level
+remember_level_is_kind
+typed_field_invalid
+typed_field_unknown
+
+# src/mesh/idp.rs
+team_idp_device_flow_expired
+team_idp_provider_unsupported
+team_idp_token_invalid
+
+# src/graph/mod.rs
+
+# src/db/migrate.rs
+shard_fanout_target_hash_mismatch
+
+# src/core/jsonl_import.rs
+unauthenticated_native_import_trust
+
+# src/config/mod.rs and src/config/path_resolver.rs -- declared in both

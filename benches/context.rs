@@ -498,6 +498,15 @@ fn sampled_p99_ms(samples: &mut [Duration]) -> f64 {
     samples[rank.saturating_sub(1)].as_secs_f64() * 1_000.0
 }
 
+/// Canonical memory id (`mem_` + Crockford payload), as the schema CHECK and
+/// `MemoryId` parsing require.
+fn pack_dna_memory_id(index: usize) -> String {
+    MemoryId::from_uuid(uuid::Uuid::from_u128(
+        0x0D4A_0000 + u128::try_from(index).expect("Pack DNA memory index fits u128"),
+    ))
+    .to_string()
+}
+
 fn seed_pack_dna_orchestration_database(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let workspace_path = temp_dir.to_path_buf();
     let db_path = workspace_path.join(".ee").join("ee.db");
@@ -548,7 +557,7 @@ fn seed_pack_dna_orchestration_database(temp_dir: &Path) -> (PathBuf, PathBuf, P
             valid_to: None,
         };
         connection
-            .insert_memory(&format!("mem_pack_dna_{index:03}"), &input)
+            .insert_memory(&pack_dna_memory_id(index), &input)
             .expect("insert Pack DNA benchmark memory");
     }
 
@@ -577,8 +586,8 @@ fn seed_pack_dna_orchestration_database(temp_dir: &Path) -> (PathBuf, PathBuf, P
     .enumerate()
     {
         let input = CreateMemoryLinkInput {
-            src_memory_id: format!("mem_pack_dna_{src:03}"),
-            dst_memory_id: format!("mem_pack_dna_{dst:03}"),
+            src_memory_id: pack_dna_memory_id(src),
+            dst_memory_id: pack_dna_memory_id(dst),
             relation: MemoryLinkRelation::Supports,
             weight: 0.75,
             confidence: 0.9,
@@ -606,6 +615,7 @@ fn pack_dna_orchestration_options(
 ) -> ContextPackOptions {
     ContextPackOptions {
         task_paths: Vec::new(),
+        bead_id: None,
         task_lens: None,
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(db_path.to_path_buf()),
@@ -651,6 +661,15 @@ fn write_tiered_recall_config(workspace_path: &Path, enabled: bool) {
     .expect("write tiered recall benchmark config");
 }
 
+/// Canonical memory id (`mem_` + Crockford payload), as the schema CHECK and
+/// `MemoryId` parsing require.
+fn tiered_recall_memory_id(index: u128) -> String {
+    MemoryId::from_uuid(uuid::Uuid::from_u128(0x7_1E2_0000 + index)).to_string()
+}
+
+/// Past every filler index, so the cold sentinel never collides with one.
+const TIERED_RECALL_COLD_INDEX: u128 = 0xC01D;
+
 fn seed_tiered_recall_database(temp_dir: &Path, tier_enabled: bool) -> (PathBuf, PathBuf, PathBuf) {
     let workspace_path = temp_dir.to_path_buf();
     let db_path = workspace_path.join(".ee").join("ee.db");
@@ -688,7 +707,12 @@ fn seed_tiered_recall_database(temp_dir: &Path, tier_enabled: bool) -> (PathBuf,
             valid_to: None,
         };
         connection
-            .insert_memory(&format!("mem_tiered_recall_filler_{index:03}"), &input)
+            .insert_memory(
+                &tiered_recall_memory_id(
+                    u128::try_from(index).expect("tiered recall filler index fits u128"),
+                ),
+                &input,
+            )
             .expect("insert tiered recall filler memory");
     }
 
@@ -715,7 +739,10 @@ fn seed_tiered_recall_database(temp_dir: &Path, tier_enabled: bool) -> (PathBuf,
         valid_to: None,
     };
     connection
-        .insert_memory("mem_tiered_recall_cold_required", &cold_input)
+        .insert_memory(
+            &tiered_recall_memory_id(TIERED_RECALL_COLD_INDEX),
+            &cold_input,
+        )
         .expect("insert tiered recall cold required memory");
     connection
         .close()
@@ -733,6 +760,7 @@ fn tiered_recall_options(
 ) -> ContextPackOptions {
     ContextPackOptions {
         task_paths: Vec::new(),
+        bead_id: None,
         task_lens: None,
         workspace_path: workspace_path.to_path_buf(),
         database_path: Some(db_path.to_path_buf()),
@@ -977,6 +1005,7 @@ fn bench_context(c: &mut Criterion) {
                 b.iter(|| {
                     let options = ContextPackOptions {
                         task_paths: Vec::new(),
+                        bead_id: None,
                         task_lens: None,
                         workspace_path: workspace_path.clone(),
                         database_path: Some(db_path.clone()),
@@ -1040,6 +1069,7 @@ fn bench_context_memory_scales(c: &mut Criterion) {
             b.iter(|| {
                 let options = ContextPackOptions {
                     task_paths: Vec::new(),
+                    bead_id: None,
                     task_lens: None,
                     workspace_path: workspace_path.clone(),
                     database_path: Some(db_path.clone()),
@@ -1101,6 +1131,7 @@ fn bench_context_s4_resource_scales(c: &mut Criterion) {
                 b.iter(|| {
                     let options = ContextPackOptions {
                         task_paths: Vec::new(),
+                        bead_id: None,
                         task_lens: None,
                         workspace_path: workspace_path.clone(),
                         database_path: Some(db_path.clone()),
@@ -1526,7 +1557,7 @@ fn bench_context_tiered_recall(c: &mut Criterion) {
                 )
                 .expect("enabled tiered recall context pack");
                 let required_cold_selected = run.response.data.pack.items.iter().any(|item| {
-                    item.memory_id.to_string() == "mem_tiered_recall_cold_required"
+                    item.memory_id.to_string() == tiered_recall_memory_id(TIERED_RECALL_COLD_INDEX)
                         && item.why.contains("tierAdmission tier=cold")
                         && item.why.contains("requiredEvidencePreserved=true")
                 });

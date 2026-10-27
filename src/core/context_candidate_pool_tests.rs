@@ -6,6 +6,7 @@ use crate::core::profile::OperatingProfile;
 
 fn options(workspace: &Path) -> ContextPackOptions {
     ContextPackOptions {
+        bead_id: None,
         workspace_path: workspace.to_owned(),
         query: "candidate pool configuration".to_owned(),
         task_paths: Vec::new(),

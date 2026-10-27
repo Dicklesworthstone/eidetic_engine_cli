@@ -873,6 +873,7 @@ mod tests {
 
     fn context_options_with_coordination_snapshot(path: PathBuf) -> super::ContextPackOptions {
         super::ContextPackOptions {
+            bead_id: None,
             task_paths: Vec::new(),
             workspace_path: PathBuf::from("/tmp/ee-context-coordination-test"),
             database_path: None,
@@ -1290,18 +1291,7 @@ mod tests {
                 changed.is_some(),
                 "real memory mutation makes the index stale"
             );
-            connection
-                .insert_search_index_job(
-                    "sidx_00000000000000000000000001",
-                    &crate::db::CreateSearchIndexJobInput {
-                        workspace_id: workspace_id.clone(),
-                        job_type: crate::db::SearchIndexJobType::SingleDocument,
-                        document_source: Some("memory".to_owned()),
-                        document_id: Some(memory_id.clone()),
-                        documents_total: 1,
-                    },
-                )
-                .map_err(|error| error.to_string())?;
+            // The score update queues its own single-document reindex (#83).
         }
         let status =
             crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
@@ -1343,11 +1333,9 @@ mod tests {
             ))
         };
         let before = snapshot()?;
-        assert!(
-            before.0.iter().any(|job| {
-                job.id == "sidx_00000000000000000000000001" && job.status == "pending"
-            })
-        );
+        assert!(before.0.iter().any(|job| {
+            job.document_id.as_deref() == Some(memory_id.as_str()) && job.status == "pending"
+        }));
         let search_options = SearchOptions {
             workspace_path: options.workspace_path.clone(),
             database_path: options.database_path.clone(),
@@ -1452,10 +1440,15 @@ mod tests {
         let (mut options, workspace_id, memory_id, _guard) = daemon_pack_retrieval_fixture()?;
         let database = options.database_path.clone().ok_or("fixture database")?;
         let index_dir = options.workspace_path.join(".ee").join("index");
-        let job_id = "sidx_00000000000000000000000002";
-        {
+        let job_id = {
             let connection =
                 DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let pending_before = connection
+                .list_pending_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|job| job.id)
+                .collect::<std::collections::BTreeSet<_>>();
             assert!(
                 connection
                     .apply_memory_score_update_audited(
@@ -1475,19 +1468,17 @@ mod tests {
                     .is_some(),
                 "a real memory update must invalidate the existing index generation"
             );
-            connection
-                .insert_search_index_job(
-                    job_id,
-                    &crate::db::CreateSearchIndexJobInput {
-                        workspace_id: workspace_id.clone(),
-                        job_type: crate::db::SearchIndexJobType::SingleDocument,
-                        document_source: Some("memory".to_owned()),
-                        document_id: Some(memory_id.clone()),
-                        documents_total: 1,
-                    },
-                )
-                .map_err(|error| error.to_string())?;
-        }
+            // The score update queues its own single-document reindex (#83).
+            let queued = connection
+                .list_pending_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter(|job| !pending_before.contains(&job.id))
+                .collect::<Vec<_>>();
+            assert_eq!(queued.len(), 1, "the score update queues exactly one job");
+            assert_eq!(queued[0].document_id.as_deref(), Some(memory_id.as_str()));
+            queued[0].id.clone()
+        };
         let status_options = crate::core::index::IndexStatusOptions {
             workspace_path: options.workspace_path.clone(),
             database_path: Some(database.clone()),
@@ -3905,6 +3896,7 @@ pub fn unrelated_context() -> u64 {{
                 Vec::new(),
                 evidence_candidates,
                 &request,
+                None,
                 &mut draft,
                 &mut degraded,
             );
@@ -3974,6 +3966,7 @@ pub fn unrelated_context() -> u64 {{
                 Vec::new(),
                 evidence_candidates,
                 &limited,
+                None,
                 &mut draft,
                 &mut degraded,
             );
@@ -4070,6 +4063,7 @@ pub fn unrelated_context() -> u64 {{
                             Vec::new(),
                             evidence,
                             &limited,
+                            None,
                             &mut draft,
                             &mut degraded,
                         );
@@ -4194,6 +4188,7 @@ pub fn unrelated_context() -> u64 {{
                 Vec::new(),
                 evidence,
                 request,
+                None,
                 &mut draft,
                 &mut degraded,
             );
@@ -4309,6 +4304,7 @@ pub fn unrelated_context() -> u64 {{
                     Vec::new(),
                     evidence,
                     request,
+                    None,
                     &mut draft,
                     &mut degraded,
                 );
@@ -6298,6 +6294,7 @@ pub fn unrelated_context() -> u64 {{
         let options = super::ContextPackOptions {
             task_paths: Vec::new(),
             workspace_path: PathBuf::from("/tmp/ee-explain"),
+            bead_id: None,
             database_path: None,
             index_dir: None,
             query: request.query.clone(),
@@ -6468,6 +6465,7 @@ pub fn unrelated_context() -> u64 {{
         let options = super::ContextPackOptions {
             task_paths: Vec::new(),
             workspace_path: PathBuf::from("/tmp/ee-l2-hit-performance"),
+            bead_id: None,
             database_path: None,
             index_dir: None,
             query: request.query.clone(),
@@ -6637,6 +6635,7 @@ pub fn unrelated_context() -> u64 {{
             task_paths: Vec::new(),
             workspace_path: workspace.clone(),
             database_path: Some(database_path.clone()),
+            bead_id: None,
             index_dir: None,
             query: request.query.clone(),
             speed: crate::search::SpeedMode::Default,
@@ -6723,20 +6722,12 @@ pub fn unrelated_context() -> u64 {{
             rerank_score_count: 7,
             degraded: Vec::new(),
         };
-        let response_json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V2,
-            "success": true,
-            "data": {
-                "command": PACK_COMMAND,
-                "embed_backend": "hash_fallback",
-                "pack": { "schema": crate::models::PACK_SCHEMA_V2 }
-            },
-            "degraded": []
-        })
-        .to_string();
+        let finalized_response = finalized_l2_response_json(&request.query)?;
+        let response_json = finalized_response.to_string();
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
             "responseJson": response_json,
+            "canonicalText": finalized_response["data"]["pack"]["text"],
             "searchAdvisorySnapshot": stale_available.cache_json(),
             "sourceMode": {
                 "requested": "hybrid",
@@ -6800,6 +6791,12 @@ pub fn unrelated_context() -> u64 {{
                 });
                 side_effect_options
             }),
+            ("Pack DNA", {
+                let mut side_effect_options = options.clone();
+                side_effect_options.output_options =
+                    side_effect_options.output_options.with_pack_dna(true);
+                side_effect_options
+            }),
         ] {
             let mut bypass_trace = super::ContextPerformanceTrace::default();
             let mut bypass_degraded = Vec::new();
@@ -6851,6 +6848,7 @@ pub fn unrelated_context() -> u64 {{
             task_paths: Vec::new(),
             workspace_path: workspace.clone(),
             database_path: Some(database_path.clone()),
+            bead_id: None,
             index_dir: None,
             query: request.query.clone(),
             speed: crate::search::SpeedMode::Default,
@@ -6940,21 +6938,13 @@ pub fn unrelated_context() -> u64 {{
     /// A stored L2 payload whose inner response says it was produced by
     /// `embed_backend`. `hash_fallback` matches the fixture's key; anything
     /// else is rejected by this module after the lookup has already hit.
-    fn l2_payload_from_backend(embed_backend: &str) -> serde_json::Value {
-        let response_json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V2,
-            "success": true,
-            "data": {
-                "command": PACK_COMMAND,
-                "embed_backend": embed_backend,
-                "pack": { "schema": crate::models::PACK_SCHEMA_V2 }
-            },
-            "degraded": []
-        })
-        .to_string();
-        serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
-            "responseJson": response_json,
+    fn l2_payload_from_backend(embed_backend: &str) -> Result<serde_json::Value, String> {
+        let mut response = finalized_l2_response_json("l2 phase invariant")?;
+        response["data"]["embed_backend"] = serde_json::json!(embed_backend);
+        Ok(serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
+            "responseJson": response.to_string(),
+            "canonicalText": response["data"]["pack"]["text"],
             "searchAdvisorySnapshot": super::ContextSearchAdvisorySnapshot {
                 rerank_configured_mode: crate::config::SearchRerankMode::Auto,
                 rerank_configured_top_k: 50,
@@ -6969,7 +6959,18 @@ pub fn unrelated_context() -> u64 {{
                 "strict": false,
                 "fallback": false
             }
-        })
+        }))
+    }
+
+    fn finalized_l2_response_json(query: &str) -> Result<serde_json::Value, String> {
+        let request = ContextRequest::from_query(query).map_err(|error| error.to_string())?;
+        let draft = crate::pack::assemble_draft(query, request.budget, Vec::<PackCandidate>::new())
+            .map_err(|error| error.to_string())?;
+        let mut response = crate::pack::ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| error.to_string())?;
+        super::finalize_context_response(&mut response, Default::default(), None, None);
+        serde_json::from_str(&crate::output::render_context_response_json(&response))
+            .map_err(|error| error.to_string())
     }
 
     /// Run the real L2 lookup and return (hit?, degraded, phases).
@@ -7040,7 +7041,7 @@ pub fn unrelated_context() -> u64 {{
             .cache
             .put_compressed(
                 &fixture.l2_context.key,
-                &l2_payload_from_backend("hash_fallback"),
+                &l2_payload_from_backend("hash_fallback")?,
             )
             .map_err(|error| error.to_string())?;
         // THE TRIGGER: the stored entry's bytes no longer decode.
@@ -7067,7 +7068,7 @@ pub fn unrelated_context() -> u64 {{
             .cache
             .put_compressed(
                 &fixture.l2_context.key,
-                &l2_payload_from_backend("neural_local"),
+                &l2_payload_from_backend("neural_local")?,
             )
             .map_err(|error| error.to_string())?;
 
@@ -7110,6 +7111,9 @@ pub fn unrelated_context() -> u64 {{
             super::missing_index_search_report("l2 phase invariant", 10, test_runtime_profile());
         let mut response =
             context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(46)))?;
+        super::finalize_context_response(&mut response, fixture.options.output_options, None, None);
+        let finalized_hash = response.data.pack.hash.clone();
+        let finalized_text = crate::output::render_context_response_markdown(&response);
 
         let ((), phases) = crate::cache::pack_l2::capture_pack_l2_phases(|| {
             super::context_pack_l2_store(
@@ -7126,6 +7130,11 @@ pub fn unrelated_context() -> u64 {{
             "l2_pack_cache_unavailable",
         );
         assert_eq!(phases, ["write", "unavailable"]);
+        assert_eq!(response.data.pack.hash, finalized_hash);
+        assert_eq!(
+            crate::output::render_context_response_markdown(&response),
+            finalized_text
+        );
         Ok(())
     }
 
@@ -7149,29 +7158,18 @@ pub fn unrelated_context() -> u64 {{
 
     #[test]
     fn l2_cached_response_json_preserves_current_payload_bytes() -> Result<(), String> {
-        let response_json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V2,
-            "success": true,
-            "data": {
-                "command": "pack",
-                "embed_backend": "hash_fallback",
-                "pack": {
-                    "schema": crate::models::PACK_SCHEMA_V2,
-                    "query": "prepare release"
-                }
-            },
-            "degraded": []
-        })
-        .to_string();
+        let response = finalized_l2_response_json("prepare release")?;
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
-            "responseJson": response_json,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
+            "responseJson": response.to_string(),
+            "canonicalText": response["data"]["pack"]["text"],
         });
 
         let replayed = super::context_pack_l2_cached_response_json(
             &payload,
             "pack",
             crate::models::EmbedBackend::HashFallback,
+            Default::default(),
         )?;
 
         assert_eq!(
@@ -7186,9 +7184,139 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn l2_v5_rejects_stale_identity_tampered_text_and_forged_composites() -> TestResult {
+        let original = finalized_l2_response_json("v5 cache validation")?;
+        let text = original["data"]["pack"]["text"]
+            .as_str()
+            .ok_or("text")?
+            .to_owned();
+        let hash = original["data"]["pack"]["hash"].as_str().ok_or("hash")?;
+        for case in 0..5 {
+            let mut response = original.clone();
+            let mut canonical_text = text.clone();
+            match case {
+                0 => response["data"]["pack"]["snapshotIdentity"]["version"] = serde_json::json!(4),
+                1 => {
+                    canonical_text = format!("Changed text\n{text}");
+                    response["data"]["pack"]["text"] = serde_json::json!(canonical_text);
+                }
+                2 => {
+                    let forged_hash = format!("blake3:{}", "0".repeat(64));
+                    let footer = crate::pack::context_markdown_identity_footer(
+                        crate::models::RESPONSE_SCHEMA_V2,
+                        hash,
+                    );
+                    canonical_text = format!(
+                        "{}{}",
+                        text.strip_suffix(&footer).ok_or("footer")?,
+                        crate::pack::context_markdown_identity_footer(
+                            crate::models::RESPONSE_SCHEMA_V2,
+                            &forged_hash
+                        )
+                    );
+                    response["data"]["pack"]["hash"] = serde_json::json!(forged_hash);
+                    response["data"]["pack"]["snapshotIdentity"]["digest"] =
+                        serde_json::json!(forged_hash);
+                    response["data"]["pack"]["text"] = serde_json::json!(canonical_text);
+                }
+                3 => response["data"]["pack"]["text"] = serde_json::Value::Null,
+                _ => {
+                    response["data"]["pack"]
+                        .as_object_mut()
+                        .ok_or("pack")?
+                        .remove("text");
+                }
+            }
+            let payload = serde_json::json!({
+                "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
+                "responseJson": response.to_string(), "canonicalText": canonical_text,
+            });
+            assert!(
+                super::context_pack_l2_cached_response_json(
+                    &payload,
+                    PACK_COMMAND,
+                    EmbedBackend::HashFallback,
+                    Default::default()
+                )
+                .is_err(),
+                "invalid cache case {case}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn l2_lean_hit_retains_finalized_markdown_without_reintroducing_json_text() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut fixture = l2_try_hit_fixture(temp.path(), temp.path().join("pack-l2"))?;
+        fixture.options.output_options =
+            super::ContextPackOutputOptions::for_profile(super::ContextPackOutputProfile::Lean)
+                .with_cache_json_response(true);
+        fixture.l2_context.key_input.output_options = fixture.options.output_options;
+        fixture.l2_context.key = super::compute_pack_l2_cache_key(&fixture.l2_context.key_input);
+        let draft = crate::pack::assemble_draft(
+            &fixture.request.query,
+            fixture.request.budget,
+            Vec::<PackCandidate>::new(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut fresh =
+            crate::pack::ContextResponse::new(fixture.request.clone(), draft, Vec::new())
+                .map_err(|error| error.to_string())?;
+        super::finalize_context_response(&mut fresh, fixture.options.output_options, None, None);
+        let text = crate::output::render_context_response_markdown(&fresh);
+        let response_json = crate::output::render_context_response_json_with_options(
+            &fresh,
+            crate::output::ContextJsonRenderOptions::from(fixture.options.output_options),
+        );
+        let snapshot = super::ContextSearchAdvisorySnapshot::from_search_report(
+            &ppr_search_report(Vec::new()),
+        );
+        let payload = serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
+            "responseJson": response_json, "canonicalText": text,
+            "searchAdvisorySnapshot": snapshot.cache_json(),
+            "sourceMode": {"requested": "hybrid", "applied": "hybrid", "strict": false, "fallback": false},
+        });
+        fixture
+            .l2_context
+            .cache
+            .put_compressed(&fixture.l2_context.key, &payload)
+            .map_err(|error| error.to_string())?;
+        let mut trace = ContextPerformanceTrace::default();
+        let mut degraded = Vec::new();
+        let hit = super::context_pack_l2_try_hit(
+            &fixture.l2_context,
+            PACK_COMMAND,
+            &fixture.options,
+            &fixture.search_options,
+            &fixture.connection,
+            &fixture.request,
+            std::time::Instant::now(),
+            &mut trace,
+            &mut degraded,
+        )
+        .ok_or("expected finalized Lean cache hit")?;
+        assert!(degraded.is_empty());
+        assert_eq!(hit.response.data.pack.hash, fresh.data.pack.hash);
+        assert_eq!(
+            crate::output::render_context_response_markdown(&hit.response),
+            text
+        );
+        let replay: serde_json::Value =
+            serde_json::from_str(&crate::output::render_context_response_json_with_options(
+                &hit.response,
+                crate::output::ContextJsonRenderOptions::from(fixture.options.output_options),
+            ))
+            .map_err(|error| error.to_string())?;
+        assert!(replay.pointer("/data/pack/text").is_none());
+        Ok(())
+    }
+
+    #[test]
     fn l2_cached_response_json_rejects_unattributed_embedding_backend() {
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
             "responseJson": serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
@@ -7208,6 +7336,7 @@ pub fn unrelated_context() -> u64 {{
             &payload,
             "pack",
             crate::models::EmbedBackend::HashFallback,
+            Default::default(),
         )
         .expect_err("cache payloads without an embedding backend must be invalidated");
         assert!(
@@ -7219,7 +7348,7 @@ pub fn unrelated_context() -> u64 {{
     #[test]
     fn l2_cached_response_json_rejects_backend_mismatch_with_cache_key() {
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
             "responseJson": serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
@@ -7240,6 +7369,7 @@ pub fn unrelated_context() -> u64 {{
             &payload,
             "pack",
             crate::models::EmbedBackend::HashFallback,
+            Default::default(),
         )
         .expect_err("a neural response stored under a hash key must be rejected");
         assert!(
@@ -7285,6 +7415,7 @@ pub fn unrelated_context() -> u64 {{
             &payload,
             "pack",
             crate::models::EmbedBackend::HashFallback,
+            Default::default(),
         )
         .expect_err("v1 cached response semantics must be invalidated");
         assert!(
@@ -7296,28 +7427,22 @@ pub fn unrelated_context() -> u64 {{
 
     #[test]
     fn l2_cached_response_json_backfills_inner_pack_schema() -> Result<(), String> {
-        let response_json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V2,
-            "success": true,
-            "data": {
-                "command": "pack",
-                "embed_backend": "hash_fallback",
-                "pack": {
-                    "query": "prepare release"
-                }
-            },
-            "degraded": []
-        })
-        .to_string();
+        let mut response = finalized_l2_response_json("prepare release")?;
+        response["data"]["pack"]
+            .as_object_mut()
+            .ok_or("pack object")?
+            .remove("schema");
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
-            "responseJson": response_json,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
+            "responseJson": response.to_string(),
+            "canonicalText": response["data"]["pack"]["text"],
         });
 
         let replayed = super::context_pack_l2_cached_response_json(
             &payload,
             "pack",
             crate::models::EmbedBackend::HashFallback,
+            Default::default(),
         )?;
         let replayed_json = serde_json::from_str::<serde_json::Value>(&replayed)
             .map_err(|error| error.to_string())?;
@@ -7344,6 +7469,7 @@ pub fn unrelated_context() -> u64 {{
         let options = super::ContextPackOptions {
             task_paths: Vec::new(),
             workspace_path: PathBuf::from("/tmp/ee-l2-hit-performance-fallback"),
+            bead_id: None,
             database_path: None,
             index_dir: None,
             query: request.query.clone(),
@@ -7378,7 +7504,7 @@ pub fn unrelated_context() -> u64 {{
             no_lod: false,
         };
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
             "responseJson": "{\"schema\":\"ee.response.v2\",\"success\":true,\"data\":{\"command\":\"pack\"},\"degraded\":[]}",
             "sourceMode": {
                 "requested": "semantic_only",
@@ -7478,6 +7604,7 @@ pub fn unrelated_context() -> u64 {{
             task_paths: Vec::new(),
             workspace_path: workspace.clone(),
             database_path: Some(db_path),
+            bead_id: None,
             index_dir: Some(empty_index_dir),
             query: "fmt before release".to_owned(),
             speed: crate::search::SpeedMode::Default,
@@ -7621,6 +7748,7 @@ pub fn unrelated_context() -> u64 {{
             task_paths: Vec::new(),
             workspace_path: workspace.clone(),
             database_path: None,
+            bead_id: None,
             index_dir: Some(empty_index_dir),
             query: "format before release".to_owned(),
             speed: crate::search::SpeedMode::Default,
@@ -7683,6 +7811,7 @@ pub fn unrelated_context() -> u64 {{
             task_paths: Vec::new(),
             workspace_path: tempdir.path().join("workspace"),
             database_path: None,
+            bead_id: None,
             index_dir: None,
             query: "lexical fallback".to_owned(),
             speed: crate::search::SpeedMode::Default,
@@ -7752,6 +7881,7 @@ pub fn unrelated_context() -> u64 {{
         search_report.source_mode_fallback = true;
         let mut response =
             context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(44)))?;
+        super::finalize_context_response(&mut response, options.output_options, None, None);
 
         super::context_pack_l2_store(&l2_context, &options, &search_report, &mut response);
 
@@ -7778,6 +7908,7 @@ pub fn unrelated_context() -> u64 {{
             task_paths: Vec::new(),
             workspace_path: tempdir.path().join("workspace"),
             database_path: None,
+            bead_id: None,
             index_dir: None,
             query: "backend transition".to_owned(),
             speed: crate::search::SpeedMode::Default,
@@ -7850,6 +7981,7 @@ pub fn unrelated_context() -> u64 {{
         let mut response =
             context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(45)))?;
         response.data.embed_backend = EmbedBackend::NeuralLocal;
+        super::finalize_context_response(&mut response, options.output_options, None, None);
 
         super::context_pack_l2_store(&l2_context, &options, &search_report, &mut response);
 
@@ -7879,6 +8011,7 @@ pub fn unrelated_context() -> u64 {{
                 .map_err(|error| error.to_string())?;
             let ee_dir = workspace.join(".ee");
             std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+            write_context_graph_config(&workspace, "[graph.feature.pack_dna]\nenabled = true\n")?;
             let db_path = ee_dir.join("ee.db");
             let empty_index_dir = tempdir.path().join("empty-index");
             std::fs::create_dir_all(&empty_index_dir).map_err(|error| error.to_string())?;
@@ -7920,11 +8053,18 @@ pub fn unrelated_context() -> u64 {{
                 .map_err(|error| error.to_string())?;
 
             let determinism = crate::runtime::determinism::Deterministic::from_seed(seed);
-            let response = super::run_context_pack_seeded(
+            super::set_context_pack_dna_compute_error(Some(
+                crate::graph::GraphError::AlgorithmTimeout {
+                    algorithm: "pack_dna".to_owned(),
+                    timeout_ms: 125,
+                },
+            ));
+            let result = super::run_context_pack_seeded(
                 &super::ContextPackOptions {
                     task_paths: Vec::new(),
                     workspace_path: workspace,
                     database_path: Some(db_path),
+                    bead_id: None,
                     index_dir: Some(empty_index_dir),
                     query: "format before release".to_owned(),
                     speed: crate::search::SpeedMode::Default,
@@ -7952,14 +8092,20 @@ pub fn unrelated_context() -> u64 {{
                     coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
                     task_lens: None,
                     require_fresh_sentinels: false,
-                    output_options: Default::default(),
+                    output_options: super::ContextPackOutputOptions::default().with_pack_dna(true),
                     persist_pack: true,
                     baseline_write: None,
                     no_lod: false,
                 },
                 determinism,
-            )
-            .map_err(|error| error.to_string())?;
+            );
+            super::set_context_pack_dna_compute_error(None);
+            let response = result.map_err(|error| error.to_string())?;
+            assert_eq!(
+                response.data.pack_dna.as_ref().ok_or("requested DNA")?["degraded"][0]["code"],
+                crate::models::degradation::GRAPH_PACK_DNA_TIMEOUT_CODE
+            );
+            assert_finalized_text_contract(&response)?;
 
             assert!(
                 response
@@ -7974,6 +8120,20 @@ pub fn unrelated_context() -> u64 {{
                 .list_pack_records_for_memory(&memory_id, 10)
                 .map_err(|error| error.to_string())?;
             assert_eq!(history.len(), 1);
+            assert_eq!(
+                response.data.pack.hash.as_deref(),
+                Some(history[0].0.pack_hash.as_str())
+            );
+            // The list projection carries no ledger body; load the full row.
+            let record = connection
+                .get_pack_record(&history[0].0.id)
+                .map_err(|error| error.to_string())?
+                .ok_or("persisted pack record")?;
+            let ledger = crate::db::parse_stored_pack_ledger(&record);
+            assert_eq!(
+                ledger.available_ledger().ok_or("verified ledger")?["packHash"],
+                history[0].0.pack_hash
+            );
             Ok(history[0].0.id.clone())
         }
 
@@ -8041,6 +8201,7 @@ pub fn unrelated_context() -> u64 {{
             task_paths: Vec::new(),
             workspace_path: workspace,
             database_path: Some(db_path.clone()),
+            bead_id: None,
             index_dir: Some(empty_index_dir),
             query: query.to_owned(),
             speed: crate::search::SpeedMode::Default,
@@ -8212,6 +8373,7 @@ pub fn unrelated_context() -> u64 {{
             task_paths: Vec::new(),
             workspace_path: workspace.clone(),
             database_path: Some(db_path.clone()),
+            bead_id: None,
             index_dir: Some(empty_index_dir),
             query: "read pool determinism release".to_owned(),
             speed: crate::search::SpeedMode::Default,
@@ -8245,6 +8407,37 @@ pub fn unrelated_context() -> u64 {{
             no_lod: false,
         };
 
+        // bd-verzk: THE PACK CACHE MUST BE OFF OR THIS TEST MEASURES THE WRONG
+        // THING. The three iterations below issue a BYTE-IDENTICAL request and
+        // differ only in `.ee/config.toml` on disk, which is not part of request
+        // identity. With `persist_pack: true` the first iteration assembled
+        // cold and persisted, and the later two were served from that pack --
+        // so the comparison was cold-assembly against a cache hit, not
+        // pool_size=1 against pool_size=8.
+        //
+        // The symptom was a hash mismatch that looked like a determinism defect
+        // and carried three unresolved hypotheses for a month. What it actually
+        // reported: `index_dir` is deliberately an EMPTY directory, so a real
+        // search MUST degrade -- and only the first iteration carried
+        // `index_missing` and `context_lexical_fallback`. The later iterations
+        // lacked them because they never searched. `renderedText` differed for
+        // the same single reason, since degraded codes are interpolated into
+        // hash-bearing prose and cannot differ independently of `degraded`.
+        //
+        // Measured 2026-10-21 on an RCH worker, one variable changed:
+        //     persist_pack: true   -> FAILED, 0 passed / 1 failed
+        //     persist_pack: false  -> ok,     1 passed / 0 failed  (93.89s)
+        // So read-pool size does NOT change the pack hash. The defect was this
+        // test's control.
+        //
+        // Do not "restore" persistence here. A cache-served response carries
+        // its own snapshot identity by design -- the panic arm below says so --
+        // which makes a persisted pack unusable as a determinism baseline.
+        let base_options = super::ContextPackOptions {
+            persist_pack: false,
+            ..base_options
+        };
+
         let mut hashes_by_pool_size = BTreeMap::new();
         for pool_size in [1_u32, 4, 8] {
             std::fs::write(
@@ -8272,17 +8465,69 @@ pub fn unrelated_context() -> u64 {{
                 .hash
                 .clone()
                 .ok_or_else(|| format!("pool_size={pool_size} response missing pack hash"))?;
-            hashes_by_pool_size.insert(pool_size, hash);
+            // bd-verzk: keep the COMPONENT digests and the degraded codes, not
+            // just the composite. A bare hash mismatch prints two blake3
+            // strings and names nothing, which is why that bead has carried
+            // three unresolved hypotheses since 2026-09-25 and lists "print
+            // both packs' phase-1 component digests" as its own first step.
+            // `differing_components` already answers it; this test was simply
+            // throwing the answer away.
+            let degraded_codes: Vec<String> = response
+                .data
+                .degraded
+                .iter()
+                .map(|entry| entry.code.clone())
+                .collect();
+            hashes_by_pool_size.insert(
+                pool_size,
+                (
+                    hash,
+                    response.data.pack_hash_components.clone(),
+                    degraded_codes,
+                ),
+            );
         }
 
-        let single_hash = hashes_by_pool_size
+        let (single_hash, single_components, single_degraded) = hashes_by_pool_size
             .get(&1)
             .ok_or_else(|| "pool_size=1 hash missing".to_string())?;
         for pool_size in [4_u32, 8] {
-            assert_eq!(
-                hashes_by_pool_size.get(&pool_size),
-                Some(single_hash),
-                "pool_size={pool_size} must preserve the pool_size=1 pack hash"
+            let (hash, components, degraded) = hashes_by_pool_size
+                .get(&pool_size)
+                .ok_or_else(|| format!("pool_size={pool_size} hash missing"))?;
+            if hash == single_hash {
+                continue;
+            }
+            // Name the differing component rather than leaving the reader with
+            // two opaque digests. `degraded` differing points at bd-ve7c6 (two
+            // surviving degradations interpolate run-properties -- queue depth,
+            // retry delay, scanned counts -- into hash-bearing prose); `items`
+            // differing points instead at read-pool size genuinely changing
+            // retrieval or ordering, which is a different and worse defect.
+            // The digests carry no raw inputs, so printing them discloses
+            // nothing.
+            let named = match (single_components.as_ref(), components.as_ref()) {
+                (Some(base), Some(other)) => {
+                    let differing = base.differing_components(other);
+                    if differing.is_empty() {
+                        "none -- components all equal while the composite differs, \
+                         which would indicate a defect in the composite itself"
+                            .to_owned()
+                    } else {
+                        differing.join(", ")
+                    }
+                }
+                _ => "<unavailable: at least one response was served from the L2 \
+                      cache, which carries its own snapshot identity>"
+                    .to_owned(),
+            };
+            panic!(
+                "pool_size={pool_size} must preserve the pool_size=1 pack hash\n\
+                 differing components: {named}\n\
+                 pool_size=1 hash: {single_hash}\n\
+                 pool_size={pool_size} hash: {hash}\n\
+                 pool_size=1 degraded codes: {single_degraded:?}\n\
+                 pool_size={pool_size} degraded codes: {degraded:?}"
             );
         }
         Ok(())
@@ -8869,6 +9114,7 @@ pub fn unrelated_context() -> u64 {{
             task_paths: Vec::new(),
             workspace_path: workspace,
             database_path: Some(db_path),
+            bead_id: None,
             index_dir: Some(empty_index_dir),
             query: "clippy release candidate".to_owned(),
             speed: crate::search::SpeedMode::Default,
@@ -9047,6 +9293,7 @@ pub fn unrelated_context() -> u64 {{
             task_paths: Vec::new(),
             workspace_path: workspace,
             database_path: Some(db_path),
+            bead_id: None,
             index_dir: Some(empty_index_dir),
             query: "validity window marker zeta release rule".to_owned(),
             speed: crate::search::SpeedMode::Default,
@@ -10817,8 +11064,8 @@ pub fn unrelated_context() -> u64 {{
             serde_json::from_str(&crate::output::render_context_response_json(&response))
                 .map_err(|error| error.to_string())?;
         let identity = &json["data"]["pack"]["snapshotIdentity"];
-        assert_eq!(identity["version"], 4);
-        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v4");
+        assert_eq!(identity["version"], 5);
+        assert_eq!(identity["inputSchema"], "ee.pack.hash_input.v5");
         assert_eq!(
             identity["components"]["referenceTime"],
             first.digests.reference_time
@@ -10953,7 +11200,8 @@ pub fn unrelated_context() -> u64 {{
         );
         assert_eq!(
             changed(&base, &repair),
-            ["degraded", "rendered_text", "composite"]
+            ["degraded", "composite"],
+            "filtered workspace-state repairs are bound but absent from canonical text"
         );
 
         let coordination_later = PackCoordinationSnapshot::from_json_str(
@@ -11038,6 +11286,63 @@ pub fn unrelated_context() -> u64 {{
         Ok(())
     }
 
+    #[test]
+    fn pack_hash_resource_posture_preserves_identity_without_runtime_measurements()
+    -> Result<(), String> {
+        use super::{ContextPackOutputOptions, compute_pack_hash_components};
+        use crate::pack::{PackAssemblySlo, PackAssemblySloActuals, PackResourceProfile};
+
+        let (request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let actuals = |scanned_count, graph_edges_traversed| PackAssemblySloActuals {
+            candidate_count: scanned_count,
+            scanned_count,
+            index_generation: Some(12),
+            graph_generation: Some(12),
+            graph_edges_traversed,
+            elapsed_ms: 0,
+            memory_bytes_peak: 4096,
+        };
+        let hash = |slo: &PackAssemblySlo| {
+            compute_pack_hash_components(
+                &request,
+                &draft,
+                &slo.context_degradations(),
+                ContextPackOutputOptions::default(),
+                None,
+                None,
+                None,
+            )
+        };
+        let profile = PackResourceProfile::Standard;
+        let clean = hash(&PackAssemblySlo::evaluate(profile, actuals(0, 0)));
+        for (first, second) in [
+            (
+                PackAssemblySlo::evaluate(profile, actuals(241, 0)),
+                PackAssemblySlo::evaluate(profile, actuals(5000, 50_000)),
+            ),
+            (
+                PackAssemblySlo::concurrent_limit_reached(profile, actuals(0, 0), 10, 4),
+                PackAssemblySlo::concurrent_limit_reached(
+                    profile,
+                    actuals(0, 0),
+                    u64::MAX,
+                    usize::MAX,
+                ),
+            ),
+        ] {
+            assert_ne!(first, second, "the measured runs must actually differ");
+            assert!(!first.context_degradations().is_empty());
+            let first = hash(&first);
+            let second = hash(&second);
+            assert_eq!(first.digests, second.digests);
+            assert_eq!(first.composite_hash, second.composite_hash);
+            assert_ne!(first.digests.degraded, clean.digests.degraded);
+            assert_ne!(first.digests.rendered_text, clean.digests.rendered_text);
+            assert_ne!(first.composite_hash, clean.composite_hash);
+        }
+        Ok(())
+    }
+
     /// ADR 0087 finding 1: evidence scores were hashed as raw f32 bytes. v2
     /// quantizes them like every other hashed score.
     #[test]
@@ -11081,11 +11386,11 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
-    fn pack_hash_refresh_includes_late_context_degradation() -> Result<(), String> {
+    fn pack_finalization_includes_pre_persistence_degradation() -> Result<(), String> {
         use super::{
             ContextPackOutputOptions, ContextResponseDegradation, ContextResponseSeverity,
             compute_pack_hash_with_output_options_coordination_snapshot_and_lens,
-            refresh_context_pack_hash,
+            finalize_context_response,
         };
         use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
@@ -11111,7 +11416,7 @@ pub fn unrelated_context() -> u64 {{
         })
         .map_err(|error| error.to_string())?
         .with_trust_signal(PackTrustSignal::new(TrustClass::AgentValidated, None));
-        let mut draft = assemble_draft(
+        let draft = assemble_draft(
             "late degradation hash",
             TokenBudget::default_context(),
             [candidate],
@@ -11121,16 +11426,22 @@ pub fn unrelated_context() -> u64 {{
         let read_snapshot_generation = Some(17);
         let initial_degraded: Vec<ContextResponseDegradation> = Vec::new();
 
-        let stale_components = refresh_context_pack_hash(
-            &request,
-            &mut draft,
-            &initial_degraded,
+        let mut response = ContextResponse::new(request, draft, initial_degraded)
+            .map_err(|error| error.to_string())?;
+        finalize_context_response(
+            &mut response,
             output_options,
-            None,
             read_snapshot_generation,
             None,
         );
-        let stale_hash = draft
+        let stale_components = response
+            .data
+            .pack_hash_components
+            .clone()
+            .ok_or("initial components")?;
+        let stale_hash = response
+            .data
+            .pack
             .hash
             .clone()
             .ok_or_else(|| "initial hash should be assigned".to_string())?;
@@ -11143,15 +11454,18 @@ pub fn unrelated_context() -> u64 {{
                 "Increase the resource profile or retry after the pack slot clears.".to_string(),
             ),
         }];
-        let refreshed_components = refresh_context_pack_hash(
-            &request,
-            &mut draft,
-            &late_degraded,
+        response.data.degraded = late_degraded.clone();
+        finalize_context_response(
+            &mut response,
             output_options,
-            None,
             read_snapshot_generation,
             None,
         );
+        let refreshed_components = response
+            .data
+            .pack_hash_components
+            .clone()
+            .ok_or("final components")?;
         assert_ne!(
             stale_components.degraded, refreshed_components.degraded,
             "a late degradation must change the degraded component digest"
@@ -11160,13 +11474,15 @@ pub fn unrelated_context() -> u64 {{
             stale_components.request, refreshed_components.request,
             "a late degradation must not change the request component digest"
         );
-        let refreshed_hash = draft
+        let refreshed_hash = response
+            .data
+            .pack
             .hash
             .clone()
             .ok_or_else(|| "refreshed hash should be assigned".to_string())?;
         let expected_hash = compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
-            &request,
-            &draft,
+            &response.data.request,
+            &response.data.pack,
             &late_degraded,
             output_options,
             None,
@@ -11182,12 +11498,159 @@ pub fn unrelated_context() -> u64 {{
             refreshed_hash, expected_hash,
             "refreshed response hash must be computed from the final degradation list"
         );
-        let response = ContextResponse::new(request, draft, late_degraded)
-            .map_err(|error| error.to_string())?;
         assert_eq!(
             response.data.pack.hash.as_deref(),
             Some(refreshed_hash.as_str()),
             "final response must carry the hash for the final degraded set"
+        );
+        Ok(())
+    }
+
+    fn assert_finalized_text_contract(response: &crate::pack::ContextResponse) -> TestResult {
+        let json: serde_json::Value =
+            serde_json::from_str(&crate::output::render_context_response_json(response))
+                .map_err(|error| error.to_string())?;
+        let text = json
+            .pointer("/data/pack/text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("canonical text")?;
+        let hash = response.data.pack.hash.as_deref().ok_or("finalized hash")?;
+        let footer = crate::pack::context_markdown_identity_footer(response.schema, hash);
+        let body = text.strip_suffix(&footer).ok_or("typed final footer")?;
+        let normalized = format!(
+            "{body}{}",
+            crate::pack::context_markdown_identity_footer(
+                response.schema,
+                crate::pack::PACK_HASH_TEXT_FOOTER_PLACEHOLDER,
+            )
+        );
+        let mut hasher = super::pack_hash_component_hasher("rendered_text");
+        super::hash_labeled_bytes(&mut hasher, "text", normalized.as_bytes());
+        let components = response
+            .data
+            .pack_hash_components
+            .as_ref()
+            .ok_or("components")?;
+        assert_eq!(components.rendered_text, super::finalize_blake3(hasher));
+        assert_eq!(
+            text,
+            crate::output::render_context_response_markdown(response)
+        );
+        assert_eq!(
+            text,
+            crate::pack::render_context_response_markdown(response)
+        );
+        assert_eq!(json["data"]["pack"]["snapshotIdentity"]["version"], 5);
+        Ok(())
+    }
+
+    #[test]
+    fn finalized_text_binds_backend_dna_and_preserves_literal_footer_content() -> TestResult {
+        let (request, mut draft) = pack_hash_v2_fixture(Vec::new())?;
+        draft.items[0].content =
+            "Keep ee.pack.hash.self.v1 literal; <!-- pack.hash: ee.pack.hash.self.v1 -->"
+                .to_owned();
+        let mut response = crate::pack::ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| error.to_string())?;
+        response.data.pack_dna = Some(serde_json::json!({
+            "schema": "ee.context.pack_dna.v1", "snapshotVersion": 1,
+            "egoSubgraph": {"nodes": [], "edges": []}
+        }));
+        let options = super::ContextPackOutputOptions::default().with_pack_dna(true);
+        super::finalize_context_response(&mut response, options, Some(12), None);
+        assert_finalized_text_contract(&response)?;
+        let text = crate::output::render_context_response_markdown(&response);
+        assert!(text.contains("Keep ee.pack.hash.self.v1 literal"));
+        assert!(text.contains("# Pack DNA"));
+        let baseline = response
+            .data
+            .pack_hash_components
+            .clone()
+            .ok_or("base components")?;
+        let original_hash = response.data.pack.hash.clone();
+        for change_backend in [true, false] {
+            let mut changed = response.clone();
+            if change_backend {
+                changed.data.embed_backend = EmbedBackend::NeuralLocal;
+            } else {
+                changed.data.pack_dna.as_mut().ok_or("DNA")?["snapshotVersion"] =
+                    serde_json::json!(2);
+            }
+            super::finalize_context_response(&mut changed, options, Some(12), None);
+            assert_finalized_text_contract(&changed)?;
+            assert_eq!(
+                baseline.differing_components(
+                    changed
+                        .data
+                        .pack_hash_components
+                        .as_ref()
+                        .ok_or("changed components")?
+                ),
+                ["renderedText"]
+            );
+            assert_ne!(original_hash, changed.data.pack.hash);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn finalization_freezes_text_before_delivery_notices_and_json_text_omission() -> TestResult {
+        let (request, draft) = pack_hash_v2_fixture(Vec::new())?;
+        let mut response = crate::pack::ContextResponse::new(request, draft, Vec::new())
+            .map_err(|error| error.to_string())?;
+        let options =
+            super::ContextPackOutputOptions::for_profile(super::ContextPackOutputProfile::Lean);
+        super::finalize_context_response(&mut response, options, None, None);
+        assert_finalized_text_contract(&response)?;
+        let hash = response.data.pack.hash.clone();
+        let text = crate::output::render_context_response_markdown(&response);
+        let before = response
+            .data
+            .pack_hash_components
+            .clone()
+            .ok_or("before components")?;
+        response.data.degraded.push(ContextResponseDegradation {
+            code: "context_delta_prior_unknown".to_owned(),
+            severity: ContextResponseSeverity::Low,
+            message: "Delivery-only delta fallback notice.".to_owned(),
+            repair: None,
+        });
+        let json: serde_json::Value =
+            serde_json::from_str(&crate::output::render_context_response_json_with_options(
+                &response,
+                crate::output::ContextJsonRenderOptions::from(options),
+            ))
+            .map_err(|error| error.to_string())?;
+        assert!(json.pointer("/data/pack/text").is_none());
+        assert_eq!(response.data.pack.hash, hash);
+        assert_eq!(
+            crate::output::render_context_response_markdown(&response),
+            text
+        );
+        assert!(
+            json["data"]["degraded"]
+                .as_array()
+                .ok_or("degraded")?
+                .iter()
+                .any(|entry| entry["code"] == "context_delta_prior_unknown")
+        );
+        let mut changed = response.clone();
+        changed.data.degraded.clear();
+        changed.data.embed_backend = EmbedBackend::NeuralLocal;
+        super::finalize_context_response(&mut changed, options, None, None);
+        assert_eq!(
+            before.differing_components(
+                changed
+                    .data
+                    .pack_hash_components
+                    .as_ref()
+                    .ok_or("changed components")?
+            ),
+            ["renderedText"]
+        );
+        assert_ne!(
+            changed.data.pack.hash, hash,
+            "Lean identity must still bind canonical Markdown"
         );
         Ok(())
     }
@@ -11752,6 +12215,241 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(first, replay);
         assert_ne!(first, other_seed);
         assert!(first.starts_with("pack_"));
+        Ok(())
+    }
+
+    struct ConflictGuardFixture {
+        db: DbConnection,
+        draft: crate::pack::PackDraft,
+        workspace: String,
+        a: String,
+        b: String,
+        decision: String,
+        conflict_id: String,
+    }
+
+    impl ConflictGuardFixture {
+        fn new() -> Result<Self, String> {
+            let (_, mut draft) = pack_hash_v2_fixture(Vec::new())?;
+            let a = draft.items[0].memory_id.to_string();
+            let mut second = draft.items[0].clone();
+            second.memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(88));
+            second.rank = 2;
+            second.content = "A different deployment requirement.".to_owned();
+            let b = second.memory_id.to_string();
+            draft.items.push(second);
+            draft.used_tokens = 18;
+            draft.selection_audit.candidate_count = 2;
+            draft.selection_audit.selected_count = 2;
+            draft.selection_audit.budget_used = 18;
+            let decision = MemoryId::from_uuid(uuid::Uuid::from_u128(89)).to_string();
+            let workspace = WorkspaceId::from_uuid(uuid::Uuid::from_u128(66)).to_string();
+            let db = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            db.migrate().map_err(|error| error.to_string())?;
+            db.insert_workspace(
+                &workspace,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-conflict-pack-guard".to_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            for (id, kind) in [(&a, "fact"), (&b, "fact"), (&decision, "decision")] {
+                db.insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace.clone(),
+                        content: "Reviewed deployment context.".to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: kind.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.5,
+                        importance: 0.5,
+                        trust_class: "agent_assertion".to_owned(),
+                        trust_subclass: None,
+                        provenance_uri: Some("manual://conflict-pack-guard".to_owned()),
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            let mut fixture = Self {
+                db,
+                draft,
+                workspace,
+                a,
+                b,
+                decision,
+                conflict_id: String::new(),
+            };
+            fixture.link(
+                1,
+                &fixture.a,
+                &fixture.b,
+                crate::db::MemoryLinkRelation::Contradicts,
+                false,
+                None,
+            )?;
+            let surface = crate::core::contradiction_detect::assemble_conflict_surface(
+                &fixture.db,
+                crate::core::contradiction_detect::ContradictionDetectionConfig::default(),
+            );
+            assert_eq!(surface.pairs.len(), 1);
+            fixture.conflict_id = surface.pairs[0].conflict_id.clone();
+            Ok(fixture)
+        }
+
+        fn link(
+            &self,
+            number: u8,
+            from: &str,
+            to: &str,
+            relation: crate::db::MemoryLinkRelation,
+            directed: bool,
+            metadata_json: Option<String>,
+        ) -> TestResult {
+            self.db
+                .insert_memory_link(
+                    &format!("link_{number:026}"),
+                    &crate::db::CreateMemoryLinkInput {
+                        src_memory_id: from.to_owned(),
+                        dst_memory_id: to.to_owned(),
+                        relation,
+                        weight: 1.0,
+                        confidence: 1.0,
+                        directed,
+                        evidence_count: 1,
+                        last_reinforced_at: None,
+                        source: crate::db::MemoryLinkSource::Agent,
+                        created_by: Some("conflict-pack-guard-test".to_owned()),
+                        metadata_json,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        }
+
+        fn details(&self, verb: &str) -> serde_json::Value {
+            serde_json::json!({
+                "schema": crate::core::contradiction_detect::CONFLICT_RESOLUTION_AUDIT_SCHEMA,
+                "conflictId": self.conflict_id,
+                "memoryA": self.a,
+                "memoryB": self.b,
+                "verb": verb,
+                "resolutionDecisionId": self.decision,
+            })
+        }
+
+        fn completion(&self, details: String) -> TestResult {
+            self.db
+                .insert_audit(
+                    &crate::db::generate_audit_id(),
+                    &crate::db::CreateAuditInput {
+                        workspace_id: Some(self.workspace.clone()),
+                        actor: Some("conflict-pack-guard-test".to_owned()),
+                        action: crate::core::contradiction_detect::CONFLICT_RESOLUTION_AUDIT_ACTION
+                            .to_owned(),
+                        target_type: Some("conflict".to_owned()),
+                        target_id: Some(self.conflict_id.clone()),
+                        details: Some(details),
+                    },
+                )
+                .map_err(|error| error.to_string())
+        }
+
+        fn assert_retained(&self, expected: usize) {
+            let mut draft = self.draft.clone();
+            super::apply_context_pack_contradiction_guard(&self.db, &mut draft);
+            assert_eq!(draft.items.len(), expected);
+            assert_eq!(draft.selection_audit.selected_count, expected);
+            assert_eq!(draft.omitted.len(), 2 - expected);
+            if expected == 1 {
+                assert_eq!(draft.items[0].memory_id.to_string(), self.a);
+                assert_eq!(draft.omitted[0].memory_id.to_string(), self.b);
+                assert_eq!(
+                    draft.omitted[0].reason,
+                    crate::pack::PackOmissionReason::ContradictionSuppressed
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn context_pack_retains_both_sources_only_after_completed_coexistence() -> TestResult {
+        for verb in ["scope-split", "both-valid"] {
+            let fixture = ConflictGuardFixture::new()?;
+            fixture.assert_retained(1);
+            fixture.link(
+                4,
+                &fixture.a,
+                &fixture.b,
+                crate::db::MemoryLinkRelation::Related,
+                false,
+                Some(
+                    serde_json::json!({
+                        "resolution": "both_valid",
+                        "conflictId": fixture.conflict_id,
+                    })
+                    .to_string(),
+                ),
+            )?;
+            fixture.assert_retained(1);
+            for (number, source) in [(2, &fixture.a), (3, &fixture.b)] {
+                fixture.link(
+                    number,
+                    &fixture.decision,
+                    source,
+                    crate::db::MemoryLinkRelation::DerivedFrom,
+                    true,
+                    None,
+                )?;
+            }
+            fixture.completion(fixture.details(verb).to_string())?;
+            fixture.assert_retained(2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_keeps_suppressing_when_resolution_authority_is_incomplete() -> TestResult {
+        for flaw in [
+            "malformed",
+            "wrong-pair",
+            "missing-provenance",
+            "undirected-provenance",
+        ] {
+            let fixture = ConflictGuardFixture::new()?;
+            fixture.link(
+                2,
+                &fixture.decision,
+                &fixture.a,
+                crate::db::MemoryLinkRelation::DerivedFrom,
+                true,
+                None,
+            )?;
+            if flaw != "missing-provenance" {
+                fixture.link(
+                    3,
+                    &fixture.decision,
+                    &fixture.b,
+                    crate::db::MemoryLinkRelation::DerivedFrom,
+                    flaw != "undirected-provenance",
+                    None,
+                )?;
+            }
+            let mut details = fixture.details("both-valid");
+            if flaw == "wrong-pair" {
+                details["memoryB"] = serde_json::json!(fixture.decision);
+            }
+            fixture.completion(if flaw == "malformed" {
+                "{".to_owned()
+            } else {
+                details.to_string()
+            })?;
+            fixture.assert_retained(1);
+        }
         Ok(())
     }
 

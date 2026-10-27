@@ -112,6 +112,8 @@ mod readme_invariant_manifest_schema;
 mod readme_perf_coverage_test;
 #[path = "../readme_perf_sync.rs"]
 mod readme_perf_sync;
+#[path = "../real_shape_corpus_shapes.rs"]
+mod real_shape_corpus_shapes;
 #[path = "../recall_cli_golden.rs"]
 mod recall_cli_golden;
 #[path = "../recorder_event_spine_contract.rs"]

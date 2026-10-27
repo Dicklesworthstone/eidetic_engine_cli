@@ -17,8 +17,8 @@
 
 ```bash
 f="$(mktemp)"
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.16.0/install.sh -o "$f"
-export EE_VERSION=v0.16.0
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.18.0/install.sh -o "$f"
+export EE_VERSION=v0.18.0
 if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
 ```
 
@@ -348,9 +348,9 @@ Hard constraints. CI fails if any of them break.
 
 | Path | Status | Provenance | Tracking |
 |---|---|---|---|
-| GitHub release installer | available; latest published tag is v0.16.0 | SHA-256 required; SLSA provenance JSON and its Sigstore bundle optional via `--require-provenance` (v0.16.0 published unsigned) | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
-| Homebrew tap | available; formula version 0.16.0 | release-asset sha256 in the tap formula | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
-| crates.io | available; package `eidetic-engine` 0.16.0; binary remains `ee` | crates.io checksum | [published versions](https://crates.io/crates/eidetic-engine/versions) |
+| GitHub release installer | available; latest published tag is v0.18.0 | SHA-256 required; v0.18.0 also publishes a minisign `.minisig` per archive. SLSA provenance JSON and its Sigstore bundle are still not published, so `--require-provenance` fails by design | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
+| Homebrew tap | available; formula version 0.18.0 | release-asset sha256 in the tap formula | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
+| crates.io | available; package `eidetic-engine` 0.18.0; binary remains `ee` | crates.io checksum | [published versions](https://crates.io/crates/eidetic-engine/versions) |
 | Source build | available now | local build only | this README |
 
 When upgrading from a version earlier than 0.15.0, rebuild each workspace's semantic index with
@@ -368,12 +368,12 @@ for systems without glibc.
 
 ```bash
 f="$(mktemp)"
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.16.0/install.sh -o "$f"
-export EE_VERSION=v0.16.0
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.18.0/install.sh -o "$f"
+export EE_VERSION=v0.18.0
 if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
 ```
 
-This fetches the installer and the matching `v0.16.0` release binary from GitHub
+This fetches the installer and the matching `v0.18.0` release binary from GitHub
 release assets, not from mutable `main`. To install a different published tag,
 change both the URL path and `EE_VERSION`.
 
@@ -426,11 +426,11 @@ compatible GNU build when that release does not include musl.
 
 ```powershell
 $f = Join-Path $env:TEMP 'install-ee.ps1'
-Invoke-WebRequest -UseBasicParsing "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.16.0/install.ps1" -OutFile $f
-if (Test-Path $f) { & $f -Version "0.16.0" -Verify } else { Write-Error "Installer download failed - retry in a few minutes" }
+Invoke-WebRequest -UseBasicParsing "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.18.0/install.ps1" -OutFile $f
+if (Test-Path $f) { & $f -Version "0.18.0" -Verify } else { Write-Error "Installer download failed - retry in a few minutes" }
 ```
 
-This pins both the installer script and the installed binary to the `v0.16.0`
+This pins both the installer script and the installed binary to the `v0.18.0`
 release assets. The mutable-`main` jsDelivr / `raw.githubusercontent.com`
 fallback remains for installer-script development only:
 
@@ -480,10 +480,10 @@ brew install Dicklesworthstone/tap/ee
 
 Use nightly Rust and the published lockfile. Version 0.15.1 has a read-only
 storage regression affecting native reranking and concurrent writes; install
-0.16.0, or any version after 0.15.1, from the registry:
+0.18.0, or any version after 0.15.1, from the registry:
 
 ```bash
-cargo +nightly install eidetic-engine --version 0.16.0 --locked
+cargo +nightly install eidetic-engine --version 0.18.0 --locked
 ```
 
 A `cargo install` build does not run `build.rs` (crates.io excludes it from the
@@ -600,7 +600,7 @@ This runs all readiness gates in order, stopping at the first failure:
 | 6 | Unit, contract, golden, binary, test, and example targets |
 | 6 | Basic E2E |
 | 6.06 | Replay lab smoke E2E |
-| 6.5 | Overhaul integration when `VERIFY_OVERHAUL` is enabled |
+| 6.5 | Overhaul integration (runs by default; `VERIFY_OVERHAUL` is never set — bd-e4ymh) |
 | 6.6 | Fake Tailscale harness |
 | 6.7 | Fake OIDC happy-path, defect, and deterministic capability/privacy/time matrix harnesses |
 | 7 | Advanced E2E |
@@ -987,7 +987,8 @@ need a deterministic brief:
 ee swarm brief --workspace . --agent-mail-snapshot <snapshot.json> --json
 ```
 
-The flag defaults to `<workspace>/.ee/agent-mail-snapshot.json` when omitted.
+When the flag is omitted, `<workspace>/.ee/agent-mail-snapshot.json` is read if
+it exists; `ee handoff` uses the same default.
 
 If either summary form (`ee swarm brief --fields summary ...` or
 `ee --fields summary swarm brief ...`) returns an `ee.error.v2` usage failure
@@ -1230,17 +1231,28 @@ mid-task state.
 
 | Command | Purpose |
 |---|---|
+| `ee handoff preview --workspace . --json` | Show what `create` would capture, without writing a capsule |
 | `ee handoff create --workspace . --out <capsule.json> --json` | Write a signed capsule |
-| `ee handoff inspect <capsule.json> --workspace . --json` | Inspect capsule contents without consuming it |
-| `ee handoff preview <capsule.json> --workspace . --json` | Show resume effects before consuming it |
-| `ee handoff resume <capsule.json> --workspace . --json` | Consume the capsule and re-warm context |
-| `ee handoff rotate-key <capsule.json> --workspace . --json` | Re-sign after suspected exposure |
+| `ee handoff inspect <capsule.json> --workspace . --json` | Validate a capsule and show its contents |
+| `ee handoff resume <capsule.json> --workspace . --json` | Verify a capsule and render the context the next agent resumes from |
+| `ee handoff rotate-key --capsule <capsule.json> --workspace . --json` | Re-sign after suspected exposure |
 
-Capsules carry bead context, recent commits, reservations, last pack ID,
-posture, next steps, redaction summary, and content hashes. They are
-HMAC-signed files, so treat the capsule path as a credential. Use `ee support
-bundle` for bug reports and `ee export` for memory transfer; handoff is for
-resuming work.
+Capsules carry bead context, recent commits, Agent Mail reservation evidence,
+last pack ID, posture, next steps, redaction summary, and content hashes. They
+are HMAC-signed files, so treat the capsule path as a credential. Use `ee
+support bundle` for bug reports and `ee export` for memory transfer; handoff is
+for resuming work.
+
+Reservations come from a redacted Agent Mail snapshot, not from a live mailbox
+query. `preview`, `create` and `resume` read
+`<workspace>/.ee/agent-mail-snapshot.json`, or the file passed with
+`--agent-mail-snapshot <path>`; run `scripts/agent_mail_snapshot.sh` just before
+capturing or resuming. The snapshot must belong to this checkout's canonical
+path. When one mail project serves a checkout at a different path, pass that
+project's key (the `project_key` the snapshot producer reports) with
+`--agent-mail-project-key sha256:<hex>`. A missing, stale or mismatched snapshot
+is recorded as unverified with no count, never as zero reservations. See
+[Handoff reservation evidence](docs/swarm/coordination_runbook.md#handoff-reservation-evidence).
 
 ### Swarm schema contracts
 
@@ -1467,7 +1479,7 @@ entity too; stored secrets and private paths are redacted on output.
 | `ee memory expire <id> [--dry-run]` | Audited soft expiration without deleting memory rows |
 | `ee memory link <id> [target-id] --relation <type> [--dry-run]` | Deterministic memory link listing and audited explicit link creation |
 | `ee memory tags <id> [--add <tags>] [--remove <tags>] [--set <tags>] [--clear]` | Deterministic audited tag listing and mutation |
-| `ee memory promote-global <id> [--dry-run]` | Evidence-gated copy-with-link promotion of a workspace memory into the user-global lane; refusals are typed exit-7 plans (`ee.global_promotion.plan.v1`) |
+| `ee memory promote-global <id> [--dry-run]` | Evidence-gated promotion into the user-global lane: reuse an exact twin, queue a near-duplicate merge for review, or insert new knowledge; refusals are typed exit-7 plans (`ee.global_promotion.plan.v2`) |
 | `ee memory demote-global <global-id>` | Audited tombstone of a promoted global row (`ee.global_demotion.report.v1`); tombstoned rows never re-enter candidate pools |
 | `ee memory outcome-global <global-id> --signal helpful\|harmful [--dry-run]` | Feedback on a global row with clamped confidence backflow to the origin workspace row (`ee.global_promotion.backflow.v1`) |
 
@@ -1504,13 +1516,25 @@ entity too; stored secrets and private paths are redacted on output.
 | Command | Purpose |
 |---|---|
 | `ee conflict list` / `explain <id>` / `cluster` | Read-only ranked contradiction surface: conflicting pairs with both bodies + the preferred side, and k-truss/Louvain clusters (`ee.conflict.v1`) |
-| `ee conflict resolve <a> <b> --verb supersede\|reject-one\|scope-split\|both-valid [--keep ID] [--reason "..."] [--apply]` | Audited resolution against the LIVE surface; dry-run plan by default. Every mutation maps onto existing audited atoms and the rationale persists as a `kind=decision` memory (`ee.conflict.resolve.v1`) |
+| `ee conflict resolve <a> <b> --verb supersede\|reject-one\|scope-split\|both-valid [--keep ID] [--reason "..."] [--propose\|--apply]` | Preview a resolution, save it in the curation queue with `--propose`, or apply it directly with `--apply`. Resolutions use the existing atomic decision writer and preserve an audited rationale (`ee.conflict.resolve.v1`; queued proposal: `ee.conflict.proposal.v1`) |
 
 Resolution is terminal: a tombstoned side (superseded or rejected) drops the
 pair from the actionable surface, and re-running against a moved surface
 refuses with `conflict_resolve_stale_surface` plus the focused live state.
 See [`docs/agent-ux/graph-intelligence.md`](docs/agent-ux/graph-intelligence.md)
 for the full densification and resolution loop.
+
+Use `--propose` when a resolution needs review before it changes memory.
+The response includes the durable `candidateId` and commands for inspecting
+and reviewing it. `ee curate show <candidate-id>` previews the resolution;
+`ee curate validate <candidate-id> --dry-run` checks it without approving it;
+`ee curate accept <candidate-id>` approves it; and `ee curate apply
+<candidate-id>` performs the approved resolution. `--propose` and `--apply`
+are mutually exclusive. Repeating an unchanged proposal reuses its queue
+entry. Apply checks the live conflict and the captured source state again,
+so approval cannot overwrite a later resolution or silently act on changed
+memories. A scope split keeps both bodies and applies the corresponding scope
+tags; it does not tombstone either side.
 
 ### Index
 
@@ -1526,6 +1550,12 @@ in a non-recoverable rejected quarantine. See [`docs/indexing.md`](docs/indexing
 equivalence, fallback, and RCH-only E2E contracts.
 
 ### Workspace, models, schemas
+
+Operational commands resolve an existing workspace root to its physical path,
+so a symlinked `--workspace` or `EE_WORKSPACE` selects the same store as its target.
+Path expressions are expanded once, before resolving symlinks. `ee init` still
+requires `--allow-symlink` to initialize through a symlinked root. Symlinks inside
+the store path, including `.ee` and `ee.db`, remain refused.
 
 | Command | Purpose |
 |---|---|
@@ -2086,6 +2116,16 @@ origin workspace keeps its row and audit history; the global copy carries
 **evidence-gated**: only `human_explicit` or `agent_validated` memories
 qualify, everything else gets a typed exit-7 refusal plan
 (`--dry-run` previews the verdict without writing).
+
+Promotion reuses an eligible exact-content twin. A sufficiently similar but
+different lesson produces a pending merge candidate instead of another global
+row. The proposal retains both texts and their origin provenance for review;
+it changes neither the workspace memory nor the existing global memory.
+The promotion report names the `mergeCandidateId` and provides a
+`reviewCommand` selecting the global store. Inspect and approve the proposal
+there before applying it. Apply rechecks the destination snapshot and refuses
+stale proposals, so intervening edits cannot be overwritten by an older
+approval. Dry-run reports the proposed action without creating a queue entry.
 
 Precedence at retrieval is fixed: global rows compete in the same
 pack/recall/primer/search sections as workspace rows, always labeled

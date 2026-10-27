@@ -29,7 +29,7 @@
         "score": 1.0,
         "relevanceScore": 1.0,
         "scoreKind": "query_relative_pool_minmax",
-        "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+        "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
         "scoreInterval": [
           0.0,
           1.0
@@ -64,7 +64,7 @@
           "provenanceVerificationStatus": "unverified",
           "qualityScoring": {
             "schema": "ee.search.quality_scoring.v1",
-            "policyHash": "blake3:c132faf5bee2e594dd3fcb3780987f73685bd759903375480173145ca87f1341",
+            "policyHash": "blake3:8e16c005d7beb92b4d0d862f6e102e18816aa01d84181c337b616370e458ef25",
             "entityType": "memory",
             "rankingBound": 1.8000001,
             "referenceTime": "2026-04-30T12:00:00.000Z",
@@ -107,6 +107,9 @@
               "redundancy": null,
               "freshnessDrift": null,
               "anchorMatch": null,
+              "anchorMatchExactMatches": null,
+              "anchorMatchCapped": null,
+              "anchorMatchSource": null,
               "beadAffinity": null
             }
           },
@@ -115,7 +118,7 @@
             "schema": "ee.search.score_calibration.v1",
             "method": "scaled_split_conformal",
             "status": "absent",
-            "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+            "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
             "coverage": 0.95,
             "sampleCount": 0,
             "minimumSamples": 20,
@@ -233,11 +236,18 @@
               "formula": "1 when anchor freshness is not observed"
             },
             {
+              "name": "anchorMatch",
+              "value": 0.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.anchorMatch",
+              "formula": "min(0.04 * exact_matches, anchor_match_bias_cap, 0.08) from live memory content; 0 when unobserved"
+            },
+            {
               "name": "qualityRanking",
               "value": 1.0799959,
               "contribution": "final EE quality ranking; engine relevance is unchanged",
               "sourceField": "metadata.qualityScoring.components.finalScore",
-              "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch; unobserved optional terms are neutral"
+              "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch + anchorMatch; unobserved optional terms are neutral"
             }
           ]
         }
@@ -247,7 +257,7 @@
         "score": 0.6233764,
         "relevanceScore": 0.623376,
         "scoreKind": "query_relative_pool_minmax",
-        "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+        "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
         "scoreInterval": [
           0.0,
           1.0
@@ -282,7 +292,7 @@
           "provenanceVerificationStatus": "unverified",
           "qualityScoring": {
             "schema": "ee.search.quality_scoring.v1",
-            "policyHash": "blake3:c132faf5bee2e594dd3fcb3780987f73685bd759903375480173145ca87f1341",
+            "policyHash": "blake3:8e16c005d7beb92b4d0d862f6e102e18816aa01d84181c337b616370e458ef25",
             "entityType": "memory",
             "rankingBound": 1.8000001,
             "referenceTime": "2026-04-30T12:00:00.000Z",
@@ -325,6 +335,9 @@
               "redundancy": null,
               "freshnessDrift": null,
               "anchorMatch": null,
+              "anchorMatchExactMatches": null,
+              "anchorMatchCapped": null,
+              "anchorMatchSource": null,
               "beadAffinity": null
             }
           },
@@ -333,7 +346,7 @@
             "schema": "ee.search.score_calibration.v1",
             "method": "scaled_split_conformal",
             "status": "absent",
-            "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+            "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
             "coverage": 0.95,
             "sampleCount": 0,
             "minimumSamples": 20,
@@ -451,11 +464,18 @@
               "formula": "1 when anchor freshness is not observed"
             },
             {
+              "name": "anchorMatch",
+              "value": 0.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.anchorMatch",
+              "formula": "min(0.04 * exact_matches, anchor_match_bias_cap, 0.08) from live memory content; 0 when unobserved"
+            },
+            {
               "name": "qualityRanking",
               "value": 0.597392,
               "contribution": "final EE quality ranking; engine relevance is unchanged",
               "sourceField": "metadata.qualityScoring.components.finalScore",
-              "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch; unobserved optional terms are neutral"
+              "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch + anchorMatch; unobserved optional terms are neutral"
             }
           ]
         }
@@ -465,7 +485,7 @@
         "score": 0.36304024,
         "relevanceScore": 0.36304,
         "scoreKind": "query_relative_pool_minmax",
-        "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+        "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
         "scoreInterval": [
           0.0,
           1.0
@@ -500,7 +520,7 @@
           "provenanceVerificationStatus": "unverified",
           "qualityScoring": {
             "schema": "ee.search.quality_scoring.v1",
-            "policyHash": "blake3:c132faf5bee2e594dd3fcb3780987f73685bd759903375480173145ca87f1341",
+            "policyHash": "blake3:8e16c005d7beb92b4d0d862f6e102e18816aa01d84181c337b616370e458ef25",
             "entityType": "memory",
             "rankingBound": 1.8000001,
             "referenceTime": "2026-04-30T12:00:00.000Z",
@@ -543,6 +563,9 @@
               "redundancy": null,
               "freshnessDrift": null,
               "anchorMatch": null,
+              "anchorMatchExactMatches": null,
+              "anchorMatchCapped": null,
+              "anchorMatchSource": null,
               "beadAffinity": null
             }
           },
@@ -551,7 +574,7 @@
             "schema": "ee.search.score_calibration.v1",
             "method": "scaled_split_conformal",
             "status": "absent",
-            "calibrationId": "blake3:35546ed493457c8e01f63b1f8ec54a05ff0c8f26fcfc6ff388897f08d7609ac1",
+            "calibrationId": "blake3:94d4ce6eedb1a932ac39c20998597daaf6a05e85bb4a8e576c97e732ebfb9b22",
             "coverage": 0.95,
             "sampleCount": 0,
             "minimumSamples": 20,
@@ -669,11 +692,18 @@
               "formula": "1 when anchor freshness is not observed"
             },
             {
+              "name": "anchorMatch",
+              "value": 0.0,
+              "contribution": "neutral: signal unavailable or not observed",
+              "sourceField": "metadata.qualityScoring.components.anchorMatch",
+              "formula": "min(0.04 * exact_matches, anchor_match_bias_cap, 0.08) from live memory content; 0 when unobserved"
+            },
+            {
               "name": "qualityRanking",
               "value": 0.24633883,
               "contribution": "final EE quality ranking; engine relevance is unchanged",
               "sourceField": "metadata.qualityScoring.components.finalScore",
-              "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch; unobserved optional terms are neutral"
+              "formula": "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch + anchorMatch; unobserved optional terms are neutral"
             }
           ]
         }

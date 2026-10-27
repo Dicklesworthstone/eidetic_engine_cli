@@ -5665,6 +5665,156 @@ mod tests {
         )
     }
 
+    /// The schema's `required` list, walked against a REAL rendered payload.
+    ///
+    /// The pre-existing guard for this contract
+    /// (`why_schema_documents_load_bearing_graph_block`,
+    /// tests/contracts/graph_schemas_v1.rs) only reads
+    /// docs/schemas/ee.why.v1.json and asserts the schema says what the test
+    /// says it says. It renders nothing, so it cannot fail when the RENDERER
+    /// stops emitting the block -- which is exactly what happened in
+    /// bd-maisx, with that test and the ee.why.v1 snapshot both green. The
+    /// snapshot is no help either: it is five lines whose entire content is
+    /// the string "ee.why.v1".
+    ///
+    /// This drives the field list FROM THE SCHEMA FILE rather than a
+    /// hardcoded copy, so adding a required field widens the test by itself,
+    /// and it carries its own negative control. bd-6ox3b.
+    #[test]
+    fn why_load_bearing_payload_satisfies_every_schema_required_field() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_00000000000000000000001011";
+        let memory_id = "mem_00000000000000000000001011";
+        let connection =
+            crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: temp.path().display().to_string(),
+                    name: Some("why load-bearing schema contract".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Load-bearing memory anchors the schema contract.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: Some("2026-05-20T00:00:00Z".to_owned()),
+                    valid_to: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        for rule_id in [
+            crate::testing::rule("whyschemarequiredalpha"),
+            crate::testing::rule("whyschemarequiredbeta"),
+        ] {
+            connection
+                .insert_procedural_rule(
+                    &rule_id,
+                    &CreateProceduralRuleInput {
+                        workspace_id: workspace_id.to_owned(),
+                        content: format!("{rule_id} cites load-bearing evidence."),
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        trust_class: "human_explicit".to_owned(),
+                        scope: "workspace".to_owned(),
+                        scope_pattern: None,
+                        maturity: "validated".to_owned(),
+                        protected: false,
+                        source_memory_ids: vec![memory_id.to_owned()],
+                        tags: Vec::new(),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        drop(connection);
+
+        let report = explain_memory(&WhyOptions {
+            database_path: &database_path,
+            memory_id,
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        });
+        let rendered: serde_json::Value =
+            serde_json::from_str(&crate::output::render_why_json(&report))
+                .map_err(|error| error.to_string())?;
+        let block = rendered
+            .pointer("/data/graph/loadBearing")
+            .ok_or_else(|| "rendered why payload carries no data.graph.loadBearing".to_owned())?;
+
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs")
+            .join("schemas")
+            .join("ee.why.v1.json");
+        let schema: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&schema_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let required = schema
+            .pointer("/$defs/loadBearingWhy/required")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "ee.why.v1.json has no $defs.loadBearingWhy.required".to_owned())?;
+        // An empty required list would make every assertion below vacuous.
+        ensure(
+            required.is_empty(),
+            false,
+            "the schema's required list must not be empty",
+        )?;
+
+        let missing = |value: &serde_json::Value| -> Vec<String> {
+            required
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|name| value.get(*name).is_none())
+                .map(str::to_owned)
+                .collect()
+        };
+        ensure(
+            missing(block),
+            Vec::<String>::new(),
+            "every field ee.why.v1.json requires of loadBearingWhy must appear in the rendered payload",
+        )?;
+
+        // NEGATIVE CONTROL. Remove one required field from the rendered value
+        // and the walk must name exactly that field. Without this the walk
+        // could be silently matching nothing and still report success.
+        let first = required
+            .first()
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "required list should have a first entry".to_owned())?;
+        let mut stripped = block.clone();
+        stripped
+            .as_object_mut()
+            .ok_or_else(|| "loadBearing should render as an object".to_owned())?
+            .remove(first);
+        ensure(
+            missing(&stripped),
+            vec![first.to_owned()],
+            "the presence walk must notice a removed required field",
+        )
+    }
+
     #[test]
     fn why_revision_lineage_aggregates_dominance_degradations() -> TestResult {
         let degraded = aggregate_why_dominance_degraded(&[

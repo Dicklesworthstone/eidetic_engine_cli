@@ -190,6 +190,20 @@ fn run_step_with_env(
     let start = Instant::now();
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     command.args(&spec.args);
+    // Prohibit network downloads for every step. On a host without the local
+    // embedding model cached, ee's first embedding call prints a one-time
+    // notice to STDERR -- "ee is downloading the local embedding model
+    // potion-multilingual-128M (506.4 MB) once into the private ee model
+    // registry. Set EE_EMBED_DOWNLOAD=off to prohibit network downloads" --
+    // and the Appendix C contract this test enforces requires stderr to be
+    // EMPTY on success. So the step failed with "stderr was not empty" while
+    // its own stdout reported success:true and a completed import, which reads
+    // as a product defect and is really an uncached model.
+    //
+    // The notice names this exact remedy, and 37 other test files already set
+    // it. Set BEFORE the caller's envs so a step that deliberately exercises
+    // download behaviour can still override it.
+    command.env("EE_EMBED_DOWNLOAD", "off");
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -305,16 +319,31 @@ fn cass_session_source_path(value: &JsonValue) -> Option<&str> {
         .and_then(JsonValue::as_str)
 }
 
+/// Collect the memory ids present among the pack's items.
+///
+/// Items WITHOUT a `memoryId` are skipped rather than rejected, because not
+/// every pack item is memory-backed. An imported CASS evidence span carries no
+/// `memoryId` BY DESIGN -- `src/pack/binary.rs:872` pins that an evidence item
+/// has none, bd-16imy's acceptance requires hydration "without inventing
+/// MemoryIds", and that project's own e2e asserts the absence
+/// (`evidence_items_carry_no_synthetic_memory_id`). This flow imports CASS at
+/// step `02_setup_import_cass`, so its pack legitimately contains such items,
+/// and the previous `map(...).ok_or_else(...)` form failed the whole scenario
+/// with "context item missing memoryId" the moment the evidence lane started
+/// hydrating. That read as an Appendix C regression and was a collision between
+/// this helper's universal expectation and a deliberate product contract.
+///
+/// Skipping does not weaken the caller: it asserts that one of two SPECIFIC
+/// memory ids appears, so an empty or memory-free list still fails.
 fn context_memory_ids(value: &JsonValue) -> Result<Vec<String>, String> {
-    json_array(value, "/data/pack/items", "context")?
+    Ok(json_array(value, "/data/pack/items", "context")?
         .iter()
-        .map(|item| {
+        .filter_map(|item| {
             item.get("memoryId")
                 .and_then(JsonValue::as_str)
                 .map(str::to_owned)
-                .ok_or_else(|| "context item missing memoryId".to_owned())
         })
-        .collect()
+        .collect())
 }
 
 fn ensure_context_items_have_provenance(value: &JsonValue) -> TestResult {
@@ -777,8 +806,8 @@ fn appendix_c_agent_flow_parity_scenario() -> TestResult {
                         index + 6
                     ),
                     format!(
-                        "Before modifying src/middleware/rate_limit.rs:{}, run `ee search \"Send + Sync error governor\" --json` from workspace root to retrieve governor failures from rate-limit-feb-2026 workflow.",
-                        42 + index * 10
+                        "Lesson {}: Before modifying src/middleware/rate_limit.rs:42, run `ee search \"Send + Sync error governor\" --json` from workspace root to retrieve governor failures from rate-limit-feb-2026 workflow.",
+                        index + 1
                     ),
                 ],
                 expected_exit_code: 0,

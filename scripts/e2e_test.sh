@@ -41,6 +41,14 @@ fi
 # shellcheck source=scripts/lib/ee_binary_resolution.sh
 source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
 EE_BINARY="$(ee_resolve_binary debug)"
+# bd-resolve-without-require-binary-guard-jqiws: resolving a binary is not the
+# same as being able to run it. Refuse a missing, foreign-format or stale one
+# here, so a single environment fault does not read as N product failures.
+# Exit 76 is verify.sh's STAGE_ENV_UNRUNNABLE_CODE, deliberately not 2:
+# verify.sh invokes this script and maps unrecognised codes to FAIL.
+if ! ee_require_current_binary "$EE_BINARY" "e2e_test"; then
+    exit 76
+fi
 
 # Test workspace (created fresh per run)
 TEST_WORKSPACE=""

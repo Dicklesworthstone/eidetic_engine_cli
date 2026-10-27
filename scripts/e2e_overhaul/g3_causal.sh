@@ -10,6 +10,13 @@ require_jq
 START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g3_causal"
 seed_corpus
+# graph.feature.causal_explain.enabled DEFAULTS TO FALSE, like every other
+# graph.feature.*.enabled (src/config/merge.rs:1304, built_in_config). Without
+# this the suite asserts enabled-feature behaviour against a dormant feature
+# and the empty paths read as a regression. Measured 2026-10-19: 10 failed
+# assertions here, of which g3_causal_explanation_not_degraded got "1" for an
+# expected "-eq 0". See g9_load_bearing for the same flag class enabled, 30/30.
+ee_workspace config set graph.feature.causal_explain.enabled true --json >/dev/null
 
 e2e_log_note "g3_causal_surface=why --causal-explain"
 remember_causal_fixture() {

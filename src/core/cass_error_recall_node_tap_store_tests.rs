@@ -233,3 +233,6 @@ fn invalid_node_retries_never_persist_helpful_repairs() -> TestResult {
     }
     Ok(())
 }
+
+#[path = "cass_error_recall_node_tap_growth_tests.rs"]
+mod growth;

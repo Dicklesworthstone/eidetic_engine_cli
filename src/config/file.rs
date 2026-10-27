@@ -284,7 +284,7 @@ impl SearchConfig {
 }
 
 /// Operator controls for the retrieval signals observed by live search.
-/// Unobserved graph, redundancy, anchor, and bead signals have no config keys.
+/// Unobserved graph, redundancy, and bead signals have no config keys.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScoringConfig {
     pub recency_tau_days: Option<f64>,
@@ -295,6 +295,7 @@ pub struct ScoringConfig {
     pub scope_match_bonus: Option<f64>,
     pub candidate_multiplier: Option<f64>,
     pub established_multiplier: Option<f64>,
+    pub anchor_match_bias_cap: Option<f64>,
 }
 
 impl ScoringConfig {
@@ -312,6 +313,7 @@ impl ScoringConfig {
             scope_match_bonus: optional_float(document, "scoring", "scope_match_bonus")?,
             candidate_multiplier: optional_float(document, "scoring", "candidate_multiplier")?,
             established_multiplier: optional_float(document, "scoring", "established_multiplier")?,
+            anchor_match_bias_cap: optional_float(document, "scoring", "anchor_match_bias_cap")?,
         };
         config.validate()?;
         Ok(config)
@@ -352,6 +354,12 @@ impl ScoringConfig {
                 self.established_multiplier,
                 0.0,
                 2.0,
+            ),
+            (
+                "anchor_match_bias_cap",
+                self.anchor_match_bias_cap,
+                0.0,
+                0.08,
             ),
         ] {
             let Some(value) = value else {
@@ -1697,6 +1705,7 @@ fn config_key_policy(table_path: &str) -> Option<ConfigKeyPolicy> {
             "scope_match_bonus",
             "candidate_multiplier",
             "established_multiplier",
+            "anchor_match_bias_cap",
         ]),
         "pack" => ConfigKeyPolicy::Closed(&[
             "default_profile",
@@ -4259,7 +4268,7 @@ source_mode = "random"
         let parsed = ConfigFile::parse(
             "[scoring]\nrecency_tau_days = 0.25\nconfidence_floor = 0\nutility_floor = 1\n\
              harmful_penalty_per_hit = 0\nharmful_penalty_floor = 1\nscope_match_bonus = 2\n\
-             candidate_multiplier = 0\nestablished_multiplier = 2\n",
+             candidate_multiplier = 0\nestablished_multiplier = 2\nanchor_match_bias_cap = 0.08\n",
         )
         .map_err(|error| error.to_string())?;
         ensure_equal(
@@ -4273,8 +4282,16 @@ source_mode = "random"
                 scope_match_bonus: Some(2.0),
                 candidate_multiplier: Some(0.0),
                 established_multiplier: Some(2.0),
+                anchor_match_bias_cap: Some(0.08),
             },
             "active scoring boundaries",
+        )?;
+        let disabled = ConfigFile::parse("[scoring]\nanchor_match_bias_cap = 0\n")
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &disabled.scoring.anchor_match_bias_cap,
+            &Some(0.0),
+            "zero explicitly disables anchor bias",
         )
     }
 
@@ -4289,6 +4306,7 @@ source_mode = "random"
             "scope_match_bonus",
             "candidate_multiplier",
             "established_multiplier",
+            "anchor_match_bias_cap",
         ] {
             for value in ["nan", "inf", "-inf", "-1", "\"0.5\"", "true"] {
                 let error = expect_config_error(&format!("[scoring]\n{key} = {value}\n"))?;
@@ -4310,6 +4328,7 @@ source_mode = "random"
             ("scope_match_bonus", "2.01"),
             ("candidate_multiplier", "1.01"),
             ("established_multiplier", "2.01"),
+            ("anchor_match_bias_cap", "0.08000001"),
             ("graph_centrality_weight", "0.1"),
             ("redundancy_lambda", "0.7"),
             ("proven_multiplier", "1.5"),
@@ -4323,7 +4342,18 @@ source_mode = "random"
         ensure(
             invalid.validate().is_err(),
             "programmatic NaN must be rejected",
-        )
+        )?;
+        for value in [-0.01, 0.08000001, f64::NAN, f64::INFINITY] {
+            let invalid = super::ScoringConfig {
+                anchor_match_bias_cap: Some(value),
+                ..super::ScoringConfig::default()
+            };
+            ensure(
+                invalid.validate().is_err(),
+                format!("invalid programmatic anchor cap must be rejected: {value}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

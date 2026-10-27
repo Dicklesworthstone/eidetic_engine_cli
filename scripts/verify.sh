@@ -34,6 +34,9 @@ set -euo pipefail
 #   ./scripts/verify.sh --fuzz-smoke   # Include 30s cargo-fuzz query parser smoke
 #   ./scripts/verify.sh --include-bench # Include performance benchmarks
 #   ./scripts/verify.sh --eval          # Include pack-quality eval regression sweep
+#   ./scripts/verify.sh --include-real-shape-fixture # Include the ~555s real-cass
+#                                       # corpus import (needs a real `cass` on
+#                                       # PATH and the committed corpus fixture)
 #   ./scripts/verify.sh --help         # Show this help
 #
 # Exit status:
@@ -108,7 +111,7 @@ set -euo pipefail
 #   6.1296 Bundled Embeddings E2E - scripts/e2e_bundled_embeddings.sh
 #   6.1297 Native Reranker E2E - scripts/e2e_native_reranker.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
-#   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
+#   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (NOT gated; bd-e4ymh)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
 #   6.7a-c Fake OIDC IdP Harness - protocol, defect, and matrix self-tests (T7.7)
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
@@ -123,6 +126,7 @@ set -euo pipefail
 INCLUDE_BENCH=false
 INCLUDE_EVAL=false
 INCLUDE_FUZZ_SMOKE=false
+INCLUDE_REAL_SHAPE_FIXTURE=false
 FUZZ_TARGET_AUDIT_SELF_TEST=false
 PLAN_DOC_SMOKE=false
 CI_SMOKE=false
@@ -134,6 +138,19 @@ source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
 DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
 BEADS_LOCK_WAIT_SECONDS="${EE_BEADS_LOCK_WAIT_SECONDS:-30}"
 BEADS_LOCK_SKIP_CODE=75
+# bd-3ghvw: "this ENVIRONMENT cannot run this stage" is a THIRD state, distinct
+# from both a failure and a contended skip, and it needs its own code.
+#
+# Why not reuse 75: that is the contention skip, so a no-git tree would be
+# counted in STAGE_SKIPPED_CONTENTION and named in the banner as LOCK
+# CONTENTION. That trades a visible wrong FAIL for an invisible wrong label,
+# which is worse -- the first gets investigated and the second gets believed.
+#
+# Why not leave it at the hygiene script's 3: every unclassified code falls to
+# FAIL in stage_status_for_exit_code, so a stage that printed "CANNOT RUN -- the
+# check needs a git repository" in words was still reported as a hygiene
+# failure. The script already knew; only the verifier did not.
+STAGE_ENV_UNRUNNABLE_CODE=76
 # scripts/closure-lint.sh exits this when its audit baseline lists debt that no
 # longer exists. Kept distinct from 1 so the Verification Drift Guard cannot
 # excuse it as a tracked violation; see closure_lint_or_tracked_drift.
@@ -160,6 +177,9 @@ for arg in "$@"; do
             ;;
         --fuzz-smoke)
             INCLUDE_FUZZ_SMOKE=true
+            ;;
+        --include-real-shape-fixture)
+            INCLUDE_REAL_SHAPE_FIXTURE=true
             ;;
         --include-bench)
             INCLUDE_BENCH=true
@@ -316,7 +336,7 @@ VERIFY_EXIT_NOTHING_ATTEMPTED=70
 # exit-code-derived. Their aggregation is held by
 # `advisory_and_tracked_red_are_counted_apart_from_passed` in
 # tests/verification_drift_guard.rs (1azkt.5 bullet 8, clause 2).
-STAGE_STATUS_VOCABULARY="PASS FAIL NOT_APPLICABLE SKIP ADVISORY TRACKED_RED INFRA_ERROR TIMEOUT CANCELLED"
+STAGE_STATUS_VOCABULARY="PASS FAIL NOT_APPLICABLE SKIP ADVISORY TRACKED_RED INFRA_ERROR TIMEOUT CANCELLED ENV_UNRUNNABLE"
 
 # Classify a stage's exit code into the vocabulary above.
 #
@@ -327,6 +347,11 @@ stage_status_for_exit_code() {
     case "$1" in
         0) printf '%s\n' "PASS" ;;
         "$BEADS_LOCK_SKIP_CODE") printf '%s\n' "SKIP" ;;
+        # bd-3ghvw. The stage established nothing because this environment
+        # cannot run it -- a clean overlay with no .git, most commonly. Distinct
+        # from SKIP (transient contention, retry helps) and from FAIL (it ran
+        # and decided).
+        "$STAGE_ENV_UNRUNNABLE_CODE") printf '%s\n' "ENV_UNRUNNABLE" ;;
         # GNU timeout(1). The stage did not finish, so it established nothing.
         124) printf '%s\n' "TIMEOUT" ;;
         # 128+9 SIGKILL: the OOM killer and `kill -9` both land here. The stage
@@ -341,6 +366,11 @@ stage_status_for_exit_code() {
 STAGE_PASSED=0
 STAGE_SKIPPED_CONTENTION=0
 STAGE_SKIPPED_CONTENTION_NAMES=""
+# bd-3ghvw. Counted separately from BOTH passed and contended: a stage this
+# environment could not run did not pass, and calling it contention would make
+# a missing capability look like a transient lock.
+STAGE_ENV_UNRUNNABLE=0
+STAGE_ENV_UNRUNNABLE_NAMES=""
 STAGE_GATED_OFF=0
 STAGE_GATED_OFF_NAMES=""
 # Declared-non-required outcomes. Counted SEPARATELY from STAGE_PASSED on
@@ -492,12 +522,17 @@ if ! EE_ACTUAL_FEATURES="$(ee_binary_enabled_features)"; then
     exit 1
 fi
 printf 'verify: ee_binary_features=%s\n' "${EE_ACTUAL_FEATURES}" >&2
-if [ "${EE_ACTUAL_FEATURES}" != "${EE_EXPECTED_FEATURES}" ]; then
-    printf 'verify: refusing: candidate binary feature set does not match Cargo.toml.\n' >&2
-    printf 'verify:   expected (Cargo.toml default): %s\n' "${EE_EXPECTED_FEATURES}" >&2
-    printf 'verify:   actual   (%s): %s\n' "${EE_BINARY}" "${EE_ACTUAL_FEATURES}" >&2
-    printf 'verify: stages would run against a binary built differently from the\n' >&2
-    printf 'verify: one this manifest describes.\n' >&2
+# The comparison lives in the resolution lib for the same reason the triple
+# comparison below does: an inline chain here could only be exercised by running
+# the whole script. This one never was -- measured 2026-10-18, 0 of the suite's
+# 36 arms touched it, against 4 each for hash, triple and OS.
+#
+# bd-sb2pl: both reads above test EXIT STATUS only, and `default = []` exits 0
+# having printed nothing, so EE_EXPECTED_FEATURES was "" and a featureless
+# binary compared equal to it. The helper's arm 3 is what refuses that.
+if ! ee_assert_feature_set_matches_manifest \
+        "${EE_ACTUAL_FEATURES}" "${EE_EXPECTED_FEATURES}" "${EE_BINARY}" "verify"; then
+    printf 'verify: refusing to run stages against that binary.\n' >&2
     exit 1
 fi
 export EE_BINARY_FEATURES="${EE_ACTUAL_FEATURES}"
@@ -1250,7 +1285,7 @@ verification_exit_status() {
     # nothing is not transient -- retrying it attempts nothing again -- so
     # reusing 75 would spin. 70 = EX_SOFTWARE says the invocation itself was
     # wrong. One value cannot express two states.
-    local attempted=$((STAGE_PASSED + STAGE_SKIPPED_CONTENTION + STAGE_ADVISORY + STAGE_TRACKED_RED))
+    local attempted=$((STAGE_PASSED + STAGE_SKIPPED_CONTENTION + STAGE_ENV_UNRUNNABLE + STAGE_ADVISORY + STAGE_TRACKED_RED))
     if [ "$attempted" -eq 0 ]; then
         printf '%s\n' "$VERIFY_EXIT_NOTHING_ATTEMPTED"
         return
@@ -1259,11 +1294,21 @@ verification_exit_status() {
         printf '%s\n' "$VERIFY_EXIT_INCOMPLETE"
         return
     fi
+    # bd-3ghvw. A run that could not execute a stage has not verified what that
+    # stage checks, so it is INCOMPLETE for the same reason contention is. This
+    # arm is the whole point of the classification: without it, teaching
+    # verify.sh to continue past a git-dependent stage would have turned a
+    # visible FAIL into a SILENT GREEN, which is strictly worse than the
+    # symptom this bead reported.
+    if [ "$STAGE_ENV_UNRUNNABLE" -gt 0 ]; then
+        printf '%s\n' "$VERIFY_EXIT_INCOMPLETE"
+        return
+    fi
     printf '%s\n' "0"
 }
 
 verification_summary_banner() {
-    local attempted=$((STAGE_PASSED + STAGE_SKIPPED_CONTENTION + STAGE_ADVISORY + STAGE_TRACKED_RED))
+    local attempted=$((STAGE_PASSED + STAGE_SKIPPED_CONTENTION + STAGE_ENV_UNRUNNABLE + STAGE_ADVISORY + STAGE_TRACKED_RED))
     local declared=$((attempted + STAGE_GATED_OFF))
     # A census, never a boolean. The excused population has to appear in the
     # same line that claims success, or an excuse nobody counts is an excuse
@@ -1272,7 +1317,7 @@ verification_summary_banner() {
     # "N/M attempted verification stages passed" is its own contract, asserted
     # by a_complete_run_exits_zero, and dropping it to make room for the census
     # would trade one honest number for another instead of reporting both.
-    local census="${STAGE_ADVISORY} advisory, ${STAGE_TRACKED_RED} tracked-red, ${STAGE_SKIPPED_CONTENTION} did-not-run, ${STAGE_GATED_OFF} not-applicable"
+    local census="${STAGE_ADVISORY} advisory, ${STAGE_TRACKED_RED} tracked-red, ${STAGE_SKIPPED_CONTENTION} did-not-run, ${STAGE_ENV_UNRUNNABLE} unrunnable-here, ${STAGE_GATED_OFF} not-applicable"
 
     if [ "$attempted" -eq 0 ]; then
         # THE TEXT HALF OF bullet 4. Without this branch the banner printed
@@ -1293,6 +1338,16 @@ verification_summary_banner() {
         echo ""
         echo "    This run does not establish what these stages check:"
         printf "%b" "$STAGE_SKIPPED_CONTENTION_NAMES"
+    elif [ "$STAGE_ENV_UNRUNNABLE" -gt 0 ]; then
+        # bd-3ghvw. Deliberately worded away from "lock contention": contention
+        # is transient and a retry fixes it, while this says the stage cannot
+        # run HERE at all and a retry on the same host will say the same thing.
+        # Conflating them would send a reader to retry a missing capability.
+        echo "=== INCOMPLETE: ${STAGE_PASSED}/${attempted} attempted stages passed; ${STAGE_ENV_UNRUNNABLE} could NOT run in this environment; ${census} ==="
+        echo ""
+        echo "    This run does not establish what these stages check, and a"
+        echo "    retry on this host will not change that:"
+        printf "%b" "$STAGE_ENV_UNRUNNABLE_NAMES"
     elif [ "$STAGE_ADVISORY" -gt 0 ] || [ "$STAGE_TRACKED_RED" -gt 0 ]; then
         # Stages that did not pass were excused by declaration, and the headline
         # names them rather than letting a reader infer a clean run from an exit
@@ -1313,6 +1368,10 @@ verification_summary_banner() {
     echo "  advisory (did NOT pass)   : ${STAGE_ADVISORY}"
     echo "  tracked red (did NOT pass): ${STAGE_TRACKED_RED}"
     echo "  did not run (contention)  : ${STAGE_SKIPPED_CONTENTION}"
+    # bd-3ghvw. In the accounting block as well as the census: a counter that
+    # exists but appears in neither place is a number nobody can audit, which is
+    # the defect this whole block was added to prevent.
+    echo "  unrunnable here (env)     : ${STAGE_ENV_UNRUNNABLE}"
     echo "  gated off (not attempted) : ${STAGE_GATED_OFF}"
     if [ "$STAGE_GATED_OFF" -gt 0 ]; then
         printf "%b" "$STAGE_GATED_OFF_NAMES"
@@ -1388,6 +1447,24 @@ run_stage() {
             STAGE_SKIPPED_CONTENTION=$((STAGE_SKIPPED_CONTENTION + 1))
             STAGE_SKIPPED_CONTENTION_NAMES="${STAGE_SKIPPED_CONTENTION_NAMES}    - ${name} (beads lock held)\n"
             record_stage_artifacts "$name" "SKIP" "$output_file"
+            rm -f "$output_file"
+            enforce_stage_budget "$name" "$duration"
+            echo ""
+            return 0
+        fi
+        # bd-3ghvw. Mirrors the contention branch above deliberately: non-fatal
+        # so the rest of the run proceeds, but NOT a pass, counted on its own
+        # and named in the banner. This is the half that lets verify.sh run on a
+        # tree with no .git at all instead of stopping at the first
+        # git-dependent stage and reporting it as broken.
+        if [ "$exit_code" -eq "$STAGE_ENV_UNRUNNABLE_CODE" ]; then
+            local env_budget_summary
+            env_budget_summary="$(stage_budget_summary "$name" "$duration")"
+            echo "[!] ENV_UNRUNNABLE: $name (${duration}s; ${env_budget_summary})"
+            STAGE_RESULTS="${STAGE_RESULTS}ENV_UNRUNNABLE ${name} (${duration}s; ${env_budget_summary})\n"
+            STAGE_ENV_UNRUNNABLE=$((STAGE_ENV_UNRUNNABLE + 1))
+            STAGE_ENV_UNRUNNABLE_NAMES="${STAGE_ENV_UNRUNNABLE_NAMES}    - ${name} (this environment cannot run it)\n"
+            record_stage_artifacts "$name" "ENV_UNRUNNABLE" "$output_file"
             rm -f "$output_file"
             enforce_stage_budget "$name" "$duration"
             echo ""
@@ -1991,6 +2068,75 @@ run_stage "RCH Doc Examples Contract" "python3 scripts/check-rch-doc-examples.py
 # copy-pasteable local Cargo compile examples that bypass the verifier wrapper.
 run_stage "RCH Doc Examples Lint" "python3 scripts/check-rch-doc-examples.py --json"
 
+# Gate 3.906-3.913: the eight no-Cargo static check gates that previously ran
+# ONLY in .github/workflows (bd-actions-disabled-repo-wide-33mfm, bd-9vkmt).
+#
+# Every one is pure Python, deterministic, needs no network and no Cargo, and
+# they total about 3.5 seconds measured on this host. They were wired into
+# hosted workflows and nowhere else, so while Actions has been dark -- 11.4
+# days and 1005 commits at the time of writing -- they were not running at all,
+# and verify.sh stayed green without them.
+#
+# THAT IS NOT HYPOTHETICAL. check-ee-spawn-isolation.py was FAILING on main for
+# eleven days (census 272 un-isolated ee spawns against a 270 baseline) with its
+# job in ci-static.yml. One of the two new sites spawned the real `ee` binary
+# while inheriting the developer's HOME, so the test read the host's own
+# ~/.local/share/ee; bd-rvrj2 measured that host state changes degradation
+# codes. Nothing reported it because a wired gate in a dark workflow is
+# indistinguishable from an unwired one. Fixed in a99ff01ff; these stages are
+# how the next one gets caught locally instead.
+#
+# check-rch-doc-examples.py is deliberately absent here: Gates 3.90 and 3.905
+# above already run it.
+#
+# Room for these exists because bd-2di61 moved the readiness-total exclusion
+# from a literal stage name to the property "verify.sh gates it behind an
+# opt-in flag", which took the non-benchmark total from 608/608 to 566/608.
+# Their p50s are measured, not estimated: each sub-second check declares 1s and
+# check-production-reachability, timed at 1.99s, declares 2s.
+run_stage "Action Pins Contract" "python3 scripts/check-action-pins.py"
+run_stage "Degraded Code Classification Contract" "python3 scripts/check-degraded-code-classified.py"
+run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation.py"
+run_stage "Graph Metric FNX Routing Contract" "python3 scripts/check-graph-metric-fnx-routing.py"
+run_stage "Production Reachability Contract" "python3 scripts/check-production-reachability.py"
+run_stage "RCH Remediation Guidance Contract" "python3 scripts/check-rch-remediation-guidance.py"
+# The probe is the measuring instrument for every §16.5 outcome metric (UTR,
+# TTFUC, PAP, FAR, WCS) and for the report-mode half of the .50 real-corpus
+# gate, so a silent regression in it publishes zeros that read exactly like
+# product failure. Its 24 self-test arms are binary-free -- they carry both
+# directions of the platform, stdout-envelope, registry and fail-closed
+# controls -- so this stage needs no `ee` build and no corpus. 1azkt.67 closed
+# on an EXECUTION of them and recorded this wiring as the one remaining step
+# ("verify.sh wiring needs a budget stage ... and was not shipped unverified").
+# Until this stage existed nothing ran them, so the instrument that grades every
+# outcome metric was itself ungraded.
+run_stage "Real-Shape Probe Fail-Closed Contract (1azkt.67)" "python3 scripts/real_shape_corpus/probe.py --self-test"
+run_stage "Shard Coverage Contract" "python3 scripts/check-shard-coverage.py"
+run_stage "Step Assertion Isolation Contract" "python3 scripts/check-step-assertion-isolation.py"
+
+# Gate 3.9051: jq `//` and negation vacuity (bd-9h1z5, class fixed under bd-o8e1n).
+#
+# TWO STAGES WITH OPPOSITE POSTURES, deliberately, the same split
+# check-rch-doc-examples.py already uses:
+#
+#   Contract  --self-test   FAILS. It runs the detector against planted
+#                           fixtures ONLY -- the real pre-fix line from
+#                           bd-o8e1n plus six hand-written shapes and four
+#                           negatives -- and never against repository content,
+#                           so it cannot red because somebody edited an e2e
+#                           script. It protects the instrument, which is the
+#                           part bd-9h1z5 says was worth preserving: the
+#                           original detector was validated and then lost with
+#                           the scratchpad it lived in.
+#   Lint      (no flag)     REPORTS and exits 0. Every one of the 16 hits in
+#                           the tree today is judged in the script's own
+#                           baseline, with the reason per site, so a new hit
+#                           prints as UNJUDGED against a clean field. Promote
+#                           to failing after one clean full-suite observation,
+#                           and ratchet on the judged SET rather than a count.
+run_stage "JQ Vacuity Contract" "python3 scripts/check-jq-vacuity.py --self-test"
+run_stage "JQ Vacuity Lint" "python3 scripts/check-jq-vacuity.py"
+
 # Gate 3.91: Local Cargo tripwire contract (bd-1n3x1.10). This deterministic
 # self-test validates command-shape denials, JSON repair actions, and fixture
 # process classification without scanning live peer processes or running Cargo.
@@ -2024,6 +2170,38 @@ if [ "$INCLUDE_FUZZ_SMOKE" = "true" ]; then
     run_stage "Fuzz Smoke: search query parser (bd-2j2h0)" "fuzz_smoke"
 else
     record_gated_off "Fuzz Smoke: search query parser (bd-2j2h0)" "--include-fuzz-smoke not set"
+fi
+
+# Gate 4.82: real-shape CASS corpus end to end on a REAL cass binary
+# (bd-reality-core-convergence-1azkt.43).
+#
+# WHY IT IS OPT-IN. The script's own header says it is deliberately unwired:
+# the import alone takes minutes (308 sessions, each span through a `cass view`
+# subprocess) and the non-benchmark p50 total had ~31s of headroom at 608s, so
+# "a stage this size has to be an opt-in gate, which is a budget decision for
+# the operator, not something to smuggle in with a script." bd-2di61 then made
+# opt-in-flag gating a general budget exclusion, which is the route that header
+# names, so this stage declares its real 555s p50 and is excluded from the
+# readiness ceiling while the flag is unset.
+#
+# WHY EVERY PRECONDITION IS CHECKED HERE RATHER THAN LEFT TO THE SCRIPT.
+# Measured: the script's missing-prerequisite paths call `log_drop` and then
+# `harness_summary`, which returns nonzero only when HARNESS_FAIL is nonzero. A
+# drop increments HARNESS_DROPS, so the verdict is "PASS" and the exit is 0 --
+# the script reports success having imported nothing. That is correct for an
+# ad-hoc run (a host without cass genuinely cannot answer this question, and
+# the script refuses to substitute the emulator) and it is exactly the
+# constant-green shape a verify.sh stage must never have. So the gate declines
+# to run rather than collecting a pass it did not earn: each branch below
+# either RUNS the script or says plainly that it did not.
+if [ "$INCLUDE_REAL_SHAPE_FIXTURE" != "true" ]; then
+    record_gated_off "Real-Shape Corpus Fixture E2E (1azkt.43)" "--include-real-shape-fixture not set"
+elif ! command -v cass >/dev/null 2>&1; then
+    record_gated_off "Real-Shape Corpus Fixture E2E (1azkt.43)" "cass unavailable on this host"
+elif [ ! -f "${REPO_ROOT}/tests/fixtures/real_shape_cass/manifest.json" ]; then
+    record_gated_off "Real-Shape Corpus Fixture E2E (1azkt.43)" "real-shape corpus fixture absent"
+else
+    run_stage "Real-Shape Corpus Fixture E2E (1azkt.43)" "./scripts/e2e_real_shape_fixture.sh"
 fi
 
 # Gate 4: Strategic Vision Coverage
@@ -2092,7 +2270,25 @@ unit_contract_golden_tests() {
     # diff; only by running both arms.
     cargo test --workspace --lib --bins --tests --examples -- --test-threads=1 2>&1 \
         | tee "$log" || rc=${PIPESTATUS[0]}
-    python3 "${REPO_ROOT}/scripts/lib/grade_test_log.py" --all-targets "$log" || grade=$?
+    # --require-targets (bd-mbupe). The cargo line above has no --no-fail-fast,
+    # so it STOPS at the first failing target and no `--tests` target is reached
+    # while the lib target is red. Every other rule in the grader judges the
+    # announcement/summary pairs that are PRESENT, so a target that never ran
+    # contributes no pair and cannot fail any check -- which is why the diagnostic
+    # below could claim the grader catches "a target that never reported" while it
+    # could not. Measured cost: docs/degraded_codes.md drifted for three days
+    # (607 of 609 codes) behind K3, a correct six-arm gate living in
+    # integration_a_d that simply never executed.
+    #
+    # These three are named because they are the gates that guard the gates:
+    # integration_a_d carries K3, contracts carries the contract fixtures, and
+    # verification_drift_guard guards this verification system itself. All 46
+    # declared [[test]] targets are unconditional (zero carry required-features,
+    # per cargo metadata), so this list can be widened without risking a false
+    # red on a feature-gated target; it is kept short to stay maintainable.
+    python3 "${REPO_ROOT}/scripts/lib/grade_test_log.py" --all-targets \
+        --require-targets contracts,integration_a_d,verification_drift_guard \
+        "$log" || grade=$?
     # Unconditional, and before any return: in the first version this sat on the
     # unreachable path, so every failing run leaked a temp file.
     rm -f "$log"
@@ -2454,10 +2650,22 @@ if [ "$CI_SMOKE" != "true" ]; then
     # are reported as skips until their implementation beads land.
     run_stage "Agent Ergonomics E2E (F1-F5)" "./scripts/e2e_lib/run_agent_ergonomics_e2e.sh"
 
-    # Gate 6.5: Overhaul Integration (J4). Gated behind VERIFY_OVERHAUL=1
-    # until enough implementation beads ship to make the suite reliably
-    # pass across CI. The driver itself respects VERIFY_OVERHAUL=0 and
-    # exits 0 without running, so this stage stays fast in default CI.
+    # Gate 6.5: Overhaul Integration (J4).
+    #
+    # THIS STAGE IS NOT GATED, despite what this comment said until 2026-10-18
+    # and what README.md and docs/operator-swarm-slo.md still implied. The
+    # driver DOES honour VERIFY_OVERHAUL=0 (scripts/e2e_overhaul.sh:165) and
+    # NOTHING IN THE TREE EVER ASSIGNS THAT VARIABLE -- measured tree-wide
+    # across *.sh, *.yml, *.rs, *.toml and *.md: every occurrence is prose or
+    # the driver's own handling, and `VERIFY_OVERHAUL=` outside a `:-` default
+    # matches only two comments and one echo string. The driver's default is
+    # `${VERIFY_OVERHAUL:-1}`, so the no-op branch is unreachable from here and
+    # the line below selects all 23 epics in its EPIC_SCRIPTS registry.
+    #
+    # It was never wired: 232f6759a (2026-05-11) added this comment and the
+    # run_stage line in the same commit, and the line has never carried the
+    # prefix. Whether the gate should exist at all is bd-e4ymh -- turning it on
+    # now would silence 23 e2e epics, which is a decision, not a cleanup.
     run_stage "Overhaul Integration E2E (J4)" "./scripts/e2e_overhaul.sh"
 
     # Gate 6.5.2: Lightweight swarm next-action recommendation-card contract.

@@ -219,6 +219,7 @@ fn build_capsule_with_identity() -> Result<(TempDir, PathBuf, PathBuf), String> 
         machine_salt_path: None,
         redaction_level: RedactionLevel::Standard,
         command_timeout_ms: ee::core::swarm_brief::DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+        agent_mail: Default::default(),
     })
     .map_err(|error| format!("create_handoff: {error:?}"))?;
 
@@ -273,6 +274,7 @@ fn resume_populates_workspace_match_when_structured_identity_is_bound() -> TestR
         require_fresh: false,
         insecure_skip_hmac: false,
         machine_salt_path: None,
+        agent_mail: Default::default(),
     })
     .map_err(|error| format!("resume_handoff(exact): {error:?}"))?;
     if !matches!(report_same.workspace_match, Some(WorkspaceMatch::Exact)) {
@@ -306,6 +308,7 @@ fn resume_populates_workspace_match_when_structured_identity_is_bound() -> TestR
         require_fresh: false,
         insecure_skip_hmac: false,
         machine_salt_path: None,
+        agent_mail: Default::default(),
     })
     .map_err(|error| format!("resume_handoff(hard): {error:?}"))?;
     if !matches!(report_hard.workspace_match, Some(WorkspaceMatch::Hard)) {

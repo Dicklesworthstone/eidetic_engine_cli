@@ -50,7 +50,8 @@ use crate::cache::pack_l2::{
     PackL2CompressionHit, PackL2WriteOutcome,
 };
 use crate::config::{
-    ConfigFile, EnvVar, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
+    ConfigFile, EnvVar, GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY,
+    GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
     GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY,
     GRAPH_PACK_DNA_MAX_ITEMS_KEY, ReadPoolConfig, WorkspaceLocation, env_var_is_set,
     parse_env_bool_flag, read_env_var,
@@ -74,7 +75,7 @@ use crate::core::search::{
     SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
     SearchWorkspaceProbeState, elapsed_timing_json, map_frankensearch_error,
     performance_redaction_json, query_observation_json, reconcile_search_index_before_read_with_cx,
-    resolve_search_rerank_runtime_posture, run_context_search_with_preloaded_memories,
+    resolve_search_rerank_runtime_posture,
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx,
     search_advisory_snapshot_data_json_with_delivery_reservation, search_degraded_data_json,
 };
@@ -112,8 +113,7 @@ use crate::pack::{
     PackTrustPosture, PackTrustSignal, TokenBudget, WhyNotSelectedInput, WhyNotSelectedReport,
     assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
-    estimate_tokens_default, explain_why_not_selected, pack_item_provenance_json,
-    redact_pack_provenance_text,
+    estimate_tokens_default, pack_item_provenance_json, redact_pack_provenance_text,
 };
 // The production PPR rerank is cfg(test)-only until the pinned FrankenNetworkX
 // release exposes deterministic personalized PageRank; the breakdown type is
@@ -123,6 +123,17 @@ use crate::pack::PackScoreBreakdown;
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::search::RuleIndexProjection;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
+
+#[path = "context_turn.rs"]
+mod turn;
+
+#[path = "context_why_not.rs"]
+mod why_not;
+use why_not::OmissionCause;
+pub use why_not::{
+    TypedWhyNotSelectedReport, WHY_NOT_SELECTED_SCHEMA_V2, WhyNotEntity, WhyNotEntityScores,
+    WhyNotEntityTokenFrontier, explain_why_not_entity_default, parse_why_not_entity,
+};
 
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
 static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
@@ -154,10 +165,10 @@ const PACK_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(debug_assertions)]
 const PACK_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-/// v9: bind the executed quality policy and scored candidates after retrieval,
-/// and miss responses written before pack-hash input v4 (ADR 0087 §8).
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V9: &str = "ee.pack.l2_cache_key.v9";
-const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3: &str = "ee.pack.l2_context_response.v3";
+/// v10: bind the executed quality policy and scored candidates after retrieval,
+/// and miss responses written before finalized pack-hash input v5 (ADR 0087 §8).
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V10: &str = "ee.pack.l2_cache_key.v10";
+const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4: &str = "ee.pack.l2_context_response.v4";
 const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 const GRAPH_PPR_UPSTREAM_UNAVAILABLE_MESSAGE: &str = "Personalized PageRank pack influence is unavailable because the pinned FrankenNetworkX dependency does not expose deterministic personalized PageRank; textual ranking and non-PPR graph explanations remain active.";
@@ -761,6 +772,8 @@ impl CommandContext {
     }
 }
 
+#[path = "context_bead_affinity.rs"]
+mod bead_affinity;
 #[path = "context_task_paths.rs"]
 mod task_paths;
 pub use task_paths::{
@@ -782,6 +795,8 @@ pub struct ContextPackOptions {
     pub database_path: Option<PathBuf>,
     pub index_dir: Option<PathBuf>,
     pub query: String,
+    /// Opt-in local bead context used as a bounded memory-ranking prior.
+    pub bead_id: Option<String>,
     pub speed: crate::search::SpeedMode,
     pub source_mode: crate::core::search::SearchSourceMode,
     pub strict_source_mode: bool,
@@ -873,6 +888,9 @@ pub struct ContextPackOutputOptions {
     pub profile: ContextPackOutputProfile,
     pub resource_profile: PackResourceProfile,
     pub cache_json_response: bool,
+    /// Attach graph DNA from the held context snapshot before finalizing text
+    /// and persisting its identity. DNA requests always bypass L2 replay.
+    pub include_pack_dna: bool,
     pub include_coverage_fill: bool,
     pub include_rendered_text: bool,
     pub include_skipped: bool,
@@ -926,7 +944,7 @@ pub struct ContextPackOutputOptions {
     /// contract (two identical invocations must be byte-identical).
     ///
     /// Suppressing by PROFILE is deterministic instead: the output is a pure
-    /// function of (inputs, profile), and `refresh_context_pack_hash` already
+    /// function of (inputs, profile), and `finalize_context_response` already
     /// takes `ContextPackOutputOptions` as a hash input, so the hash is already
     /// profile-aware.
     ///
@@ -953,6 +971,7 @@ impl ContextPackOutputOptions {
                 profile,
                 resource_profile: PackResourceProfile::Standard,
                 cache_json_response: false,
+                include_pack_dna: false,
                 include_coverage_fill: false,
                 include_rendered_text: false,
                 include_skipped: false,
@@ -973,6 +992,7 @@ impl ContextPackOutputOptions {
                 profile,
                 resource_profile: PackResourceProfile::Standard,
                 cache_json_response: false,
+                include_pack_dna: false,
                 include_coverage_fill: true,
                 include_rendered_text: true,
                 include_skipped: true,
@@ -991,6 +1011,7 @@ impl ContextPackOutputOptions {
                 profile,
                 resource_profile: PackResourceProfile::Standard,
                 cache_json_response: false,
+                include_pack_dna: false,
                 include_coverage_fill: true,
                 include_rendered_text: true,
                 include_skipped: true,
@@ -1012,6 +1033,7 @@ impl ContextPackOutputOptions {
             profile: self.profile,
             resource_profile: self.resource_profile,
             cache_json_response: self.cache_json_response,
+            include_pack_dna: self.include_pack_dna,
             include_coverage_fill: overrides
                 .no_coverage_fill
                 .map_or(self.include_coverage_fill, |value| !value),
@@ -1046,6 +1068,12 @@ impl ContextPackOutputOptions {
     #[must_use]
     pub const fn with_cache_json_response(mut self, cache_json_response: bool) -> Self {
         self.cache_json_response = cache_json_response;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_pack_dna(mut self, include_pack_dna: bool) -> Self {
+        self.include_pack_dna = include_pack_dna;
         self
     }
 }
@@ -1612,7 +1640,7 @@ pub(crate) fn run_context_pack_with_embedder(
         run_context_pack_with_performance_inner(
             options,
             PACK_COMMAND,
-            Deterministic::from_seed(0),
+            &mut Deterministic::from_seed(0),
             PackRecordPersistence::Seeded,
             ContextPackControl::new(&cx, None, None),
             Some(embedder),
@@ -1959,21 +1987,22 @@ fn compute_context_pack_dna(
     crate::graph::pack_dna::compute_pack_dna(projection, input)
 }
 
-pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut ContextResponse) {
-    let workspace_path = workspace_path_from_database_path(database_path);
-    let pack_dna_config = match workspace_path
-        .as_deref()
+fn resolve_pack_dna_config_for_response(
+    workspace_path: Option<&Path>,
+    response: &mut ContextResponse,
+) -> Option<ContextPackDnaConfig> {
+    match workspace_path
         .map(context_pack_dna_config)
         .unwrap_or(Ok(ContextPackDnaConfig {
             enabled: false,
             max_items: DEFAULT_CONTEXT_PACK_DNA_MAX_ITEMS,
             max_edges: DEFAULT_CONTEXT_PACK_DNA_MAX_EDGES,
         })) {
-        Ok(config) if config.enabled => config,
+        Ok(config) if config.enabled => Some(config),
         Ok(_) => {
             response.data.pack_dna = Some(serde_json::Value::Null);
             push_pack_dna_feature_disabled_degradation(&mut response.data.degraded);
-            return;
+            None
         }
         Err(message) => {
             response.data.pack_dna = Some(serde_json::Value::Null);
@@ -1984,10 +2013,25 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
                 message,
                 Some("Fix or remove .ee/config.toml.".to_string()),
             );
-            return;
+            None
         }
-    };
+    }
+}
 
+/// Attach DNA while building an unfinalized response. Production callers
+/// request it through `ContextPackOutputOptions::with_pack_dna` so the held
+/// read snapshot supplies the graph before identity and persistence. A
+/// finalized response is immutable and is left unchanged by this helper.
+pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut ContextResponse) {
+    if response.data.finalized_text.is_some() {
+        return;
+    }
+    let workspace_path = workspace_path_from_database_path(database_path);
+    let Some(pack_dna_config) =
+        resolve_pack_dna_config_for_response(workspace_path.as_deref(), response)
+    else {
+        return;
+    };
     let graph_explain_start = Instant::now();
     let connection = match DbConnection::open_file_read_only(database_path) {
         Ok(connection) => connection,
@@ -2009,6 +2053,15 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         }
     };
 
+    attach_pack_dna_from_snapshot(&connection, response, pack_dna_config, graph_explain_start);
+}
+
+fn attach_pack_dna_from_snapshot(
+    connection: &DbConnection,
+    response: &mut ContextResponse,
+    pack_dna_config: ContextPackDnaConfig,
+    graph_explain_start: Instant,
+) {
     let pack_memory_ids = response
         .data
         .pack
@@ -2048,7 +2101,7 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
     };
     let projection_seed_ids = pack_dna_projection_seed_ids(&input, pack_dna_config.max_items);
     let projection = match crate::graph::build_memory_graph_for_frontier(
-        &connection,
+        connection,
         &projection_seed_ids,
         &crate::graph::FrontierProjectionOptions {
             max_depth: input.ego_radius,
@@ -2335,7 +2388,7 @@ pub(crate) fn run_context_pack_with_search_provider(
         run_context_pack_with_performance_inner(
             options,
             command,
-            Deterministic::from_seed(0),
+            &mut Deterministic::from_seed(0),
             PackRecordPersistence::Ambient,
             ContextPackControl::new(&cx, None, None),
             None,
@@ -2351,11 +2404,11 @@ pub async fn run_context_pack_with_performance_with_cx(
     options: &ContextPackOptions,
     command: &'static str,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
-    let determinism = Deterministic::from_seed(0);
+    let mut determinism = Deterministic::from_seed(0);
     run_context_pack_with_performance_inner(
         options,
         command,
-        determinism,
+        &mut determinism,
         PackRecordPersistence::Ambient,
         ContextPackControl::new(cx, None, None),
         None,
@@ -2393,6 +2446,7 @@ fn context_request_from_options_with_runtime_profile(
     options: &ContextPackOptions,
     runtime_profile: &RuntimeProfileReport,
 ) -> Result<RuntimeProfileCappedRequest, ContextPackError> {
+    bead_affinity::validate_request(options)?;
     let mut request = ContextRequest::new(ContextRequestInput {
         query: options.query.clone(),
         profile: options.profile,
@@ -2438,11 +2492,11 @@ pub fn run_context_pack_with_performance_controlled(
         .unwrap_or(Duration::from_secs(60))
         .max(Duration::from_secs(60));
     crate::core::run_cli_with_cx(runtime_timeout, |cx| async move {
-        let determinism = Deterministic::from_seed(0);
+        let mut determinism = Deterministic::from_seed(0);
         run_context_pack_with_performance_inner(
             options,
             command,
-            determinism,
+            &mut determinism,
             PackRecordPersistence::Ambient,
             ContextPackControl::new(&cx, deadline, cancellation_flag),
             None,
@@ -2456,13 +2510,13 @@ pub fn run_context_pack_with_performance_controlled(
 pub fn run_context_pack_with_performance_seeded(
     options: &ContextPackOptions,
     command: &'static str,
-    determinism: Deterministic<Seed>,
+    mut determinism: Deterministic<Seed>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
     crate::core::run_cli_with_cx(PACK_COMMAND_TIMEOUT, |cx| async move {
         run_context_pack_with_performance_inner(
             options,
             command,
-            determinism,
+            &mut determinism,
             PackRecordPersistence::Seeded,
             ContextPackControl::new(&cx, None, None),
             None,
@@ -2484,6 +2538,7 @@ struct ContextPackControl<'a> {
     cx: &'a asupersync::Cx,
     deadline: Option<Instant>,
     cancellation_flag: Option<&'a AtomicBool>,
+    why_not: Option<&'a why_not::WhyNotSelectionProbe>,
 }
 
 impl<'a> ContextPackControl<'a> {
@@ -2497,6 +2552,7 @@ impl<'a> ContextPackControl<'a> {
             cx,
             deadline: deadline.and_then(|duration| now.checked_add(duration)),
             cancellation_flag,
+            why_not: None,
         }
     }
 
@@ -2538,12 +2594,12 @@ impl<'a> ContextPackControl<'a> {
 /// Explain why a target memory was (or was not) selected for a context pack.
 ///
 /// This is the read-only counterfactual of [`run_context_pack_with_performance`]
-/// (`ee why-not`, the reverse of `ee why`). It resolves the exact candidate
-/// universe the task+workspace would trigger, locates the target memory among
-/// those candidates (or reconstructs a not-retrieved candidate when the memory
-/// never reached the candidate pool), and delegates to
-/// [`crate::pack::explain_why_not_selected`]. The cost is one `ee pack`-shaped
-/// retrieval; nothing is persisted, mutated, or cached.
+/// (`ee why-not`, the reverse of `ee why`). A one-target observer follows the
+/// production pack through retrieval, filtering and mixed-source selection.
+/// The report therefore reflects native rule/evidence budget competition,
+/// graph/focus fan-in, pagination and the contradiction guard. Missing targets
+/// are reconstructed only for explanation, never inserted into selection.
+/// Nothing is persisted, mutated, or cached.
 ///
 /// When the target is in the candidate pool the report's `reason_source` is
 /// `authoritative`; for a reconstructed not-retrieved candidate it is
@@ -2557,274 +2613,9 @@ impl<'a> ContextPackControl<'a> {
 pub fn explain_why_not(
     options: &ContextPackOptions,
     target_memory_id: MemoryId,
-    determinism: &Deterministic<Seed>,
+    determinism: &mut Deterministic<Seed>,
 ) -> Result<WhyNotSelectedReport, ContextPackError> {
-    let database_path = options
-        .database_path
-        .clone()
-        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
-    if !database_path.exists() {
-        return Err(ContextPackError::WorkspaceStoreMissing(database_path));
-    }
-
-    let fast_embedder_override = if options.source_mode.uses_embeddings() {
-        let embedder_database_path = database_path.clone();
-        let preparation = crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
-            prepare_read_only_search_embedder_for_workspace(
-                &cx,
-                &options.workspace_path,
-                &embedder_database_path,
-            )
-            .map_err(|error| {
-                ContextPackError::Search(map_frankensearch_error(
-                    &cx,
-                    "why-not embedder preparation",
-                    error,
-                ))
-            })
-        })
-        .map_err(|error| {
-            ContextPackError::Pack(format!(
-                "Failed to start why-not embedder preparation: {error}"
-            ))
-        })??;
-        Some(preparation.fast_embedder)
-    } else {
-        None
-    };
-
-    let effective_filters = context_effective_filters(options);
-
-    let mut degraded = Vec::new();
-    let (read_pool_config, pin_snapshot) =
-        context_read_pool_config(&options.workspace_path, &mut degraded);
-    let read_pool = registered_process_read_pool(
-        DatabaseConfig::file(database_path.clone()),
-        read_pool_config,
-    );
-
-    let mut request = ContextRequest::new(ContextRequestInput {
-        query: options.query.clone(),
-        profile: options.profile,
-        max_tokens: options.max_tokens,
-        candidate_pool: resolved_candidate_pool(options)?,
-        max_results: options.max_results,
-        sections: Vec::new(),
-    })
-    .map_err(|error| ContextPackError::Pack(error.to_string()))?;
-
-    request.reference_time = context_validity_reference_time(options, &effective_filters);
-    let read_snapshot = if pin_snapshot {
-        read_pool.pin_snapshot_with_metadata(context_snapshot_pin_metadata(&request))
-    } else {
-        read_pool.acquire_snapshot(false)
-    }
-    .map_err(|error| ContextPackError::Storage(format!("Failed to open database: {error}")))?;
-
-    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let mut search_preloaded_memories = BTreeMap::new();
-    let search_options = SearchOptions {
-        workspace_path: options.workspace_path.clone(),
-        database_path: Some(database_path.clone()),
-        index_dir: options.index_dir.clone(),
-        query: request.query.clone(),
-        limit: request.candidate_pool,
-        speed: options.speed,
-        explain: false,
-        as_of: context_validity_reference_time(options, &effective_filters),
-        include_tombstoned: options.include_tombstoned,
-        include_expired: context_include_expired(options, &effective_filters),
-        include_future: context_include_future(options, &effective_filters),
-        include_stale: context_include_stale(options, &effective_filters),
-        relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
-        dedup_mode: crate::core::search::SearchDedupMode::DocId,
-        source_mode: options.source_mode,
-        strict_source_mode: options.strict_source_mode,
-        memory_scope: options.memory_scope,
-        strict_scope: options.strict_scope,
-    };
-    let mut search_report = match run_context_search_with_preloaded_memories(
-        &search_options,
-        read_connection,
-        None,
-        determinism,
-        fast_embedder_override,
-    ) {
-        Ok(context_search) => {
-            request.quality_scoring_policy = Some(context_search.quality_scoring_policy);
-            search_preloaded_memories = context_search.preloaded_memories;
-            context_search.report
-        }
-        Err(SearchError::NoIndex) => missing_index_search_report(
-            &request.query,
-            request.candidate_pool,
-            runtime_profile_for_workspace(&options.workspace_path),
-        ),
-        Err(error) => return Err(ContextPackError::Search(error)),
-    };
-
-    // Mirror the production pack path: when the derived index is missing or
-    // errored, resolve candidates from a deterministic lexical memory fallback so
-    // why-not reflects the same candidate universe `ee pack` would actually use
-    // (otherwise a memory the pack would include via fallback is misreported as
-    // not_retrieved/reconstructed).
-    push_search_degradations(&mut degraded, &search_report.degraded);
-    if matches!(
-        search_report.status,
-        SearchStatus::IndexError | SearchStatus::IndexNotFound
-    ) {
-        let global_memories = global_store_fallback_memories(
-            &search_options,
-            &mut degraded,
-            &mut search_preloaded_memories,
-        )?;
-        let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-        let (fallback_hits, quality_policy) = quality_scored_lexical_memory_fallback_hits(
-            read_connection,
-            &search_options,
-            global_memories,
-            &mut degraded,
-        )?;
-        request.quality_scoring_policy = Some(quality_policy);
-        search_report.results = fallback_hits;
-        search_report.status = if search_report.results.is_empty() {
-            SearchStatus::NoResults
-        } else {
-            SearchStatus::Success
-        };
-    }
-
-    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let (candidates, _candidate_metrics) = candidates_from_search_for_task_paths(
-        read_connection,
-        &options.workspace_path,
-        &search_report,
-        &effective_filters,
-        options.include_tombstoned,
-        &mut degraded,
-        Some(&search_preloaded_memories),
-        &task_paths::normalize(&options.workspace_path, &options.task_paths)?,
-        request.reference_time,
-        &mut Vec::new(),
-    );
-
-    let profile = options.profile.unwrap_or(ContextPackProfile::Balanced);
-    let budget = match options.max_tokens {
-        Some(max_tokens) => TokenBudget::new(max_tokens)
-            .map_err(|error| ContextPackError::Pack(error.to_string()))?,
-        None => TokenBudget::default_context(),
-    };
-
-    // Locate the target among the real candidate pool (authoritative path). When
-    // it never reached the pool, reconstruct a not-retrieved candidate so scores
-    // still render and the library reports reason_source=reconstructed.
-    // bd-1n0np.1.9: when the target was filtered out of the candidate pool,
-    // classify *why* by re-running the SAME candidate filters the pack applies
-    // (see candidates_from_search_with_metrics) against the target memory, so a
-    // memory dropped by tag/validity/trust/redaction reports the authoritative
-    // `excluded_by_*` reason instead of collapsing into a bare `not_retrieved`.
-    let mut why_not_exclusions: Vec<crate::pack::WhyNotSelectionExclusion> = Vec::new();
-    let target = match candidates
-        .iter()
-        .find(|candidate| candidate.memory_id == target_memory_id)
-        .cloned()
-    {
-        Some(candidate) => candidate,
-        None => {
-            let classify_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-            if let Ok(Some(target_memory)) =
-                classify_connection.get_memory(&target_memory_id.to_string())
-            {
-                let target_tags = classify_connection
-                    .get_memory_tags(&target_memory.id)
-                    .unwrap_or_default();
-                if !effective_filters.tags.is_empty()
-                    && !effective_filters.matches_tags(&target_tags)
-                {
-                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
-                        crate::pack::WhyNotSelectionExclusionKind::Filter,
-                        "excluded_by_tag_filter",
-                        "The memory did not match the requested tag filter.",
-                        None,
-                    ));
-                }
-                if !effective_filters.temporal.is_empty()
-                    && matches!(
-                        temporal_memory_outcome(&target_memory, &effective_filters.temporal),
-                        TemporalCandidateOutcome::Exclude
-                    )
-                {
-                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
-                        crate::pack::WhyNotSelectionExclusionKind::ValidityWindow,
-                        "excluded_by_validity_window",
-                        "The memory fell outside the requested temporal validity window.",
-                        None,
-                    ));
-                }
-                if !effective_filters.trust.is_empty()
-                    && !effective_filters.trust.matches(
-                        &target_memory.trust_class,
-                        posture_for_trust_class(&target_memory.trust_class),
-                    )
-                {
-                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
-                        crate::pack::WhyNotSelectionExclusionKind::Filter,
-                        "excluded_by_trust_filter",
-                        "The memory's trust class did not match the requested trust filter.",
-                        None,
-                    ));
-                }
-                if !effective_filters.redaction.allow_categories.is_empty()
-                    && !redaction_allow_categories(
-                        &target_memory.content,
-                        &effective_filters.redaction,
-                    )
-                {
-                    why_not_exclusions.push(crate::pack::WhyNotSelectionExclusion::new(
-                        crate::pack::WhyNotSelectionExclusionKind::Redaction,
-                        "excluded_by_redaction",
-                        "The memory was withheld by the redaction allow-category filter.",
-                        None,
-                    ));
-                }
-            }
-            let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-            reconstruct_not_retrieved_candidate(
-                read_connection,
-                &options.workspace_path,
-                target_memory_id,
-                request.reference_time,
-                &mut degraded,
-            )?
-        }
-    };
-
-    // bd-1n0np.1.8: surface the retrieval-time degradations collected above (e.g.
-    // a degraded/missing search index that forced the lexical fallback) so a miss
-    // caused by a broken index reports `not_retrieved_due_to_degraded_index`
-    // (stage `degraded_index`) instead of a bare `not_retrieved` — the
-    // honest-vs-misleading distinction. Map the context degradations onto the
-    // why-not degradation contract.
-    let why_not_degraded: Vec<crate::pack::WhyNotSelectionDegradation> = degraded
-        .iter()
-        .map(|degradation| {
-            crate::pack::WhyNotSelectionDegradation::new(
-                degradation.code.clone(),
-                degradation.severity.as_str(),
-                degradation.message.clone(),
-                degradation.repair.clone(),
-            )
-        })
-        .collect();
-    let input =
-        WhyNotSelectedInput::new(options.query.clone(), target, budget, profile, candidates)
-            .with_options(crate::pack::PackAssemblyOptions {
-                relevance_floor: options.relevance_floor,
-                ..crate::pack::PackAssemblyOptions::default()
-            })
-            .with_degraded(why_not_degraded)
-            .with_exclusions(why_not_exclusions);
-    explain_why_not_selected(input).map_err(|error| ContextPackError::Pack(error.to_string()))
+    why_not::explain_memory(options, target_memory_id, determinism)
 }
 
 /// CLI-facing convenience wrapper for [`explain_why_not`] that uses the same
@@ -2838,8 +2629,8 @@ pub fn explain_why_not_default(
     options: &ContextPackOptions,
     target_memory_id: MemoryId,
 ) -> Result<WhyNotSelectedReport, ContextPackError> {
-    let determinism = Deterministic::from_seed(0);
-    explain_why_not(options, target_memory_id, &determinism)
+    let mut determinism = Deterministic::from_seed(0);
+    explain_why_not(options, target_memory_id, &mut determinism)
 }
 
 /// Build a `PackCandidate` for a memory that did not appear in the retrieved
@@ -2881,6 +2672,16 @@ fn reconstruct_not_retrieved_candidate(
     ) {
         source_signals = Some(memory_provenance.attach_to(&mut provenance));
     }
+    if provenance.is_empty() {
+        provenance.push(
+            PackProvenance::new(
+                ProvenanceUri::from_str(&format!("ee://memory/{memory_id}"))
+                    .map_err(|error| ContextPackError::Pack(error.to_string()))?,
+                "Target memory identity; no external source provenance is available.",
+            )
+            .map_err(|error| ContextPackError::Pack(error.to_string()))?,
+        );
+    }
     let relevance = unit_score(0.0)
         .ok_or_else(|| ContextPackError::Pack("invalid relevance score".to_string()))?;
     let utility = unit_score(memory.utility)
@@ -2913,7 +2714,7 @@ fn reconstruct_not_retrieved_candidate(
 async fn run_context_pack_with_performance_inner(
     options: &ContextPackOptions,
     command: &'static str,
-    determinism: Deterministic<Seed>,
+    determinism: &mut Deterministic<Seed>,
     pack_record_persistence: PackRecordPersistence,
     control: ContextPackControl<'_>,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
@@ -2958,6 +2759,11 @@ async fn run_context_pack_with_performance_inner(
     control.check()?;
 
     let mut degraded = Vec::new();
+
+    // Capture external tracker inputs exactly once. Only this normalized
+    // snapshot may influence ranking and the resulting pack identity.
+    let bead_context = bead_affinity::resolve(options, &mut degraded);
+    request.bead_affinity_identity = bead_context.as_ref().map(|bead| bead.identity.clone());
 
     let index_dir = crate::config::workspace::resolve_store_index_dir(
         &options.workspace_path,
@@ -3320,6 +3126,17 @@ async fn run_context_pack_with_performance_inner(
         }
     }
 
+    if let Some(probe) = control.why_not {
+        probe.initialize(
+            checked_context_read_snapshot(&read_pool, &read_snapshot)?,
+            options,
+            &request,
+            &effective_filters,
+            &search_report,
+            &search_preloaded_memories,
+        )?;
+    }
+
     // Apply metadata query filters to search results. Tag filters are applied
     // after memory tags have been batch-loaded during candidate resolution.
     if !effective_filters.filters.is_empty() {
@@ -3342,6 +3159,9 @@ async fn run_context_pack_with_performance_inner(
                 None,
             );
         }
+    }
+    if let Some(probe) = control.why_not {
+        probe.observe_search(&search_report);
     }
     if search_report.status == SearchStatus::NoResults
         && !degraded
@@ -3434,6 +3254,10 @@ async fn run_context_pack_with_performance_inner(
         request.reference_time,
         &mut direct_rule_hits,
     );
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Filter);
+        probe.observe_rule_sources(&direct_rule_hits, OmissionCause::RuleAdmission);
+    }
     if candidate_metrics.tag_filtered_candidates > 0 {
         trace.filter_input_count = trace.filter_input_count.max(candidate_filter_input_count);
         trace.filtered_count = trace
@@ -3501,22 +3325,31 @@ async fn run_context_pack_with_performance_inner(
     let graph_hint_start = Instant::now();
     let graph_metrics = apply_graph_hints(
         read_connection,
-        &options.workspace_path,
+        &search_options,
         &effective_filters,
         options.include_tombstoned,
         &mut candidates,
         &mut degraded,
         request.reference_time,
-    );
+    )?;
     candidate_metrics.subspans.graph_hints = graph_hint_start.elapsed();
     candidate_metrics.graph_boosted_candidates = graph_metrics.boosted_candidates;
     candidate_metrics.graph_expanded_candidates = graph_metrics.expanded_candidates;
     candidate_metrics.graph_filtered_candidates = graph_metrics.filtered_candidates;
     candidate_metrics.graph_missing_seeds = graph_metrics.missing_seeds;
     candidate_metrics.graph_traversed_edges = graph_metrics.traversed_edges;
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Filter);
+    }
     trace.record_elapsed("candidateResolution", candidate_start);
     control.check()?;
 
+    let mut required_relevance_candidates = effective_filters
+        .graph
+        .seed_memories
+        .iter()
+        .filter_map(|seed| MemoryId::from_str(seed).ok())
+        .collect::<BTreeSet<_>>();
     let focus_start = Instant::now();
     trace.focus_state_read_attempts = trace.focus_state_read_attempts.saturating_add(1);
     match read_active_focus_state(&options.workspace_path) {
@@ -3527,19 +3360,69 @@ async fn run_context_pack_with_performance_inner(
                 context_workspace_ids(read_connection, &options.workspace_path, &mut degraded)
                     .into_iter()
                     .collect::<BTreeSet<_>>();
-            let focus_candidates = focus_candidates_from_state(
+            let validity_reference_time =
+                context_validity_reference_time(options, &effective_filters)
+                    .unwrap_or_else(Utc::now);
+            let mut focus_candidates = focus_candidates_from_state(
                 read_connection,
                 &options.workspace_path,
                 &focus_state,
                 options.include_tombstoned,
                 context_include_expired(options, &effective_filters),
                 context_include_future(options, &effective_filters),
-                context_validity_reference_time(options, &effective_filters)
-                    .unwrap_or_else(Utc::now),
+                validity_reference_time,
                 &focus_workspace_ids,
+                &effective_filters,
                 &mut degraded,
             );
+            // Focus is an input to retrieval, not an exemption from an explicit
+            // ee.query.v1 graph neighborhood restriction. Graph admission has
+            // already removed out-of-neighborhood search and expansion hits.
+            if !effective_filters.graph.is_empty() && !effective_filters.graph.include_orphans {
+                let graph_admitted_ids = candidates
+                    .iter()
+                    .map(|candidate| candidate.memory_id)
+                    .collect::<BTreeSet<_>>();
+                let before = focus_candidates.len();
+                focus_candidates
+                    .retain(|candidate| graph_admitted_ids.contains(&candidate.memory_id));
+                let omitted = before.saturating_sub(focus_candidates.len());
+                if omitted > 0 {
+                    push_degradation(
+                        &mut degraded,
+                        "context_graph_orphans_filtered",
+                        ContextResponseSeverity::Low,
+                        format!(
+                            "{omitted} passive-focus candidate(s) excluded by graph.includeOrphans=false."
+                        ),
+                        Some(
+                            "Set graph.includeOrphans=true to include focused memories outside the graph neighborhood."
+                                .to_string(),
+                        ),
+                    );
+                }
+            }
+            if !focus_candidates.is_empty() {
+                let focus_ids = focus_candidates
+                    .iter()
+                    .map(|candidate| candidate.memory_id.to_string())
+                    .collect::<Vec<_>>();
+                let focus_refs = focus_ids.iter().map(String::as_str).collect::<Vec<_>>();
+                let (focus_memories, _) =
+                    load_candidate_batch_maps(read_connection, &focus_refs, &mut degraded);
+                quality_score_direct_memory_candidates(
+                    read_connection,
+                    &search_options,
+                    Some(validity_reference_time),
+                    &focus_memories,
+                    &mut focus_candidates,
+                    "Passive-focus",
+                    &mut degraded,
+                )?;
+            }
             trace.focus_candidate_count = focus_candidates.len();
+            required_relevance_candidates
+                .extend(focus_candidates.iter().map(|candidate| candidate.memory_id));
             candidates.extend(focus_candidates);
         }
         Ok(None) => {}
@@ -3564,6 +3447,9 @@ async fn run_context_pack_with_performance_inner(
         Some(read_connection),
     );
     let global_store_memory_ids = global_store_search_memory_ids(&search_report);
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Filter);
+    }
     let mut scope_stats = filter_candidates_by_memory_scope(
         read_connection,
         &mut candidates,
@@ -3582,6 +3468,10 @@ async fn run_context_pack_with_performance_inner(
     if scope_context.strict_scope && scope_stats.strict_violations > 0 {
         candidates.clear();
         direct_rule_hits.clear();
+    }
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Scope);
+        probe.observe_rule_sources(&direct_rule_hits, OmissionCause::Scope);
     }
     if scope_stats.candidates_excluded_by_scope > 0 {
         candidate_metrics.scope_filtered_candidates = candidate_metrics
@@ -3603,6 +3493,9 @@ async fn run_context_pack_with_performance_inner(
         trace.filtered_count = trace.filtered_count.saturating_add(global_fan_in_filtered);
     }
     apply_team_lane_pack_policy(&mut candidates, &global_store_memory_ids, &mut degraded);
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Policy);
+    }
 
     let redaction_filter_input_count =
         candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
@@ -3610,6 +3503,9 @@ async fn run_context_pack_with_performance_inner(
         &mut candidates,
         &effective_filters.redaction,
     );
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Redaction);
+    }
     if redaction_filtered_candidates > 0 {
         candidate_metrics.redaction_filtered_candidates = candidate_metrics
             .redaction_filtered_candidates
@@ -3693,6 +3589,10 @@ async fn run_context_pack_with_performance_inner(
             &mut degraded,
         )?;
     }
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Policy);
+        probe.observe_rule_sources(&direct_rule_hits, OmissionCause::Policy);
+    }
     control.check()?;
 
     let ppr_rerank_start = Instant::now();
@@ -3727,6 +3627,17 @@ async fn run_context_pack_with_performance_inner(
         .graph_boosted_candidates
         .saturating_add(ppr_metrics.reranked_candidates);
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    let hits_boost_metrics = apply_context_profile_hits_boost(
+        read_connection,
+        &options.workspace_path,
+        request.profile,
+        &mut candidates,
+        &mut degraded,
+    );
+    candidate_metrics.graph_boosted_candidates = candidate_metrics
+        .graph_boosted_candidates
+        .saturating_add(hits_boost_metrics.boosted_candidates);
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let proximity_metrics = apply_proximity_to_seed_scores(
         read_connection,
         &options.workspace_path,
@@ -3748,15 +3659,24 @@ async fn run_context_pack_with_performance_inner(
         .graph_boosted_candidates
         .saturating_add(changed_symbol_metrics.boosted_candidates);
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let mut agent_profile =
+    let agent_profile =
         apply_agent_context_profile_bias(read_connection, &options.workspace_path, &mut candidates);
+    let bead_affinity = bead_context.as_ref().map(|bead| {
+        bead_affinity::apply(
+            bead,
+            read_connection,
+            &mut candidates,
+            read_snapshot_generation,
+            &mut degraded,
+        )
+    });
     apply_attempt_family_multiplicity_discount(&mut candidates)?;
     control.check()?;
 
     let scoring_ordering_start = Instant::now();
     sort_context_candidates(&mut candidates);
 
-    let mut evidence_candidates = collect_direct_evidence_pack_candidates(
+    let mut evidence_candidates = collect_direct_evidence_pack_candidates_with_probe(
         read_connection,
         &options.workspace_path,
         &search_report,
@@ -3764,6 +3684,7 @@ async fn run_context_pack_with_performance_inner(
         &effective_filters,
         options.relevance_floor,
         &mut degraded,
+        control.why_not,
     )?;
     let mut rule_candidates = direct_rule_pack_candidates(
         direct_rule_hits,
@@ -3772,8 +3693,32 @@ async fn run_context_pack_with_performance_inner(
         output_redaction_enabled,
         &mut degraded,
     );
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Filter);
+        probe.observe_native(
+            &rule_candidates,
+            &evidence_candidates,
+            OmissionCause::Filter,
+        );
+    }
     // Every fan-in has joined and final ranking scores are known. Reject
     // below-floor items before they can consume a result slot or page offset.
+    let mut relevance_excluded_evidence = evidence_candidates
+        .iter()
+        .map(|candidate| candidate.item.evidence_id.clone())
+        .collect::<BTreeSet<_>>();
+    policy_omissions.extend(filter_context_pack_candidates_by_query_relative_elbow(
+        &search_report.results,
+        &required_relevance_candidates,
+        &mut candidates,
+        &mut rule_candidates,
+        &mut evidence_candidates,
+        options.relevance_floor,
+        &mut degraded,
+    ));
+    for candidate in &evidence_candidates {
+        relevance_excluded_evidence.remove(&candidate.item.evidence_id);
+    }
     policy_omissions.extend(filter_context_pack_candidates_by_relevance_floor(
         &mut candidates,
         &mut rule_candidates,
@@ -3781,14 +3726,38 @@ async fn run_context_pack_with_performance_inner(
         options.relevance_floor,
         &mut degraded,
     )?);
-    let pagination_info = apply_pagination_with_rules(
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::ScoreFloor);
+        probe.observe_native(
+            &rule_candidates,
+            &evidence_candidates,
+            OmissionCause::ScoreFloor,
+        );
+    }
+    let warning_reservation = native_warning_candidate_for_page(
+        &candidates,
+        &rule_candidates,
+        &request,
+        options.relevance_floor,
+    );
+    let pagination_info = apply_pagination_with_rules_and_probe(
         &mut candidates,
         &mut rule_candidates,
         &mut evidence_candidates,
         &options.pagination,
         request.max_results,
+        warning_reservation,
         &mut degraded,
+        control.why_not,
     );
+    if let Some(probe) = control.why_not {
+        probe.observe_memories(&candidates, OmissionCause::Pagination);
+        probe.observe_native(
+            &rule_candidates,
+            &evidence_candidates,
+            OmissionCause::Pagination,
+        );
+    }
     candidate_metrics.subspans.scoring_ordering = scoring_ordering_start.elapsed();
     trace.record_candidate_resolution_subspans(&candidate_metrics.subspans);
     trace.candidate_resolution = candidate_metrics;
@@ -3911,18 +3880,36 @@ async fn run_context_pack_with_performance_inner(
             // golden harness proves byte-identical output.
             arena_mode: crate::pack::ArenaMode::Disabled,
         },
-        &determinism,
+        determinism,
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     apply_context_pack_contradiction_guard(read_connection, &mut draft);
     if concurrent_limit_retry_after_ms.is_none() {
-        append_ranked_native_pack_items(
+        let considered_evidence = evidence_candidates
+            .iter()
+            .map(|candidate| candidate.item.evidence_id.clone())
+            .collect::<BTreeSet<_>>();
+        append_ranked_native_pack_items_with_probe(
             rule_candidates,
             evidence_candidates,
             &request,
+            options.relevance_floor,
             &mut draft,
             &mut degraded,
+            control.why_not,
         );
+        if turn::permitted(options.pagination.as_ref(), options.relevance_floor) {
+            turn::complete_selected_turns(
+                read_connection,
+                &options.workspace_path,
+                &request,
+                &effective_filters,
+                &considered_evidence,
+                &relevance_excluded_evidence,
+                &mut draft,
+                &mut degraded,
+            );
+        }
     }
     if !policy_omissions.is_empty() {
         let omitted_count = policy_omissions.len();
@@ -3942,13 +3929,21 @@ async fn run_context_pack_with_performance_inner(
         .iter()
         .filter(|omission| omission.reason == PackOmissionReason::BelowRelevanceFloor)
         .count();
-    if options.relevance_floor.is_none() && below_relevance_floor_count > 0 {
+    let coverage_fill_below_floor_count = draft
+        .omitted
+        .iter()
+        .filter(|omission| {
+            omission.reason == PackOmissionReason::BelowRelevanceFloor
+                && omission.rejected_at == PackRejectionStage::Selection
+        })
+        .count();
+    if options.relevance_floor.is_none() && coverage_fill_below_floor_count > 0 {
         push_degradation(
             &mut degraded,
             "context_filtered_results",
             ContextResponseSeverity::Low,
             format!(
-                "{below_relevance_floor_count} memory candidates omitted by default coverage-fill relevance floor {:.4} (below_relevance_floor).",
+                "{coverage_fill_below_floor_count} memory candidates omitted by default coverage-fill relevance floor {:.4} (below_relevance_floor).",
                 crate::pack::DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR,
             ),
             None,
@@ -4125,12 +4120,38 @@ async fn run_context_pack_with_performance_inner(
             &cross_shard_memory_ids,
         );
     }
-    let mut pack_hash_components = refresh_context_pack_hash(
-        &request,
-        &mut draft,
-        &response_degraded,
+    let mut response = ContextResponse::new(request, draft, response_degraded)
+        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    response.data.command = command;
+    response.data.embed_backend = search_report.embed_backend;
+    response.data.adaptive_budget = adaptive_budget_decision;
+    response.data.agent_profile = agent_profile;
+    response.data.bead_affinity = bead_affinity;
+    response.data.slo = Some(slo);
+    response.data.scope_stats = Some(scope_stats);
+    response.data.consensus = consensus_conflicts.consensus;
+    response.data.conflicts = consensus_conflicts.conflicts;
+    response.data.coordination = coordination;
+    if pagination_info.applied {
+        response.data.pagination = Some(pagination_info.into_response());
+    }
+    if options.output_options.include_pack_dna {
+        control.check()?;
+        if let Some(config) =
+            resolve_pack_dna_config_for_response(Some(&options.workspace_path), &mut response)
+        {
+            attach_pack_dna_from_snapshot(
+                checked_context_read_snapshot(&read_pool, &read_snapshot)?,
+                &mut response,
+                config,
+                Instant::now(),
+            );
+        }
+        control.check()?;
+    }
+    finalize_context_response(
+        &mut response,
         options.output_options,
-        coordination.as_ref(),
         read_snapshot_generation,
         options.task_lens.as_ref(),
     );
@@ -4148,9 +4169,9 @@ async fn run_context_pack_with_performance_inner(
                     PackRecordPersistence::Ambient => persist_pack_record_measured(
                         &connection,
                         &options.workspace_path,
-                        &request,
-                        &draft,
-                        &response_degraded,
+                        &response.data.request,
+                        &response.data.pack,
+                        &response.data.degraded,
                         &non_ledger_memory_ids,
                         options.task_lens.as_ref(),
                         options.baseline_write.as_ref(),
@@ -4160,11 +4181,11 @@ async fn run_context_pack_with_performance_inner(
                     PackRecordPersistence::Seeded => persist_pack_record_seeded_measured(
                         &connection,
                         &options.workspace_path,
-                        &request,
-                        &draft,
-                        &response_degraded,
+                        &response.data.request,
+                        &response.data.pack,
+                        &response.data.degraded,
                         &non_ledger_memory_ids,
-                        &determinism,
+                        determinism,
                         options.task_lens.as_ref(),
                         options.baseline_write.as_ref(),
                         &mut pack_persistence,
@@ -4184,9 +4205,9 @@ async fn run_context_pack_with_performance_inner(
                             PackRecordPersistence::Ambient => persist_pack_record_measured(
                                 &connection,
                                 &options.workspace_path,
-                                &request,
-                                &draft,
-                                &response_degraded,
+                                &response.data.request,
+                                &response.data.pack,
+                                &response.data.degraded,
                                 &non_ledger_memory_ids,
                                 options.task_lens.as_ref(),
                                 options.baseline_write.as_ref(),
@@ -4196,11 +4217,11 @@ async fn run_context_pack_with_performance_inner(
                             PackRecordPersistence::Seeded => persist_pack_record_seeded_measured(
                                 &connection,
                                 &options.workspace_path,
-                                &request,
-                                &draft,
-                                &response_degraded,
+                                &response.data.request,
+                                &response.data.pack,
+                                &response.data.degraded,
                                 &non_ledger_memory_ids,
-                                &determinism,
+                                determinism,
                                 options.task_lens.as_ref(),
                                 options.baseline_write.as_ref(),
                                 &mut pack_persistence,
@@ -4232,30 +4253,26 @@ async fn run_context_pack_with_performance_inner(
         // The "persisted without its global items" notice was added before
         // the write so the persisted record and hash include it. No pack was
         // persisted, so it would now contradict `context_pack_persist_failed`.
-        response_degraded.retain(|entry| {
+        response.data.degraded.retain(|entry| {
             entry.code != GLOBAL_ITEMS_NOT_PERSISTED_CODE
                 && entry.code != CROSS_SHARD_ITEMS_NOT_PERSISTED_CODE
         });
         let (message, repair) = context_pack_persist_failed_message_and_repair(&persist_error);
         push_degradation(
-            &mut response_degraded,
+            &mut response.data.degraded,
             "context_pack_persist_failed",
             ContextResponseSeverity::Medium,
             message,
             Some(repair),
         );
-        pack_hash_components = refresh_context_pack_hash(
-            &request,
-            &mut draft,
-            &response_degraded,
+        // No record was committed, so the nonpersisted response can safely
+        // receive a new identity that includes the persistence failure.
+        finalize_context_response(
+            &mut response,
             options.output_options,
-            coordination.as_ref(),
             read_snapshot_generation,
             options.task_lens.as_ref(),
         );
-    }
-    if let Some(profile) = agent_profile.as_mut() {
-        set_agent_profile_base_pack_hash(profile, draft.hash.as_deref());
     }
     trace.pack_persistence = pack_persistence;
     trace.record_elapsed("packPersistence", persist_start);
@@ -4265,34 +4282,10 @@ async fn run_context_pack_with_performance_inner(
     // pack that blew its published latency budget says so rather than carrying
     // it only in `slo.elapsedStatus`.
     //
-    // Placed here, immediately before the response is built, because
-    // `response_degraded` is the hash input for EVERY
-    // `refresh_context_pack_hash` call in this function — including the second
-    // one inside the persist-failure branch above. Wall-clock time is not
-    // reproducible, so letting a timing entry reach any of them would make the
-    // same query over the same store hash differently on a loaded machine,
-    // breaking the determinism guarantee AGENTS.md calls non-negotiable. This
-    // is also why it is sourced from `timing_degradations()` rather than added
-    // to `slo.degradations`, which stays resource-only and deterministic.
-    //
-    // Persistence deliberately does not see it either: the persisted pack
-    // record should match the hashed, reproducible content.
-    response_degraded.extend(slo.timing_degradations());
-
-    let mut response = ContextResponse::new(request, draft, response_degraded)
-        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
-    response.data.command = command;
-    response.data.embed_backend = search_report.embed_backend;
-    response.data.adaptive_budget = adaptive_budget_decision;
-    response.data.agent_profile = agent_profile;
-    response.data.slo = Some(slo);
-    response.data.scope_stats = Some(scope_stats);
-    response.data.consensus = consensus_conflicts.consensus;
-    response.data.conflicts = consensus_conflicts.conflicts;
-    response.data.coordination = coordination;
-    response.data.pack_hash_components = Some(pack_hash_components);
-    if pagination_info.applied {
-        response.data.pagination = Some(pagination_info.into_response());
+    // Finalized prompt bytes and the persisted ledger exclude delivery
+    // telemetry. The envelope still reports it without changing either.
+    if let Some(slo) = &response.data.slo {
+        response.data.degraded.extend(slo.timing_degradations());
     }
 
     control.check()?;
@@ -4325,25 +4318,7 @@ async fn run_context_pack_with_performance_inner(
             .ok()
             == Some(l2_context.key_input.database_generation)
     {
-        let degraded_count_before_l2_store = response.data.degraded.len();
         context_pack_l2_store(l2_context, options, &search_report, &mut response);
-        if response.data.degraded.len() != degraded_count_before_l2_store {
-            // `response.data.degraded` already holds the timing entry here;
-            // the v2 hash drops it by construction (ADR 0087 §5).
-            let pack_hash_components = refresh_context_pack_hash(
-                &response.data.request,
-                &mut response.data.pack,
-                &response.data.degraded,
-                options.output_options,
-                response.data.coordination.as_ref(),
-                read_snapshot_generation,
-                options.task_lens.as_ref(),
-            );
-            response.data.pack_hash_components = Some(pack_hash_components);
-            if let Some(profile) = response.data.agent_profile.as_mut() {
-                set_agent_profile_base_pack_hash(profile, response.data.pack.hash.as_deref());
-            }
-        }
     }
     trace.record_pack_persistence_subspans();
     trace.record_elapsed("total", total_start);
@@ -5681,6 +5656,7 @@ fn apply_pagination(
         evidence_candidates,
         pagination,
         max_results,
+        None,
         degraded,
     )
 }
@@ -5725,16 +5701,94 @@ enum ContextPackCandidateSlot {
     Evidence(usize),
 }
 
+/// Keep the warning reservation reachable through a hard result cap. Native
+/// warnings compete with an eligible memory warning for one slot; ordinary
+/// rules retain their relevance ordering. Explicit pages traverse that stable
+/// population once instead of repeating the warning on every page.
+fn native_warning_candidate_for_page(
+    memories: &[PackCandidate],
+    rules: &[crate::pack::PackRuleItem],
+    request: &ContextRequest,
+    relevance_floor: Option<f32>,
+) -> Option<ContextPackEntityKey> {
+    let floor = crate::pack::PackAssemblyOptions {
+        relevance_floor,
+        ..crate::pack::PackAssemblyOptions::default()
+    }
+    .effective_relevance_floor();
+    let quotas =
+        crate::pack::SectionQuotas::for_profile(request.profile, request.budget.max_tokens());
+    let native = rules
+        .iter()
+        .filter(|item| {
+            item.section == PackSection::Failures
+                && item.relevance.into_inner() >= floor
+                && quotas.has_room(PackSection::Failures, 0, item.estimated_tokens)
+                && item.estimated_tokens <= request.budget.max_tokens()
+        })
+        .map(|item| ContextPackPriority {
+            relevance: item.relevance,
+            utility: item.utility,
+            entity: ContextPackEntityKey::Rule(item.rule_id.clone()),
+        })
+        .min_by(compare_context_pack_priority)?;
+    memories
+        .iter()
+        .filter(|item| {
+            item.section == PackSection::Failures
+                && item.relevance.into_inner() >= floor
+                // MMR needs positive relevance on its first step; facility
+                // coverage can also gain from a candidate's positive utility.
+                && (item.relevance.into_inner() > 0.0
+                    || (request.profile == ContextPackProfile::Submodular
+                        && item.utility.into_inner() > 0.0))
+                && quotas.has_room(PackSection::Failures, 0, item.estimated_tokens)
+                && item.estimated_tokens <= request.budget.max_tokens()
+        })
+        .map(|item| ContextPackPriority {
+            relevance: item.relevance,
+            utility: item.utility,
+            entity: ContextPackEntityKey::Memory(item.memory_id),
+        })
+        .chain(std::iter::once(native))
+        .min_by(compare_context_pack_priority)
+        .map(|priority| priority.entity)
+}
+
 /// Apply result caps and page offsets to one ranked candidate population.
 /// Native evidence and rules must not lose their places merely because their
 /// source kind used to follow every memory in an implicit concatenation.
+#[cfg(test)]
 fn apply_pagination_with_rules(
     candidates: &mut Vec<PackCandidate>,
     rule_candidates: &mut Vec<crate::pack::PackRuleItem>,
     evidence_candidates: &mut Vec<DirectEvidencePackCandidate>,
     pagination: &Option<ContextPagination>,
     max_results: Option<u32>,
+    warning_reservation: Option<ContextPackEntityKey>,
     degraded: &mut Vec<ContextResponseDegradation>,
+) -> PaginationInfo {
+    apply_pagination_with_rules_and_probe(
+        candidates,
+        rule_candidates,
+        evidence_candidates,
+        pagination,
+        max_results,
+        warning_reservation,
+        degraded,
+        None,
+    )
+}
+
+fn apply_pagination_with_rules_and_probe(
+    candidates: &mut Vec<PackCandidate>,
+    rule_candidates: &mut Vec<crate::pack::PackRuleItem>,
+    evidence_candidates: &mut Vec<DirectEvidencePackCandidate>,
+    pagination: &Option<ContextPagination>,
+    max_results: Option<u32>,
+    warning_reservation: Option<ContextPackEntityKey>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+    why_not: Option<&why_not::WhyNotSelectionProbe>,
 ) -> PaginationInfo {
     if pagination.is_none() && max_results.is_none() {
         return PaginationInfo::default();
@@ -5800,10 +5854,17 @@ fn apply_pagination_with_rules(
         )
         .collect::<Vec<_>>();
     if !rule_candidates.is_empty() || !evidence_candidates.is_empty() {
-        ranked.sort_by(|(left, _), (right, _)| compare_context_pack_priority(left, right));
+        ranked.sort_by(|(left, _), (right, _)| {
+            let left_reserved = warning_reservation.as_ref() == Some(&left.entity);
+            let right_reserved = warning_reservation.as_ref() == Some(&right.entity);
+            right_reserved
+                .cmp(&left_reserved)
+                .then_with(|| compare_context_pack_priority(left, right))
+        });
     }
     let mut represented_links = BTreeSet::new();
-    ranked.retain(|(_, slot)| {
+    let mut representative_entities = BTreeMap::new();
+    ranked.retain(|(priority, slot)| {
         let group = match slot {
             ContextPackCandidateSlot::Memory(index) => {
                 Some(candidates[*index].memory_id).filter(|id| linked_memory_ids.contains(id))
@@ -5815,13 +5876,28 @@ fn apply_pagination_with_rules(
                 .filter(|id| linked_memory_ids.contains(id)),
             ContextPackCandidateSlot::Rule(_) => None,
         };
-        group.is_none_or(|id| represented_links.insert(id))
+        let keep = group.is_none_or(|id| represented_links.insert(id));
+        if let Some(probe) = why_not
+            && let Some(id) = group
+        {
+            if keep {
+                representative_entities.insert(id, priority.entity.clone());
+            } else if probe.matches(&priority.entity)
+                && let Some(representative) = representative_entities.get(&id)
+            {
+                probe.represented_by_key(representative, OmissionCause::Duplicate);
+            }
+        }
+        keep
     });
     if let Some(max_results) = max_results {
         let mut memory_trimmed = 0_usize;
         let mut rule_trimmed = 0_usize;
         let mut evidence_trimmed = 0_usize;
-        for (_, slot) in ranked.iter().skip(max_results as usize) {
+        for (priority, slot) in ranked.iter().skip(max_results as usize) {
+            if let Some(probe) = why_not.filter(|probe| probe.matches(&priority.entity)) {
+                probe.reject(OmissionCause::ResultLimit);
+            }
             match slot {
                 ContextPackCandidateSlot::Memory(_) => memory_trimmed += 1,
                 ContextPackCandidateSlot::Rule(_) => rule_trimmed += 1,
@@ -5859,6 +5935,15 @@ fn apply_pagination_with_rules(
     let remaining = total.saturating_sub(offset);
     let page_size = remaining.min(limit);
     let has_more = remaining > limit;
+    if let Some(probe) = why_not {
+        for (index, (priority, _)) in ranked.iter().enumerate() {
+            if (index < offset || index >= offset.saturating_add(page_size))
+                && probe.matches(&priority.entity)
+            {
+                probe.reject(OmissionCause::Pagination);
+            }
+        }
+    }
     let page_slots = ranked
         .iter()
         .skip(offset)
@@ -7591,11 +7676,17 @@ fn context_pack_l2_bypass_reason(
     options: &ContextPackOptions,
     filters: &crate::models::QueryFilters,
 ) -> Option<&'static str> {
+    if options.bead_id.is_some() {
+        return Some("bead_context_requires_live_snapshot");
+    }
     if read_env_bool(EnvVar::L2PackCacheDisable) == Some(true) {
         return Some("disabled_by_environment");
     }
     if context_validity_reference_time(options, filters).is_none() {
         return Some("implicit_validity_reference_time");
+    }
+    if options.output_options.include_pack_dna {
+        return Some("pack_dna_requires_live_snapshot");
     }
     if options.coordination_snapshot_path.is_some() {
         return Some("coordination_snapshot");
@@ -7639,6 +7730,9 @@ fn context_pack_l2_bypass_reason(
 }
 
 fn context_pack_l2_side_effect_bypass_reason(options: &ContextPackOptions) -> Option<&'static str> {
+    if options.output_options.include_pack_dna {
+        return Some("pack_dna_requires_live_snapshot");
+    }
     // A cache hit returns before pack-record persistence, baseline ledger
     // writes, and the per-invocation audit. Until those side effects can be
     // replayed from a structured cache payload, write-bearing requests must
@@ -7652,6 +7746,9 @@ fn context_pack_l2_side_effect_bypass_reason(options: &ContextPackOptions) -> Op
 fn context_pack_l2_mutable_state_bypass_reason(
     options: &ContextPackOptions,
 ) -> Option<&'static str> {
+    if options.output_options.include_pack_dna {
+        return Some("pack_dna_requires_live_snapshot");
+    }
     // These mutable files are consumed after the cache lookup. Absence is
     // rechecked on every request, so a newly-created file forces a fresh run;
     // any present, unreadable, or unsafe path bypasses replay entirely.
@@ -7855,6 +7952,7 @@ fn context_pack_l2_try_hit(
                 &hit.pack_json,
                 command,
                 l2_context.key_input.embed_backend,
+                options.output_options,
             ) {
                 Ok(cached_json) => {
                     let mut search_advisory_snapshot =
@@ -7918,12 +8016,18 @@ fn context_pack_l2_try_hit(
                         dictionary_id = hit.compression.as_ref().and_then(|compression| compression.dictionary_id.as_deref()).unwrap_or("none"),
                         stored_at_epoch_seconds = hit.stored_at_epoch_seconds,
                     );
+                    let mut response = ContextResponse::from_cached_json_with_command(
+                        request.clone(),
+                        cached_json,
+                        command,
+                    );
+                    response.data.finalized_text = hit
+                        .pack_json
+                        .get("canonicalText")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
                     return Some(ContextPackPerformanceRun {
-                        response: ContextResponse::from_cached_json_with_command(
-                            request.clone(),
-                            cached_json,
-                            command,
-                        ),
+                        response,
                         performance: context_pack_l2_hit_performance_json(
                             command,
                             options,
@@ -7990,6 +8094,14 @@ fn context_pack_l2_store(
     if !options.persist_pack {
         return;
     }
+    if response.data.finalized_text.is_none() || response.data.pack_hash_components.is_none() {
+        tracing::debug!(
+            target: "ee::pack_l2",
+            event = "pack_l2_cache_write_skipped",
+            reason = "unfinalized_response",
+        );
+        return;
+    }
     if let Some(reason) = context_pack_l2_mutable_state_bypass_reason(options) {
         tracing::debug!(
             target: "ee::pack_l2",
@@ -8047,8 +8159,9 @@ fn context_pack_l2_store(
     let search_advisory_snapshot =
         ContextSearchAdvisorySnapshot::from_search_report(search_report).cache_json();
     let payload = serde_json::json!({
-        "schema": PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+        "schema": PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4,
         "responseJson": rendered,
+        "canonicalText": response.data.finalized_text,
         "searchAdvisorySnapshot": search_advisory_snapshot,
         "sourceMode": {
             "requested": source_mode_metadata.requested.as_str(),
@@ -8435,18 +8548,26 @@ fn context_pack_l2_feature_flags_hash(
     hash_labeled_bytes(&mut hasher, "instruction_authority_policy", b"v1");
     // Cached source-memory hydration predating native rule filters and
     // advisory posture must be reassembled under the current admission policy.
-    // v2 admits sourced rules under RuleId and applies native authority and
-    // section filters. Older persisted packs may carry rule bodies under a
-    // source MemoryId, so they cannot bypass this admission on an L2 hit.
-    hash_labeled_bytes(&mut hasher, "procedural_rule_admission_policy", b"v2");
+    // v3 preserves native anti-pattern section semantics and the warning
+    // reservation. Older packs can contain the same rule as ordinary advice,
+    // or omit it despite an explicit failure-section request.
+    hash_labeled_bytes(&mut hasher, "procedural_rule_admission_policy", b"v3");
     // Older responses classify elapsed breaches as within_budget and include
     // elapsed time in signed resource warnings. They cannot satisfy this policy.
     hash_labeled_bytes(&mut hasher, "pack_slo_diagnostics_policy", b"v2");
-    // Cached packs from before caller floors reached assembly must be rebuilt.
-    hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v1");
-    // Native sources now compete with lower-ranked selected memories for the
-    // shared budget. A memory-first cached pack cannot satisfy that policy.
-    hash_labeled_bytes(&mut hasher, "mixed_source_budget_policy", b"v1");
+    // Reassemble older packs that filled the budget with an uncalibrated tail
+    // before query-relative admission reached the complete candidate universe.
+    hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v2");
+    // Reassemble older cached packs without bounded conversational companions.
+    hash_labeled_bytes(&mut hasher, "conversation_turn_completion_policy", b"v1");
+    // Graph expansion now uses the canonical quality scorer; older cached
+    // packs did not apply confidence or harmful-feedback penalties to graph hints.
+    hash_labeled_bytes(&mut hasher, "graph_hint_quality_policy", b"v1");
+    // Focus inputs now respect query filters and quality penalties.
+    hash_labeled_bytes(&mut hasher, "passive_focus_admission_policy", b"v1");
+    // Native sources share memory's budget and warning reservation. Cached
+    // packs from before native warnings had priority must be reassembled.
+    hash_labeled_bytes(&mut hasher, "mixed_source_budget_policy", b"v2");
     if options.pagination.is_some() {
         // Offsets and maxResults operate on one ranked native-entity union.
         hash_labeled_bytes(&mut hasher, "native_evidence_pagination_policy", b"v2");
@@ -8572,12 +8693,13 @@ fn context_pack_l2_cached_response_json(
     payload: &serde_json::Value,
     command: &'static str,
     expected_embed_backend: EmbedBackend,
+    output_options: ContextPackOutputOptions,
 ) -> Result<String, String> {
     let schema = payload
         .get("schema")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "L2 pack cache payload is missing schema".to_string())?;
-    if schema != PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3 {
+    if schema != PACK_L2_CONTEXT_RESPONSE_SCHEMA_V4 {
         return Err(format!(
             "L2 pack cache payload has unexpected schema {schema}"
         ));
@@ -8610,6 +8732,11 @@ fn context_pack_l2_cached_response_json(
             expected_embed_backend.as_str()
         ));
     }
+    let canonical_text = payload
+        .get("canonicalText")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "L2 pack cache payload is missing canonicalText".to_owned())?;
+    validate_cached_context_finalization(&parsed, canonical_text, output_options)?;
     if command_matches && pack_schema_matches {
         return Ok(response_json.to_owned());
     }
@@ -8640,6 +8767,102 @@ fn context_pack_l2_cached_response_json(
     }
     serde_json::to_string(&adjusted)
         .map_err(|error| format!("L2 pack cache responseJson rewrite failed: {error}"))
+}
+
+fn validate_cached_context_finalization(
+    parsed: &serde_json::Value,
+    canonical_text: &str,
+    output_options: ContextPackOutputOptions,
+) -> Result<(), String> {
+    let identity = parsed.pointer("/data/pack/snapshotIdentity");
+    let hash = parsed
+        .pointer("/data/pack/hash")
+        .and_then(serde_json::Value::as_str);
+    if hash.is_none()
+        || identity
+            .and_then(|value| value.get("version"))
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(crate::pack::PACK_SNAPSHOT_IDENTITY_VERSION))
+        || identity
+            .and_then(|value| value.get("inputSchema"))
+            .and_then(serde_json::Value::as_str)
+            != Some(crate::pack::PACK_HASH_INPUT_SCHEMA_V5)
+        || identity
+            .and_then(|value| value.get("digest"))
+            .and_then(serde_json::Value::as_str)
+            != hash
+    {
+        return Err("L2 pack cache responseJson is missing a finalized v5 identity".to_owned());
+    }
+    match (
+        output_options.include_rendered_text,
+        parsed.pointer("/data/pack/text"),
+    ) {
+        (true, Some(serde_json::Value::String(text))) if text == canonical_text => {}
+        (false, None) => {}
+        _ => {
+            return Err(
+                "L2 pack cache responseJson text does not match its finalized output policy"
+                    .to_owned(),
+            );
+        }
+    }
+    let components = identity
+        .and_then(|value| value.get("components"))
+        .ok_or_else(|| "L2 pack cache v5 identity is missing component digests".to_owned())?;
+    let read_digest = |name| -> Result<String, String> {
+        components
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| {
+                value.strip_prefix("blake3:").is_some_and(|hex| {
+                    hex.len() == 64
+                        && hex
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+            })
+            .map(str::to_owned)
+            .ok_or_else(|| "L2 pack cache v5 identity has an invalid component digest".to_owned())
+    };
+    let digests = crate::pack::PackHashComponentDigests {
+        request: read_digest("request")?,
+        reference_time: read_digest("referenceTime")?,
+        quality_scoring: read_digest("qualityScoring")?,
+        items: read_digest("items")?,
+        omitted: read_digest("omitted")?,
+        degraded: read_digest("degraded")?,
+        coordination: read_digest("coordination")?,
+        rendered_text: read_digest("renderedText")?,
+    };
+    let composite = compute_pack_hash_composite(&digests, output_options.include_skipped);
+    if Some(composite.as_str()) != hash {
+        return Err("L2 pack cache v5 composite does not match its component digests".to_owned());
+    }
+    // `composite` equals the stored hash here, so it names the footer.
+    let footer = crate::pack::context_markdown_identity_footer(
+        crate::models::RESPONSE_SCHEMA_V2,
+        &composite,
+    );
+    let body = canonical_text
+        .strip_suffix(&footer)
+        .ok_or_else(|| "L2 pack cache canonical text has an invalid identity footer".to_owned())?;
+    // Only the terminal footer produced by the typed renderer is replaced.
+    // Identical-looking strings inside query or memory text are untouched.
+    let canonical_text = format!(
+        "{body}{}",
+        crate::pack::context_markdown_identity_footer(
+            crate::models::RESPONSE_SCHEMA_V2,
+            crate::pack::PACK_HASH_TEXT_FOOTER_PLACEHOLDER,
+        )
+    );
+    let mut hasher = pack_hash_component_hasher("rendered_text");
+    hash_labeled_bytes(&mut hasher, "text", canonical_text.as_bytes());
+    let digest = finalize_blake3(hasher);
+    if digests.rendered_text != digest {
+        return Err("L2 pack cache canonical text does not match its v5 text digest".to_owned());
+    }
+    Ok(())
 }
 
 fn context_pack_l2_cached_search_advisory_snapshot(
@@ -8894,7 +9117,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V9.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V10.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_bytes(&mut hasher, "database_identity", &input.database_identity);
@@ -8926,6 +9149,9 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
             .as_deref()
             .map(str::as_bytes),
     );
+    if let Some(identity) = &input.request.bead_affinity_identity {
+        hash_labeled_bytes(&mut hasher, "bead_affinity", identity.as_bytes());
+    }
     hash_labeled_bytes(
         &mut hasher,
         "context_profile",
@@ -9070,7 +9296,9 @@ fn hash_labeled_bool(hasher: &mut blake3::Hasher, label: &str, value: bool) {
 /// `render_context_markdown` byte-equality. The hash is deterministic
 /// over `(request, draft, degraded, default ContextPackOutputOptions,
 /// no coordination, no read snapshot)`; arena allocation strategy does
-/// not participate in any of those inputs.
+/// not participate in any of those inputs. Its renderer uses the default
+/// hash-fallback backend and no analysis or DNA; production finalizes the
+/// actual response metadata before persistence instead.
 pub fn compute_pack_hash(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
@@ -9157,30 +9385,34 @@ fn compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
     components.composite_hash
 }
 
-/// Set `draft.hash` and return the component digests behind it, which the
-/// caller carries to the response's snapshot identity.
-#[must_use]
-fn refresh_context_pack_hash(
-    request: &ContextRequest,
-    draft: &mut crate::pack::PackDraft,
-    degraded: &[ContextResponseDegradation],
+/// Freeze the complete canonical prompt and its v5 identity together. All
+/// canonical attachments must be present before this boundary. Later delivery
+/// notices may extend the envelope but cannot change the persisted prompt.
+fn finalize_context_response(
+    response: &mut ContextResponse,
     output_options: ContextPackOutputOptions,
-    coordination: Option<&PackCoordinationSnapshot>,
     read_snapshot_generation: Option<u64>,
     task_lens: Option<&ContextTaskLens>,
-) -> crate::pack::PackHashComponentDigests {
-    let components = compute_pack_hash_components(
-        request,
-        draft,
-        degraded,
+) {
+    let components = compute_context_pack_hash_components(
+        &crate::pack::ContextMarkdownInput::from(&*response),
         output_options,
-        coordination,
         read_snapshot_generation,
         task_lens,
     );
     log_pack_hash_components(&components);
-    draft.hash = Some(components.composite_hash);
-    components.digests
+    let composite_hash = components.composite_hash;
+    response.data.pack.hash = Some(composite_hash.clone());
+    response.data.pack_hash_components = Some(components.digests);
+    let finalized_text = crate::output::render_context_markdown_for_finalization(
+        &crate::pack::ContextMarkdownInput::from(&*response),
+        output_options.include_non_affecting_degradations,
+        &composite_hash,
+    );
+    response.data.finalized_text = Some(finalized_text);
+    if let Some(profile) = response.data.agent_profile.as_mut() {
+        set_agent_profile_base_pack_hash(profile, response.data.pack.hash.as_deref());
+    }
 }
 
 #[derive(Debug)]
@@ -9189,15 +9421,8 @@ struct PackHashComponents {
     composite_hash: String,
 }
 
-/// The v4 pack hash (ADR 0087 §4, §7, §8).
-///
-/// Each component is its own blake3 hasher, opened with the input schema tag
-/// and the component name, over labeled, length-prefixed fields only
-/// (`hash_labeled_*`), so no two field sequences can feed the same bytes. The
-/// composite hashes the schema tag and the tagged component digests, never raw
-/// fields, which is what lets a differing composite name the component that
-/// differs. `omitted` enters the composite only when skipped items are shown,
-/// and `rendered_text` only when the text is shown, as in v1.
+/// Default metadata for the public draft-hash builder. Production finalizes
+/// the full response through `compute_context_pack_hash_components` instead.
 fn compute_pack_hash_components(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
@@ -9207,7 +9432,44 @@ fn compute_pack_hash_components(
     read_snapshot_generation: Option<u64>,
     task_lens: Option<&ContextTaskLens>,
 ) -> PackHashComponents {
-    let canonical_degraded = canonical_pack_hash_degraded(degraded);
+    compute_context_pack_hash_components(
+        &crate::pack::ContextMarkdownInput {
+            schema: crate::models::RESPONSE_SCHEMA_V2,
+            request,
+            pack: draft,
+            degraded,
+            embed_backend: EmbedBackend::HashFallback,
+            consensus: &[],
+            conflicts: &[],
+            coordination,
+            pack_dna: None,
+        },
+        output_options,
+        read_snapshot_generation,
+        task_lens,
+    )
+}
+
+/// The v5 pack hash (ADR 0087 §4, §7, §8).
+///
+/// Each component is its own blake3 hasher, opened with the input schema tag
+/// and the component name, over labeled, length-prefixed fields only
+/// (`hash_labeled_*`), so no two field sequences can feed the same bytes. The
+/// composite hashes the schema tag and the tagged component digests, never raw
+/// fields, which is what lets a differing composite name the component that
+/// differs. The actual output renderer binds its backend, analysis, DNA and
+/// filtered degradations, with only the typed footer hash value replaced by
+/// the declared placeholder. Text is bound even when JSON omits `pack.text`:
+/// the same canonical prompt remains available to Markdown consumers.
+fn compute_context_pack_hash_components(
+    input: &crate::pack::ContextMarkdownInput<'_>,
+    output_options: ContextPackOutputOptions,
+    read_snapshot_generation: Option<u64>,
+    task_lens: Option<&ContextTaskLens>,
+) -> PackHashComponents {
+    let request = input.request;
+    let draft = input.pack;
+    let canonical_degraded = canonical_pack_hash_degraded(input.degraded);
 
     let mut request_hasher = pack_hash_component_hasher("request");
     hash_labeled_bytes(&mut request_hasher, "query", request.query.as_bytes());
@@ -9246,6 +9508,11 @@ fn compute_pack_hash_components(
             "output.include_verbose_meta",
             output_options.include_verbose_meta,
         ),
+        (
+            "output.include_non_affecting_degradations",
+            output_options.include_non_affecting_degradations,
+        ),
+        ("output.include_pack_dna", output_options.include_pack_dna),
     ] {
         hash_labeled_bool(&mut request_hasher, label, value);
     }
@@ -9256,6 +9523,11 @@ fn compute_pack_hash_components(
     );
     hash_context_task_lens(&mut request_hasher, task_lens);
     task_paths::hash(&mut request_hasher, &request.task_paths);
+    // Do not add an absent marker: requests without bead context retain their
+    // exact historical hash. Opt-in requests bind the captured scoring inputs.
+    if let Some(identity) = &request.bead_affinity_identity {
+        hash_labeled_bytes(&mut request_hasher, "bead_affinity", identity.as_bytes());
+    }
 
     let mut reference_time_hasher = pack_hash_component_hasher("reference_time");
     hash_pack_reference_time(&mut reference_time_hasher, request.reference_time);
@@ -9347,20 +9619,17 @@ fn compute_pack_hash_components(
     }
 
     let mut coordination_hasher = pack_hash_component_hasher("coordination");
-    let coordination_input = coordination.map(coordination_snapshot_hash_input);
+    let coordination_input = input.coordination.map(coordination_snapshot_hash_input);
     hash_labeled_optional_bytes(
         &mut coordination_hasher,
         "coordination.snapshot",
         coordination_input.as_deref().map(str::as_bytes),
     );
 
-    let rendered_text = crate::pack::render_context_markdown_with_analysis(
-        request,
-        draft,
-        &canonical_degraded,
-        &[],
-        &[],
-        coordination,
+    let rendered_text = crate::output::render_context_markdown_for_finalization(
+        input,
+        output_options.include_non_affecting_degradations,
+        crate::pack::PACK_HASH_TEXT_FOOTER_PLACEHOLDER,
     );
     let mut rendered_text_hasher = pack_hash_component_hasher("rendered_text");
     hash_labeled_bytes(&mut rendered_text_hasher, "text", rendered_text.as_bytes());
@@ -9376,11 +9645,22 @@ fn compute_pack_hash_components(
         rendered_text: finalize_blake3(rendered_text_hasher),
     };
 
+    PackHashComponents {
+        composite_hash: compute_pack_hash_composite(&digests, output_options.include_skipped),
+        digests,
+    }
+}
+
+/// Fresh assembly and L2 replay share exactly the same component membership.
+fn compute_pack_hash_composite(
+    digests: &crate::pack::PackHashComponentDigests,
+    include_skipped: bool,
+) -> String {
     let mut composite_hasher = blake3::Hasher::new();
     hash_labeled_bytes(
         &mut composite_hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V4.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V5.as_bytes(),
     );
     hash_labeled_bytes(&mut composite_hasher, "request", digests.request.as_bytes());
     hash_labeled_bytes(
@@ -9394,7 +9674,7 @@ fn compute_pack_hash_components(
         digests.quality_scoring.as_bytes(),
     );
     hash_labeled_bytes(&mut composite_hasher, "items", digests.items.as_bytes());
-    if output_options.include_skipped {
+    if include_skipped {
         hash_labeled_bytes(&mut composite_hasher, "omitted", digests.omitted.as_bytes());
     }
     hash_labeled_bytes(
@@ -9407,25 +9687,20 @@ fn compute_pack_hash_components(
         "coordination",
         digests.coordination.as_bytes(),
     );
-    if output_options.include_rendered_text {
-        hash_labeled_bytes(
-            &mut composite_hasher,
-            "rendered_text",
-            digests.rendered_text.as_bytes(),
-        );
-    }
+    hash_labeled_bytes(
+        &mut composite_hasher,
+        "rendered_text",
+        digests.rendered_text.as_bytes(),
+    );
 
-    PackHashComponents {
-        composite_hash: finalize_blake3(composite_hasher),
-        digests,
-    }
+    finalize_blake3(composite_hasher)
 }
 
-/// The degraded set the v4 pack hash binds (ADR 0087 §4): non-canonical
+/// The degraded set the v5 pack hash binds (ADR 0087 §4): non-canonical
 /// telemetry codes are dropped, the rest sorted by (code, severity, message,
 /// repair) with exact duplicates removed. Emission order and repetition are
 /// presentation, and timing is telemetry, so neither can fork `pack.hash`,
-/// whichever `refresh_context_pack_hash` call site passes them in.
+/// whichever finalization call site passes them in.
 fn canonical_pack_hash_degraded(
     degraded: &[ContextResponseDegradation],
 ) -> Vec<ContextResponseDegradation> {
@@ -9450,7 +9725,7 @@ fn pack_hash_component_hasher(component: &str) -> blake3::Hasher {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        crate::pack::PACK_HASH_INPUT_SCHEMA_V4.as_bytes(),
+        crate::pack::PACK_HASH_INPUT_SCHEMA_V5.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "component", component.as_bytes());
     hasher
@@ -11159,6 +11434,213 @@ fn push_ppr_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegra
     );
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ContextProfileHitsBoostMetrics {
+    boosted_candidates: usize,
+}
+
+fn context_hits_profiles_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
+    let config = context_workspace_config(workspace_path, "Context profile HITS boost")?;
+    Ok(config
+        .and_then(|config| config.graph.feature.hits_profiles_enabled)
+        .unwrap_or(false))
+}
+
+fn push_hits_profiles_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
+    push_degradation(
+        degraded,
+        "graph_feature_disabled",
+        ContextResponseSeverity::Medium,
+        format!(
+            "Context profile HITS boost is disabled by {GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY}."
+        ),
+        Some(format!(
+            "ee config set {GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY} true"
+        )),
+    );
+}
+
+/// Apply the requested context profile's HITS authority/hub weights to
+/// candidate relevance.
+///
+/// The weights are declared on [`ContextPackProfile::hits_boost_weights`] and
+/// encode the documented profile semantics: `grounding` leans on authorities,
+/// `orientation` on hubs, `balanced` splits the difference. `compact`,
+/// `thorough` and `submodular` declare no weight and are left untouched, so
+/// selecting them cannot change a score here.
+///
+/// The blend mirrors the convex form `apply_personalized_pagerank_rerank`
+/// uses, extended to two signals, so no combination of weights can push a
+/// score out of the unit interval:
+///
+/// ```text
+/// relevance' = (w_authority * authority)
+///            + (w_hub * hub)
+///            + (1 - w_authority - w_hub) * relevance
+/// ```
+///
+/// `authority` and `hub` are the snapshot's max-normalized HITS scores — the
+/// same two numbers `ee why` reports for the memory under `graph.hits`, so a
+/// reranked item and its explanation cite one set of values.
+fn apply_context_profile_hits_boost(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    profile: ContextPackProfile,
+    candidates: &mut [PackCandidate],
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> ContextProfileHitsBoostMetrics {
+    let weights = profile.hits_boost_weights();
+    let total_weight = weights.authority + weights.hub;
+    if candidates.is_empty() || !total_weight.is_finite() || total_weight <= 0.0 {
+        return ContextProfileHitsBoostMetrics::default();
+    }
+    match context_hits_profiles_feature_enabled(workspace_path) {
+        Ok(true) => {}
+        Ok(false) => {
+            push_hits_profiles_feature_disabled_degradation(degraded);
+            return ContextProfileHitsBoostMetrics::default();
+        }
+        Err(message) => {
+            push_degradation(
+                degraded,
+                "context_config_unavailable",
+                ContextResponseSeverity::Medium,
+                message,
+                Some("Fix or remove .ee/config.toml.".to_string()),
+            );
+            return ContextProfileHitsBoostMetrics::default();
+        }
+    }
+
+    // Deliberately NOT `latest_valid_memory_links_snapshot`: that helper always
+    // pushes a degradation on a miss, and its text and code both name the PPR
+    // rerank. Borrowing it here would report a HITS skip as a PPR skip, which
+    // sends a reader to the wrong subsystem. Same lookup, own attribution.
+    let workspace_ids = graph_context_workspace_ids(connection, workspace_path, degraded);
+    let mut snapshot = None;
+    for workspace_id in &workspace_ids {
+        match connection
+            .get_latest_graph_snapshot(workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+        {
+            Ok(Some(found)) if found.status == crate::db::GraphSnapshotStatus::Valid => {
+                snapshot = Some(found);
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Context profile HITS boost could not check graph snapshot posture for {workspace_id}: {error}"
+                ),
+                Some("ee graph centrality-refresh".to_string()),
+            ),
+        }
+    }
+    let Some(snapshot) = snapshot else {
+        push_degradation(
+            degraded,
+            "context_graph_snapshot_missing",
+            ContextResponseSeverity::Low,
+            "Context profile HITS boost skipped because no valid memory_links graph snapshot exists.",
+            Some("ee graph centrality-refresh".to_string()),
+        );
+        return ContextProfileHitsBoostMetrics::default();
+    };
+    let centrality = match crate::graph::graph_snapshot_centrality_report(&snapshot) {
+        Ok(centrality) => centrality,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Context profile HITS boost skipped because HITS scores could not be read from graph snapshot {}: {error}",
+                    snapshot.id
+                ),
+                Some("ee graph centrality-refresh".to_string()),
+            );
+            return ContextProfileHitsBoostMetrics::default();
+        }
+    };
+
+    let authority_max =
+        max_finite_hits_score(centrality.scores.iter().map(|score| score.authority));
+    let hub_max = max_finite_hits_score(centrality.scores.iter().map(|score| score.hub));
+    // A snapshot whose HITS pass did not run carries all-zero scores, which
+    // normalize to 0.0 and would quietly scale every candidate's relevance by
+    // `base_weight` without reordering anything. That is a silent magnitude
+    // change dressed up as a rerank, so refuse instead and say which status
+    // produced the zeros.
+    if authority_max <= 0.0 && hub_max <= 0.0 {
+        push_degradation(
+            degraded,
+            "context_graph_snapshot_unavailable",
+            ContextResponseSeverity::Low,
+            format!(
+                "Context profile HITS boost skipped because graph snapshot {} carries no non-zero HITS scores (hits status {}).",
+                snapshot.id,
+                centrality.hits_status.as_str()
+            ),
+            Some("ee graph centrality-refresh".to_string()),
+        );
+        return ContextProfileHitsBoostMetrics::default();
+    }
+    let scores = centrality
+        .scores
+        .iter()
+        .map(|score| {
+            (
+                score.memory_id.clone(),
+                (
+                    normalize_hits_score(score.authority, authority_max),
+                    normalize_hits_score(score.hub, hub_max),
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let base_weight = 1.0 - total_weight;
+    let mut boosted_candidates = 0_usize;
+    for candidate in candidates {
+        let Some((authority, hub)) = scores.get(&candidate.memory_id.to_string()).copied() else {
+            continue;
+        };
+        let base = candidate.relevance.into_inner();
+        let blended = (weights.authority * authority) + (weights.hub * hub) + (base_weight * base);
+        let Some(score) = unit_score(blended) else {
+            continue;
+        };
+        candidate.relevance = score;
+        candidate.why = format!(
+            "{} Context profile `{}` HITS boost blended base={base:.4}, authority={authority:.4} (weight {:.2}), hub={hub:.4} (weight {:.2}), snapshot={}.",
+            candidate.why,
+            profile.as_str(),
+            weights.authority,
+            weights.hub,
+            snapshot.id
+        );
+        boosted_candidates = boosted_candidates.saturating_add(1);
+    }
+
+    ContextProfileHitsBoostMetrics { boosted_candidates }
+}
+
+fn max_finite_hits_score(scores: impl Iterator<Item = f64>) -> f64 {
+    scores
+        .filter(|value| value.is_finite())
+        .fold(0.0_f64, f64::max)
+}
+
+fn normalize_hits_score(value: f64, max_value: f64) -> f32 {
+    if value.is_finite() && max_value.is_finite() && max_value > 0.0 {
+        (value / max_value).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    }
+}
+
 fn apply_proximity_to_seed_scores(
     connection: &DbConnection,
     workspace_path: &Path,
@@ -11967,18 +12449,19 @@ fn positive_f32_score(value: f32) -> Option<f64> {
 
 fn apply_graph_hints(
     connection: &DbConnection,
-    workspace_path: &Path,
+    search_options: &SearchOptions,
     filters: &crate::models::QueryFilters,
     include_tombstoned: bool,
     candidates: &mut Vec<PackCandidate>,
     degraded: &mut Vec<ContextResponseDegradation>,
     reference_time: Option<DateTime<Utc>>,
-) -> GraphHintApplicationMetrics {
+) -> Result<GraphHintApplicationMetrics, ContextPackError> {
     let graph = &filters.graph;
     if graph.is_empty() {
-        return GraphHintApplicationMetrics::default();
+        return Ok(GraphHintApplicationMetrics::default());
     }
 
+    let workspace_path = &search_options.workspace_path;
     let workspace_ids = graph_context_workspace_ids(connection, workspace_path, degraded);
     push_graph_snapshot_posture(connection, &workspace_ids, degraded);
 
@@ -12009,7 +12492,7 @@ fn apply_graph_hints(
             candidates.clear();
             metrics.filtered_candidates = filtered;
         }
-        return metrics;
+        return Ok(metrics);
     }
 
     let graph_ids: BTreeSet<String> = graph_nodes.keys().cloned().collect();
@@ -12052,11 +12535,12 @@ fn apply_graph_hints(
         .cloned()
         .collect();
     if expansion_ids.is_empty() {
-        return metrics;
+        return Ok(metrics);
     }
 
     let expansion_refs: Vec<&str> = expansion_ids.iter().map(String::as_str).collect();
     let (memories, tags_map) = load_candidate_batch_maps(connection, &expansion_refs, degraded);
+    let mut expanded_candidates = Vec::with_capacity(expansion_ids.len());
     for memory_id in expansion_ids {
         let Some(memory) = memories.get(&memory_id) else {
             metrics.missing_seeds = metrics.missing_seeds.saturating_add(1);
@@ -12126,11 +12610,26 @@ fn apply_graph_hints(
             Some(memory.workspace_id.as_str()),
             degraded,
         ) {
-            metrics.expanded_candidates = metrics.expanded_candidates.saturating_add(1);
-            candidates
+            expanded_candidates
                 .push(candidate.with_lifecycle(pack_lifecycle_for_memory(memory, reference_time)));
         }
     }
+
+    let before_quality = expanded_candidates.len();
+    quality_score_direct_memory_candidates(
+        connection,
+        search_options,
+        reference_time,
+        &memories,
+        &mut expanded_candidates,
+        "Graph-hint",
+        degraded,
+    )?;
+    metrics.expanded_candidates = expanded_candidates.len();
+    metrics.filtered_candidates = metrics
+        .filtered_candidates
+        .saturating_add(before_quality.saturating_sub(expanded_candidates.len()));
+    candidates.extend(expanded_candidates);
 
     if metrics.expanded_candidates > 0 {
         push_degradation(
@@ -12146,7 +12645,82 @@ fn apply_graph_hints(
         );
     }
 
-    metrics
+    Ok(metrics)
+}
+
+/// Graph topology and passive focus are retrieval priors, not exemptions from
+/// memory quality. Score direct-source candidates with the same policy as
+/// indexed search before admitting them into the shared context pack.
+fn quality_score_direct_memory_candidates(
+    connection: &DbConnection,
+    options: &SearchOptions,
+    reference_time: Option<DateTime<Utc>>,
+    memories: &BTreeMap<String, StoredMemory>,
+    candidates: &mut Vec<PackCandidate>,
+    source_label: &str,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Result<(), ContextPackError> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let config = crate::core::search::resolved_search_scoring_config(&options.workspace_path)
+        .map_err(ContextPackError::Search)?;
+    let reference_time = reference_time.or(options.as_of).unwrap_or_else(Utc::now);
+    let mut hits: Vec<SearchHit> = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let memory_id = candidate.memory_id.to_string();
+            let memory = memories.get(&memory_id)?;
+            Some(SearchHit {
+                doc_id: memory_id,
+                score: candidate.relevance.into_inner(),
+                // Internal scoring adapter; graph-only hits do not claim an
+                // observed lexical/embedding/reranker source in pack metadata.
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: Some(public_memory_fallback_metadata(memory, reference_time)),
+                explanation: None,
+            })
+        })
+        .collect();
+
+    let mut search_degraded = Vec::new();
+    crate::core::search::apply_quality_scoring(
+        options,
+        &mut hits,
+        config,
+        reference_time,
+        Some(connection),
+        Some(memories),
+        None,
+        &mut search_degraded,
+    );
+    push_search_degradations(degraded, &search_degraded);
+    let scored_relevance: BTreeMap<String, UnitScore> = hits
+        .into_iter()
+        .filter_map(|hit| {
+            pack_candidate_relevance_from_search_hit(&hit).map(|relevance| (hit.doc_id, relevance))
+        })
+        .collect();
+    candidates.retain_mut(|candidate| {
+        let Some(relevance) = scored_relevance.get(&candidate.memory_id.to_string()) else {
+            return false;
+        };
+        let graph_relevance = candidate.relevance.into_inner();
+        candidate.relevance = *relevance;
+        candidate.why = format!(
+            "{} {source_label} relevance {:.3} adjusted to {:.3} by the active memory-quality policy.",
+            candidate.why,
+            graph_relevance,
+            relevance.into_inner(),
+        );
+        true
+    });
+    Ok(())
 }
 
 fn push_graph_snapshot_posture(
@@ -12461,13 +13035,10 @@ fn boost_candidate_for_graph(candidate: &mut PackCandidate, evidence: &GraphHint
         2 => 0.09,
         _ => 0.05,
     };
-    let floor = match evidence.depth {
-        0 => 0.98,
-        1 => 0.92,
-        2 => 0.86,
-        _ => 0.80,
-    };
-    let boosted = (current + boost).max(floor).min(1.0);
+    // Graph proximity is a prior, not a replacement for memory quality.
+    // An absolute floor used to promote even zero-relevance memories to 0.98,
+    // erasing confidence, harmful-feedback, maturity, and recency penalties.
+    let boosted = (current * (1.0 + boost)).min(1.0);
     let Some(score) = unit_score(boosted) else {
         return false;
     };
@@ -13355,6 +13926,7 @@ struct FocusCandidateSource<'a> {
     focus_state: &'a crate::models::FocusState,
     workspace_path: &'a Path,
     workspace_ids: &'a BTreeSet<String>,
+    filters: &'a crate::models::QueryFilters,
     focus_hash: &'a str,
     storage_path: &'a str,
     include_tombstoned: bool,
@@ -13462,6 +14034,7 @@ fn focus_candidates_from_state(
     include_future: bool,
     validity_reference_time: DateTime<Utc>,
     workspace_ids: &BTreeSet<String>,
+    filters: &crate::models::QueryFilters,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<PackCandidate> {
     let mut candidates = Vec::new();
@@ -13472,6 +14045,7 @@ fn focus_candidates_from_state(
         focus_state,
         workspace_path,
         workspace_ids,
+        filters,
         focus_hash: &focus_hash,
         storage_path: &storage_path,
         include_tombstoned,
@@ -13627,6 +14201,16 @@ fn focus_candidate_from_item(
         .connection
         .get_memory_tags(&memory.id)
         .unwrap_or_else(|_| Vec::new());
+    // The active typed query's tags, trust, temporal and metadata filters
+    // constrain passive focus just as they constrain graph expansion.
+    if !graph_memory_matches_filters(
+        &memory,
+        &tags,
+        source.filters,
+        Some(source.validity_reference_time),
+    ) {
+        return None;
+    }
     let mut provenance = Vec::new();
     let mut source_signals = None;
     if let Some(memory_provenance) = provenance_for_memory(
@@ -14190,9 +14774,6 @@ fn direct_rule_pack_candidates(
     output_redaction_enabled: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<crate::pack::PackRuleItem> {
-    if !request.sections.is_empty() && !request.sections.contains(&PackSection::ProceduralRules) {
-        return Vec::new();
-    }
     let mut items = Vec::new();
     let mut seen = BTreeSet::new();
     let mut filtered_count = 0_usize;
@@ -14200,6 +14781,21 @@ fn direct_rule_pack_candidates(
     for (hit, projection) in hits {
         let rule = projection.rule();
         if !seen.insert(rule.id.clone()) {
+            continue;
+        }
+        // Anti-pattern curation persists a native rule, with this explicit
+        // tag identifying its warning semantics. Protection alone is a
+        // lifecycle setting and must not turn ordinary guidance into a risk.
+        let section = if projection
+            .tags()
+            .iter()
+            .any(|tag| matches!(tag.as_str(), "anti-pattern" | "anti_pattern"))
+        {
+            PackSection::Failures
+        } else {
+            PackSection::ProceduralRules
+        };
+        if !request.sections.is_empty() && !request.sections.contains(&section) {
             continue;
         }
         let Ok(trust_class) = TrustClass::from_str(&rule.trust_class) else {
@@ -14277,7 +14873,7 @@ fn direct_rule_pack_candidates(
             rank: 0,
             rule_id: rule.id.clone(),
             entity_revision: projection.entity_revision().to_owned(),
-            section: PackSection::ProceduralRules,
+            section,
             content,
             estimated_tokens,
             relevance,
@@ -14350,13 +14946,15 @@ struct NativePackEvictionGroup {
 /// Find a complete feasible replacement before mutating selection. An
 /// oversized native item must never clear useful memory and then fail to fit.
 /// A memory's selected LODs move together; an anti-pattern reservation or an
-/// equal/higher-ranked member protects the entire memory identity.
+/// equal/higher-ranked member protects the entire memory identity, except
+/// when reserving the one warning slice before ordinary action items.
 fn native_pack_memory_displacements(
     priority: &ContextPackPriority,
     estimated_tokens: u32,
     request: &ContextRequest,
     draft: &PackDraft,
     represented_memory_ids: &BTreeSet<MemoryId>,
+    reserve_warning: bool,
 ) -> Option<Vec<MemoryId>> {
     let budget = u64::from(draft.budget.max_tokens());
     let mut next_tokens = u64::from(draft.used_tokens) + u64::from(estimated_tokens);
@@ -14380,7 +14978,7 @@ fn native_pack_memory_displacements(
         };
         let eligible = !represented_memory_ids.contains(&item.memory_id)
             && item.selected_in != crate::pack::PackSelectionPhase::AntiPatternFirst
-            && compare_context_pack_priority(priority, &item_priority).is_lt();
+            && (reserve_warning || compare_context_pack_priority(priority, &item_priority).is_lt());
         let group = groups
             .entry(item.memory_id)
             .or_insert_with(|| NativePackEvictionGroup {
@@ -14419,14 +15017,38 @@ fn native_pack_memory_displacements(
 
 /// Admit native sources in their shared ranking order. The memory selector
 /// still supplies its MMR/facility-location choice; a better-ranked native
-/// item can reclaim budget only from strictly weaker selected memories.
-/// No source receives a fixed quota or a manufactured memory identity.
+/// item can reclaim budget from strictly weaker selected memories. The one
+/// anti-pattern reservation may also replace higher-ranked ordinary memories;
+/// it uses the existing failure quota and never displaces a reserved warning.
+/// No source receives a manufactured memory identity.
+#[cfg(test)]
 fn append_ranked_native_pack_items(
     rules: Vec<crate::pack::PackRuleItem>,
     evidence: Vec<DirectEvidencePackCandidate>,
     request: &ContextRequest,
+    relevance_floor: Option<f32>,
     draft: &mut PackDraft,
     degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    append_ranked_native_pack_items_with_probe(
+        rules,
+        evidence,
+        request,
+        relevance_floor,
+        draft,
+        degraded,
+        None,
+    );
+}
+
+fn append_ranked_native_pack_items_with_probe(
+    rules: Vec<crate::pack::PackRuleItem>,
+    evidence: Vec<DirectEvidencePackCandidate>,
+    request: &ContextRequest,
+    relevance_floor: Option<f32>,
+    draft: &mut PackDraft,
+    degraded: &mut Vec<ContextResponseDegradation>,
+    why_not: Option<&why_not::WhyNotSelectionProbe>,
 ) {
     let mut candidates = rules
         .into_iter()
@@ -14438,6 +15060,57 @@ fn append_ranked_native_pack_items(
         return;
     }
     candidates.sort_by(|(left, _), (right, _)| compare_context_pack_priority(left, right));
+    // The memory selector already reserves one failure/risk item. When it
+    // found none, a native anti-pattern must be able to fill that same slice
+    // before action rules or evidence consume the remaining budget. Admission
+    // and caller filtering have already run; reservation additionally uses
+    // the same relevance floor and failure quota as the memory selector.
+    let warning_reserved = draft
+        .items
+        .iter()
+        .any(|item| item.selected_in == crate::pack::PackSelectionPhase::AntiPatternFirst)
+        || draft
+            .rule_items
+            .iter()
+            .any(|item| item.section == PackSection::Failures);
+    let floor = crate::pack::PackAssemblyOptions {
+        relevance_floor,
+        ..crate::pack::PackAssemblyOptions::default()
+    }
+    .effective_relevance_floor();
+    let quotas =
+        crate::pack::SectionQuotas::for_profile(request.profile, draft.budget.max_tokens());
+    let failure_tokens = draft
+        .items
+        .iter()
+        .filter(|item| item.section == PackSection::Failures)
+        .map(|item| item.estimated_tokens)
+        .fold(0_u32, u32::saturating_add);
+    let reserved_index = (!warning_reserved)
+        .then(|| {
+            candidates.iter().position(|(priority, candidate)| {
+                matches!(candidate, NativePackCandidate::Rule(item)
+                    if item.section == PackSection::Failures
+                        && item.relevance.into_inner() >= floor
+                        && quotas.has_room(PackSection::Failures, failure_tokens, item.estimated_tokens))
+                    && native_pack_memory_displacements(
+                        priority,
+                        candidate.estimated_tokens(),
+                        request,
+                        draft,
+                        &BTreeSet::new(),
+                        true,
+                    )
+                    .is_some()
+            })
+        })
+        .flatten();
+    let reserved_entity = reserved_index.map(|index| {
+        let reserved = candidates.remove(index);
+        let entity = reserved.0.entity.clone();
+        candidates.insert(0, reserved);
+        entity
+    });
     let candidate_count = candidates.len();
     let mut rule_result_limit = 0_usize;
     let mut evidence_result_limit = 0_usize;
@@ -14446,6 +15119,7 @@ fn append_ranked_native_pack_items(
     let mut linked_duplicates = 0_usize;
     let mut represented_memory_ids = BTreeSet::new();
     for (priority, candidate) in candidates {
+        let reserve_warning = reserved_entity.as_ref() == Some(&priority.entity);
         if let NativePackCandidate::Evidence(evidence) = &candidate
             && let Some(memory_id) = evidence
                 .linked_memory_id
@@ -14457,6 +15131,12 @@ fn append_ranked_native_pack_items(
             // skipped source, a later weaker source cannot erase both of them.
             represented_memory_ids.insert(memory_id);
             linked_duplicates = linked_duplicates.saturating_add(1);
+            if let Some(probe) = why_not.filter(|probe| probe.matches(&priority.entity)) {
+                probe.represented_by(
+                    crate::pack::PackEntityRef::Memory(memory_id),
+                    OmissionCause::Duplicate,
+                );
+            }
             continue;
         }
         let estimated_tokens = candidate.estimated_tokens();
@@ -14466,10 +15146,18 @@ fn append_ranked_native_pack_items(
             request,
             draft,
             &represented_memory_ids,
+            reserve_warning,
         ) else {
             let result_limited = request
                 .max_results
                 .is_some_and(|limit| draft.selected_item_count() >= limit as usize);
+            if let Some(probe) = why_not.filter(|probe| probe.matches(&priority.entity)) {
+                probe.reject(if result_limited {
+                    OmissionCause::ResultLimit
+                } else {
+                    OmissionCause::TokenBudget
+                });
+            }
             match (&candidate, result_limited) {
                 (NativePackCandidate::Rule(_), true) => rule_result_limit += 1,
                 (NativePackCandidate::Evidence(_), true) => evidence_result_limit += 1,
@@ -14493,8 +15181,34 @@ fn append_ranked_native_pack_items(
                 omission.reason = PackOmissionReason::ExcludedByFilter;
             }
         }
-        let rank = u32::try_from(draft.selected_item_count().saturating_add(1)).unwrap_or(u32::MAX);
-        let selection_note = if displaced_count > 0 {
+        let rank = if reserve_warning {
+            // Keep the typed warning first in persisted selection as well as
+            // in the prompt. The memory-only audit retains its own entities
+            // and their updated ranks; no synthetic MemoryId is introduced.
+            for item in &mut draft.items {
+                item.rank = item.rank.saturating_add(1);
+            }
+            for item in &mut draft.rule_items {
+                item.rank = item.rank.saturating_add(1);
+            }
+            for item in &mut draft.evidence_items {
+                item.rank = item.rank.saturating_add(1);
+            }
+            for item in &mut draft.selection_audit.selected_items {
+                item.rank = item.rank.saturating_add(1);
+            }
+            for step in &mut draft.selection_audit.steps {
+                step.rank = step.rank.saturating_add(1);
+            }
+            1
+        } else {
+            u32::try_from(draft.selected_item_count().saturating_add(1)).unwrap_or(u32::MAX)
+        };
+        let selection_note = if reserve_warning && displaced_count > 0 {
+            format!(
+                "; anti-pattern reservation displaced {displaced_count} non-reserved memory items"
+            )
+        } else if displaced_count > 0 {
             format!("; shared budget ranking displaced {displaced_count} lower-ranked memory items")
         } else {
             "; selected within the shared native-source budget".to_owned()
@@ -14502,6 +15216,12 @@ fn append_ranked_native_pack_items(
         match candidate {
             NativePackCandidate::Rule(mut item) => {
                 item.rank = rank;
+                if reserve_warning {
+                    item.why = format!(
+                        "What NOT to do: selected from the reserved anti-pattern/failure/risk slice before action. {}",
+                        item.why
+                    );
+                }
                 item.why.push_str(&selection_note);
                 draft.rule_items.push(item);
             }
@@ -14572,6 +15292,180 @@ struct DirectEvidencePackCandidate {
     source: String,
 }
 
+/// Find a clear separation in one query's uncalibrated ranking domain.
+///
+/// This is admission policy, not a relevance estimator: scores and their
+/// interpretation remain unchanged. A small or smooth pool provides no
+/// evidence of a background tail. Require at least three entities, a gap
+/// spanning more than half the observed range, and a drop of at least a
+/// quarter of the best score. The upper edge keeps every tied leading hit.
+fn query_relative_elbow_floor(scores: &[f32]) -> Option<f32> {
+    if scores.len() < 3
+        || scores
+            .iter()
+            .any(|score| !score.is_finite() || !(0.0..=1.0).contains(score))
+    {
+        return None;
+    }
+    let mut ordered = scores.to_vec();
+    ordered.sort_by(|left, right| right.total_cmp(left));
+    let best = ordered[0];
+    let spread = best - ordered[ordered.len() - 1];
+    if best <= 0.0 || spread <= 0.0 {
+        return None;
+    }
+    let mut largest_gap = 0.0_f32;
+    let mut floor = best;
+    for pair in ordered.windows(2) {
+        let gap = pair[0] - pair[1];
+        if gap > largest_gap {
+            largest_gap = gap;
+            floor = pair[0];
+        }
+    }
+    // Nearly equal adjacent gaps must not manufacture an elbow through f32
+    // subtraction noise. The margin scales with this pool, like the policy.
+    let tolerance = 4.0 * f32::EPSILON * best;
+    (largest_gap >= 0.25 * best && largest_gap > 0.5 * spread + tolerance).then_some(floor)
+}
+
+/// Apply the fresh-store fallback after all native and memory fan-in, before
+/// pagination. Each local retrieval source is fitted independently; lexical
+/// pool ratios, cosine, and reranker values are not a shared confidence scale.
+fn filter_context_pack_candidates_by_query_relative_elbow(
+    search_hits: &[SearchHit],
+    required_memory_ids: &BTreeSet<MemoryId>,
+    candidates: &mut Vec<PackCandidate>,
+    rule_candidates: &mut Vec<crate::pack::PackRuleItem>,
+    evidence_candidates: &mut Vec<DirectEvidencePackCandidate>,
+    relevance_floor: Option<f32>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Vec<PackOmission> {
+    if relevance_floor.is_some() {
+        return Vec::new();
+    }
+    let sources = search_hits
+        .iter()
+        .filter(|hit| {
+            !search_hit_is_global_store_lane(hit)
+                && hit
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("calibrated"))
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+        })
+        .map(|hit| (hit.doc_id.as_str(), hit.source.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut population = BTreeMap::<ContextPackEntityKey, (&str, f32)>::new();
+    for candidate in candidates.iter() {
+        // Focus, explicit graph seeds, warnings, and independently normalized
+        // stores neither set this local cutoff nor lose their reservation to it.
+        if candidate.section == PackSection::Failures
+            || candidate.origin.is_some()
+            || required_memory_ids.contains(&candidate.memory_id)
+        {
+            continue;
+        }
+        if let Some(source) = sources.get(candidate.memory_id.to_string().as_str()) {
+            let score = candidate.relevance.into_inner();
+            population
+                .entry(ContextPackEntityKey::Memory(candidate.memory_id))
+                .and_modify(|entry| entry.1 = entry.1.max(score))
+                .or_insert((*source, score));
+        }
+    }
+    for item in rule_candidates.iter() {
+        if item.section != PackSection::Failures
+            && let Some(source) = sources.get(item.rule_id.as_str())
+        {
+            population.insert(
+                ContextPackEntityKey::Rule(item.rule_id.clone()),
+                (*source, item.relevance.into_inner()),
+            );
+        }
+    }
+    for candidate in evidence_candidates.iter() {
+        // A derived card can replace several source spans. Its synthesis is
+        // not another independent observation of their retrieval distribution.
+        if !candidate.incident_card
+            && let Some(source) = sources.get(candidate.item.evidence_id.as_str())
+        {
+            population.insert(
+                ContextPackEntityKey::Evidence(candidate.item.evidence_id.clone()),
+                (*source, candidate.item.relevance.into_inner()),
+            );
+        }
+    }
+    let mut score_pools = BTreeMap::<&str, Vec<f32>>::new();
+    for (source, score) in population.values() {
+        score_pools.entry(source).or_default().push(*score);
+    }
+    let floors = score_pools
+        .iter()
+        .filter_map(|(source, scores)| {
+            query_relative_elbow_floor(scores).map(|floor| (*source, floor))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let rejected = population
+        .iter()
+        .filter_map(|(entity, (source, score))| {
+            floors
+                .get(source)
+                .filter(|floor| score < *floor)
+                .map(|floor| (entity.clone(), *floor))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if rejected.is_empty() {
+        return Vec::new();
+    }
+
+    let mut omitted = Vec::new();
+    candidates.retain(|candidate| {
+        let Some(floor) = rejected.get(&ContextPackEntityKey::Memory(candidate.memory_id)) else {
+            return true;
+        };
+        let options = crate::pack::PackAssemblyOptions {
+            relevance_floor: Some(*floor),
+            ..crate::pack::PackAssemblyOptions::default()
+        };
+        if let Some(omission) = options.relevance_floor_omission(candidate) {
+            omitted.push(omission);
+            false
+        } else {
+            true
+        }
+    });
+    omitted.sort_by_key(|omission| omission.memory_id);
+    let rule_count = rule_candidates.len();
+    rule_candidates
+        .retain(|item| !rejected.contains_key(&ContextPackEntityKey::Rule(item.rule_id.clone())));
+    let rule_count = rule_count.saturating_sub(rule_candidates.len());
+    let evidence_count = evidence_candidates.len();
+    evidence_candidates.retain(|candidate| {
+        !rejected.contains_key(&ContextPackEntityKey::Evidence(
+            candidate.item.evidence_id.clone(),
+        ))
+    });
+    let evidence_count = evidence_count.saturating_sub(evidence_candidates.len());
+    let cutoffs = floors
+        .iter()
+        .map(|(source, floor)| format!("{source}={floor:.4}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_degradation(
+        degraded,
+        "context_filtered_results",
+        ContextResponseSeverity::Low,
+        format!(
+            "{} memory, {rule_count} procedural rule, and {evidence_count} imported evidence candidates excluded by heuristic_uncalibrated query-relative elbow admission (below_relevance_floor); per-source cutoffs: {cutoffs}. These cutoffs are ranking heuristics, not calibrated confidence.",
+            omitted.len(),
+        ),
+        Some("Pass --relevance-floor 0 to disable default relevance admission.".to_owned()),
+    );
+    omitted
+}
+
 /// Enforce the caller's floor after every candidate source and score adjustment.
 fn filter_context_pack_candidates_by_relevance_floor(
     candidates: &mut Vec<PackCandidate>,
@@ -14625,6 +15519,7 @@ fn filter_context_pack_candidates_by_relevance_floor(
 /// Admit and deduplicate native evidence before pagination, without spending
 /// the page's token budget or assigning a selected rank. Pages can therefore
 /// reach every eligible hit, including hits that did not fit an earlier page.
+#[cfg(test)]
 fn collect_direct_evidence_pack_candidates(
     connection: &DbConnection,
     workspace_path: &Path,
@@ -14633,6 +15528,28 @@ fn collect_direct_evidence_pack_candidates(
     filters: &crate::models::QueryFilters,
     relevance_floor: Option<f32>,
     degraded: &mut Vec<ContextResponseDegradation>,
+) -> Result<Vec<DirectEvidencePackCandidate>, ContextPackError> {
+    collect_direct_evidence_pack_candidates_with_probe(
+        connection,
+        workspace_path,
+        search_report,
+        request,
+        filters,
+        relevance_floor,
+        degraded,
+        None,
+    )
+}
+
+fn collect_direct_evidence_pack_candidates_with_probe(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    search_report: &crate::core::search::SearchReport,
+    request: &ContextRequest,
+    filters: &crate::models::QueryFilters,
+    relevance_floor: Option<f32>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+    why_not: Option<&why_not::WhyNotSelectionProbe>,
 ) -> Result<Vec<DirectEvidencePackCandidate>, ContextPackError> {
     crate::pack::PackAssemblyOptions {
         relevance_floor,
@@ -14719,6 +15636,9 @@ fn collect_direct_evidence_pack_candidates(
         };
         candidates.push(candidate);
     }
+    if let Some(probe) = why_not {
+        probe.observe_evidence(&candidates, OmissionCause::Filter);
+    }
     if relevance_floor.is_none() {
         apply_direct_evidence_query_relative_floor(&mut candidates, degraded);
     }
@@ -14732,14 +15652,24 @@ fn collect_direct_evidence_pack_candidates(
         relevance_floor,
         degraded,
     )?;
+    if let Some(probe) = why_not {
+        probe.observe_evidence(&candidates, OmissionCause::ScoreFloor);
+    }
     let mut candidates = prefer_incident_cards(
         connection,
         &workspace_ids,
         filters,
         &request.query,
         candidates,
+        degraded,
     );
+    if let Some(probe) = why_not {
+        probe.observe_incident_preference(connection, &candidates);
+    }
     collapse_duplicate_evidence(&mut candidates, degraded);
+    if let Some(probe) = why_not {
+        probe.observe_evidence(&candidates, OmissionCause::Duplicate);
+    }
     if rejected_live_admission > 0 {
         push_degradation(
             degraded,
@@ -15030,18 +15960,63 @@ fn direct_evidence_pack_candidate(
     })
 }
 
-/// Incident cards (ADR 0091) replace the transcript turns they summarize: a
-/// matched turn inside an admitted card's line range brings the card instead,
-/// at the turn's rank, and a turn is dropped when its card is already a
-/// candidate. Error classes add occurrence context, without suppressing cards
-/// containing different repairs. Order is the search order throughout, so the
-/// result is deterministic.
+/// Exact source identities of an already verified incident card. Its enclosing
+/// line range can include unrelated observations; only the recorded sources
+/// may be replaced. Missing or malformed metadata never consumes a matched
+/// turn. This helper grants no admission authority: callers must retain the
+/// current-source proof check before using these identities.
+fn incident_card_source_ids(card: &crate::db::StoredEvidenceSpan) -> BTreeSet<String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Sources {
+        derivation: String,
+        attempt_span_id: String,
+        failure_span_id: String,
+        proof_span_id: String,
+        repair_span_ids: Vec<String>,
+    }
+
+    let Some(metadata) = card.metadata_json.as_deref() else {
+        return BTreeSet::new();
+    };
+    let Ok(sources) = serde_json::from_str::<Sources>(metadata) else {
+        return BTreeSet::new();
+    };
+    if sources.derivation != crate::core::incident_card::INCIDENT_CARD_DERIVATION {
+        return BTreeSet::new();
+    }
+    let ids = [
+        sources.attempt_span_id,
+        sources.failure_span_id,
+        sources.proof_span_id,
+    ]
+    .into_iter()
+    .chain(sources.repair_span_ids)
+    .collect::<BTreeSet<_>>();
+    if ids.iter().all(|source| {
+        source
+            .parse::<EvidenceId>()
+            .is_ok_and(|id| id.to_string() == *source)
+    }) {
+        ids
+    } else {
+        BTreeSet::new()
+    }
+}
+
+/// Incident cards (ADR 0091) replace only their exact recorded source turns:
+/// a matched source inside a verified card's line range brings the card at
+/// the turn's rank, or is dropped when its card is already a candidate.
+/// Interleaved observations remain eligible. Error classes add occurrence
+/// context without suppressing cards containing different repairs. Order is
+/// the search order throughout, so the result is deterministic.
 fn prefer_incident_cards(
     connection: &DbConnection,
     workspace_ids: &[String],
     filters: &crate::models::QueryFilters,
     query: &str,
     candidates: Vec<DirectEvidencePackCandidate>,
+    degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<DirectEvidencePackCandidate> {
     let sessions = candidates
         .iter()
@@ -15050,53 +16025,165 @@ fn prefer_incident_cards(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+
     let mut cards = if sessions.is_empty() {
         Vec::new()
     } else {
-        connection
-            .incident_card_spans_for_sessions(&sessions)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|row| {
-                workspace_ids.iter().any(|id| id == &row.span.workspace_id)
-                    && row.is_direct_pack_admitted(&row.span.workspace_id)
-                    && direct_evidence_matches_filters(&row.span, filters)
-            })
-            .map(|row| row.span)
-            .collect::<Vec<_>>()
+        match connection.incident_card_spans_for_sessions(&sessions) {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| {
+                    workspace_ids.iter().any(|id| id == &row.span.workspace_id)
+                        && row.is_direct_pack_admitted(&row.span.workspace_id)
+                        && direct_evidence_matches_filters(&row.span, filters)
+                })
+                .map(|row| row.span)
+                .collect::<Vec<_>>(),
+            Err(_) => {
+                push_degradation(
+                    degraded,
+                    "context_evidence_hit_unhydrated",
+                    ContextResponseSeverity::Low,
+                    "Incident-card preference could not read its live source rows; original transcript candidates were retained.".to_owned(),
+                    Some("ee doctor --json".to_owned()),
+                );
+                Vec::new()
+            }
+        }
     };
-    // Narrowest covering card first, so nested ranges resolve to the tightest.
+
+    let direct_ids = candidates
+        .iter()
+        .filter(|candidate| candidate.incident_card)
+        .map(|candidate| candidate.item.evidence_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let direct_refs = direct_ids.iter().copied().collect::<Vec<_>>();
+    let mut refused = BTreeSet::new();
+    let direct_spans = if direct_refs.is_empty() {
+        Vec::new()
+    } else {
+        match connection.get_evidence_spans_with_sessions(&direct_refs) {
+            Ok(rows) => {
+                let found = rows
+                    .iter()
+                    .map(|row| row.span.id.as_str())
+                    .collect::<BTreeSet<_>>();
+                refused.extend(
+                    direct_ids
+                        .iter()
+                        .filter(|id| !found.contains(*id))
+                        .map(|id| (*id).to_owned()),
+                );
+                rows.into_iter().map(|row| row.span).collect::<Vec<_>>()
+            }
+            Err(_) => {
+                refused.extend(direct_ids.iter().map(|id| (*id).to_owned()));
+                push_degradation(
+                    degraded,
+                    "context_evidence_hit_unhydrated",
+                    ContextResponseSeverity::Low,
+                    "Direct incident-card hits could not be reloaded for current-source verification and were withheld.".to_owned(),
+                    Some("ee doctor --json".to_owned()),
+                );
+                Vec::new()
+            }
+        }
+    };
+
+    let mut proof_spans = cards.clone();
+    proof_spans.extend(direct_spans);
+    proof_spans.sort_by(|left, right| left.id.cmp(&right.id));
+    proof_spans.dedup_by(|left, right| left.id == right.id);
+    let mut checks = BTreeMap::<String, crate::core::incident_card::proof::CardChecks>::new();
+    let mut ids_by_workspace = BTreeMap::<String, BTreeSet<String>>::new();
+    for span in &proof_spans {
+        ids_by_workspace
+            .entry(span.workspace_id.clone())
+            .or_default()
+            .insert(span.id.clone());
+        let check = checks.entry(span.workspace_id.clone()).or_default();
+        if check.observe(span).is_err() {
+            refused.insert(span.id.clone());
+        }
+    }
+    for (workspace, check) in checks {
+        match check.withheld(connection, &workspace) {
+            Ok(withheld) => refused.extend(withheld),
+            Err(_) => {
+                refused.extend(
+                    ids_by_workspace
+                        .get(&workspace)
+                        .into_iter()
+                        .flat_map(|ids| ids.iter().cloned()),
+                );
+                push_degradation(
+                    degraded,
+                    "context_evidence_hit_unhydrated",
+                    ContextResponseSeverity::Low,
+                    "Incident-card current-source verification was unavailable; derived cards from that source were withheld while ordinary transcript evidence remained eligible.".to_owned(),
+                    Some("ee doctor --json".to_owned()),
+                );
+            }
+        }
+    }
+    if !refused.is_empty() {
+        push_degradation(
+            degraded,
+            "context_evidence_hit_unhydrated",
+            ContextResponseSeverity::Low,
+            format!(
+                "Withheld {} derived incident card candidate(s) because current failure/repair/retry proof did not validate.",
+                refused.len()
+            ),
+            None,
+        );
+    }
+    cards.retain(|card| !refused.contains(&card.id));
+
     cards.sort_by(|left, right| {
         (left.end_line - left.start_line)
             .cmp(&(right.end_line - right.start_line))
             .then_with(|| left.id.cmp(&right.id))
     });
+    // Parse each proved card once, without any additional source reads. Range
+    // containment alone cannot establish that a retrieved fact is represented
+    // by the card's failure, repair or verification.
+    let cards = cards
+        .into_iter()
+        .map(|card| {
+            let source_ids = incident_card_source_ids(&card);
+            (card, source_ids)
+        })
+        .collect::<Vec<_>>();
     let mut seen = BTreeSet::new();
     let mut preferred = Vec::with_capacity(candidates.len());
     for candidate in &candidates {
-        if candidate.incident_card {
+        if candidate.incident_card && !refused.contains(&candidate.item.evidence_id) {
             seen.insert(candidate.item.evidence_id.clone());
         }
     }
     let mut emitted = BTreeSet::new();
     for candidate in candidates {
         if candidate.incident_card {
+            if refused.contains(&candidate.item.evidence_id) {
+                continue;
+            }
             if emitted.insert(candidate.item.evidence_id.clone()) {
                 preferred.push(candidate);
             }
             continue;
         }
-        let covering = cards.iter().find(|card| {
+        let covering = cards.iter().find(|(card, source_ids)| {
             card.session_id == candidate.item.session_id
                 && card.start_line <= candidate.item.start_line
                 && candidate.item.end_line <= card.end_line
+                && source_ids.contains(&candidate.item.evidence_id)
         });
-        let Some(card) = covering else {
+        let Some((card, _)) = covering else {
             preferred.push(candidate);
             continue;
         };
         if seen.contains(&card.id) {
-            // The card itself matched; its source turn adds nothing.
             continue;
         }
         if !emitted.insert(card.id.clone()) {
@@ -15682,17 +16769,17 @@ fn apply_context_pack_contradiction_guard(connection: &DbConnection, draft: &mut
         tracing::warn!(
             target: "ee::pack::contradiction_guard",
             error = read_error,
-            "skipping context pack contradiction guard because memory links could not be read"
+            "context pack contradiction guard is using the available explicit evidence"
         );
-        return;
     }
     let detected = gathered
         .edges
         .iter()
         .map(|edge| (edge.memory_a.clone(), edge.memory_b.clone()))
         .collect::<Vec<_>>();
+    let resolved = gathered.resolved_pairs.into_iter().collect::<Vec<_>>();
     let unresolved =
-        crate::core::contradiction_guard::unresolved_contradiction_pairs(&detected, &[]);
+        crate::core::contradiction_guard::unresolved_contradiction_pairs(&detected, &resolved);
     let suppressed = draft.apply_contradiction_guard(&unresolved, false);
     if suppressed > 0 {
         tracing::debug!(
@@ -15797,6 +16884,49 @@ mod relevance_floor_tests {
         evidence: Vec<DirectEvidencePackCandidate>,
     }
 
+    #[test]
+    fn graph_hint_boost_does_not_resurrect_zero_relevance() {
+        for depth in [0, 1, 2, 3, u32::MAX] {
+            let mut candidates = candidate_set(&[0.0]).memories;
+            let candidate = &mut candidates[0];
+            let original_why = candidate.why.clone();
+            let evidence = GraphHintEvidence {
+                seed_memory_id: candidate.memory_id.to_string(),
+                depth,
+                relation: None,
+                traversal: crate::models::QueryGraphTraversal::Outbound,
+            };
+            assert!(!boost_candidate_for_graph(candidate, &evidence));
+            assert_eq!(candidate.relevance.into_inner(), 0.0);
+            assert_eq!(candidate.why, original_why);
+        }
+    }
+
+    #[test]
+    fn graph_hint_boost_preserves_quality_order_and_bounds() {
+        for (depth, multiplier) in [(0, 1.20), (1, 1.14), (2, 1.09), (3, 1.05)] {
+            let scores = [0.05_f32, 0.10, 0.50, 0.99, 1.0];
+            let mut candidates = candidate_set(&scores).memories;
+            for (candidate, original) in candidates.iter_mut().zip(scores) {
+                let evidence = GraphHintEvidence {
+                    seed_memory_id: candidate.memory_id.to_string(),
+                    depth,
+                    relation: Some("supports".to_owned()),
+                    traversal: crate::models::QueryGraphTraversal::Outbound,
+                };
+                let changed = boost_candidate_for_graph(candidate, &evidence);
+                let expected = (original * multiplier).min(1.0);
+                assert!((candidate.relevance.into_inner() - expected).abs() < 1.0e-6);
+                assert_eq!(changed, original < 1.0);
+            }
+            assert!(
+                candidates.windows(2).all(|pair| {
+                    pair[0].relevance.into_inner() <= pair[1].relevance.into_inner()
+                })
+            );
+        }
+    }
+
     fn candidate_set(scores: &[f32]) -> CandidateSet {
         let provenance = PackProvenance::new(
             ProvenanceUri::from_str("file://AGENTS.md#L1").expect("fixture URI"),
@@ -15863,6 +16993,278 @@ mod relevance_floor_tests {
         candidates
     }
 
+    fn elbow_candidate_set(scores: &[f32]) -> CandidateSet {
+        let mut candidates = candidate_set(scores);
+        for evidence in &mut candidates.evidence {
+            evidence.incident_card = false;
+        }
+        candidates
+    }
+
+    fn retrieval_hits(candidates: &CandidateSet) -> Vec<SearchHit> {
+        candidates
+            .memories
+            .iter()
+            .map(|candidate| candidate.memory_id.to_string())
+            .chain(candidates.rules.iter().map(|item| item.rule_id.clone()))
+            .chain(
+                candidates
+                    .evidence
+                    .iter()
+                    .map(|candidate| candidate.item.evidence_id.clone()),
+            )
+            .map(|doc_id| SearchHit {
+                doc_id,
+                // The admission fit must use final candidate scores, not this
+                // unrelated raw engine value or a second scoring formula.
+                score: 0.0,
+                source: crate::core::search::ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: None,
+                explanation: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn query_relative_elbow_separates_measured_release_tail_and_preserves_ties() {
+        let mut scores = [
+            0.3968, 0.3968, 0.1936, 0.1906, 0.1877, 0.1848, 0.1821, 0.1794, 0.1768, 0.1743,
+        ];
+        assert_eq!(query_relative_elbow_floor(&scores), Some(0.3968));
+        scores.reverse();
+        assert_eq!(query_relative_elbow_floor(&scores), Some(0.3968));
+    }
+
+    #[test]
+    fn query_relative_elbow_does_not_invent_a_split_for_small_or_smooth_pools() {
+        for scores in [
+            vec![],
+            vec![0.5],
+            vec![0.9, 0.1],
+            vec![0.0, 0.0, 0.0],
+            vec![0.2, 0.2, 0.2],
+            vec![0.2, 0.19, 0.18],
+            vec![0.9, 0.7, 0.5, 0.3],
+            vec![1.0, 0.6, 0.2],
+            vec![1.0, 0.999, 0.9988],
+            vec![1.0, f32::NAN, 0.01],
+            vec![1.0, f32::INFINITY, 0.01],
+            vec![1.0, -0.1, 0.01],
+        ] {
+            assert_eq!(query_relative_elbow_floor(&scores), None, "{scores:?}");
+        }
+    }
+
+    #[test]
+    fn default_query_relative_admission_filters_all_native_kinds_before_pagination() {
+        let scores = [
+            0.3968, 0.3968, 0.1936, 0.1906, 0.1877, 0.1848, 0.1821, 0.1794, 0.1768, 0.1743,
+        ];
+        let mut candidates = elbow_candidate_set(&scores);
+        let hits = retrieval_hits(&candidates);
+        let retained_memories = candidates.memories[..2]
+            .iter()
+            .map(|candidate| candidate.memory_id)
+            .collect::<Vec<_>>();
+        let mut degraded = Vec::new();
+        let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            &hits,
+            &BTreeSet::new(),
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            None,
+            &mut degraded,
+        );
+        assert_eq!(omitted.len(), 8);
+        assert!(omitted.iter().all(|item| {
+            item.reason == PackOmissionReason::BelowRelevanceFloor
+                && item.rejected_at == PackRejectionStage::CandidateFilter
+        }));
+        assert_eq!(
+            candidates
+                .memories
+                .iter()
+                .map(|candidate| candidate.memory_id)
+                .collect::<Vec<_>>(),
+            retained_memories,
+        );
+        assert_eq!(candidates.rules.len(), 2);
+        assert_eq!(candidates.evidence.len(), 2);
+        assert_eq!(candidates.rules[0].rule_id, "rule_0");
+        assert_eq!(candidates.evidence[1].item.evidence_id, "ev_1");
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_filtered_results"
+                && entry.message.contains("heuristic_uncalibrated")
+                && entry.message.contains("lexical=0.3968")
+                && entry
+                    .message
+                    .contains("8 memory, 8 procedural rule, and 8 imported evidence")
+                && entry
+                    .repair
+                    .as_deref()
+                    .is_some_and(|repair| repair.contains("--relevance-floor 0"))
+        }));
+
+        let page = apply_pagination_with_rules(
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            &Some(ContextPagination {
+                offset: 2,
+                limit: 4,
+                query_hash: "adaptive-relevance".to_owned(),
+            }),
+            Some(6),
+            None,
+            &mut degraded,
+        );
+        assert_eq!(page.total, 6, "excluded tails cannot occupy result offsets");
+        assert_eq!(page.page_size, 4);
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn query_relative_admission_respects_every_explicit_floor_including_zero() {
+        for floor in [0.0, 0.5, 1.0] {
+            let mut candidates = elbow_candidate_set(&[0.9, 0.8, 0.1]);
+            let hits = retrieval_hits(&candidates);
+            let mut degraded = Vec::new();
+            let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+                &hits,
+                &BTreeSet::new(),
+                &mut candidates.memories,
+                &mut candidates.rules,
+                &mut candidates.evidence,
+                Some(floor),
+                &mut degraded,
+            );
+            assert!(omitted.is_empty());
+            assert!(degraded.is_empty());
+            assert_eq!(candidates.memories.len(), 3);
+            assert_eq!(candidates.rules.len(), 3);
+            assert_eq!(candidates.evidence.len(), 3);
+        }
+    }
+
+    #[test]
+    fn query_relative_admission_never_compares_distinct_score_sources() {
+        let mut candidates = elbow_candidate_set(&[0.9, 0.85, 0.1, 0.2, 0.19, 0.18]);
+        candidates.rules.clear();
+        candidates.evidence.clear();
+        let mut hits = retrieval_hits(&candidates);
+        for hit in &mut hits[3..] {
+            hit.source = crate::core::search::ScoreSource::SemanticFast;
+        }
+        let mut degraded = Vec::new();
+        let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            &hits,
+            &BTreeSet::new(),
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            None,
+            &mut degraded,
+        );
+        assert_eq!(omitted.len(), 1);
+        assert_eq!(candidates.memories.len(), 5);
+        assert!(candidates.memories.iter().any(|candidate| {
+            candidate.memory_id == MemoryId::from_uuid(uuid::Uuid::from_u128(6))
+        }));
+        assert!(degraded[0].message.contains("lexical=0.8500"));
+        assert!(!degraded[0].message.contains("semantic_fast="));
+    }
+
+    #[test]
+    fn protected_candidates_do_not_create_an_elbow_in_unrelated_action_scores() {
+        for protection in [
+            "required",
+            "warning",
+            "nonlocal",
+            "calibrated",
+            "not_retrieved",
+        ] {
+            let mut candidates = elbow_candidate_set(&[0.99, 0.2, 0.19, 0.18]);
+            candidates.rules.clear();
+            candidates.evidence.clear();
+            let mut hits = retrieval_hits(&candidates);
+            let mut required = BTreeSet::new();
+            match protection {
+                "required" => {
+                    required.insert(candidates.memories[0].memory_id);
+                }
+                "warning" => candidates.memories[0].section = PackSection::Failures,
+                "nonlocal" => {
+                    candidates.memories[0].origin = Some(crate::pack::PackItemOrigin {
+                        lane: crate::pack::PackItemOrigin::GLOBAL_LANE.to_owned(),
+                        workspace_id: "global-fixture".to_owned(),
+                    });
+                }
+                "calibrated" => hits[0].metadata = Some(serde_json::json!({"calibrated": true})),
+                "not_retrieved" => {
+                    hits.remove(0);
+                }
+                _ => unreachable!(),
+            }
+            let mut degraded = Vec::new();
+            let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+                &hits,
+                &required,
+                &mut candidates.memories,
+                &mut candidates.rules,
+                &mut candidates.evidence,
+                None,
+                &mut degraded,
+            );
+            assert!(omitted.is_empty(), "{protection}");
+            assert!(degraded.is_empty(), "{protection}");
+            assert_eq!(candidates.memories.len(), 4, "{protection}");
+        }
+    }
+
+    #[test]
+    fn query_relative_admission_preserves_required_native_and_memory_candidates() {
+        let mut candidates = elbow_candidate_set(&[0.9, 0.8, 0.1, 0.05, 0.04]);
+        let required = BTreeSet::from([candidates.memories[2].memory_id]);
+        candidates.memories[3].origin = Some(crate::pack::PackItemOrigin {
+            lane: crate::pack::PackItemOrigin::CROSS_SHARD_LANE.to_owned(),
+            workspace_id: "peer-workspace".to_owned(),
+        });
+        candidates.rules[2].section = PackSection::Failures;
+        candidates.evidence[2].incident_card = true;
+        let mut hits = retrieval_hits(&candidates);
+        for hit in &mut hits {
+            if hit.doc_id == "rule_3" || hit.doc_id == "ev_3" {
+                hit.metadata = Some(serde_json::json!({"calibrated": true}));
+            }
+        }
+        let mut degraded = Vec::new();
+        let omitted = filter_context_pack_candidates_by_query_relative_elbow(
+            &hits,
+            &required,
+            &mut candidates.memories,
+            &mut candidates.rules,
+            &mut candidates.evidence,
+            None,
+            &mut degraded,
+        );
+        assert_eq!(omitted.len(), 1);
+        assert_eq!(
+            omitted[0].memory_id,
+            MemoryId::from_uuid(uuid::Uuid::from_u128(5))
+        );
+        assert_eq!(candidates.memories.len(), 4);
+        assert_eq!(candidates.rules.len(), 4);
+        assert_eq!(candidates.evidence.len(), 4);
+        assert_eq!(candidates.rules[2].section, PackSection::Failures);
+        assert!(candidates.evidence[2].incident_card);
+        assert_eq!(candidates.evidence[3].item.evidence_id, "ev_3");
+    }
+
     #[test]
     fn caller_floor_filters_native_fan_in_before_pagination_and_append() {
         let mut candidates = candidate_set(&[0.3, 0.5, 0.8]);
@@ -15906,6 +17308,7 @@ mod relevance_floor_tests {
                 query_hash: "relevance-floor".to_owned(),
             }),
             Some(6),
+            None,
             &mut degraded,
         );
         assert_eq!(page.total, 6);
@@ -15934,6 +17337,7 @@ mod relevance_floor_tests {
             candidates.rules,
             candidates.evidence,
             &request,
+            Some(0.5),
             &mut draft,
             &mut degraded,
         );

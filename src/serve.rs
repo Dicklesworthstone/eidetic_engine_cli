@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{BufReader, ErrorKind, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -49,6 +49,7 @@ pub const DAEMON_JOB_ROW_SCHEMA_V1: &str = "ee.steward.daemon_job_row.v1";
 /// allocation. Truncation past the cap surfaces through the existing
 /// `serde_json::from_str` error path, so callers see an explicit parse
 /// failure instead of silent data loss.
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 const DAEMON_JOB_TABLE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 pub const DAEMON_STATUS_SCHEMA_V1: &str = "ee.steward.daemon_status.v1";
 pub const DAEMON_RECOVERY_SCHEMA_V1: &str = "ee.steward.daemon_recovery.v1";
@@ -218,6 +219,7 @@ fn serve_search_advisory_state() -> &'static ServeSearchAdvisoryState {
     STATE.get_or_init(ServeSearchAdvisoryState::default)
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn trace_serve_localhost(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
     tracing::info!(
         workspace_id = "serve-localhost",
@@ -1859,6 +1861,7 @@ fn serve_context_payload_json(
     let task = require_single_query_value(request, "task", "/v1/context")?;
     let output_options = ContextPackOutputOptions::default();
     let options = ContextPackOptions {
+        bead_id: None,
         task_paths: Vec::new(),
         workspace_path,
         database_path: None,
@@ -2596,6 +2599,7 @@ fn serve_transport_timeout_error(timeout: Duration) -> DomainError {
 }
 
 #[derive(Clone, Debug)]
+#[expect(dead_code, reason = "replaced by job_journal.rs")]
 pub struct DaemonRunPlan {
     pub run_id: String,
     pub table_path: PathBuf,
@@ -2649,6 +2653,7 @@ impl DaemonJobRow {
 }
 
 #[derive(Clone, Debug)]
+#[expect(dead_code, reason = "replaced by job_journal.rs")]
 pub struct DaemonRecoveryReport {
     pub workspace: String,
     pub table_path: PathBuf,
@@ -2660,6 +2665,7 @@ pub struct DaemonRecoveryReport {
 
 impl DaemonRecoveryReport {
     #[must_use]
+    #[expect(dead_code, reason = "replaced by job_journal.rs")]
     pub fn data_json(&self) -> JsonValue {
         json!({
             "schema": DAEMON_RECOVERY_SCHEMA_V1,
@@ -2746,12 +2752,36 @@ pub fn daemon_job_table_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".ee").join("daemon-jobs.jsonl")
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 pub fn record_daemon_foreground_start(
     workspace_path: &Path,
     options: &DaemonForegroundOptions,
 ) -> Result<DaemonRunPlan, String> {
     trace_serve_localhost("input", 0, &[]);
     let table_path = daemon_job_table_path(workspace_path);
+    // Reject invalid requests before any allocation, journal creation or mutation.
+    // The steward enforces the same limits at execution time.
+    if options.workspace.trim().is_empty() {
+        return Err("Daemon workspace must not be empty".to_owned());
+    }
+    if options.tick_limit == 0
+        || options.tick_limit > crate::steward::MAX_DAEMON_FOREGROUND_TICK_LIMIT
+    {
+        return Err(format!(
+            "Daemon foreground tick limit must be between 1 and {}",
+            crate::steward::MAX_DAEMON_FOREGROUND_TICK_LIMIT
+        ));
+    }
+    if options.interval_ms > crate::steward::MAX_DAEMON_FOREGROUND_INTERVAL_MS {
+        return Err(format!(
+            "Daemon foreground interval must be no greater than {} ms",
+            crate::steward::MAX_DAEMON_FOREGROUND_INTERVAL_MS
+        ));
+    }
+    if options.job_types.is_empty() {
+        return Err("Daemon foreground mode requires at least one steward job type".to_owned());
+    }
+
     if options.dry_run {
         trace_serve_localhost("response", 0, &[]);
         return Ok(DaemonRunPlan {
@@ -2763,35 +2793,35 @@ pub fn record_daemon_foreground_start(
 
     let recorded_at = Utc::now().to_rfc3339();
     let run_id = daemon_run_id(workspace_path, &recorded_at);
-    let mut rows = Vec::new();
-    for tick in 1..=options.tick_limit {
-        for (offset, job_type) in options.job_types.iter().enumerate() {
-            let runner_job_id = runner_job_id(offset);
-            rows.push(DaemonJobRow {
-                schema: DAEMON_JOB_ROW_SCHEMA_V1.to_owned(),
-                row_id: row_id(&run_id, tick, &runner_job_id, "planned"),
-                run_id: run_id.clone(),
-                daemon_job_key: daemon_job_key(&run_id, tick, &runner_job_id),
-                runner_job_id,
-                tick,
-                job_type: job_type.as_str().to_owned(),
-                status: if tick == 1 { "running" } else { "pending" }.to_owned(),
-                outcome: None,
-                workspace: workspace_path.to_string_lossy().into_owned(),
-                write_owner_id: DAEMON_WRITE_OWNER_IDENTITY.to_owned(),
-                reason: format!("daemon foreground tick {tick} planned"),
-                started_at: Some(recorded_at.clone()),
-                completed_at: None,
-                recorded_at: recorded_at.clone(),
-                duration_ms: None,
-                items_processed: None,
-                error: None,
-                dry_run: false,
-                durable_mutation: false,
-                recovered_from_orphan: false,
-                recovery_reason: None,
-            });
-        }
+    // Only the first tick can be running. Never materialize future work up front.
+    let mut rows = Vec::with_capacity(options.job_types.len());
+    let tick = 1;
+    for (offset, job_type) in options.job_types.iter().enumerate() {
+        let runner_job_id = runner_job_id(offset);
+        rows.push(DaemonJobRow {
+            schema: DAEMON_JOB_ROW_SCHEMA_V1.to_owned(),
+            row_id: row_id(&run_id, tick, &runner_job_id, "planned"),
+            run_id: run_id.clone(),
+            daemon_job_key: daemon_job_key(&run_id, tick, &runner_job_id),
+            runner_job_id,
+            tick,
+            job_type: job_type.as_str().to_owned(),
+            status: "running".to_owned(),
+            outcome: None,
+            workspace: workspace_path.to_string_lossy().into_owned(),
+            write_owner_id: DAEMON_WRITE_OWNER_IDENTITY.to_owned(),
+            reason: format!("daemon foreground tick {tick} planned"),
+            started_at: Some(recorded_at.clone()),
+            completed_at: None,
+            recorded_at: recorded_at.clone(),
+            duration_ms: None,
+            items_processed: None,
+            error: None,
+            dry_run: false,
+            durable_mutation: false,
+            recovered_from_orphan: false,
+            recovery_reason: None,
+        });
     }
 
     trace_serve_localhost("persistence", 0, &[]);
@@ -2804,6 +2834,7 @@ pub fn record_daemon_foreground_start(
     })
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 pub fn record_daemon_foreground_report(
     workspace_path: &Path,
     report: &DaemonForegroundReport,
@@ -2835,6 +2866,7 @@ pub fn record_daemon_foreground_report(
     Ok(rows)
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 pub fn recover_orphaned_daemon_jobs(
     workspace_path: &Path,
     reason: &str,
@@ -2894,6 +2926,7 @@ pub fn recover_orphaned_daemon_jobs(
     })
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 pub fn daemon_status_report(
     workspace_path: &Path,
     requested_job_types: &[JobType],
@@ -2921,6 +2954,7 @@ pub fn daemon_status_report(
     })
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, String> {
     let table_path = daemon_job_table_path(workspace_path);
     if !daemon_job_table_path_is_regular_file(&table_path, "read")? {
@@ -2937,25 +2971,41 @@ pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, 
     // preserving the streaming line-by-line shape. Same defense pattern
     // as the parallel ledger reader at
     // `src/core/why.rs::fetch_coordination_fallback_evidence` (b040cde7).
-    let reader = BufReader::new(file.take(DAEMON_JOB_TABLE_MAX_BYTES));
+    let mut reader = BufReader::new(file.take(DAEMON_JOB_TABLE_MAX_BYTES));
     let mut rows = Vec::new();
-    for (index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|error| format!("Failed to read daemon job row: {error}"))?;
-        if line.trim().is_empty() {
+    let mut line = Vec::new();
+    let mut index = 0;
+    loop {
+        line.clear();
+        let bytes = std::io::BufRead::read_until(&mut reader, b'\n', &mut line)
+            .map_err(|error| format!("Failed to read daemon job row: {error}"))?;
+        if bytes == 0 {
+            break;
+        }
+        index += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let row = serde_json::from_str::<DaemonJobRow>(&line).map_err(|error| {
-            format!(
-                "Failed to parse daemon job row {} in {}: {error}",
-                index + 1,
-                table_path.display()
-            )
-        })?;
-        rows.push(row);
+        match serde_json::from_slice::<DaemonJobRow>(&line) {
+            Ok(row) => rows.push(row),
+            Err(error) if !line.ends_with(b"\n") && error.is_eof() => {
+                // An interrupted final append is not committed. Keep every
+                // preceding complete row and make status available again.
+                break;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to parse daemon job row {} in {}: {error}",
+                    index,
+                    table_path.display()
+                ));
+            }
+        }
     }
     Ok(rows)
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<(), String> {
     if rows.is_empty() {
         return Ok(());
@@ -2976,20 +3026,77 @@ fn append_daemon_job_rows(table_path: &Path, rows: &[DaemonJobRow]) -> Result<()
     let mut file = open_daemon_job_table_for_append(table_path)
         .map_err(|error| format!("Failed to open daemon job table for append: {error}"))?;
 
-    let mut buffer = Vec::new();
-    for row in rows {
-        serde_json::to_writer(&mut buffer, row)
-            .map_err(|error| format!("Failed to serialize daemon job row: {error}"))?;
-        buffer.push(b'\n');
+    // A torn final record can occur when the process is interrupted during
+    // append. Repair only the incomplete tail, preserving all committed rows.
+    // The file is opened with NOFOLLOW above to reject symlinked journals.
+    let mut existing = open_daemon_job_table_for_read(table_path)
+        .map_err(|error| format!("Failed to inspect daemon job tail: {error}"))?;
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let size = existing
+        .metadata()
+        .map_err(|error| format!("Failed to stat daemon job table: {error}"))?
+        .len();
+    if size > 0 {
+        existing
+            .seek(SeekFrom::Start(size - 1))
+            .map_err(|error| format!("Failed to inspect daemon job tail: {error}"))?;
+        let mut last = [0_u8; 1];
+        existing
+            .read_exact(&mut last)
+            .map_err(|error| format!("Failed to inspect daemon job tail: {error}"))?;
+        if last[0] != b'\n' {
+            // Find the last complete line without reading the whole ledger.
+            let mut boundary = size;
+            let mut chunk = [0_u8; 8192];
+            while boundary > 0 {
+                let start = boundary.saturating_sub(chunk.len() as u64);
+                existing
+                    .seek(SeekFrom::Start(start))
+                    .map_err(|error| format!("Failed to seek daemon job tail: {error}"))?;
+                let length = (boundary - start) as usize;
+                existing
+                    .read_exact(&mut chunk[..length])
+                    .map_err(|error| format!("Failed to read daemon job tail: {error}"))?;
+                if let Some(pos) = chunk[..length].iter().rposition(|byte| *byte == b'\n') {
+                    boundary = start + pos as u64 + 1;
+                    break;
+                }
+                boundary = start;
+            }
+            let tail_bytes = size - boundary;
+            if tail_bytes > 1_048_576 {
+                return Err("Daemon journal tail exceeds safe recovery limit".to_owned());
+            }
+            existing
+                .seek(SeekFrom::Start(boundary))
+                .map_err(|error| format!("Failed to seek daemon job tail: {error}"))?;
+            let mut trailing = Vec::new();
+            existing
+                .read_to_end(&mut trailing)
+                .map_err(|error| format!("Failed to read daemon job tail: {error}"))?;
+            match serde_json::from_slice::<DaemonJobRow>(&trailing) {
+                Err(error) if error.is_eof() => file.set_len(boundary).map_err(|error| {
+                    format!("Failed to repair incomplete daemon job tail: {error}")
+                })?,
+                Err(error) => return Err(format!("Malformed daemon journal tail: {error}")),
+                Ok(_) => {
+                    return Err("Daemon journal tail lacks a newline; refusing append".to_owned());
+                }
+            }
+        }
     }
-
-    file.write_all(&buffer)
-        .map_err(|error| format!("Failed to write daemon job rows: {error}"))?;
+    for row in rows {
+        serde_json::to_writer(&mut file, row)
+            .map_err(|error| format!("Failed to serialize daemon job row: {error}"))?;
+        file.write_all(b"\n")
+            .map_err(|error| format!("Failed to write daemon job row: {error}"))?;
+    }
 
     file.sync_all()
         .map_err(|error| format!("Failed to sync daemon job table: {error}"))
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn open_daemon_job_table_for_read(table_path: &Path) -> std::io::Result<fs::File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -2997,6 +3104,7 @@ fn open_daemon_job_table_for_read(table_path: &Path) -> std::io::Result<fs::File
     options.open(table_path)
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn open_daemon_job_table_for_append(table_path: &Path) -> std::io::Result<fs::File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -3005,6 +3113,7 @@ fn open_daemon_job_table_for_append(table_path: &Path) -> std::io::Result<fs::Fi
 }
 
 #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn configure_daemon_job_table_open_options(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -3014,6 +3123,7 @@ fn configure_daemon_job_table_open_options(options: &mut OpenOptions) {
 #[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
 fn configure_daemon_job_table_open_options(_options: &mut OpenOptions) {}
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn ensure_daemon_job_table_path_is_not_symlink(table_path: &Path) -> Result<(), String> {
     if let Some(symlink_path) = first_existing_symlink_component(table_path)? {
         return Err(format!(
@@ -3025,6 +3135,7 @@ fn ensure_daemon_job_table_path_is_not_symlink(table_path: &Path) -> Result<(), 
     Ok(())
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn daemon_job_table_path_is_regular_file(
     table_path: &Path,
     operation: &str,
@@ -3051,6 +3162,7 @@ fn daemon_job_table_path_is_regular_file(
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn daemon_job_table_path_exists_as_non_regular_file(table_path: &Path) -> Result<bool, String> {
     match fs::symlink_metadata(table_path) {
         Ok(metadata) => Ok(!metadata.file_type().is_file()),
@@ -3069,6 +3181,7 @@ fn daemon_job_table_path_exists_as_non_regular_file(table_path: &Path) -> Result
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, String> {
     crate::core::path_safety::first_existing_symlink_component(path).map_err(|error| {
         format!(
@@ -3078,6 +3191,7 @@ fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, Stri
     })
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn latest_daemon_rows(rows: &[DaemonJobRow]) -> Vec<DaemonJobRow> {
     let mut by_key = BTreeMap::new();
     for row in rows {
@@ -3086,6 +3200,7 @@ fn latest_daemon_rows(rows: &[DaemonJobRow]) -> Vec<DaemonJobRow> {
     by_key.into_values().collect()
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn row_from_result(
     workspace_path: &Path,
     run_id: &str,
@@ -3126,20 +3241,24 @@ fn row_from_result(
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn daemon_run_id(workspace_path: &Path, recorded_at: &str) -> String {
     let input = format!("{}|{recorded_at}", workspace_path.display());
     let digest = blake3::hash(input.as_bytes()).to_hex().to_string();
     format!("daemon-run-{}", &digest[..16])
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn daemon_job_key(run_id: &str, tick: u32, runner_job_id: &str) -> String {
     format!("{run_id}:tick-{tick:06}:{runner_job_id}")
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn runner_job_id(offset: usize) -> String {
     format!("job-{:06}", offset.saturating_add(1))
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "replaced by job_journal.rs"))]
 fn row_id(run_id: &str, tick: u32, runner_job_id: &str, phase: &str) -> String {
     let input = format!(
         "{run_id}|{tick}|{runner_job_id}|{phase}|{}",
@@ -5757,6 +5876,76 @@ mod tests {
             error.contains("Failed to parse daemon job row 1"),
             true,
             "malformed table parse error",
+        )
+    }
+
+    #[test]
+    fn invalid_large_tick_plan_never_creates_journal() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = DaemonForegroundOptions::new(temp.path().to_string_lossy().into_owned());
+        options.tick_limit = 1_000_000;
+        options.job_types = vec![JobType::HealthCheck];
+        ensure(
+            record_daemon_foreground_start(temp.path(), &options).is_err(),
+            true,
+            "large ticks refused",
+        )?;
+        ensure(
+            daemon_job_table_path(temp.path()).exists(),
+            false,
+            "no invalid plan persisted",
+        )?;
+        options.tick_limit = 1000;
+        options.interval_ms = crate::steward::MAX_DAEMON_FOREGROUND_INTERVAL_MS + 1;
+        ensure(
+            record_daemon_foreground_start(temp.path(), &options).is_err(),
+            true,
+            "interval rejected",
+        )?;
+        ensure(
+            daemon_job_table_path(temp.path()).exists(),
+            false,
+            "no invalid interval plan persisted",
+        )
+    }
+
+    #[test]
+    fn future_ticks_are_not_materialized_at_start() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = DaemonForegroundOptions::new(temp.path().to_string_lossy().into_owned());
+        options.tick_limit = crate::steward::MAX_DAEMON_FOREGROUND_TICK_LIMIT;
+        options.job_types = vec![JobType::HealthCheck];
+        let plan = record_daemon_foreground_start(temp.path(), &options)?;
+        ensure(plan.rows.len(), 1, "only current tick planned")?;
+        ensure(
+            load_daemon_job_rows(temp.path())?.len(),
+            1,
+            "bounded journal rows",
+        )
+    }
+
+    #[test]
+    fn torn_final_journal_row_does_not_hide_valid_status_or_recovery() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut options = DaemonForegroundOptions::new(temp.path().to_string_lossy().into_owned());
+        options.job_types = vec![JobType::HealthCheck];
+        let _ = record_daemon_foreground_start(temp.path(), &options)?;
+        let path = daemon_job_table_path(temp.path());
+        use std::io::Write as _;
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .map_err(|error| error.to_string())?
+            .write_all(b"{\"status\":\"interrupted")
+            .map_err(|error| error.to_string())?;
+        let status = daemon_status_report(temp.path(), &[JobType::HealthCheck], 5)?;
+        ensure(status.open_job_count, 1, "valid preceding row preserved")?;
+        let recovered = recover_orphaned_daemon_jobs(temp.path(), "restart")?;
+        ensure(recovered.open_jobs_cancelled, 1, "orphan recovered")?;
+        ensure(
+            daemon_status_report(temp.path(), &[JobType::HealthCheck], 5)?.open_job_count,
+            0,
+            "status after repair",
         )
     }
 

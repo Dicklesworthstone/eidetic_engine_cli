@@ -30,6 +30,8 @@ mod graph_scale_degradation;
 mod graph_telemetry_integration;
 #[path = "../graph_test_policy.rs"]
 mod graph_test_policy;
+#[path = "../handoff_agent_mail_snapshot.rs"]
+mod handoff_agent_mail_snapshot;
 #[path = "../handoff_capsule_roundtrip.rs"]
 mod handoff_capsule_roundtrip;
 #[path = "../handoff_no_mocks_e2e.rs"]

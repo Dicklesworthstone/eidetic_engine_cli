@@ -131,8 +131,20 @@ else
 fi
 
 step "apply refuses bulk auto-import without --approved-only"
-run_id="$(printf '%s' "$run" | jq -r '.data.runId // empty')"
-if [ -n "$run_id" ] && ee_supports bootstrap apply; then
+# jq_read, not a bare `jq -r` (bd-orll0). An empty run_id silently drops the
+# THREE assert_jq calls in this block, and the drop at the bottom names the two
+# causes it cannot tell apart -- "bootstrap apply or runId unavailable". That
+# conflation is the defect: a wrong path and an unsupported subcommand produce
+# the same honest-looking line. jq_read separates them, because a `.data` that
+# exists without a `runId` key can never yield a value and is reported as a
+# WRONG PATH, while a genuinely absent runId still takes the drop below.
+# Pre-initialised rather than suppressed with a directive: jq_read assigns this
+# through `printf -v`, which shellcheck's static model cannot follow, and a bare
+# declaration here removes the whole SC2154 class at the source instead of
+# silencing it at each of the three use sites below.
+run_id=""
+jq_read "$run" '.data.runId // empty' "bootstrap run id" run_id
+if [ "$JQ_READ_STATUS" = "value" ] && ee_supports bootstrap apply; then
     refuse="$(ee_json bootstrap apply "$run_id" --include SKILL.md --include 'references/**/*.md' --workspace "$WS" --json)"
     # Assert what success should BE, not what it should not be (bd-o8e1n). This is a
 # `!=` site, where direct comparison does NOT fix the vacuity: with the field
@@ -157,9 +169,16 @@ assert_jq "$refuse" '.success == false' \
     # No candidate was approved through curation, so nothing is written silently.
     assert_jq "$applied" '.success == true and .data.materializedCount > 0 and .data.appliedCount == 0' \
         "apply materializes review rows but writes no unapproved memory"
-else
-    log_drop 1 "bootstrap apply or runId unavailable: when present, assert apply refuses without --approved-only and applies only curation-approved candidates with audit"
+elif [ "$JQ_READ_STATUS" = "value" ]; then
+    # The runId read worked, so this is the honest case the old combined message
+    # was mostly describing: the binary does not carry `bootstrap apply`.
+    log_drop 1 "bootstrap apply unavailable on this binary (runId read fine): when present, assert apply refuses without --approved-only and applies only curation-approved candidates with audit"
+elif [ "$JQ_READ_STATUS" = "absent" ]; then
+    log_drop 1 "bootstrap init emitted a runId key with no value on this host, so the apply assertions cannot run; the path itself is confirmed present in the envelope, so this is a missing run and not a misread"
 fi
+# A missing_key or harness_error status has already recorded its own FAILURE
+# naming the path, so there is deliberately no drop for those: a drop beside a
+# failure would read as though the suite had excused itself.
 
 end_temp_workspace
 harness_summary

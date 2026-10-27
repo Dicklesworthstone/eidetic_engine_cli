@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.context.bead_affinity.v1.json",
   "title": "ee.context.bead_affinity.v1",
-  "description": "Bead-aware retrieval-bias summary emitted by ee context --explain --json (and ee why --json) when an --bead-id argument scopes pack ranking. Each memory in the candidate pool receives a small additive bias clamped to [-maxBiasMagnitude, +maxBiasMagnitude] (default 0.05, matching ee.context.agent_profile.v1) when its tags/content/links overlap with the supplied bead's labels, title tokens, or link graph. The block is purely explanatory: agents may use it to understand why ranking changed under --bead-id without mutating retrieval logic. Filed by bd-2942u (swarmx.barp: bead-aware retrieval prioritization).",
+  "description": "Summary at data.pack.beadAffinity in context and pack JSON when --bead-id scopes ranking. Already-admitted local memories receive a capped additive bias from source tags and content overlapping the selected bead's labels, title, or description. The current implementation does not infer link-family signals or change native rule, evidence, or nonlocal candidate scores. Raw tracker prose is not emitted. The normalized bead snapshot is bound to request identity; candidate pagination and envelope cursors are not supported with this mutable external input. Filed by bd-2942u (swarmx.barp: bead-aware retrieval prioritization).",
   "type": "object",
   "required": [
     "schema",
@@ -20,7 +20,7 @@
     "beadId": {
       "type": "string",
       "minLength": 1,
-      "description": "The bead ID supplied via --bead-id; verbatim, never hashed."
+      "description": "The bead ID supplied via --bead-id, with surrounding whitespace trimmed; never hashed."
     },
     "beadTitle": {
       "type": ["string", "null"],
@@ -41,7 +41,7 @@
     "matchedFeatureCount": {
       "type": "integer",
       "minimum": 0,
-      "description": "Total count of (memory, feature) match signals that produced a non-zero bias contribution. 0 implies coldStart=true."
+      "description": "Total count of observed (memory, feature) matches before score saturation. Zero means no matches were observed; inspect coldStart and degraded to distinguish observed no-overlap from unavailable bead or memory inputs."
     },
     "biasMagnitudeMax": {
       "type": "number",
@@ -61,7 +61,7 @@
     },
     "coldStart": {
       "type": "boolean",
-      "description": "True when the supplied bead has no matching memories under any of the feature dimensions (tags, title tokens, link graph). When true, no bias is applied and the degraded[] block records bead_affinity_cold_start."
+      "description": "True only when the bead and local memory signals were successfully read and no label, title-token, or description-token overlap was observed. When true, no bias is applied and degraded records bead_affinity_cold_start. False when inputs are unavailable; degraded then identifies the lookup or read failure."
     },
     "halfLifeDays": {
       "type": ["integer", "null"],
@@ -75,6 +75,7 @@
       "properties": {
         "label": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
         "titleToken": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "descriptionToken": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
         "link": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
         "parentChild": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
       }
@@ -84,9 +85,14 @@
       "required": ["workspaceGeneration", "beadGeneration", "beadId", "basePackHash"],
       "additionalProperties": false,
       "properties": {
-        "workspaceGeneration": { "type": "integer", "minimum": 0 },
+        "workspaceGeneration": { "type": ["integer", "null"], "minimum": 0 },
         "beadGeneration": { "type": ["integer", "null"], "minimum": 0 },
         "beadId": { "type": "string" },
+        "beadContextHash": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Digest of the selected bead's normalized scoring inputs, identifier, and affinity policy. Unrelated tracker edits do not change it."
+        },
         "basePackHash": {
           "type": ["string", "null"],
           "description": "Pack hash that would have been produced without bead_affinity. Lets callers prove the bias was applied on top of the canonical pack."
@@ -211,7 +217,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["label", "titleToken", "link", "parentChild"]
+            "enum": ["label", "titleToken", "descriptionToken", "link", "parentChild"]
           },
           "uniqueItems": true,
           "minItems": 1

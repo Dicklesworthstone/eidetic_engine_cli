@@ -55,6 +55,50 @@ record_pass() {
     e2e_log_note "agent_ergonomics_pass label=$label"
 }
 
+# record_absent_value <label> <json> <parent> <key> <product_detail> -- report a
+# read that came back empty WITHOUT asserting which side is at fault (bd-orll0).
+#
+# The four sites in e2e_rule_validation_counter.sh that read an id with a bare
+# `jq -r` and branch on emptiness already `record_failure` and exit, so unlike
+# the harness-side sites they never became silent skips. Their defect is narrower
+# and still real: every one of their messages blames the PRODUCT -- "data.ruleId
+# missing", "remember returned no memory id" -- when an equally likely cause is
+# that the read names a path the envelope does not carry at that position. A
+# failure that misattributes its cause sends the next reader into the wrong
+# subsystem, and the e2e log keeps that misattribution.
+#
+# Asking the parent whether it HAS the key separates the two, because an absent
+# key and a present-but-null key are both null and no null test can tell them
+# apart. This is the same discrimination jq_read makes in lib/e2e_harness.sh;
+# that helper is not reachable here, because this library sources only
+# lib/e2e_logger.sh and carries its own reporters. Rather than duplicate it, this
+# reports through record_failure and stays small.
+# <key> may be a COMMA-SEPARATED list when the read hedges between spellings, as
+# `.data.memory_id // .data.memoryId` does. A hedge is wrong only if EVERY
+# spelling is wrong: one key present means the read can resolve, so checking a
+# single spelling of a hedged read would manufacture a false WRONG PATH. (`ee
+# remember` really does emit both of those, which is exactly how that mistake
+# would have been made here.)
+record_absent_value() {
+    local label="${1:?label required}" json="${2-}" parent="${3:?parent required}"
+    local keys="${4:?key required}" product_detail="${5:-no value}"
+    local key found=0 oldifs="$IFS"
+    IFS=','
+    for key in $keys; do
+        IFS="$oldifs"
+        if printf '%s' "$json" | jq -e "($parent | type == \"object\") and ($parent | has(\"$key\"))" >/dev/null 2>&1; then
+            found=1
+        fi
+        IFS=','
+    done
+    IFS="$oldifs"
+    if [ "$found" -eq 0 ] && printf '%s' "$json" | jq -e "$parent | type == \"object\"" >/dev/null 2>&1; then
+        record_failure "$label" "WRONG PATH, not a missing feature: $parent exists but carries none of the key(s) [$keys], so this read can never produce a value -- settle the path against a captured envelope before blaming the command"
+    else
+        record_failure "$label" "$product_detail"
+    fi
+}
+
 log_step() {
     local label="${1:?step label required}"
     STEP=$((STEP + 1))

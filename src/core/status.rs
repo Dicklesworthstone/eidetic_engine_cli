@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 
+use crate::config::workspace::resolve_workspace_with_expanded_explicit_path;
 use crate::config::{
     EnvVar, GRAPH_FEATURE_SKYLINE_ENABLED_KEY, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
     WorkspaceResolution, WorkspaceResolutionMode, WorkspaceResolutionRequest,
     WorkspaceResolutionSource, diagnose_workspace_resolution, parse_env_bool_flag, read_env_var,
-    read_env_var_or_default, read_env_var_os, resolve_workspace, workspace_config,
+    read_env_var_or_default, read_env_var_os, workspace_config,
 };
 use crate::db::{
     CreateWorkspaceInput, DatabaseConfig, DbConnection, FeedbackSourceHarmfulCount,
@@ -965,7 +966,7 @@ impl StatusSkylineReport {
     #[must_use]
     pub fn gather_for_workspace(workspace_path: Option<&Path>) -> Self {
         let skyline_feature_enabled = status_skyline_feature_enabled(workspace_path);
-        let gathered_skyline = if skyline_feature_enabled == Some(true) {
+        let gathered_skyline = if skyline_feature_enabled == SkylineFeatureFlag::Read(true) {
             gather_status_skyline_snapshot(workspace_path)
         } else {
             None
@@ -2579,7 +2580,7 @@ impl StatusReport {
         });
         let skyline_feature_enabled =
             status_skyline_feature_enabled(options.workspace_path.as_deref());
-        let skyline_community_count = if skyline_feature_enabled == Some(true) {
+        let skyline_community_count = if skyline_feature_enabled == SkylineFeatureFlag::Read(true) {
             gather_status_skyline_community_count(
                 options.workspace_path.as_deref(),
                 status_connection_ref,
@@ -4691,10 +4692,16 @@ fn graph_capability_unavailable_for_build() -> bool {
 
 fn push_status_skyline_feature_disabled_degradation(
     degradations: &mut Vec<DegradationReport>,
-    enabled: Option<bool>,
+    enabled: SkylineFeatureFlag,
     graph_unavailable: bool,
 ) {
-    if enabled != Some(false) {
+    // Two states reach the body: an explicitly disabled config, and a config
+    // that could not be read. NoWorkspace and Unset stay silent exactly as
+    // before -- there is nothing to explain when no value was ever set.
+    if !matches!(
+        enabled,
+        SkylineFeatureFlag::Read(false) | SkylineFeatureFlag::Unreadable
+    ) {
         return;
     }
     // When graph compute is absent for BUILD reasons, the config key is not the
@@ -4709,6 +4716,22 @@ fn push_status_skyline_feature_disabled_degradation(
     // on the main status surface, so suppressing here removes a misleading
     // second answer rather than removing the explanation.
     if graph_unavailable {
+        return;
+    }
+    // An unreadable config is a DIFFERENT answer from a disabled one, and the
+    // difference is the whole point: `graph_skyline_disabled` asserts the
+    // operator turned the section off, which this code cannot assert because
+    // it never learned the value. Folding the two together is what let
+    // `ee status --skyline` report "no communities" for a graph that had one,
+    // with success:true and nothing in degraded[]. bd-l7t9x.
+    if enabled == SkylineFeatureFlag::Unreadable {
+        degradations.push(DegradationReport {
+            code: "graph_skyline_flag_unreadable",
+            severity: "medium",
+            message:
+                "Knowledge skyline status could not read graph.feature.skyline.enabled, so the skyline is reported empty without confirming the section is off.",
+            repair: "ee config show graph.feature.* --json",
+        });
         return;
     }
     // Not `graph_feature_disabled`: that code means the binary was built
@@ -4807,15 +4830,56 @@ fn gather_status_skyline(
     }
 }
 
-fn status_skyline_feature_enabled(workspace_path: Option<&Path>) -> Option<bool> {
-    let workspace_root = workspace_path?;
+/// The distinguishable states of the skyline feature flag.
+///
+/// This was `Option<bool>`, which could not express the last one: a workspace
+/// config that EXISTS but cannot be read. `.ok()` folded that into `None` —
+/// the same value as "no workspace was addressed" — so an unreadable config
+/// behaved exactly like an absent feature and `ee status --skyline` answered
+/// with an empty skyline, `success: true`, and no signal of any kind. One
+/// value cannot carry two states; this type is the repair. bd-l7t9x.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SkylineFeatureFlag {
+    /// No workspace was addressed, so there is no workspace config to consult.
+    NoWorkspace,
+    /// The workspace config holds no value for the key.
+    Unset,
+    /// The flag was read and carries this value.
+    Read(bool),
+    /// A workspace config is present but could not be read or parsed, so the
+    /// flag's value is UNKNOWN — which is not the same as knowing it is off.
+    Unreadable,
+}
+
+fn status_skyline_feature_enabled(workspace_path: Option<&Path>) -> SkylineFeatureFlag {
+    let Some(workspace_root) = workspace_path else {
+        return SkylineFeatureFlag::NoWorkspace;
+    };
+    // Resolve before reading: the config surface refuses a config reached
+    // through a symlinked path COMPONENT, and `.ok()` below discards that
+    // refusal, so an unresolved path yields None -- an empty skyline with no
+    // signal of any kind. On macOS /tmp and /var are symlinks and $TMPDIR
+    // lives under /var/folders, so that is the common case, not the exotic
+    // one. Same unresolved-path defect as ee insights (bd-l7t9x), except
+    // this one fails silently instead of loudly.
+    let workspace_root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
     let options = crate::core::config_surface::ConfigSurfaceOptions {
-        workspace_root: workspace_root.to_path_buf(),
+        workspace_root,
         config_path: None,
     };
-    crate::core::config_surface::get_config(&options, GRAPH_FEATURE_SKYLINE_ENABLED_KEY)
-        .ok()
-        .map(|report| report.value == "true")
+    match crate::core::config_surface::get_config(&options, GRAPH_FEATURE_SKYLINE_ENABLED_KEY) {
+        Ok(report) => SkylineFeatureFlag::Read(report.value == "true"),
+        // A key the merged config does not carry is not a read FAILURE: the
+        // flag simply has no value here, which is the ordinary case and must
+        // stay silent. Only a config that cannot be read or parsed is unknown.
+        Err(
+            crate::core::config_surface::ConfigSurfaceError::UnsetKey { .. }
+            | crate::core::config_surface::ConfigSurfaceError::UnknownKey { .. },
+        ) => SkylineFeatureFlag::Unset,
+        Err(_) => SkylineFeatureFlag::Unreadable,
+    }
 }
 
 #[cfg(feature = "graph")]
@@ -5012,7 +5076,7 @@ fn gather_workspace_status(workspace_path: Option<&Path>) -> Option<WorkspaceSta
         )
         .with_explicit_workspace(workspace_path.to_path_buf()),
     };
-    let resolution = resolve_workspace(&request).ok()?;
+    let resolution = resolve_workspace_with_expanded_explicit_path(&request).ok()?;
     let diagnostics = diagnose_workspace_resolution(&request, &resolution);
     Some(WorkspaceStatusReport::from_resolution(
         resolution,
@@ -7100,6 +7164,46 @@ mod tests {
     }
 
     #[test]
+    fn workspace_status_keeps_literal_environment_syntax_in_resolved_path() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("literal-${PATH}");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+
+        let report = gather_workspace_status(Some(&workspace))
+            .ok_or_else(|| "resolved workspace must produce workspace status".to_owned())?;
+
+        ensure(report.root, workspace.clone(), "literal workspace root")?;
+        ensure(
+            report.canonical_root,
+            workspace.clone(),
+            "literal canonical workspace root",
+        )?;
+        ensure(
+            report.config_dir,
+            workspace.join(".ee"),
+            "literal marker path",
+        )?;
+        ensure(
+            report.marker_present,
+            true,
+            "existing literal workspace marker",
+        )?;
+        ensure(
+            report.fingerprint,
+            crate::config::workspace_fingerprint(&workspace),
+            "workspace fingerprint follows the addressed filesystem root",
+        )?;
+        ensure(
+            workspace.join(".ee/ee.db").exists(),
+            false,
+            "workspace status inspection does not create a store",
+        )
+    }
+
+    #[test]
     fn status_read_pool_degradations_emit_acquire_timeout() -> TestResult {
         let mut degradations = Vec::new();
         let read_pool = ReadPoolStatusReport {
@@ -7587,7 +7691,11 @@ mod tests {
         // only answer. This arm is what makes the negative below meaningful —
         // without it, a function that never emitted anything would also pass.
         let mut enabled_build = Vec::new();
-        push_status_skyline_feature_disabled_degradation(&mut enabled_build, Some(false), false);
+        push_status_skyline_feature_disabled_degradation(
+            &mut enabled_build,
+            SkylineFeatureFlag::Read(false),
+            false,
+        );
         ensure(
             enabled_build
                 .iter()
@@ -7609,7 +7717,11 @@ mod tests {
         // build-time code is pushed by push_graph_capability_degradation, which
         // is asserted separately below.
         let mut graph_less_build = Vec::new();
-        push_status_skyline_feature_disabled_degradation(&mut graph_less_build, Some(false), true);
+        push_status_skyline_feature_disabled_degradation(
+            &mut graph_less_build,
+            SkylineFeatureFlag::Read(false),
+            true,
+        );
         ensure(
             graph_less_build.is_empty(),
             true,
@@ -7631,7 +7743,11 @@ mod tests {
         // Composed: exactly one explanation, and it is the build-time one.
         let mut combined = Vec::new();
         push_graph_capability_degradation(&mut combined, GraphComputeStatus::Unavailable);
-        push_status_skyline_feature_disabled_degradation(&mut combined, Some(false), true);
+        push_status_skyline_feature_disabled_degradation(
+            &mut combined,
+            SkylineFeatureFlag::Read(false),
+            true,
+        );
         ensure(
             combined
                 .iter()
@@ -7641,10 +7757,14 @@ mod tests {
             "a graph-less build must report the build-time code and no config code",
         )?;
 
-        // The suppression is scoped to the disabled case only: an enabled or
-        // unknown config still emits nothing, so the gate cannot be credited
-        // for silence it did not cause.
-        for enabled in [Some(true), None] {
+        // The suppression is scoped to the disabled case only: an enabled
+        // config, an unset one, and no workspace at all still emit nothing, so
+        // the gate cannot be credited for silence it did not cause.
+        for enabled in [
+            SkylineFeatureFlag::Read(true),
+            SkylineFeatureFlag::Unset,
+            SkylineFeatureFlag::NoWorkspace,
+        ] {
             let mut other = Vec::new();
             push_status_skyline_feature_disabled_degradation(&mut other, enabled, false);
             ensure(
@@ -7653,6 +7773,48 @@ mod tests {
                 "only an explicitly disabled config emits the skyline code",
             )?;
         }
+
+        // The state that used to be silent. An unreadable config is reported
+        // with its OWN code, never as `graph_skyline_disabled`, because the
+        // reader never learned whether the operator turned the section off.
+        // Without this arm the Unreadable branch could be deleted and every
+        // other assertion here would still pass. bd-l7t9x.
+        let mut unreadable = Vec::new();
+        push_status_skyline_feature_disabled_degradation(
+            &mut unreadable,
+            SkylineFeatureFlag::Unreadable,
+            false,
+        );
+        ensure(
+            unreadable
+                .iter()
+                .map(|degradation| degradation.code)
+                .collect::<Vec<_>>(),
+            vec!["graph_skyline_flag_unreadable"],
+            "an unreadable skyline config must report its own code",
+        )?;
+        ensure(
+            unreadable
+                .iter()
+                .map(|degradation| degradation.severity)
+                .collect::<Vec<_>>(),
+            vec!["medium"],
+            "an unreadable config is not an info-level choice",
+        )?;
+
+        // And it is suppressed on a graph-less build for the same reason the
+        // config code is: the config is not why the skyline is missing there.
+        let mut unreadable_graph_less = Vec::new();
+        push_status_skyline_feature_disabled_degradation(
+            &mut unreadable_graph_less,
+            SkylineFeatureFlag::Unreadable,
+            true,
+        );
+        ensure(
+            unreadable_graph_less.is_empty(),
+            true,
+            "a graph-less build must not advise reading a config that cannot help",
+        )?;
         Ok(())
     }
 

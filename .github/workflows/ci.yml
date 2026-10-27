@@ -546,6 +546,11 @@ jobs:
               run_test "cargo test --lib serve::" cargo test --workspace --lib --jobs 1 serve:: -- --test-threads=1 --nocapture
               run_test "cargo test --lib shadow::" cargo test --workspace --lib --jobs 1 shadow:: -- --test-threads=1 --nocapture
               run_test "cargo test --lib steward::" cargo test --workspace --lib --jobs 1 steward:: -- --test-threads=1 --nocapture
+              # `subscription` is mounted from src/core/subscribe_stream.rs by a
+              # #[path] attribute, so there is no src/subscription.rs to find and
+              # `core::s` does NOT reach it -- a filter matches the module path,
+              # not the file path. Added 2026-10-21 in f2896d1b4 with no shard.
+              run_test "cargo test --lib subscription::" cargo test --workspace --lib --jobs 1 subscription:: -- --test-threads=1 --nocapture
               run_test "cargo test --lib testing::" cargo test --workspace --lib --jobs 1 testing:: -- --test-threads=1 --nocapture
               run_test "cargo test --lib util::" cargo test --workspace --lib --jobs 1 util:: -- --test-threads=1 --nocapture
               run_test "cargo test --lib workspace_rebind::" cargo test --workspace --lib --jobs 1 workspace_rebind:: -- --test-threads=1 --nocapture

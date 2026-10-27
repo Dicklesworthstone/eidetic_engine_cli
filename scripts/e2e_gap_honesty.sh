@@ -59,18 +59,68 @@ step "blind-spot map: uncovered high-importance nodes + coverageRatio (6.1/6.2)"
 if ee_supports insights && ee_help_lists insights blindSpots; then
     bs="$(ee_json insights --section blindSpots --workspace "$WS" --json)"
     assert_jq "$bs" '.success == true' "insights --section blindSpots succeeds"
-    assert_jq "$bs" \
-        '(.data.blindSpots // .data.blind_spots // .data.section) != null' \
-        "blindSpots section is present"
+    # THE SECTION PAYLOAD LIVES IN `.data.sections[]`, KEYED BY `.data.selectedSection`.
+    #
+    # This assertion used to read `.data.blindSpots // .data.blind_spots //
+    # .data.section` and failed on all three (bd-psna1). That looked like a
+    # regression because the envelope is well-formed and `.success` is true --
+    # the command works, only the reader was wrong. It is a STALE EXPECTATION
+    # that nothing caught, because no gate has ever invoked this script.
+    #
+    # The replacement is not another guess. It is the shape three sibling
+    # suites assert and PASS against on this same 0.18.0 binary:
+    #
+    #   g9_load_bearing  .data.selectedSection == "loadBearingMemories"
+    #   g6_proximity     (.data.sections | type) == "array"
+    #   g10_hits         .data.sections[0].name == <section>
+    #
+    # Do not widen this back into a `//` chain. The original chain is what hid
+    # the defect: a chain that tries several spellings cannot distinguish
+    # "absent" from "I never knew the name", and it reports the same null for
+    # both.
+    # NOTE THE 3-ARG FORM. This harness is assert_jq(json, PREDICATE, label) and
+    # grades on `jq -e`'s exit code, whereas scripts/e2e_overhaul/lib/shared.sh
+    # takes assert_jq(json, filter, EXPECTED, label). Copying the 4-arg shape
+    # here does not fail loudly -- the 4th argument is silently dropped and the
+    # 3rd becomes the label, so `'(.data.sections | type)' "array"` would assert
+    # the string "array", which is truthy, and PASS for any value at all.
+    assert_jq "$bs" '(.data.sections | type) == "array"' "blindSpots sections is an array"
+    assert_jq "$bs" '.data.selectedSection == "blindSpots"' "blindSpots is the selected section"
+    assert_jq "$bs" '(.data.sections | map(.name) | index("blindSpots")) != null' "blindSpots section is present"
     # coverageRatio is an honesty number in [0,1]; log it (no silent omission).
-    cov="$(printf '%s' "$bs" | jq -r '(.data.coverageRatio // .data.coverage_ratio // empty)')"
-    if [ -n "$cov" ]; then
+    #
+    # PATH SETTLED 2026-10-21, the way the previous comment here asked for it
+    # to be settled: by capturing keys, NOT by widening the chain.
+    #
+    # `coverageRatio` is a PER-ITEM field of the blindSpots items. The product
+    # emits that spelling at exactly one place, `blind_spots_section_from_inputs`
+    # (src/cli/insights/mod.rs:2801), in the same json! object as
+    # rank/blindSpotId/coverageStatus. Confirmed against a live envelope:
+    #
+    #   .data | keys             -> 13 keys, none coverage-ish
+    #   .data.sections[0] | keys -> items,name,nextCommands,summary,title,
+    #                               whyItMatters
+    #
+    # So the old two-spelling read could never hit, and the old `else` branch
+    # then attributed a wrong-path read to an unbuilt feature -- exactly the
+    # failure the previous comment predicted of itself. Same defect class as
+    # bd-psna1 (fixed in 9429f5be5), in this same script, which that fix did
+    # not reach.
+    #
+    # Zero items and items-without-the-field are now DIFFERENT outcomes: the
+    # first is an honest empty section, the second is a product gap that fails.
+    cov_items="$(printf '%s' "$bs" | jq -r '[.data.sections[]? | select(.name == "blindSpots") | .items[]?] | length')"
+    if [ "${cov_items:-0}" -gt 0 ]; then
+        # (length > 0) is the empty-world guard: jq's all() returns true for an
+        # empty array, so without it an absent field would pass vacuously.
+        # Verified all four ways -- in-range true, out-of-range false, field
+        # absent false, zero items false.
         assert_jq "$bs" \
-            '((.data.coverageRatio // .data.coverage_ratio) >= 0) and ((.data.coverageRatio // .data.coverage_ratio) <= 1)' \
-            "coverageRatio is a ratio in [0,1]"
-        e2e_log_note "coverageRatio=$cov"
+            '[.data.sections[]? | select(.name == "blindSpots") | .items[]? | .coverageRatio] | map(select(. != null)) | (length > 0) and all(. >= 0 and . <= 1)' \
+            "every blindSpots item carries a coverageRatio in [0,1]"
+        e2e_log_note "coverageRatio values=$(printf '%s' "$bs" | jq -c '[.data.sections[]? | select(.name == "blindSpots") | .items[]? | .coverageRatio]')"
     else
-        log_drop 1 "coverageRatio absent (bd-1n0np.6.2 importance/coverage ranking not built)"
+        log_drop 1 "blindSpots carried 0 items in this fixture, so no coverageRatio existed to assert; the PATH is settled (.data.sections[].items[].coverageRatio, src/cli/insights/mod.rs:2801) -- this drop reports an empty section, not an unverified read"
     fi
 else
     log_drop 1 "insights --section blindSpots pending (bd-1n0np.6.1): blind-spot assertions skipped"

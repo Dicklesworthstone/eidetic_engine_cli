@@ -22,11 +22,11 @@ fn target_tmp_dir() -> PathBuf {
 }
 
 fn write_fake_ee(path: &Path) -> Result<(), String> {
-    let source = r#"#!/usr/bin/env bash
+    let template = r#"#!/usr/bin/env bash
 set -uo pipefail
 
 if [ "${1:-}" = "--version" ]; then
-    printf 'ee 0.0.0-retention-test\n'
+    printf 'ee __EE_VERSION__\n'
     exit 0
 fi
 
@@ -55,6 +55,18 @@ fi
 echo "unexpected fake ee invocation: $*" >&2
 exit 64
 "#;
+    // The fixture declares the CURRENT source version rather than a sentinel.
+    // scripts/lib/ee_binary_resolution.sh refuses any binary whose --version
+    // differs from Cargo.toml ("refusing STALE binary"), and that refusal made
+    // epic_setup fail before this test could reach its own assertion: the
+    // script exited 2 from the guard instead of the 7 the test plants, so the
+    // retention manifest was never exercised. A sentinel version cannot be
+    // made to pass that guard, and the guard should NOT grow a fixture bypass
+    // -- its whole purpose is to stop assertions running against a binary that
+    // is not this source. Declaring the real version satisfies it honestly;
+    // the guard's own header notes it already accepts any binary reporting a
+    // matching version, so nothing is weakened here.
+    let source = template.replace("__EE_VERSION__", env!("CARGO_PKG_VERSION"));
     fs::write(path, source).map_err(|error| format!("failed to write fake ee: {error}"))?;
 
     #[cfg(unix)]

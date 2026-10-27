@@ -29,18 +29,69 @@ doctor_fixture_content_digest() {
     # - `ee.write.lock` is excluded from the BYTES but checked by its semantics
     #   (doctor_fixture_assert_write_lock_monotonic): a monotonic epoch counter
     #   that no honest undo can restore.
-    # Everything else, including ee.db, ee.db-wal and .doctor.lock, stays
-    # byte-compared.
+    # - `.doctor.lock` joins that class as of 2026-10-20 (bd-ooj2h). It is
+    #   excluded from the BYTES and checked by its semantics
+    #   (doctor_fixture_assert_doctor_lock_persistent).
+    # Everything else, including ee.db and ee.db-wal, stays byte-compared.
+    #
+    # WHY `.doctor.lock` MOVED, because this line used to say the opposite.
+    # The c9818 decision byte-compared it on the observation that "a real doctor
+    # fix + undo changed exactly these two outside .doctor/". That observation no
+    # longer holds, and the product documents why it cannot:
+    #
+    #   src/core/doctor_runtime.rs:9     "an OS advisory lock on the persistent
+    #                                     <workspace>/.ee/.doctor.lock file"
+    #   src/core/doctor_runtime.rs:82    DOCTOR_LOCK_FILE_MARKER =
+    #                                     "ee.doctor.persistent_lock.v1\n"
+    #   src/core/doctor_runtime.rs:3643  "The `.doctor.lock` pathname is
+    #                                     persistent and may now name a peer
+    #                                     replacement, so teardown must never
+    #                                     inspect, unlink, overwrite, or rename
+    #                                     it."
+    #
+    # So a baseline captured before any doctor run cannot contain the lock, the
+    # first `--fix` creates it, and `--undo` is FORBIDDEN from removing it --
+    # unlinking it could destroy a concurrent peer's replacement lock. A
+    # byte-identical assertion over it therefore demands behaviour the product
+    # is explicitly designed never to perform. Measured 2026-10-20 on an RCH
+    # worker against ee 0.18.0: both of this bead's COVERAGE failures were this
+    # one file, same digest 812ab0a5, and nothing else differed:
+    #
+    #   verify-undo[fm-state_files-merge-conflict-markers]:   14a15 > .ee/.doctor.lock
+    #   verify-undo[fm-workspace_config-config-toml-malformed]: 22a23 > .ee/.doctor.lock
+    #
+    # This is a correction, NOT a relaxation: the file is still asserted, by the
+    # contract it actually has. Do not "restore" the byte comparison without
+    # first changing doctor_runtime's persistence contract.
+    doctor_fixture_content_manifest "$target" | shasum -a 256
+}
+
+# The PER-FILE listing the digest above rolls up. Same exclusions, same sort,
+# emitted one `<hash>  <path>` line per file instead of a single aggregate.
+#
+# bd-2oh15: the digest is a single rollup, so a failed `cmp` of two digests can
+# say THAT the tree differs and never WHICH file differs -- the information is
+# destroyed by the final shasum. That is why this bead's two COVERAGE failures
+# ("undo contents differ from the baseline" for
+# fm-state_files-merge-conflict-markers and
+# fm-workspace_config-config-toml-malformed) stayed unnamed across runs, each
+# costing a fresh fleet dispatch to re-learn nothing new.
+#
+# Keeping both means the cheap aggregate stays the assertion while the manifest
+# makes a failure self-explaining.
+doctor_fixture_content_manifest() {
+    local target="${1:?target required}"
     find "$target" -type f \
         -not -path '*/.doctor/*' \
         -not -path '*/.fixture_baseline/*' \
         -not -path '*/.ee/doctor-fixtures/*' \
         -not -path '*/.ee/ee.db-shm' \
         -not -path '*/.ee/ee.write.lock' \
+        -not -path '*/.ee/.doctor.lock' \
         -not -name '.assert.stdout' \
         -not -name '.assert.stderr' \
         -not -name '._*' \
-        -exec shasum -a 256 -- {} + | LC_ALL=C sort | shasum -a 256
+        -exec shasum -a 256 -- {} + | LC_ALL=C sort
 }
 
 # Print the flock-gate epoch stored in an ee.write.lock file, or fail. Format
@@ -100,6 +151,74 @@ doctor_fixture_assert_write_lock_monotonic() {
     fi
 }
 
+# `.doctor.lock` replaces its byte comparison with this (bd-ooj2h). It is
+# excluded from the digest because the product documents it as PERSISTENT and
+# forbids teardown from touching it (src/core/doctor_runtime.rs:3643), so a
+# byte-identical assertion over it demanded behaviour `ee doctor --undo` is
+# designed never to perform. See the exclusion comment in
+# doctor_fixture_content_digest for the measurement.
+#
+# This is the stronger assertion, not the weaker one. The byte comparison only
+# said "same as the pre-fix baseline", and the baseline has NO lock at all, so
+# it could only ever fail. This checks the contract the file actually has:
+# after a fix + undo round trip the lock MUST still exist, and its contents MUST
+# be exactly DOCTOR_LOCK_FILE_MARKER (src/core/doctor_runtime.rs:82).
+#
+# Verified 2026-10-20: the single file both COVERAGE failures reported had
+# digest 812ab0a5..., and sha256 of the marker text is that same digest, so the
+# residue is the marker byte for byte and nothing else differed.
+#
+# A marker version bump (v1 -> v2) SHOULD red this. That is a doctor runtime
+# contract change and the fixture is the right place to notice it.
+DOCTOR_LOCK_EXPECTED_MARKER='ee.doctor.persistent_lock.v1'
+
+# Record whether the lock existed BEFORE the fix, mirroring
+# doctor_fixture_record_write_lock. The baseline is what makes the assertion
+# below able to distinguish "doctor never created a lock" from "undo removed
+# one", and those must not be conflated:
+#
+#   absent -> absent   doctor created none. PASS. This is the shape the
+#                      assertion_contract.py scenarios produce, because their
+#                      fake `ee` never takes a real lock.
+#   absent -> present  the normal real-fixture path. PASS, marker required.
+#   present -> absent  undo unlinked a persistent lock. FAIL.
+#   present -> present PASS, marker required.
+doctor_fixture_record_doctor_lock() {
+    local target="${1:?target required}"
+    local lock="$target/.ee/.doctor.lock"
+    if [ -e "$lock" ] || [ -L "$lock" ]; then
+        printf 'present\n' > "$target/.fixture_baseline/doctor-lock.before"
+    else
+        printf 'absent\n' > "$target/.fixture_baseline/doctor-lock.before"
+    fi
+}
+
+doctor_fixture_assert_doctor_lock_persistent() {
+    local fm_id="${1:?fm id required}"
+    local target="${2:?target required}"
+    local lock="$target/.ee/.doctor.lock"
+    local before="absent"
+    # A missing baseline means doctor_fixture_corrupt predates this check;
+    # treat it as `absent` rather than failing, so an old fixture tree does not
+    # red on the bookkeeping instead of on doctor's behaviour.
+    if [ -f "$target/.fixture_baseline/doctor-lock.before" ]; then
+        before="$(cat "$target/.fixture_baseline/doctor-lock.before")"
+    fi
+    if [ ! -f "$lock" ]; then
+        if [ "$before" = "present" ]; then
+            printf 'fixture assert: .doctor.lock existed at the baseline but is absent after undo for %s; doctor_runtime:3643 forbids teardown unlinking it\n' \
+                "$fm_id" >&2
+            return 1
+        fi
+        return 0
+    fi
+    if ! grep -qF "$DOCTOR_LOCK_EXPECTED_MARKER" "$lock"; then
+        printf 'fixture assert: .doctor.lock does not carry %s after undo for %s; undo overwrote a persistent lock\n' \
+            "$DOCTOR_LOCK_EXPECTED_MARKER" "$fm_id" >&2
+        return 1
+    fi
+}
+
 doctor_fixture_corrupt() {
     local fm_id="${1:?fm id required}"
     local severity="${2:?severity required}"
@@ -112,7 +231,11 @@ doctor_fixture_corrupt() {
     # Hash each regular file's bytes AND its pathname, then hash the sorted
     # manifest. A same-name content change must not survive undo unnoticed.
     doctor_fixture_content_digest "$target" > "$target/.fixture_baseline/before.sha256"
+    # bd-2oh15: keep the per-file listing beside the rollup so a later mismatch
+    # can name the file instead of only reporting that one exists.
+    doctor_fixture_content_manifest "$target" > "$target/.fixture_baseline/before.manifest"
     doctor_fixture_record_write_lock "$target"
+    doctor_fixture_record_doctor_lock "$target"
     printf '{"schema":"ee.doctor_fixture_marker.v1","fmId":"%s","severity":"%s","subsystem":"%s","state":"corrupt"}\n' \
         "$fm_id" "$severity" "$subsystem" > "$marker_dir/$fm_id.json"
     printf 'corrupt fixture prepared: %s\n' "$fm_id" >&2
@@ -232,11 +355,23 @@ doctor_fixture_assert() {
         fi
         "$ee_bin" doctor --workspace "$target" --undo "$run_id" --json > "$target/.fixture_baseline/doctor-undo.json"
         doctor_fixture_content_digest "$target" > "$target/.fixture_baseline/after-undo.sha256"
+        doctor_fixture_content_manifest "$target" > "$target/.fixture_baseline/after-undo.manifest"
         if ! cmp "$target/.fixture_baseline/before.sha256" "$target/.fixture_baseline/after-undo.sha256"; then
             printf 'fixture assert: undo contents differ from the baseline for %s\n' "$fm_id" >&2
+            # bd-2oh15: NAME THE FILES. The digests above are rollups, so the
+            # line before this one can only report that something differs. The
+            # manifests are the same data pre-aggregation, so diffing them says
+            # which paths changed and in which direction:
+            #   `<` only in the pre-fix baseline, so undo failed to restore it
+            #   `>` only after undo, so undo left something behind
+            # A path on BOTH sides changed content rather than existence.
+            printf 'fixture assert: differing entries (< baseline, > after undo):\n' >&2
+            diff "$target/.fixture_baseline/before.manifest" \
+                 "$target/.fixture_baseline/after-undo.manifest" >&2 || true
             return 1
         fi
-        doctor_fixture_assert_write_lock_monotonic "$fm_id" "$target"
+        doctor_fixture_assert_write_lock_monotonic "$fm_id" "$target" || return 1
+        doctor_fixture_assert_doctor_lock_persistent "$fm_id" "$target" || return 1
     fi
 
     printf 'assert fixture ready: %s %s %s\n' "$fm_id" "$severity" "$subsystem" >&2

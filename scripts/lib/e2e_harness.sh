@@ -49,6 +49,14 @@ HARNESS_FAIL=0
 HARNESS_STEP=0
 HARNESS_DROPS=0
 HARNESS_FAILURES=()
+# Set by jq_read and read by CALLERS in other scripts, which is why reporting
+# goes through a global rather than stdout: a `v="$(jq_read ...)"` capture would
+# run in a subshell and lose the status. shellcheck cannot see a use across that
+# source boundary and reports SC2034 against whichever assignment inside the
+# function it saw last, so a per-line directive just chases the warning around.
+# `export` is the remedy SC2034's own text names for a variable consumed
+# externally, and it settles all four assignment sites at once.
+export JQ_READ_STATUS=""
 HARNESS_START_NS=0
 HARNESS_TMP_WORKSPACES=()
 
@@ -139,7 +147,28 @@ harness_init() {
     export EE_BIN
     local run_id="${EE_E2E_RUN_ID:-$(python3 -c 'from datetime import datetime,timezone; print(datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))')}"
     LOG_DIR="${LOG_DIR:-$REPO_ROOT/tests/logs/wizard_e2e/${HARNESS_TEST_NAME}.${run_id}.${BASHPID:-$$}}"
-    mkdir -p "$LOG_DIR"
+    # FAIL LOUDLY IF THE LOG DIR CANNOT BE CREATED (bd-e2e-harness-would-swallow-logdir-failure-c393s).
+    #
+    # Unchecked, `mkdir -p` printed to stderr and harness_init carried on with
+    # LOG_DIR exported to a path that does not exist. EE_TEST_LOG_PATH is
+    # derived from it on the next line, so every subsequent `e2e_log_note`
+    # wrote nothing while the suite still reported pass/fail on stdout: a
+    # complete-looking verdict with no evidence behind it. The artifact this
+    # destroys is the run's own evidence, which is why it is worth a crash.
+    #
+    # EXIT, NOT RETURN. The bead proposed `return 1`, and that would have
+    # reproduced the swallow one level up: harness_init has 45 call sites and
+    # ZERO of them check its return value, and the callers deliberately do not
+    # run under `set -e` so that assert_* can accumulate failures. A return
+    # would be discarded by every one of them. `exit 2` matches what this same
+    # function already does for its three other refusals (:98, :115, :137).
+    if ! mkdir -p "$LOG_DIR"; then
+        printf '[harness] FATAL: cannot create log dir %s\n' "$LOG_DIR" >&2
+        printf '[harness] refusing: EE_TEST_LOG_PATH derives from it, so every\n' >&2
+        printf '[harness] e2e_log_note would write nowhere and this run would\n' >&2
+        printf '[harness] report pass/fail with no evidence behind it.\n' >&2
+        exit 2
+    fi
     export LOG_DIR
     EE_TEST_LOG_PATH="${EE_TEST_LOG_PATH:-$LOG_DIR/events.jsonl}"
     export EE_TEST_LOG_PATH
@@ -275,6 +304,131 @@ assert_jq() {
     esac
 }
 
+# jq_read <json> <filter> <label> <outvar> -- a bare-jq read that cannot decay
+# into a silent skip (bd-orll0).
+#
+# THE DEFECT CLASS. 108 sites across scripts/e2e_*.sh read a value with a bare
+# `jq -r` into a shell variable, and 8 of them then branch on whether that
+# variable came back empty to decide WHETHER TO ASSERT AT ALL. A read naming the
+# wrong path yields empty, the else branch fires, and the script records a drop
+# that reads as "the feature is not built yet" rather than "I looked in the wrong
+# place". assert_jq and its null-path diagnostic are never reached, because no
+# assertion runs. Two confirmed instances: bd-psna1 (blindSpots read at three
+# spellings the envelope never had) and the coverageRatio read in
+# scripts/e2e_gap_honesty.sh (fixed in 4f11475eb), which lived in the SAME FILE
+# as the first and survived its fix.
+#
+# WHY has() AND NOT `== null`. _assert_jq_resolvable_null_paths above asks "is
+# this path null", which CANNOT separate a wrong spelling from a run that had no
+# value -- both are null. Asking the PARENT whether it carries the KEY does
+# separate them, and that discrimination is the only thing this helper adds:
+#
+#     parent is an object and LACKS the key   -> the read is in the WRONG PLACE
+#     parent HAS the key, value is null       -> genuinely absent this run
+#
+# Validated against a live `ee insights --json` envelope: `.data` is an object of
+# 14 keys, and has("coverageRatio") and has("blindSpots") are BOTH false, so this
+# check flags both historical instances, while has("mode") is true so a real key
+# is not flagged.
+#
+# THE CHECK IS DRIVEN BY THE FILTER'S PATHS, NOT BY EMPTINESS, and that is load
+# bearing. Three of the eight sites default with `// 0` or `// ""`, so their read
+# NEVER comes back empty: a missing key arrives as a plausible "0" and the
+# caller's own `-gt 0` test then skips just as quietly. Keying the diagnostic on
+# the path tokens catches those; keying it on emptiness would not.
+#
+# A FILTER THAT HEDGES IS ONLY WRONG IF EVERY SPELLING IS WRONG. `.data.a //
+# .data.b` is reported missing only when NEITHER parent carries its key, because
+# one resolving spelling means the read works.
+#
+# RETURNS 0 ALWAYS, reporting through <outvar> and JQ_READ_STATUS. Both are
+# forced, not stylistic:
+#   * A non-zero return would abort scripts/e2e_rule_validation_counter.sh on a
+#     bare assignment -- it runs under `set -euo pipefail` and holds four of the
+#     eight sites.
+#   * The status cannot come back from `v="$(jq_read ...)"`, because command
+#     substitution runs in a SUBSHELL and the assignment would be lost. Hence
+#     the out-variable rather than stdout.
+#
+# JQ_READ_STATUS is one of:
+#   value          <outvar> holds a non-empty, non-null value
+#   absent         the paths resolve but there is no value; the caller should
+#                  take whatever drop or skip it already intended
+#   missing_key    every path named by the filter is absent from its parent
+#                  object; a FAILURE naming them has already been recorded
+#   harness_error  the filter did not compile or the input is not JSON; a
+#                  FAILURE has already been recorded
+#
+# JQ_READ_STATUS IS ONE GLOBAL AND HOLDS ONLY THE MOST RECENT READ. A caller that
+# does two reads before branching must capture each status immediately
+# (`st1="$JQ_READ_STATUS"`), or a wrong first path hides behind a good second one
+# and the branch runs as though both resolved. This is not hypothetical -- the
+# first draft of the e2e_backup_roundtrip.sh conversion had exactly that bug.
+#
+# BEST EFFORT, LIKE ITS SIBLING. Only root-anchored `.data.<key>...` tokens are
+# inspected. Interpolated paths ("${items_path}[].${id_field}") and anything
+# behind an iterator are invisible here and fall through as `absent`, which is
+# exactly the behaviour the call site had before -- no better, no worse. Nor is a
+# missing INTERMEDIATE object flagged: `.data.counts` being absent entirely is
+# genuinely ambiguous (a command may omit an optional object), and flagging it
+# would red a script whose feature works, which is the worse error. A diagnostic
+# that overstated its coverage would recreate, one level up, the defect it exists
+# to fix.
+jq_read() {
+    local json="$1" filter="$2" label="${3:-jq_read}" outvar="$4"
+    local value jq_err rc token parent leaf missing="" seen=0 resolved=0
+    JQ_READ_STATUS="harness_error"
+
+    # THE OUT-VARIABLE MUST NOT SHADOW ONE OF THIS FUNCTION'S OWN LOCALS.
+    # `printf -v value ...` inside a function that has `local value` writes the
+    # LOCAL, so the caller's variable is never assigned, stays empty, and the
+    # caller takes its absent/skip branch -- which is the exact silent skip this
+    # helper exists to prevent, reintroduced through its own interface. Refuse
+    # loudly instead; a caller cannot debug a write that went somewhere else.
+    case "$outvar" in
+        json | filter | label | outvar | value | jq_err | rc | token | parent | leaf | missing | seen | resolved | "")
+            _harness_fail "$label: HARNESS ERROR -- jq_read cannot write to out-variable '$outvar'; it shadows one of jq_read's own locals (or is empty), so the assignment would silently go nowhere. Rename the caller's variable."
+            return 0
+            ;;
+    esac
+    printf -v "$outvar" '%s' ""
+
+    value="$(printf '%s' "$json" | jq -r "$filter" 2>/dev/null)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        jq_err="$(printf '%s' "$json" | jq -r "$filter" 2>&1 >/dev/null)"
+        _harness_fail "$label: HARNESS ERROR -- bare read failed (jq exit $rc) for [$filter]: $(printf '%s' "$jq_err" | tr '\n' ' ' | cut -c1-300)"
+        return 0
+    fi
+
+    for token in $(printf '%s' "$filter" | grep -oE '\.data(\.[A-Za-z_][A-Za-z0-9_]*)+' | sort -u); do
+        seen=$((seen + 1))
+        parent="${token%.*}"
+        leaf="${token##*.}"
+        # Only the unambiguous shape counts: the parent EXISTS as an object and
+        # does not carry the key. Anything else is left to the caller.
+        if printf '%s' "$json" | jq -e "($parent | type == \"object\") and (($parent | has(\"$leaf\")) | not)" >/dev/null 2>&1; then
+            missing="${missing:+$missing, }$token"
+        else
+            resolved=$((resolved + 1))
+        fi
+    done
+
+    if [ "$seen" -gt 0 ] && [ "$resolved" -eq 0 ]; then
+        _harness_fail "$label: WRONG PATH, not a missing feature -- every root-anchored path in [$filter] names a key its parent object does not carry: $missing. The payload's parent object exists, so this read can never produce a value and the branch it guards would have been skipped silently."
+        JQ_READ_STATUS="missing_key"
+        return 0
+    fi
+
+    if [ -n "$value" ] && [ "$value" != "null" ]; then
+        printf -v "$outvar" '%s' "$value"
+        JQ_READ_STATUS="value"
+    else
+        JQ_READ_STATUS="absent"
+    fi
+    return 0
+}
+
 # assert_exit <expected_code> <label> -- <command...>
 assert_exit() {
     local expected="$1" label="$2"; shift 2; [ "${1:-}" = "--" ] && shift
@@ -358,23 +512,56 @@ harness_summary() {
     end_ns="$(_harness_now_ns)"
     elapsed_ms="$(python3 -c "print(round(($end_ns-$HARNESS_START_NS)/1e6,3))")"
     e2e_log_end
-    python3 - "$LOG_DIR/summary.json" "$HARNESS_TEST_NAME" "$HARNESS_PASS" "$HARNESS_FAIL" "$HARNESS_STEP" "$HARNESS_DROPS" "$elapsed_ms" "$EE_TEST_LOG_PATH" <<'PYEOF'
+    python3 - "$LOG_DIR/summary.json" "$HARNESS_TEST_NAME" "$HARNESS_PASS" "$HARNESS_FAIL" "$HARNESS_STEP" "$HARNESS_DROPS" "$elapsed_ms" "$EE_TEST_LOG_PATH" "${EE_E2E_REFUSE_VACUOUS_PASS:-0}" <<'PYEOF'
 import json, sys
-path, name, p, f, steps, drops, ms, events = sys.argv[1:9]
+path, name, p, f, steps, drops, ms, events, refuse = sys.argv[1:10]
+# `asserted` is ALWAYS emitted; the verdict only changes when asked to.
+#
+# A run with 0 pass and 0 fail verified nothing, and verdict PASS said so for
+# as long as this file has existed: a script that drops every arm for a missing
+# prerequisite exits 0 and reports PASS. That is right for an ad-hoc run on a
+# host that genuinely cannot answer the question, and wrong for a gate, so the
+# REFUSAL is opt-in while the FACT is not. A grader that reads `verdict` alone
+# cannot tell the two apart; one that also reads `asserted` can, without any
+# caller changing behaviour.
+asserted = int(p) > 0
+verdict = "FAIL" if int(f) else ("VACUOUS" if refuse == "1" and not asserted else "PASS")
 doc = {"schema":"ee.test_event.v1.summary","test":name,
        "steps":int(steps),"pass":int(p),"fail":int(f),"drops":int(drops),
+       "asserted":asserted,
        "elapsed_ms":float(ms),"events":events,
-       "verdict":("PASS" if int(f)==0 else "FAIL")}
+       "verdict":verdict}
 open(path,"w").write(json.dumps(doc,indent=2)+"\n")
 print(json.dumps(doc))
 PYEOF
+    local human_verdict="PASS"
+    if [ "$HARNESS_FAIL" -ne 0 ]; then
+        human_verdict="FAIL"
+    elif [ "$HARNESS_PASS" -eq 0 ]; then
+        # Reported whether or not refusal is enabled: a reader of the log should
+        # never have to know which flag was set to learn that nothing asserted.
+        human_verdict="PASS (VACUOUS: nothing asserted)"
+        if [ "${EE_E2E_REFUSE_VACUOUS_PASS:-0}" = "1" ]; then
+            human_verdict="VACUOUS"
+        fi
+    fi
     printf '[harness] %s: %d pass, %d fail, %d steps, %d drops, %sms -> %s\n' \
         "$HARNESS_TEST_NAME" "$HARNESS_PASS" "$HARNESS_FAIL" "$HARNESS_STEP" "$HARNESS_DROPS" "$elapsed_ms" \
-        "$([ "$HARNESS_FAIL" -eq 0 ] && echo PASS || echo FAIL)" >&2
+        "$human_verdict" >&2
     if [ "$HARNESS_FAIL" -ne 0 ]; then
         printf '[harness] failures:\n' >&2
         local fmsg; for fmsg in "${HARNESS_FAILURES[@]}"; do printf '  - %s\n' "$fmsg" >&2; done
         return 1
+    fi
+    if [ "${EE_E2E_REFUSE_VACUOUS_PASS:-0}" = "1" ] && [ "$HARNESS_PASS" -eq 0 ]; then
+        # 2, not 1: a caller distinguishing "the system is wrong" from "this run
+        # answered nothing" needs two codes, and 1 already means real failures.
+        printf '[harness] REFUSING a vacuous pass: 0 assertions succeeded (%d drops). \n' \
+            "$HARNESS_DROPS" >&2
+        printf '[harness] Set EE_E2E_REFUSE_VACUOUS_PASS=0 for an ad-hoc run on a host that\n' >&2
+        printf '[harness] cannot satisfy this script, or gate the call site so it declines\n' >&2
+        printf '[harness] to run instead of collecting a pass it did not earn.\n' >&2
+        return 2
     fi
     return 0
 }

@@ -2144,7 +2144,9 @@ fn bounded_stdin_grant_replay_and_revoke_are_generation_atomic() -> TestResult {
 
 #[test]
 fn peer_revoke_and_same_node_reenrollment_cannot_resurrect_lane_consent() -> TestResult {
-    let fixture = set_up_fixture("peer-reenroll")?;
+    // `mut` because re-enrollment mints a new principal and the assertions
+    // after it must target that one (bd-mesh-no-stable-node-identity-pt7k5).
+    let mut fixture = set_up_fixture("peer-reenroll")?;
     let (_, first_token_json) = preview(&fixture, true)?;
     let first_bearer = sensitive_json_string(
         &first_token_json,
@@ -2239,12 +2241,86 @@ fn peer_revoke_and_same_node_reenrollment_cannot_resurrect_lane_consent() -> Tes
         ],
     )?;
     let peer_add_json = success_json(&peer_add, "same-node ee mesh peer add")?;
-    ensure_equal(
-        &peer_add_json
-            .pointer("/data/peerId")
-            .and_then(Value::as_str),
-        &Some(fixture.peer_id.as_str()),
-        "same-node re-enrollment must reproduce the peer id used by the regression",
+    // bd-mesh-no-stable-node-identity-pt7k5. This used to assert that
+    // re-enrollment REPRODUCED the peer id, and that assertion can never pass:
+    // `generate_peer_origin_node_id` mints a random principal per enrollment by
+    // design, and its doc comment says so -- "Tailscale StableID and
+    // current-key generations bind to this principal in storage, but neither
+    // value contributes bytes to the principal itself". Principal equality
+    // across enrollments is precisely what the product guarantees will NOT
+    // hold, so the old precondition failed on every run and `?` meant the
+    // deny-baseline assertion below HAD NEVER BEEN EVALUATED.
+    //
+    // Assert the real guarantee instead, then retarget the fixture at the
+    // re-enrolled peer. Retargeting is not cosmetic: leaving `fixture.peer_id`
+    // pointing at the revoked principal would preview a peer that no longer
+    // exists, and "decision == deny" would then pass for the wrong reason --
+    // trading a test that never ran for one that cannot fail.
+    let reenrolled_peer_id = peer_add_json
+        .pointer("/data/peerId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "same-node re-enrollment emitted no /data/peerId".to_owned())?
+        .to_owned();
+    ensure(
+        reenrolled_peer_id != fixture.peer_id,
+        format!(
+            "re-enrollment must mint a FRESH principal: identity binds to the \
+             principal rather than deriving it, so reproducing {} would mean the \
+             principal is derived from node identity after all",
+            fixture.peer_id
+        ),
+    )?;
+    fixture.peer_id = reenrolled_peer_id.clone();
+
+    // Plant the transport identity for the NEW principal the same way
+    // set_up_fixture does for the first one -- this fixture lives after the
+    // production LocalAPI boundary and there is no live Tailscale here, so
+    // without it `preview-grant` refuses with policy_denied "has no
+    // authoritative LocalAPI identity binding" (exit 7) and the deny-baseline
+    // assertion is unreachable for a second, different reason.
+    //
+    // THE STABLE ID IS DELIBERATELY IDENTICAL to the original enrollment's.
+    // That is what makes this the SAME NODE re-enrolling: the principal is
+    // fresh, the node identity is not. A different stable id here would make
+    // the test prove nothing about resurrection, because it would describe a
+    // different node.
+    //
+    // The re-enrolled principal also needs a policy entry, because the product
+    // treats a missing one as a CONFIGURATION ERROR rather than as an implicit
+    // deny: without it `preview-grant` refuses with
+    // "mesh_peer_policy_lookup_missing" (exit 2) and the assertion below is
+    // again unreachable.
+    //
+    // write_mesh_policy_config's fourth argument is include_peer_group_binding,
+    // NOT "allow" -- the binding it writes carries `default_action = "deny"`.
+    // So the policy entry is infrastructure that makes the peer KNOWN with a
+    // deny default, and it is the GRANT that would make it allow. Writing it
+    // for the re-enrolled principal is therefore not weakening the test: the
+    // property is that the earlier grant does not come back for a new
+    // principal on the same node, and that is exactly what the assertion below
+    // now measures.
+    let reenrolled_database_path = Path::new(&fixture.workspace).join(".ee").join("ee.db");
+    let reenrolled_connection = DbConnection::open_file(&reenrolled_database_path)
+        .map_err(|error| format!("open re-enrollment fixture database: {error}"))?;
+    reenrolled_connection
+        .observe_mesh_peer_transport_identity(&ObserveMeshPeerTransportIdentityInput {
+            workspace_id: fixture.workspace_id.clone(),
+            peer_id: reenrolled_peer_id,
+            tailnet_id: "tn_lane_grant_e2e".to_owned(),
+            stable_node_id: "stable-lane-grant-peer-reenroll".to_owned(),
+            current_node_pubkey: TEST_TAILSCALE_NODE_KEY.to_owned(),
+            observed_at: Some("2026-08-09T00:00:00Z".to_owned()),
+        })
+        .map_err(|error| format!("bind re-enrollment transport identity: {error}"))?;
+    reenrolled_connection
+        .close()
+        .map_err(|error| format!("close re-enrollment fixture database: {error}"))?;
+
+    write_mesh_policy_config(
+        Path::new(&fixture.workspace),
+        &fixture.workspace_id,
+        &fixture.peer_id,
+        true,
     )?;
 
     let (_, reenrolled_preview_json) = preview(&fixture, false)?;
@@ -2257,14 +2333,32 @@ fn peer_revoke_and_same_node_reenrollment_cannot_resurrect_lane_consent() -> Tes
         &Some("deny"),
         "re-enrollment must inherit the deny baseline instead of resurrecting an allow",
     )?;
+    // bd-mesh-no-stable-node-identity-pt7k5. This expected 3 -- grant, revoke
+    // and re-enrollment each leaving a fence -- which assumed the counter
+    // follows the NODE across a re-enrollment. It does not, and cannot:
+    //
+    //     src/mesh/policy.rs:253
+    //     pub fn lane_grant_generation_for(&self, local_workspace_id: &str,
+    //                                      peer_id: &str) -> u64
+    //         .map_or(0, |state| state.grant_generation)
+    //
+    // The key includes peer_id and the default is 0, so a principal that has
+    // never been granted reads 0 by construction. This file's own other
+    // assertions agree: an un-granted peer is 0 (lines 889, 1113, 1545) and a
+    // first grant makes it 1 (line 1788).
+    //
+    // 0 IS THE PROPERTY, not a shortfall. A re-enrolled principal inheriting
+    // the revoked peer's generation would mean grant history survived the
+    // revoke -- the same resurrection this test exists to forbid, one field
+    // over from the decision it already checks above.
     ensure_equal(
         &json_u64(
             &reenrolled_preview,
             "/grantGeneration",
             "same-node re-enrollment preview",
         )?,
-        &3,
-        "grant, revoke, and re-enrollment must each leave a monotonic generation fence",
+        &0,
+        "a re-enrolled principal must carry NO grant generation from the revoked one",
     )?;
 
     let stale = run_ee_with_stdin(

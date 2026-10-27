@@ -155,6 +155,16 @@ drain_surface() {
     full_count="$(printf '%s\n' "$full_ids" | grep -c . || true)"
     assert_eq "$([ "$full_count" -gt 0 ] && echo nonempty || echo empty)" "nonempty" \
         "${surface}: ungoverned baseline returns rows (got ${full_count})"
+    # The count floor above catches a wrong items_path -- `.data.rows[].id` yields
+    # nothing and full_count is 0 -- but it is BLIND to a wrong id_field, and that
+    # is the worse case (bd-orll0). `jq -r '.data.items[].ident'` prints the
+    # literal string "null" once per element, so the rows are counted, the drained
+    # sequence is the SAME string, and both the count comparison and the
+    # byte-identity comparison below pass with both sides equally wrong. That is a
+    # vacuous green, not a skip: nothing is ever reported. Asserting the ids are
+    # real values is what makes the id field load-bearing.
+    assert_eq "$(printf '%s\n' "$full_ids" | grep -c '^null$' || true)" "0" \
+        "${surface}: baseline ids are real values, not the literal \"null\" a wrong id field yields"
 
     cursor=""
     for page in $(seq 0 399); do

@@ -346,7 +346,7 @@ impl DoctorReport {
         // CORE:     check_runtime, check_workspace, check_database, check_search_index
         // ADVISORY: check_ee_install_path (advisory via its own builder, bd-1et0v.18),
         //           check_shard_fanout, check_flight_recorder, check_lexical_ram_tier,
-        //           check_graph_numa_pin, check_daemon_socket_reachable,
+        //           check_graph_snapshot, check_graph_numa_pin, check_daemon_socket_reachable,
         //           check_rch_worker_pressure, check_rch_verify_ledger, check_cass
         let checks = vec![
             check_runtime(),
@@ -360,6 +360,7 @@ impl DoctorReport {
             check_flight_recorder(&flight_recorder).advisory(),
             check_search_index(workspace_path),
             check_lexical_ram_tier(workspace_path).advisory(),
+            check_graph_snapshot(workspace_path).advisory(),
             check_graph_numa_pin(workspace_path).advisory(),
             check_daemon_socket_reachable(workspace_path).advisory(),
             check_rch_worker_pressure(&rch_worker_pressure).advisory(),
@@ -3168,6 +3169,48 @@ fn embedding_posture_check_result(
 /// bd-h1xbv: a present bundled model whose `.verified` receipt is missing or
 /// stale is re-hashed by every process that loads it. Say so on the embedding
 /// check, advisory only (results are unaffected), and point at the re-mint.
+/// Join the configured `search.semantic_weight` to the ACTIVE vector tier
+/// (bd-2vq2z.15).
+///
+/// `lint_semantic_weight_without_neural_tier` has existed in
+/// `core::config_explain` with zero callers. Both facts it needs were already
+/// computed inside this check and nothing joined them: the tier arrives as
+/// `posture.deterministic` from `get_index_status`, and the weight is one
+/// `workspace_config` read away, which this module already does elsewhere
+/// (`materialized_peer_group_counts`, :890).
+///
+/// Without the join, an operator who sets `search.semantic_weight = 0.45` on a
+/// deterministic-hash box is told nothing at all: the posture check reports the
+/// tier without mentioning the weight, and `ee config explain` is not a surface
+/// anyone runs before being confused. That silence is the exact trap this bead
+/// was filed for -- `semantic_weight` reads as "turn on neural semantic
+/// search", and setting it on a hash-fallback tier does no such thing.
+///
+/// `neural_tier_active` is `!deterministic`: the lint's own message says the
+/// condition is "the active vector tier is deterministic hash, not neural".
+fn with_semantic_weight_lint_advisory(
+    mut check: CheckResult,
+    workspace_path: &Path,
+    deterministic_tier: bool,
+) -> CheckResult {
+    let configured_weight =
+        workspace_config(workspace_path).and_then(|config| config.search.semantic_weight);
+    let Some(finding) = crate::core::config_explain::lint_semantic_weight_without_neural_tier(
+        configured_weight,
+        !deterministic_tier,
+    ) else {
+        return check;
+    };
+    check.message.push_str(&format!(
+        " Advisory code: {}. {}",
+        finding.code, finding.message
+    ));
+    if matches!(check.severity, CheckSeverity::Ok) {
+        check.severity = CheckSeverity::Warning;
+    }
+    check.advisory()
+}
+
 fn with_model_receipt_stale_advisory(mut check: CheckResult, receipt_stale: bool) -> CheckResult {
     if !receipt_stale {
         return check;
@@ -3226,16 +3269,20 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
     };
     match get_index_status(&options) {
         Ok(report) => match &report.embedding {
-            Some(posture) => with_model_receipt_stale_advisory(
-                embedding_posture_check_result(
-                    posture.semantic,
-                    posture.mode,
-                    &posture.fast_model_id,
-                    posture.fast_dimension,
-                    posture.deterministic,
-                    &trap_present,
+            Some(posture) => with_semantic_weight_lint_advisory(
+                with_model_receipt_stale_advisory(
+                    embedding_posture_check_result(
+                        posture.semantic,
+                        posture.mode,
+                        &posture.fast_model_id,
+                        posture.fast_dimension,
+                        posture.deterministic,
+                        &trap_present,
+                    ),
+                    !super::index::stale_receipt_potion_model_dirs().is_empty(),
                 ),
-                !super::index::stale_receipt_potion_model_dirs().is_empty(),
+                workspace_path,
+                posture.deterministic,
             ),
             None => embedding_posture_unavailable_check(
                 &trap_present,
@@ -3592,7 +3639,10 @@ fn check_search_index(workspace_path: Option<&Path>) -> CheckResult {
             ),
             IndexHealth::Stale => CheckResult::warning(
                 "search_index",
-                "Search index exists but is stale.",
+                report.last_check_error.as_deref().map_or_else(
+                    || "Search index exists but is stale.".to_owned(),
+                    |reason| format!("Search index exists but is stale: {reason}"),
+                ),
                 error_codes::INDEX_STALE,
             ),
             IndexHealth::Missing => CheckResult::warning(
@@ -3734,6 +3784,119 @@ fn lexical_ram_tier_index_path(workspace_path: Option<&Path>) -> PathBuf {
                 .join(DEFAULT_INDEX_SUBDIR)
                 .join("lexical")
         })
+}
+
+/// Inspect a stored MemoryLinks projection in one read transaction. This does
+/// not run algorithms, publish a snapshot, or modify source records.
+fn check_graph_snapshot(workspace_path: Option<&Path>) -> CheckResult {
+    let Some(workspace_path) = workspace_path else {
+        return CheckResult::ok(
+            "graph_snapshot",
+            "Graph snapshot was not inspected without a workspace path.",
+        );
+    };
+    if !cfg!(feature = "graph") {
+        return CheckResult::ok(
+            "graph_snapshot",
+            "Graph snapshot inspection is not applicable: this binary has no graph feature.",
+        );
+    }
+    if let Some((_, reason)) = database_unreadable(workspace_path) {
+        return CheckResult::ok(
+            "graph_snapshot",
+            format!("Graph snapshot not inspected: {reason}; see the database check."),
+        );
+    }
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.is_file() {
+        return CheckResult::ok(
+            "graph_snapshot",
+            "Graph snapshot not inspected: the database is missing; see the database check.",
+        );
+    }
+    let unavailable = |error: String| {
+        CheckResult::warning(
+            "graph_snapshot",
+            format!("Graph snapshot freshness could not be measured: {error}"),
+            error_codes::DATABASE_UNAVAILABLE,
+        )
+    };
+    let connection = match DbConnection::open_file_read_only(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => return unavailable(error.to_string()),
+    };
+    if let Err(error) = connection.begin_read_snapshot() {
+        return unavailable(error.to_string());
+    }
+    let check = (|| {
+        let workspace = match crate::core::workspace::addressed_workspace_row(
+            &connection,
+            workspace_path,
+            &database_path,
+        ) {
+            Ok(Some(workspace)) => workspace,
+            Ok(None) => {
+                return unavailable("the addressed workspace row is missing".to_owned());
+            }
+            Err(error) => return unavailable(error.to_string()),
+        };
+        match crate::graph::inspect_memory_link_snapshot(&connection, &workspace.id) {
+            Ok(inspection) => graph_snapshot_check_from_inspection(&inspection),
+            Err(
+                error @ (crate::graph::GraphError::Json { .. }
+                | crate::graph::GraphError::InvalidSnapshotMetrics { .. }),
+            ) => CheckResult::warning(
+                "graph_snapshot",
+                format!("Graph snapshot metrics cannot be validated: {error}"),
+                error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED,
+            ),
+            Err(error) => unavailable(error.to_string()),
+        }
+    })();
+    if let Err(error) = connection.rollback_read_snapshot() {
+        return unavailable(error.to_string());
+    }
+    check
+}
+
+fn graph_snapshot_check_from_inspection(
+    inspection: &crate::graph::MemoryLinkSnapshotInspection,
+) -> CheckResult {
+    use crate::graph::SnapshotValidationResult;
+
+    let validation = &inspection.validation;
+    match validation.result {
+        SnapshotValidationResult::NotFound if validation.current_generation == 0 => {
+            CheckResult::ok(
+                "graph_snapshot",
+                "No visible memory links require a graph snapshot.",
+            )
+        }
+        SnapshotValidationResult::Valid if inspection.source_selection_known => CheckResult::ok(
+            "graph_snapshot",
+            format!(
+                "MemoryLinks snapshot version {} matches all {} selected source links, including endpoints, weights, confidence, and provenance.",
+                validation.snapshot_version.unwrap_or(0),
+                validation.current_generation,
+            ),
+        ),
+        SnapshotValidationResult::Valid => CheckResult::warning(
+            "graph_snapshot",
+            "Legacy MemoryLinks snapshot has no recorded source filters; freshness is unverified. Refresh to record the source selection and enable exact comparison.",
+            error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED,
+        ),
+        result => CheckResult::warning(
+            "graph_snapshot",
+            format!(
+                "MemoryLinks snapshot is {}. {}",
+                result.as_str(),
+                validation.repair_hint.as_deref().unwrap_or(
+                    "Run `ee graph centrality-refresh` to rebuild it from the current source."
+                ),
+            ),
+            error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED,
+        ),
+    }
 }
 
 fn check_graph_numa_pin(workspace_path: Option<&Path>) -> CheckResult {
@@ -4119,7 +4282,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "registry",
-            version: "0.4.6",
+            version: "0.4.10",
             path: "https://crates.io/crates/fsqlite",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -4175,7 +4338,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "registry",
-            version: "0.6.0",
+            version: "0.7.1",
             path: "https://crates.io/crates/frankensearch",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -4332,7 +4495,7 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         enabled_by_default: true,
         source: DependencySource {
             kind: "registry",
-            version: "0.2.3",
+            version: "0.3.8",
             path: "https://crates.io/crates/franken-agent-detection",
         },
         default_feature_profile: DependencyFeatureProfile {
@@ -4404,6 +4567,69 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    /// bd-2vq2z.15: the semantic-weight lint must fire on a hash tier and stay
+    /// silent on a neural one.
+    ///
+    /// This is a unit test and not an e2e arm on purpose. The first attempt to
+    /// verify the wiring through `ee doctor` could not trigger it at all: the
+    /// worker had a real model installed, so `get_index_status` reported
+    /// `mode: "neural_local"`, `deterministic` was false, and the lint
+    /// correctly returned None. A fixture that cannot reach the condition
+    /// proves nothing about the join, and forcing a hash tier end-to-end means
+    /// defeating model discovery rather than testing this function.
+    ///
+    /// Both polarities are asserted. The negative arm is the one that matters:
+    /// without it, a version of this function that appended unconditionally
+    /// would pass.
+    #[test]
+    fn semantic_weight_lint_fires_only_on_a_hash_tier_bd_2vq2z_15() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee).map_err(|error| error.to_string())?;
+        std::fs::write(
+            ee.join("config.toml"),
+            "search = { semantic_weight = 0.45 }\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let base = CheckResult::ok("embedding", "posture reported");
+
+        let hash_tier = with_semantic_weight_lint_advisory(base.clone(), temp.path(), true);
+        if !hash_tier
+            .message
+            .contains(crate::core::config_explain::LINT_WEIGHT_WITHOUT_NEURAL_TIER)
+        {
+            return Err(format!(
+                "a configured semantic weight on a deterministic tier must carry the lint code; got {:?}",
+                hash_tier.message
+            ));
+        }
+        if matches!(hash_tier.severity, CheckSeverity::Ok) {
+            return Err("the advisory must lift an Ok severity to Warning".to_owned());
+        }
+
+        let neural_tier = with_semantic_weight_lint_advisory(base.clone(), temp.path(), false);
+        if neural_tier.message != base.message {
+            return Err(format!(
+                "a neural tier must leave the message untouched; got {:?}",
+                neural_tier.message
+            ));
+        }
+
+        // Empty-world guard: no configured weight means nothing to warn about,
+        // on either tier. Without this, a function that keyed off the tier
+        // alone would satisfy both arms above.
+        let bare = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let unset = with_semantic_weight_lint_advisory(base.clone(), bare.path(), true);
+        if unset.message != base.message {
+            return Err(format!(
+                "no configured weight must produce no advisory; got {:?}",
+                unset.message
+            ));
+        }
+        Ok(())
     }
 
     /// bd-bigu7: a config.toml that exists and does not parse must be
@@ -5403,6 +5629,14 @@ mod tests {
             report
                 .checks
                 .iter()
+                .any(|check| check.name == "graph_snapshot" && check.tier == CheckTier::Advisory),
+            true,
+            "graph freshness doctor check is advisory",
+        )?;
+        ensure(
+            report
+                .checks
+                .iter()
                 .any(|check| check.name == "daemon_socket_reachable"),
             true,
             "daemon socket doctor check exists",
@@ -5801,6 +6035,283 @@ mod tests {
             true,
             "workspace message includes selected path",
         )
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn doctor_graph_snapshot_measures_source_drift_without_writing() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path();
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let database_path = workspace.join(".ee/ee.db");
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("graph doctor".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            check_graph_snapshot(Some(workspace)).severity,
+            CheckSeverity::Ok
+        );
+        let source = "mem_00000000000000000000000181";
+        let target = "mem_00000000000000000000000182";
+        for memory_id in [source, target] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: format!("Graph doctor source {memory_id}"),
+                        workflow_id: None,
+                        confidence: 0.8,
+                        utility: 0.0,
+                        importance: 0.0,
+                        provenance_uri: None,
+                        trust_class: TrustClass::AgentAssertion.as_str().to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .insert_memory_link(
+                "link_00000000000000000000000181",
+                &crate::db::CreateMemoryLinkInput {
+                    src_memory_id: source.to_owned(),
+                    dst_memory_id: target.to_owned(),
+                    relation: crate::db::MemoryLinkRelation::Supports,
+                    weight: 0.8,
+                    confidence: 0.9,
+                    directed: true,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: crate::db::MemoryLinkSource::Agent,
+                    created_by: None,
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let missing = check_graph_snapshot(Some(workspace));
+        assert_eq!(
+            missing.error_code,
+            Some(error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED)
+        );
+        assert!(missing.message.contains("not_found"));
+        let refreshed = crate::graph::refresh_graph_snapshot(
+            &connection,
+            &workspace_id,
+            &crate::graph::CentralityRefreshOptions::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let expected_id = refreshed
+            .snapshot
+            .ok_or_else(|| "refresh must publish snapshot".to_owned())?
+            .id;
+        let audits_before = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len();
+        let healthy = check_graph_snapshot(Some(workspace));
+        assert_eq!(healthy.severity, CheckSeverity::Ok);
+        assert!(
+            healthy
+                .message
+                .contains("matches all 1 selected source links")
+        );
+        assert_eq!(
+            connection
+                .list_audit_entries(Some(&workspace_id), None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            audits_before
+        );
+        assert_eq!(
+            connection
+                .get_latest_graph_snapshot(&workspace_id, crate::db::GraphSnapshotType::MemoryLinks)
+                .map_err(|error| error.to_string())?
+                .map(|snapshot| snapshot.id),
+            Some(expected_id)
+        );
+        connection
+            .execute_raw("UPDATE memory_links SET weight = 0.4")
+            .map_err(|error| error.to_string())?;
+        let stale = check_graph_snapshot(Some(workspace));
+        assert_eq!(
+            stale.error_code,
+            Some(error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED)
+        );
+        assert!(stale.message.contains("stale"));
+        assert_eq!(
+            super::super::doctor_fixers::fix_mode_for_check(
+                stale.error_code.map(|code| code.id),
+                stale.name,
+                false
+            ),
+            (
+                super::super::doctor_fixers::FixMode::AutoGuidance,
+                Some("graph_snapshot_stale")
+            )
+        );
+        assert!(stale.advisory().is_topline_healthy());
+
+        // A failed source read cannot be passed off as either a current graph
+        // or an absent snapshot that refreshing would automatically repair.
+        connection
+            .execute_raw("ALTER TABLE memory_links RENAME TO unavailable_memory_links")
+            .map_err(|error| error.to_string())?;
+        let unavailable = check_graph_snapshot(Some(workspace));
+        assert_eq!(
+            unavailable.error_code,
+            Some(error_codes::DATABASE_UNAVAILABLE)
+        );
+        assert!(unavailable.message.contains("could not be measured"));
+        assert_eq!(
+            super::super::doctor_fixers::fix_finding_for_check(
+                unavailable.error_code.map(|code| code.id),
+                unavailable.name,
+                false
+            ),
+            None
+        );
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn doctor_graph_snapshot_does_not_claim_legacy_source_freshness() {
+        let mut validation = crate::graph::SnapshotValidationReport::not_found(
+            &crate::graph::SnapshotValidationOptions::default(),
+        );
+        validation.result = crate::graph::SnapshotValidationResult::Valid;
+        let check =
+            graph_snapshot_check_from_inspection(&crate::graph::MemoryLinkSnapshotInspection {
+                validation,
+                source_selection_known: false,
+            });
+        assert_eq!(
+            check.error_code,
+            Some(error_codes::GRAPH_SNAPSHOT_REFRESH_REQUIRED)
+        );
+        assert!(check.message.contains("freshness is unverified"));
+    }
+
+    #[test]
+    fn doctor_search_index_reports_same_dimension_producer_drift() -> TestResult {
+        use crate::core::index::{
+            IndexRebuildOptions, install_test_workspace_embedder, rebuild_index,
+        };
+        use crate::search::{Embedder, EmbedderStack, HashEmbedder};
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path();
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let database_path = ee_dir.join("ee.db");
+        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("doctor producer identity".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            insert_canary_memory(&connection, &workspace_id).status,
+            IntegrityCanaryStatus::Created,
+            "the real index must contain a memory",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        // Native JL producers can share their display id and width while
+        // their immutable seed changes the vector space. This must not be
+        // hidden by hash metadata's deliberate omission of a semantic tuple.
+        let producer = HashEmbedder::jl_384(11);
+        let replacement = HashEmbedder::jl_384(29);
+        ensure(
+            (producer.id(), producer.dimension()),
+            (replacement.id(), replacement.dimension()),
+            "the regression must bypass model-label and dimension checks",
+        )?;
+        let original_guard = install_test_workspace_embedder(
+            &workspace_id,
+            EmbedderStack::from_parts(Arc::new(producer), None),
+        );
+        let built = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: None,
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(built.documents_total, 1, "one memory was indexed")?;
+        ensure(
+            check_search_index(Some(workspace)).severity,
+            CheckSeverity::Ok,
+            "doctor must accept the actual producer before selection changes",
+        )?;
+
+        let replacement_guard = install_test_workspace_embedder(
+            &workspace_id,
+            EmbedderStack::from_parts(Arc::new(replacement), None),
+        );
+        let status = get_index_status(&IndexStatusOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: None,
+            index_dir: None,
+        })
+        .map_err(|error| error.to_string())?;
+        let reason = status.last_check_error.as_deref().ok_or_else(|| {
+            "a different native producer must expose its incompatibility".to_owned()
+        })?;
+        ensure(
+            reason.contains("producer identity"),
+            true,
+            "the stale cause must identify producer incompatibility",
+        )?;
+        let check = check_search_index(Some(workspace));
+        ensure(check.severity, CheckSeverity::Warning, "doctor severity")?;
+        ensure(
+            check.error_code.map(|code| code.id),
+            Some(error_codes::INDEX_STALE.id),
+            "producer drift must retain the existing INDEX_STALE contract",
+        )?;
+        ensure(
+            check.message.contains(reason),
+            true,
+            "doctor must preserve the actionable index status cause",
+        )?;
+        ensure(
+            check.repair,
+            error_codes::INDEX_STALE.default_repair,
+            "producer drift must retain the rebuild repair",
+        )?;
+
+        drop(replacement_guard);
+        ensure(
+            check_search_index(Some(workspace)).severity,
+            CheckSeverity::Ok,
+            "restoring the original producer must restore readiness without a rebuild",
+        )?;
+        drop(original_guard);
+        Ok(())
     }
 
     #[cfg(unix)]

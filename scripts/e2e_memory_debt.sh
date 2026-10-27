@@ -231,8 +231,13 @@ else
 fi
 
 # --- remembering the demand flips the cluster to likely_covered -----------
+# Production miss rows are hash-only by design. Bind the answer to the stable
+# gap id exactly as the suggested remember command does; no raw query text or
+# vector is persisted merely to make coverage possible.
+GAP_ID="$(jq -r '(.gaps // .data.gaps)[0].clusterId // empty' "${G}" 2>/dev/null)"
 run_ee remember "Zebra hovercraft docking protocol: engage the magnetic clamps before docking." \
-    --workspace "${WS}" --level procedural --kind rule --tags "docking" --json
+    --workspace "${WS}" --level procedural --kind rule \
+    --tags "docking,knowledge-gap:${GAP_ID}" --json
 COVER_EXIT=$LAST_EXIT
 # The id of the memory that is SUPPOSED to close the gap. Printed in the
 # failure diagnosis because it is the only way to tell the two causes apart
@@ -241,14 +246,43 @@ COVER_EXIT=$LAST_EXIT
 # similarity or recency, and if it does not appear the memory was never
 # visible to the matcher at all. Those need opposite fixes.
 COVER_ID="$(jq -r '.data.memoryId // .data.memory_id // empty' "${LAST_STDOUT}" 2>/dev/null)"
+# The remembered memory's OWN createdAt, which is the third value needed to
+# partition the failure (bd-betm5). The coverage predicate in learn_gap_cluster
+# has three conjuncts -- not tombstoned, `created_at > cluster.last_seen_at`,
+# and carrying the exact `knowledge-gap:<clusterId>` tag -- and the two-way
+# COVER_ID-in-nearestExistingEvidence diagnostic above cannot separate them,
+# because explicit coverage is a TAG match evaluated BEFORE the similarity
+# branch and nearestExistingEvidence is populated by a different code path. So
+# a tagged memory can be absent from that list and still have been visible to
+# the tag matcher. With lastSeenAt (already printed) and this value:
+#   createdAt > lastSeenAt and coveredBy null -> the TAG lookup failed
+#   createdAt < lastSeenAt                    -> the RECENCY conjunct, i.e.
+#                                                `ee learn gaps` re-observed the
+#                                                misses and advanced
+#                                                last_seen_at past the answer,
+#                                                which no later memory can beat
+#   coveredBy set                             -> covered; the loop closes
+COVER_CREATED="$(jq -r '.data.createdAt // .data.created_at // empty' "${LAST_STDOUT}" 2>/dev/null)"
+COVER_TAGS="$(jq -c '.data.tags // empty' "${LAST_STDOUT}" 2>/dev/null)"
 run_ee learn gaps --workspace "${WS}" --json
 G2="${LAST_STDOUT}"
 if [[ "${COVER_EXIT}" -eq 0 && "${LAST_EXIT}" -eq 0 ]] \
     && jq -e '[(.gaps // .data.gaps)[]? | select(.status == "likely_covered" and .coveredBy != null)] | length >= 1' \
         "${G2}" >/dev/null 2>&1; then
+    # Publish the WITNESS on the pass path, not only a diagnosis on the fail
+    # path. bd-betm5's acceptance asks to be closed "cited with the coveredBy
+    # value that proves the link, not just the step's status", and a green run
+    # printed nothing -- so the one value the bead asked for was the one value
+    # no passing run emitted.
+    #
+    # Deliberately NOT routed through event()'s third argument: that argument
+    # lands in `first_failure_diagnosis`, a field other suites and
+    # tests/advanced_subsystem_logged_e2e.rs read as "why it failed". A success
+    # witness there would be a non-empty failure diagnosis on a passing step.
+    echo "[witness] remembered_demand_marks_cluster_covered: $(jq -c '[(.gaps // .data.gaps)[]? | select(.coveredBy != null) | {clusterId, status, coveredBy, coveredByCreatedAt}]' "${G2}" 2>/dev/null) remembered=${COVER_ID:-<none>} coverTags=${COVER_TAGS:-<none>}"
     event remembered_demand_marks_cluster_covered pass
 else
-    event remembered_demand_marks_cluster_covered fail "cover=${COVER_EXIT} exit=${LAST_EXIT} remembered=${COVER_ID:-<none>}; $(jq -c '[(.gaps // .data.gaps)[]? | {status, coveredBy, lastSeenAt, nearestStatus: .nearestExistingEvidenceStatus, nearest: [(.nearestExistingEvidence // [])[] | {memoryId, reason}]}]' "${G2}" 2>/dev/null)"
+    event remembered_demand_marks_cluster_covered fail "cover=${COVER_EXIT} exit=${LAST_EXIT} remembered=${COVER_ID:-<none>} gapId=${GAP_ID:-<none>} coverCreatedAt=${COVER_CREATED:-<none>} coverTags=${COVER_TAGS:-<none>}; $(jq -c '[(.gaps // .data.gaps)[]? | {clusterId, status, coveredBy, coveredByCreatedAt, lastSeenAt, nearestStatus: .nearestExistingEvidenceStatus, nearest: [(.nearestExistingEvidence // [])[] | {memoryId, reason}]}]' "${G2}" 2>/dev/null)"
 fi
 
 # --- trend: two steward snapshots around a fix show the direction ---------

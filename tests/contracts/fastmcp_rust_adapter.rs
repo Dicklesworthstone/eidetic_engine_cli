@@ -75,6 +75,30 @@ fn boolean(object: &Map<String, Value>, key: &str) -> Result<bool, String> {
         .ok_or_else(|| format!("`{key}` must be a boolean"))
 }
 
+/// Replace `result.serverInfo.version` with the shared golden sentinel.
+///
+/// bd-5gaxt. Mirrors `scrub_golden_server_version` in src/mcp.rs and the
+/// `<scrubbed:eeVersion>` convention in tests/golden.rs. The duplication is
+/// deliberate: this file is an integration test and the src/ copy lives inside
+/// a `#[cfg(test)]` module it cannot import. Both are five lines and both name
+/// each other, which is cheaper than exporting test-support code from the
+/// library just to share them.
+///
+/// Narrow on purpose: one field at one path, returned untouched when the path
+/// is absent, so a response that stops carrying serverInfo FAILS the
+/// comparison rather than being normalised into agreement.
+#[cfg(feature = "mcp")]
+fn scrub_golden_server_version(mut response: Value) -> Value {
+    if let Some(version) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("serverInfo"))
+        .and_then(|server_info| server_info.get_mut("version"))
+    {
+        *version = Value::String("<scrubbed:eeVersion>".to_owned());
+    }
+    response
+}
+
 fn load_json(relative: &str) -> Result<Value, String> {
     let text = read_text(relative)?;
     serde_json::from_str(&text).map_err(|error| format!("{relative} is invalid JSON: {error}"))
@@ -265,6 +289,20 @@ mod enabled_mcp {
                 let actual = actual.ok_or_else(|| {
                     format!("MCP golden case `{name}` suppressed a required response")
                 })?;
+                // bd-5gaxt / bd-j41d8: this golden has TWO consumers and both
+                // must scrub the same field. src/mcp.rs's inline
+                // `stdio_json_rpc_golden_fixtures_match_contract` is the other
+                // one; it got the scrubber first, and THIS test kept comparing
+                // raw -- invisibly, because the enclosing `enabled_mcp` module
+                // is behind `cfg(feature = "mcp")` and no invoker supplied the
+                // feature (bd-j41d8). Running it under the feature for the
+                // first time is what exposed the half-fix.
+                //
+                // serverInfo.version is `env!("CARGO_PKG_VERSION")`, so it moves
+                // at every release by construction: the fixture has already
+                // been outrun by 0.12.0 -> 0.15.2 -> 0.18.0. Same sentinel as
+                // src/mcp.rs and tests/golden.rs so all three agree.
+                let actual = scrub_golden_server_version(actual);
                 ensure(
                     &actual == expected,
                     format!("MCP golden case `{name}` no longer matches the adapter"),

@@ -4,15 +4,74 @@
 # regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
 # scripts/verify.sh fails the run when elapsed time exceeds p50 * 3.
 #
-# Non-benchmark p50 values must not EXCEED 601s, the 10-minute readiness
-# target plus the one stage added since. This is a ceiling, not an equality. It
+# Non-benchmark p50 values must not EXCEED 608s, the 10-minute readiness
+# target plus the stages added since. This is a ceiling, not an equality. It
 # used to be an exact sum, which
 # meant adding any verify.sh stage forced someone to reduce another stage's p50
 # to keep the total -- i.e. to write down a number that was not the
 # measurement. A budget file that can only stay green by falsifying a latency
 # is worse than a loose one, so the equality was removed on 2026-09-16.
 #
-# Benchmarks are optional behind --include-bench and excluded from that total.
+# THIS LINE SAID 601 UNTIL 2026-10-19 and the enforced value was already 608.
+# `total_expected_seconds = 608` below is authoritative, and
+# verification_drift_guard.rs asserts both that figure and the <= 608 total,
+# so the drift was in the prose only -- but the prose is what a reader checks
+# their stage against before adding one. Other mentions of 601 further down are
+# CONTEMPORANEOUS RECORDS of decisions taken while the ceiling was 601 and are
+# deliberately left alone; this file is partly a log, and rewriting the numbers
+# inside a dated observation would destroy the thing that makes it evidence.
+#
+# SUPERSEDED THE NEXT DAY -- there are 42 seconds of headroom, not zero. Read
+# the opt-in-flag paragraph below before acting on the dated measurement that
+# follows. bd-2di61 (2026-10-20) broadened the budget exclusion from the single
+# literal name "Performance Benchmarks" to EVERY stage verify.sh gates behind an
+# opt-in flag, which took the non-benchmark total from 608/608 to 566/608.
+# scripts/verify.sh:2087 records the same transition independently.
+#
+# The measurement below is left exactly as written, per this file's own rule
+# about dated observations. What is corrected is its STANDING ADVICE: "Read that
+# before planning a stage" sent every later reader to a ceiling that had already
+# moved, and at least three beads want an e2e stage that the paragraph appears
+# to forbid. A stale warning in an authoritative file does not sit still; it
+# deters work. Recomputing independently here (excluding the four opt-in stages)
+# lands at ~566-577 against 608, i.e. comfortably under either way.
+#
+# THERE IS CURRENTLY ZERO HEADROOM. The non-benchmark p50s total EXACTLY 608
+# against the 608 ceiling (measured 2026-10-19, 120 stages, 27 unmeasured,
+# benchmarks excluded). Any new stage carrying a measured p50 -- of any size,
+# one second included -- reds the guard on arrival. Read that before planning a
+# stage, because it is not a question of whether your stage is small.
+#
+# EVERY STAGE verify.sh GATES BEHIND AN OPT-IN FLAG is excluded from that
+# total, not just benchmarks (bd-2di61, 2026-10-20). The exclusion used to be
+# the literal `name != "Performance Benchmarks"`, so a second opt-in stage was
+# charged against a ceiling the default path never spends -- the stage note
+# beginning "Worth noting while it sits here" records that happening to a
+# gated-off stage holding 30s.
+#
+# Four stages qualify today, and `opt_in_gated_stage_names` in
+# verification_drift_guard.rs derives them from verify.sh rather than listing
+# them here:
+#
+#     Plan Doc Smoke (bd-3usjw.23)                 --plan-doc-smoke        2s
+#     Fuzz Smoke: search query parser (bd-2j2h0)   --include-fuzz-smoke   30s
+#     Eval Regression (bd-bife.18)                 --include-eval         10s
+#     Performance Benchmarks                       --include-bench       120s
+#
+# so the non-benchmark readiness total is 566 of 608, with 42s of headroom
+# where there was none.
+#
+# THE PREDICATE IS NARROW ON PURPOSE. `record_gated_off` also fires for
+# "ci-smoke" (a FULL verify.sh runs those stages), for "ruby unavailable on
+# this host", and for "no Git metadata in this tree". Those run by default
+# elsewhere and MUST keep counting; excluding them would have freed 307s the
+# default path actually spends. `only_opt_in_flag_gating_excludes_a_stage` is
+# the planted negative against exactly that over-generalisation.
+#
+# Text further down says that decision "belongs" to bd-vihzq. It did when that
+# was written; bd-vihzq closed on 2026-09-22 having established something else
+# entirely (p50 provenance, 13773e207), so the pointer outlived its bead. Left
+# in place as the dated record it is -- bd-2di61 is the live owner.
 #
 # A stage with no measurement yet declares `expected_seconds_p50_unmeasured =
 # true` and NO `expected_seconds_p50`. That is deliberate: verify.sh's
@@ -48,6 +107,15 @@
 #       samples_s=a,b,c median_s=<m> declared_p50_s=<p50>
 #   # P50_PROVENANCE unmeasured_reason=<token>          (and NO p50 declared)
 #   # P50_PROVENANCE inherited_unverified_reason=<token> declared_p50_s=<p50>
+#
+# `host=` TAKES A PSEUDONYM, NEVER A REAL HOST NAME (`mac-dev-1`, `worker-01`),
+# per AGENTS.md "Private Fleet Identifiers: Never In Tracked Content". This is
+# the field that keeps re-polluting the tree, and not out of carelessness:
+# provenance exists to say WHERE a number came from, so it naturally reaches for
+# the machine's real name. `tests/fleet_identifier_guard.rs` fails closed on it.
+# Keep the pseudonym STABLE across entries -- comparability between two
+# measurements is the only thing this field buys, and a fresh placeholder each
+# time buys nothing.
 #
 # The third spelling exists because the file previously had no honest exit. A
 # cargo p50 nobody had timed could be left as a plausible-looking number, which
@@ -429,6 +497,135 @@ name = "RCH Doc Examples Lint"
 expected_seconds_p50 = 2
 regression_factor = 1.5
 
+# The eight no-Cargo static check gates wired into verify.sh on 2026-10-20
+# (bd-actions-disabled-repo-wide-33mfm). They ran ONLY in .github/workflows
+# before, and Actions has been dark for 11.4 days across 1005 commits, so they
+# were not running anywhere -- check-ee-spawn-isolation.py was FAILING on main
+# for all of it.
+#
+# Every p50 below is MEASURED on this host, not estimated: seven of the eight
+# complete in under a second and declare 1s; check-production-reachability was
+# timed at 1.99s and declares 2s. Nine seconds in total, which the readiness
+# ceiling has room for only because bd-2di61 moved the exclusion from one
+# literal stage name to the opt-in-flag property (608/608 -> 566/608).
+#
+# If one of these grows past p50 * 3 verify.sh fails the run, which for a
+# sub-second static scan means something structural changed rather than the
+# host being slow -- worth reading the scanner's own output rather than
+# raising the number.
+
+[[stage]]
+name = "Action Pins Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Degraded Code Classification Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "ee Spawn Isolation Ratchet"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Graph Metric FNX Routing Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Production Reachability Contract"
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+name = "RCH Remediation Guidance Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Real-Shape Probe Fail-Closed Contract (1azkt.67)"
+# Measured 2026-10-24, seven consecutive runs of
+# `python3 -I scripts/real_shape_corpus/probe.py --self-test`:
+#   MEDIAN 0.260   min 0.260   max 0.340   spread 0.080   p90 0.320
+#   host: this Mac, 10 cores -- the same host verify.sh runs on.
+#   load: 2.05 one-minute, about 0.2 per core, with an rch dispatch in flight,
+#         so these are an upper bound rather than an idle-host best case.
+#
+# RE-MEASURED the same day after ten arms were added for `.63` acceptance 3 and
+# 4 (the cass-provisioning code, the envelope-stripped shape precheck, and the
+# absent-surface record, each with its twin), eight consecutive runs:
+#   MEDIAN 0.288   min 0.281   max 0.308   spread 0.027
+# The added arms generate a 14-session / 123-record corpus and validate it
+# twice, which costs 5 ms; the declared p50 and the 1.5x ceiling are unchanged
+# and no neighbour was retuned. 24 -> 34 arms binary-free, 29 -> 39 with --ee.
+# Declares 1s per the convention of the sub-second Python contract block in
+# verify.sh, which states it directly: "each sub-second check declares 1s".
+#
+# No ceiling raise was needed and none was taken. bd-2di61 moved the
+# readiness-total exclusion from the literal name "Performance Benchmarks" to
+# the property "verify.sh gates it behind an opt-in flag", which freed 162s
+# across four stages; the non-benchmark total was 577/608 before this stage and
+# is 578/608 after it. `total_expected_seconds` stays at 608 and no neighbour's
+# p50 was retuned to make room.
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Shard Coverage Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "Step Assertion Isolation Contract"
+# The cargo-provenance guard flags this stage because
+# scripts/check-step-assertion-isolation.py CONTAINS the text `cargo test` --
+# in its docstrings and in the planted YAML fixtures it analyses. It does not
+# RUN cargo: its only subprocess call re-invokes itself
+# (sys.executable + __file__) for a self-test. The guard is matching
+# conservatively on the string, which is the right direction to be wrong in,
+# so this record satisfies it with a real measurement rather than arguing.
+# P50_PROVENANCE measured=2026-10-20 host=mac-dev-1 load=3.27 samples_s=0.15,0.11,0.11 median_s=0.11 declared_p50_s=1
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+# The two jq-vacuity stages (bd-9h1z5, 2026-10-22). Two seconds declared for a
+# pair of scans measured at 0.08s and 0.11s, following the convention of the
+# group above: a sub-second static check declares 1s.
+#
+# ON THE BUDGET QUESTION bd-9h1z5 ASKED TO BE DECIDED FIRST. That bead's
+# blocker reads "verify budget admits no new stage", and it was true when
+# filed: the non-benchmark p50s totalled EXACTLY 608 against the 608 ceiling,
+# so any measured stage of any size would have redded the guard on arrival.
+# bd-2di61 landed the NEXT DAY (2026-10-20) and moved the exclusion from one
+# literal stage name to the opt-in-flag property, which freed the four gated
+# stages' 162s. The blocker died with it; it was a filing-time fact, not a
+# standing property.
+#
+# Re-measured here rather than taken from the prose above, which is itself
+# stale in the other direction -- it says 566 of 608 with 42s of headroom, and
+# the real sum at ec3d369e2 is 575 of 608 over 97 counted stages, so 33s. Nine
+# seconds of stages were added after that sentence was written. Adding these
+# two makes it 577.
+#
+# The unmeasured route was checked and rejected rather than overlooked: a stage
+# declaring `expected_seconds_p50_unmeasured = true` carries no p50 and spends
+# nothing, but UNMEASURED_STAGE_ALLOWANCE in verification_drift_guard.rs is a
+# down-only ratchet sitting at exactly 27 against 27 such stages today, so a
+# 28th reds that assert instead. A cheap stage with an honest measurement is
+# the only route that does not require weakening something.
+
+[[stage]]
+name = "JQ Vacuity Contract"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
+[[stage]]
+name = "JQ Vacuity Lint"
+expected_seconds_p50 = 1
+regression_factor = 1.5
+
 [[stage]]
 name = "Local Cargo Tripwire Contract"
 expected_seconds_p50 = 3
@@ -484,6 +681,38 @@ name = "Fuzz Smoke: search query parser (bd-2j2h0)"
 # stage is holding budget that the default path never spends.
 # P50_PROVENANCE inherited_unverified_reason=equals-the-max-total-time-knob declared_p50_s=30
 expected_seconds_p50 = 30
+regression_factor = 1.5
+
+[[stage]]
+name = "Real-Shape Corpus Fixture E2E (1azkt.43)"
+# Wired 2026-10-24. The script existed since 2026-10-22 and was invoked by
+# NOTHING: it was the single new orphan failing the E2E Invocation Audit, at 53
+# against a baseline of 52.
+#
+# It was unwired deliberately, and its own header says why: the import alone
+# takes minutes and "a stage this size has to be an opt-in gate or a separate
+# job, which is a budget decision for the operator, not something to smuggle in
+# with a script." That header also names the route out -- "bd-2di61 made
+# opt-in-flag gating a general budget exclusion if that is the chosen route" --
+# and bd-2di61 has since landed. This is that route taken.
+#
+# THE 555 IS INHERITED, NOT MEASURED HERE. It comes from
+# tests/real_shape_corpus_shapes.rs, which records the script at 555s while
+# explaining why it reimplemented the cheap judgment checks as a unit test.
+# This host cannot reproduce it: the workspace path must EQUAL the `cwd`
+# recorded in every transcript (/work/ledger) or discovery returns 0 sessions,
+# and /work/ledger does not exist here. So the number is honestly second-hand,
+# and it is marked as such rather than dressed up as a median of this lane.
+#
+# It does NOT consume the readiness ceiling. bd-2di61 excludes a stage gated
+# behind an opt-in flag, and verify.sh's `record_gated_off` for this stage
+# reads "--include-real-shape-fixture not set", which satisfies that predicate
+# (`reason.contains("not set") && reason.contains("--")`). The non-benchmark
+# p50 total therefore stays 578/608 and no neighbour was retuned -- which
+# matters, because 555 against 30s of headroom could not have been absorbed
+# any other way.
+# P50_PROVENANCE inherited_unverified_reason=recorded-in-real_shape_corpus_shapes-rs declared_p50_s=555
+expected_seconds_p50 = 555
 regression_factor = 1.5
 
 [[stage]]

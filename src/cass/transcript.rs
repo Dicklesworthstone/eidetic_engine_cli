@@ -91,8 +91,15 @@ pub fn project_transcript(excerpt: &str) -> Option<Vec<TranscriptProjection<'_>>
     project_with(excerpt, ProjectionPurpose::Reader)
 }
 
+/// Preserve each conversation turn's role for learning. Validate the complete
+/// window before exposing any turns: summaries, reasoning and refused records
+/// must not be skipped to manufacture a lesson from the remaining text.
+pub(crate) fn learning_projections(excerpt: &str) -> Option<Vec<TranscriptProjection<'_>>> {
+    project_with(excerpt, ProjectionPurpose::Learning)
+}
+
 pub(crate) fn message_text(excerpt: &str) -> Option<Cow<'_, str>> {
-    join_projections(project_with(excerpt, ProjectionPurpose::Learning)?, false)
+    join_projections(learning_projections(excerpt)?, false)
 }
 
 /// Reader body text without labels. Reasoning is never returned to a reader.

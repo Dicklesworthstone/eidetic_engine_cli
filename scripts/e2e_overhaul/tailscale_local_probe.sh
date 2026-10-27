@@ -11,10 +11,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=scripts/e2e_overhaul/lib/fake_tailscale.sh
 source "$SCRIPT_DIR/lib/fake_tailscale.sh"
 
+# Every refusal in this driver is an ENVIRONMENT condition -- jq absent, or no
+# usable ee binary for a harness that deliberately will not run cargo. They
+# exit 76 so scripts/verify.sh reports ENV_UNRUNNABLE instead of FAIL:
+# stage_status_for_exit_code (verify.sh:339) sends every unrecognised code to
+# FAIL, so exit 2 read as "this stage found a defect". bd-e4ymh; same
+# precedent as e2e_repo_hygiene.sh (bd-3ghvw) and e2e_overhaul.sh.
+STAGE_ENV_UNRUNNABLE_EXIT=76
+
 require_jq() {
     if ! command -v jq >/dev/null 2>&1; then
         echo "tailscale_local_probe: jq is required" >&2
-        exit 2
+        exit "$STAGE_ENV_UNRUNNABLE_EXIT"
     fi
 }
 
@@ -37,7 +45,7 @@ resolve_ee_binary() {
     fi
     echo "tailscale_local_probe: set EE_BINARY or CARGO_TARGET_DIR to an existing ee binary" >&2
     echo "    this no-build harness will not run cargo" >&2
-    exit 2
+    exit "$STAGE_ENV_UNRUNNABLE_EXIT"
 }
 
 fail() {
@@ -98,15 +106,15 @@ require_jq
 EE_BINARY="$(resolve_ee_binary)"
 if [ ! -x "$EE_BINARY" ]; then
     echo "tailscale_local_probe: resolved EE_BINARY is not executable: $EE_BINARY" >&2
-    exit 2
+    exit "$STAGE_ENV_UNRUNNABLE_EXIT"
 fi
 version_output="$("$EE_BINARY" --version 2>&1)" || {
     echo "tailscale_local_probe: resolved EE_BINARY is not runnable: $EE_BINARY" >&2
-    exit 2
+    exit "$STAGE_ENV_UNRUNNABLE_EXIT"
 }
 if [ -z "$version_output" ]; then
     echo "tailscale_local_probe: resolved EE_BINARY returned empty --version output: $EE_BINARY" >&2
-    exit 2
+    exit "$STAGE_ENV_UNRUNNABLE_EXIT"
 fi
 
 TMP_ROOT="${TMPDIR:-/tmp}"

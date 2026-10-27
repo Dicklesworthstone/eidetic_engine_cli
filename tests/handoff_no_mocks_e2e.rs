@@ -576,9 +576,38 @@ fn no_mocks_handoff_cli_cycle_verifies_hmac_and_rejects_tampering() -> TestResul
     )?;
     let capsule_id = json_string(&create_json, "/capsule_id", "handoff create")?;
     let create_content_hash = json_string(&create_json, "/content_hash", "handoff create")?;
+    // The handoff capsule hash is a BARE 16-char lowercase hex BLAKE3 prefix,
+    // not an algorithm-tagged `blake3:<hex>` string. That shape is pinned
+    // deliberately in five other places: handoff_capsule_roundtrip.rs:114 (this
+    // same field), :122 and :795, contracts/
+    // handoff_capsule_roundtrip_determinism.rs:190 -- whose test is named
+    // canonical_hash_is_stable_short_hex_prefix and says it exists to catch
+    // changes that quietly widen or narrow the shape -- and
+    // contracts/backup_import_roundtrip.rs:724.
+    //
+    // Until 2026-10-25 this arm required starts_with("blake3:"), which no value
+    // can satisfy at the same time as len() == 16, because the tag alone is 7
+    // characters. So this assertion and handoff_capsule_roundtrip.rs:114 read
+    // the SAME field of the SAME ee.handoff.create.v1 response and contradicted
+    // each other: one of the two was red by construction whatever
+    // compute_content_hash emitted, and its bare form made it this one.
+    // Measured on the pinned lane 2026-10-24, `got 1bf6cc51fef7e86c`. The
+    // ensure() aborted here at line 582 of 961, so the 33 assertions and 5 of
+    // the 9 CLI invocations below it had never executed.
+    //
+    // Whether handoff hashes SHOULD carry the tag that every other hash surface
+    // in this tree carries is a real cross-surface contract question with its
+    // own blast radius, so it rides on bd-xmhzk rather than on this fix.
     ensure(
-        create_content_hash.starts_with("blake3:"),
-        format!("handoff create content hash must be blake3-prefixed, got {create_content_hash}"),
+        create_content_hash.len() == 16
+            && create_content_hash
+                .chars()
+                .all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+        format!(
+            "handoff create content hash must be 16 lowercase hex chars \
+             (a bare BLAKE3 prefix, not blake3:<hex> -- see bd-xmhzk), \
+             got {create_content_hash}"
+        ),
     )?;
     ensure(
         create_json.pointer("/redaction_summary").is_some(),
@@ -867,7 +896,7 @@ fn no_mocks_handoff_cli_cycle_verifies_hmac_and_rejects_tampering() -> TestResul
     )?;
     ensure_equal(
         &resume_tampered_json.pointer("/error/severity"),
-        &Some(&json!("high")),
+        &Some(&json!("critical")),
         "tampered resume error severity",
     )?;
     let tampered_repair = json_string(

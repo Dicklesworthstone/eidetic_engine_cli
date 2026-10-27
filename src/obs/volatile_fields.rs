@@ -43,6 +43,7 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "elapsedMsBucket",
     "durationMs",
     "wallClockMs",
+    "leaseHeldMs",
     "startedAt",
     "started_at",
     "endedAt",
@@ -621,10 +622,44 @@ mod tests {
         PackEnvelopeTimingReport, VOLATILE_FIELD_NAMES, WORKSPACE_DAEMON_SOCKET_PLACEHOLDER,
         is_volatile_field_name, normalize_pack_envelope_timing, normalize_pack_timing_degradations,
         normalize_pack_timing_markdown, normalize_workspace_daemon_socket_paths,
-        normalize_workspace_daemon_socket_paths_in_json, strip_volatile_fields,
+        normalize_workspace_daemon_socket_paths_in_json, renumber_degraded_signal_prose,
+        strip_volatile_fields,
     };
 
     type TestResult = Result<(), String>;
+
+    /// RESTORED, and relocated to where the code now lives (bd-0rkti).
+    ///
+    /// `renumber_degraded_signal_prose` used to be a helper inside
+    /// `tests/json_contract_snapshots.rs` with this test beside it. fdff9016a
+    /// moved the FUNCTION into production here and left the test behind, so a
+    /// private production helper has had zero direct coverage since. It is
+    /// private, so an inline module is the only place it can be tested at all.
+    ///
+    /// BOTH ARMS ARE LOAD-BEARING, and they are the original two. The first is
+    /// the singular boundary: the renderer pluralizes from the same count, so
+    /// 2 -> 1 must read "signal", not "signals". The second is the pass-through
+    /// -- without it an implementation that rewrote every sentence it was
+    /// handed would satisfy the first arm.
+    #[test]
+    fn renumbering_degraded_prose_repluralizes_at_the_singular_boundary() -> TestResult {
+        let renumbered = renumber_degraded_signal_prose(
+            "Context includes 2 degraded signals; semantic embedding is unavailable.",
+            1,
+        );
+        if renumbered != "Context includes 1 degraded signal; semantic embedding is unavailable." {
+            return Err(format!(
+                "singular boundary not handled, got: {renumbered:?}"
+            ));
+        }
+
+        let untouched = renumber_degraded_signal_prose("Context is clear.", 1);
+        if untouched != "Context is clear." {
+            return Err(format!("unrelated prose was rewritten, got: {untouched:?}"));
+        }
+
+        Ok(())
+    }
 
     /// Build the two readings the SAME request produces on a fast and a slow
     /// host, differing only in the wall-clock degradation.

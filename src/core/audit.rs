@@ -909,9 +909,32 @@ fn open_database(database_path: &Path) -> Result<DbConnection, DomainError> {
 }
 
 fn resolved_database_path(workspace: &Path, database_path: Option<&Path>) -> PathBuf {
-    database_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"))
+    database_path.map(Path::to_path_buf).unwrap_or_else(|| {
+        // bd-6as5e: RESOLVE THE WORKSPACE BEFORE DERIVING THE STORE PATH.
+        // src/db/mod.rs's ensure_file_database_path_has_no_symlink_components
+        // refuses any database path with a symlink component, so joining an
+        // unresolved workspace made `ee audit timeline` exit 3 with
+        // error.code "storage" on a path that remember, search, index rebuild,
+        // context, status, doctor and learn gaps all accept. Measured on
+        // ee 0.18.0 over a workspace reached through a symlink: seven commands
+        // accepted it and this one refused.
+        //
+        // The guard is right -- a store reached through a symlink is a real
+        // identity hazard -- and the caller is what was wrong. This mirrors
+        // learning_database_path (src/core/learn.rs:2332), which is why
+        // `learn gaps` stopped refusing; `unwrap_or_else` keeps the previous
+        // behaviour when the workspace does not yet exist, so a storeless
+        // workspace still reports its own error rather than a path error.
+        //
+        // An EXPLICIT --database path is deliberately left untouched: that is
+        // the caller's chosen path, and silently resolving it would report a
+        // different file than the one they named.
+        workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf())
+            .join(".ee")
+            .join("ee.db")
+    })
 }
 
 /// Outcome of resolving an optional `--cursor` token against the live

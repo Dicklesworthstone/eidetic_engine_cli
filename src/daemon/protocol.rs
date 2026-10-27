@@ -29,6 +29,9 @@ use super::{
     DAEMON_RESPONSE_SCHEMA_V1,
 };
 
+#[path = "frame_io.rs"]
+mod frame_io;
+
 /// Method dispatch name for the warm-loaded `ee search` path.
 pub const METHOD_SEARCH: &str = "ee.daemon.search";
 
@@ -423,8 +426,8 @@ pub enum FrameReadError {
     /// The peer announced a payload larger than the configured cap.
     /// Defends against unbounded `Vec` allocation.
     TooLarge { announced: u32, max: usize },
-    /// A short read happened mid-frame (the connection died after the
-    /// length prefix but before the full payload arrived).
+    /// A short read happened mid-frame. For a partial length prefix,
+    /// expected is 4 and got counts prefix bytes; otherwise they count body bytes.
     Truncated { expected: u32, got: usize },
     /// Underlying `io::Error`, including timeouts.
     Io(io::Error),
@@ -495,53 +498,12 @@ const REQUEST_BODY_READ_CHUNK: usize = 8 * 1024;
 /// it actually delivered — not the announced size. The announced length
 /// is still hard-capped at [`super::DAEMON_REQUEST_MAX_BYTES`] before
 /// the read begins. bd-26jks.
+///
+/// Prefix, body and Interrupted retries share one cooperative frame deadline
+/// and observe the caller's current cancellation context. Transport owners
+/// must still bound individual blocking calls with socket timeouts.
 pub fn read_request<R: Read>(reader: &mut R) -> Result<DaemonRequest, FrameReadError> {
-    let mut length_prefix = [0_u8; 4];
-    match reader.read_exact(&mut length_prefix) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-            return Err(FrameReadError::Eof);
-        }
-        Err(error) => return Err(FrameReadError::Io(error)),
-    }
-    let announced = u32::from_be_bytes(length_prefix);
-    let announced_usize = usize::try_from(announced).map_err(|_| FrameReadError::TooLarge {
-        announced,
-        max: DAEMON_REQUEST_MAX_BYTES,
-    })?;
-    if announced_usize > DAEMON_REQUEST_MAX_BYTES {
-        return Err(FrameReadError::TooLarge {
-            announced,
-            max: DAEMON_REQUEST_MAX_BYTES,
-        });
-    }
-    // Stream the body in bounded chunks so a hostile (or merely stuck)
-    // client that announces up to DAEMON_REQUEST_MAX_BYTES but trickles
-    // the body cannot pin the announced size in heap. The buffer grows
-    // only as bytes actually arrive; peak allocation tracks delivered
-    // bytes, not announced bytes. bd-26jks.
-    let mut buffer = Vec::with_capacity(announced_usize.min(REQUEST_BODY_PREALLOC_CAP));
-    let mut chunk = [0_u8; REQUEST_BODY_READ_CHUNK];
-    while buffer.len() < announced_usize {
-        let remaining = announced_usize - buffer.len();
-        let want = remaining.min(REQUEST_BODY_READ_CHUNK);
-        match reader.read(&mut chunk[..want]) {
-            // Peer closed mid-frame before delivering the announced
-            // bytes. Report how many actually arrived so the caller can
-            // tell a stalled slow-loris from a clean EOF.
-            Ok(0) => {
-                return Err(FrameReadError::Truncated {
-                    expected: announced,
-                    got: buffer.len(),
-                });
-            }
-            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(FrameReadError::Io(error)),
-        }
-    }
-    let request: DaemonRequest = serde_json::from_slice(&buffer).map_err(FrameReadError::Decode)?;
-    Ok(request)
+    frame_io::read_request(reader)
 }
 
 /// Errors that can occur on the write side of the wire framing.
@@ -593,25 +555,13 @@ impl From<io::Error> for FrameWriteError {
 /// Refuses to send a response above
 /// [`super::DAEMON_RESPONSE_MAX_BYTES`] (returns `TooLarge`); callers
 /// MUST truncate or split before this point.
+/// Encoding, partial writes, retries and flush share one cooperative frame
+/// deadline. A late/failed flush never acknowledges successful delivery.
 pub fn write_response<W: Write>(
     writer: &mut W,
     response: &DaemonResponse,
 ) -> Result<(), FrameWriteError> {
-    let body = serde_json::to_vec(response).map_err(FrameWriteError::Encode)?;
-    if body.len() > DAEMON_RESPONSE_MAX_BYTES {
-        return Err(FrameWriteError::TooLarge {
-            actual: body.len(),
-            max: DAEMON_RESPONSE_MAX_BYTES,
-        });
-    }
-    let length = u32::try_from(body.len()).map_err(|_| FrameWriteError::TooLarge {
-        actual: body.len(),
-        max: DAEMON_RESPONSE_MAX_BYTES,
-    })?;
-    writer.write_all(&length.to_be_bytes())?;
-    writer.write_all(&body)?;
-    writer.flush()?;
-    Ok(())
+    frame_io::write_response(writer, response)
 }
 
 #[cfg(test)]

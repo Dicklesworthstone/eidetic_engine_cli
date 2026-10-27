@@ -5,10 +5,225 @@
 //! opaque references changes history on every recovery. Neither operation is
 //! needed to remove source text, and neither is allowed to confer admission.
 
-use super::{BackupCassEvidenceRecord, RedactionLevel, hash_bytes, redact_content};
+use std::collections::BTreeSet;
+use std::io::Read;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use super::{
+    BackupCassEvidenceChunk, BackupCassEvidenceRecord, BackupDegradation, BackupDerivedAssetReport,
+    MAX_DERIVED_ASSET_BYTES, RedactionLevel, StoredEvidenceSpan, hash_bytes,
+    open_backup_artifact_for_read, redact_content, safe_artifact_path,
+};
 
 #[path = "backup_evidence_metadata.rs"]
 mod metadata;
+
+/// Exact persisted eligibility counts. These are not live admission verdicts:
+/// source provenance and policy are still checked again by each reader.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BackupEvidenceEligibilityCounts {
+    pub admitted: u64,
+    pub quarantined: u64,
+    pub denied: u64,
+}
+
+impl BackupEvidenceEligibilityCounts {
+    fn observe(&mut self, eligibility: &str) -> Result<(), &'static str> {
+        let count = match eligibility {
+            "admitted" => &mut self.admitted,
+            "quarantined" => &mut self.quarantined,
+            "denied" => &mut self.denied,
+            _ => return Err("unsupported evidence eligibility"),
+        };
+        *count = count.checked_add(1).ok_or("evidence count overflow")?;
+        Ok(())
+    }
+
+    fn total(&self) -> Option<u64> {
+        self.admitted
+            .checked_add(self.quarantined)?
+            .checked_add(self.denied)
+    }
+
+    fn can_be_exported_as(&self, exported: &Self, expected: u64) -> bool {
+        self.total() == Some(expected)
+            && exported.total() == Some(expected)
+            && exported.admitted <= self.admitted
+            && exported.quarantined <= self.quarantined
+            && exported.denied >= self.denied
+    }
+}
+
+/// Source and artifact histograms captured by the same export snapshot.
+/// Redaction may withhold evidence but can never grant stronger eligibility.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BackupEvidenceAdmissionSummary {
+    pub source_search: BackupEvidenceEligibilityCounts,
+    pub exported_search: BackupEvidenceEligibilityCounts,
+    pub source_pack: BackupEvidenceEligibilityCounts,
+    pub exported_pack: BackupEvidenceEligibilityCounts,
+}
+
+impl BackupEvidenceAdmissionSummary {
+    pub(super) fn observe(
+        &mut self,
+        source: &StoredEvidenceSpan,
+        exported: &BackupCassEvidenceRecord,
+    ) -> Result<(), &'static str> {
+        self.source_search.observe(&source.search_eligibility)?;
+        self.source_pack.observe(&source.pack_eligibility)?;
+        self.exported_search.observe(&exported.search_eligibility)?;
+        self.exported_pack.observe(&exported.pack_eligibility)
+    }
+
+    fn validate(&self, expected: u64) -> Result<(), &'static str> {
+        if expected > i64::MAX as u64
+            || !self
+                .source_search
+                .can_be_exported_as(&self.exported_search, expected)
+            || !self
+                .source_pack
+                .can_be_exported_as(&self.exported_pack, expected)
+        {
+            return Err("backup evidence eligibility counts disagree with its source inventory");
+        }
+        Ok(())
+    }
+
+    pub(super) fn degradation(&self) -> Option<BackupDegradation> {
+        let pack_lost = self
+            .exported_pack
+            .denied
+            .saturating_sub(self.source_pack.denied);
+        let search_lost = self
+            .exported_search
+            .denied
+            .saturating_sub(self.source_search.denied);
+        if pack_lost == 0 && search_lost == 0 {
+            return None;
+        }
+        Some(BackupDegradation::warning(
+            "backup_evidence_admission_reduced",
+            format!(
+                "Backup export changed {pack_lost} evidence span(s) to pack-denied and {search_lost} to search-denied. The artifact retains {} pack-admitted span(s) from {} in the source. Restore preserves these privacy denials; rebuilding an index cannot recover the original evidence eligibility.",
+                self.exported_pack.admitted, self.source_pack.admitted,
+            ),
+            "For a private recovery copy without export redaction, run ee backup create --workspace . --redaction none; source provenance and policy checks still apply. Protect that unredacted artifact as source data.",
+        ))
+    }
+}
+
+/// Version 1 inventories predate this measurement. They carry no evidence
+/// fidelity claim; version 2 must state both the source and artifact counts.
+pub(super) fn summary_from_manifest(
+    manifest: &serde_json::Value,
+) -> Result<Option<BackupEvidenceAdmissionSummary>, &'static str> {
+    let Some(inventory) = manifest.get("recoveryInventory") else {
+        // Older manifests can still be integrity-checked. Restore separately
+        // requires a complete durable inventory before writing anything.
+        return Ok(None);
+    };
+    match inventory.get("schema").and_then(serde_json::Value::as_str) {
+        Some("ee.backup.recovery_inventory.v1") => return Ok(None),
+        Some("ee.backup.recovery_inventory.v2") => {}
+        _ => return Err("backup has an unsupported recovery inventory"),
+    }
+    if inventory
+        .get("rowCountBasis")
+        .and_then(serde_json::Value::as_str)
+        != Some("source_snapshot")
+    {
+        return Err("backup recovery counts have no source-snapshot basis");
+    }
+    let summary: BackupEvidenceAdmissionSummary = serde_json::from_value(
+        inventory
+            .get("evidenceAdmission")
+            .cloned()
+            .ok_or("backup has no evidence eligibility measurement")?,
+    )
+    .map_err(|_| "backup has malformed evidence eligibility counts")?;
+    let tables = inventory
+        .get("tables")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("backup recovery inventory has no table array")?;
+    let mut evidence = tables.iter().filter(|row| {
+        row.get("table").and_then(serde_json::Value::as_str) == Some("evidence_spans")
+    });
+    let count = evidence
+        .next()
+        .and_then(|row| row.get("rowCount"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("backup recovery inventory has no evidence count")?;
+    if evidence.next().is_some() {
+        return Err("backup recovery inventory repeats its evidence count");
+    }
+    summary.validate(count)?;
+    Ok(Some(summary))
+}
+
+/// A manifest hash proves which claims were signed, not that those claims
+/// describe its evidence. Check exact authenticated bytes and native rows.
+pub(super) fn verify_summary_assets(
+    backup_path: &Path,
+    workspace_id: &str,
+    assets: &[BackupDerivedAssetReport],
+    summary: &BackupEvidenceAdmissionSummary,
+) -> Result<(), &'static str> {
+    let mut search = BackupEvidenceEligibilityCounts::default();
+    let mut pack = BackupEvidenceEligibilityCounts::default();
+    let mut identities = BTreeSet::new();
+    let mut chunk_indices = BTreeSet::new();
+    for asset in assets
+        .iter()
+        .filter(|asset| asset.kind == "cass_evidence_spans")
+    {
+        let path = safe_artifact_path(backup_path, &asset.path, &mut Vec::new())
+            .ok_or("backup evidence path is unsafe")?;
+        let file = open_backup_artifact_for_read(&path)
+            .map_err(|_| "backup evidence asset cannot be read")?;
+        let mut bytes = Vec::new();
+        file.take(MAX_DERIVED_ASSET_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "backup evidence asset cannot be read")?;
+        if bytes.len() as u64 > MAX_DERIVED_ASSET_BYTES
+            || asset.byte_size != Some(bytes.len() as u64)
+            || asset.hash.as_deref() != Some(hash_bytes(&bytes).as_str())
+        {
+            return Err("backup evidence bytes differ from the authenticated inventory");
+        }
+        let chunk: BackupCassEvidenceChunk = serde_json::from_slice(&bytes)
+            .map_err(|_| "backup evidence asset has malformed rows")?;
+        if chunk.schema != "ee.backup.derived.cass_evidence_spans.v1"
+            || !chunk_indices.insert(chunk.chunk_index)
+            || chunk.evidence_spans.is_empty()
+            || chunk.evidence_spans.len() > super::CASS_BACKUP_CHUNK_ROWS
+        {
+            return Err("backup evidence chunks are incomplete or out of order");
+        }
+        for row in chunk.evidence_spans {
+            if row.workspace_id != workspace_id || !identities.insert(row.id) {
+                return Err("backup evidence contains foreign or duplicate identities");
+            }
+            search.observe(&row.search_eligibility)?;
+            pack.observe(&row.pack_eligibility)?;
+        }
+    }
+    if chunk_indices
+        .into_iter()
+        .enumerate()
+        .any(|(index, actual)| usize::try_from(actual).ok() != Some(index))
+    {
+        return Err("backup evidence chunks are incomplete or out of order");
+    }
+    if search != summary.exported_search || pack != summary.exported_pack {
+        return Err("backup evidence eligibility does not match its artifact summary");
+    }
+    Ok(())
+}
 
 fn canonical_digest(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(|suffix| {
@@ -121,6 +336,90 @@ pub(super) fn redact_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evidence_admission_summary_requires_exact_counts_and_cannot_claim_promotion() {
+        let source = BackupEvidenceEligibilityCounts {
+            admitted: 2,
+            quarantined: 1,
+            denied: 1,
+        };
+        let exported = BackupEvidenceEligibilityCounts {
+            admitted: 1,
+            quarantined: 0,
+            denied: 3,
+        };
+        let summary = BackupEvidenceAdmissionSummary {
+            source_search: source.clone(),
+            exported_search: exported.clone(),
+            source_pack: source,
+            exported_pack: exported,
+        };
+        let original = serde_json::json!({"recoveryInventory": {
+            "schema": "ee.backup.recovery_inventory.v2",
+            "rowCountBasis": "source_snapshot",
+            "evidenceAdmission": summary,
+            "tables": [{"table": "evidence_spans", "rowCount": 4}],
+        }});
+        assert_eq!(summary_from_manifest(&original), Ok(Some(summary)));
+        for bad_counts in [
+            serde_json::json!({"admitted": 3, "quarantined": 0, "denied": 1}),
+            serde_json::json!({"admitted": 1, "quarantined": 0, "denied": 2}),
+            serde_json::json!({"admitted": 1, "denied": 3}),
+            serde_json::json!({"admitted": -1, "quarantined": 1, "denied": 4}),
+            serde_json::json!({"admitted": 1.5, "quarantined": 0, "denied": 2.5}),
+            serde_json::json!({"admitted": u64::MAX, "quarantined": 2, "denied": 3}),
+            serde_json::json!({"admitted": 1, "quarantined": 0, "denied": 3, "unknown": 0}),
+        ] {
+            for field in ["exportedSearch", "exportedPack"] {
+                let mut manifest = original.clone();
+                manifest["recoveryInventory"]["evidenceAdmission"][field] = bad_counts.clone();
+                assert!(
+                    summary_from_manifest(&manifest).is_err(),
+                    "{field}: {bad_counts}"
+                );
+            }
+        }
+        for basis in [serde_json::Value::Null, serde_json::json!("artifact")] {
+            let mut manifest = original.clone();
+            manifest["recoveryInventory"]["rowCountBasis"] = basis;
+            assert!(summary_from_manifest(&manifest).is_err());
+        }
+        let mut manifest = original.clone();
+        manifest["recoveryInventory"]["tables"] = serde_json::json!([
+            {"table": "evidence_spans", "rowCount": 4},
+            {"table": "evidence_spans", "rowCount": 4},
+        ]);
+        assert!(summary_from_manifest(&manifest).is_err());
+        manifest = original;
+        manifest["recoveryInventory"]["evidenceAdmission"] = serde_json::Value::Null;
+        assert!(summary_from_manifest(&manifest).is_err());
+        manifest["recoveryInventory"]["schema"] =
+            serde_json::json!("ee.backup.recovery_inventory.v1");
+        assert_eq!(summary_from_manifest(&manifest), Ok(None));
+    }
+
+    #[test]
+    fn evidence_admission_empty_and_preserved_histograms_have_no_loss_warning() {
+        let empty = BackupEvidenceAdmissionSummary::default();
+        assert_eq!(empty.validate(0), Ok(()));
+        assert!(empty.degradation().is_none());
+        let counts = BackupEvidenceEligibilityCounts {
+            admitted: 2,
+            quarantined: 1,
+            denied: 3,
+        };
+        let unchanged = BackupEvidenceAdmissionSummary {
+            source_search: counts.clone(),
+            exported_search: counts.clone(),
+            source_pack: counts.clone(),
+            exported_pack: counts,
+        };
+        assert_eq!(unchanged.validate(6), Ok(()));
+        assert!(unchanged.degradation().is_none());
+        assert!(unchanged.validate(5).is_err());
+        assert!(unchanged.validate(u64::MAX).is_err());
+    }
 
     fn row() -> BackupCassEvidenceRecord {
         let excerpt = "The release tests completed successfully.";

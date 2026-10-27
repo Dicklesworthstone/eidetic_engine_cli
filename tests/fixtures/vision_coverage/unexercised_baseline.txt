@@ -29,8 +29,11 @@
 # needs hand verification at all.
 
 # No invocation of any kind anywhere in tests/ or scripts/. Zero lines mention
-# both words outside comments. These four are the clearest real gaps in the set.
-focus add
+# both words outside comments. These three are the clearest real gaps in the set.
+# `focus add` was the fourth until 2026-10-19, when the gate reported it as now
+# exercised: tests/conformance/query_v1_matrix.rs:353 runs it through run_ee and
+# asserts both the exit code and the response envelope. Verified independently
+# before removing the line, and the other three still have zero references.
 focus explain
 focus remove
 focus show

@@ -48,6 +48,11 @@ mod batch;
 #[path = "index_delta_metadata.rs"]
 mod metadata;
 
+#[path = "index_delta_stream.rs"]
+mod stream;
+
+pub(super) use stream::{ReconciledSource, SourceReconciler};
+
 #[cfg(feature = "lexical-bm25")]
 #[path = "index_delta_lexical.rs"]
 mod lexical_maintenance;
@@ -182,7 +187,7 @@ pub(super) fn embedder_identity(stack: &EmbedderStack) -> Option<String> {
     Some(format!("fast={fast};quality={quality}"))
 }
 
-fn verified_embedder_identity(embedder: &dyn crate::search::Embedder) -> Option<String> {
+pub(super) fn verified_embedder_identity(embedder: &dyn crate::search::Embedder) -> Option<String> {
     let identity = embedder.identity().ok()?;
     identity.validate().ok()?;
     if usize::try_from(identity.space.dimension).ok() != Some(embedder.dimension()) {
@@ -388,7 +393,15 @@ pub(super) fn plan(
     if let Some(inputs) = live.embedding_inputs.as_ref() {
         metadata::diff(&live.documents, inputs, documents, identity)
     } else {
-        diff_documents(&live.documents, documents, document_digest)
+        let mut delta = diff_documents(&live.documents, documents, document_digest)?;
+        // V2 cannot prove input reuse, but its validated producer must still
+        // hold at apply time. An empty input map re-embeds every changed row
+        // while retaining the same producer fence as a v3 plan.
+        delta.reuse = Some(EmbeddingReuse {
+            identity,
+            inputs: BTreeMap::new(),
+        });
+        Ok(delta)
     }
 }
 
@@ -691,6 +704,7 @@ pub(super) async fn apply(
 
 /// Best-effort removal of a staging directory this publisher created and
 /// abandoned before publication.
+#[cfg(unix)]
 pub(super) fn discard_staging(staging_dir: &Path) {
     if ensure_index_path_has_no_symlinks(staging_dir, "discard abandoned staging").is_ok()
         && let Err(error) = std::fs::remove_dir_all(staging_dir)
@@ -699,7 +713,7 @@ pub(super) fn discard_staging(staging_dir: &Path) {
             target: "ee::index",
             %error,
             staging = %staging_dir.display(),
-            "abandoned delta staging could not be removed; ee index vacuum reports it"
+            "abandoned index staging could not be removed; ee index vacuum reports it"
         );
     }
 }
@@ -1474,6 +1488,78 @@ mod tests {
     }
 
     #[test]
+    fn v2_delta_rechecks_planned_producer_before_native_tier_mutation() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let parent = root
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(120), |cx| async move {
+            let _root = root;
+            let live = parent.join("live");
+            let staged = parent.join("staged");
+            let stack = jl_stack(11);
+            let original: Vec<_> = (0..8)
+                .map(|number| doc(&format!("mem_{number:02}"), &format!("lesson {number}")))
+                .collect();
+            let builder = super::super::IndexBuilder::new(&live).with_embedder_stack(stack.clone());
+            #[cfg(feature = "lexical-bm25")]
+            let builder = builder.with_tantivy_lexical();
+            builder
+                .add_documents(original.clone())
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut old = DocDigests::new(&stack, &original);
+            old.schema = DOC_DIGESTS_SCHEMA_V2.to_owned();
+            old.embedding_inputs = None;
+            old.write(&live).map_err(|error| error.to_string())?;
+            let mut current = original[..7].to_vec();
+            current[0].title = Some("Changed metadata still requires v2 inference".to_owned());
+            let delta = plan(&live, &stack, &current).map_err(|error| error.detail)?;
+            let identity = embedder_identity(&stack).ok_or("planned producer identity")?;
+            assert_eq!(delta.removals, ["mem_07"]);
+            assert_eq!(
+                delta
+                    .vector_upserts(&identity)
+                    .map_err(|error| error.detail)?
+                    .iter()
+                    .map(|document| document.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["mem_00"],
+                "the producer fence must not grant v2 metadata-only vector reuse",
+            );
+            std::fs::create_dir(&staged).map_err(|error| error.to_string())?;
+            copy_generation(&live, &staged).map_err(|error| error.to_string())?;
+            let before =
+                std::fs::read(staged.join("vector.fast.idx")).map_err(|error| error.to_string())?;
+            let refusal = apply(&cx, &staged, &jl_stack(29), &delta)
+                .await
+                .expect_err("producer changes after planning must refuse even a v2 delta");
+            assert_eq!(
+                refusal.reason,
+                IncrementalFallbackReason::CorpusRevisionMismatch,
+            );
+            assert!(
+                refusal
+                    .detail
+                    .contains("producer changed after delta planning")
+            );
+            assert_eq!(
+                std::fs::read(staged.join("vector.fast.idx")).map_err(|error| error.to_string())?,
+                before,
+            );
+            assert_eq!(
+                read_finalized_vectors(&staged)?,
+                read_finalized_vectors(&live)?
+            );
+            super::super::verify_published_tier_counts(&staged, 8, false)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    #[test]
     fn incomplete_or_malformed_v3_input_maps_never_authorize_reuse() -> TestResult {
         let stack = super::super::hash_fallback_embedder_stack();
         let original = [doc("mem_one", "source text")];
@@ -1821,7 +1907,9 @@ mod tests {
             })
             .map(document_digest)
             .collect::<Vec<_>>();
-        let selected = delta.vector_upserts(identity).map_err(|error| error.detail)?;
+        let selected = delta
+            .vector_upserts(identity)
+            .map_err(|error| error.detail)?;
         assert_eq!(selected.len(), 3);
         assert_eq!(
             selected.iter().map(document_digest).collect::<Vec<_>>(),

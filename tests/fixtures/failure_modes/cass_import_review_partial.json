@@ -1,0 +1,23 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cass_import_review_partial",
+  "introduced_by": { "bead": "bd-2d32o", "epic_letter": "I" },
+  "surfaces": ["import cass"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Explicit import cass --propose commits source evidence, then one independently reviewed session fails or returns degraded proposals. Later eligible sessions continue; a successful import is not rewritten as a total failure.",
+    "setup_commands": [
+      "ee import cass --workspace . --json",
+      "# Make one imported session unavailable to review after source import commits; keep another admitted session with a concrete lesson."
+    ],
+    "invocation": "ee import cass --workspace . --propose --json"
+  },
+  "expected_emission": {
+    "code": "cass_import_review_partial",
+    "severity": "warning",
+    "message_contains": ["source import remains committed", "session reviews failed", "Other eligible sessions were still reviewed"],
+    "repair_contains": "review.sessions[].retryCommand",
+    "repair_string": "Inspect review.sessions[].error and review.sessions[].degraded; retry the affected sessions with review.sessions[].retryCommand. Candidates require explicit validation and application."
+  }
+}

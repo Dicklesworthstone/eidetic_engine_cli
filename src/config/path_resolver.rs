@@ -11,7 +11,12 @@ use std::path::PathBuf;
 
 /// Degraded code emitted when a Windows data directory cannot be resolved.
 pub const WINDOWS_APPDATA_UNAVAILABLE_CODE: &str = "windows_appdata_unavailable";
-/// Typed diagnostic code emitted when a Unix data directory cannot be resolved.
+/// Degraded code emitted when a Unix data directory cannot be resolved.
+///
+/// Said "typed diagnostic code" until bd-nnheo, while the Windows constant
+/// directly above called itself a degraded code. Both are the `code` field of
+/// the same `PlatformDataDirError`, so the two words described one thing, and
+/// the Unix half was the one missing from the degraded taxonomy.
 pub const UNIX_XDG_DATA_UNAVAILABLE_CODE: &str = "unix_xdg_data_unavailable";
 
 /// Platform data-directory resolution failure.

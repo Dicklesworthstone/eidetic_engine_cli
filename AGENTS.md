@@ -52,6 +52,78 @@ Hard integration rules:
 
 ---
 
+## Control Markers Must Not Match Their Own Command Line
+
+**A log contains the command that produced it.** So any sentinel a grader
+greps for is already in the log *before the run emits a single byte of its
+own output*. Both directions fail silently and both produce confident,
+well-formed, wrong answers:
+
+- **false positive** — a monitor sees its terminal marker in the echoed
+  command and reports a verdict for a run that has not started;
+- **false negative** — an assertion "finds" a secret that was only ever its
+  own query, because `ee search` echoes the query at `.data.query`,
+  `.data.queryAssist.captureTemplate.content` and `.command`. A string
+  present nowhere in the corpus returns 0 results and is still in the
+  response.
+
+**Namespace the marker.** Write `EE_GRADE_RC=` or `RS_HARNESS_RC=`, never a
+bare `HARNESS_RC=`. A prefix cannot be half-applied: either the token is
+distinctive or it is not.
+
+The alternatives are worse, and both have failed here. `grep '^MARKER'`
+works but has to be remembered at *every* call site, and forgetting it once
+is invisible. The `[m]arker` bracket trick was applied to one alternative of
+an alternation and forgotten on the others, by someone who knew the trick,
+so 2 of 5 hits were the searcher's own command line.
+
+If a bare marker is unavoidable — a grader built around `cargo`'s own
+`test result:` line, say — filter the echoed script out explicitly
+(`grep -v '^echo'`) and say in the grader why. A grader that greps
+`VERDICT=[A-Z]+` and matches the text of its own `echo` has been observed
+reporting `VERDICT=PASS` for a job that produced no output at all.
+
+**A watcher's terminal condition must be something the watched thing
+demonstrably prints.** A driver ending in `exit 99` prints nothing, so a
+watcher waiting for `^exit 99` in its log waits forever on a finished
+process. Produce the marker deliberately once before relying on it.
+
+Full incident set and the three-shapes analysis (constant-green,
+constant-red, and cannot-pass assertions are the same defect — the verdict
+does not vary with the property): bd-2phcw.
+
+---
+
+## Private Fleet Identifiers: Never In Tracked Content
+
+**Do not write real worker names, host names, or routable IP addresses into
+anything this repository tracks.** Not source, not docs, not published JSON
+schemas, not test fixtures or golden files, not bead descriptions or bead
+comments, and not path names either — a fixture directory named after a worker
+leaks exactly as much as its contents, and scrubbing only the contents leaves
+the code pointing at a path that no longer exists.
+
+Use neutral placeholders instead:
+
+| For | Use |
+|-----|-----|
+| hosts / workers | `worker-01`, `worker-a`, `windows-host-1` |
+| public addresses | RFC 5737 documentation range, `198.51.100.x` |
+| tailnet peers | CGNAT range, `100.64.0.x` |
+
+`tests/fleet_identifier_guard.rs` enforces this over every git-tracked file and
+fails closed when it cannot see `.beads/issues.jsonl`. It reports an uncapped
+count and an uncapped per-file breakdown, and caps only the quoted excerpts —
+the cap is a disclosure control, so do not widen it to "see more".
+
+This convention lived only in that guard's module header until 2026-10-22
+(bd-42puv). A rule enforced by a test nobody opens is a rule agents break in
+good faith: 1151 of the 4913 lines in the tracker export carry an identifier,
+and every scrubbing pass is re-polluted by the next agent who never read the
+test. If you are about to paste diagnostic output into a bead, scan it first.
+
+---
+
 ## Git Branch: ONLY Use `main`, NEVER `master`
 
 **The default branch is `main`.** All work happens on `main` — commits, PRs, feature branches all merge to `main`. Never reference `master` in code or docs. If you see `master` anywhere, it's a bug that needs fixing.
@@ -124,7 +196,7 @@ Run `cargo tree -e features` and grep for these crates. CI must fail if any appe
 | `fsqlite-ext-fts5`, `fsqlite-ext-json` | Lexical FTS fallback and JSON ops |
 | `sqlmodel` (+ `-core`, `-query`, `-schema`, `-session`, `-pool`, `-frankensqlite`) | ORM and migrations on top of FrankenSQLite |
 | `frankensearch` | Hybrid lexical + semantic retrieval (`TwoTierSearcher`) |
-| `fnx-runtime`, `fnx-classes`, `fnx-algorithms`, `fnx-cgse`, `fnx-convert` | FrankenNetworkX graph analytics |
+| `fnx-runtime`, `fnx-classes`, `fnx-algorithms`, `fnx-cgse` | FrankenNetworkX graph analytics (the first three are declared in `Cargo.toml`; `fnx-cgse` arrives transitively) |
 | `clap` + `clap_complete` | CLI argument parsing with shell completions |
 | `serde` + `serde_json` + `serde_yaml` | Stable JSON/YAML output contracts |
 | `toml` + `toml_edit` | Config parsing with formatting preservation |
@@ -223,8 +295,45 @@ Hard rules for agents working on this Mac:
    affects where the returned artifact lands.
 5. **If the USB drive is unplugged**, the `if [ -d ... ]` guard falls
    through and cargo writes to the in-repo `./target/` as usual — slower
-   to fill the disk but builds still work. Re-plug the drive and open a
-   new shell to restore the redirect.
+   to fill the disk. Re-plug the drive and open a new shell to restore the
+   redirect.
+
+   **BUT "builds still work" IS NOT TRUE, and this note said so until
+   2026-10-26.** The guard only covers `CARGO_TARGET_DIR`. The TOOLCHAIN is on
+   the same volume:
+
+   ```text
+   ~/.rustup/toolchains  ⇒  /Volumes/USBNVME16TB/rustup_toolchains   (symlink)
+   ```
+
+   With the drive unmounted that symlink dangles, so there is no toolchain at
+   all. Measured when the drive dropped mid-session: `cargo fmt --check` — the
+   ONE cargo subcommand the local tripwire permits — exits 1 having computed
+   nothing, with zero `Diff in` lines and
+
+   ```text
+   info: syncing channel updates for nightly-2026-08-31-aarch64-apple-darwin
+   info: downloading 6 components
+   info: rolling back changes
+   error: could not create component directory:
+     '.../nightly-2026-08-31-aarch64-apple-darwin/bin': File exists (os error 17)
+   ```
+
+   That rc=1 reads exactly like unformatted code. It is not: the gate never ran.
+   Check `/sbin/mount | grep USBNVME16TB` before believing any local cargo
+   result.
+
+   **Four things live on that one volume**, so losing it takes out every
+   verification rail at once: the toolchain (above), `CARGO_TARGET_DIR`,
+   the per-invocation `TMPDIR`, and the APFS sparse image that the pinned RCH
+   lane uses as its committed-tree export base (`/Volumes/EERCHExport`, created
+   on the USB — see CLAUDE.md). A dropped drive therefore also fails every
+   dispatch, with `bash: script file read error: Input/output error` and exit
+   128 from `scripts/rch_verify.sh` re-execing itself.
+
+   **Nothing is damaged and nothing needs deleting.** Re-mounting restores all
+   four. Do not "repair" the half-synced toolchain directory — the rustup error
+   above is the dangling symlink, not corruption.
 6. **Disk-pressure cleanup playbook**: when the internal SSD gets tight,
    the safe-now wins are (in order of size):
    - `rm -rf "$CARGO_TARGET_DIR/debug/incremental"` — ~7–9 GB, only when
@@ -922,11 +1031,34 @@ release:
 
 - `ee-{target}.tar.xz`
 - `ee-{target}.tar.xz.sha256`
-- `SHA256SUMS`, `ee-v{version}-manifest.json`
+- `ee-{target}.tar.xz.minisig` — **this is the signature that actually ships.**
+  v0.18.0 and v0.17.0 each carry 7 (one per target archive, plus
+  `SHA256SUMS.minisig`); v0.16.0 carries none.
+- `SHA256SUMS`, and `SHA256SUMS.minisig` since v0.17.0
 - `install.sh`, `install.ps1`
-- `ee-{target}.tar.xz.sigstore.json` **only when the Actions signing job
-  runs**; hand-cut releases such as `v0.14.4` publish `signed: false` in the
-  manifest and carry no Sigstore or SLSA asset
+
+**Two assets this list claimed until 2026-10-22 and no release has ever
+carried.** Measured with `gh release view <tag> --json assets` across the three
+most recent releases, so this is an observation of the published artifacts, not
+a reading of the release flow:
+
+| asset | v0.18.0 | v0.17.0 | v0.16.0 |
+|---|---|---|---|
+| `ee-v{version}-manifest.json` | 0 | 0 | 0 |
+| `*.sigstore.json` | 0 | 0 | 0 |
+| `*.minisig` | 7 | 7 | 0 |
+
+- `ee-v{version}-manifest.json` is **not produced by the hand-cut flow.** Whether
+  to restore it or drop the expectation is the open decision on
+  bd-reality-core-convergence-1azkt.7 / `.27`; this list states what ships today
+  rather than pre-empting that. Nothing in `.github/workflows/release.yml` or
+  `scripts/release*` emits it.
+- Because there is no manifest, the previous note that hand-cut releases
+  "publish `signed: false` in the manifest" described a field in a file that
+  does not exist. Signing status is visible from whether `.minisig` assets are
+  present, which is how v0.16.0 (none) differs from v0.17.0 and v0.18.0.
+- A Sigstore/SLSA asset has never appeared, consistent with the Actions signing
+  job being disabled repo-wide.
 
 Homebrew (`Dicklesworthstone/homebrew-tap`) is updated by the disabled
 `update-homebrew` job, so a hand-cut release must also bump the formula by

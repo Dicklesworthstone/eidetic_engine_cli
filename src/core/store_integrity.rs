@@ -14,6 +14,7 @@ use crate::core::write_owner::{
 pub const STORE_INTEGRITY_REPORT_SCHEMA_V1: &str = "ee.store_integrity.report.v1";
 pub const STORE_INTEGRITY_READ_FENCE_SCHEMA_V1: &str = "ee.store_integrity.read_fence.v1";
 pub const STORE_INTEGRITY_WRITE_IMMUNE_SCHEMA_V1: &str = "ee.store_integrity.write_immune.v1";
+pub const READ_FENCE_GENERATION_UNAVAILABLE_REPAIR: &str = "Inspect `ee index status` for the same workspace, database and index directory; repair the store or rebuild the index before retrying.";
 
 #[derive(Clone, Debug)]
 pub struct StoreIntegrityOptions {
@@ -152,7 +153,7 @@ pub fn run_store_integrity_report(options: StoreIntegrityOptions) -> StoreIntegr
         options.asset_generations,
         options.strict_read_fence,
     );
-    let read_fence =
+    let mut read_fence =
         StoreIntegrityReadFenceReport::from_consistency(&consistency, options.generation_source);
 
     let stats =
@@ -192,21 +193,34 @@ pub fn run_store_integrity_report(options: StoreIntegrityOptions) -> StoreIntegr
     // "I could not look" is a closed-fail. The cause travels in the same
     // block as `generation_source`, so a reader is never left guessing which
     // condition produced the status.
-    let generations_unobservable = matches!(
-        options.generation_source,
-        GenerationSource::Unavailable | GenerationSource::Mixed
-    ) && consistency.asset_generations.is_empty();
-    let status =
-        if read_fence.strict_failed || (options.strict_read_fence && generations_unobservable) {
-            StoreIntegrityStatus::Blocked
-        } else if quarantined_source_count > 0
-            || generations_unobservable
-            || !matches!(consistency.severity, ConsistencySeverity::Info)
-        {
-            StoreIntegrityStatus::Degraded
+    let generations_unobservable = options.generation_source == GenerationSource::Unavailable
+        || (options.generation_source == GenerationSource::Mixed
+            && consistency.asset_generations.is_empty());
+    if generations_unobservable {
+        // An incomplete observation cannot prove coherence or a pinned replay.
+        // Keep the observed values and their provenance, but make the nested
+        // verdict agree with the admission decision used by every read surface.
+        read_fence.verdict = "unavailable".to_owned();
+        read_fence.severity = if options.strict_read_fence {
+            "high"
         } else {
-            StoreIntegrityStatus::Ok
-        };
+            "warning"
+        }
+        .to_owned();
+        read_fence.strict_failed = options.strict_read_fence;
+        read_fence.snapshot_generation = None;
+        read_fence.repair = Some(READ_FENCE_GENERATION_UNAVAILABLE_REPAIR.to_owned());
+    }
+    let status = if read_fence.strict_failed {
+        StoreIntegrityStatus::Blocked
+    } else if quarantined_source_count > 0
+        || generations_unobservable
+        || !matches!(consistency.severity, ConsistencySeverity::Info)
+    {
+        StoreIntegrityStatus::Degraded
+    } else {
+        StoreIntegrityStatus::Ok
+    };
 
     StoreIntegrityReport {
         schema: STORE_INTEGRITY_REPORT_SCHEMA_V1,
@@ -259,6 +273,58 @@ impl StoreIntegrityReadFenceReport {
             stale_assets,
             snapshot_generation,
             repair: consistency.repair.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_generations_never_claim_coherence_or_a_pinned_snapshot() {
+        for read_fence in [
+            ReadFence::Eventual,
+            ReadFence::Latest,
+            ReadFence::Snapshot(7),
+        ] {
+            for strict in [false, true] {
+                for asset_generations in [Vec::new(), vec![("search_index".to_owned(), 7)]] {
+                    let report = run_store_integrity_report(StoreIntegrityOptions {
+                        read_fence,
+                        db_generation: 0,
+                        asset_generations,
+                        strict_read_fence: strict,
+                        generation_source: GenerationSource::Unavailable,
+                        write_stream_config: WriteStreamStatsConfig::new(0, 1_000, 3),
+                        write_observations: Vec::new(),
+                        quarantine_config: WriteImmuneQuarantineConfig::default(),
+                    });
+                    assert_eq!(report.read_fence.verdict, "unavailable");
+                    assert_eq!(report.read_fence.strict_failed, strict);
+                    assert_eq!(report.read_fence.snapshot_generation, None);
+                    assert_eq!(
+                        report.read_fence.generation_source,
+                        GenerationSource::Unavailable
+                    );
+                    assert_eq!(
+                        report.read_fence.repair.as_deref(),
+                        Some(READ_FENCE_GENERATION_UNAVAILABLE_REPAIR)
+                    );
+                    assert_eq!(
+                        report.status,
+                        if strict {
+                            StoreIntegrityStatus::Blocked
+                        } else {
+                            StoreIntegrityStatus::Degraded
+                        }
+                    );
+                    assert_eq!(
+                        report.read_fence.severity,
+                        if strict { "high" } else { "warning" }
+                    );
+                }
+            }
         }
     }
 }

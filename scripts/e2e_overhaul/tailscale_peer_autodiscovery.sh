@@ -11,10 +11,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=scripts/e2e_overhaul/lib/fake_tailscale.sh
 source "$SCRIPT_DIR/lib/fake_tailscale.sh"
 
+# Environment refusals exit 76 so scripts/verify.sh reports ENV_UNRUNNABLE
+# rather than FAIL; unrecognised codes fall through to FAIL in
+# stage_status_for_exit_code (verify.sh:339). bd-e4ymh.
+STAGE_ENV_UNRUNNABLE_EXIT=76
+
 require_jq() {
     if ! command -v jq >/dev/null 2>&1; then
         echo "tailscale_peer_autodiscovery: jq is required" >&2
-        exit 2
+        exit "$STAGE_ENV_UNRUNNABLE_EXIT"
     fi
 }
 
@@ -37,7 +42,7 @@ resolve_ee_binary() {
     fi
     echo "tailscale_peer_autodiscovery: set EE_BINARY or CARGO_TARGET_DIR to an existing ee binary" >&2
     echo "    this no-build harness will not run cargo" >&2
-    exit 2
+    exit "$STAGE_ENV_UNRUNNABLE_EXIT"
 }
 
 fail() {
@@ -105,7 +110,7 @@ require_jq
 EE_BINARY="$(resolve_ee_binary)"
 if [ ! -x "$EE_BINARY" ]; then
     echo "tailscale_peer_autodiscovery: resolved EE_BINARY is not executable: $EE_BINARY" >&2
-    exit 2
+    exit "$STAGE_ENV_UNRUNNABLE_EXIT"
 fi
 
 TMP_ROOT="${TMPDIR:-/tmp}"

@@ -5,6 +5,12 @@
 //! prove process success, even when truncated or wrapped in exit-code zero.
 //! Native test reports keep their earlier, stricter test-inventory dispatch.
 
+#[path = "exception_group.rs"]
+mod exception_group;
+
+#[path = "syntax.rs"]
+mod syntax;
+
 use std::collections::BTreeSet;
 
 use super::{
@@ -146,7 +152,83 @@ fn summaries(text: &str) -> Option<Vec<&str>> {
     }
 }
 
+/// Compose complete top-level ordinary/group traceback sections. Only exact,
+/// unindented CPython connectors are boundaries: source lines and group-local
+/// margins stay opaque to this layer. A damaged section invalidates the whole
+/// chain, including any otherwise valid prefix or later ordinary traceback.
+fn chained_summaries(text: &str) -> Option<Vec<&str>> {
+    let mut result = Vec::new();
+    let mut frames = 0_usize;
+    let mut sections = 0_usize;
+    let mut start = 0;
+    let mut offset = 0;
+    for raw in text.split_inclusive('\n') {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if matches!(line, CAUSE | CONTEXT) {
+            if sections == MAX_CHAIN {
+                return None;
+            }
+            append_chain_section(
+                &text[start..offset],
+                sections == 0,
+                &mut frames,
+                &mut result,
+            )?;
+            sections += 1;
+            start = offset + raw.len();
+        }
+        offset += raw.len();
+    }
+    // The terminal summary of a mixed chain may otherwise be only a streamed
+    // prefix. Standalone group handling retains its existing border contract.
+    if sections == MAX_CHAIN || (sections > 0 && !text.ends_with('\n')) {
+        return None;
+    }
+    append_chain_section(&text[start..], sections == 0, &mut frames, &mut result)?;
+    Some(result)
+}
+
+fn append_chain_section<'a>(
+    text: &'a str,
+    first: bool,
+    frames: &mut usize,
+    result: &mut Vec<&'a str>,
+) -> Option<()> {
+    let header = text.lines().find(|line| {
+        *line == HEADER || line.trim_start() == exception_group::ROOT_HEADER.trim_start()
+    })?;
+    // Ordinary stdout can precede the first traceback. After a connector, only
+    // blank separators may precede the next traceback, never arbitrary prose.
+    if !first && text.lines().find(|line| !line.trim().is_empty()) != Some(header) {
+        return None;
+    }
+    if header != HEADER {
+        return exception_group::append_summaries(text, frames, result);
+    }
+    let section = summaries(text)?;
+    if section.len() != 1 {
+        return None;
+    }
+    // The ordinary decoder already validated frame/source placement. Count
+    // only that validated suffix; displayed source has four-space indentation.
+    let count = text
+        .lines()
+        .skip_while(|line| *line != HEADER)
+        .filter(|line| frame(line))
+        .count();
+    *frames = frames.checked_add(count)?;
+    if *frames > MAX_FRAMES {
+        return None;
+    }
+    result.extend(section);
+    Some(())
+}
+
 pub(super) fn inspect(text: &str) -> Option<Decoded> {
+    if let Some(output) = syntax::inspect(text) {
+        return Some(output);
+    }
     // Cheap family probe before allocation. Standard CPython styling wraps
     // this header; it does not put terminal commands inside the header words.
     let mut end = text.len().min(MAX_SCANNED_OUTPUT_BYTES);
@@ -176,15 +258,23 @@ pub(super) fn inspect(text: &str) -> Option<Decoded> {
     };
     // A quoted or indented example is not a native traceback. An unindented
     // header may follow ordinary stdout from the same invocation.
-    if !visible.lines().any(|line| line == HEADER) {
-        // Exception groups use a different, indented tree grammar. Do not
-        // extract subexceptions from that tree or accept it as a green retry.
-        return visible
+    let ordinary = visible.lines().any(|line| line == HEADER);
+    if !ordinary
+        && !visible
             .lines()
             .any(|line| line.trim_start() == "+ Exception Group Traceback (most recent call last):")
-            .then_some(output);
+    {
+        return None;
     }
-    let Some(summaries) = summaries(&visible) else {
+    let summaries = if visible
+        .lines()
+        .any(|line| line.trim_start() == exception_group::ROOT_HEADER.trim_start())
+    {
+        chained_summaries(&visible)
+    } else {
+        summaries(&visible)
+    };
+    let Some(summaries) = summaries else {
         return Some(output);
     };
     output.symptom = summaries
@@ -386,3 +476,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "traceback_chain_tests.rs"]
+mod chain_tests;

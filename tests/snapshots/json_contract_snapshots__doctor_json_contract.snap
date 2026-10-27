@@ -12,7 +12,7 @@ expression: canonical_json_text(value)
         "tier": "core"
       },
       {
-        "message": "Advisory-only ee install posture needs attention: binary_not_on_path: no 'ee' binary was found in PATH; binary_not_on_path: running ee binary is not available through PATH. running version <scrubbed:eeVersion>; local source version <scrubbed:eeVersion> via cargo_toml at [REPO]/Cargo.toml; installed/current version <scrubbed:eeVersion> via running_process at [EE_BINARY]; freshness path_binary_missing; PATH status missing; No ee binary was found on PATH. This check uses only local PATH/source evidence and performs no network lookup.",
+        "message": "Advisory-only ee install posture needs attention: binary_not_on_path: no 'ee' binary was found in PATH. running version <scrubbed:eeVersion>; local source version unknown via unknown; installed/current version <scrubbed:eeVersion> via running_process at [EE_BINARY]; freshness unknown_source_version; PATH status missing; No ee binary was found on PATH. This check uses only local PATH/source evidence and performs no network lookup.",
         "name": "ee_install_path",
         "severity": "warning",
         "tier": "advisory"
@@ -72,6 +72,12 @@ expression: canonical_json_text(value)
         "tier": "advisory"
       },
       {
+        "message": "No visible memory links require a graph snapshot.",
+        "name": "graph_snapshot",
+        "severity": "ok",
+        "tier": "advisory"
+      },
+      {
         "message": "Graph NUMA pinning is not implemented on this Linux platform yet for [WORKSPACE]/.ee/graph; no effect on ee memory storage or retrieval. The graph loader falls back without functional regression. Degraded code: numa_pin_linux_not_implemented.",
         "name": "graph_numa_pin",
         "severity": "ok",
@@ -102,7 +108,7 @@ expression: canonical_json_text(value)
         "tier": "advisory"
       },
       {
-        "message": "WAL sidecar is 5903992 bytes across 1433 frames, larger than the 2510848-byte database it describes; every connection open replays it.",
+        "message": "WAL sidecar is [COUNT] bytes across [COUNT] frames, larger than the [COUNT]-byte database it describes; every connection open replays it.",
         "name": "wal_pressure",
         "severity": "warning",
         "tier": "advisory"

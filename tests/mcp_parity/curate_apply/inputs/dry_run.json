@@ -1,0 +1,22 @@
+{
+  "surface": "curate_apply",
+  "mcpTool": "ee_curate_apply",
+  "cliArgs": [
+    "ee",
+    "--json",
+    "--workspace",
+    "__WORKSPACE__",
+    "curate",
+    "apply",
+    "curate_00000000000000000000000401",
+    "--actor",
+    "mcp-reviewer",
+    "--dry-run"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "candidateId": "curate_00000000000000000000000401",
+    "actor": "mcp-reviewer",
+    "allowWrite": true
+  }
+}

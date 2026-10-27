@@ -115,6 +115,9 @@ pub(super) struct Execution {
     failed: BTreeSet<Subject>,
     passed: BTreeSet<Subject>,
     complete: bool,
+    // Report-level vetoes also apply to direct execution comparisons. This
+    // permits, but never supplies, the caller's independent process exit.
+    allows_completion: bool,
 }
 
 impl Execution {
@@ -125,8 +128,16 @@ impl Execution {
     pub(super) fn verified_by(&self, proof: &Self) -> bool {
         self.has_known_failures()
             && proof.complete
-            && self.inventory == proof.inventory
+            && proof.allows_completion
+            && proof.failed.is_empty()
+            // File and ancestor/title components bind subjects independently
+            // of inventory size. Added regression tests are useful evidence,
+            // not a new anonymous suite. Every original subject must remain.
+            && self.inventory.is_subset(&proof.inventory)
             && self.failed.is_subset(&proof.passed)
+            // Pending/TODO rows are inventory, not execution. A green retry
+            // must not replace an earlier passing control with a skipped row.
+            && self.passed.is_subset(&proof.passed)
     }
 }
 
@@ -317,6 +328,7 @@ pub(super) fn decode(text: &str) -> Result<Option<Decoded>, ()> {
             .is_some_and(|snapshot| snapshot.failure);
     output.allows_completion =
         !output.failed && report.num_passed_tests > 0 && report.num_pending_test_suites == 0;
+    execution.allows_completion = output.allows_completion;
     Ok(Some(Decoded { output, execution }))
 }
 

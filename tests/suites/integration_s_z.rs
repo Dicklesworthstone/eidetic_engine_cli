@@ -31,6 +31,8 @@ mod session_budget_plan_golden;
 mod session_budget_recorder_unit;
 #[path = "../session_budget_schema_unit.rs"]
 mod session_budget_schema_unit;
+#[path = "../set_e_dead_handler_gate.rs"]
+mod set_e_dead_handler_gate;
 #[path = "../shard_fanout_closeout_matrix.rs"]
 mod shard_fanout_closeout_matrix;
 #[path = "../shard_fanout_concurrency.rs"]
@@ -165,6 +167,8 @@ mod workspace_hygiene_public_emission;
 mod workspace_hygiene_recommendations_e2e;
 #[path = "../workspace_rebind_cli_e2e.rs"]
 mod workspace_rebind_cli_e2e;
+#[path = "../workspace_resolution_cli_e2e.rs"]
+mod workspace_resolution_cli_e2e;
 #[path = "../write_immune_quarantine.rs"]
 mod write_immune_quarantine;
 #[path = "../write_owner.rs"]

@@ -433,11 +433,24 @@ fn fold_rounds(rounds: &[Verdict]) -> Verdict {
             return verdict.clone();
         }
     }
+    // "observation", NOT "round", and the distinction is not pedantry: this
+    // slice is a FLAT accumulation from three different sources, so the
+    // positional index is not a round number.
+    //
+    //   `for (kind, outcomes) in cold_rounds`  pushes one entry per KIND
+    //   `for round in 0..rounds`               pushes one entry per ROUND
+    //   the post-window durable/infra checks   push entries belonging to NO round
+    //
+    // Labelling entry 7 "round 7" therefore names a round that may not exist,
+    // and for the cold-kind entries it reports a kind as a round. A reader
+    // chasing "round 7" in a 3-round run looks for a round that was never
+    // executed and concludes the log is corrupt. Index the observation, which
+    // is a fact, instead of inferring a round, which is not.
     let mut divergences = Vec::new();
-    for (round, verdict) in rounds.iter().enumerate() {
+    for (index, verdict) in rounds.iter().enumerate() {
         if let Verdict::RaceReproduced(round_divergences) = verdict {
             for divergence in round_divergences {
-                divergences.push(format!("round {round}: {divergence}"));
+                divergences.push(format!("observation #{index}: {divergence}"));
             }
         }
     }
@@ -447,8 +460,8 @@ fn fold_rounds(rounds: &[Verdict]) -> Verdict {
     let inconclusive: Vec<String> = rounds
         .iter()
         .enumerate()
-        .filter_map(|(round, verdict)| match verdict {
-            Verdict::Inconclusive(reason) => Some(format!("round {round}: {reason}")),
+        .filter_map(|(index, verdict)| match verdict {
+            Verdict::Inconclusive(reason) => Some(format!("observation #{index}: {reason}")),
             _ => None,
         })
         .collect();
@@ -3567,14 +3580,45 @@ fn read_only_window_attribution() -> TestResult {
     Ok(())
 }
 
-/// Sequential proof that `ee pack --read-only` does not mutate workspace files
-/// and that a second identical pack is byte-identical.
+/// How many sequential `--read-only` packs this probe takes. It must exceed 2,
+/// and the reason is measured rather than defensive.
 ///
-/// The concurrent oracle (`RACE_REPRODUCED` at 294d9ca95) showed concurrent
-/// `--read-only` packs agreeing with each other and disagreeing with the
-/// serial pack. That is serial-then-later, not inter-probe disagreement. This
-/// test isolates that leaf without touching pack-hash identity files owned by
-/// ADR 0087 / bd-reality-core-convergence-1azkt.1.
+/// This test was written on 2026-09-17 (2ba9673d9) within the hour of the
+/// concurrent oracle returning `RACE_REPRODUCED` at 294d9ca95, to isolate the
+/// pack.hash leaf. It took exactly TWO packs. The 2026-10-23 oracle run at
+/// cf0df2719 returned `RACE_REPRODUCED` on the same leaf again and recorded
+/// WHERE the fork lands: pack 1 (the serial baseline) and packs 2..9 (round 0's
+/// eight concurrent probes) all reported one hash, and packs 10..25 (rounds 1
+/// and 2) all reported a second. Exactly two distinct hashes in 25 packs, each
+/// stable on its own side.
+///
+/// A two-pack probe samples only the agreeing side of that split, so it reports
+/// `ok.` whether or not the defect is present. It did: it stayed green for the
+/// five weeks between the two red oracle runs. That is the constant-green case
+/// of bd-2phcw — the verdict does not vary with the property — and raising the
+/// call count is the whole repair. Twelve crosses the observed boundary with
+/// margin at roughly 12 x 1.8 s of pack assembly.
+const SEQUENTIAL_PACK_CALLS: usize = 12;
+
+/// Sequential proof that `ee pack --read-only` does not mutate workspace files
+/// and that every pack in a run of [`SEQUENTIAL_PACK_CALLS`] is byte-identical.
+///
+/// The concurrent oracle has returned `RACE_REPRODUCED` on pack.hash twice, at
+/// 294d9ca95 (2026-09-17, recorded on bd-reality-core-convergence-1azkt.2) and
+/// at cf0df2719 (2026-10-23, filed as bd-wubqf). The first was attributed to
+/// the first `--read-only` pack creating `.ee/pack-slots/standard-00.lock`,
+/// fixed at 897250ccd, after which the oracle re-ran `RACE_ABSENT`. The second
+/// cannot be that mechanism: its evidence records `workspaceFiles` 152 -> 152
+/// and no row findings, so no lockfile was written. The two runs also split
+/// differently — 2026-09-17 had every concurrent round disagree with the serial
+/// baseline, 2026-10-23 had round 0 AGREE with it — so neither "concurrency" nor
+/// "accumulation" is yet established as the variable.
+///
+/// This probe answers that with no concurrency at all: a purely serial run of
+/// N > 2 identical packs. If the hashes fork here, the concurrent probes were
+/// never the variable and "race" is the wrong frame for bd-wubqf. It stays off
+/// the pack-hash identity files owned by ADR 0087 /
+/// bd-reality-core-convergence-1azkt.1 — it only calls the CLI.
 #[test]
 fn sequential_read_only_packs_are_byte_identical_and_do_not_mutate_the_workspace() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -3601,56 +3645,95 @@ fn sequential_read_only_packs_are_byte_identical_and_do_not_mutate_the_workspace
     )?;
     run_ee(&fixture, &["index", "rebuild", "--json"])?;
 
-    let before_first = digest_tree(&fixture.workspace)?;
-    let first = run_ee(
-        &fixture,
-        &[
-            "pack",
-            "prepare release",
-            "--read-only",
-            "--max-tokens",
-            "1500",
-            "--json",
-        ],
-    )?;
-    let after_first = digest_tree(&fixture.workspace)?;
-    let first_hash = pointer_string(&first, "/data/pack/hash").ok_or_else(|| {
-        "first --read-only pack carried no /data/pack/hash; the JSON path is probably renamed"
-            .to_owned()
-    })?;
-    if first_hash.is_empty() {
-        return Err(
-            "first --read-only pack.hash was empty; vacuous agreement is forbidden".to_owned(),
-        );
+    // One argument vector, reused verbatim, so that call ORDER is the only
+    // thing that varies across the run.
+    let pack_args = [
+        "pack",
+        "prepare release",
+        "--read-only",
+        "--max-tokens",
+        "1500",
+        "--json",
+    ];
+
+    let mut hashes: Vec<String> = Vec::with_capacity(SEQUENTIAL_PACK_CALLS);
+    let mut mutations: Vec<(usize, Vec<String>)> = Vec::new();
+    let mut previous_tree = digest_tree(&fixture.workspace)?;
+
+    for call in 1..=SEQUENTIAL_PACK_CALLS {
+        let response = run_ee(&fixture, &pack_args)?;
+        let next_tree = digest_tree(&fixture.workspace)?;
+        let hash = pointer_string(&response, "/data/pack/hash").ok_or_else(|| {
+            format!(
+                "pack {call} of {SEQUENTIAL_PACK_CALLS} carried no /data/pack/hash; the JSON path is probably renamed"
+            )
+        })?;
+        if hash.is_empty() {
+            return Err(format!(
+                "pack {call} of {SEQUENTIAL_PACK_CALLS} reported an empty pack.hash; vacuous agreement is forbidden"
+            ));
+        }
+        let changed = tree_diff(&previous_tree, &next_tree);
+        if !changed.is_empty() {
+            mutations.push((call, changed));
+        }
+        hashes.push(hash);
+        previous_tree = next_tree;
     }
-    let first_pack_mutations = tree_diff(&before_first, &after_first);
 
-    let second = run_ee(
-        &fixture,
-        &[
-            "pack",
-            "prepare release",
-            "--read-only",
-            "--max-tokens",
-            "1500",
-            "--json",
-        ],
-    )?;
-    let after_second = digest_tree(&fixture.workspace)?;
-    let second_hash = pointer_string(&second, "/data/pack/hash").ok_or_else(|| {
-        "second --read-only pack carried no /data/pack/hash; the JSON path is probably renamed"
-            .to_owned()
-    })?;
-    let second_pack_mutations = tree_diff(&after_first, &after_second);
-
-    if first_hash != second_hash || !second_pack_mutations.is_empty() {
+    // Report the WHOLE sequence and the index of the first fork, never just
+    // "they differ". Which call diverges is the discriminator between
+    // accumulated state and concurrency, and a message that omits it costs
+    // another dispatch to recover.
+    let baseline = hashes
+        .first()
+        .ok_or_else(|| "no packs were executed".to_owned())?
+        .clone();
+    if let Some(first_fork) = hashes.iter().position(|hash| *hash != baseline) {
+        let sequence = hashes
+            .iter()
+            .enumerate()
+            .map(|(index, hash)| format!("  pack {}: {hash}", index + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let distinct: BTreeSet<&String> = hashes.iter().collect();
         return Err(format!(
-            "RACE_REPRODUCED: sequential --read-only packs were not byte-identical. first_hash={first_hash} second_hash={second_hash} files_changed_by_first_pack={first_pack_mutations:?} files_changed_by_second_pack={second_pack_mutations:?}"
+            "RACE_REPRODUCED: {SEQUENTIAL_PACK_CALLS} identical sequential --read-only packs produced {} distinct pack.hash values against an unchanged workspace and an unchanged index generation. First fork at pack {} (1-based). NO CONCURRENCY WAS INVOLVED, so the concurrent probes recorded on bd-wubqf were not the variable and accumulated state is.\n{sequence}\nworkspace mutations by call: {mutations:?}",
+            distinct.len(),
+            first_fork + 1
         ));
     }
-    if !first_pack_mutations.is_empty() {
+    if !mutations.is_empty() {
         return Err(format!(
-            "RACE_REPRODUCED: first --read-only pack mutated workspace files even though the second pack hash matched: {first_pack_mutations:?}"
+            "RACE_REPRODUCED: a --read-only pack mutated workspace files even though all {SEQUENTIAL_PACK_CALLS} pack hashes agreed: {mutations:?}"
+        ));
+    }
+
+    // NEGATIVE CONTROL, because every assertion above would ALSO pass if
+    // pack.hash stopped binding its inputs — which is the cheapest wrong way
+    // to make this test green. Prove the hash still MOVES when the pack
+    // genuinely changes: add a second rule relevant to the same query,
+    // republish the index, and require a different hash. Without this arm the
+    // agreement proven above is not evidence of determinism.
+    run_ee(
+        &fixture,
+        &[
+            "remember",
+            "Regenerate the changelog before tagging a release.",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--json",
+        ],
+    )?;
+    run_ee(&fixture, &["index", "rebuild", "--json"])?;
+    let after_change = run_ee(&fixture, &pack_args)?;
+    let changed_hash = pointer_string(&after_change, "/data/pack/hash")
+        .ok_or_else(|| "post-change pack carried no /data/pack/hash".to_owned())?;
+    if changed_hash == baseline {
+        return Err(format!(
+            "NEGATIVE CONTROL FAILED: pack.hash did not move after a second relevant rule entered the corpus and the index was rebuilt. hash={changed_hash}. A hash that is stable across genuinely different content cannot evidence determinism, so the {SEQUENTIAL_PACK_CALLS}-pack agreement above is vacuous."
         ));
     }
     Ok(())
@@ -3962,6 +4045,42 @@ mod classifier {
             "INFRA_ERROR"
         );
         assert_eq!(fold_rounds(&[]).class(), "INFRA_ERROR");
+    }
+
+    /// The fold labels a POSITION, not a round, and nothing may quietly put
+    /// "round" back. `round_verdicts` is filled by a per-kind loop, a
+    /// per-round loop and post-window durable checks that belong to no round,
+    /// so the positional index is not a round number and claiming otherwise
+    /// sends a reader looking for a round that was never executed.
+    #[test]
+    fn folded_labels_index_the_observation_and_never_claim_a_round() {
+        let folded = fold_rounds(&[
+            Verdict::RaceAbsent,
+            Verdict::RaceReproduced(vec!["order flipped".to_owned()]),
+        ]);
+        let Verdict::RaceReproduced(divergences) = &folded else {
+            panic!("expected RACE_REPRODUCED, got {folded:?}");
+        };
+        assert_eq!(
+            divergences,
+            &["observation #1: order flipped".to_owned()],
+            "the label must carry the flat position of the observation"
+        );
+        assert!(
+            !divergences.iter().any(|d| d.contains("round")),
+            "no folded label may say `round`: the index is not a round number. got {divergences:?}"
+        );
+
+        // Same for the inconclusive arm, which has its own format! site.
+        let folded = fold_rounds(&[
+            Verdict::RaceAbsent,
+            Verdict::RaceAbsent,
+            Verdict::Inconclusive("busy".to_owned()),
+        ]);
+        let Verdict::Inconclusive(reason) = &folded else {
+            panic!("expected INCONCLUSIVE, got {folded:?}");
+        };
+        assert_eq!(reason, "observation #2: busy");
     }
 
     #[test]

@@ -2,7 +2,15 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
-use crate::db::{CreateFeedbackQuarantineInput, CreateMemoryInput, CreateWorkspaceInput};
+use crate::core::contradiction_detect::{
+    ConflictResolutionOutcome, ConflictResolutionPlan, ConflictResolveRequest,
+    ContradictionDetectionConfig, PlannedResolutionAction, ResolveVerb, assemble_conflict_surface,
+    plan_conflict_resolution,
+};
+use crate::db::{
+    CreateFeedbackQuarantineInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
+    MemoryLinkSource,
+};
 use crate::models::{MemoryId, WorkspaceId};
 
 const PRIVATE_TOPIC: &str = "Reserved deployment";
@@ -124,6 +132,109 @@ impl Fixture {
         self.db
             .insert_memory_seal(id, &format!("blake3:{}", "a".repeat(64)), TIME)
             .unwrap();
+    }
+
+    fn conflict_pair(&self) -> (String, String, String, String) {
+        let mut ids = Vec::new();
+        for number in [992_u128, 993] {
+            let id = MemoryId::from_uuid(uuid::Uuid::from_u128(number)).to_string();
+            self.db
+                .insert_memory(
+                    &id,
+                    &CreateMemoryInput {
+                        workspace_id: self.workspace.clone(),
+                        content: format!("{PRIVATE_CHOICE}: deployment setting {number}"),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.5,
+                        importance: 0.5,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        provenance_uri: Some("manual://conflict-admission".to_owned()),
+                        tags: Vec::new(),
+                        valid_from: Some(TIME.to_owned()),
+                        valid_to: None,
+                    },
+                )
+                .unwrap();
+            ids.push(id);
+        }
+        let keeper = ids.remove(0);
+        let loser = ids.remove(0);
+        self.db
+            .insert_memory_link(
+                "link_00000000000000000000000992",
+                &CreateMemoryLinkInput {
+                    src_memory_id: keeper.clone(),
+                    dst_memory_id: loser.clone(),
+                    relation: MemoryLinkRelation::Contradicts,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: false,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("conflict-admission-test".to_owned()),
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        let surface = crate::core::contradiction_detect::assemble_conflict_surface(
+            &self.db,
+            crate::core::contradiction_detect::ContradictionDetectionConfig::default(),
+        );
+        assert_eq!(
+            surface.pairs.len(),
+            1,
+            "real explicit conflict is actionable"
+        );
+        let topic = format!("conflict:{}", surface.pairs[0].conflict_id);
+        let chosen = format!("keep {keeper}");
+        (keeper, loser, topic, chosen)
+    }
+
+    fn conflict_plan(&self, verb: ResolveVerb) -> ConflictResolutionPlan {
+        let (keeper, loser, _, _) = self.conflict_pair();
+        let surface = assemble_conflict_surface(&self.db, ContradictionDetectionConfig::default());
+        let outcome = plan_conflict_resolution(
+            &surface,
+            &ConflictResolveRequest {
+                memory_a: &keeper,
+                memory_b: &loser,
+                verb,
+                keep: Some(&keeper),
+                reason: self.request().rationale,
+                scope_a_tags: vec!["rust".to_owned()],
+                scope_b_tags: vec!["python".to_owned()],
+            },
+        );
+        let ConflictResolutionOutcome::Plan(plan) = outcome else {
+            panic!("expected an actionable conflict plan: {outcome:?}");
+        };
+        plan
+    }
+
+    fn conflict_request<'a>(&'a self, plan: &'a ConflictResolutionPlan) -> DecideRecordOptions<'a> {
+        let Some(PlannedResolutionAction::RecordDecision {
+            topic,
+            chosen,
+            alternatives,
+            supersedes,
+        }) = plan
+            .actions
+            .iter()
+            .find(|action| matches!(action, PlannedResolutionAction::RecordDecision { .. }))
+        else {
+            panic!("every resolution must record its rationale");
+        };
+        let mut request = self.request();
+        request.topic = topic;
+        request.chosen = chosen;
+        request.alternatives = alternatives.clone();
+        request.supersedes = supersedes.as_deref();
+        request
     }
 
     fn review(&self, id: &str, status: &str) {
@@ -488,4 +599,127 @@ fn releasing_review_does_not_resurrect_a_superseded_decision_head() {
             Err(DomainError::NotFound { .. })
         ));
     }
+}
+
+#[test]
+fn every_conflict_verb_refuses_sealed_or_held_fact_endpoints_until_reviewed() {
+    for verb in [
+        ResolveVerb::Supersede,
+        ResolveVerb::RejectOne,
+        ResolveVerb::ScopeSplit,
+        ResolveVerb::BothValid,
+    ] {
+        for sealed in [false, true] {
+            for hide_first in [false, true] {
+                let fixture = Fixture::new();
+                let plan = fixture.conflict_plan(verb);
+                let hidden = if hide_first {
+                    &plan.memory_a
+                } else {
+                    &plan.memory_b
+                };
+                let hold = if sealed {
+                    fixture.seal(hidden);
+                    None
+                } else {
+                    Some(fixture.hold(1, &fixture.workspace, "memory", hidden))
+                };
+                assert_conflict_policy_denied_without_effects(&fixture, &plan);
+
+                if let Some(hold) = hold {
+                    fixture.review(&hold, "released");
+                } else {
+                    assert!(fixture.db.mark_memory_seal_revealed(hidden, TIME).unwrap());
+                }
+                let report =
+                    decide_conflict_resolution(&fixture.conflict_request(&plan), &plan).unwrap();
+                assert!(
+                    report.decision.persisted,
+                    "reviewed source can resolve the same {verb:?} conflict"
+                );
+                assert!(
+                    assemble_conflict_surface(&fixture.db, ContradictionDetectionConfig::default())
+                        .pairs
+                        .is_empty(),
+                    "successful {verb:?} resolution is terminal"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn every_conflict_verb_refuses_placeholder_sources_without_a_seal_record() {
+    for verb in [
+        ResolveVerb::Supersede,
+        ResolveVerb::RejectOne,
+        ResolveVerb::ScopeSplit,
+        ResolveVerb::BothValid,
+    ] {
+        for hide_first in [false, true] {
+            let fixture = Fixture::new();
+            let plan = fixture.conflict_plan(verb);
+            let hidden = if hide_first {
+                &plan.memory_a
+            } else {
+                &plan.memory_b
+            };
+            fixture
+                .db
+                .execute_raw(&format!(
+                    "UPDATE memories SET content = '{}' WHERE id = '{hidden}'",
+                    crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+                ))
+                .unwrap();
+            assert_conflict_policy_denied_without_effects(&fixture, &plan);
+        }
+    }
+}
+
+#[test]
+fn every_conflict_verb_rechecks_workspace_authority_after_planning() {
+    for verb in [
+        ResolveVerb::Supersede,
+        ResolveVerb::RejectOne,
+        ResolveVerb::ScopeSplit,
+        ResolveVerb::BothValid,
+    ] {
+        for move_first in [false, true] {
+            let fixture = Fixture::new();
+            let plan = fixture.conflict_plan(verb);
+            let foreign = if move_first {
+                &plan.memory_a
+            } else {
+                &plan.memory_b
+            };
+            fixture
+                .db
+                .execute_raw(&format!(
+                    "UPDATE memories SET workspace_id = '{}' WHERE id = '{foreign}'",
+                    fixture.other
+                ))
+                .unwrap();
+            assert_conflict_policy_denied_without_effects(&fixture, &plan);
+        }
+    }
+}
+
+fn assert_conflict_policy_denied_without_effects(fixture: &Fixture, plan: &ConflictResolutionPlan) {
+    let before = fixture.state();
+    let error = decide_conflict_resolution(&fixture.conflict_request(plan), plan).unwrap_err();
+    assert!(
+        matches!(error, DomainError::PolicyDenied { .. }),
+        "{error:?}"
+    );
+    let rendered = format!("{error:?}");
+    for private in [
+        plan.memory_a.as_str(),
+        plan.memory_b.as_str(),
+        PRIVATE_CHOICE,
+        "PRIVATE-REVIEW",
+    ] {
+        assert!(!rendered.contains(private));
+    }
+    assert_eq!(fixture.state(), before, "denial must not persist any atom");
+    assert!(!fixture.root.path().join(".ee/index").exists());
 }

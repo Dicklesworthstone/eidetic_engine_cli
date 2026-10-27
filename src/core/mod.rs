@@ -14,6 +14,7 @@ pub mod adaptive_scheduler;
 pub mod agent_detect;
 pub mod agent_docs;
 pub mod agentsmd;
+pub mod anchors;
 pub mod artifact;
 pub mod artifact_relocation;
 pub mod ask;
@@ -29,6 +30,7 @@ pub mod budget_delta_recommender;
 pub mod capabilities;
 pub mod cass_error_recall;
 pub mod cass_prefetch;
+pub mod cass_review;
 pub mod causal;
 pub mod certificate;
 pub mod check;
@@ -36,6 +38,7 @@ pub mod claims;
 pub mod completion_audit;
 pub mod config_explain;
 pub mod config_surface;
+pub(crate) mod conflict_proposal;
 pub mod conformal;
 pub mod contention;
 pub mod context;
@@ -61,6 +64,7 @@ pub mod effect;
 pub mod environment_attestation;
 pub mod error_diagnosis;
 pub mod error_recall;
+pub mod evidence;
 pub mod explanation_latency_budget;
 pub mod feedback;
 pub mod focus;
@@ -98,6 +102,7 @@ pub mod model;
 pub mod orient;
 pub mod outcome;
 pub mod ownership_snapshot;
+pub(crate) mod pack_selection_identity;
 pub mod path_safety;
 pub mod perf_forensics;
 pub mod perf_live;
@@ -898,6 +903,48 @@ pub fn storeless_workspace_error(database_path: &std::path::Path) -> crate::mode
         details_json,
         recovery_actions: assessment.recovery_actions,
     }
+}
+
+/// Repair advice for a recovered storage panic. A panic is not an input
+/// problem, so none of the ordinary "retry the operation" lines help: the
+/// retry reproduces it.
+pub const STORAGE_PANIC_REPAIR: &str = "a storage panic is not an input problem; capture the panic from stderr and report it \
+     before retrying";
+
+/// Classify a `DbError` that a caller would otherwise map onto a domain-shaped
+/// variant, carving a RECOVERED PANIC out of that framing (bd-12ybp).
+///
+/// `guard_storage_panic` (src/db/mod.rs) converts a frankensqlite panic into
+/// `DbError::StoragePanic` so it flows through the ordinary error path, and its
+/// contract is that callers render it as `DomainError::Storage` — exit 3,
+/// `ee.error.v2`. `DbConnection::migrate` reaches that guard transitively
+/// (`migrate` -> `migrate_under_owner_fence` -> `ensure_migration_table` ->
+/// `execute_raw_for` / `query_for`), so every `migrate().map_err(..)` site can
+/// receive one.
+///
+/// Measured 2026-10-22: five such sites mapped it to something else. Four used
+/// `MigrationRequired`, which exits 8 and advises running a migration — the
+/// operation that just panicked. One used `Import`, which exits 5 and advises
+/// retrying a restore that reproduces it. Every one told the operator to
+/// repeat the thing that failed, under an exit code naming the wrong
+/// subsystem.
+///
+/// `fallback` is passed already built rather than as a closure: these are cold
+/// error paths, the extra `format!` is irrelevant, and a plain value keeps the
+/// call sites free of borrow-ordering subtleties.
+#[must_use]
+pub fn db_failure_or_storage_panic(
+    error: &crate::db::DbError,
+    panic_message: String,
+    fallback: crate::models::DomainError,
+) -> crate::models::DomainError {
+    if error.is_storage_panic() {
+        return crate::models::DomainError::Storage {
+            message: panic_message,
+            repair: Some(STORAGE_PANIC_REPAIR.to_owned()),
+        };
+    }
+    fallback
 }
 
 /// Require an already-addressed database path to exist without opening it.

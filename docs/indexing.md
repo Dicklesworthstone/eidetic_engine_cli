@@ -133,6 +133,49 @@ The CASS CLI path is `scripts/e2e_capture.sh`. Direct `EvidenceSpan` packing
 is owned by `bd-16imy`; remaining `bd-3k1mg` follow-up is the
 failure-retry-crash matrix for the attachment job itself.
 
+## Withdrawing Imported Evidence
+
+Use the `ev_...` evidence ID from a search result or source citation to withdraw
+one CASS source from future retrieval and derivation:
+
+```bash
+ee evidence withdraw <evidence-id> --workspace . \
+  --reason "This source is no longer suitable for retrieval" --dry-run --json
+ee evidence withdraw <evidence-id> --workspace . \
+  --reason "This source is no longer suitable for retrieval" --json
+```
+
+The first command previews the decision using a read-only snapshot. The second
+commits the withdrawal. Add `--database <path>` to address an existing custom
+store, and `--actor <name>` to identify the operator in the audit trail. The
+reason is required and is redacted before audit storage. The response contains
+IDs and admission/index status, without copying the transcript or the reason.
+
+Withdrawal sets both search and pack eligibility, including their canonical
+security metadata, to `denied`. It also blocks the class-A derivation path used
+for safe tool observations. Fresh retrieval and derivation honor the denial
+immediately; current-source proof checks withhold dependent incident cards.
+Withdrawing a derived card directly leaves its original transcript sources
+available. Re-importing the retained transcript or rederiving the same card
+does not silently readmit it.
+
+The source change, `evidence.withdraw` audit and a durable incremental session
+index job commit together. `indexStatus: queued` means publication is pending.
+The existing index worker removes the excluded source when it publishes the
+next generation. Repeating a withdrawal returns `already_withdrawn`, creates no
+new audit or job, and reports `persisted: false`, `changed: false`, and
+`indexStatus: not_scheduled`. That status makes no claim about an earlier job's
+completion. Preview returns `would_withdraw`, `wouldChange: true`, and
+`persisted: false`; no index job is scheduled.
+
+This operation retains the source bytes, hashes and provenance. Historical
+packs, backups, and independently curated memories/rules remain intact.
+Withdrawal controls future use of this evidence ID; it is not an erasure or
+restore command. It supports CASS evidence only and requires an existing,
+current-schema database. Missing stores and pending migrations are reported
+without initialization or migration. The machine payload contract is
+[`ee.evidence.withdraw.v1`](schemas/ee.evidence.withdraw.v1.json).
+
 ## Refreshing Previously Imported Sessions
 
 A known CASS session is not assumed to be finished. With evidence capture

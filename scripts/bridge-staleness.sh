@@ -634,7 +634,44 @@ report=$(jq -n \
     signals: $signals
   }')
 
-printf '%s\n' "$report" > "$OUTPUT_PATH"
+# ATOMIC PUBLICATION (bd-fuon7). `> "$OUTPUT_PATH"` opens the VISIBLE report
+# with O_TRUNC before printf writes a byte, so any concurrent reader -- another
+# agent, verify.sh's Bridge Staleness Advisory stage at :1850, or a user
+# running this script directly -- can observe the destination empty or
+# half-written. There is no publication lock: with_beads_read_locks takes a
+# SHARED Beads lock (flock -s), which does not serialise writers of this file,
+# and direct callers take nothing at all.
+#
+# Writing beside the target and renaming makes publication atomic: a reader
+# sees either the previous complete report or the new complete one, never a
+# truncated one. rename(2) is atomic within a filesystem, and the temp is in
+# the SAME DIRECTORY as the destination, so it cannot cross one.
+#
+# A fixed `.tmp.$$` name rather than mktemp, deliberately: mktemp creates 0600
+# and the plain redirect above created the report at the process umask (0644
+# under the usual 022). Keeping the redirect preserves the file mode this
+# script has always published, so this change is atomicity only and not a
+# permissions change. If the write fails the temp remains, named visibly
+# beside the report -- a diagnosable leftover rather than a silently corrupted
+# destination.
+# NON-REGULAR DESTINATIONS ARE WRITTEN THROUGH, NOT RENAMED OVER, and this
+# guard is not hypothetical: --self-test sets OUTPUT_PATH=/dev/null, which
+# caught the first version of this change. Two reasons it must stay:
+#   1. "${OUTPUT_PATH}.tmp.$$" beside /dev/null is /dev/null.tmp.NNNN, which
+#      the OS refuses to create ("Operation not permitted").
+#   2. Far worse, if it HAD been creatable, `mv -f` onto /dev/null would
+#      REPLACE THE DEVICE NODE with a regular file. Atomic replacement is the
+#      right idiom for a report and exactly the wrong one for a character
+#      device, a fifo, or a symlink into one.
+# For those destinations there is no truncation window worth closing anyway --
+# nothing reads a report back out of /dev/null.
+if [ -e "$OUTPUT_PATH" ] && [ ! -f "$OUTPUT_PATH" ]; then
+  printf '%s\n' "$report" > "$OUTPUT_PATH"
+else
+  report_tmp="${OUTPUT_PATH}.tmp.$$"
+  printf '%s\n' "$report" > "$report_tmp"
+  mv -f "$report_tmp" "$OUTPUT_PATH"
+fi
 
 if [ -n "$JSON_FLAG" ]; then
   printf '%s\n' "$report"

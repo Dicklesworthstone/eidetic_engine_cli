@@ -28,8 +28,9 @@ use crate::models::degradation::{
 use crate::models::model_registry::{EmbedBackend, ModelPurpose, ModelRegistryStatus};
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
-    DomainError, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats,
-    ProvenanceUri, TrustClass, UnitScore, degraded_recovery_actions,
+    DomainError, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryAnchorSource, MemoryId, MemoryScope,
+    MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore, degraded_recovery_actions,
+    extract_precision_memory_anchors,
 };
 use crate::obs::audit_events::query_hash as audit_query_hash;
 use crate::pack::{
@@ -66,8 +67,8 @@ use crate::search::plan_cache::{
     compute_search_config_hash, lookup_or_insert_process_plan,
 };
 use crate::search::scoring::{
-    RetrievalMaturity, SEARCH_SCORING_POLICY_V1, SearchScoreComponents, SearchScoringConfig,
-    SearchScoringSignals,
+    AnchorMatchCandidateSignals, RetrievalMaturity, SEARCH_SCORING_POLICY_V1,
+    SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, anchor_match_score,
 };
 use crate::search::{
     NativeReranker, Reranker, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
@@ -7350,6 +7351,10 @@ impl ScoreExplanation {
                     ("graphCentrality", "1 when graph centrality is not observed"),
                     ("redundancy", "1 when redundancy is not observed"),
                     ("freshnessDrift", "1 when anchor freshness is not observed"),
+                    (
+                        "anchorMatch",
+                        "min(0.04 * exact_matches, anchor_match_bias_cap, 0.08) from live memory content; 0 when unobserved",
+                    ),
                 ] {
                     let Some(value) = components.get(key).and_then(serde_json::Value::as_f64)
                     else {
@@ -7378,7 +7383,7 @@ impl ScoreExplanation {
                 hit.ranking_score(),
                 "final EE quality ranking; engine relevance is unchanged",
                 "metadata.qualityScoring.components.finalScore",
-                "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch; unobserved optional terms are neutral",
+                "ranking = base * recency * confidence * utility * maturity * harmfulPenalty * scopeMatch + anchorMatch; unobserved optional terms are neutral",
             ));
             explanation.summary.push_str(&format!(
                 " EE quality ranking {:.6}; original relevance and calibration are unchanged.",
@@ -9748,6 +9753,9 @@ async fn run_search_inner_with_performance(
         }
         #[cfg(unix)]
         let selected = match source_generation {
+            Some(generation) if !options.source_mode.uses_embeddings() => lease
+                .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
+                .map_err(map_index_generation_error)?,
             Some(generation) => match fast_embedder_override.as_deref() {
                 Some(embedder) => lease.index_for_snapshot_with_identity(
                     cx,
@@ -9768,13 +9776,18 @@ async fn run_search_inner_with_performance(
         let selected = index_dir.clone();
         // Snapshot selection already validated the complete generation.
         if (!cfg!(unix) || source_generation.is_none())
-            && let Err(reason) = match fast_embedder_override.as_deref() {
-                Some(embedder) => {
+            && let Err(reason) = match (options.source_mode, fast_embedder_override.as_deref()) {
+                (SearchSourceMode::LexicalOnly, _) => {
+                    crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
+                        &selected,
+                    )
+                }
+                (_, Some(embedder)) => {
                     crate::core::index::validate_index_corpus_compatibility_with_embedder(
                         &selected, embedder,
                     )
                 }
-                None => crate::core::index::validate_index_corpus_compatibility(&selected),
+                (_, None) => crate::core::index::validate_index_corpus_compatibility(&selected),
             }
         {
             return Err(index_compatibility_search_error(&selected, reason));
@@ -10033,8 +10046,23 @@ async fn run_search_inner_with_performance(
                 raw_hits.extend(global_hits);
                 sort_search_hits_by_score_order(&mut raw_hits);
             }
+            // bd-search-warm-latency-0bh05: close this span at the dedupe, not
+            // three operations later. `record_elapsed` is `start.elapsed()`, so
+            // recording it after apply_live_evidence_visibility and
+            // admit_hits charged BOTH of those to "search::dedupeDocId" -- a
+            // span named for one operation that measured three, and one that
+            // strictly contained the sibling span recorded just above it.
+            //
+            // That is not a rounding problem. Measured on an EMPTY store (0
+            // documents, so dedupe has nothing to collapse), dedupeDocId was
+            // the LARGEST span in the whole run at a 161ms median, which reads
+            // as "deduplication is the bottleneck" and sends anyone optimising
+            // it straight at the wrong function. This bead's own acceptance
+            // asks for a timing split "so regressions are attributable"; an
+            // overlapping span is the one thing that cannot be.
             let dedupe_doc_id_start = Instant::now();
             let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
+            trace.record_elapsed("search::dedupeDocId", dedupe_doc_id_start);
             let evidence_visibility_start = Instant::now();
             let raw_hits =
                 apply_live_evidence_visibility(options, raw_hits, &mut degraded, read_connection);
@@ -10044,7 +10072,6 @@ async fn run_search_inner_with_performance(
                 "search::evidenceLiveAdmissionVisibility",
                 evidence_visibility_start,
             );
-            trace.record_elapsed("search::dedupeDocId", dedupe_doc_id_start);
             let dedupe_mi_start = Instant::now();
             let (raw_hits, mi_duplicates_collapsed, mi_eligible_count) =
                 if options.dedup_mode == SearchDedupMode::MutualInformation {
@@ -10558,6 +10585,9 @@ async fn run_diag_search_in_snapshot(
     }
     #[cfg(unix)]
     let index_dir = match source_generation {
+        Some(generation) if !options.source_mode.uses_embeddings() => generation_lease
+            .index_for_snapshot_with_identity(cx, &index_dir, generation, None)
+            .map_err(map_index_generation_error)?,
         Some(generation) => match fast_embedder_override.as_deref() {
             Some(embedder) => generation_lease.index_for_snapshot_with_identity(
                 cx,
@@ -10575,13 +10605,18 @@ async fn run_diag_search_in_snapshot(
         None => index_dir,
     };
     if (!cfg!(unix) || source_generation.is_none())
-        && let Err(reason) = match fast_embedder_override.as_deref() {
-            Some(embedder) => {
+        && let Err(reason) = match (options.source_mode, fast_embedder_override.as_deref()) {
+            (SearchSourceMode::LexicalOnly, _) => {
+                crate::core::index::validate_index_corpus_compatibility_for_lexical_search(
+                    &index_dir,
+                )
+            }
+            (_, Some(embedder)) => {
                 crate::core::index::validate_index_corpus_compatibility_with_embedder(
                     &index_dir, embedder,
                 )
             }
-            None => crate::core::index::validate_index_corpus_compatibility(&index_dir),
+            (_, None) => crate::core::index::validate_index_corpus_compatibility(&index_dir),
         }
     {
         return Err(index_compatibility_search_error(&index_dir, reason));
@@ -11047,6 +11082,27 @@ fn lexical_ram_tier_config_for_search(workspace_path: &Path) -> LexicalRamTierCo
     config
 }
 
+/// Resolve the effective `[search.lexical_ram_tier]` settings for
+/// `workspace_path`, falling back to the environment when the workspace config
+/// cannot be read (bd-p9m4j).
+///
+/// THE `Err` ARM IS A CONTRACT, NOT A SWALLOW. An unreadable config here is
+/// deliberately not propagated, and the rule that separates this from the
+/// neighbouring enrichment sites that DO propagate (bd-8a19j) is what the
+/// fallback changes:
+///
+/// - PROPAGATE when an unreadable config would silently change RESULTS.
+///   Fusion weights change ranking, so swallowing an error there turns a
+///   config fault into a quietly different answer.
+/// - DEGRADE when it only changes PERFORMANCE. This config governs mmap
+///   pinning and hugepages, so an unreadable one means search runs UNPINNED,
+///   never wrong. Refusing a search because a RAM-tuning knob could not be
+///   read would be the worse outcome.
+///
+/// Documented rather than changed, because an unstated fallback is
+/// indistinguishable from an oversight -- which is why this bead had to ask.
+/// Compare [`resolve_search_rerank_config`] directly below, which states its
+/// own fallback the same way.
 fn resolve_lexical_ram_tier_config_for_search(workspace_path: &Path) -> LexicalRamTierConfig {
     if let Ok(merged) = crate::core::config_surface::merged_workspace_config(workspace_path) {
         return LexicalRamTierConfig::from_config_overrides(&merged.values.search.lexical_ram_tier);
@@ -11455,14 +11511,21 @@ fn cached_index_status_for_search(
     // cache entry was populated, and never let this request repopulate the
     // cache with an observation older than a concurrent writer's invalidation.
     if let Some(connection) = connection {
-        let status = match fast_embedder {
-            Some(embedder) => crate::core::index::get_index_status_with_embedder(
+        let status = match (options.source_mode, fast_embedder) {
+            (SearchSourceMode::LexicalOnly, _) => {
+                crate::core::index::get_index_status_for_lexical_search(
+                    &status_options,
+                    Some(connection),
+                    true,
+                )
+            }
+            (_, Some(embedder)) => crate::core::index::get_index_status_with_embedder(
                 &status_options,
                 Some(connection),
                 true,
                 embedder,
             ),
-            None => get_index_status_in_current_snapshot(&status_options, connection),
+            (_, None) => get_index_status_in_current_snapshot(&status_options, connection),
         };
         match status {
             Ok(status) => return Ok(status),
@@ -11474,6 +11537,16 @@ fn cached_index_status_for_search(
                 );
             }
         }
+    }
+
+    // Lexical health cannot reuse or populate the semantic readiness cache:
+    // the same generation may be readable lexically but need a vector rebuild.
+    if !options.source_mode.uses_embeddings() {
+        return crate::core::index::get_index_status_for_lexical_search(
+            &status_options,
+            None,
+            false,
+        );
     }
 
     // The shared cache describes the process-default expectation. A supplied
@@ -11780,14 +11853,17 @@ async fn reconcile_search_index_within_budget(
         Ok(None) => return,
         Ok(Some(true)) | Err(_) => {}
     }
-    let status = match stack_override.as_ref() {
-        Some(stack) => crate::core::index::get_index_status_with_embedder(
+    let status = match (options.source_mode, stack_override.as_ref()) {
+        (SearchSourceMode::LexicalOnly, _) => {
+            crate::core::index::get_index_status_for_lexical_search(&status_options, None, false)
+        }
+        (_, Some(stack)) => crate::core::index::get_index_status_with_embedder(
             &status_options,
             None,
             false,
             stack.fast(),
         ),
-        None => get_index_status_with_connection(&status_options, None),
+        (_, None) => get_index_status_with_connection(&status_options, None),
     };
     let status = match status {
         Ok(status) => status,
@@ -12540,6 +12616,18 @@ pub(crate) fn apply_quality_scoring(
     };
     let local_ids: BTreeSet<&str> = local_ids.into_iter().collect();
     let policy = config.policy_hash();
+    let query_anchors = crate::search::query::query_anchor_match_context(&options.query);
+    // A plain-prose query cannot receive an anchor boost. Preserve its existing
+    // pack projection, while anchor-bearing queries share a bound across lanes.
+    let ranking_bound = if query_anchors.is_cold_start() {
+        SearchScoringConfig {
+            anchor_match_bias_cap: 0.0,
+            ..config
+        }
+        .ranking_bound()
+    } else {
+        config.ranking_bound()
+    };
     for hit in hits.iter_mut() {
         if let Some(object) = hit
             .metadata
@@ -12557,6 +12645,7 @@ pub(crate) fn apply_quality_scoring(
         let mut maturity = None;
         let mut harmful_count = None;
         let mut scope_match = None;
+        let mut anchor_match = None;
         let entity_type;
         if let Some(memory) = local_memories
             .get(&hit.doc_id)
@@ -12585,6 +12674,32 @@ pub(crate) fn apply_quality_scoring(
             } else if admitted_global_ids.is_some_and(|ids| ids.contains(&hit.doc_id)) {
                 // A workspace DB cannot observe a separate store's feedback.
                 scope_match = Some(options.memory_scope == MemoryScope::Global);
+            }
+            let admitted_anchor_source = local_ids.contains(hit.doc_id.as_str())
+                || (!local_memories.contains_key(&hit.doc_id)
+                    && admitted_global_ids.is_some_and(|ids| ids.contains(&hit.doc_id)));
+            if admitted_anchor_source && !query_anchors.is_cold_start() {
+                // Source, revision, seal and scope admission already ran. Reuse
+                // the loaded live body, never indexed anchor/content metadata.
+                let anchors = extract_precision_memory_anchors(
+                    &memory.id,
+                    &memory.content,
+                    MemoryAnchorSource::IndexRebuild,
+                    Some("memory.content"),
+                );
+                let candidate = AnchorMatchCandidateSignals::new().with_anchors(
+                    anchors.into_iter().map(|anchor| {
+                        (
+                            anchor.anchor_kind.as_str().to_owned(),
+                            anchor.anchor_value_hash,
+                        )
+                    }),
+                );
+                anchor_match = Some(anchor_match_score(
+                    &query_anchors,
+                    &candidate,
+                    config.anchor_match_cap(),
+                ));
             }
         } else if rule_admission::is_rule_hit(hit) {
             // admit_hits replaced this metadata from the native source row.
@@ -12637,12 +12752,13 @@ pub(crate) fn apply_quality_scoring(
         signals.utility_score = utility.unwrap_or(1.0);
         signals.harmful_count = harmful_count.unwrap_or(0);
         signals.scope_match = scope_match.unwrap_or(false);
+        signals.anchor_match = anchor_match.map(|score| score.value);
         let components = SearchScoreComponents::from_signals(signals, config);
         let scoring = serde_json::json!({
             "schema": SEARCH_SCORING_POLICY_V1,
             "policyHash": policy,
             "entityType": entity_type,
-            "rankingBound": config.ranking_bound(),
+            "rankingBound": ranking_bound,
             "referenceTime": reference_time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "components": components,
             "observedSignals": {
@@ -12650,13 +12766,17 @@ pub(crate) fn apply_quality_scoring(
                 "utility": utility.is_some(), "maturity": maturity.is_some(),
                 "harmfulPenalty": harmful_count.is_some(), "scopeMatch": scope_match.is_some(),
                 "graphCentrality": false, "redundancy": false, "freshnessDrift": false,
-                "anchorMatch": false, "beadAffinity": false
+                "anchorMatch": anchor_match.is_some(), "beadAffinity": false
             },
             "inputs": {
                 "ageDays": age_days, "confidence": confidence, "utility": utility,
                 "maturity": maturity, "harmfulCount": harmful_count, "scopeMatch": scope_match,
                 "graphCentrality": null, "redundancy": null, "freshnessDrift": null,
-                "anchorMatch": null, "beadAffinity": null
+                "anchorMatch": anchor_match.map(|score| score.value),
+                "anchorMatchExactMatches": anchor_match.map(|score| score.exact_matches),
+                "anchorMatchCapped": anchor_match.map(|score| score.capped),
+                "anchorMatchSource": anchor_match.map(|_| "live_memory_content"),
+                "beadAffinity": null
             }
         });
         let metadata = hit.metadata.get_or_insert_with(|| serde_json::json!({}));
@@ -14422,6 +14542,20 @@ fn apply_tombstone_visibility_with_connection(
         .into_iter()
         .collect();
     let batch_memories = connection.get_memories_batch(&hit_doc_ids).ok();
+    // Seal authority is hydrated beside source bodies in the caller's pinned
+    // snapshot, not once per hit. A failed batch retains the point getter's
+    // fail-closed semantics while isolating any single malformed sidecar.
+    let batch_seals = match connection.get_memory_seals_batch(&hit_doc_ids) {
+        Ok(seals) => Some(seals),
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::search::visibility",
+                error = %error,
+                "batched seal hydration failed; falling back to per-hit reads"
+            );
+            None
+        }
+    };
     if let (Some(memories), Some(preloaded)) =
         (batch_memories.as_ref(), preloaded_memories.as_deref_mut())
     {
@@ -14452,7 +14586,11 @@ fn apply_tombstone_visibility_with_connection(
                 // malformed row carries ordinary body text. Neither the
                 // placeholder spelling nor a cached projection proves that
                 // content was revealed; a failed lookup cannot grant access.
-                match connection.get_memory_seal(&memory.id) {
+                let seal = match batch_seals.as_ref() {
+                    Some(seals) if memory.id == hit.doc_id => Ok(seals.get(&memory.id).cloned()),
+                    _ => connection.get_memory_seal(&memory.id),
+                };
+                match seal {
                     Ok(Some(seal)) if seal.is_sealed() => {
                         sealed_filtered = sealed_filtered.saturating_add(1);
                         return None;
@@ -20170,8 +20308,19 @@ mod tests {
             memory_visibility_hit(PLACEHOLDER, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT),
         ];
         let mut degraded = Vec::new();
-        let visible =
-            apply_tombstone_visibility(&options, hits.clone(), &mut degraded, Some(&connection));
+        let (visible, queries) = crate::db::capture_query_sql_for_test(|| {
+            apply_tombstone_visibility(&options, hits.clone(), &mut degraded, Some(&connection))
+        });
+        let seal_reads: Vec<_> = queries
+            .iter()
+            .filter(|sql| sql.contains("FROM memory_seals WHERE"))
+            .collect();
+        assert_eq!(
+            seal_reads.len(),
+            1,
+            "seal checks must be batched across candidates"
+        );
+        assert!(seal_reads[0].contains("WHERE memory_id IN ("));
         assert_eq!(visible.len(), 1);
         assert_eq!(
             visible[0].doc_id, PLACEHOLDER,
@@ -20188,6 +20337,28 @@ mod tests {
                 .len(),
             2
         );
+
+        // A corrupt sidecar fails the batch, then the point-read fallback
+        // still admits its healthy neighbor without exposing the bad row.
+        connection
+            .execute_raw(&format!(
+                "UPDATE memory_seals SET content_commitment = 'blake3:{}' WHERE memory_id = '{SEALED}'",
+                "S".repeat(64)
+            ))
+            .map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .get_memory_seals_batch(&[SEALED, PLACEHOLDER])
+                .is_err()
+        );
+        let mut corrupt = Vec::new();
+        let visible =
+            apply_tombstone_visibility(&options, hits.clone(), &mut corrupt, Some(&connection));
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].doc_id, PLACEHOLDER);
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(corrupt[0].code, "tombstone_visibility_unavailable");
+        assert!(!serde_json::json!(visible).to_string().contains(BODY));
 
         connection
             .execute_raw("ALTER TABLE memory_seals RENAME TO temporarily_unavailable_seals")

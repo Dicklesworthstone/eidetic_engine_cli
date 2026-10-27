@@ -767,6 +767,58 @@ fn replay_schema_validation_enforces_public_scalar_and_collection_constraints() 
         }
     }
 
+    for (kind, id, evidence_id) in [
+        (
+            "evidence_span",
+            "ev_00000000000000000000000001",
+            Some("ev_00000000000000000000000001"),
+        ),
+        ("rule", "rul_0000000000000000000000001", None),
+    ] {
+        let mut native = golden.clone();
+        let item = native
+            .pointer_mut("/data/replay/ledger/selectedItems/0")
+            .and_then(Value::as_object_mut)
+            .ok_or("missing selected item fixture")?;
+        item.remove("memoryId");
+        item.insert("entityKind".to_owned(), json!(kind));
+        item.insert("entityId".to_owned(), json!(id));
+        item.insert(
+            "entityRevision".to_owned(),
+            json!("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        );
+        if let Some(evidence_id) = evidence_id {
+            item.insert("evidenceSpanId".to_owned(), json!(evidence_id));
+        }
+        validate_json_schema(&native, &schema, &schema, "$")
+            .map_err(|error| format!("validator rejected native {kind} selected item: {error}"))?;
+
+        let mut fabricated_memory_alias = native.clone();
+        fabricated_memory_alias
+            .pointer_mut("/data/replay/ledger/selectedItems/0")
+            .and_then(Value::as_object_mut)
+            .ok_or("missing native selected item fixture")?
+            .insert(
+                "memoryId".to_owned(),
+                json!("mem_00000000000000000000000001"),
+            );
+        if validate_json_schema(&fabricated_memory_alias, &schema, &schema, "$").is_ok() {
+            return Err(format!(
+                "validator accepted native {kind} with a fabricated memoryId"
+            ));
+        }
+
+        let mut missing_identity = native.clone();
+        missing_identity
+            .pointer_mut("/data/replay/ledger/selectedItems/0")
+            .and_then(Value::as_object_mut)
+            .ok_or("missing native selected item fixture")?
+            .remove("entityId");
+        if validate_json_schema(&missing_identity, &schema, &schema, "$").is_ok() {
+            return Err(format!("validator accepted native {kind} without entityId"));
+        }
+    }
+
     let keyword_cases = [
         (
             json!(["same", "same"]),
@@ -910,6 +962,12 @@ fn validate_json_schema(
         for candidate in all_of {
             validate_json_schema(value, candidate, root_schema, path)?;
         }
+    }
+
+    if let Some(denied) = schema.get("not")
+        && validate_json_schema(value, denied, root_schema, path).is_ok()
+    {
+        return Err(format!("{path} matched a forbidden schema branch"));
     }
 
     if let Some(expected) = schema.get("const")

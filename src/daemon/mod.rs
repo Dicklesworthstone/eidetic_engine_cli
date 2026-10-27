@@ -121,12 +121,12 @@ pub const DAEMON_SOCKET_UNAVAILABLE_CODE: &str = "daemon_socket_unavailable";
 /// brief backoff once existing workers drain. See bd-jnyui.
 pub const DAEMON_OVERLOADED_CODE: &str = "daemon_overloaded";
 
-/// Hard upper bound on the number of in-flight per-connection worker
-/// threads the daemon will spawn. Defaults to 32 and is overridable via
-/// `EE_DAEMON_MAX_INFLIGHT` for stress harnesses; saturated accepts are
-/// answered with a framed `daemon_overloaded` response and the
-/// connection closed rather than queued. See bd-jnyui (P1 — unbounded
-/// thread spawn was a local DoS vector before this cap shipped).
+/// Hard upper bound N on active foreground connection workers. Opt-in adaptive
+/// context admission can suspend at most N additional residents, for a total
+/// thread bound of 2N; suspended workers release foreground capacity and remain
+/// part of shutdown draining. Defaults to 32 and is overridable through
+/// `EE_DAEMON_MAX_INFLIGHT`. Saturated admission returns `daemon_overloaded`
+/// rather than accumulating an unbounded connection queue (bd-jnyui).
 pub const DAEMON_MAX_INFLIGHT: usize = 32;
 
 /// Degraded code emitted on the daemon's accept side when a peer's

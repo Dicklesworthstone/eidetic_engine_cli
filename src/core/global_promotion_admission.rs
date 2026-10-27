@@ -188,6 +188,8 @@ pub(super) fn preview_report(plan: PromotionPlan, twin: Option<String>) -> Promo
         index_job_id: None,
         index_status: "not_applicable".to_owned(),
         index_error: None,
+        merge_candidate_id: None,
+        review_command: None,
     }
 }
 
@@ -195,7 +197,9 @@ pub(super) fn preview_report(plan: PromotionPlan, twin: Option<String>) -> Promo
 /// The caller owns the snapshot/transaction. Expired, sealed, superseded,
 /// differently trusted, and differently typed twins cannot absorb a source.
 /// Authored bounds must match as instants, including null/unbounded starts and
-/// ends. Promotion changes scope, never the source's lifetime or attestation.
+/// ends. Distinct default capture starts may corroborate one row only when
+/// both origins have positive, snapshot-bound creation evidence. Promotion
+/// changes scope, never either row's lifetime or attestation.
 pub(super) fn find_twin(
     db: &DbConnection,
     workspace: &str,
@@ -244,18 +248,27 @@ pub(super) fn find_twin(
         }
         let start = from.map(timestamp).transpose()?;
         let end = to.map(timestamp).transpose()?;
-        if start != source_start
-            || end != source_end
-            || !payload.matches_fields(&source.kind, optional_text(row.get(6))?)?
-        {
+        if end != source_end || !payload.matches_fields(&source.kind, optional_text(row.get(6))?)? {
             continue;
+        }
+        if start != source_start {
+            let Some(proof) = payload.default_start() else {
+                continue;
+            };
+            let target = db.get_memory(id)?.ok_or_else(invalid_authority)?;
+            if !super::validity::default_starts_compatible(db, source, proof, &target)? {
+                continue;
+            }
         }
         return Ok(Some(id.clone()));
     }
     Ok(None)
 }
 
-fn bound_global_workspace(db: &DbConnection, paths: &GlobalStorePaths) -> Result<String, String> {
+pub(super) fn bound_global_workspace(
+    db: &DbConnection,
+    paths: &GlobalStorePaths,
+) -> Result<String, String> {
     if db
         .needs_migration()
         .map_err(|_| "Could not inspect global store schema".to_owned())?
@@ -272,18 +285,18 @@ fn bound_global_workspace(db: &DbConnection, paths: &GlobalStorePaths) -> Result
     .ok_or_else(|| "Existing global store has no matching workspace binding".to_owned())
 }
 
-pub(super) fn preview_twin(
+pub(super) fn preview_destination(
     paths: &GlobalStorePaths,
     source: &StoredMemory,
     payload: &PromotionPayload,
     reference: DateTime<Utc>,
-) -> Result<Option<String>, String> {
+) -> Result<(Option<String>, Option<super::merge::MergeProposal>), String> {
     if !paths
         .database_path
         .try_exists()
         .map_err(|_| "Could not inspect global store".to_owned())?
     {
-        return Ok(None);
+        return Ok((None, None));
     }
     let db = DbConnection::open_file_read_only(&paths.database_path)
         .map_err(|_| "Could not open existing global store read-only".to_owned())?;
@@ -292,10 +305,16 @@ pub(super) fn preview_twin(
     let workspace = bound_global_workspace(&db, paths)?;
     let twin = find_twin(&db, &workspace, source, payload, reference)
         .map_err(|_| "Could not verify global duplicate lifecycle".to_owned())?;
+    let proposal = if twin.is_none() {
+        super::merge::find_proposal(&db, &workspace, source, payload, reference)
+            .map_err(|_| "Could not verify global merge proposal authority".to_owned())?
+    } else {
+        None
+    };
     snapshot
         .finish()
         .map_err(|_| "Could not release global preview snapshot".to_owned())?;
-    Ok(twin)
+    Ok((twin, proposal))
 }
 
 /// Demotion and feedback address existing records; neither is an initializer.

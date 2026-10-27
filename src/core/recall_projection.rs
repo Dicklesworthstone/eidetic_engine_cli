@@ -8,7 +8,7 @@ use super::super::{RecallCandidateRow, RecallProvenanceRef};
 use crate::db::StoredMemory;
 
 pub(super) fn locator_is_public(value: &str) -> bool {
-    !contains_private_path(value) && !crate::policy::redact_public_replay_text(value).redacted
+    crate::models::memory_anchor::code_anchor_locator_is_public(value)
 }
 
 fn contains_private_path(value: &str) -> bool {
@@ -137,8 +137,11 @@ mod tests {
     #[test]
     fn code_locators_are_not_redacted_into_phantom_paths() {
         assert!(locator_is_public("src/café.rs"));
+        assert!(locator_is_public("app/page.tsx"));
         assert!(locator_is_public("Release::publish"));
         assert!(!locator_is_public("/home/private/project.rs"));
+        assert!(!locator_is_public("src/app/page.tsx"));
+        assert!(!locator_is_public("src/home/a.rs"));
         assert!(!locator_is_public(&format!(
             "src/{}{}.rs",
             "AKIA", "ABCDEFGHIJKLMNOP"

@@ -16,8 +16,17 @@ const RAW_RUNTIME_EE_ENV_PATTERNS: [&str; 4] = [
     r#"env::var_os("EE_"#,
 ];
 const RAW_BUILD_TIME_EE_ENV_PATTERNS: [&str; 2] = [r#"option_env!("EE_"#, r#"env!("EE_"#];
-const ALLOWED_BUILD_TIME_EE_ENV_VARS: [&str; 3] =
-    ["EE_BUILD_TARGET", "EE_RELEASE_CHANNEL", "EE_TRACE_BEAD_ID"];
+const ALLOWED_BUILD_TIME_EE_ENV_VARS: [&str; 4] = [
+    "EE_BUILD_TARGET",
+    // Stamped by build.rs:73 via `cargo:rustc-env` from Cargo.lock, so the
+    // binary records WHICH sibling engine versions it was built against and not
+    // only which commit. Read with `option_env!` at src/core/mod.rs:264 for
+    // build provenance and again at :1234 by the test that asserts the stamp
+    // exists and names every linked sibling.
+    "EE_FRANKEN_STACK",
+    "EE_RELEASE_CHANNEL",
+    "EE_TRACE_BEAD_ID",
+];
 const README_WORKSPACE_HYGIENE_ENV_VARS: [&str; 4] = [
     "EE_WORKSPACE_HYGIENE_ALWAYS_REVIEW_PATTERNS",
     "EE_WORKSPACE_HYGIENE_GENERATED_PATTERNS",
@@ -44,6 +53,10 @@ const README_OBSOLETE_WORKSPACE_HYGIENE_ENV_VARS: [&str; 2] = [
 /// src/output/mod.rs).
 ///
 /// Measured 2026-10-14: 11 of 131 registered variables had no production read.
+/// Now 10. `EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN` was wired to
+/// `ee curate auto-promote --max-per-run` and its row removed in the same
+/// change, which is this list working as intended: the test fails when an entry
+/// becomes read, so honouring a variable forces its deletion here.
 /// The reasons differ in kind and the distinction is the point -- most name a
 /// subsystem that has no production caller at all, which is a different defect
 /// from a knob someone forgot to plumb -- so each entry carries its own.
@@ -51,7 +64,7 @@ const README_OBSOLETE_WORKSPACE_HYGIENE_ENV_VARS: [&str; 2] = [
 /// An entry is not permission to leave a variable unread. The test fails both
 /// ways: an unread variable missing from this list fails, and an entry that
 /// becomes read fails until it is removed. Wiring one up forces its deletion.
-const REGISTERED_WITHOUT_PRODUCTION_READ: [(&str, &str); 11] = [
+const REGISTERED_WITHOUT_PRODUCTION_READ: [(&str, &str); 10] = [
     (
         "EE_AUDIT_LANE_BATCH_MAX",
         "audit lane has no production caller: the only AuditLane::new sits in the \
@@ -72,13 +85,6 @@ const REGISTERED_WITHOUT_PRODUCTION_READ: [(&str, &str); 11] = [
         "docs/env_vars.md calls it a reserved contract; `ee curate auto-promote` exposes \
          --min-confidence-episodic and --min-confidence-semantic, and one floor does not \
          map onto both without deciding which it overrides",
-    ),
-    (
-        "EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN",
-        "`ee curate auto-promote --max-per-run` is live with default_value_t = 10, matching \
-         this variable's documented default; honoring the documented precedence (explicit \
-         flag > env > default) needs an Option field, because default_value_t cannot \
-         distinguish an explicit 10 from a defaulted one, and that moves --help goldens",
     ),
     (
         "EE_CURATION_DERIVED_PREVIEW_LIMIT",

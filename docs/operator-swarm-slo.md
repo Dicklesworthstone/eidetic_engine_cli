@@ -46,7 +46,9 @@ agent pre-push readiness.
 
 - Proof Verification (Lean4/TLA+ tooling)
 - Agent Ergonomics E2E (F1-F5)
-- Overhaul Integration E2E (J4) — already gated by `VERIFY_OVERHAUL`
+- Overhaul Integration E2E (J4) — skipped here by `ci-smoke` only. It is NOT
+  gated by `VERIFY_OVERHAUL`: the driver honours that variable but nothing in
+  the tree assigns it, so outside `ci-smoke` all 23 epics run (bd-e4ymh).
 - Swarm Next-Action Recommendation Cards E2E
 - Graph Determinism E2E (F4.a)
 - Fake Tailscale Harness (SRR6.46.10) and the SRR6.46.{1,2,6,12} mesh

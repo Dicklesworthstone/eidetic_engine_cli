@@ -186,6 +186,7 @@ impl Fixture {
 
     fn pack_options(&self) -> crate::core::context::ContextPackOptions {
         crate::core::context::ContextPackOptions {
+            bead_id: None,
             task_paths: Vec::new(),
             workspace_path: self.root.clone(),
             database_path: Some(self.root.join(".ee/ee.db")),

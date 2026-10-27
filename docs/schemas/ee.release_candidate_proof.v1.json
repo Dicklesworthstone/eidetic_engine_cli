@@ -182,7 +182,8 @@
               "TRACKED_RED",
               "INFRA_ERROR",
               "TIMEOUT",
-              "CANCELLED"
+              "CANCELLED",
+              "ENV_UNRUNNABLE"
             ]
           },
           "exitCode": { "type": ["integer", "null"] },

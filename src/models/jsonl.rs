@@ -966,6 +966,48 @@ where
     Option::<String>::deserialize(deserializer).map(Some)
 }
 
+/// Durable code locator carried independently of a memory's content and source
+/// provenance. Legacy exports omit these bindings. They are authenticated as
+/// part of the containing memory line, never inferred from export metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportCodeAnchorRecord {
+    pub kind: String,
+    pub value: String,
+    pub source: String,
+    pub provenance: String,
+}
+
+impl ExportCodeAnchorRecord {
+    /// Validate portable source grammar and public-locator policy without
+    /// consulting the receiving filesystem. Callers also screen provenance.
+    pub(crate) fn to_surface(
+        &self,
+        memory_id: &str,
+    ) -> Option<crate::models::ExtractedAnchorSurface> {
+        use crate::models::{CreateMemoryAnchorInput, MemoryAnchorKind, MemoryAnchorSource};
+        let kind = MemoryAnchorKind::parse(&self.kind)?;
+        let source = MemoryAnchorSource::parse(&self.source)?;
+        if !matches!(
+            source,
+            MemoryAnchorSource::Explicit | MemoryAnchorSource::IndexRebuild
+        ) || self.provenance.trim().is_empty()
+            || self.provenance.len() > 512
+            || self.provenance.chars().any(char::is_control)
+            || !crate::models::memory_anchor::code_anchor_locator_is_public(&self.value)
+        {
+            return None;
+        }
+        CreateMemoryAnchorInput::from_stored_code_surface(
+            memory_id,
+            kind,
+            &self.value,
+            source,
+            &self.provenance,
+        )
+    }
+}
+
 /// Export memory record.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExportMemoryRecord {
@@ -989,6 +1031,9 @@ pub struct ExportMemoryRecord {
     /// optional carrier is authenticated as part of the emitted memory line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typed_fields: Option<serde_json::Value>,
+    /// V133 additive anchors cannot be reconstructed from a memory body alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub code_anchors: Vec<ExportCodeAnchorRecord>,
     pub importance: Option<f64>,
     pub confidence: Option<f64>,
     pub utility: Option<f64>,
@@ -1345,6 +1390,7 @@ impl ExportMemoryRecordBuilder {
                 .ok_or_else(|| missing_required(ExportRecordType::Memory, "content"))?,
             content_hash: self.content_hash,
             typed_fields: self.typed_fields,
+            code_anchors: Vec::new(),
             importance: self.importance,
             confidence: self.confidence,
             utility: self.utility,

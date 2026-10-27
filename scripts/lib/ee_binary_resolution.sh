@@ -439,6 +439,65 @@ ee_assert_target_os_supported() {
     return 1
 }
 
+# Does the candidate binary's enabled feature set match what Cargo.toml declares
+# as `default = [...]`? (bd-reality-core-convergence-1azkt.5, bullet 5,
+# "features"; emptiness arm from bd-sb2pl.)
+#
+# WHY THIS MOVED OUT OF verify.sh. The comparison was an inline `[ "$a" != "$b" ]`
+# there, which that file's own comment on the TRIPLE check already argues against:
+# "the comparison lives in the resolution lib so it has self-test arms; an inline
+# chain here could only be exercised by running the whole script." Measured
+# 2026-10-18: of this suite's 36 arms, 0 exercised the feature comparison, while
+# the three sibling properties (hash, triple, OS) had 4, 4 and 4.
+#
+# THE TWO SIDES ARE NOT SYMMETRIC, which is why this does not reuse the triple
+# helper's single `-z a || -z b` arm:
+#
+#   EXPECTED empty is never legitimate. `default = []` MATCHES verify.sh's regex,
+#   so findall returns [], the helper prints an empty line and exits 0 -- a
+#   success status carrying no expectation. Measured against a `default = []`
+#   fixture 2026-10-18. The old exit-status guard passed it, "" == "" compared
+#   equal, and the check certified a binary it had not examined.
+#
+#   ACTUAL empty IS legitimate: a binary built --no-default-features genuinely
+#   has zero features enabled. Against a non-empty expectation that is a real
+#   MISMATCH (1), not an unreadable world (3) -- the distinction the triple
+#   helper does not have to draw because ee_binary_target_triple refuses an
+#   empty triple before returning.
+#
+# Equality of the sorted, space-joined lists, because both callers sort.
+#
+#   0  match
+#   1  mismatch -- prints both sets, rendering an empty side as <none>
+#   3  no expectation to compare against, so nothing was checked
+ee_assert_feature_set_matches_manifest() {
+    local actual="${1-}"
+    local expected="${2-}"
+    local binary="${3:-the candidate binary}"
+    local label="${4:-verify}"
+
+    if [ -z "$expected" ]; then
+        printf '%s: features NOT CHECKED: Cargo.toml declared no default set.\n' "$label" >&2
+        printf '%s: `default = []` reads as success but carries no expectation,\n' "$label" >&2
+        printf '%s: and a binary with no features enabled would compare equal to\n' "$label" >&2
+        printf '%s: it. Two empty values are not a match.\n' "$label" >&2
+        return 3
+    fi
+
+    if [ "$actual" = "$expected" ]; then
+        printf '%s: candidate binary features match Cargo.toml default: %s\n' \
+            "$label" "$actual" >&2
+        return 0
+    fi
+
+    printf '%s: candidate binary feature set does not match Cargo.toml.\n' "$label" >&2
+    printf '%s:   expected (Cargo.toml default): %s\n' "$label" "$expected" >&2
+    printf '%s:   actual   (%s): %s\n' "$label" "$binary" "${actual:-<none>}" >&2
+    printf '%s: a stage needing an optional feature does not error at the feature\n' "$label" >&2
+    printf '%s: boundary -- it takes the fallback path and asserts against that.\n' "$label" >&2
+    return 1
+}
+
 # Default binary for a harness that would otherwise fall back to PATH `ee`
 # (bd-z6g1s).
 #
@@ -483,6 +542,29 @@ ee_resolve_fixture_binary() {
         fi
     fi
 
-    printf '%s: ee_binary=%s origin=%s\n' "$label" "$candidate" "$origin" >&2
+    # VERSION BELONGS ON THE PROVENANCE LINE, not just the path and origin.
+    # This function does NOT require the binary to be current (that is
+    # bd-resolve-without-require-binary-guard-jqiws, and adding the
+    # requirement here would refuse every local harness run on a host that
+    # cannot build one). What it can do for free is stop the staleness being
+    # SILENT.
+    #
+    # Measured on this Mac 2026-10-18: both built binaries are Linux ELF, so
+    # `ee_binary_executes_here` rejects them, the fallback takes PATH `ee`,
+    # and the line read
+    #
+    #     verify-metamorphic: ee_binary=ee origin=path_fallback
+    #
+    # while that binary was 0.14.2 against a source version of 0.18.0 -- four
+    # minor versions and two months behind. The origin said where it came
+    # from and nothing said what it was.
+    #
+    # `|| echo unknown` because a candidate that cannot report a version must
+    # not break resolution; that is a different failure and the callers that
+    # care have ee_require_current_binary.
+    local candidate_version
+    candidate_version="$(ee_binary_version "$candidate" 2>/dev/null || true)"
+    printf '%s: ee_binary=%s origin=%s version=%s\n' \
+        "$label" "$candidate" "$origin" "${candidate_version:-unknown}" >&2
     printf '%s\n' "$candidate"
 }

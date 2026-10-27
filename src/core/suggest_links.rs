@@ -12,7 +12,7 @@
 //! Worst-case cost is O(Σ deg²) over CAPPED lists — never O(n²) over the
 //! corpus (the planted-trap unit test enforces this).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use fnx_classes::Graph;
 use fnx_runtime::CompatibilityMode;
@@ -162,6 +162,10 @@ fn jaccard<T: Ord>(left: &BTreeSet<T>, right: &BTreeSet<T>) -> f64 {
     }
 }
 
+/// Flat positive signals are evidence, not missing measurements. Fall back to
+/// zero-anchored scaling when their spread cannot support min-max scaling;
+/// this keeps a singleton or equally supported cohort above a positive floor.
+/// These are batch-relative ranking signals, not calibrated probabilities.
 fn min_max_normalize(values: &mut [f64]) {
     let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
     for value in values.iter() {
@@ -171,7 +175,11 @@ fn min_max_normalize(values: &mut [f64]) {
     let span = max - min;
     if !span.is_finite() || span < 1e-12 {
         for value in values.iter_mut() {
-            *value = 0.0;
+            *value = if span.is_finite() && max > 0.0 && value.is_finite() {
+                (*value / max).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
         }
         return;
     }
@@ -187,6 +195,8 @@ fn typed_relation(
     memory_a: &str,
     memory_b: &str,
 ) -> SuggestedRelation {
+    #[cfg(test)]
+    RELATION_CLASSIFICATIONS.with(|calls| calls.set(calls.get() + 1));
     let (Some(text_a), Some(text_b)) = (content.get(memory_a), content.get(memory_b)) else {
         return SuggestedRelation::Related;
     };
@@ -282,15 +292,88 @@ fn bounded_candidates(
             }
         }
     }
-    let ordered: Vec<(String, String)> = candidates.iter().cloned().collect();
+    let ordered: Vec<(String, String)> = candidates.into_iter().collect();
     (linked, capped_neighbors, ordered)
+}
+
+/// Indices refer to the complete, lexicographically ordered candidate pool.
+/// Better scores sort first; a max-heap therefore exposes the worst retained
+/// candidate. Equal scores (including signed zero) keep the earlier pair ID.
+#[derive(Clone, Copy, Debug)]
+struct RankedCandidate {
+    index: usize,
+    score: f64,
+}
+
+impl Ord for RankedCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let score_order = if self.score == other.score {
+            std::cmp::Ordering::Equal
+        } else {
+            other.score.total_cmp(&self.score)
+        };
+        score_order.then_with(|| self.index.cmp(&other.index))
+    }
+}
+
+impl PartialOrd for RankedCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for RankedCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for RankedCandidate {}
+
+/// Score EVERY candidate against the already normalized complete cohort, then
+/// retain only K numeric ordinals. Do not take K candidates before scoring:
+/// that changes extrema, discards late winners and changes the emitted scores.
+/// A zero limit retains its historical unlimited meaning. No allocation is
+/// reserved from the caller's limit, which may legitimately be usize::MAX.
+fn rank_candidates(
+    candidate_count: usize,
+    limit: usize,
+    min_score: f64,
+    mut score: impl FnMut(usize) -> f64,
+) -> Vec<RankedCandidate> {
+    let mut retained = BinaryHeap::new();
+    for index in 0..candidate_count {
+        let score = score(index);
+        // Preserve the inclusive floor and its NaN refusal behavior.
+        if score
+            .partial_cmp(&min_score)
+            .is_none_or(|ordering| ordering.is_lt())
+        {
+            continue;
+        }
+        let candidate = RankedCandidate { index, score };
+        if limit == 0 || retained.len() < limit {
+            retained.push(candidate);
+        } else if let Some(mut worst) = retained.peek_mut()
+            && candidate < *worst
+        {
+            *worst = candidate;
+        }
+        debug_assert!(limit == 0 || retained.len() <= limit);
+    }
+    retained.into_sorted_vec()
+}
+
+#[cfg(test)]
+thread_local! {
+    static RELATION_CLASSIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Generate bounded candidates and score them with the blended predictor
 /// suite. Deterministic: ordering is score desc, then pair id.
 #[must_use]
 pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
-    let (_linked, capped_neighbors, candidate_pairs) = bounded_candidates(input);
+    let (_, capped_neighbors, candidate_pairs) = bounded_candidates(input);
     let candidate_count = candidate_pairs.len();
     if candidate_pairs.is_empty() {
         return SuggestLinksReport {
@@ -311,14 +394,13 @@ pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
         graph.add_node(left.as_str());
         graph.add_node(right.as_str());
     }
-    let ebunch: Vec<(String, String)> = candidate_pairs.clone();
-    let aa_scores = fnx_algorithms::adamic_adar_index(&graph, &ebunch);
-    let pa_scores = fnx_algorithms::preferential_attachment(&graph, &ebunch);
+    let aa_scores = fnx_algorithms::adamic_adar_index(&graph, &candidate_pairs);
+    let pa_scores = fnx_algorithms::preferential_attachment(&graph, &candidate_pairs);
 
     // ── raw signal vectors in candidate order ────────────────────────────
     let empty_tags = BTreeSet::new();
-    let mut aa: Vec<f64> = aa_scores.iter().map(|(_, _, score)| *score).collect();
-    let mut pa: Vec<f64> = pa_scores.iter().map(|(_, _, score)| *score).collect();
+    let mut aa: Vec<f64> = aa_scores.into_iter().map(|(_, _, score)| score).collect();
+    let mut pa: Vec<f64> = pa_scores.into_iter().map(|(_, _, score)| score).collect();
     let mut jaccard_tags: Vec<f64> = candidate_pairs
         .iter()
         .map(|(left, right)| {
@@ -364,15 +446,20 @@ pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
         input.weights.affinity
     };
 
-    let mut suggestions: Vec<SuggestedLink> = candidate_pairs
-        .iter()
-        .enumerate()
-        .map(|(index, (memory_a, memory_b))| {
-            let score = input.weights.adamic_adar * aa[index]
-                + input.weights.jaccard_tags * jaccard_tags[index]
-                + input.weights.ppr * ppr[index]
-                + affinity_weight * affinity[index]
-                + input.weights.preferential_attachment * pa[index];
+    let ranked = rank_candidates(candidate_count, input.limit, input.min_score, |index| {
+        input.weights.adamic_adar * aa[index]
+            + input.weights.jaccard_tags * jaccard_tags[index]
+            + input.weights.ppr * ppr[index]
+            + affinity_weight * affinity[index]
+            + input.weights.preferential_attachment * pa[index]
+    });
+    // Content tokenization, relation typing, ID copies and reason strings are
+    // only needed for returned suggestions. Rejected candidates retain neither
+    // output objects nor a duplicate body-derived token set.
+    let suggestions = ranked
+        .into_iter()
+        .map(|RankedCandidate { index, score }| {
+            let (memory_a, memory_b) = &candidate_pairs[index];
             let signals = SuggestSignals {
                 adamic_adar: raw.0[index],
                 jaccard_tags: raw.1[index],
@@ -418,19 +505,7 @@ pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
                 reason,
             }
         })
-        .filter(|suggestion| suggestion.score >= input.min_score)
         .collect();
-
-    suggestions.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| (&left.memory_a, &left.memory_b).cmp(&(&right.memory_a, &right.memory_b)))
-    });
-    if input.limit > 0 {
-        suggestions.truncate(input.limit);
-    }
 
     SuggestLinksReport {
         suggestions,
@@ -442,6 +517,281 @@ pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sorted_reference(scores: &[f64], limit: usize, floor: f64) -> Vec<RankedCandidate> {
+        let mut result: Vec<_> = scores
+            .iter()
+            .enumerate()
+            .filter(|(_, score)| **score >= floor)
+            .map(|(index, &score)| RankedCandidate { index, score })
+            .collect();
+        // The old full-materialization comparator, not the heap's Ord impl.
+        result.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.index.cmp(&right.index))
+        });
+        if limit != 0 {
+            result.truncate(limit);
+        }
+        result
+    }
+
+    #[test]
+    fn numeric_selection_matches_full_sort_across_limits_floors_and_ties() {
+        let scores = [
+            0.1,
+            0.8,
+            0.8,
+            0.5,
+            0.9,
+            -0.0,
+            0.0,
+            f64::INFINITY,
+            f64::NAN,
+            f64::NEG_INFINITY,
+        ];
+        for limit in [0, 1, 2, 5, 20, usize::MAX] {
+            for floor in [f64::NEG_INFINITY, -0.0, 0.6, 1.0, f64::INFINITY, f64::NAN] {
+                let mut calls = 0;
+                let actual = rank_candidates(scores.len(), limit, floor, |index| {
+                    calls += 1;
+                    scores[index]
+                });
+                assert_eq!(actual, sorted_reference(&scores, limit, floor));
+                assert_eq!(calls, scores.len());
+                assert!(limit == 0 || actual.len() <= limit);
+            }
+        }
+    }
+
+    #[test]
+    fn heap_selection_matches_the_independent_full_sort_over_generated_cohorts() {
+        let mut random = 17_u64;
+        for count in 0..96 {
+            let scores: Vec<_> = (0..count)
+                .map(|_| {
+                    random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((random >> 32) % 19) as f64 / 13.0
+                })
+                .collect();
+            for limit in [0, 1, 2, 7, 32, 96, usize::MAX] {
+                for floor in [-1.0, 0.0, 0.5, 1.0, 2.0] {
+                    assert_eq!(
+                        rank_candidates(count, limit, floor, |index| scores[index]),
+                        sorted_reference(&scores, limit, floor)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_late_winner_is_not_lost_to_an_early_candidate_limit() {
+        let result = rank_candidates(10_000, 1, 0.0, |index| index as f64);
+        assert_eq!(
+            result,
+            vec![RankedCandidate {
+                index: 9999,
+                score: 9999.0
+            }]
+        );
+        let tied = rank_candidates(10_000, 3, 0.0, |_| 1.0);
+        assert_eq!(
+            tied.iter().map(|item| item.index).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+    }
+
+    fn ranking_fixture() -> SuggestLinksInput {
+        let mut input = SuggestLinksInput {
+            limit: 0,
+            ..SuggestLinksInput::default()
+        };
+        for index in 0..24 {
+            let id = format!("mem_{index:03}");
+            input.tags.insert(
+                id.clone(),
+                BTreeSet::from(["candidate".to_owned(), format!("group_{}", index % 5)]),
+            );
+            input.content.insert(
+                id.clone(),
+                format!(
+                    "{} run the schema drift gate before changing public JSON",
+                    if index % 3 == 0 { "never" } else { "always" }
+                ),
+            );
+            if index != 0 {
+                input.links.push((format!("mem_{:03}", index - 1), id));
+            }
+        }
+        let pairs = generate_candidate_pairs(&input);
+        let mut affinity = BTreeMap::new();
+        for (index, pair) in pairs.into_iter().enumerate() {
+            input.ppr.insert(pair.clone(), (index % 11) as f64 / 11.0);
+            affinity.insert(pair, (index % 7) as f64 / 7.0);
+        }
+        input.affinity = Some(affinity);
+        input
+    }
+
+    #[test]
+    fn limited_public_reports_equal_full_cohort_prefixes_including_all_evidence() {
+        for warm in [false, true] {
+            for floor in [0.0, 0.2, 0.4, 0.6] {
+                let mut input = ranking_fixture();
+                input.min_score = floor;
+                if !warm {
+                    input.affinity = None;
+                }
+                let full = suggest_links(&input);
+                assert!(full.candidate_count > 100);
+                for limit in [1, 2, 7, 64, usize::MAX] {
+                    input.limit = limit;
+                    let actual = suggest_links(&input);
+                    let mut expected = full.suggestions.clone();
+                    expected.truncate(limit);
+                    assert_eq!(actual.suggestions, expected);
+                    assert_eq!(
+                        serde_json::to_value(&actual.suggestions).expect("limited JSON"),
+                        serde_json::to_value(&expected).expect("full-prefix JSON")
+                    );
+                    assert_eq!(actual.candidate_count, full.candidate_count);
+                    assert_eq!(actual.affinity_cold, full.affinity_cold);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn discarded_candidates_never_reach_content_classification() {
+        let mut input = ranking_fixture();
+        for (limit, floor) in [(1, 0.0), (7, 0.0), (0, 0.0), (1, 2.0)] {
+            input.limit = limit;
+            input.min_score = floor;
+            let before = RELATION_CLASSIFICATIONS.with(std::cell::Cell::get);
+            let report = suggest_links(&input);
+            let calls = RELATION_CLASSIFICATIONS.with(std::cell::Cell::get) - before;
+            assert_eq!(calls, report.suggestions.len());
+            assert!(report.candidate_count > 100);
+            if floor > 1.0 {
+                assert_eq!(calls, 0);
+            } else if limit == 0 {
+                assert_eq!(calls, report.candidate_count);
+            } else {
+                assert_eq!(calls, limit);
+            }
+        }
+    }
+
+    #[test]
+    fn a_single_tag_supported_pair_survives_a_positive_score_floor() {
+        let input = SuggestLinksInput {
+            tags: tags_for(&[("mem_a", &["release"]), ("mem_b", &["release"])]),
+            min_score: 0.19,
+            limit: 10,
+            ..SuggestLinksInput::default()
+        };
+        let report = suggest_links(&input);
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(report.suggestions.len(), 1);
+        let suggestion = &report.suggestions[0];
+        assert_eq!(suggestion.score, input.weights.jaccard_tags);
+        assert_eq!(suggestion.signals.jaccard_tags, 1.0);
+        assert_eq!(suggestion.signals.adamic_adar, 0.0);
+        assert_eq!(suggestion.signals.ppr, 0.0);
+        assert_eq!(suggestion.signals.affinity, 0.0);
+        assert!(suggestion.reason.contains("driven by tag overlap"));
+        assert!(report.affinity_cold);
+    }
+
+    #[test]
+    fn equal_positive_cohorts_keep_support_and_the_inclusive_floor() {
+        let mut input = SuggestLinksInput {
+            tags: tags_for(&[
+                ("mem_c", &["release"]),
+                ("mem_a", &["release"]),
+                ("mem_b", &["release"]),
+            ]),
+            min_score: 0.20,
+            limit: 10,
+            ..SuggestLinksInput::default()
+        };
+        let report = suggest_links(&input);
+        assert_eq!(report.candidate_count, 3);
+        assert_eq!(report.suggestions.len(), 3);
+        assert!(report.suggestions.iter().all(|item| item.score == 0.20));
+        assert_eq!(report, suggest_links(&input));
+        input.min_score = 0.2001;
+        assert!(suggest_links(&input).suggestions.is_empty());
+    }
+
+    #[test]
+    fn singleton_native_graph_signals_retain_their_blend_weights() {
+        let input = SuggestLinksInput {
+            links: vec![
+                ("mem_a".to_owned(), "mem_c".to_owned()),
+                ("mem_b".to_owned(), "mem_c".to_owned()),
+            ],
+            min_score: 0.39,
+            limit: 10,
+            ..SuggestLinksInput::default()
+        };
+        let report = suggest_links(&input);
+        assert_eq!(report.suggestions.len(), 1);
+        let suggestion = &report.suggestions[0];
+        assert_eq!(
+            suggestion.score,
+            input.weights.adamic_adar + input.weights.preferential_attachment
+        );
+        assert!((suggestion.signals.adamic_adar - 1.0 / 2f64.ln()).abs() < 1e-9);
+        assert_eq!(suggestion.signals.preferential_attachment, 1.0);
+    }
+
+    #[test]
+    fn singleton_affinity_is_not_confused_with_cold_or_zero_affinity() {
+        let pair = ("mem_a".to_owned(), "mem_b".to_owned());
+        let mut input = SuggestLinksInput {
+            affinity: Some(BTreeMap::from([(pair.clone(), 0.7)])),
+            min_score: 0.14,
+            limit: 10,
+            ..SuggestLinksInput::default()
+        };
+        let report = suggest_links(&input);
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(report.suggestions.len(), 1);
+        assert_eq!(report.suggestions[0].score, input.weights.affinity);
+        assert_eq!(report.suggestions[0].signals.affinity, 0.7);
+        assert!(!report.affinity_cold);
+        input.affinity = Some(BTreeMap::from([(pair, 0.0)]));
+        let empty = suggest_links(&input);
+        assert_eq!(empty.candidate_count, 1);
+        assert!(empty.suggestions.is_empty());
+        assert!(!empty.affinity_cold);
+        input.affinity = None;
+        assert!(suggest_links(&input).affinity_cold);
+    }
+
+    #[test]
+    fn flat_scaling_preserves_absence_and_nonflat_scaling_is_unchanged() {
+        for (mut values, expected) in [
+            (vec![], vec![]),
+            (vec![0.0], vec![0.0]),
+            (vec![0.0, 0.0], vec![0.0, 0.0]),
+            (vec![-1.0, -1.0], vec![0.0, 0.0]),
+            (vec![2.0], vec![1.0]),
+            (vec![2.0, 2.0], vec![1.0, 1.0]),
+            (vec![0.0, 1e-13], vec![0.0, 1.0]),
+            (vec![9.0, 5.0, 2.0], vec![1.0, 3.0 / 7.0, 0.0]),
+            (vec![f64::INFINITY], vec![0.0]),
+            (vec![f64::NAN], vec![0.0]),
+        ] {
+            min_max_normalize(&mut values);
+            assert_eq!(values, expected);
+        }
+    }
 
     fn tags_for(pairs: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
         pairs

@@ -168,7 +168,18 @@ fn workspace_daemon_serves_real_hook_reads_and_falls_back_without_crossing_store
             let warm = read(root, args, None)?;
             assert!(
                 !has_fallback(&warm),
-                "same-workspace RPC must execute successfully: {warm}"
+                "same-workspace read must be SERVED BY THE DAEMON, not by the \
+                 in-process fallback. The predicate here is the absence of \
+                 `daemon_memory_read_fallback` from degraded[] -- it is NOT \
+                 whether the call succeeded, and the envelope below will \
+                 normally carry success:true either way, because falling back \
+                 still answers the question. Read degraded[] first: a \
+                 `Daemon attempt deadline exceeded` message means the daemon \
+                 did not answer in time rather than that it answered wrongly, \
+                 which is a timing condition and is graded differently from a \
+                 store-crossing bug. Saying \"must execute successfully\" here \
+                 sent one reader looking for an execution failure that had not \
+                 happened: {warm}"
             );
             let text = warm["data"]["ambientContext"]["text"]
                 .as_str()
@@ -332,7 +343,29 @@ fn generated_session_hook_delivers_context_and_records_runtime_outcomes() -> Tes
             .map_err(|error| error.to_string())?;
         child.wait_with_output().map_err(|error| error.to_string())
     };
-    let response = successful(invoke(&snippet.command, "first")?)?;
+    // THE HOOK IS FAIL-OPEN, so "emitted nothing" is three different states
+    // wearing one appearance: a dedup hit, an internal error, and a missing ee
+    // binary all exit 0 with empty stdout -- this test asserts the last two of
+    // those further down. Handed that to `successful`, the whole diagnosis is
+    // `invalid JSON: EOF while parsing a value at line 1 column 0: `, which is
+    // what a 2026-10-23 dispatch actually returned and which names none of the
+    // three. The outcome IS recorded, in the state file this test already reads
+    // below, so read it here instead of reporting the emptiness.
+    let first = invoke(&snippet.command, "first")?;
+    if first.stdout.is_empty() {
+        let recorded = root.join(".ee/hook-state/session_start_orient.last.json");
+        return Err(format!(
+            "the SessionStart hook emitted nothing on its FIRST invocation, so \
+             there is no context to check. Exit {:?} with empty stdout is also \
+             what a dedup hit and an internal error look like here, so read the \
+             recorded outcome rather than this emptiness.\nstate {}: {}\nstderr: {}",
+            first.status.code(),
+            recorded.display(),
+            fs::read_to_string(&recorded).unwrap_or_else(|error| format!("<unreadable: {error}>")),
+            String::from_utf8_lossy(&first.stderr)
+        ));
+    }
+    let response = successful(first)?;
     let context = response["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .ok_or("hook must inject context")?;

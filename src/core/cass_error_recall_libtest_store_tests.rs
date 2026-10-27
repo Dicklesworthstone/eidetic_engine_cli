@@ -273,3 +273,91 @@ fn instruction_risk_in_captured_stdout_still_blocks_the_whole_learning_source() 
     assert!(!error_recall_report(&episode.connection, WS, &canonical())?.exact);
     Ok(())
 }
+
+fn pretty_retry(name: &str, ignored: bool) -> String {
+    format!(
+        "running 1 test\ntest {name} ... {}\n\ntest result: ok. {} passed; 0 failed; {} ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+        if ignored { "ignored" } else { "ok" },
+        usize::from(!ignored),
+        usize::from(ignored),
+    )
+}
+
+#[test]
+fn styled_libtest_reruns_verify_typed_incidents_and_preserve_their_source_bytes() -> TestResult {
+    let pretty = pretty_retry("cache::round_trip", false);
+    for proof in [
+        format!("\u{1b}[32m{pretty}\u{1b}[0m"),
+        pretty
+            .replace(" ... ok", " ... \u{1b}[32mok\u{1b}[0m")
+            .replace("test result:", "\u{1b}[1mtest result:\u{1b}[0m"),
+        format!("\u{1b}]8;;https://example.test/results\u{7}{pretty}\u{1b}]8;;\u{7}"),
+    ] {
+        let episode = episode(&test_output("failed"), &proof, COMMAND)?;
+        let db = &episode.connection;
+        let before = db.list_evidence_spans_for_session(&episode.session)?;
+        let report = record_session_error_recall(db, WS, &episode.session)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.resolved_failures, 1);
+        assert_eq!(report.incident_cards_recorded, 1);
+        let recall = error_recall_report(db, WS, &canonical())?;
+        assert!(recall.exact);
+        assert!(recall.helpful_repairs.contains(&episode.repair));
+        assert_eq!(recall.proof_links, vec![episode.proof.clone()]);
+        let card_id = crate::core::incident_card::incident_card_id(WS, &episode.failure);
+        let card = db.get_evidence_span(&card_id)?.ok_or("card")?;
+        let mut checks = crate::core::incident_card::proof::CardChecks::default();
+        checks.observe(&card)?;
+        assert!(checks.withheld(db, WS)?.is_empty());
+        assert!(recall.helpful_repairs.contains(&card_id));
+        assert!(pack_error_recall_query_seed(db, WS, &canonical())?.contains("flushing"));
+        for source in before {
+            let after = db.get_evidence_span(&source.id)?.ok_or("source")?;
+            assert_eq!(source.excerpt, after.excerpt);
+            assert_eq!(source.content_hash, after.content_hash);
+            assert_eq!(source.metadata_json, after.metadata_json);
+            assert_eq!(
+                source.canonical_provenance_uri(),
+                after.canonical_provenance_uri()
+            );
+        }
+        assert_eq!(
+            record_session_error_recall(db, WS, &episode.session)?.incident_cards_recorded,
+            0
+        );
+        assert_eq!(
+            db.list_error_repair_links(WS, &canonical().layered_key().key)?
+                .len(),
+            3
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn styled_green_summaries_cannot_hide_missing_skipped_or_renamed_failed_tests() -> TestResult {
+    let complete = pretty_retry("cache::round_trip", false);
+    for plain in [
+        pretty_retry("cache::round_trip", true),
+        pretty_retry("Cache::round_trip", false),
+        pretty_retry("replacement", false),
+        "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.01s\n".to_owned(),
+        complete.lines().skip(1).collect::<Vec<_>>().join("\n"),
+        complete.replace("1 passed", "2 passed"),
+    ] {
+        let proof = format!("\u{1b}[32m{plain}\u{1b}[0m");
+        let episode = episode(&test_output("failed"), &proof, COMMAND)?;
+        let db = &episode.connection;
+        let report = record_session_error_recall(db, WS, &episode.session)?;
+        assert_eq!(report.failures_seen, 1);
+        assert_eq!(report.resolved_failures, 0, "{plain}");
+        assert_eq!(report.repair_links_recorded, 0);
+        assert_eq!(report.incident_cards_recorded, 0);
+        let recall = error_recall_report(db, WS, &canonical())?;
+        assert!(recall.exact);
+        assert!(recall.helpful_repairs.is_empty());
+        assert!(recall.proof_links.is_empty());
+        assert!(!pack_error_recall_query_seed(db, WS, &canonical())?.contains("prior fix:"));
+    }
+    Ok(())
+}

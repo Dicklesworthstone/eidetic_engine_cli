@@ -34,7 +34,7 @@ use crate::graph::health::{
     ContradictionCluster, ContradictionClusterPolicy, ContradictionSeverity,
     detect_contradiction_clusters_with_policy,
 };
-use crate::models::TrustClass;
+use crate::models::{Tag, TrustClass};
 
 /// An explicit, DB-recorded conflict signal between two memories. Each variant is
 /// evidence the store already holds — never an inferred/fuzzy guess.
@@ -285,14 +285,74 @@ pub struct GatheredConflictEdges {
     /// Explicit signal kinds deferred to a later DB-gather slice (reported, not
     /// silently dropped).
     pub deferred: Vec<ExplicitConflictSignal>,
-    /// Set when the link read failed: the gather degrades to no edges rather than
-    /// panicking, and the read failure is reported instead of being swallowed.
+    /// A failed evidence or resolution read is reported instead of swallowed.
+    /// If only resolution authority is unavailable, explicit edges are retained
+    /// and no pair is treated as resolved.
     pub read_error: Option<String>,
-    /// Canonical pairs a reviewed `both-valid` resolution marked as legitimate
-    /// tension (`ee conflict resolve --verb both-valid` writes a `related` link
-    /// with `resolution=both_valid` metadata): suppressed from the actionable
-    /// pair surface, bd-3a1op.4.
-    pub both_valid_resolved: std::collections::BTreeSet<(String, String)>,
+    /// Canonical pairs with a completed, decision-backed resolution audit.
+    /// Generic link metadata cannot establish resolution authority.
+    pub resolved_pairs: BTreeSet<(String, String)>,
+}
+
+pub(crate) const CONFLICT_RESOLUTION_AUDIT_ACTION: &str = "conflict.resolve";
+pub(crate) const CONFLICT_RESOLUTION_AUDIT_SCHEMA: &str = "ee.conflict.resolution.v1";
+
+/// A completion is authoritative only when its workspace, pair, decision and
+/// both provenance links agree. Original conflict edges remain available as
+/// history; the surface and pack guard consume this same completed-pair set.
+fn load_completed_conflict_pairs(
+    connection: &DbConnection,
+) -> crate::db::Result<BTreeSet<(String, String)>> {
+    use sqlmodel_core::Value;
+
+    let rows = connection.query(
+        "WITH resolutions AS (\
+             SELECT workspace_id, target_id, \
+                    CASE WHEN json_valid(details) THEN details ELSE NULL END AS details \
+             FROM audit_log WHERE action = ?1 AND target_type = 'conflict'\
+         ) \
+         SELECT first.id, second.id, resolution.target_id \
+         FROM resolutions AS resolution \
+         JOIN memories AS first ON first.id = json_extract(resolution.details, '$.memoryA') \
+           AND first.workspace_id = resolution.workspace_id \
+         JOIN memories AS second ON second.id = json_extract(resolution.details, '$.memoryB') \
+           AND second.workspace_id = resolution.workspace_id \
+         JOIN memories AS decision \
+           ON decision.id = json_extract(resolution.details, '$.resolutionDecisionId') \
+          AND decision.kind = 'decision' AND decision.workspace_id = resolution.workspace_id \
+         WHERE json_extract(resolution.details, '$.schema') = ?2 \
+           AND json_extract(resolution.details, '$.verb') IN \
+               ('supersede', 'reject-one', 'scope-split', 'both-valid') \
+           AND json_extract(resolution.details, '$.conflictId') = resolution.target_id \
+           AND first.id < second.id AND decision.id <> first.id AND decision.id <> second.id \
+           AND EXISTS (SELECT 1 FROM memory_links AS provenance \
+                       WHERE provenance.src_memory_id = decision.id \
+                         AND provenance.dst_memory_id = first.id \
+                         AND provenance.relation = 'derived_from' AND provenance.directed = 1) \
+           AND EXISTS (SELECT 1 FROM memory_links AS provenance \
+                       WHERE provenance.src_memory_id = decision.id \
+                         AND provenance.dst_memory_id = second.id \
+                         AND provenance.relation = 'derived_from' AND provenance.directed = 1) \
+         ORDER BY first.id ASC, second.id ASC",
+        &[
+            Value::Text(CONFLICT_RESOLUTION_AUDIT_ACTION.to_owned()),
+            Value::Text(CONFLICT_RESOLUTION_AUDIT_SCHEMA.to_owned()),
+        ],
+    )?;
+    let mut resolved = BTreeSet::new();
+    for row in rows {
+        let (Some(a), Some(b), Some(conflict_id)) = (
+            row.get(0).and_then(Value::as_str),
+            row.get(1).and_then(Value::as_str),
+            row.get(2).and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if conflict_pair_id(a, b) == conflict_id {
+            resolved.insert((a.to_owned(), b.to_owned()));
+        }
+    }
+    Ok(resolved)
 }
 
 /// Explicit signal kinds the v1 DB-gather covers (the link-based, least-ambiguous
@@ -344,38 +404,16 @@ pub fn gather_explicit_conflict_edges(connection: &DbConnection) -> GatheredConf
                 gathered,
                 deferred,
                 read_error: Some(format!("memory links could not be read: {error}")),
-                both_valid_resolved: std::collections::BTreeSet::new(),
+                resolved_pairs: BTreeSet::new(),
             };
         }
     };
 
     let mut edges = Vec::new();
-    let mut both_valid_resolved = std::collections::BTreeSet::new();
     for link in &links {
         let signal = match link.relation_enum() {
             Some(MemoryLinkRelation::Contradicts) => ExplicitConflictSignal::ContradictionLink,
             Some(MemoryLinkRelation::Supersedes) => ExplicitConflictSignal::Supersession,
-            Some(MemoryLinkRelation::Related) => {
-                // A reviewed both-valid resolution (bd-3a1op.4) marks the pair
-                // as legitimate tension; record it so the surface suppresses
-                // the pair instead of re-flagging a settled conflict.
-                let resolved = link
-                    .metadata_json
-                    .as_deref()
-                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                    .and_then(|meta| {
-                        meta.get("resolution")
-                            .and_then(serde_json::Value::as_str)
-                            .map(|value| value == "both_valid")
-                    })
-                    .unwrap_or(false);
-                if resolved {
-                    let (a, b) = (link.src_memory_id.as_str(), link.dst_memory_id.as_str());
-                    let pair = if a <= b { (a, b) } else { (b, a) };
-                    both_valid_resolved.insert((pair.0.to_owned(), pair.1.to_owned()));
-                }
-                continue;
-            }
             // Supports / DerivedFrom / CoTag / CoMention and any unparseable
             // relation are not explicit conflict evidence.
             _ => continue,
@@ -387,12 +425,21 @@ pub fn gather_explicit_conflict_edges(connection: &DbConnection) -> GatheredConf
         ));
     }
 
+    let (resolved_pairs, read_error) = match load_completed_conflict_pairs(connection) {
+        Ok(resolved) => (resolved, None),
+        Err(error) => (
+            BTreeSet::new(),
+            Some(format!(
+                "conflict resolution authority could not be read: {error}"
+            )),
+        ),
+    };
     GatheredConflictEdges {
         edges,
         gathered,
         deferred,
-        read_error: None,
-        both_valid_resolved,
+        read_error,
+        resolved_pairs,
     }
 }
 
@@ -516,6 +563,25 @@ pub struct ConflictSurface {
 }
 
 impl ConflictSurface {
+    pub(crate) fn empty(config: ContradictionDetectionConfig) -> Self {
+        Self {
+            schema: CONFLICT_SURFACE_SCHEMA_V1,
+            pairs: Vec::new(),
+            clusters: Vec::new(),
+            explicit_edge_count: 0,
+            gathered_signals: GATHERED_SIGNAL_KINDS
+                .iter()
+                .map(|signal| signal.as_str().to_owned())
+                .collect(),
+            deferred_signals: DEFERRED_SIGNAL_KINDS
+                .iter()
+                .map(|signal| signal.as_str().to_owned())
+                .collect(),
+            fuzzy_near_conflict_skipped: config.include_fuzzy_near_conflict,
+            degraded: Vec::new(),
+        }
+    }
+
     /// Pairs/clusters that implicate `memory_id` (for `ee conflict explain`).
     #[must_use]
     pub fn focused_on(&self, memory_id: &str) -> ConflictSurface {
@@ -587,28 +653,159 @@ fn preferred_side(
 
 /// Assemble the read-only conflict surface from the database (bd-1n0np.7.3).
 ///
-/// Reuses [`detect_explicit_contradictions_from_connection`] (the 7.2 gather +
-/// detector), then joins each canonical conflicting pair with both memory rows so
-/// the surface can report both bodies, the higher-trust/fresher side, and the
-/// load-bearing weight. A pair whose memory rows cannot be read is dropped with a
-/// visible `degraded` note (never silent). Deterministic: pairs sort by
-/// load-bearing weight desc, then `conflict_id`.
+/// This database-wide helper admits only current, visible sources and never
+/// joins a pair across workspaces. Public callers addressing one workspace must
+/// use [`assemble_conflict_surface_for_workspace`]. Graph, lifecycle authority
+/// and bodies share one source snapshot; an existing caller transaction is
+/// borrowed without committing or releasing it. Bodies pass the same public
+/// screen as recall. Pairs sort by load-bearing weight desc, then `conflict_id`.
 #[must_use]
 pub fn assemble_conflict_surface(
     connection: &DbConnection,
     config: ContradictionDetectionConfig,
 ) -> ConflictSurface {
-    let (report, gathered) = detect_explicit_contradictions_from_connection(connection, config);
+    assemble_conflict_surface_scoped(connection, None, config)
+}
 
-    let mut degraded: Vec<String> = Vec::new();
-    if let Some(error) = &gathered.read_error {
-        degraded.push(error.clone());
+/// Assemble conflicts belonging entirely to the addressed workspace.
+#[must_use]
+pub fn assemble_conflict_surface_for_workspace(
+    connection: &DbConnection,
+    workspace_id: &str,
+    config: ContradictionDetectionConfig,
+) -> ConflictSurface {
+    assemble_conflict_surface_scoped(connection, Some(workspace_id), config)
+}
+
+/// Also shared with the CLI so workspace binding belongs to the source snapshot.
+pub(crate) struct ConflictReadSnapshot<'a> {
+    connection: &'a DbConnection,
+    owned: bool,
+}
+
+impl<'a> ConflictReadSnapshot<'a> {
+    pub(crate) fn begin(connection: &'a DbConnection) -> crate::db::Result<Self> {
+        let owned = match connection.begin_read_snapshot() {
+            Ok(()) => true,
+            Err(error) if crate::db::db_error_is_nested_transaction(&error) => false,
+            Err(error) => return Err(error),
+        };
+        Ok(Self { connection, owned })
     }
+
+    pub(crate) fn finish(mut self) -> crate::db::Result<()> {
+        if self.owned {
+            self.connection.rollback_read_snapshot()?;
+            self.owned = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ConflictReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if self.owned && self.connection.rollback_read_snapshot().is_err() {
+            tracing::error!("failed to release the owned conflict read snapshot");
+        }
+    }
+}
+
+fn withheld_conflict_surface(
+    config: ContradictionDetectionConfig,
+    reason: &str,
+) -> ConflictSurface {
+    let mut surface = ConflictSurface::empty(config);
+    surface.degraded.push(reason.to_owned());
+    surface
+}
+
+fn assemble_conflict_surface_scoped(
+    connection: &DbConnection,
+    workspace_id: Option<&str>,
+    config: ContradictionDetectionConfig,
+) -> ConflictSurface {
+    let Ok(snapshot) = ConflictReadSnapshot::begin(connection) else {
+        return withheld_conflict_surface(
+            config,
+            "conflict surface withheld: a coherent source snapshot could not be opened",
+        );
+    };
+    let surface = assemble_conflict_surface_in_snapshot(connection, workspace_id, config);
+    if snapshot.finish().is_err() {
+        return withheld_conflict_surface(
+            config,
+            "conflict surface withheld: the source snapshot could not be released",
+        );
+    }
+    surface
+}
+
+/// Establish membership from identity metadata before loading any source bodies.
+fn conflict_source_workspaces(
+    connection: &DbConnection,
+    workspace_id: Option<&str>,
+    current_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, Vec<String>>, &'static str> {
+    use sqlmodel_core::Value;
+
+    const UNAVAILABLE: &str =
+        "conflict surface withheld: source workspace membership could not be read";
+    let mut workspaces = BTreeMap::<String, Vec<String>>::new();
+    let ids: Vec<_> = current_ids.iter().collect();
+    for page in ids.chunks(256) {
+        let slots = (1..=page.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!("SELECT id, workspace_id FROM memories WHERE id IN ({slots})");
+        let mut values: Vec<_> = page.iter().map(|id| Value::Text(id.to_string())).collect();
+        if let Some(workspace_id) = workspace_id {
+            values.push(Value::Text(workspace_id.to_owned()));
+            sql.push_str(&format!(" AND workspace_id = ?{}", values.len()));
+        }
+        sql.push_str(" ORDER BY workspace_id, id");
+        for row in connection.query(&sql, &values).map_err(|_| UNAVAILABLE)? {
+            let id = row.get(0).and_then(Value::as_str).ok_or(UNAVAILABLE)?;
+            let workspace = row.get(1).and_then(Value::as_str).ok_or(UNAVAILABLE)?;
+            if !current_ids.contains(id)
+                || workspace.is_empty()
+                || workspace_id.is_some_and(|expected| expected != workspace)
+            {
+                return Err(UNAVAILABLE);
+            }
+            workspaces
+                .entry(workspace.to_owned())
+                .or_default()
+                .push(id.to_owned());
+        }
+    }
+    Ok(workspaces)
+}
+
+fn assemble_conflict_surface_in_snapshot(
+    connection: &DbConnection,
+    workspace_id: Option<&str>,
+    config: ContradictionDetectionConfig,
+) -> ConflictSurface {
+    use super::memory_lifecycle::{load_memory_seals_for_admission, pending_memory_review_ids};
+
+    let gathered = gather_explicit_conflict_edges(connection);
+    if gathered.read_error.is_some() {
+        return withheld_conflict_surface(
+            config,
+            "conflict surface withheld: explicit evidence or resolution authority could not be read",
+        );
+    }
+    let mut degraded = BTreeSet::new();
 
     // Deduplicate to canonical pairs, keeping the heaviest signal per pair.
     let mut pair_signal: BTreeMap<(String, String), ExplicitConflictSignal> = BTreeMap::new();
     for edge in &gathered.edges {
         if let Some(pair) = canonical_pair(edge) {
+            // Only a completed, decision-backed resolution settles this tension.
+            if gathered.resolved_pairs.contains(&pair) {
+                continue;
+            }
             pair_signal
                 .entry(pair)
                 .and_modify(|s| {
@@ -620,37 +817,98 @@ pub fn assemble_conflict_surface(
         }
     }
 
+    // Superseded and tombstoned identities are history. Author-supplied valid_to
+    // alone does not establish retirement; read revision state from its source
+    // of truth rather than treating it as a StoredMemory body field.
+    let memory_ids: Vec<String> = pair_signal
+        .keys()
+        .flat_map(|(low, high)| [low.clone(), high.clone()])
+        .collect();
+    let current_ids = match connection.filter_current_memory_ids(&memory_ids) {
+        Ok(ids) => ids,
+        Err(_) => {
+            return withheld_conflict_surface(
+                config,
+                "conflict surface withheld: memory revision state could not be read",
+            );
+        }
+    };
+    let workspaces = match conflict_source_workspaces(connection, workspace_id, &current_ids) {
+        Ok(workspaces) => workspaces,
+        Err(reason) => return withheld_conflict_surface(config, reason),
+    };
+
+    // Verify authority before hydrating bodies. Read each admitted source once,
+    // even when it participates in many pairs, and screen only an in-memory copy.
+    let mut memories = BTreeMap::new();
+    for (workspace, ids) in workspaces {
+        let seals = match load_memory_seals_for_admission(connection, &workspace) {
+            Ok(seals) => seals,
+            Err(_) => {
+                degraded.insert(
+                    "conflict sources withheld: live seal authority could not be read".to_owned(),
+                );
+                continue;
+            }
+        };
+        let candidates: Vec<_> = ids.iter().map(String::as_str).collect();
+        let held = match pending_memory_review_ids(connection, &workspace, &candidates) {
+            Ok(held) => held,
+            Err(_) => {
+                degraded.insert(
+                    "conflict sources withheld: pending memory review authority could not be read"
+                        .to_owned(),
+                );
+                continue;
+            }
+        };
+        let sealed: BTreeSet<_> = seals
+            .iter()
+            .filter(|seal| seal.is_sealed())
+            .map(|seal| seal.memory_id.as_str())
+            .collect();
+        for id in ids {
+            if sealed.contains(id.as_str()) || held.contains(&id) {
+                continue;
+            }
+            let Ok(Some(mut memory)) = connection.get_memory(&id) else {
+                degraded.insert(
+                    "conflict sources withheld: a cited memory row could not be read".to_owned(),
+                );
+                continue;
+            };
+            if memory.workspace_id != workspace
+                || memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+            {
+                continue;
+            }
+            let public_body = crate::policy::redact_public_replay_body(&memory.content);
+            if public_body.redacted {
+                degraded.insert("conflict bodies redacted by public-read policy".to_owned());
+            }
+            memory.content = public_body.content;
+            memories.insert(id, memory);
+        }
+    }
+
     let mut pairs: Vec<ConflictPairView> = Vec::new();
     for ((low, high), signal) in &pair_signal {
-        // A reviewed both-valid resolution settled this tension: suppress.
-        if gathered
-            .both_valid_resolved
-            .contains(&(low.clone(), high.clone()))
-        {
-            continue;
-        }
-        let (Ok(Some(a)), Ok(Some(b))) = (connection.get_memory(low), connection.get_memory(high))
-        else {
-            degraded.push(format!(
-                "conflict pair {low}<->{high} skipped: a cited memory row could not be read"
-            ));
+        let (Some(a), Some(b)) = (memories.get(low), memories.get(high)) else {
             continue;
         };
-        // A tombstoned side means the conflict was already resolved (superseded,
-        // rejected, or expired): the pair is history, not an actionable conflict.
-        // Deterministic — keyed on the persisted tombstone, never wall clock.
-        if a.tombstoned_at.is_some() || b.tombstoned_at.is_some() {
+        // A link cannot grant access to a source from a different workspace.
+        if a.workspace_id != b.workspace_id {
             continue;
         }
-        let (preferred, reason, a_pref, b_pref) = preferred_side(&a, &b);
+        let (preferred, reason, a_pref, b_pref) = preferred_side(a, b);
         pairs.push(ConflictPairView {
             conflict_id: conflict_pair_id(low, high),
             signal: signal.as_str().to_owned(),
             load_bearing_milli: signal.weight_milli(),
             preferred_side: preferred.to_owned(),
             preferred_reason: reason.to_owned(),
-            memory_a: member_view(&a, a_pref),
-            memory_b: member_view(&b, b_pref),
+            memory_a: member_view(a, a_pref),
+            memory_b: member_view(b, b_pref),
         });
     }
 
@@ -662,6 +920,19 @@ pub fn assemble_conflict_surface(
             .then_with(|| left.conflict_id.cmp(&right.conflict_id))
     });
 
+    // Rank clusters from the same actionable pairs as list/explain. Retired or
+    // reviewed both-valid edges must not keep a resolved cluster alive.
+    let active_pairs: BTreeSet<_> = pairs
+        .iter()
+        .map(|pair| (pair.memory_a.id.clone(), pair.memory_b.id.clone()))
+        .collect();
+    let active_edges: Vec<_> = gathered
+        .edges
+        .iter()
+        .filter(|edge| canonical_pair(edge).is_some_and(|pair| active_pairs.contains(&pair)))
+        .cloned()
+        .collect();
+    let report = detect_explicit_contradictions(&active_edges, config);
     let clusters: Vec<ConflictClusterView> = report
         .clusters
         .iter()
@@ -694,7 +965,7 @@ pub fn assemble_conflict_surface(
             .map(|s| s.as_str().to_owned())
             .collect(),
         fuzzy_near_conflict_skipped: report.fuzzy_near_conflict_skipped,
-        degraded,
+        degraded: degraded.into_iter().collect(),
     }
 }
 
@@ -711,7 +982,7 @@ pub const CONFLICT_RESOLVE_SCHEMA_V1: &str = "ee.conflict.resolve.v1";
 pub enum ResolveVerb {
     /// Keeper supersedes the loser: supersede link + validity close + decision.
     Supersede,
-    /// Loser was simply wrong: expire it with the rationale on record.
+    /// Loser was simply wrong: tombstone it with the rationale on record.
     RejectOne,
     /// Both sides hold in different scopes: tag each side into its scope.
     ScopeSplit,
@@ -741,14 +1012,14 @@ impl ResolveVerb {
     }
 }
 
-/// One planned mutation atom. Every atom maps 1:1 onto an EXISTING audited
-/// core operation (`decide_record`, `expire_memory`, `update_memory_link`,
-/// `update_memory_tags`) — the plan never introduces a novel mutation path.
+/// One planned mutation atom. The resolution writer commits these effects and
+/// their decision, provenance and audit together using existing DB primitives.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "camelCase")]
 pub enum PlannedResolutionAction {
-    /// `decide_record` — when `supersedes` is set the one atom also creates
-    /// the supersede link and closes the loser's validity window.
+    /// When `supersedes` names a conflict loser, the atomic decision writer
+    /// records the rationale and replaces that memory with the plan's keeper.
+    /// This does not make the rationale a revision of the losing memory.
     #[serde(rename_all = "camelCase")]
     RecordDecision {
         topic: String,
@@ -756,9 +1027,9 @@ pub enum PlannedResolutionAction {
         alternatives: Vec<String>,
         supersedes: Option<String>,
     },
-    /// `expire_memory` — audited soft expiration.
+    /// Audited tombstoning preserves the rejected source as historical data.
     #[serde(rename_all = "camelCase")]
-    ExpireMemory { memory_id: String, reason: String },
+    TombstoneMemory { memory_id: String, reason: String },
     /// `update_memory_link` create — audited explicit typed link.
     #[serde(rename_all = "camelCase")]
     CreateLink {
@@ -824,17 +1095,6 @@ pub enum ConflictResolutionOutcome {
 
 fn decision_topic(pair: &ConflictPairView) -> String {
     format!("conflict:{}", pair.conflict_id)
-}
-
-fn head(content: &str) -> String {
-    const MAX: usize = 96;
-    let oneline = content.replace('\n', " ");
-    if oneline.chars().count() <= MAX {
-        oneline
-    } else {
-        let truncated: String = oneline.chars().take(MAX).collect();
-        format!("{truncated}…")
-    }
 }
 
 /// Pure planner: re-checks the pair against the live surface, enforces verb
@@ -917,37 +1177,34 @@ pub fn plan_conflict_resolution(
         {
             return ConflictResolutionOutcome::PolicyDenied {
                 message: format!(
-                    "reject-one refuses to expire {lose_id}: it is a human-explicit rule; \
+                    "reject-one refuses to tombstone {lose_id}: it is a human-explicit rule; \
                      rejecting it outright requires a human decision."
                 ),
-                repair: "Use --verb supersede (records provenance + the decision) or have a \
-                         human run `ee memory expire` directly."
-                    .to_owned(),
+                repair:
+                    "Use --verb supersede to record a replacement with provenance and a decision."
+                        .to_owned(),
             };
         }
     }
 
-    let loser_head = lose.as_deref().map(|id| {
-        if pair.memory_a.id == id {
-            head(&pair.memory_a.content)
-        } else {
-            head(&pair.memory_b.content)
-        }
-    });
-
     let actions = match request.verb {
         ResolveVerb::Supersede => {
-            // One existing atom: decide_record(supersedes=loser) creates the
-            // decision memory, the supersede link, AND closes the loser.
+            // One writer transaction records the decision, keeper -> loser
+            // supersession and lifecycle close. Options carry identities rather
+            // than copying a source body's potentially sensitive text.
             vec![PlannedResolutionAction::RecordDecision {
                 topic: decision_topic(pair),
                 chosen: format!("keep {}", keep.as_deref().unwrap_or_default()),
-                alternatives: loser_head.into_iter().collect(),
+                alternatives: lose
+                    .as_deref()
+                    .map(|id| format!("keep {id}"))
+                    .into_iter()
+                    .collect(),
                 supersedes: lose.clone(),
             }]
         }
         ResolveVerb::RejectOne => vec![
-            PlannedResolutionAction::ExpireMemory {
+            PlannedResolutionAction::TombstoneMemory {
                 memory_id: lose.clone().unwrap_or_default(),
                 reason: request.reason.to_owned(),
             },
@@ -957,7 +1214,11 @@ pub fn plan_conflict_resolution(
                     "keep {}; reject the other side",
                     keep.as_deref().unwrap_or_default()
                 ),
-                alternatives: loser_head.into_iter().collect(),
+                alternatives: lose
+                    .as_deref()
+                    .map(|id| format!("keep {id}"))
+                    .into_iter()
+                    .collect(),
                 supersedes: None,
             },
         ],
@@ -974,25 +1235,59 @@ pub fn plan_conflict_resolution(
                     ),
                 };
             }
+            // Tag insertion can silently ignore invalid storage values. Build
+            // both the effects and rationale from validated canonical tags
+            // before permitting a terminal resolution.
+            let canonical_scope_tags = |tags: &[String]| {
+                tags.iter()
+                    .map(|raw| Tag::parse(raw).map(|tag| tag.to_string()))
+                    .collect::<Result<BTreeSet<_>, _>>()
+                    .map(|tags| tags.into_iter().collect::<Vec<_>>())
+            };
+            let (Ok(positional_a_tags), Ok(positional_b_tags)) = (
+                canonical_scope_tags(&request.scope_a_tags),
+                canonical_scope_tags(&request.scope_b_tags),
+            ) else {
+                return ConflictResolutionOutcome::InvalidRequest {
+                    message: format!(
+                        "--verb scope-split requires valid memory tags of at most {} UTF-8 bytes in both scopes.",
+                        crate::models::MAX_TAG_BYTES,
+                    ),
+                    repair: "Use comma-separated labels such as --scope-a-tags scope:production --scope-b-tags scope:development; labels cannot contain spaces or path delimiters."
+                        .to_owned(),
+                };
+            };
+            // Scopes name the positional CLI arguments, which may be reversed
+            // relative to the canonical pair ordering used by the surface.
+            let (scope_a_tags, scope_b_tags) = if request.memory_a == pair.memory_a.id {
+                (&positional_a_tags, &positional_b_tags)
+            } else {
+                (&positional_b_tags, &positional_a_tags)
+            };
             vec![
                 PlannedResolutionAction::AddTags {
                     memory_id: pair.memory_a.id.clone(),
-                    tags: request.scope_a_tags.clone(),
+                    tags: scope_a_tags.clone(),
                 },
                 PlannedResolutionAction::AddTags {
                     memory_id: pair.memory_b.id.clone(),
-                    tags: request.scope_b_tags.clone(),
+                    tags: scope_b_tags.clone(),
+                },
+                PlannedResolutionAction::CreateLink {
+                    from: pair.memory_a.id.clone(),
+                    to: pair.memory_b.id.clone(),
+                    relation: "related".to_owned(),
                 },
                 PlannedResolutionAction::RecordDecision {
                     topic: decision_topic(pair),
                     chosen: format!(
                         "scope-split: {} → [{}]; {} → [{}]",
                         pair.memory_a.id,
-                        request.scope_a_tags.join(","),
+                        scope_a_tags.join(","),
                         pair.memory_b.id,
-                        request.scope_b_tags.join(",")
+                        scope_b_tags.join(",")
                     ),
-                    alternatives: Vec::new(),
+                    alternatives: vec!["leave the conflict unresolved".to_owned()],
                     supersedes: None,
                 },
             ]
@@ -1006,7 +1301,7 @@ pub fn plan_conflict_resolution(
             PlannedResolutionAction::RecordDecision {
                 topic: decision_topic(pair),
                 chosen: "both-valid: the tension is legitimate; both memories stand".to_owned(),
-                alternatives: Vec::new(),
+                alternatives: vec!["leave the conflict unresolved".to_owned()],
                 supersedes: None,
             },
         ],
@@ -1032,8 +1327,8 @@ mod tests {
         gather_explicit_conflict_edges, trust_class_rank,
     };
     use crate::db::{
-        CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
-        MemoryLinkRelation, MemoryLinkSource,
+        CreateAuditInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
+        DbConnection, MemoryLinkRelation, MemoryLinkSource, generate_audit_id,
     };
 
     // ---- DB-gather test scaffolding (mirrors src/core/health.rs) ----------
@@ -1115,6 +1410,71 @@ mod tests {
                 },
             )
             .expect("insert link");
+    }
+
+    fn completed_resolution_fixture(
+        verb: &str,
+        provenance_count: usize,
+    ) -> (DbConnection, CreateAuditInput) {
+        let connection = open_seeded_db();
+        for id in [MEM_A, MEM_B, MEM_C] {
+            seed_memory(&connection, id);
+        }
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET kind = 'decision' WHERE id = '{MEM_C}'"
+            ))
+            .expect("seed decision kind");
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Contradicts,
+        );
+        for (id, source) in [(LINK_2, MEM_A), (LINK_3, MEM_B)]
+            .into_iter()
+            .take(provenance_count)
+        {
+            connection
+                .insert_memory_link(
+                    id,
+                    &CreateMemoryLinkInput {
+                        src_memory_id: MEM_C.to_owned(),
+                        dst_memory_id: source.to_owned(),
+                        relation: MemoryLinkRelation::DerivedFrom,
+                        weight: 1.0,
+                        confidence: 1.0,
+                        directed: true,
+                        evidence_count: 1,
+                        last_reinforced_at: None,
+                        source: MemoryLinkSource::Agent,
+                        created_by: Some("conflict-resolution-test".to_owned()),
+                        metadata_json: None,
+                    },
+                )
+                .expect("seed directed rationale provenance");
+        }
+        let conflict_id = super::conflict_pair_id(MEM_A, MEM_B);
+        let audit = CreateAuditInput {
+            workspace_id: Some(WS_ID.to_owned()),
+            actor: Some("conflict-resolution-test".to_owned()),
+            action: super::CONFLICT_RESOLUTION_AUDIT_ACTION.to_owned(),
+            target_type: Some("conflict".to_owned()),
+            target_id: Some(conflict_id.clone()),
+            details: Some(
+                serde_json::json!({
+                    "schema": super::CONFLICT_RESOLUTION_AUDIT_SCHEMA,
+                    "conflictId": conflict_id,
+                    "memoryA": MEM_A,
+                    "memoryB": MEM_B,
+                    "verb": verb,
+                    "resolutionDecisionId": MEM_C,
+                })
+                .to_string(),
+            ),
+        };
+        (connection, audit)
     }
 
     #[test]
@@ -1419,9 +1779,7 @@ mod tests {
 
     #[test]
     fn surface_drops_pairs_with_a_tombstoned_side() {
-        // A resolved conflict (loser expired/superseded → tombstoned) must
-        // leave the actionable surface: this is what makes `ee conflict
-        // resolve` terminal and its stale-surface re-run refusal real.
+        // Tombstoned history must leave the actionable surface.
         let connection = open_seeded_db();
         seed_memory_trust(&connection, MEM_A, "human_explicit");
         seed_memory_trust(&connection, MEM_B, "agent_assertion");
@@ -1445,9 +1803,38 @@ mod tests {
     }
 
     #[test]
-    fn surface_suppresses_both_valid_resolved_pairs() {
-        // `ee conflict resolve --verb both-valid` records a related link with
-        // resolution metadata; the settled pair must stop being re-flagged.
+    fn surface_removes_superseded_history_from_pairs_and_clusters_without_tombstoning() {
+        let connection = open_seeded_db();
+        for id in [MEM_A, MEM_B, MEM_C] {
+            seed_memory(&connection, id);
+        }
+        for (id, from, to) in [
+            (LINK_1, MEM_A, MEM_B),
+            (LINK_2, MEM_A, MEM_C),
+            (LINK_3, MEM_B, MEM_C),
+        ] {
+            seed_link(&connection, id, from, to, MemoryLinkRelation::Contradicts);
+        }
+        let before =
+            assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert_eq!(before.pairs.len(), 3);
+        assert!(!before.clusters.is_empty());
+        connection
+            .mark_memory_superseded(MEM_A, "2026-01-01T00:00:00Z")
+            .unwrap();
+        let retired = connection.get_memory(MEM_A).unwrap().unwrap();
+        assert!(retired.valid_to.is_none() && retired.tombstoned_at.is_none());
+        let after = assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert_eq!(after.pairs.len(), 1);
+        assert_eq!(after.pairs[0].memory_a.id, MEM_B);
+        assert_eq!(after.pairs[0].memory_b.id, MEM_C);
+        assert!(after.clusters.is_empty());
+        assert_eq!(after.explicit_edge_count, 1);
+        assert!(after.degraded.is_empty());
+    }
+
+    #[test]
+    fn surface_does_not_trust_related_link_metadata_as_resolution_authority() {
         let connection = open_seeded_db();
         seed_memory(&connection, MEM_A);
         seed_memory(&connection, MEM_B);
@@ -1481,10 +1868,10 @@ mod tests {
 
         let surface =
             assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
-        assert!(
-            surface.pairs.is_empty(),
-            "both-valid-resolved pair must be suppressed: {:?}",
-            surface.pairs
+        assert_eq!(
+            surface.pairs.len(),
+            1,
+            "caller-supplied related-link metadata cannot settle a conflict"
         );
 
         // A plain related link WITHOUT the resolution marker must not suppress.
@@ -1512,6 +1899,104 @@ mod tests {
             1,
             "plain related link is not a resolution"
         );
+    }
+
+    #[test]
+    fn completed_coexistence_resolutions_settle_pairs_without_destroying_history() {
+        for verb in ["scope-split", "both-valid"] {
+            let (connection, audit) = completed_resolution_fixture(verb, 2);
+            let before = gather_explicit_conflict_edges(&connection);
+            assert_eq!(before.edges.len(), 1);
+            assert!(before.resolved_pairs.is_empty());
+            connection
+                .insert_audit(&generate_audit_id(), &audit)
+                .unwrap();
+
+            let gathered = gather_explicit_conflict_edges(&connection);
+            assert_eq!(
+                gathered.edges, before.edges,
+                "original evidence remains history"
+            );
+            assert!(
+                gathered
+                    .resolved_pairs
+                    .contains(&(MEM_A.to_owned(), MEM_B.to_owned()))
+            );
+            let surface =
+                assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+            assert!(surface.pairs.is_empty() && surface.clusters.is_empty());
+            assert_eq!(surface.explicit_edge_count, 0);
+            assert!(surface.degraded.is_empty());
+            for id in [MEM_A, MEM_B] {
+                assert!(
+                    connection
+                        .get_memory(id)
+                        .unwrap()
+                        .unwrap()
+                        .tombstoned_at
+                        .is_none()
+                );
+                assert!(connection.get_memory_superseded_at(id).unwrap().is_none());
+            }
+            // Hiding the historical explanation does not undo the durable
+            // resolution or make either surviving source contradictory again.
+            connection.tombstone_memory(MEM_C).unwrap();
+            assert!(
+                assemble_conflict_surface(&connection, ContradictionDetectionConfig::default())
+                    .pairs
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_or_mismatched_completion_audits_cannot_hide_conflicts() {
+        for defect in [
+            "schema",
+            "verb",
+            "pair",
+            "conflict_id",
+            "decision",
+            "json",
+            "workspace",
+            "target_type",
+            "provenance",
+        ] {
+            let (connection, mut audit) = completed_resolution_fixture(
+                "both-valid",
+                if defect == "provenance" { 1 } else { 2 },
+            );
+            let mut details: serde_json::Value =
+                serde_json::from_str(audit.details.as_deref().unwrap()).unwrap();
+            match defect {
+                "schema" => details["schema"] = serde_json::json!("caller-supplied"),
+                "verb" => details["verb"] = serde_json::json!("ignore"),
+                "pair" => details["memoryB"] = serde_json::json!(MEM_C),
+                "conflict_id" => {
+                    details["conflictId"] = serde_json::json!("cf_forged");
+                    audit.target_id = Some("cf_forged".to_owned());
+                }
+                "decision" => details["resolutionDecisionId"] = serde_json::json!(MEM_A),
+                "workspace" => audit.workspace_id = None,
+                "target_type" => audit.target_type = Some("memory".to_owned()),
+                _ => {}
+            }
+            audit.details = Some(if defect == "json" {
+                "{".to_owned()
+            } else {
+                details.to_string()
+            });
+            connection
+                .insert_audit(&generate_audit_id(), &audit)
+                .unwrap();
+            let surface =
+                assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+            assert_eq!(surface.pairs.len(), 1, "{defect} cannot settle the pair");
+            assert!(
+                surface.degraded.is_empty(),
+                "malformed authority is ignored safely: {defect}"
+            );
+        }
     }
 
     #[test]
@@ -1617,6 +2102,89 @@ mod tests {
         assert_eq!(first, second, "conflict surface is deterministic");
     }
 
+    #[test]
+    fn surface_releases_owned_snapshot_and_borrows_caller_transaction() {
+        let connection = open_seeded_db();
+        seed_memory(&connection, MEM_A);
+        seed_memory(&connection, MEM_B);
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Contradicts,
+        );
+        let before =
+            assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert_eq!(before.pairs.len(), 1);
+        connection
+            .begin_read_snapshot()
+            .expect("surface released its owned snapshot");
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET content = 'transaction-local conflict advice' WHERE id = '{MEM_B}'"
+            ))
+            .unwrap();
+
+        let borrowed =
+            assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert_eq!(borrowed.pairs.len(), 1);
+        assert_eq!(
+            borrowed.pairs[0].memory_b.content,
+            "transaction-local conflict advice"
+        );
+        let error = connection
+            .begin_read_snapshot()
+            .expect_err("surface must preserve the caller's transaction");
+        assert!(crate::db::db_error_is_nested_transaction(&error));
+        connection.rollback_read_snapshot().unwrap();
+        let after = assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert_eq!(
+            after, before,
+            "borrowed reads must not commit caller writes"
+        );
+    }
+
+    #[test]
+    fn failed_surface_admission_releases_only_its_owned_snapshot() {
+        let connection = open_seeded_db();
+        seed_memory(&connection, MEM_A);
+        seed_memory(&connection, MEM_B);
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Contradicts,
+        );
+        connection
+            .execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_memory_seals")
+            .unwrap();
+        for borrowed in [false, true] {
+            if borrowed {
+                connection.begin_read_snapshot().unwrap();
+            }
+            let surface =
+                assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+            assert!(surface.pairs.is_empty() && surface.clusters.is_empty());
+            assert_eq!(surface.explicit_edge_count, 0);
+            assert!(!surface.degraded.is_empty());
+            let public = serde_json::to_string(&surface).unwrap();
+            assert!(!public.contains(MEM_A) && !public.contains(MEM_B));
+            if borrowed {
+                let error = connection
+                    .begin_read_snapshot()
+                    .expect_err("failed admission must preserve a caller snapshot");
+                assert!(crate::db::db_error_is_nested_transaction(&error));
+            } else {
+                connection
+                    .begin_read_snapshot()
+                    .expect("failed admission must release its owned snapshot");
+            }
+            connection.rollback_read_snapshot().unwrap();
+        }
+    }
+
     // ---- resolution planner (bd-3a1op.4) ---------------------------------
 
     use super::{
@@ -1693,7 +2261,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_one_plans_expire_then_decision_and_reversed_keep_resolves_loser() {
+    fn reject_one_plans_tombstone_then_decision_and_reversed_keep_resolves_loser() {
         // keep=b exercises the orientation-independent keep/lose resolution.
         let outcome = plan_conflict_resolution(
             &fixture_surface(),
@@ -1705,7 +2273,7 @@ mod tests {
         assert_eq!(plan.lose.as_deref(), Some(MEM_A));
         assert!(matches!(
             &plan.actions[0],
-            PlannedResolutionAction::ExpireMemory { memory_id, reason }
+            PlannedResolutionAction::TombstoneMemory { memory_id, reason }
                 if memory_id == MEM_A && reason == "test rationale"
         ));
         assert!(matches!(
@@ -1770,7 +2338,7 @@ mod tests {
             plan_conflict_resolution(&surface, &request(ResolveVerb::RejectOne, Some(MEM_A)));
         assert!(
             matches!(outcome, ConflictResolutionOutcome::PolicyDenied { .. }),
-            "expiring a human-explicit rule via reject-one must be policy-denied, got {outcome:?}"
+            "tombstoning a human-explicit rule via reject-one must be policy-denied, got {outcome:?}"
         );
         // supersede of the same memory stays allowed (records provenance).
         let outcome =
@@ -1779,7 +2347,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_split_requires_both_scopes_and_plans_tags_then_decision() {
+    fn scope_split_requires_both_scopes_and_plans_tags_coexistence_and_decision() {
         let outcome =
             plan_conflict_resolution(&fixture_surface(), &request(ResolveVerb::ScopeSplit, None));
         assert!(matches!(
@@ -1794,7 +2362,7 @@ mod tests {
         let ConflictResolutionOutcome::Plan(plan) = outcome else {
             panic!("expected a plan, got {outcome:?}");
         };
-        assert_eq!(plan.actions.len(), 3);
+        assert_eq!(plan.actions.len(), 4);
         assert!(matches!(
             &plan.actions[0],
             PlannedResolutionAction::AddTags { memory_id, tags }
@@ -1802,8 +2370,159 @@ mod tests {
         ));
         assert!(matches!(
             &plan.actions[2],
+            PlannedResolutionAction::CreateLink { from, to, relation }
+                if from == MEM_A && to == MEM_B && relation == "related"
+        ));
+        assert!(matches!(
+            &plan.actions[3],
             PlannedResolutionAction::RecordDecision { .. }
         ));
+    }
+
+    #[test]
+    fn scope_split_rejects_invalid_tags_on_either_side_before_planning_effects() {
+        for invalid in [
+            String::new(),
+            "   ".to_owned(),
+            "x".repeat(65),
+            "é".repeat(33),
+            "scope/team".to_owned(),
+            "scope team".to_owned(),
+            "scope,team".to_owned(),
+            "*".to_owned(),
+        ] {
+            for invalid_a in [true, false] {
+                let mut req = request(ResolveVerb::ScopeSplit, None);
+                req.scope_a_tags = vec!["scope:production".to_owned()];
+                req.scope_b_tags = vec!["scope:development".to_owned()];
+                if invalid_a {
+                    req.scope_a_tags = vec![invalid.clone()];
+                } else {
+                    req.scope_b_tags = vec![invalid.clone()];
+                }
+                let outcome = plan_conflict_resolution(&fixture_surface(), &req);
+                assert!(
+                    matches!(outcome, ConflictResolutionOutcome::InvalidRequest { .. }),
+                    "invalid scope label {invalid:?} on side a={invalid_a} must not yield resolution effects: {outcome:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scope_split_uses_canonical_tags_for_effects_rationale_and_writer_replanning() {
+        let mut req = request(ResolveVerb::ScopeSplit, None);
+        req.scope_a_tags = vec![
+            " Scope:PROD ".to_owned(),
+            "Team:OPS".to_owned(),
+            "scope:prod".to_owned(),
+            "Cafe\u{301}".to_owned(),
+        ];
+        req.scope_b_tags = vec![" PYTHON ".to_owned(), "python".to_owned()];
+        let outcome = plan_conflict_resolution(&fixture_surface(), &req);
+        let ConflictResolutionOutcome::Plan(plan) = outcome else {
+            panic!("expected a canonical scope plan, got {outcome:?}");
+        };
+        let PlannedResolutionAction::AddTags {
+            memory_id: memory_a,
+            tags: tags_a,
+        } = &plan.actions[0]
+        else {
+            panic!("first effect must scope the first canonical memory");
+        };
+        let PlannedResolutionAction::AddTags {
+            memory_id: memory_b,
+            tags: tags_b,
+        } = &plan.actions[1]
+        else {
+            panic!("second effect must scope the second canonical memory");
+        };
+        assert_eq!(memory_a, MEM_A);
+        assert_eq!(memory_b, MEM_B);
+        assert_eq!(tags_a, &["café", "scope:prod", "team:ops"]);
+        assert_eq!(tags_b, &["python"]);
+        let PlannedResolutionAction::RecordDecision { chosen, .. } = &plan.actions[3] else {
+            panic!("scope resolution must record its canonical rationale");
+        };
+        assert_eq!(
+            chosen,
+            &format!("scope-split: {MEM_A} → [café,scope:prod,team:ops]; {MEM_B} → [python]"),
+        );
+        // The writer reconstructs its request from these exact AddTags effects.
+        // It must reproduce the reviewed plan after acquiring the transaction.
+        req.scope_a_tags = tags_a.clone();
+        req.scope_b_tags = tags_b.clone();
+        assert_eq!(
+            plan_conflict_resolution(&fixture_surface(), &req),
+            ConflictResolutionOutcome::Plan(plan),
+        );
+    }
+
+    #[test]
+    fn every_resolution_decision_has_a_distinct_alternative_without_copying_bodies() {
+        let mut surface = fixture_surface();
+        surface.pairs[0].memory_a.content = "password=conflict-private-canary".to_owned();
+        surface.pairs[0].memory_b.content = "password=conflict-private-canary".to_owned();
+        for verb in [
+            ResolveVerb::Supersede,
+            ResolveVerb::RejectOne,
+            ResolveVerb::ScopeSplit,
+            ResolveVerb::BothValid,
+        ] {
+            let mut req = request(verb, Some(MEM_A));
+            req.scope_a_tags = vec!["rust".to_owned()];
+            req.scope_b_tags = vec!["python".to_owned()];
+            let ConflictResolutionOutcome::Plan(plan) = plan_conflict_resolution(&surface, &req)
+            else {
+                panic!("expected valid resolution plan");
+            };
+            let Some(PlannedResolutionAction::RecordDecision {
+                chosen,
+                alternatives,
+                ..
+            }) = plan.actions.last()
+            else {
+                panic!("resolution must record its rationale");
+            };
+            assert!(alternatives.iter().any(|alternative| alternative != chosen));
+            assert!(
+                !serde_json::to_string(&plan)
+                    .unwrap()
+                    .contains("conflict-private-canary")
+            );
+        }
+    }
+
+    #[test]
+    fn scope_split_keeps_scopes_bound_to_positional_memories_when_reversed() {
+        let mut forward = request(ResolveVerb::ScopeSplit, None);
+        forward.scope_a_tags = vec![
+            " Rust ".to_owned(),
+            "scope:ALL".to_owned(),
+            "RUST".to_owned(),
+        ];
+        forward.scope_b_tags = vec![
+            " Python ".to_owned(),
+            "scope:dev".to_owned(),
+            "PYTHON".to_owned(),
+        ];
+        let mut reversed = forward.clone();
+        reversed.memory_a = MEM_B;
+        reversed.memory_b = MEM_A;
+        reversed.scope_a_tags = vec!["SCOPE:DEV".to_owned(), "python".to_owned()];
+        reversed.scope_b_tags = vec!["rust".to_owned(), "scope:all".to_owned()];
+        let forward_outcome = plan_conflict_resolution(&fixture_surface(), &forward);
+        let reversed_outcome = plan_conflict_resolution(&fixture_surface(), &reversed);
+        let ConflictResolutionOutcome::Plan(forward_plan) = forward_outcome else {
+            panic!("expected a forward scope plan, got {forward_outcome:?}");
+        };
+        let ConflictResolutionOutcome::Plan(reversed_plan) = reversed_outcome else {
+            panic!("expected a reversed scope plan, got {reversed_outcome:?}");
+        };
+        assert_eq!(
+            reversed_plan, forward_plan,
+            "the same positional bindings must yield the same canonical plan and rationale"
+        );
     }
 
     #[test]

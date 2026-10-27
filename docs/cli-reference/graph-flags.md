@@ -422,14 +422,16 @@ ee profile config apply --workspace . --profile portable \
 | `ee maintenance wal-checkpoint` | `--mode <MODE>` | `passive`, `truncate` | `passive` | Selects the SQLite checkpoint mode. |
 | `ee maintenance wal-checkpoint` | `--dry-run` | boolean | false | Reports WAL status without running a checkpoint. |
 | `ee maintenance status` | none | none | none | Reports maintenance job availability and the next suggested steward command. |
-| `ee job run <KIND>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Runs a steward handler against an explicit DB. |
+| `ee job run <KIND>` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Runs a steward handler against an explicit DB. A `.ee/ee.db` or `.ee-campaign/ee.db` store keeps the run in its own job history; other paths use the workspace history. |
 | `ee job run <KIND>` | `--dry-run` | boolean | false | Reports planned work without mutating memory scores or job history. |
 | `ee job run <KIND>` | `--time-limit-ms <MS>` | integer | job default | Overrides per-job time budget. |
 | `ee job run <KIND>` | `--item-limit <N>` | integer | job default | Overrides per-job item budget. |
 | `ee job list` | `--kind <KIND>` | steward job kind | omitted | Filters durable job history rows to one maintenance job family. |
 | `ee job list` | `--since <RFC3339>` | timestamp | omitted | Filters durable job history rows to records at or after the timestamp. |
 | `ee job list` | `--limit`, `-n` | integer | `20` | Caps durable job history rows returned. |
+| `ee job list` | `--database <PATH>` | filesystem path | workspace history | Reads the history that `ee job run --database` writes for that path: the store's own history for a `.ee/ee.db` or `.ee-campaign/ee.db` store, the workspace history for any other path. |
 | `ee job show <JOB_ID>` | `JOB_ID` | job history row ID | required | Shows one durable job history row, or the latest match for a steward runner job ID. |
+| `ee job show <JOB_ID>` | `--database <PATH>` | filesystem path | workspace history | Reads the job history of that database's store, as `ee job list --database` does. |
 
 Example:
 

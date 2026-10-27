@@ -10,6 +10,7 @@ use std::path::PathBuf;
 const WORKSPACE: &str = "wsp_00000000000000000000000072";
 const PROCEDURE: &str = "proc_00000000000000000000000072";
 const EVENT: &str = "fb_00000000000000000000000072";
+const FIRST_EVENT: &str = "fb_00000000000000000000000073";
 const SPARE_EVENT: &str = "pevt_00000000000000000000000073";
 const SEED: u64 = 0x5052_4f43_4154;
 
@@ -94,6 +95,50 @@ impl Fixture {
             self.db.count_table_rows("audit_log").unwrap(),
             self.db.count_table_rows("procedure_events").unwrap(),
         )
+    }
+
+    fn seed_before_retirement(&self) {
+        self.db
+            .execute_raw(&format!(
+                "UPDATE procedures SET maturity = 'mature', harmful_count = 1 WHERE id = '{PROCEDURE}'"
+            ))
+            .unwrap();
+    }
+
+    fn harmful_options(&self) -> OutcomeRecordOptions<'_> {
+        let mut options = self.options();
+        options.signal = "harmful".to_owned();
+        options.source_id = Some("atomic-procedure-release".to_owned());
+        options.reason = Some("Release validation found a regression.".to_owned());
+        options
+    }
+
+    fn queue_harmful_feedback(&self) -> String {
+        let mut options = self.harmful_options();
+        options.event_id = Some(FIRST_EVENT.to_owned());
+        options.harmful_per_source_per_hour = 1;
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+        let before = self.procedure();
+        options.event_id = Some(EVENT.to_owned());
+        let queued = record_outcome(&options).unwrap();
+        assert_eq!(queued.status, OutcomeRecordStatus::Quarantined);
+        assert_eq!(self.procedure(), before);
+        assert!(self.db.get_feedback_event(EVENT).unwrap().is_none());
+        queued.quarantine.and_then(|summary| summary.id).unwrap()
+    }
+
+    fn release_options<'a>(&'a self, quarantine_id: &'a str) -> OutcomeQuarantineReviewOptions<'a> {
+        OutcomeQuarantineReviewOptions {
+            workspace_path: self._root.path(),
+            database_path: Some(&self.database),
+            quarantine_id,
+            reject: false,
+            actor: Some("atomic-procedure-reviewer"),
+            dry_run: false,
+        }
     }
 
     fn collide_history(&self) {
@@ -425,4 +470,86 @@ fn caller_owned_procedure_update_never_commits_before_its_parent_transaction() {
             .contains("parent transaction failure")
     );
     fixture.assert_unchanged(&before, counts);
+}
+
+#[test]
+fn quarantine_release_matches_procedure_retirement_and_retries_failed_history_atomically() {
+    let direct = Fixture::new();
+    direct.seed_before_retirement();
+    let mut direct_options = direct.harmful_options();
+    direct_options.event_id = Some(FIRST_EVENT.to_owned());
+    assert_eq!(
+        record_outcome(&direct_options).unwrap().status,
+        OutcomeRecordStatus::Recorded
+    );
+    direct_options.event_id = Some(EVENT.to_owned());
+    assert_eq!(
+        record_outcome(&direct_options).unwrap().status,
+        OutcomeRecordStatus::Recorded
+    );
+    let expected = direct.procedure();
+    assert_eq!(expected.harmful_count, 3);
+    assert_eq!(expected.maturity, "retired");
+
+    let fixture = Fixture::new();
+    fixture.seed_before_retirement();
+    let quarantine_id = fixture.queue_harmful_feedback();
+    let pending = fixture.db.get_feedback_quarantine(&quarantine_id).unwrap();
+    fixture.collide_history();
+    let before = fixture.procedure();
+    let counts = fixture.counts();
+    assert_eq!(before.harmful_count, 2);
+    assert_eq!(before.maturity, "mature");
+    let release = fixture.release_options(&quarantine_id);
+    assert!(matches!(
+        review_feedback_quarantine(&release),
+        Err(DomainError::Storage { .. })
+    ));
+    assert!(fixture.db.get_feedback_event(EVENT).unwrap().is_none());
+    assert_eq!(
+        fixture.db.get_feedback_quarantine(&quarantine_id).unwrap(),
+        pending
+    );
+    fixture.assert_unchanged(&before, counts);
+
+    fixture.release_history_collision();
+    let report = review_feedback_quarantine(&release).unwrap();
+    assert_eq!(report.status, "released");
+    assert_eq!(report.feedback_event_id.as_deref(), Some(EVENT));
+    let learned = fixture.procedure();
+    assert_eq!(learned.helpful_count, expected.helpful_count);
+    assert_eq!(learned.harmful_count, expected.harmful_count);
+    assert_eq!(learned.confidence, expected.confidence);
+    assert_eq!(learned.utility, expected.utility);
+    assert_eq!(learned.maturity, expected.maturity);
+    assert_eq!(learned.retire_reason, expected.retire_reason);
+    assert!(learned.retired_at.is_some());
+    let event = fixture.db.get_feedback_event(EVENT).unwrap().unwrap();
+    assert_eq!(event.weight, 0.5);
+    assert_eq!(event.signal, "harmful");
+    assert_eq!(event.source_id, direct_options.source_id);
+    assert_eq!(event.reason, direct_options.reason);
+    let history = fixture
+        .db
+        .get_procedure_event(&procedure_event_id_for_feedback(EVENT))
+        .unwrap()
+        .unwrap();
+    assert_eq!(history.event_type, "outcome_harmful");
+    assert_eq!(history.from_maturity.as_deref(), Some("mature"));
+    assert_eq!(history.to_maturity.as_deref(), Some("retired"));
+    assert_eq!(history.reason, event.reason);
+    assert_eq!(history.actor.as_deref(), release.actor);
+
+    let counts = fixture.counts();
+    let replay = review_feedback_quarantine(&release).unwrap();
+    assert_eq!(replay.status, "already_reviewed");
+    assert!(!replay.changed);
+    fixture.assert_unchanged(&learned, counts);
+    assert_eq!(
+        fixture
+            .db
+            .get_procedure_event(&procedure_event_id_for_feedback(EVENT))
+            .unwrap(),
+        Some(history)
+    );
 }

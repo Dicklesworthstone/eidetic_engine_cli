@@ -5,8 +5,11 @@
 use super::*;
 use crate::core::memory::{WorkflowCloseOptions, close_workflow};
 use crate::core::why::{WhyOptions, explain_memory_with_connection};
-use crate::db::{CreateMemoryInput, CreateSearchIndexJobInput, SearchIndexJobType};
-use crate::models::{MemoryId, WorkspaceId};
+use crate::db::{
+    CreateEvidenceSpanInput, CreateMemoryInput, CreateSearchIndexJobInput, CreateSessionInput,
+    EvidenceProducerKind, SearchIndexJobType,
+};
+use crate::models::{EvidenceId, MemoryId, SessionId, WorkspaceId};
 use uuid::Uuid;
 
 const TIME: &str = "2026-09-01T00:00:00+00:00";
@@ -17,6 +20,26 @@ fn id(n: u128) -> String {
 
 fn workspace_id() -> String {
     WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string()
+}
+
+fn tree_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, Option<blake3::Hash>> {
+    let mut snapshot = std::collections::BTreeMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if entry.file_type().unwrap().is_dir() {
+                snapshot.insert(relative, None);
+                pending.push(path);
+            } else {
+                assert!(entry.file_type().unwrap().is_file());
+                snapshot.insert(relative, Some(blake3::hash(&fs::read(path).unwrap())));
+            }
+        }
+    }
+    snapshot
 }
 
 fn source(private: bool) -> (tempfile::TempDir, PathBuf, PathBuf, String, String) {
@@ -95,6 +118,318 @@ fn options(
         restore_graph_cache: false,
         dry_run: false,
     }
+}
+
+fn evidence_source() -> (tempfile::TempDir, PathBuf, PathBuf, Vec<StoredEvidenceSpan>) {
+    let (root, workspace, database) = tests::fixture().unwrap();
+    let db = DbConnection::open_file(&database).unwrap();
+    let session_id = SessionId::from_uuid(Uuid::from_u128(10)).to_string();
+    db.insert_session(
+        &session_id,
+        &CreateSessionInput {
+            workspace_id: workspace_id(),
+            cass_session_id: "cass://recovery-fidelity".to_owned(),
+            source_path: None,
+            agent_name: Some("claude_code".to_owned()),
+            model: None,
+            started_at: Some(TIME.to_owned()),
+            ended_at: None,
+            message_count: 4,
+            token_count: None,
+            content_hash: hash_bytes(b"recovery-fidelity-session"),
+            metadata_json: None,
+        },
+    )
+    .unwrap();
+    for (index, (producer, role, body)) in [
+        (
+            EvidenceProducerKind::CassImport,
+            "assistant",
+            "The release checks passed.",
+        ),
+        (
+            EvidenceProducerKind::CassImport,
+            "assistant",
+            "The credential parser passed the release checks.",
+        ),
+        (
+            EvidenceProducerKind::CassImport,
+            "system",
+            "Release environment metadata.",
+        ),
+        (
+            EvidenceProducerKind::DocsBootstrap,
+            "docs_bootstrap",
+            "Documentation described the release checks.",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let excerpt = if producer == EvidenceProducerKind::CassImport {
+            json!({"type": role, "message": {"role": role, "content": body}}).to_string()
+        } else {
+            body.to_owned()
+        };
+        db.insert_evidence_span(
+            &EvidenceId::from_uuid(Uuid::from_u128(20 + index as u128)).to_string(),
+            &CreateEvidenceSpanInput {
+                workspace_id: workspace_id(),
+                session_id: session_id.clone(),
+                memory_id: None,
+                producer_kind: producer,
+                cass_span_id: format!("cass://recovery-fidelity:{index}"),
+                span_kind: "message".to_owned(),
+                start_line: index as u32 + 1,
+                end_line: index as u32 + 1,
+                start_byte: None,
+                end_byte: None,
+                role: Some(role.to_owned()),
+                content_hash: hash_bytes(excerpt.as_bytes()),
+                excerpt,
+                metadata_json: None,
+                inherited_redaction_classes: vec![],
+            },
+        )
+        .unwrap();
+    }
+    let rows = db
+        .list_evidence_spans_for_workspace(&workspace_id())
+        .unwrap();
+    let session = db.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(rows.len(), 4);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.pack_eligibility == "admitted")
+            .count(),
+        2
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.pack_eligibility == "quarantined")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.pack_eligibility == "denied")
+            .count(),
+        1
+    );
+    assert!(
+        rows.iter()
+            .filter(|row| row.pack_eligibility == "admitted")
+            .all(|row| { row.is_direct_pack_admitted_for_session(&workspace_id(), &session) })
+    );
+    db.close().unwrap();
+    (root, workspace, database, rows)
+}
+
+#[test]
+fn evidence_admission_fidelity_round_trips_none_and_warns_for_minimal() {
+    let (root, workspace, database, before) = evidence_source();
+    for level in [RedactionLevel::None, RedactionLevel::Minimal] {
+        let lossy = level == RedactionLevel::Minimal;
+        let backup = create(&workspace, &database, level);
+        let summary = backup
+            .recovery_inventory
+            .evidence_admission
+            .as_ref()
+            .unwrap();
+        let source_counts = BackupEvidenceEligibilityCounts {
+            admitted: 2,
+            quarantined: 1,
+            denied: 1,
+        };
+        let exported_counts = if lossy {
+            BackupEvidenceEligibilityCounts {
+                admitted: 1,
+                quarantined: 0,
+                denied: 3,
+            }
+        } else {
+            source_counts.clone()
+        };
+        assert_eq!(summary.source_search, source_counts);
+        assert_eq!(summary.source_pack, source_counts);
+        assert_eq!(summary.exported_search, exported_counts);
+        assert_eq!(summary.exported_pack, exported_counts);
+        let mut manifest = read_backup_manifest(Path::new(&backup.backup_path))
+            .unwrap()
+            .1;
+        assert_eq!(
+            manifest["recoveryInventory"]["schema"],
+            "ee.backup.recovery_inventory.v2"
+        );
+        assert_eq!(
+            manifest["recoveryInventory"]["rowCountBasis"],
+            "source_snapshot"
+        );
+        let warning = backup
+            .degraded
+            .iter()
+            .find(|entry| entry.code == "backup_evidence_admission_reduced");
+        assert_eq!(warning.is_some(), lossy);
+        if let Some(warning) = warning {
+            assert!(
+                warning
+                    .message
+                    .contains("2 evidence span(s) to pack-denied")
+            );
+            assert!(warning.next_action.contains("--redaction none"));
+        }
+        if lossy {
+            // The measured state, rather than a copied warning string, must
+            // keep inspection and restore honest for another valid producer.
+            manifest["degraded"] = json!([]);
+            let key = StoreAuthRoot::open(workspace_keys_dir(&workspace)).unwrap();
+            authenticate_backup_manifest(&mut manifest, &key).unwrap();
+            fs::write(
+                &backup.manifest_path,
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+        }
+        let inspected = inspect_backup(&BackupInspectOptions {
+            backup_path: PathBuf::from(&backup.backup_path),
+        })
+        .unwrap();
+        assert_eq!(
+            inspected
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "backup_evidence_admission_reduced"),
+            lossy
+        );
+        let verified = verify_backup(&BackupVerifyOptions {
+            workspace_path: workspace.clone(),
+            backup_path: PathBuf::from(&backup.backup_path),
+        })
+        .unwrap();
+        assert_eq!(verified.status, if lossy { "degraded" } else { "verified" });
+        assert_eq!(
+            verified
+                .issues
+                .iter()
+                .any(|issue| issue.code == "backup_evidence_admission_reduced"),
+            lossy
+        );
+        let mut opts = options(
+            root.path(),
+            &workspace,
+            &backup,
+            if lossy { "minimal" } else { "none" },
+        );
+        let source_tree = tree_snapshot(root.path());
+        opts.dry_run = true;
+        let preview = restore_backup_to_side_path(&opts).unwrap();
+        assert_eq!(preview.status, "dry_run");
+        assert!(preview.dry_run);
+        assert_eq!(preview.imported_memory_count, 0);
+        assert_eq!(preview.restored_evidence_span_count, 0);
+        assert!(!opts.side_path.exists());
+        assert_eq!(tree_snapshot(root.path()), source_tree);
+        let preview_warning = preview
+            .degraded
+            .iter()
+            .find(|entry| entry.code == "backup_evidence_admission_reduced");
+        assert_eq!(preview_warning.is_some(), lossy);
+        if let Some(warning) = preview_warning {
+            assert!(
+                warning
+                    .message
+                    .contains("2 evidence span(s) to pack-denied")
+            );
+            assert!(warning.next_action.contains("--redaction none"));
+        }
+        assert_eq!(
+            preview.data_json()["degraded"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["code"] == "backup_evidence_admission_reduced"),
+            lossy,
+        );
+        opts.dry_run = false;
+        let restored = restore_backup_to_side_path(&opts).unwrap();
+        assert_eq!(restored.restored_evidence_span_count, 4);
+        assert_eq!(preview.degraded, restored.degraded);
+        assert_eq!(preview.next_actions, restored.next_actions);
+        assert_eq!(
+            restored
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "backup_evidence_admission_reduced"),
+            lossy
+        );
+        let db = DbConnection::open_file(&restored.restored_database_path).unwrap();
+        for asset in backup
+            .derived
+            .iter()
+            .filter(|asset| asset.kind == "cass_evidence_spans")
+        {
+            let chunk: BackupCassEvidenceChunk = serde_json::from_slice(
+                &fs::read(Path::new(&backup.backup_path).join(&asset.path)).unwrap(),
+            )
+            .unwrap();
+            for row in chunk.evidence_spans {
+                let restored_row = db.get_evidence_span(&row.id).unwrap().unwrap();
+                assert_eq!(BackupCassEvidenceRecord::from_stored(&restored_row), row);
+            }
+        }
+        db.close().unwrap();
+        let source = DbConnection::open_file(&database).unwrap();
+        assert_eq!(
+            source
+                .list_evidence_spans_for_workspace(&workspace_id())
+                .unwrap(),
+            before
+        );
+        source.close().unwrap();
+    }
+}
+
+#[test]
+fn evidence_admission_verification_refuses_signed_counts_that_disagree_with_artifacts() {
+    let (root, workspace, database, _) = evidence_source();
+    let backup = create(&workspace, &database, RedactionLevel::Minimal);
+    let mut manifest = read_backup_manifest(Path::new(&backup.backup_path))
+        .unwrap()
+        .1;
+    // These are internally consistent counts, with a real source signature,
+    // but they falsely claim that the redacted artifact retained eligibility.
+    let summary = &mut manifest["recoveryInventory"]["evidenceAdmission"];
+    summary["exportedSearch"] = summary["sourceSearch"].clone();
+    summary["exportedPack"] = summary["sourcePack"].clone();
+    let key = StoreAuthRoot::open(workspace_keys_dir(&workspace)).unwrap();
+    authenticate_backup_manifest(&mut manifest, &key).unwrap();
+    verify_backup_manifest_authentication(&workspace, &manifest).unwrap();
+    fs::write(
+        &backup.manifest_path,
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let verified = verify_backup(&BackupVerifyOptions {
+        workspace_path: workspace.clone(),
+        backup_path: PathBuf::from(&backup.backup_path),
+    })
+    .unwrap();
+    assert_eq!(verified.status, "failed");
+    assert!(
+        verified
+            .issues
+            .iter()
+            .any(|issue| issue.code == "manifest_evidence_admission_invalid")
+    );
+    assert!(
+        !verified
+            .issues
+            .iter()
+            .any(|issue| issue.code == "manifest_authentication_failed")
+    );
+    let opts = options(root.path(), &workspace, &backup, "rejected-admission-claim");
+    assert!(restore_backup_to_side_path(&opts).is_err());
+    assert!(!opts.side_path.exists());
 }
 
 #[test]

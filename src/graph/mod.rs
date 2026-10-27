@@ -1268,23 +1268,30 @@ struct TypedMemoryGraphRow {
     fields: BTreeMap<String, String>,
 }
 
+/// An edge derived from a memory's typed fields rather than from a row in
+/// `memory_links`, e.g. a decision's `supersedes`.
+///
+/// `pub(crate)` so the CLI's algorithm surfaces can project these alongside
+/// explicit links (bd-3tofq); before that they were visible only to
+/// `build_memory_graph`, which those surfaces do not call.
 #[derive(Debug, Clone, PartialEq)]
-struct TypedMemoryGraphEdge {
+pub(crate) struct TypedMemoryGraphEdge {
     edge_id: String,
-    src_memory_id: String,
-    dst_memory_id: String,
+    pub(crate) src_memory_id: String,
+    pub(crate) dst_memory_id: String,
     relation: String,
     typed_field: String,
     typed_value_hash: String,
-    weight: f64,
-    confidence: f64,
-    directed: bool,
+    pub(crate) weight: f64,
+    pub(crate) confidence: f64,
+    pub(crate) directed: bool,
     evidence_count: u32,
     contribution_score: f64,
 }
 
 /// Options for building a memory graph.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectionOptions {
     /// Maximum links to process (for testing/debugging).
     pub link_limit: Option<u32>,
@@ -2206,7 +2213,10 @@ fn graph_projection_edge_attrs(link: &StoredMemoryLink) -> AttrMap {
     attrs
 }
 
-fn typed_projection_edge_attrs(edge: &TypedMemoryGraphEdge) -> AttrMap {
+/// Canonical attribute shape for a typed-field edge. Shared with the CLI's
+/// algorithm surfaces (bd-3tofq) so a typed edge carries the same
+/// `source = "typed_fields"` marking wherever it is projected.
+pub(crate) fn typed_projection_edge_attrs(edge: &TypedMemoryGraphEdge) -> AttrMap {
     let mut attrs = AttrMap::new();
     attrs.insert("weight".to_string(), CgseValue::Float(edge.weight));
     attrs.insert("confidence".to_string(), CgseValue::Float(edge.confidence));
@@ -2269,7 +2279,13 @@ fn add_typed_projection_edge(
         })
 }
 
-fn typed_memory_graph_edges(
+/// Load the typed-field-derived edges for a workspace scope.
+///
+/// `pub(crate)` for the CLI's algorithm surfaces (bd-3tofq). Note that the
+/// underlying row query filters `tombstoned_at IS NULL` unconditionally, so
+/// these edges never carry a tombstoned memory even when a caller opted into
+/// tombstoned LINKS.
+pub(crate) fn typed_memory_graph_edges(
     conn: &DbConnection,
     workspace_filter: Option<&BTreeSet<String>>,
 ) -> GraphResult<Vec<TypedMemoryGraphEdge>> {
@@ -3415,7 +3431,9 @@ fn score_json(value: f64) -> serde_json::Value {
 
 /// Run the graph refresh job and persist a rebuildable graph snapshot.
 ///
-/// Dry runs, empty graphs, and disabled graph builds are report-only. A refreshed
+/// Dry runs, initially empty graphs, and disabled graph builds are report-only.
+/// An empty graph replaces an existing snapshot so removed links cannot retain
+/// their old scores. A refreshed
 /// graph writes one versioned `memory_links` graph snapshot containing topology
 /// plus centrality scores for deterministic export and validation.
 pub fn refresh_graph_snapshot(
@@ -3586,11 +3604,16 @@ fn refresh_graph_snapshot_in_transaction(
         snapshot: None,
     };
 
-    if report.centrality.status != CentralityRefreshStatus::Refreshed {
+    let replaces_empty_source = report.centrality.status == CentralityRefreshStatus::EmptyGraph
+        && conn
+            .get_latest_graph_snapshot(workspace_id, GraphSnapshotType::MemoryLinks)
+            .map_err(|error| GraphError::storage("inspect empty graph replacement", error))?
+            .is_some();
+    if report.centrality.status != CentralityRefreshStatus::Refreshed && !replaces_empty_source {
         return Ok(report);
     }
 
-    let persistence = graph_snapshot_persistence_input(&report.centrality, &links)?;
+    let persistence = graph_snapshot_persistence_input(&report.centrality, &links, options)?;
     let snapshot =
         persist_graph_snapshot_in_transaction(conn, workspace_id, persistence, write_owner)?;
 
@@ -3659,9 +3682,15 @@ fn float_millis_to_u64_saturating(value: f64) -> u64 {
 fn graph_snapshot_persistence_input(
     centrality: &CentralityRefreshReport,
     links: &[StoredMemoryLink],
+    options: &CentralityRefreshOptions,
 ) -> GraphResult<GraphSnapshotPersistenceInput> {
     let graph_type = GraphSnapshotType::MemoryLinks;
-    let metrics_json = graph_snapshot_metrics_json(graph_type, centrality, links)?;
+    let projection = ProjectionOptions {
+        link_limit: options.link_limit,
+        min_weight: options.min_weight,
+        min_confidence: options.min_confidence,
+    };
+    let metrics_json = graph_snapshot_metrics_json(graph_type, centrality, links, &projection)?;
     let content_hash = graph_snapshot_content_hash(graph_type, &metrics_json);
     let source_generation = u32::try_from(links.len())
         .map_err(|_| GraphError::numeric_overflow("source link count", links.len()))?;
@@ -4355,7 +4384,15 @@ fn graph_snapshot_metrics_json(
     graph_type: GraphSnapshotType,
     centrality: &CentralityRefreshReport,
     links: &[StoredMemoryLink],
+    projection: &ProjectionOptions,
 ) -> GraphResult<String> {
+    if !projection.min_weight.is_none_or(f32::is_finite)
+        || !projection.min_confidence.is_none_or(f32::is_finite)
+    {
+        return Err(GraphError::invalid_snapshot_metrics(
+            "graph source projection thresholds must be finite",
+        ));
+    }
     let scores_by_memory: BTreeMap<&str, &MemoryCentralityScore> = centrality
         .scores
         .iter()
@@ -4383,31 +4420,13 @@ fn graph_snapshot_metrics_json(
         })
         .collect();
 
-    let edges: Vec<_> = links
-        .iter()
-        .map(|link| {
-            let origin = graph_projection_edge_origin(link.metadata_json.as_deref());
-            serde_json::json!({
-                "id": link.id,
-                "source": link.src_memory_id,
-                "target": link.dst_memory_id,
-                "sourceMemoryId": link.src_memory_id,
-                "targetMemoryId": link.dst_memory_id,
-                "relation": link.relation,
-                "directed": link.directed,
-                "weight": link.weight,
-                "confidence": link.confidence,
-                "evidenceCount": link.evidence_count,
-                "sourceKind": link.source,
-                "origin": origin.data_json(),
-            })
-        })
-        .collect();
+    let edges = graph_snapshot_edges(links);
     let remote_graph = graph_snapshot_remote_graph_summary(links);
 
     let metrics = serde_json::json!({
-        "schema": "ee.graph.snapshot.metrics.v1",
+        "schema": "ee.graph.snapshot.metrics.v2",
         "graphType": graph_type.as_str(),
+        "sourceProjection": projection,
         "graph": {
             "nodes": nodes.clone(),
             "edges": edges.clone(),
@@ -4434,6 +4453,29 @@ fn graph_snapshot_metrics_json(
 
     serde_json::to_string(&metrics)
         .map_err(|error| GraphError::json("serialize graph snapshot metrics", error))
+}
+
+fn graph_snapshot_edges(links: &[StoredMemoryLink]) -> Vec<serde_json::Value> {
+    links
+        .iter()
+        .map(|link| {
+            let origin = graph_projection_edge_origin(link.metadata_json.as_deref());
+            serde_json::json!({
+                "id": link.id,
+                "source": link.src_memory_id,
+                "target": link.dst_memory_id,
+                "sourceMemoryId": link.src_memory_id,
+                "targetMemoryId": link.dst_memory_id,
+                "relation": link.relation,
+                "directed": link.directed,
+                "weight": link.weight,
+                "confidence": link.confidence,
+                "evidenceCount": link.evidence_count,
+                "sourceKind": link.source,
+                "origin": origin.data_json(),
+            })
+        })
+        .collect()
 }
 
 fn graph_snapshot_remote_graph_summary(links: &[StoredMemoryLink]) -> serde_json::Value {
@@ -5142,6 +5184,32 @@ pub fn graph_snapshot_centrality_report(
 ) -> GraphResult<CentralityRefreshReport> {
     let value: serde_json::Value = serde_json::from_str(&snapshot.metrics_json)
         .map_err(|error| GraphError::json("parse graph snapshot metrics_json", error))?;
+    if is_explicit_empty_memory_snapshot(&value)
+        && snapshot.node_count == 0
+        && snapshot.edge_count == 0
+        && snapshot.source_generation == 0
+    {
+        return Ok(CentralityRefreshReport {
+            version: env!("CARGO_PKG_VERSION"),
+            status: CentralityRefreshStatus::EmptyGraph,
+            pagerank_status: CentralityAlgorithmStatus::Skipped,
+            betweenness_status: CentralityAlgorithmStatus::Skipped,
+            hits_status: CentralityAlgorithmStatus::Skipped,
+            dry_run: false,
+            node_count: 0,
+            edge_count: 0,
+            projection_ms: 0.0,
+            pagerank_ms: 0.0,
+            betweenness_ms: 0.0,
+            hits_ms: 0.0,
+            total_ms: 0.0,
+            scores: Vec::new(),
+            top_pagerank: Vec::new(),
+            top_betweenness: Vec::new(),
+            top_hubs: Vec::new(),
+            top_authorities: Vec::new(),
+        });
+    }
     let nodes = value
         .get("nodes")
         .or_else(|| value.pointer("/graph/nodes"))
@@ -5664,7 +5732,7 @@ pub const SNAPSHOT_VALIDATION_SCHEMA_V1: &str = "ee.graph.snapshot_validation.v1
 pub enum SnapshotValidationResult {
     /// Snapshot is valid and current.
     Valid,
-    /// Snapshot exists but is stale (source generation has advanced).
+    /// Snapshot is explicitly stale or differs from the current source.
     Stale,
     /// Snapshot content hash does not match recomputed hash.
     HashMismatch,
@@ -5786,8 +5854,15 @@ pub fn validate_snapshot(
         .get_latest_graph_snapshot(&options.workspace_id, options.graph_type)
         .map_err(|error| GraphError::storage("inspect latest graph snapshot", error))?;
 
+    Ok(validate_stored_snapshot(snapshot.as_ref(), options))
+}
+
+fn validate_stored_snapshot(
+    snapshot: Option<&StoredGraphSnapshot>,
+    options: &SnapshotValidationOptions,
+) -> SnapshotValidationReport {
     let Some(snapshot) = snapshot else {
-        return Ok(SnapshotValidationReport::not_found(options));
+        return SnapshotValidationReport::not_found(options);
     };
 
     let generation_delta =
@@ -5813,7 +5888,7 @@ pub fn validate_snapshot(
         SnapshotValidationResult::SchemaIncompatible
     } else if hash_verified == Some(false) {
         SnapshotValidationResult::HashMismatch
-    } else if generation_delta > 0 {
+    } else if snapshot.status == GraphSnapshotStatus::Stale || generation_delta != 0 {
         SnapshotValidationResult::Stale
     } else {
         SnapshotValidationResult::Valid
@@ -5822,11 +5897,11 @@ pub fn validate_snapshot(
     let repair_hint = match result {
         SnapshotValidationResult::Valid => None,
         SnapshotValidationResult::Stale => Some(format!(
-            "Snapshot is {} generations behind. Run `ee graph centrality-refresh`.",
-            generation_delta
+            "Snapshot source count {} differs from the current count {} or its status is stale. Run `ee graph centrality-refresh`.",
+            snapshot.source_generation, options.current_generation
         )),
         SnapshotValidationResult::HashMismatch => {
-            Some("Snapshot hash mismatch. Run `ee graph centrality-refresh --force`.".to_owned())
+            Some("Snapshot hash mismatch. Run `ee graph centrality-refresh`.".to_owned())
         }
         SnapshotValidationResult::SchemaIncompatible => Some(format!(
             "Snapshot schema {} is incompatible with {}. Migrate or rebuild.",
@@ -5840,13 +5915,13 @@ pub fn validate_snapshot(
         }
     };
 
-    Ok(SnapshotValidationReport {
+    SnapshotValidationReport {
         schema: SNAPSHOT_VALIDATION_SCHEMA_V1,
         version: env!("CARGO_PKG_VERSION"),
         result,
         workspace_id: options.workspace_id.clone(),
         graph_type: options.graph_type.as_str().to_owned(),
-        snapshot_id: Some(snapshot.id),
+        snapshot_id: Some(snapshot.id.clone()),
         snapshot_version: Some(snapshot.snapshot_version),
         snapshot_generation: Some(snapshot.source_generation),
         current_generation: options.current_generation,
@@ -5854,7 +5929,142 @@ pub fn validate_snapshot(
         schema_compatible,
         hash_verified,
         repair_hint,
+    }
+}
+
+pub(crate) struct MemoryLinkSnapshotInspection {
+    pub validation: SnapshotValidationReport,
+    /// Older snapshots did not persist their filters. Equal row counts cannot
+    /// establish freshness for those snapshots, so callers must say unknown.
+    pub source_selection_known: bool,
+}
+
+/// Inspect the exact source projection without running graph algorithms.
+/// The caller holds one read snapshot across this inspection and workspace
+/// resolution. Publication and inspection share edge serialization, filters,
+/// and mesh visibility; link counts alone cannot detect weight/endpoint edits.
+pub(crate) fn inspect_memory_link_snapshot(
+    conn: &DbConnection,
+    workspace_id: &str,
+) -> GraphResult<MemoryLinkSnapshotInspection> {
+    let snapshot = conn
+        .get_latest_graph_snapshot(workspace_id, GraphSnapshotType::MemoryLinks)
+        .map_err(|error| GraphError::storage("inspect latest graph snapshot", error))?;
+    let mut options = SnapshotValidationOptions {
+        workspace_id: workspace_id.to_owned(),
+        graph_type: GraphSnapshotType::MemoryLinks,
+        expected_schema_version: GRAPH_EXPORT_SCHEMA_V1.to_owned(),
+        ..SnapshotValidationOptions::default()
+    };
+    let metrics = snapshot
+        .as_ref()
+        .map(|snapshot| serde_json::from_str::<serde_json::Value>(&snapshot.metrics_json))
+        .transpose()
+        .map_err(|error| GraphError::json("read graph snapshot projection", error))?;
+    let projection = metrics
+        .as_ref()
+        .and_then(|metrics| metrics.get("sourceProjection"))
+        .cloned()
+        .map(serde_json::from_value::<ProjectionOptions>)
+        .transpose()
+        .map_err(|error| GraphError::json("read graph source selection", error))?;
+    if projection.is_some()
+        && metrics
+            .as_ref()
+            .and_then(|metrics| metrics.get("schema"))
+            .and_then(serde_json::Value::as_str)
+            != Some("ee.graph.snapshot.metrics.v2")
+    {
+        return Err(GraphError::invalid_snapshot_metrics(
+            "source projection requires graph snapshot metrics v2",
+        ));
+    }
+
+    if let Some(snapshot) = snapshot.as_ref()
+        && projection.is_none()
+    {
+        // Do not assume that a legacy snapshot used today's default filters.
+        // Its status and bytes remain checkable; its exact source is unknown.
+        options.current_generation = snapshot.source_generation;
+        let mut validation = validate_stored_snapshot(Some(snapshot), &options);
+        validation.generation_delta = None;
+        return Ok(MemoryLinkSnapshotInspection {
+            validation,
+            source_selection_known: false,
+        });
+    }
+
+    let projection = projection.unwrap_or_default();
+    if !projection.min_weight.is_none_or(f32::is_finite)
+        || !projection.min_confidence.is_none_or(f32::is_finite)
+    {
+        return Err(GraphError::invalid_snapshot_metrics(
+            "graph source projection thresholds must be finite",
+        ));
+    }
+    let links = graph_projection_links(conn, &projection)?;
+    options.current_generation =
+        u32::try_from(links.len()).map_err(|_| GraphError::NumericOverflow {
+            field: "source link count",
+            value: links.len().to_string(),
+        })?;
+    let mut validation = validate_stored_snapshot(snapshot.as_ref(), &options);
+    if validation.result == SnapshotValidationResult::Valid
+        && let Some(metrics) = metrics.as_ref()
+    {
+        let expected = graph_snapshot_edges(&links);
+        let matches = metrics
+            .get("edges")
+            .and_then(serde_json::Value::as_array)
+            .zip(
+                metrics
+                    .get("graph")
+                    .and_then(|graph| graph.get("edges"))
+                    .and_then(serde_json::Value::as_array),
+            )
+            .is_some_and(|(top, nested)| {
+                canonical_graph_edges(top) == canonical_graph_edges(&expected)
+                    && canonical_graph_edges(nested) == canonical_graph_edges(&expected)
+            });
+        if !matches {
+            validation.result = SnapshotValidationResult::Stale;
+            validation.repair_hint = Some(
+                "Snapshot links differ from the current source projection. Run `ee graph centrality-refresh`."
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(MemoryLinkSnapshotInspection {
+        validation,
+        source_selection_known: true,
     })
+}
+
+fn canonical_graph_edges(edges: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+    let mut edges: Vec<_> = edges.iter().collect();
+    edges.sort_by(|left, right| {
+        left.get("id")
+            .and_then(serde_json::Value::as_str)
+            .cmp(&right.get("id").and_then(serde_json::Value::as_str))
+    });
+    edges
+}
+
+fn is_explicit_empty_memory_snapshot(value: &serde_json::Value) -> bool {
+    value.get("schema").and_then(serde_json::Value::as_str) == Some("ee.graph.snapshot.metrics.v2")
+        && value.get("graphType").and_then(serde_json::Value::as_str) == Some("memory_links")
+        && value
+            .pointer("/centrality/status")
+            .and_then(serde_json::Value::as_str)
+            == Some("empty_graph")
+        && ["/nodes", "/edges", "/graph/nodes", "/graph/edges"]
+            .into_iter()
+            .all(|path| {
+                value
+                    .pointer(path)
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(Vec::is_empty)
+            })
 }
 
 // ============================================================================
@@ -6267,7 +6477,7 @@ fn parse_graph_snapshot_metrics(metrics_json: &str) -> GraphResult<ParsedGraphDo
         }
     }
 
-    if nodes_by_id.is_empty() && edges.is_empty() {
+    if nodes_by_id.is_empty() && edges.is_empty() && !is_explicit_empty_memory_snapshot(&value) {
         return Err(GraphError::invalid_snapshot_metrics(
             "missing nodes or edges",
         ));
@@ -9916,11 +10126,13 @@ mod tests {
             GraphSnapshotType::MemoryLinks,
             &centrality,
             &[remote.clone()],
+            &super::ProjectionOptions::default(),
         ))?;
         let second = graph_result(super::graph_snapshot_metrics_json(
             GraphSnapshotType::MemoryLinks,
             &centrality,
             &[remote],
+            &super::ProjectionOptions::default(),
         ))?;
         assert_eq!(first, second);
         let value: serde_json::Value =
@@ -9988,6 +10200,7 @@ mod tests {
             GraphSnapshotType::MemoryLinks,
             &centrality,
             &[link],
+            &super::ProjectionOptions::default(),
         ))?;
         let value: serde_json::Value =
             serde_json::from_str(&metrics_json).map_err(|error| error.to_string())?;
@@ -12695,6 +12908,436 @@ mod tests {
         connection.close().map_err(|error| error.to_string())
     }
 
+    #[test]
+    fn validate_snapshot_detects_deletions_and_explicit_staleness() -> TestResult {
+        let connection = open_snapshot_db()?;
+        let metrics = r#"{"nodes":[],"edges":[]}"#;
+        let hash = super::graph_snapshot_content_hash(GraphSnapshotType::MemoryLinks, metrics);
+        let snapshot_id = "gsnap_0000000000000000000000231";
+        insert_graph_snapshot_with_hash(&connection, snapshot_id, metrics, 1, &hash)?;
+        let mut options = super::SnapshotValidationOptions {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            current_generation: 6,
+            ..Default::default()
+        };
+        let deleted = graph_result(super::validate_snapshot(&connection, &options))?;
+        assert_eq!(deleted.result, super::SnapshotValidationResult::Stale);
+        assert_eq!(deleted.generation_delta, Some(-1));
+        assert!(!deleted.is_usable());
+
+        options.current_generation = 7;
+        assert!(graph_result(super::validate_snapshot(&connection, &options))?.is_usable());
+        connection
+            .update_graph_snapshot_status(snapshot_id, GraphSnapshotStatus::Stale)
+            .map_err(|error| error.to_string())?;
+        let marked = graph_result(super::validate_snapshot(&connection, &options))?;
+        assert_eq!(marked.result, super::SnapshotValidationResult::Stale);
+        assert_eq!(marked.generation_delta, Some(0));
+        assert!(!marked.is_usable());
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn memory_link_snapshot_inspection_detects_same_count_source_changes() -> TestResult {
+        let connection = open_projection_db()?;
+        let empty = graph_result(super::inspect_memory_link_snapshot(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert_eq!(
+            empty.validation.result,
+            super::SnapshotValidationResult::NotFound
+        );
+        assert_eq!(empty.validation.current_generation, 0);
+        insert_link(
+            &connection,
+            "link_00000000000000000000000151",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        let missing = graph_result(super::inspect_memory_link_snapshot(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert_eq!(
+            missing.validation.result,
+            super::SnapshotValidationResult::NotFound
+        );
+        assert_eq!(missing.validation.current_generation, 1);
+        let options = super::CentralityRefreshOptions::default();
+        graph_result(super::refresh_graph_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            &options,
+        ))?;
+        let original = graph_result(super::inspect_memory_link_snapshot(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert!(original.source_selection_known);
+        assert!(original.validation.is_usable());
+
+        for sql in [
+            "UPDATE memory_links SET weight = 0.4",
+            "UPDATE memory_links SET confidence = 0.6",
+            "UPDATE memory_links SET evidence_count = 8",
+        ] {
+            connection
+                .execute_raw(sql)
+                .map_err(|error| error.to_string())?;
+            let changed = graph_result(super::inspect_memory_link_snapshot(
+                &connection,
+                WORKSPACE_ID,
+            ))?;
+            assert_eq!(
+                changed.validation.result,
+                super::SnapshotValidationResult::Stale,
+                "{sql}"
+            );
+            assert_eq!(changed.validation.generation_delta, Some(0));
+            graph_result(super::refresh_graph_snapshot(
+                &connection,
+                WORKSPACE_ID,
+                &options,
+            ))?;
+            assert!(
+                graph_result(super::inspect_memory_link_snapshot(
+                    &connection,
+                    WORKSPACE_ID
+                ))?
+                .validation
+                .is_usable()
+            );
+        }
+        connection
+            .execute_raw(&format!(
+                "UPDATE memory_links SET dst_memory_id = '{MEMORY_C}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        let moved = graph_result(super::inspect_memory_link_snapshot(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert_eq!(
+            moved.validation.result,
+            super::SnapshotValidationResult::Stale
+        );
+        assert_eq!(moved.validation.generation_delta, Some(0));
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn memory_link_snapshot_inspection_replays_filters_limit_and_mesh_visibility() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_memory(&connection, MEMORY_D, "Outside the selected source limit")?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000161",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000162",
+            MEMORY_A,
+            MEMORY_C,
+            true,
+            0.2,
+            0.3,
+        )?;
+        insert_link_with_metadata(
+            &connection,
+            "link_00000000000000000000000163",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+            Some(mesh_link_metadata_with_policy_action(
+                "allow", "metadata", true, "deny",
+            )),
+        )?;
+        let options = super::CentralityRefreshOptions {
+            min_weight: Some(0.7),
+            min_confidence: Some(0.6),
+            link_limit: Some(3),
+            ..Default::default()
+        };
+        let refreshed = graph_result(super::refresh_graph_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            &options,
+        ))?;
+        assert_eq!(
+            refreshed
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.source_generation),
+            Some(1)
+        );
+        insert_link(
+            &connection,
+            "link_00000000000000000000000164",
+            MEMORY_C,
+            MEMORY_D,
+            true,
+            0.9,
+            0.9,
+        )?;
+        let unchanged = graph_result(super::inspect_memory_link_snapshot(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert!(
+            unchanged.validation.is_usable(),
+            "filtered, denied, and out-of-limit links must not create false staleness"
+        );
+        assert_eq!(unchanged.validation.current_generation, 1);
+        connection.execute_raw("UPDATE memory_links SET weight = 0.8, confidence = 0.8 WHERE id = 'link_00000000000000000000000162'")
+            .map_err(|error| error.to_string())?;
+        let selected = graph_result(super::inspect_memory_link_snapshot(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert_eq!(
+            selected.validation.result,
+            super::SnapshotValidationResult::Stale
+        );
+        assert_eq!(selected.validation.current_generation, 2);
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn memory_link_snapshot_inspection_uses_edge_identity_not_array_order() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000165",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000166",
+            MEMORY_B,
+            MEMORY_C,
+            true,
+            0.8,
+            0.9,
+        )?;
+        let refreshed = graph_result(super::refresh_graph_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            &super::CentralityRefreshOptions::default(),
+        ))?;
+        let id = refreshed
+            .snapshot
+            .ok_or_else(|| "snapshot required".to_owned())?
+            .id;
+        let stored = connection
+            .get_graph_snapshot(&id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "stored snapshot required".to_owned())?;
+        let mut metrics: serde_json::Value =
+            serde_json::from_str(&stored.metrics_json).map_err(|error| error.to_string())?;
+        for path in ["/edges", "/graph/edges"] {
+            metrics
+                .pointer_mut(path)
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_else(|| format!("missing {path}"))?
+                .reverse();
+        }
+        let bytes = metrics.to_string();
+        let hash = super::graph_snapshot_content_hash(GraphSnapshotType::MemoryLinks, &bytes);
+        connection.execute_raw(&format!("UPDATE graph_snapshots SET metrics_json = '{}', content_hash = '{hash}' WHERE id = '{id}'",
+            bytes.replace('\'', "''"))).map_err(|error| error.to_string())?;
+        assert!(
+            graph_result(super::inspect_memory_link_snapshot(
+                &connection,
+                WORKSPACE_ID
+            ))?
+            .validation
+            .is_usable()
+        );
+
+        // Both copies must agree with the source: a matching top-level array
+        // cannot conceal a stale nested projection used by another consumer.
+        metrics["graph"]["edges"][0]["weight"] = serde_json::json!(0.1);
+        let bytes = metrics.to_string();
+        let hash = super::graph_snapshot_content_hash(GraphSnapshotType::MemoryLinks, &bytes);
+        connection.execute_raw(&format!("UPDATE graph_snapshots SET metrics_json = '{}', content_hash = '{hash}' WHERE id = '{id}'",
+            bytes.replace('\'', "''"))).map_err(|error| error.to_string())?;
+        assert_eq!(
+            graph_result(super::inspect_memory_link_snapshot(
+                &connection,
+                WORKSPACE_ID
+            ))?
+            .validation
+            .result,
+            super::SnapshotValidationResult::Stale
+        );
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn legacy_snapshot_source_selection_is_unverified() -> TestResult {
+        let connection = open_snapshot_db()?;
+        let metrics = r#"{"schema":"ee.graph.snapshot.metrics.v1","nodes":[],"edges":[]}"#;
+        let hash = super::graph_snapshot_content_hash(GraphSnapshotType::MemoryLinks, metrics);
+        insert_graph_snapshot_with_hash(
+            &connection,
+            "gsnap_0000000000000000000000232",
+            metrics,
+            1,
+            &hash,
+        )?;
+        let inspected = graph_result(super::inspect_memory_link_snapshot(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert!(!inspected.source_selection_known);
+        assert_eq!(inspected.validation.generation_delta, None);
+        assert_eq!(inspected.validation.hash_verified, Some(true));
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn refresh_graph_snapshot_clears_deleted_last_link_and_cached_scores() -> TestResult {
+        let connection = open_projection_db()?;
+        let options = super::CentralityRefreshOptions::default();
+        let initially_empty = graph_result(super::refresh_graph_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            &options,
+        ))?;
+        assert!(initially_empty.snapshot.is_none());
+        insert_link(
+            &connection,
+            "link_00000000000000000000000171",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        let populated = graph_result(super::refresh_graph_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            &options,
+        ))?;
+        let previous = populated
+            .snapshot
+            .ok_or_else(|| "expected populated snapshot".to_owned())?;
+        connection
+            .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                snapshot_id: previous.id.clone(),
+                algorithm: "pagerank".to_owned(),
+                params_hash: "blake3:empty-replacement-cache".to_owned(),
+                result_json: r#"{"scores":[["mem_a",0.9]]}"#.to_owned(),
+                ttl_seconds: 300,
+            })
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("DELETE FROM memory_links")
+            .map_err(|error| error.to_string())?;
+        let deleted = graph_result(super::inspect_memory_link_snapshot(
+            &connection,
+            WORKSPACE_ID,
+        ))?;
+        assert_eq!(
+            deleted.validation.result,
+            super::SnapshotValidationResult::Stale
+        );
+        let dry_run = graph_result(super::refresh_graph_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            &super::CentralityRefreshOptions {
+                dry_run: true,
+                ..Default::default()
+            },
+        ))?;
+        assert!(dry_run.snapshot.is_none());
+        let replaced = graph_result(super::refresh_graph_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            &options,
+        ))?;
+        assert_eq!(
+            replaced.centrality.status,
+            super::CentralityRefreshStatus::EmptyGraph
+        );
+        let replacement = replaced
+            .snapshot
+            .ok_or_else(|| "empty replacement must be persisted".to_owned())?;
+        assert_eq!(replacement.snapshot_version, previous.snapshot_version + 1);
+        let stored = connection
+            .get_graph_snapshot(&replacement.id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "empty replacement must exist".to_owned())?;
+        assert_eq!(
+            (
+                stored.node_count,
+                stored.edge_count,
+                stored.source_generation
+            ),
+            (0, 0, 0)
+        );
+        let scores = graph_result(super::graph_snapshot_centrality_report(&stored))?;
+        assert_eq!(scores.status, super::CentralityRefreshStatus::EmptyGraph);
+        assert!(scores.scores.is_empty());
+        assert!(
+            graph_result(super::inspect_memory_link_snapshot(
+                &connection,
+                WORKSPACE_ID
+            ))?
+            .validation
+            .is_usable()
+        );
+        assert_eq!(
+            connection
+                .get_graph_snapshot(&previous.id)
+                .map_err(|error| error.to_string())?
+                .map(|snapshot| snapshot.status),
+            Some(GraphSnapshotStatus::Archived)
+        );
+        assert!(
+            connection
+                .list_graph_algorithm_results(WORKSPACE_ID, &previous.id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        assert!(
+            connection
+                .list_audit_by_target(SNAPSHOT_TARGET_TYPE, &previous.id, None)
+                .map_err(|error| error.to_string())?
+                .iter()
+                .any(|audit| audit.action == SNAPSHOT_ARCHIVED_ACTION)
+        );
+        let export = graph_result(super::export_graph_snapshot(
+            &connection,
+            &super::GraphExportOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                ..Default::default()
+            },
+        ))?;
+        assert_eq!(export.status, super::GraphExportStatus::Exported);
+        connection.close().map_err(|error| error.to_string())
+    }
+
     #[cfg(feature = "graph")]
     #[test]
     fn validate_snapshot_returns_not_found_for_missing_workspace() -> TestResult {
@@ -12781,7 +13424,7 @@ mod tests {
             report
                 .repair_hint
                 .as_deref()
-                .is_some_and(|hint| hint.contains("centrality-refresh --force"))
+                .is_some_and(|hint| hint.contains("centrality-refresh"))
         );
 
         connection.close().map_err(|error| error.to_string())

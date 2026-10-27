@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.global_promotion.report.v2.json",
+  "title": "ee.global_promotion.report.v2",
+  "description": "Global promotion execution and review receipt. Near-duplicates produce a durable merge candidate for explicit curation review; proposal creation changes no memory and queues no search-index job. Exact compatible twins and unchanged previously applied reviewed merges are idempotent re-promotions.",
+  "type": "object",
+  "required": ["schema", "plan", "executed", "globalMemoryId", "alreadyPromoted", "indexJobId", "indexStatus", "indexError", "mergeCandidateId", "reviewCommand"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.global_promotion.report.v2"},
+    "plan": {"$ref": "ee.global_promotion.plan.v2.json"},
+    "executed": {"type": "boolean", "description": "Whether the requested durable promotion or proposal operation executed; false for dry-run and refusal."},
+    "globalMemoryId": {"type": ["string", "null"], "description": "Global memory created, matched, or targeted by the merge proposal; null when no destination was selected."},
+    "alreadyPromoted": {"type": "boolean", "description": "True for an existing exact compatible twin or an unchanged, previously applied reviewed merge. Pending, approved, and rejected merge proposals do not establish promotion."},
+    "indexJobId": {"type": ["string", "null"], "description": "Durable search-index receipt for a committed global memory, including unfinished work recovered on replay. Null for proposal-only operations."},
+    "indexStatus": {"type": "string", "enum": ["indexed", "queued", "failed", "not_applicable"]},
+    "indexError": {"type": ["string", "null"]},
+    "mergeCandidateId": {"type": ["string", "null"], "description": "Deterministic curation candidate in the global store, retained when replaying its applied merge."},
+    "reviewCommand": {"type": ["string", "null"], "description": "Workspace-addressed ee curate show command for inspecting the global merge proposal before validation and application."}
+  }
+}

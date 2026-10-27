@@ -26,9 +26,10 @@ pub(super) fn screen(content: &str) -> ExternalIngestionScreenReport {
 }
 
 /// Count detector matches before replacement, including embedded bearers.
-/// For JSON carrying Unicode escapes, decode before matching so raw-line PII
-/// replacement cannot split an encoded credential. Count the selected view,
-/// not both encodings of one secret. Clean records retain their original bytes.
+/// For JSON carrying Unicode escapes or PEM blocks, validate a decoded view
+/// before accepting replacements. Raw-line PII must not split an encoded
+/// credential, and a PEM span must not consume JSON fields. Count the selected
+/// view, not both encodings of one secret. Clean records retain original bytes.
 pub(super) fn screen_with_span_count(content: &str) -> (ExternalIngestionScreenReport, usize) {
     // The screen is a pure function of its input, and CASS import screens each
     // window twice (when the view is parsed, then again at the database insert
@@ -322,6 +323,15 @@ fn screen_scanning_view(content: &str) -> (ExternalIngestionScreenReport, usize)
         // can also lose their identifying context during an earlier rewrite.
         // Reuse that implementation, not a second provider table or parser.
         let report = redact_git_capture_text(content);
+        let report = match encoded_json::preserve_json_strings(content, report) {
+            Ok(report) => report,
+            Err(_) => {
+                return withhold_encoded_record(
+                    content,
+                    "external_ingestion_encoded_json_redaction_invalid",
+                );
+            }
+        };
         let span_count = report.matches.len();
         (
             report.content,

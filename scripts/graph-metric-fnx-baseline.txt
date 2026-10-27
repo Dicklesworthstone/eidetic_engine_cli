@@ -19,3 +19,20 @@
 # Adding a line is a decision, not a formality: AGENTS.md routes graph analytics
 # through franken_networkx. Record why in the commit message, because this file
 # has room for the name and not the reason.
+
+# 2026-10-18. Both entries below are METRIC-ADJACENT, NOT METRIC-COMPUTING: each
+# is named for the metric it sits beside and implements policy or plumbing
+# around it. The metric itself still routes through fnx in the sibling file, so
+# nothing here is a hand-rolled algorithm and there is nothing for fnx to do.
+
+# Deadline recovery around the optional PPR tail -- compute/timeout/publish/
+# recover/finish_neighbors over an mpsc checkpoint. The PPR computation itself
+# is compute_pack_dna_unbudgeted in pack_dna.rs, which calls fnx 5 times.
+pack_dna_progress.rs
+
+# Admission policy applied BEFORE structural graph creation, by its own header:
+# "FNX edge insertion can create endpoints. A link is therefore not authority to
+# introduce a memory missing from the caller's selection." live_memory_workspaces
+# /link_is_admitted/canonical_links filter StoredMemory and StoredMemoryLink; the
+# structural metric is in structural.rs, which calls fnx twice.
+structural_admission.rs

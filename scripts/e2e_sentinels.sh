@@ -135,7 +135,18 @@ step "remember a sentinel-backed contract-shaped fact"
 mem="$(ee_json remember \
     "The demo.v1 schema defines the memoryId field." \
     --workspace "$WS" --level procedural --kind fact \
-    --sentinel "json_schema_contains_field:docs/schemas/demo.v1.json#memoryId" \
+    `# The selector is a DOTTED PATH FROM THE ROOT, not a field name to search` \
+    `# for. json_has_dotted_field (src/core/sentinel.rs:347) walks each segment` \
+    `# with .get(), and its own unit test pins that: "schema.json#a.b" against` \
+    `# {"a":{"b":1}} is Satisfied. The fixture seeded at line 47 declares the` \
+    `# field under "properties", so "#memoryId" asked for a ROOT key that never` \
+    `# existed and the sentinel was Unsatisfied from the start.` \
+    `#` \
+    `# That broke BOTH paired assertions, in opposite ways: step 13 ("passes` \
+    `# while the field is present") failed, and step 14 ("fails once the field` \
+    `# is absent") passed VACUOUSLY -- the status was already "fail" before` \
+    `# anything was removed, so it proved nothing about removal.` \
+    --sentinel "json_schema_contains_field:docs/schemas/demo.v1.json#properties.memoryId" \
     --json)"
 assert_jq "$mem" '.success == true' "remember succeeds"
 mem_id="$(printf '%s' "$mem" | jq -r '.data.memory_id // empty')"
@@ -323,8 +334,22 @@ assert_jq "$fail" 'all(.data.results[]?; .status != "removed")' \
 step "ee pack --require-fresh-sentinels omits the failing sentinel-backed memory"
 pk="$(ee_json pack "demo schema memoryId" --workspace "$WS" --require-fresh-sentinels --json)"
 assert_jq "$pk" '.success == true' "pack --require-fresh-sentinels runs"
+# `.data.pack.skipped[]`, not `.data.pack.omitted[]`. The pack emits its
+# per-memory omissions through `field_array_of_objects("skipped", ...)`
+# (src/output/mod.rs:3322), and src/output/mod.rs:12218 says so outright:
+# "pack's skipped omissions live at `data.pack.skipped[]`". There is no
+# `omitted` array anywhere under `.data.pack`: the name occurs only as a
+# component DIGEST STRING nested in the hash identity's `components` object
+# (:2994) and as `omittedCount`, a count under `quality` (:4267). Because
+# `[]?` suppresses the error on a missing key, `.data.pack.omitted[]?`
+# yielded nothing, `any(empty; ...)` is false, and the assertion could never
+# be true no matter what the product did.
+#
+# The element fields were already right: build_pack_skipped_item (:4450) emits
+# `memoryId` and `reason`, and `excluded_by_policy` is a real value
+# (PackOmissionReason::ExcludedByPolicy, src/pack/mod.rs:3416).
 SENTINEL_ID="$mem_id" assert_jq "$pk" \
-    'any(.data.pack.omitted[]?; ((.memoryId // .memory_id) == env.SENTINEL_ID) and ((.reason // "") == "excluded_by_policy"))' \
+    'any(.data.pack.skipped[]?; ((.memoryId // .memory_id) == env.SENTINEL_ID) and ((.reason // "") == "excluded_by_policy"))' \
     "failing sentinel-backed memory is persisted as a pack omission"
 
 step "ee why --include-sentinel shows the latest failed sentinel result"
@@ -340,12 +365,31 @@ assert_jq "$why" \
 step "orient revival degradation fixture has a reproducible real filesystem trigger"
 BROKEN_REVIVAL_WS=""
 with_temp_workspace BROKEN_REVIVAL_WS
-BROKEN_REVIVAL_DB="$EE_DATABASE_PATH"
 broken_init="$(ee_json init --workspace "$BROKEN_REVIVAL_WS" --json)"
 assert_jq "$broken_init" '.success == true' \
     "broken-revival fixture workspace initializes"
+# Sabotage the database the commands actually OPEN, which is the
+# workspace-relative one. `with_temp_workspace` exports EE_DATABASE_PATH
+# (scripts/lib/e2e_harness.sh:331) pointing at <ws>/db/ee.db, but nothing on
+# this path reads that variable: `handle_insights` (src/cli/mod.rs:19009) is
+# its only CLI consumer, while `init` and `orient` resolve
+# <workspace>/.ee/ee.db. Aiming at $EE_DATABASE_PATH made the `mv` below fail
+# with "No such file or directory"; the script has no `set -e`, so it carried
+# on, created a directory nothing opens, and left the real database intact --
+# orient then had nothing to degrade about and the assertion could not pass.
+BROKEN_REVIVAL_DB="$BROKEN_REVIVAL_WS/.ee/ee.db"
+# Assert the precondition rather than assuming it. This red stayed obscure as
+# long as it did precisely because a silent `mv` failure had quietly converted
+# a product-behavior assertion into a path-spelling one; if the layout drifts
+# again, the next reader is told which half broke.
+assert_eq "$([ -f "$BROKEN_REVIVAL_DB" ] && printf 'regular-file' || printf 'absent')" \
+    "regular-file" \
+    "broken-revival fixture: the database to sabotage exists before the swap"
 mv "$BROKEN_REVIVAL_DB" "$BROKEN_REVIVAL_DB.saved"
 mkdir "$BROKEN_REVIVAL_DB"
+assert_eq "$([ -d "$BROKEN_REVIVAL_DB" ] && printf 'directory' || printf 'not-a-directory')" \
+    "directory" \
+    "broken-revival fixture: ee.db is a directory once the swap completes"
 broken_orient="$(ee_json orient "resume work" --fast --workspace "$BROKEN_REVIVAL_WS" --json)"
 assert_jq "$broken_orient" \
     '.success == true

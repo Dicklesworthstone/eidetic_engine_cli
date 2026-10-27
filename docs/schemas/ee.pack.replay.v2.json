@@ -335,7 +335,6 @@
     "selectedItem": {
       "type": "object",
       "required": [
-        "memoryId",
         "rank",
         "section",
         "estimatedTokens",
@@ -347,9 +346,33 @@
         "redactionClasses",
         "freshness"
       ],
+      "oneOf": [
+        {
+          "required": ["memoryId"],
+          "not": { "required": ["entityKind"] }
+        },
+        {
+          "required": ["entityKind", "entityId", "evidenceSpanId", "entityRevision"],
+          "properties": {
+            "entityKind": { "const": "evidence_span" }
+          },
+          "not": { "required": ["memoryId"] }
+        },
+        {
+          "required": ["entityKind", "entityId", "entityRevision"],
+          "properties": {
+            "entityKind": { "const": "rule" }
+          },
+          "not": { "required": ["memoryId"] }
+        }
+      ],
       "additionalProperties": false,
       "properties": {
         "memoryId": { "$ref": "#/$defs/memoryId" },
+        "entityKind": { "type": "string", "enum": ["evidence_span", "rule"] },
+        "entityId": { "type": "string", "minLength": 1 },
+        "evidenceSpanId": { "type": "string", "pattern": "^ev_" },
+        "entityRevision": { "$ref": "#/$defs/blake3Hash" },
         "rank": { "type": "integer", "minimum": 1 },
         "section": {
           "type": "string",

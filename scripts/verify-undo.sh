@@ -90,10 +90,43 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
     mkdir -p "$target"
     # A corrupt.sh failure is a SKIP, and any SKIP fails the run: a missing
     # fixture must not look like a pass.
-    if ! EE_DOCTOR_FIXTURE_TARGET="$target" "$fm_dir/corrupt.sh" >/dev/null 2>&1; then
+    #
+    # EE_DOCTOR_FIXTURE_BINARY goes to corrupt.sh TOO, not only to assert.sh
+    # below. Every corrupt.sh reads `${EE_DOCTOR_FIXTURE_BINARY:-ee}` and then
+    # `command -v` on it, so without this the CORRUPT phase built its fixture
+    # with whatever `ee` happened to be on PATH while the ASSERT phase graded it
+    # with the binary under test -- two different binaries either side of one
+    # fixture -- and on a host with no `ee` installed every fixture skipped
+    # instead. Measured 2026-10-14 on a worker with no installed ee: 19 of 19
+    # corrupt.sh failures, reported as `COVERAGE passed=0 failed=0 ...
+    # skipped=19`, which is an honest non-verdict that still cost three
+    # dispatches to attribute to the invocation rather than to the product. The
+    # same tree with the binary passed returned `COVERAGE passed=8` and `GAP
+    # reproduced=6`.
+    #
+    # This is a no-op under scripts/run-safety-harness.sh, which already exports
+    # the variable (:55); it repairs the standalone path that the header above
+    # warns "used to grade an installed binary while printing nothing about
+    # which one it used".
+    # bd-2oh15: capture rather than discard. This used to be `>/dev/null 2>&1`,
+    # so "corrupt.sh failed; counted as SKIP" was the WHOLE story -- a wedged
+    # fixture root, a missing binary and a genuine script bug all produced that
+    # one line, and telling them apart cost a fresh ~24-minute fleet dispatch
+    # every time. It has cost this bead at least four.
+    #
+    # Captured into a VARIABLE, not a file under "$target" as the assert.sh
+    # branch below does: corrupt.sh is what takes the baseline digest, so a file
+    # created here would exist before that digest and would have to be added to
+    # the exclusion list to avoid perturbing the undo comparison. A variable
+    # cannot perturb anything.
+    corrupt_output=""
+    if ! corrupt_output="$(EE_DOCTOR_FIXTURE_TARGET="$target" \
+        EE_DOCTOR_FIXTURE_BINARY="$EE_BIN" \
+        "$fm_dir/corrupt.sh" 2>&1)"; then
         SKIP=$((SKIP + 1))
         FAILED_FMS="$FAILED_FMS $fm_id(corrupt.sh)"
         echo "verify-undo[$fm_id]: corrupt.sh failed; counted as SKIP" >&2
+        printf '%s\n' "$corrupt_output" | tail -6 | sed "s|^|verify-undo[$fm_id]: corrupt.sh: |" >&2
         continue
     fi
 

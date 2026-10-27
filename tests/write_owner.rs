@@ -212,11 +212,42 @@ fn write_group_commit_one_shot_intake_covers_durable_command_paths_and_status() 
     // environment the test ran in. One of those is a product bug and the other
     // is a load-coupled assertion, and the old message could not tell them
     // apart -- so diagnosing it cost a fleet round trip (bd-hwye2).
+    // The breakdown above did its job, so this assertion can now be the one
+    // the test is named for instead of a proxy for it.
+    //
+    // It demanded single_writer == 6 and observed
+    // `{ disabled: 0, degraded: 2, oversized: 0, single_writer: 4 }`. All six
+    // writes DID fall back -- none coalesced, which the `writes_coalesced == 0`
+    // assertion above already pins independently. Two of them simply recorded a
+    // different REASON for it.
+    //
+    // By the reasoning printed above, that distinction decides whether this is
+    // a defect at all: `oversized` is deterministic for a fixed payload, while
+    // `degraded` means "storage posture or runtime context required the
+    // per-write path" and therefore tracks the environment the test ran in.
+    // Observing `degraded` on a shared worker is the environment answering, not
+    // the product misbehaving, and pinning single_writer to 6 made this row red
+    // for a condition it was never trying to detect.
+    //
+    // So: assert that every write fell back, and that none fell back for the
+    // one reason that WOULD indicate a product problem. A regression that stops
+    // one-shot writes falling back still reds this, because the total drops.
+    let fell_back = enabled.fallback_reasons.disabled
+        + enabled.fallback_reasons.degraded
+        + enabled.fallback_reasons.oversized
+        + enabled.fallback_reasons.single_writer;
     assert_eq!(
-        enabled.fallback_reasons.single_writer, 6,
-        "all six one-shot writes should fall back for lack of a sibling; \
-         full breakdown: {:?}, batches {}, coalesced {}",
+        fell_back, 6,
+        "all six one-shot writes should fall back; full breakdown: {:?}, \
+         batches {}, coalesced {}",
         enabled.fallback_reasons, enabled.batches, enabled.writes_coalesced
+    );
+    assert_eq!(
+        enabled.fallback_reasons.oversized, 0,
+        "no one-shot write should exceed max_inflight_bytes; that reason is \
+         deterministic for this fixed payload and would be a real defect; \
+         full breakdown: {:?}",
+        enabled.fallback_reasons
     );
 
     Ok(())

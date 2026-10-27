@@ -1,0 +1,65 @@
+# Dispositions for `#[test]` functions that a commit deleted and nothing
+# restored, as surfaced by scripts/audit-vanished-tests.py (bd-z1dus, bd-0rkti).
+#
+# WHY THIS FILE EXISTS. The detector worked; its FINDINGS EXPIRED. `--since`
+# defaulted to a rolling `60 days ago`, nothing recorded which findings had been
+# triaged, and the tool exited 0 while printing them. So an untriaged deletion
+# did not stay surfaced: it aged out, and the report got CLEANER while the tree
+# did not. Measured 2026-10-25: a 2026-10-19 run with `--since 2026-09-05`
+# reported 12 names and that day's default run reported 11 -- the windows are
+# not nested, so the sets differed in BOTH directions -- and `05020689c` was two
+# days from leaving the default window with six names dispositioned nowhere in
+# the tracker.
+#
+# A detector whose output shrinks with the CLOCK rather than with REPAIR is not
+# a ratchet. This file makes it one, in two ways that only work together:
+#
+#   1. The window's lower bound is the baseline COMMIT below, not a date, so it
+#      can only grow as HEAD advances. A finding cannot expire.
+#   2. Every surfaced name must appear here, so the gate exits NONZERO on an
+#      untriaged one. An UNDISPOSITIONED name is the only thing that stands out.
+#
+# SHRINK-ONLY IN BOTH DIRECTIONS, the MESH_EMITTED_CODES_WITHOUT_FIXTURE idiom.
+# An undispositioned name fails. So does a row whose name is no longer
+# surfaced: with a growing window the only way that happens is that the test
+# came back, which makes the row a statement about the past. Deleting a row is
+# then the correct action, and it is the only correct direction.
+#
+# FORMAT  name<TAB>disposition<TAB>reason
+#
+#   retired   The assertion is deliberately gone. The thing it asserted is no
+#             longer a property worth asserting, or asserting it tests
+#             something other than this project's code.
+#   replaced  Another test or gate asserts the same property, named in the
+#             reason. This is the verdict a name-based sweep cannot reach on its
+#             own -- it is why the tool prints what the removing commit ADDED.
+#   owed      A real coverage loss, not yet restored. The reason must say what
+#             is unasserted, precisely enough that restoring it is mechanical.
+#
+# A reason is MANDATORY for every row and the parser refuses a row without one.
+# A disposition with no stated why would let someone clear this gate while
+# recording nothing, which is the gate's own failure mode written into its input.
+#
+# WHY THE BASELINE IS HERE AND NOT EARLIER. 2026-10-25: `05020689c` is the
+# oldest commit the 60-day window still surfaced, so its parent is the earliest
+# bound that keeps exactly the set that was measured and triaged. Moving it
+# EARLIER is how coverage grows later, and it will surface names nobody has
+# triaged -- which is the point, and is work, not a regression.
+#
+# baseline-commit: ddbd1dea939053435a251c01e33092b0f1366eaa
+
+pack_hash_refresh_includes_late_context_degradation	replaced	RENAMED, tracking a production rename. The body is at src/core/context_test_module.rs:11369 as `pack_finalization_includes_pre_persistence_degradation`, with the same fixture verbatim -- ContextRequest::from_query("late degradation hash") and "Late degradation must change the pack hash." The old name described `refresh_context_pack_hash`, which no longer exists as a function in src/ (it survives only as a doc reference at tests/pack_slo_unit.rs:279), so the name had stopped describing anything. SURFACED LATE, which is worth recording about the detector rather than the test: the present-set is any `fn` name in the tree, so while a function of this name existed anywhere it counted as present. A peer commit changed that set (43596 -> 43827 names) and un-hid it. A rename is invisible to a name-based sweep until the old name stops appearing for an unrelated reason.
+read_only_semantic_pack_keeps_embedding_preparation_local	replaced	3870f412d extracted this file's tests into src/core/context_test_module.rs; read_only_semantic_pack_names_cold_daemon_fallback_without_writes (context_test_module.rs:1139) carries the same fixture and the same daemon_fallback message, and asserts MORE: the provider signature gained require_cached_local, so the old `calls == 0` is no longer expressible and the surviving test asserts `calls == 1` with require_cached_local true plus a differential model-registry check.
+
+situation_compare_without_dry_run_is_policy_error	retired	RETIRED PREMISE, not lost coverage, and I got this wrong once before recording it. 90bf87b89 deleted a test asserting that `situation compare` without --dry-run returns PolicyDenied. At HEAD handle_situation_compare (src/cli/mod.rs:61842) returns ProcessExitCode::Success unconditionally and never reads args.dry_run, whose doc comment gives the reason: "Explicitly request a preview; comparisons never persist changes." A compare cannot persist, so requiring the flag was pointless and was removed; the flag survives as an explicit no-op. I first dispositioned this as `owed` and restored the test, on evidence from a probe of the INSTALLED binary -- which reports 0.14.2 against this tree's 0.18.0, and the behaviour changed inside that gap. There is no runnable 0.18.0 ee on this Mac, so a binary probe cannot establish current behaviour here; read the source.
+
+capabilities_report_includes_capabilities_command	retired	05020689c derived the command inventory from clap, so asserting a named command appears in the report now tests clap rather than this project. capabilities_report_accepts_cli_owned_command_inventory is the handoff assertion that commit added.
+capabilities_report_includes_docs_bootstrap_commands	retired	As above: list-membership against a clap-DERIVED inventory.
+capabilities_report_includes_documented_agent_loop_commands	retired	As above: list-membership against a clap-DERIVED inventory.
+capabilities_report_includes_impact_command	retired	As above: list-membership against a clap-DERIVED inventory.
+
+capabilities_report_advertises_group_commit_daemon_write_methods	retired	RETIRED PREMISE, and my first disposition of this row was WRONG. It asserted that `diag contention --use-daemon`, ee.daemon.telemetry, ee.daemon.write and ee.daemon.write_journal are advertised AND AVAILABLE. At HEAD src/cli/mod.rs:87082 carries a `forbidden_path` list containing exactly those four and fails with "non-canonical capability path leaked" if any appears in the inventory -- they must be ABSENT. So the inventory was deliberately made canonical and the assertion was inverted, not lost. I first recorded this `owed` and then `replaced` by a loop asserting the four ARE available, on evidence from a probe of the INSTALLED binary (0.14.2 against this tree's 0.18.0); the change happened inside that gap and the loop contradicted a test already in the tree. Reverted.
+capabilities_report_marks_daemon_maintenance_posture	retired	Same shape, same cause, same correction: it asserted `daemon foreground decay_sweep`, `daemon foreground non-decay` and `daemon background` exist and are available. The first two are in that same `forbidden_path` list at src/cli/mod.rs:87082 and must be absent. Retired with its premise.
+
+rch_verify_every_blocker_kind_has_a_remediation_mapping	replaced	86380c6e8 removed both Rust contract tests and, in the same commit, added scripts/check-rch-remediation-guidance.py covering both invariants with more cases than the tests it replaced. That gate runs locally and is green at HEAD (`{"kinds": 12, "mapped": 1, ...}`). This is the consolidation case the tool's own docstring names as the verdict a name-based sweep cannot reach.
+rch_verify_remediation_beads_are_open_or_recorded_as_stale	replaced	Same commit, same replacement gate: scripts/check-rch-remediation-guidance.py.

@@ -17,14 +17,17 @@ const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
 /// Measured, not incremented: 454 after adding `ask --read-only`, by mirroring
 /// `command_paths_in` over the marker-delimited body of `extract_command_path`
 /// (`python3` over `src/cli/mod.rs`, same rule the gate uses — a path is
-/// recovered only from `"literal".to_string()`).
+/// recovered only from `"literal".to_string()`). Re-measured at 458 the
+/// same way after `config explain`, `index backfill-anchors`, `memory anchors`
+/// and `workspace rebind` landed, and at 460 after `curate candidates
+/// --propose` and `evidence withdraw`.
 ///
 /// It sat at 416 from `c097d4da9` until now while the real inventory grew to
 /// 453. The drift is how this constant is normally wrong: an author adds one
 /// command and increments by one without re-measuring, so every count someone
 /// else forgot compounds silently. When this fails, re-measure the inventory;
 /// do not add the delta of your own change to the old number.
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 454;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 460;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",

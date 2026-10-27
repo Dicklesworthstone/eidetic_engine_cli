@@ -382,6 +382,35 @@ else
     event packed_evidence_body_is_the_transcript_line fail "no packed evidence item's content contained '${TARGET_MARKER}'; contents=$(jq -c '[(.data.pack.items // [])[]? | select((.entityKind // "") == "evidence_span") | (.content // "")[0:90]]' "${PACK_OUT}" 2>/dev/null | head -c 400)"
 fi
 
+# bd-16imy's bullet 4 says the pack hydrates imported evidence into a
+# "deterministic section". Nothing asserted the DETERMINISTIC half, so pack the
+# same phrase again and require the evidence section to be identical.
+#
+# Compared field by field rather than as whole envelopes, because the response
+# legitimately varies between runs (pack id, timing) while the SECTION must not.
+# The fields are the item's real representation, read off a measured run: rank,
+# evidenceSpanId, entityRevision, sessionId, startLine, endLine, section and
+# content. `jq -S` sorts keys so a key-order change cannot read as a difference.
+#
+# THE NON-EMPTY GUARD IS THE POINT. An earlier version of this bullet's
+# assertion compared run 2 to run 1 and nothing else, and a bead comment
+# correctly recorded that it "WOULD HAVE PASSED IDENTICALLY ON AN EMPTY PACK OR
+# ON THE WRONG 100" -- a criterion that cannot fail is not evidence. So this
+# fails when the section is empty, which makes equality meaningful.
+PACK_SECTION_FILTER='[(.data.pack.items // [])[]?
+       | select((.entityKind // "") == "evidence_span")
+       | {rank, evidenceSpanId, entityRevision, sessionId, startLine, endLine, section, content}]'
+PACK_SECTION_1="$(jq -S -c "${PACK_SECTION_FILTER}" "${PACK_OUT}" 2>/dev/null || echo 'ERR1')"
+run_ee pack "${TRANSCRIPT_PHRASE}" --workspace "${WS}" --json
+PACK_OUT_REPEAT="${LAST_STDOUT}"
+PACK_SECTION_2="$(jq -S -c "${PACK_SECTION_FILTER}" "${PACK_OUT_REPEAT}" 2>/dev/null || echo 'ERR2')"
+PACK_SECTION_COUNT="$(jq -r 'length' <<<"${PACK_SECTION_1}" 2>/dev/null || echo 0)"
+if [[ "${LAST_EXIT}" -eq 0 && "${PACK_SECTION_COUNT}" != "0" && "${PACK_SECTION_1}" == "${PACK_SECTION_2}" ]]; then
+    event pack_evidence_section_is_deterministic pass "items=${PACK_SECTION_COUNT} identical across two packs"
+else
+    event pack_evidence_section_is_deterministic fail "exit ${LAST_EXIT}; items=${PACK_SECTION_COUNT}; first=$(head -c 300 <<<"${PACK_SECTION_1}"); second=$(head -c 300 <<<"${PACK_SECTION_2}")"
+fi
+
 # --- 7. LEAK CANARY: bd-16imy's "denied/redacted material must not leak" ---
 #
 # THE QUERY IS DELIBERATELY BENIGN, and the first version of this check was
@@ -436,6 +465,99 @@ if [[ "${DISTRACTOR_TOP}" == *"${DISTRACTOR_MARKER}"* ]]; then
     event leak_control_distractor_session_is_indexed pass
 else
     event leak_control_distractor_session_is_indexed fail "the distractor session is not retrievable, so the canary's absence above is unmeasured rather than proof of redaction"
+fi
+
+# --- 8. WORKSPACE ISOLATION: bullet 1's "workspace isolation" clause ------
+#
+# bd-16imy's bullet 1 requires the canonical representation to retain
+# "workspace isolation". Everything above runs in ONE workspace, and the
+# distractor probes share it, so nothing exercised a SECOND workspace failing
+# to see the first's imported spans.
+#
+# A ZERO HERE HAS FOUR CAUSES and only one of them is isolation: the span could
+# be absent, or search could be broken in a fresh workspace, or degraded, or
+# the query could be wrong. So the second workspace gets its OWN positive
+# control first -- a memory it can find -- which proves retrieval works THERE
+# before its silence about the first workspace's phrase is allowed to mean
+# anything. WS1's hits (section 4) do not establish that: they prove search
+# works in WS1.
+# (This script has no `step` helper -- STEP is incremented inside run_ee -- so
+# sections are marked by comment, as above.)
+WS2="${ROOT}/ws2"
+# ALPHABETIC sentinel. This was `${RANDOM}${RANDOM}`, two concatenated random
+# integers, and that made this control fail INTERMITTENTLY -- roughly one run
+# in five:
+#
+#   remember_error=policy_denied: Refusing to persist memory content that
+#   contains secrets: phone_number.
+#
+# `ee` scans content for secrets before a durable write, and a long enough run
+# of digits looks like a phone number. The product was right every time; the
+# fixture was feeding it a different sentinel on each run and occasionally
+# rolled one shaped like a phone number. The failure then surfaced as the
+# second workspace being unable to retrieve its own memory, which reads like a
+# retrieval or isolation defect and is neither.
+#
+# That cost five eliminated hypotheses -- retained worker state, the argument
+# set, a contract change, an EE_DATABASE_PATH mismatch, determinism itself --
+# before the cause field added in 5475da79d named it on the first failing run
+# it saw.
+#
+# Mapping the digits to letters keeps the sentinel unique and searchable while
+# making a phone-number shape impossible to roll.
+# $RANDOM is expanded in THIS shell and only then handed to the substitution.
+# Expanding it inside `$( ... )` yields the subshell's reseeded value, which is
+# identical on every call -- the sentinel would be alphabetic but no longer
+# unique, and uniqueness is the whole point of a sentinel.
+ISO_SENTINEL_DIGITS="${RANDOM}${RANDOM}"
+ISO_SENTINEL="isolationsentinel-$(printf '%s' "${ISO_SENTINEL_DIGITS}" | tr '0-9' 'abcdefghij')"
+run_ee init --workspace "${WS2}" --json
+ISO_INIT_EXIT="${LAST_EXIT}"
+# A durable write needs provenance: `remember` without --source is POLICY
+# DENIED (exit 7, "policy denied operation"), which the first version of this
+# control hit. The arg set mirrors scripts/e2e_ask.sh's remember_memory.
+run_ee remember "Workspace isolation probe ${ISO_SENTINEL} stays local to its own store." \
+    --workspace "${WS2}" --level semantic --kind fact --confidence 0.70 \
+    --source "manual://imported_transcript_e2e/isolation-probe" \
+    --no-auto-link --no-propose-candidates --json
+ISO_REMEMBER_EXIT="${LAST_EXIT}"
+# Capture the CAUSE beside the exit code.
+#
+# A bare `remember=7` says a durable write was refused and nothing about why,
+# and this control has already cost two wrong hypotheses that one error code
+# would have killed on sight: retained worker state (refuted by a clean-root
+# run that reproduced it) and an EE_DATABASE_PATH mismatch (refuted by
+# reproducing the exact env shape, which succeeds). The response body is
+# already on disk in ${LAST_STDOUT}; only nobody was reading it.
+ISO_REMEMBER_ERR="$(jq -r '((.error.code // "none") + ": " + ((.error.message // "")[0:200]))' "${LAST_STDOUT}" 2>/dev/null || printf 'unreadable')"
+# WS2 needs its own published index for the same reason WS1 does (section 3).
+run_ee index rebuild --workspace "${WS2}" --json
+ISO_INDEX_EXIT="${LAST_EXIT}"
+run_ee search "${ISO_SENTINEL}" --workspace "${WS2}" --json
+ISO_OWN_HITS="$(jq -r '[(.data.results // [])[]?] | length' "${LAST_STDOUT}" 2>/dev/null || echo 0)"
+ISO_OWN_EXIT="${LAST_EXIT}"
+ISO_CONTROL_OK=0
+if [[ "${ISO_INIT_EXIT}" -eq 0 && "${ISO_REMEMBER_EXIT}" -eq 0 && "${ISO_INDEX_EXIT}" -eq 0 && "${ISO_OWN_EXIT}" -eq 0 && "${ISO_OWN_HITS}" != "0" ]]; then
+    ISO_CONTROL_OK=1
+    event second_workspace_retrieval_works pass "own_hits=${ISO_OWN_HITS}"
+else
+    event second_workspace_retrieval_works fail "the second workspace cannot find its OWN memory, so its silence about the first workspace proves nothing; init=${ISO_INIT_EXIT} remember=${ISO_REMEMBER_EXIT} index=${ISO_INDEX_EXIT} search=${ISO_OWN_EXIT} hits=${ISO_OWN_HITS}; remember_error=${ISO_REMEMBER_ERR}"
+fi
+
+# The isolation claim DEPENDS on that control. Measured 2026-10-14: with the
+# control broken the zero below still "passed", which is a vacuous pass of
+# exactly the kind this bead's ledger rejected for bullet 4 -- a criterion that
+# cannot fail is not evidence. So an unproven control fails this assertion too.
+run_ee search "${TRANSCRIPT_PHRASE}" --workspace "${WS2}" --json
+ISO_LEAK_OUT="${LAST_STDOUT}"
+ISO_LEAK_EXIT="${LAST_EXIT}"
+ISO_LEAK_HITS="$(evidence_hit_count "${ISO_LEAK_OUT}")"
+if [[ "${ISO_CONTROL_OK}" -eq 1 && "${ISO_LEAK_EXIT}" -eq 0 && "${ISO_LEAK_HITS}" == "0" ]]; then
+    event second_workspace_cannot_see_imported_spans pass "evidence_hits=0 while its own memory IS retrievable (own_hits=${ISO_OWN_HITS})"
+elif [[ "${ISO_CONTROL_OK}" -ne 1 ]]; then
+    event second_workspace_cannot_see_imported_spans fail "UNMEASURED: evidence_hits=${ISO_LEAK_HITS} but the second workspace cannot retrieve its own memory, so this zero does not distinguish isolation from broken retrieval"
+else
+    event second_workspace_cannot_see_imported_spans fail "a fresh workspace retrieved the other workspace's imported evidence; exit ${ISO_LEAK_EXIT}; evidence_hits=${ISO_LEAK_HITS}; docIds=$(jq -c '[(.data.results // [])[]? | .docId]' "${ISO_LEAK_OUT}" 2>/dev/null)"
 fi
 
 printf 'imported transcript retrieval e2e: %s steps, %s failures; root %s\n' \

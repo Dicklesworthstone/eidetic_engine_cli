@@ -2,10 +2,16 @@
 //!
 //! The compiler/checker decoder validates complete bounded reports. Libtest
 //! retains transient hashes of exact test names and terminal outcomes. ESLint
-//! retains exact file commitments and requires every failed file in the clean
-//! retry. These commitments are never stored or substituted for provenance.
-//! Libtest suite identity is its complete selected inventory: duplicate,
-//! incomplete fail-fast and changed inventories remain unproven.
+//! retains the complete reported file scope, including clean controls. Go
+//! retains successful as well as failed package/test subjects. A clean retry
+//! must not manufacture a repair by dropping previously exercised coverage.
+//! These commitments are never stored or substituted for provenance.
+//! Libtest anchors unchanged inventories first, then permits only a unique
+//! one-to-one coverage-preserving extension. Duplicate, incomplete fail-fast,
+//! replaced, split, merged and ambiguous inventories remain unproven.
+
+#[path = "cass_error_recall_libtest_growth.rs"]
+mod libtest_growth;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,7 +42,7 @@ struct Execution {
 
 pub(super) struct RequiredSuite {
     inventory: Inventory,
-    failed: Vec<Name>,
+    must_pass: Vec<Name>,
 }
 
 /// Other errors retain their existing exact-invocation proof rules. A typed
@@ -66,8 +72,16 @@ impl Requirement {
                 Self::Other
             } else {
                 Self::GoTests {
-                    packages: coverage.failed_packages.clone(),
-                    tests: coverage.failed_tests.clone(),
+                    packages: coverage
+                        .failed_packages
+                        .union(&coverage.passed_packages)
+                        .copied()
+                        .collect(),
+                    tests: coverage
+                        .failed_tests
+                        .union(&coverage.passed_tests)
+                        .copied()
+                        .collect(),
                 }
             };
         }
@@ -77,30 +91,39 @@ impl Requirement {
             } else if coverage.failed_files.is_empty() {
                 Self::Other
             } else {
-                Self::Eslint(coverage.failed_files.clone())
+                Self::Eslint(coverage.checked_files.clone())
             };
         }
         match execution(&output.text, &decoded) {
             Ok(None) => Self::Other,
             Ok(Some(execution)) if process_complete && execution.complete => {
+                let has_failures = execution
+                    .suites
+                    .values()
+                    .any(|outcomes| outcomes.values().any(|outcome| *outcome == Outcome::Failed));
+                if !has_failures {
+                    return Self::Other;
+                }
                 let required: Vec<_> = execution
                     .suites
                     .into_iter()
-                    .filter_map(|(inventory, outcomes)| {
-                        let failed: Vec<_> = outcomes
+                    .map(|(inventory, outcomes)| {
+                        // Successful suites are controls, not disposable noise.
+                        // Preserve their inventory and actual passes too; an
+                        // ignored retry is not execution of a previous pass.
+                        let must_pass = outcomes
                             .into_iter()
                             .filter_map(|(name, result)| {
-                                (result == Outcome::Failed).then_some(name)
+                                (result != Outcome::Ignored).then_some(name)
                             })
                             .collect();
-                        (!failed.is_empty()).then_some(RequiredSuite { inventory, failed })
+                        RequiredSuite {
+                            inventory,
+                            must_pass,
+                        }
                     })
                     .collect();
-                if required.is_empty() {
-                    Self::Other
-                } else {
-                    Self::Libtest(required)
-                }
+                Self::Libtest(required)
             }
             _ => Self::Unproven,
         }
@@ -134,19 +157,10 @@ impl Requirement {
                 .eslint_files
                 .as_ref()
                 .is_some_and(|checked| required.is_subset(checked)),
-            Self::Libtest(required) => proof.execution.as_ref().is_some_and(|execution| {
-                required.iter().all(|suite| {
-                    execution
-                        .suites
-                        .get(&suite.inventory)
-                        .is_some_and(|outcomes| {
-                            suite
-                                .failed
-                                .iter()
-                                .all(|name| outcomes.get(name) == Some(&Outcome::Passed))
-                        })
-                })
-            }),
+            Self::Libtest(required) => proof
+                .execution
+                .as_ref()
+                .is_some_and(|execution| libtest_growth::verified_by(required, execution)),
         }
     }
 }
@@ -270,7 +284,7 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    fn suite(results: &[(&str, &str)]) -> String {
+    pub(super) fn suite(results: &[(&str, &str)]) -> String {
         let mut events = vec![json!({"type":"suite","event":"started","test_count":results.len()})];
         for (name, _) in results {
             events.push(json!({"type":"test","event":"started","name":name}));
@@ -296,7 +310,7 @@ mod tests {
             .join("\n")
     }
 
-    fn output(text: String) -> ToolOutput {
+    pub(super) fn output(text: String) -> ToolOutput {
         ToolOutput {
             text,
             is_error: Some(false),
@@ -423,7 +437,7 @@ mod tests {
         assert_ne!(name_commitment("path::case"), name_commitment("case"));
     }
 
-    fn lint(files: &[(&str, bool)], wrapped: bool) -> ToolOutput {
+    pub(super) fn lint(files: &[(&str, bool)], wrapped: bool) -> ToolOutput {
         let files = files
             .iter()
             .map(|(path, failed)| {
@@ -502,7 +516,7 @@ mod tests {
         assert!(!damaged.is_verified_by(&known_good));
     }
 
-    fn go_suite(package: &str, results: &[(&str, &str)]) -> ToolOutput {
+    pub(super) fn go_suite(package: &str, results: &[(&str, &str)]) -> ToolOutput {
         let mut events = vec![json!({"Action":"start","Package":package})];
         for (name, action) in results {
             events.push(json!({"Action":"run","Package":package,"Test":name}));
@@ -613,3 +627,11 @@ mod tests {
         ))));
     }
 }
+
+#[cfg(test)]
+#[path = "cass_error_recall_coverage_preservation_tests.rs"]
+mod preservation_tests;
+
+#[cfg(test)]
+#[path = "cass_error_recall_libtest_growth_tests.rs"]
+mod growth_tests;

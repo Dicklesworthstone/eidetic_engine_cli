@@ -6,6 +6,7 @@
 
 #[path = "backup_evidence_export.rs"]
 mod evidence_export;
+pub use evidence_export::{BackupEvidenceAdmissionSummary, BackupEvidenceEligibilityCounts};
 #[cfg(test)]
 #[path = "backup_history_recovery_tests.rs"]
 mod history_recovery_tests;
@@ -403,6 +404,7 @@ impl BackupRecoveryInventoryEntry {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BackupRecoveryInventory {
     pub entries: Vec<BackupRecoveryInventoryEntry>,
+    pub evidence_admission: Option<BackupEvidenceAdmissionSummary>,
     pub schema_coverage_complete: bool,
     pub snapshot_coverage_complete: bool,
     pub uncovered_required_table_count: u32,
@@ -414,8 +416,10 @@ impl BackupRecoveryInventory {
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
         json!({
-            "schema": "ee.backup.recovery_inventory.v1",
+            "schema": "ee.backup.recovery_inventory.v2",
             "requiredRowScope": "selected_workspace_and_shared_history",
+            "rowCountBasis": "source_snapshot",
+            "evidenceAdmission": self.evidence_admission,
             "schemaCoverageComplete": self.schema_coverage_complete,
             "snapshotCoverageComplete": self.snapshot_coverage_complete,
             "uncoveredRequiredTableCount": self.uncovered_required_table_count,
@@ -1241,6 +1245,7 @@ struct BackupExportData {
     workspace_row: crate::db::StoredWorkspace,
     memories: Vec<StoredMemory>,
     typed_fields_by_memory: BTreeMap<String, JsonValue>,
+    code_anchors_by_memory: BTreeMap<String, Vec<crate::models::jsonl::ExportCodeAnchorRecord>>,
     logical_ids_by_memory: BTreeMap<String, String>,
     /// bd-tmv70: see `superseded_by_within_export`.
     superseded_by_by_memory: BTreeMap<String, String>,
@@ -2070,6 +2075,7 @@ fn build_recovery_inventory(
         .count();
 
     Ok(BackupRecoveryInventory {
+        evidence_admission: None,
         schema_coverage_complete: uncovered_required_table_count == 0
             && unclassified_table_count == 0,
         snapshot_coverage_complete: entries.iter().all(|entry| entry.snapshot_covered),
@@ -2406,7 +2412,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
             let workspace = load_workspace(&connection, &workspace_path)?;
             let export_data = load_export_data_in_current_snapshot(&connection, workspace)?;
             let workspace_id = &export_data.workspace.workspace_id;
-            let inventory = build_recovery_inventory(&connection, workspace_id)?;
+            let mut inventory = build_recovery_inventory(&connection, workspace_id)?;
             let memory_ids =
                 backup_memory_id_mapping(&export_data.memories, options.redaction_level)?;
             let mut payloads = Vec::new();
@@ -2419,7 +2425,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
                 &mut degraded,
                 &mut payloads,
             );
-            collect_cass_payloads(
+            inventory.evidence_admission = collect_cass_payloads(
                 &connection,
                 workspace_id,
                 &created_at,
@@ -2577,7 +2583,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     ));
     recovery::reconcile_primary(&mut recovery_inventory, &export_data);
     reconcile_derived_recovery_inventory(&mut recovery_inventory, &derived_payloads);
+    if recovery_inventory.evidence_admission.is_none() {
+        recovery_inventory.snapshot_coverage_complete = false;
+    }
     degraded.extend(recovery_inventory_degradations(&recovery_inventory));
+    if let Some(summary) = &recovery_inventory.evidence_admission
+        && let Some(loss) = summary.degradation()
+    {
+        degraded.push(loss);
+    }
 
     // TC-D14: a store-auth fault must not block the backup — the artifact
     // ships unauthenticated with a high degraded entry, and import then
@@ -3300,6 +3314,16 @@ fn verify_backup_manifest(
             error.message(),
         ));
     }
+    let evidence_admission = match evidence_export::summary_from_manifest(manifest) {
+        Ok(summary) => summary,
+        Err(message) => {
+            issues.push(BackupVerificationIssue::error(
+                "manifest_evidence_admission_invalid",
+                message,
+            ));
+            None
+        }
+    };
     if !inspect
         .derived
         .iter()
@@ -3561,6 +3585,30 @@ fn verify_backup_manifest(
         });
     }
 
+    if !issues.iter().any(backup_verification_issue_is_blocking)
+        && let Some(summary) = evidence_admission
+    {
+        let workspace_id = manifest
+            .pointer("/workspace/id")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        match evidence_export::verify_summary_assets(
+            backup_path,
+            workspace_id,
+            &inspect.derived,
+            &summary,
+        ) {
+            Ok(()) => {
+                if let Some(loss) = summary.degradation() {
+                    issues.push(BackupVerificationIssue::warning(loss.code, loss.message));
+                }
+            }
+            Err(message) => issues.push(BackupVerificationIssue::error(
+                "manifest_evidence_admission_invalid",
+                message,
+            )),
+        }
+    }
     let status = if issues.iter().any(backup_verification_issue_is_blocking) {
         "failed"
     } else if issues.is_empty() {
@@ -3671,6 +3719,16 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         .join(&inspect.backup_id);
     let restored_database_path = side_path.join(WORKSPACE_MARKER).join(DEFAULT_DB_FILE);
     let mut next_actions = restore_base_next_actions(&inspect.backup_id, &side_path);
+    // Preview the same recovery limitations as execution. Authentication and
+    // inventory checks above establish which artifact is being restored; a
+    // dry run must not erase its evidence-loss or peer-repair requirements.
+    let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
+    if restore_degraded
+        .iter()
+        .any(|entry| entry.code == "mesh_restore_requires_repair")
+    {
+        next_actions.push(restore_mesh_doctor_next_action(&side_path));
+    }
 
     // Preview the same destination constraints that a real restore enforces.
     ensure_side_path_is_isolated(&side_path)?;
@@ -3717,7 +3775,7 @@ fn restore_backup_to_side_path_with_recovery_hooks(
             restored_graph_cache_count: 0,
             restored_derived: Vec::new(),
             issue_count: u32::try_from(verify.issues.len()).unwrap_or(u32::MAX),
-            degraded: Vec::new(),
+            degraded: restore_degraded,
             next_actions,
         });
     }
@@ -3765,13 +3823,6 @@ fn restore_backup_to_side_path_with_recovery_hooks(
         repair: Some("choose a writable --side-path".to_owned()),
     })?;
 
-    let mut restore_degraded = restore_manifest_degradations(&manifest_bytes);
-    if restore_degraded
-        .iter()
-        .any(|entry| entry.code == "mesh_restore_requires_repair")
-    {
-        next_actions.push(restore_mesh_doctor_next_action(&side_path));
-    }
     write_new_file(&restore_manifest_path, &manifest_bytes)?;
 
     copy_new_file(&source_records_path, &restore_records_path)?;
@@ -4257,7 +4308,9 @@ fn restore_manifest_degradations(manifest_bytes: &[u8]) -> Vec<BackupDegradation
         .filter(|entry| {
             matches!(
                 entry.code.as_str(),
-                "backup_source_rows_not_covered" | "backup_table_inventory_unclassified"
+                "backup_source_rows_not_covered"
+                    | "backup_table_inventory_unclassified"
+                    | "backup_evidence_admission_reduced"
             )
         })
         .collect::<Vec<_>>();
@@ -4524,6 +4577,36 @@ fn copy_derived_artifacts_to_restore(
     Ok(restored)
 }
 
+/// bd-12ybp: classify a restore-path database failure, carving a RECOVERED
+/// PANIC out of the import framing.
+///
+/// `guard_storage_panic` (src/db/mod.rs) converts a frankensqlite panic into
+/// `DbError::StoragePanic` so it can flow through the ordinary error path, and
+/// its contract is that callers render it as `DomainError::Storage` — exit 3,
+/// `ee.error.v2`. The restore path's natural domain variant is `Import`, which
+/// exits 5 and advises "retry restore with a fresh --side-path". That advice is
+/// correct for a corrupt restored database and WRONG for a panic during result
+/// assembly, which a fresh side-path reproduces: the operator is told to redo
+/// an expensive restore that cannot succeed, and the exit code reports a data
+/// problem where there is a storage fault.
+///
+/// Ordinary storage failures keep the Import framing, because for those the
+/// restore really is what failed and the side-path advice really is the repair.
+fn restore_database_error(
+    error: &crate::db::DbError,
+    message: String,
+    import_repair: &str,
+) -> DomainError {
+    crate::core::db_failure_or_storage_panic(
+        error,
+        message.clone(),
+        DomainError::Import {
+            message,
+            repair: Some(import_repair.to_owned()),
+        },
+    )
+}
+
 fn restore_task_episode_assets(
     restored_database_path: &Path,
     restored_derived: &[BackupRestoredDerivedAssetReport],
@@ -4546,21 +4629,23 @@ fn restore_task_episode_assets(
             ),
             repair: Some("retry restore with a fresh --side-path".to_owned()),
         })?;
-    connection.migrate().map_err(|error| DomainError::Import {
-        message: format!(
-            "failed preparing restored database '{}' for task-episode restore: {error}",
-            restored_database_path.display()
-        ),
-        repair: Some("retry restore with a fresh --side-path".to_owned()),
-    })?;
-    let workspaces = connection
-        .list_workspaces()
-        .map_err(|error| DomainError::Import {
-            message: format!(
-                "failed reading restored workspaces for task-episode restore: {error}"
+    connection.migrate().map_err(|error| {
+        restore_database_error(
+            &error,
+            format!(
+                "failed preparing restored database '{}' for task-episode restore: {error}",
+                restored_database_path.display()
             ),
-            repair: Some("retry restore with a fresh --side-path".to_owned()),
-        })?;
+            "retry restore with a fresh --side-path",
+        )
+    })?;
+    let workspaces = connection.list_workspaces().map_err(|error| {
+        restore_database_error(
+            &error,
+            format!("failed reading restored workspaces for task-episode restore: {error}"),
+            "retry restore with a fresh --side-path",
+        )
+    })?;
 
     let mut restored_count = 0u32;
     for asset in episode_assets {
@@ -5389,7 +5474,7 @@ fn derived_asset_reports(
 }
 
 fn degradation_reports(manifest: &JsonValue) -> Vec<BackupDegradation> {
-    manifest
+    let mut degraded = manifest
         .get("degraded")
         .and_then(JsonValue::as_array)
         .into_iter()
@@ -5400,7 +5485,16 @@ fn degradation_reports(manifest: &JsonValue) -> Vec<BackupDegradation> {
             message: json_string(item, "message").unwrap_or_default(),
             next_action: json_string(item, "nextAction").unwrap_or_default(),
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if let Ok(Some(summary)) = evidence_export::summary_from_manifest(manifest) {
+        // Derive this warning from the measured counts, including when a
+        // producer omitted or copied a stale presentation-only warning.
+        degraded.retain(|entry| entry.code != "backup_evidence_admission_reduced");
+        if let Some(loss) = summary.degradation() {
+            degraded.push(loss);
+        }
+    }
+    degraded
 }
 
 fn safe_artifact_path(
@@ -5582,7 +5676,25 @@ fn load_export_data_in_current_snapshot(
             repair: Some("ee db check --workspace .".to_owned()),
         })?;
     let mut typed_fields_by_memory = BTreeMap::new();
+    let mut code_anchors_by_memory = BTreeMap::new();
     for memory in &memories {
+        let anchors = connection
+            .list_memory_code_anchor_sources(&memory.id)
+            .map_err(work_history_error)?;
+        if !anchors.is_empty() {
+            code_anchors_by_memory.insert(
+                memory.id.clone(),
+                anchors
+                    .into_iter()
+                    .map(|surface| crate::models::jsonl::ExportCodeAnchorRecord {
+                        kind: surface.anchor.anchor_kind.as_str().to_owned(),
+                        value: surface.normalized_value,
+                        source: surface.anchor.source.as_str().to_owned(),
+                        provenance: surface.anchor.provenance,
+                    })
+                    .collect(),
+            );
+        }
         if let Some(raw) = connection
             .get_memory_typed_fields_json(&memory.id)
             .map_err(work_history_error)?
@@ -5721,6 +5833,7 @@ fn load_export_data_in_current_snapshot(
             .map_err(export_build_error("build backup workspace record"))?,
         memories,
         typed_fields_by_memory,
+        code_anchors_by_memory,
         logical_ids_by_memory,
         superseded_by_by_memory,
         superseded_at_by_memory,
@@ -5773,6 +5886,11 @@ fn render_records(
             )
             .map_err(export_build_error("build backup memory record"))?;
             record.typed_fields = data.typed_fields_by_memory.get(&memory.id).cloned();
+            record.code_anchors = data
+                .code_anchors_by_memory
+                .get(&memory.id)
+                .cloned()
+                .unwrap_or_default();
             record.logical_id = data.logical_ids_by_memory.get(&memory.id).cloned();
             // bd-tmv70: write the supersession fact the exporter already knows.
             // Without this the archive records no headship at all post-V123,
@@ -11921,12 +12039,12 @@ fn collect_cass_payloads(
     memory_ids: &BTreeMap<String, String>,
     degraded: &mut Vec<BackupDegradation>,
     payloads: &mut Vec<BackupDerivedPayload>,
-) {
+) -> Option<BackupEvidenceAdmissionSummary> {
     let sessions = match connection.list_sessions(workspace_id) {
         Ok(sessions) => sessions,
         Err(error) => {
             degraded.push(required_backup_rows_unreadable("sessions", error));
-            return;
+            return None;
         }
     };
     for (index, chunk) in sessions.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
@@ -11961,7 +12079,7 @@ fn collect_cass_payloads(
             )),
             Err(error) => {
                 degraded.push(required_backup_rows_unreadable("sessions", error));
-                return;
+                return None;
             }
         }
     }
@@ -11970,36 +12088,41 @@ fn collect_cass_payloads(
         Ok(evidence) => evidence,
         Err(error) => {
             degraded.push(required_backup_rows_unreadable("evidence_spans", error));
-            return;
+            return None;
         }
     };
     let sessions_by_id = sessions
         .iter()
         .map(|session| (session.id.as_str(), session))
         .collect::<BTreeMap<_, _>>();
+    let mut admission = BackupEvidenceAdmissionSummary::default();
     for (index, chunk) in evidence.chunks(CASS_BACKUP_CHUNK_ROWS).enumerate() {
+        let mut evidence_spans = Vec::with_capacity(chunk.len());
+        for span in chunk {
+            let mut record = BackupCassEvidenceRecord::from_stored(span);
+            if let Some(id) = record.memory_id.as_mut()
+                && let Some(restored_id) = memory_ids.get(id)
+            {
+                id.clone_from(restored_id);
+            }
+            let provenance_admitted =
+                sessions_by_id
+                    .get(span.session_id.as_str())
+                    .is_some_and(|session| {
+                        span.is_derivation_admitted_for_session(workspace_id, session)
+                    });
+            record.redact_for_export(redaction_level, provenance_admitted);
+            if let Err(error) = admission.observe(span, &record) {
+                degraded.push(required_backup_rows_unreadable("evidence_spans", error));
+                return None;
+            }
+            evidence_spans.push(record);
+        }
         let chunk = BackupCassEvidenceChunk {
             schema: "ee.backup.derived.cass_evidence_spans.v1".to_owned(),
             captured_at: captured_at.to_owned(),
             chunk_index: u32::try_from(index).unwrap_or(u32::MAX),
-            evidence_spans: chunk
-                .iter()
-                .map(|span| {
-                    let mut record = BackupCassEvidenceRecord::from_stored(span);
-                    if let Some(id) = record.memory_id.as_mut()
-                        && let Some(restored_id) = memory_ids.get(id)
-                    {
-                        id.clone_from(restored_id);
-                    }
-                    let provenance_admitted = sessions_by_id
-                        .get(span.session_id.as_str())
-                        .is_some_and(|session| {
-                            span.is_derivation_admitted_for_session(workspace_id, session)
-                        });
-                    record.redact_for_export(redaction_level, provenance_admitted);
-                    record
-                })
-                .collect(),
+            evidence_spans,
         };
         match serialized_payload_bytes(&chunk) {
             Ok(bytes) => payloads.push(derived_payload(
@@ -12011,10 +12134,11 @@ fn collect_cass_payloads(
             )),
             Err(error) => {
                 degraded.push(required_backup_rows_unreadable("evidence_spans", error));
-                return;
+                return None;
             }
         }
     }
+    Some(admission)
 }
 
 fn required_backup_rows_unreadable(
@@ -12834,6 +12958,51 @@ mod tests {
     };
     use crate::models::{EvidenceId, MemoryId, MemoryLinkId, SessionId, WorkspaceId};
     use tempfile::TempDir;
+
+    /// bd-12ybp: the MAPPING half. bd-3unde proved that a
+    /// `DomainError::Storage` renders exit 3 and `ee.error.v2`, but it
+    /// constructed that value as its own premise, so the step where a
+    /// recovered `DbError::StoragePanic` BECOMES a `DomainError::Storage` was
+    /// never executed anywhere. This asserts it on the restore path, which was
+    /// the one measured site mapping a potentially-panicking db call onto a
+    /// non-Storage variant.
+    ///
+    /// Both arms matter. A fix that returned Storage unconditionally would
+    /// satisfy the first assertion and silently destroy the Import framing
+    /// that an ordinary corrupt-restore failure needs, along with the only
+    /// repair advice that helps there.
+    #[test]
+    fn restore_database_error_carves_out_a_recovered_storage_panic_bd_12ybp() {
+        let panicked = crate::db::DbError::StoragePanic {
+            operation: crate::db::DbOperation::Query,
+            message: "frankensqlite result assembly".to_owned(),
+        };
+        match restore_database_error(&panicked, "ctx".to_owned(), "retry with --side-path") {
+            DomainError::Storage { repair, .. } => {
+                let repair = repair.unwrap_or_default();
+                assert!(
+                    !repair.contains("side-path"),
+                    "a panic must not be given the restore-input repair; got `{repair}`"
+                );
+            }
+            other => panic!("a recovered storage panic must map to Storage, got {other:?}"),
+        }
+
+        let ordinary = crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "short row".to_owned(),
+        };
+        match restore_database_error(&ordinary, "ctx".to_owned(), "retry with --side-path") {
+            DomainError::Import { repair, .. } => {
+                assert_eq!(
+                    repair.as_deref(),
+                    Some("retry with --side-path"),
+                    "an ordinary storage failure keeps the restore-input repair"
+                );
+            }
+            other => panic!("an ordinary db failure must stay an Import error, got {other:?}"),
+        }
+    }
     use uuid::Uuid;
 
     type TestResult = Result<(), String>;
@@ -13207,6 +13376,112 @@ mod tests {
                 repair: None,
             })?;
         Ok((tempdir, workspace, database))
+    }
+
+    #[test]
+    fn code_anchor_backup_roundtrip_restores_positive_path_and_symbol_recall() -> TestResult {
+        for redaction_level in [RedactionLevel::None, RedactionLevel::Standard] {
+            let (root, workspace, database) =
+                fixture_with_memory_content("Original observation without inline locators.")
+                    .map_err(|error| error.message())?;
+            let memory_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+            let workspace_id = WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string();
+            crate::core::anchors::attach_anchors(&crate::core::anchors::AttachAnchorsOptions {
+                workspace_path: &workspace,
+                database_path: &database,
+                memory_id: &memory_id,
+                paths: &["src/portable.rs".to_owned()],
+                symbols: &["Portable::restore".to_owned()],
+                dry_run: false,
+                actor: Some("backup-anchor-fixture"),
+            })
+            .map_err(|error| error.message())?;
+            let created = create_backup(&BackupCreateOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                output_dir: None,
+                label: None,
+                redaction_level,
+                include_derived: false,
+                include_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+            let records_text =
+                fs::read_to_string(Path::new(&created.backup_path).join(RECORDS_FILE))
+                    .map_err(|error| error.to_string())?;
+            let exported = records_text
+                .lines()
+                .filter_map(|line| {
+                    let value: JsonValue = serde_json::from_str(line).ok()?;
+                    (value["schema"] == crate::models::EXPORT_MEMORY_SCHEMA_V1).then_some(value)
+                })
+                .next()
+                .ok_or("exported memory missing")?;
+            let exported: ExportMemoryRecord =
+                serde_json::from_value(exported).map_err(|error| error.to_string())?;
+            assert_eq!(exported.code_anchors.len(), 2);
+            assert_eq!(
+                exported.content,
+                "Original observation without inline locators."
+            );
+            let restored_id =
+                import_memory_id(&exported, redaction_level).map_err(|issue| issue.message)?;
+            let side_path = root
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?
+                .join("restored-anchor-workspace");
+            let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+                workspace_path: workspace,
+                backup_path: PathBuf::from(&created.backup_path),
+                side_path,
+                restore_graph_cache: false,
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+            let db = DbConnection::open_file_read_only(&restored.restored_database_path)
+                .map_err(|error| error.to_string())?;
+            let sources = db
+                .list_memory_code_anchor_sources(&restored_id)
+                .map_err(|error| error.to_string())?;
+            assert_eq!(sources.len(), 2);
+            for expected in &exported.code_anchors {
+                assert!(
+                    sources
+                        .iter()
+                        .any(|source| source.normalized_value == expected.value
+                            && source.anchor.source.as_str() == expected.source
+                            && source.anchor.provenance == expected.provenance)
+                );
+            }
+            for query in [
+                crate::core::recall::RecallQuery {
+                    paths: vec!["src/portable.rs".to_owned()],
+                    ..Default::default()
+                },
+                crate::core::recall::RecallQuery {
+                    symbols: vec!["Portable::restore".to_owned()],
+                    ..Default::default()
+                },
+            ] {
+                let recalled = crate::core::recall::run_recall(&db, &workspace_id, &query)
+                    .map_err(|error| error.to_string())?;
+                assert_eq!(recalled.items.len(), 1);
+                assert_eq!(recalled.items[0].memory_id, restored_id);
+            }
+            let memory = db
+                .get_memory(&restored_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("restored memory")?;
+            assert_eq!(
+                memory.content,
+                "Original observation without inline locators."
+            );
+            assert_eq!(memory.provenance_uri.as_deref(), Some("ee-test://backup"));
+            db.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     fn backup_denied_mesh_link_metadata() -> String {
@@ -13716,6 +13991,7 @@ mod tests {
     #[test]
     fn cass_recovery_coverage_requires_exact_aggregate_counts() -> TestResult {
         let mut inventory = BackupRecoveryInventory {
+            evidence_admission: None,
             entries: vec![
                 BackupRecoveryInventoryEntry {
                     table: "sessions".to_owned(),
@@ -16160,14 +16436,37 @@ mod tests {
         )?;
 
         let side_path = tempdir.path().join("mesh-restore-side");
-        let restored = restore_backup_to_side_path(&BackupRestoreOptions {
+        let mut restore_options = BackupRestoreOptions {
             workspace_path: workspace,
             backup_path: PathBuf::from(&report.backup_path),
-            side_path,
+            side_path: side_path.clone(),
             restore_graph_cache: false,
-            dry_run: false,
-        })
-        .map_err(|error| error.message())?;
+            dry_run: true,
+        };
+        let preview =
+            restore_backup_to_side_path(&restore_options).map_err(|error| error.message())?;
+        ensure(
+            !side_path.exists(),
+            "mesh restore preview must not create the destination",
+        )?;
+        ensure_equal(
+            preview.status.as_str(),
+            "dry_run",
+            "mesh restore preview status",
+        )?;
+        restore_options.dry_run = false;
+        let restored =
+            restore_backup_to_side_path(&restore_options).map_err(|error| error.message())?;
+        ensure_equal(
+            preview.degraded,
+            restored.degraded.clone(),
+            "mesh restore preview preserves execution's peer-repair warning",
+        )?;
+        ensure_equal(
+            preview.next_actions,
+            restored.next_actions.clone(),
+            "mesh restore preview preserves execution's repair actions",
+        )?;
         ensure(
             restored
                 .degraded
@@ -24896,6 +25195,7 @@ mod tests {
                     "restored predicate checks real file",
                 )?;
                 let pack_options = crate::core::context::ContextPackOptions {
+                    bead_id: None,
                     task_paths: Vec::new(),
                     workspace_path: side.clone(),
                     database_path: Some(restored_database.clone()),
@@ -25646,6 +25946,7 @@ mod tests {
             )?;
             let packed =
                 crate::core::context::run_context_pack(&crate::core::context::ContextPackOptions {
+                    bead_id: None,
                     task_paths: Vec::new(),
                     workspace_path: side,
                     database_path: Some(PathBuf::from(&restored.restored_database_path)),
@@ -26825,6 +27126,7 @@ mod tests {
             if redaction != RedactionLevel::Full {
                 let response = crate::core::context::run_context_pack(
                     &crate::core::context::ContextPackOptions {
+                        bead_id: None,
                         task_paths: Vec::new(),
                         workspace_path: side_path,
                         database_path: Some(PathBuf::from(&restored.restored_database_path)),

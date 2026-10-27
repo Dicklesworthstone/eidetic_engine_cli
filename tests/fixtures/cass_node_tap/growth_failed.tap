@@ -1,0 +1,56 @@
+TAP version 13
+# Subtest: ledger
+    # Subtest: cache returns the saved revision
+    not ok 1 - cache returns the saved revision
+      ---
+      duration_ms: 1
+      type: 'test'
+      location: '/fixture/cache.test.cjs:5:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+
+        'stale' !== 'saved'
+
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      expected: 'saved'
+      actual: 'stale'
+      operator: 'strictEqual'
+      stack: |-
+        TestContext.<anonymous> (/fixture/cache.test.cjs:5:57)
+        Test.runInAsyncScope (node:async_hooks:214:14)
+        Test.run (node:internal/test_runner/test:1047:25)
+        Test.start (node:internal/test_runner/test:944:17)
+        node:internal/test_runner/test:1440:71
+        node:internal/per_context/primordials:483:82
+        new Promise (<anonymous>)
+        new SafePromise (node:internal/per_context/primordials:451:29)
+        node:internal/per_context/primordials:483:9
+        Array.map (<anonymous>)
+      ...
+    # Subtest: control still runs
+    ok 2 - control still runs
+      ---
+      duration_ms: 1
+      type: 'test'
+      ...
+    1..2
+not ok 1 - ledger
+  ---
+  duration_ms: 1
+  type: 'suite'
+  location: '/fixture/cache.test.cjs:4:1'
+  failureType: 'subtestsFailed'
+  error: '1 subtest failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+1..1
+# tests 2
+# suites 1
+# pass 1
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1

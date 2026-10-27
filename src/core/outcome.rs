@@ -483,11 +483,14 @@ pub struct OutcomeQuarantineSummary {
     pub id: Option<String>,
     pub status: String,
     pub source_id: Option<String>,
-    pub limit: u32,
-    pub window_seconds: u32,
-    pub observed_count: u32,
+    /// Admission metrics are absent on replay because the original decision
+    /// parameters were not preserved in the quarantine row.
+    pub limit: Option<u32>,
+    pub window_seconds: Option<u32>,
+    pub observed_count: Option<u32>,
     pub reason: String,
     pub raw_event_hash: Option<String>,
+    pub replayed: bool,
 }
 
 impl OutcomeQuarantineSummary {
@@ -495,7 +498,7 @@ impl OutcomeQuarantineSummary {
     pub fn data_json(&self) -> serde_json::Value {
         let source_id = redacted_outcome_public_source_id(self.source_id.as_deref());
         let reason = redact_outcome_public_source_ref(&self.reason);
-        serde_json::json!({
+        let mut data = serde_json::json!({
             "id": &self.id,
             "status": &self.status,
             "sourceId": source_id,
@@ -504,7 +507,11 @@ impl OutcomeQuarantineSummary {
             "observedCount": self.observed_count,
             "reason": reason,
             "rawEventHash": &self.raw_event_hash,
-        })
+        });
+        if self.replayed {
+            data["replayed"] = serde_json::Value::Bool(true);
+        }
+        data
     }
 }
 
@@ -768,6 +775,14 @@ impl OutcomeRecordReport {
             OutcomeRecordStatus::Recorded => "Recorded outcome feedback",
             OutcomeRecordStatus::DryRun => "DRY RUN: Would record outcome feedback",
             OutcomeRecordStatus::AlreadyRecorded => "Outcome feedback already recorded",
+            OutcomeRecordStatus::Quarantined
+                if self
+                    .quarantine
+                    .as_ref()
+                    .is_some_and(|summary| summary.replayed) =>
+            {
+                "Outcome feedback already quarantined; live scoring was not changed"
+            }
             OutcomeRecordStatus::Quarantined => {
                 "Outcome feedback quarantined; live scoring was not changed"
             }
@@ -904,6 +919,32 @@ enum OutcomeIdSource<'a> {
     Seeded(&'a mut Deterministic<Seed>),
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutcomeAdmissionTestStage {
+    BeforeOwnerFence,
+    AfterEventLookup,
+    AfterAdmissionRead,
+}
+
+#[cfg(test)]
+type OutcomeAdmissionTestObserver = Box<dyn FnMut(OutcomeAdmissionTestStage, &DbConnection)>;
+
+#[cfg(test)]
+std::thread_local! {
+    static OUTCOME_ADMISSION_TEST_OBSERVER: std::cell::RefCell<Option<OutcomeAdmissionTestObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_outcome_admission_for_test(stage: OutcomeAdmissionTestStage, connection: &DbConnection) {
+    OUTCOME_ADMISSION_TEST_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow_mut().as_mut() {
+            observer(stage, connection);
+        }
+    });
+}
+
 impl OutcomeIdSource<'_> {
     fn next_feedback_event_id(&mut self) -> String {
         match self {
@@ -996,38 +1037,141 @@ fn record_outcome_inner(
             repair: Some("ee doctor".to_string()),
         })?;
 
-    let target = resolve_target_workspace(
-        &connection,
-        &target_type,
-        &target_id,
-        options.workspace_id.as_deref(),
-        options.prompt_injection_guard,
-    )?;
+    let record = || {
+        let target = resolve_target_workspace(
+            &connection,
+            &target_type,
+            &target_id,
+            options.workspace_id.as_deref(),
+            options.prompt_injection_guard,
+        )?;
 
-    let feedback_input = CreateFeedbackEventInput {
-        workspace_id: target.workspace_id.clone(),
-        target_type: target_type.clone(),
-        target_id: target_id.clone(),
-        signal: signal.clone(),
-        weight,
-        source_type: source_type.clone(),
-        source_id: source_id.clone(),
-        reason,
-        evidence_json: evidence_json.clone(),
-        session_id: session_id.clone(),
-    };
-    let explicit_human_promotion = source_type == "human_explicit"
-        && options
-            .actor
-            .as_deref()
-            .is_some_and(|actor| !actor.trim().is_empty())
-        && feedback_input
-            .reason
-            .as_deref()
-            .is_some_and(|reason| !reason.trim().is_empty());
+        let feedback_input = CreateFeedbackEventInput {
+            workspace_id: target.workspace_id.clone(),
+            target_type: target_type.clone(),
+            target_id: target_id.clone(),
+            signal: signal.clone(),
+            weight,
+            source_type: source_type.clone(),
+            source_id: source_id.clone(),
+            reason,
+            evidence_json: evidence_json.clone(),
+            session_id: session_id.clone(),
+        };
+        let explicit_human_promotion = source_type == "human_explicit"
+            && options
+                .actor
+                .as_deref()
+                .is_some_and(|actor| !actor.trim().is_empty())
+            && feedback_input
+                .reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty());
 
-    if options.dry_run {
-        let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+        if options.dry_run {
+            let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+            trace_sprt_quarantine("dependency_check", 0, &[]);
+            let sprt = sprt_quarantine_decision_preview(
+                &connection,
+                &target.workspace_id,
+                &signal,
+                source_id.as_deref(),
+            )?;
+            let burst_quarantine = harmful_quarantine_preview(
+                &connection,
+                &target.workspace_id,
+                &signal,
+                source_id.as_deref(),
+                options.harmful_per_source_per_hour,
+                options.harmful_burst_window_seconds,
+            )?;
+            let sprt_quarantine = sprt.as_ref().and_then(|decision| {
+                sprt_quarantine_summary(
+                    decision,
+                    options.harmful_per_source_per_hour,
+                    options.harmful_burst_window_seconds,
+                )
+            });
+            let quarantine = outcome_quarantine_with_cause(burst_quarantine, sprt_quarantine);
+            trace_sprt_quarantine("response", 0, &[]);
+            // Dry-run preview surfaces the same degraded code as the persisted
+            // path, but without persisted quarantine candidate IDs.
+            let degraded = quarantine
+                .as_ref()
+                .map(|(cause, summary)| vec![outcome_quarantine_degradation(*cause, summary, &[])])
+                .unwrap_or_default();
+            let quarantine = quarantine.map(|(_cause, summary)| summary);
+            return Ok(OutcomeRecordReport {
+                version: env!("CARGO_PKG_VERSION"),
+                status: OutcomeRecordStatus::DryRun,
+                dry_run: true,
+                event_id,
+                audit_id: None,
+                target_type,
+                target_id,
+                workspace_id: target.workspace_id,
+                target_verified: target.verified,
+                signal,
+                weight,
+                source_type,
+                source_id,
+                reason_present: feedback_input.reason.is_some(),
+                evidence_json_present: evidence_json.is_some(),
+                session_id,
+                quarantine,
+                feedback,
+                degraded,
+                confidence_before: None,
+                confidence_after: None,
+            });
+        }
+
+        let Some(event_id) = event_id else {
+            return Err(DomainError::Usage {
+                message: "event id was not generated for outcome write".to_string(),
+                repair: Some("ee outcome <target-id> --signal helpful".to_string()),
+            });
+        };
+        let existing = existing_feedback_outcome(&connection, &event_id, &feedback_input)?;
+        #[cfg(test)]
+        observe_outcome_admission_for_test(
+            OutcomeAdmissionTestStage::AfterEventLookup,
+            &connection,
+        );
+        if let Some(existing) = existing {
+            let (status, quarantine) = match existing {
+                ExistingFeedbackOutcome::Recorded => (OutcomeRecordStatus::AlreadyRecorded, None),
+                ExistingFeedbackOutcome::Quarantined(summary) => {
+                    (OutcomeRecordStatus::Quarantined, Some(summary))
+                }
+            };
+            let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+            trace_sprt_quarantine("response", 0, &[]);
+            return Ok(OutcomeRecordReport {
+                version: env!("CARGO_PKG_VERSION"),
+                status,
+                dry_run: false,
+                event_id: Some(event_id),
+                audit_id: None,
+                target_type,
+                target_id,
+                workspace_id: target.workspace_id,
+                target_verified: target.verified,
+                signal,
+                weight,
+                source_type,
+                source_id,
+                reason_present: feedback_input.reason.is_some(),
+                evidence_json_present: evidence_json.is_some(),
+                session_id,
+                quarantine,
+                feedback,
+                degraded: Vec::new(),
+                confidence_before: None,
+                confidence_after: None,
+            });
+        }
+
         trace_sprt_quarantine("dependency_check", 0, &[]);
         let sprt = sprt_quarantine_decision_preview(
             &connection,
@@ -1050,56 +1194,124 @@ fn record_outcome_inner(
                 options.harmful_burst_window_seconds,
             )
         });
-        let quarantine = outcome_quarantine_with_cause(burst_quarantine, sprt_quarantine);
-        trace_sprt_quarantine("response", 0, &[]);
-        // Dry-run preview surfaces the same degraded code as the persisted
-        // path, but without persisted quarantine candidate IDs.
-        let degraded = quarantine
-            .as_ref()
-            .map(|(cause, summary)| vec![outcome_quarantine_degradation(*cause, summary, &[])])
-            .unwrap_or_default();
-        let quarantine = quarantine.map(|(_cause, summary)| summary);
-        return Ok(OutcomeRecordReport {
-            version: env!("CARGO_PKG_VERSION"),
-            status: OutcomeRecordStatus::DryRun,
-            dry_run: true,
-            event_id,
-            audit_id: None,
-            target_type,
-            target_id,
-            workspace_id: target.workspace_id,
-            target_verified: target.verified,
-            signal,
-            weight,
-            source_type,
-            source_id,
-            reason_present: feedback_input.reason.is_some(),
-            evidence_json_present: evidence_json.is_some(),
-            session_id,
-            quarantine,
-            feedback,
-            degraded,
-            confidence_before: None,
-            confidence_after: None,
-        });
-    }
-
-    let Some(event_id) = event_id else {
-        return Err(DomainError::Usage {
-            message: "event id was not generated for outcome write".to_string(),
-            repair: Some("ee outcome <target-id> --signal helpful".to_string()),
-        });
-    };
-    if let Some(existing) = get_existing_event(&connection, &event_id)? {
-        if feedback_event_matches(&existing, &feedback_input) {
+        #[cfg(test)]
+        observe_outcome_admission_for_test(
+            OutcomeAdmissionTestStage::AfterAdmissionRead,
+            &connection,
+        );
+        if let Some((quarantine_cause, quarantine)) =
+            outcome_quarantine_with_cause(burst_quarantine, sprt_quarantine)
+        {
+            let quarantine_id = id_source.next_feedback_quarantine_id();
+            let raw_event_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
+            let reason = quarantine.reason.clone();
+            trace_sprt_quarantine("persistence", 0, &[]);
+            let quarantine_input = CreateFeedbackQuarantineInput {
+                workspace_id: target.workspace_id.clone(),
+                source_id: source_id.clone().unwrap_or_else(|| "unknown".to_owned()),
+                target_type: target_type.clone(),
+                target_id: target_id.clone(),
+                signal: signal.clone(),
+                weight,
+                source_type: source_type.clone(),
+                proposed_event_id: Some(event_id.clone()),
+                recorded_at: Utc::now().to_rfc3339(),
+                reason,
+                event_reason: feedback_input.reason.clone(),
+                evidence_json: feedback_input.evidence_json.clone(),
+                session_id: feedback_input.session_id.clone(),
+                raw_event_hash: raw_event_hash.clone(),
+            };
+            let write_operation = crate::core::write_owner::WriteOperation::OutcomeRecord {
+                workspace_id: target.workspace_id.clone(),
+                memory_id: target_id.clone(),
+                outcome_type: signal.clone(),
+                details: feedback_input.reason.clone(),
+            };
+            let sprt_audit = sprt.as_ref().map(|decision| OutcomeSprtAuditInput {
+                workspace_id: &target.workspace_id,
+                actor: options.actor.as_deref(),
+                target_type: "feedback_quarantine",
+                target_id: &quarantine_id,
+                decision,
+                audit_id: id_source.next_audit_id(),
+            });
+            let audit_id = crate::core::write_owner::run_one_shot_write_intake(
+                outcome_write_intake_workspace_path(options.database_path),
+                &write_operation,
+                || {
+                    connection
+                        .with_transaction(|| {
+                            record_outcome_in_txn(
+                                &connection,
+                                OutcomeRecordInTxn::Quarantine {
+                                    quarantine_id: &quarantine_id,
+                                    input: &quarantine_input,
+                                    actor: options.actor.as_deref(),
+                                    audit_id: id_source.next_audit_id(),
+                                    sprt_audit,
+                                },
+                            )
+                        })
+                        .map_err(|error| DomainError::Storage {
+                            message: format!("Failed to quarantine feedback event: {error}"),
+                            repair: Some("ee doctor".to_owned()),
+                        })
+                },
+            )?;
             let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
             trace_sprt_quarantine("response", 0, &[]);
+            let final_quarantine = OutcomeQuarantineSummary {
+                id: Some(quarantine_id.clone()),
+                raw_event_hash: Some(raw_event_hash),
+                ..quarantine
+            };
+            let quarantined_candidate_ids = vec![quarantine_id];
+            let safe_trace_source_id = final_quarantine
+                .source_id
+                .as_deref()
+                .map(redact_outcome_public_source_ref)
+                .unwrap_or_else(|| "unknown".to_owned());
+            match (
+                quarantine_cause,
+                final_quarantine.observed_count,
+                final_quarantine.limit,
+                final_quarantine.window_seconds,
+            ) {
+                (OutcomeQuarantineCause::HarmfulBurst, Some(observed), Some(cap), Some(window)) => {
+                    tracing::info!(
+                        target: "ee::outcome::harmful_burst",
+                        source_id = %safe_trace_source_id,
+                        observed_rate = observed,
+                        configured_cap = cap,
+                        window_seconds = window,
+                        quarantined_candidate_id = final_quarantine.id.as_deref(),
+                        "harmful burst quarantined"
+                    );
+                }
+                (OutcomeQuarantineCause::Sprt, Some(observed), _, Some(window)) => {
+                    tracing::info!(
+                        target: "ee::outcome::sprt_quarantine",
+                        source_id = %safe_trace_source_id,
+                        classified_event_count = observed,
+                        window_seconds = window,
+                        quarantined_candidate_id = final_quarantine.id.as_deref(),
+                        "SPRT outcome quarantined"
+                    );
+                }
+                _ => {}
+            }
+            let degraded = vec![outcome_quarantine_degradation(
+                quarantine_cause,
+                &final_quarantine,
+                &quarantined_candidate_ids,
+            )];
             return Ok(OutcomeRecordReport {
                 version: env!("CARGO_PKG_VERSION"),
-                status: OutcomeRecordStatus::AlreadyRecorded,
+                status: OutcomeRecordStatus::Quarantined,
                 dry_run: false,
                 event_id: Some(event_id),
-                audit_id: None,
+                audit_id: Some(audit_id),
                 target_type,
                 target_id,
                 workspace_id: target.workspace_id,
@@ -1111,64 +1323,19 @@ fn record_outcome_inner(
                 reason_present: feedback_input.reason.is_some(),
                 evidence_json_present: evidence_json.is_some(),
                 session_id,
-                quarantine: None,
+                quarantine: Some(final_quarantine),
                 feedback,
-                degraded: Vec::new(),
+                degraded,
                 confidence_before: None,
                 confidence_after: None,
             });
         }
 
-        return Err(DomainError::Usage {
-            message: format!("feedback event id already exists with different content: {event_id}"),
-            repair: Some("ee outcome --event-id <new-feedback-id>".to_string()),
-        });
-    }
-
-    trace_sprt_quarantine("dependency_check", 0, &[]);
-    let sprt = sprt_quarantine_decision_preview(
-        &connection,
-        &target.workspace_id,
-        &signal,
-        source_id.as_deref(),
-    )?;
-    let burst_quarantine = harmful_quarantine_preview(
-        &connection,
-        &target.workspace_id,
-        &signal,
-        source_id.as_deref(),
-        options.harmful_per_source_per_hour,
-        options.harmful_burst_window_seconds,
-    )?;
-    let sprt_quarantine = sprt.as_ref().and_then(|decision| {
-        sprt_quarantine_summary(
-            decision,
-            options.harmful_per_source_per_hour,
-            options.harmful_burst_window_seconds,
-        )
-    });
-    if let Some((quarantine_cause, quarantine)) =
-        outcome_quarantine_with_cause(burst_quarantine, sprt_quarantine)
-    {
-        let quarantine_id = id_source.next_feedback_quarantine_id();
-        let raw_event_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
-        let reason = quarantine.reason.clone();
         trace_sprt_quarantine("persistence", 0, &[]);
-        let quarantine_input = CreateFeedbackQuarantineInput {
-            workspace_id: target.workspace_id.clone(),
-            source_id: source_id.clone().unwrap_or_else(|| "unknown".to_owned()),
-            target_type: target_type.clone(),
-            target_id: target_id.clone(),
-            signal: signal.clone(),
-            weight,
-            source_type: source_type.clone(),
-            proposed_event_id: Some(event_id.clone()),
-            recorded_at: Utc::now().to_rfc3339(),
-            reason,
-            event_reason: feedback_input.reason.clone(),
-            evidence_json: feedback_input.evidence_json.clone(),
-            session_id: feedback_input.session_id.clone(),
-            raw_event_hash: raw_event_hash.clone(),
+        let audited_feedback = AuditedFeedbackEventInput {
+            event: feedback_input.clone(),
+            actor: options.actor.clone(),
+            details: Some(outcome_audit_details(&event_id, &feedback_input)),
         };
         let write_operation = crate::core::write_owner::WriteOperation::OutcomeRecord {
             workspace_id: target.workspace_id.clone(),
@@ -1179,78 +1346,71 @@ fn record_outcome_inner(
         let sprt_audit = sprt.as_ref().map(|decision| OutcomeSprtAuditInput {
             workspace_id: &target.workspace_id,
             actor: options.actor.as_deref(),
-            target_type: "feedback_quarantine",
-            target_id: &quarantine_id,
+            target_type: "feedback_event",
+            target_id: &event_id,
             decision,
             audit_id: id_source.next_audit_id(),
         });
-        let audit_id = crate::core::write_owner::run_one_shot_write_intake(
+        let (audit_id, confidence) = crate::core::write_owner::run_one_shot_write_intake(
             outcome_write_intake_workspace_path(options.database_path),
             &write_operation,
             || {
                 connection
                     .with_transaction(|| {
-                        record_outcome_in_txn(
+                        let audit_id = record_outcome_in_txn(
                             &connection,
-                            OutcomeRecordInTxn::Quarantine {
-                                quarantine_id: &quarantine_id,
-                                input: &quarantine_input,
-                                actor: options.actor.as_deref(),
+                            OutcomeRecordInTxn::Feedback {
+                                event_id: &event_id,
+                                input: &audited_feedback,
                                 audit_id: id_source.next_audit_id(),
                                 sprt_audit,
                             },
-                        )
+                        )?;
+                        let confidence = apply_memory_outcome_in_txn(
+                            &connection,
+                            &feedback_input,
+                            &event_id,
+                            options.actor.as_deref(),
+                            explicit_human_promotion,
+                            id_source,
+                        )?;
+                        apply_procedure_outcome_in_txn(
+                            &connection,
+                            &feedback_input,
+                            &event_id,
+                            options.actor.as_deref(),
+                        )?;
+                        if target_type == "memory" {
+                            record_agent_context_profile_update_in_txn(
+                                &connection,
+                                &target.workspace_id,
+                                &target_id,
+                                &signal,
+                                &event_id,
+                                options.agent_name.as_deref(),
+                                options.actor.as_deref(),
+                            )?;
+                        }
+                        Ok((audit_id, confidence))
                     })
                     .map_err(|error| DomainError::Storage {
-                        message: format!("Failed to quarantine feedback event: {error}"),
-                        repair: Some("ee doctor".to_owned()),
+                        message: format!("Failed to record feedback event: {error}"),
+                        repair: Some("ee doctor".to_string()),
                     })
             },
         )?;
+
+        // These values describe the learning committed with the event, never a
+        // second best-effort transaction that an idempotent retry could skip.
+        let (confidence_before, confidence_after) =
+            confidence.map_or((None, None), |(before, after)| (Some(before), Some(after)));
+
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
+
         trace_sprt_quarantine("response", 0, &[]);
-        let final_quarantine = OutcomeQuarantineSummary {
-            id: Some(quarantine_id.clone()),
-            raw_event_hash: Some(raw_event_hash),
-            ..quarantine
-        };
-        let quarantined_candidate_ids = vec![quarantine_id];
-        let safe_trace_source_id = final_quarantine
-            .source_id
-            .as_deref()
-            .map(redact_outcome_public_source_ref)
-            .unwrap_or_else(|| "unknown".to_owned());
-        match quarantine_cause {
-            OutcomeQuarantineCause::HarmfulBurst => {
-                tracing::info!(
-                    target: "ee::outcome::harmful_burst",
-                    source_id = %safe_trace_source_id,
-                    observed_rate = final_quarantine.observed_count,
-                    configured_cap = final_quarantine.limit,
-                    window_seconds = final_quarantine.window_seconds,
-                    quarantined_candidate_id = final_quarantine.id.as_deref(),
-                    "harmful burst quarantined"
-                );
-            }
-            OutcomeQuarantineCause::Sprt => {
-                tracing::info!(
-                    target: "ee::outcome::sprt_quarantine",
-                    source_id = %safe_trace_source_id,
-                    classified_event_count = final_quarantine.observed_count,
-                    window_seconds = final_quarantine.window_seconds,
-                    quarantined_candidate_id = final_quarantine.id.as_deref(),
-                    "SPRT outcome quarantined"
-                );
-            }
-        }
-        let degraded = vec![outcome_quarantine_degradation(
-            quarantine_cause,
-            &final_quarantine,
-            &quarantined_candidate_ids,
-        )];
-        return Ok(OutcomeRecordReport {
+        Ok(OutcomeRecordReport {
             version: env!("CARGO_PKG_VERSION"),
-            status: OutcomeRecordStatus::Quarantined,
+            status: OutcomeRecordStatus::Recorded,
             dry_run: false,
             event_id: Some(event_id),
             audit_id: Some(audit_id),
@@ -1265,131 +1425,57 @@ fn record_outcome_inner(
             reason_present: feedback_input.reason.is_some(),
             evidence_json_present: evidence_json.is_some(),
             session_id,
-            quarantine: Some(final_quarantine),
+            quarantine: None,
             feedback,
-            degraded,
-            confidence_before: None,
-            confidence_after: None,
-        });
-    }
-
-    trace_sprt_quarantine("persistence", 0, &[]);
-    let audited_feedback = AuditedFeedbackEventInput {
-        event: feedback_input.clone(),
-        actor: options.actor.clone(),
-        details: Some(outcome_audit_details(&event_id, &feedback_input)),
+            degraded: Vec::new(),
+            confidence_before,
+            confidence_after,
+        })
     };
-    let write_operation = crate::core::write_owner::WriteOperation::OutcomeRecord {
-        workspace_id: target.workspace_id.clone(),
-        memory_id: target_id.clone(),
-        outcome_type: signal.clone(),
-        details: feedback_input.reason.clone(),
-    };
-    let sprt_audit = sprt.as_ref().map(|decision| OutcomeSprtAuditInput {
-        workspace_id: &target.workspace_id,
-        actor: options.actor.as_deref(),
-        target_type: "feedback_event",
-        target_id: &event_id,
-        decision,
-        audit_id: id_source.next_audit_id(),
-    });
-    let (audit_id, confidence) = crate::core::write_owner::run_one_shot_write_intake(
-        outcome_write_intake_workspace_path(options.database_path),
-        &write_operation,
-        || {
-            connection
-                .with_transaction(|| {
-                    let audit_id = record_outcome_in_txn(
-                        &connection,
-                        OutcomeRecordInTxn::Feedback {
-                            event_id: &event_id,
-                            input: &audited_feedback,
-                            audit_id: id_source.next_audit_id(),
-                            sprt_audit,
-                        },
-                    )?;
-                    let confidence = apply_memory_outcome_in_txn(
-                        &connection,
-                        &feedback_input,
-                        &event_id,
-                        options.actor.as_deref(),
-                        explicit_human_promotion,
-                        id_source,
-                    )?;
-                    apply_procedure_outcome_in_txn(
-                        &connection,
-                        &feedback_input,
-                        &event_id,
-                        options.actor.as_deref(),
-                    )?;
-                    Ok((audit_id, confidence))
-                })
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to record feedback event: {error}"),
-                    repair: Some("ee doctor".to_string()),
-                })
-        },
-    )?;
-
-    if target_type == "memory" {
-        record_agent_context_profile_update(
+    let mut report = if options.dry_run {
+        record()?
+    } else {
+        #[cfg(test)]
+        observe_outcome_admission_for_test(
+            OutcomeAdmissionTestStage::BeforeOwnerFence,
             &connection,
-            &target.workspace_id,
-            &target_id,
-            &signal,
-            &event_id,
-            options.agent_name.as_deref(),
-            options.actor.as_deref(),
-        )?;
-    }
+        );
+        // Target authorization, idempotency and source admission must observe
+        // the same writer interval as their chosen feedback/quarantine commit.
+        // The inner transaction reuses this owner; intake accounting alone
+        // does not serialize these reads across concurrent CLI invocations.
+        connection.with_write_owner_fence(
+            |error| DomainError::Storage {
+                message: format!("Failed to acquire feedback admission write owner: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            },
+            record,
+        )?
+    };
 
-    // These values describe the learning committed with the event, never a
-    // second best-effort transaction that an idempotent retry could skip.
-    let (confidence_before, confidence_after) =
-        confidence.map_or((None, None), |(before, after)| (Some(before), Some(after)));
-
-    let mut degraded = Vec::new();
-    if target_type == "memory" && is_harmful_signal(&signal) {
+    // Candidate proposals are optional postcommit work. They must not extend
+    // the owner interval needed for mandatory admission and learning.
+    if report.status == OutcomeRecordStatus::Recorded
+        && report.target_type == "memory"
+        && is_harmful_signal(&report.signal)
+        && let Some(event_id) = report.event_id.as_deref()
+    {
         match maybe_propose_anti_pattern_candidate(
             &connection,
-            &target.workspace_id,
-            &target_id,
-            &event_id,
+            &report.workspace_id,
+            &report.target_id,
+            event_id,
             options.actor.as_deref(),
             id_source,
         ) {
-            Ok(Some(proposed)) => degraded.push(proposed),
+            Ok(Some(proposed)) => report.degraded.push(proposed),
             Ok(None) => {}
-            Err(error) => degraded.push(anti_pattern_proposal_failed_degradation(&error)),
+            Err(error) => report
+                .degraded
+                .push(anti_pattern_proposal_failed_degradation(&error)),
         }
     }
-
-    let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
-
-    trace_sprt_quarantine("response", 0, &[]);
-    Ok(OutcomeRecordReport {
-        version: env!("CARGO_PKG_VERSION"),
-        status: OutcomeRecordStatus::Recorded,
-        dry_run: false,
-        event_id: Some(event_id),
-        audit_id: Some(audit_id),
-        target_type,
-        target_id,
-        workspace_id: target.workspace_id,
-        target_verified: target.verified,
-        signal,
-        weight,
-        source_type,
-        source_id,
-        reason_present: feedback_input.reason.is_some(),
-        evidence_json_present: evidence_json.is_some(),
-        session_id,
-        quarantine: None,
-        feedback,
-        degraded,
-        confidence_before,
-        confidence_after,
-    })
+    Ok(report)
 }
 
 /// Apply procedure scoring in the transaction that records its feedback.
@@ -1579,8 +1665,18 @@ fn apply_memory_outcome_in_txn(
     }
     let missing_target = || crate::db::DbError::MalformedRow {
         operation: crate::db::DbOperation::Execute,
-        message: "Outcome memory disappeared before learning could commit".to_owned(),
+        message: "Outcome memory is no longer live in its workspace before learning could commit"
+            .to_owned(),
     };
+    // A review may release an observation long after target resolution. Keep
+    // ownership and liveness in the same writer snapshot as its learning,
+    // including neutral signals that do not update the posterior.
+    connection
+        .get_memory(&feedback.target_id)?
+        .filter(|memory| {
+            memory.workspace_id == feedback.workspace_id && memory.tombstoned_at.is_none()
+        })
+        .ok_or_else(missing_target)?;
     let (current_alpha, current_beta) = connection
         .get_memory_bayes_posterior(&feedback.target_id)?
         .ok_or_else(missing_target)?;
@@ -2199,9 +2295,15 @@ fn harmful_burst_quarantine_degradation(
     OutcomeDegradation {
         code: HARMFUL_BURST_QUARANTINE_CODE.to_string(),
         severity: "warning".to_string(),
-        message: format!(
-            "Harmful outcome feedback rate exceeded: {observed_rate} events in {window_seconds}s (cap {configured_cap}); event was quarantined and did NOT update live scoring."
-        ),
+        message: match (observed_rate, configured_cap, window_seconds) {
+            (Some(observed_rate), Some(configured_cap), Some(window_seconds)) => format!(
+                "Harmful outcome feedback rate exceeded: {observed_rate} events in {window_seconds}s (cap {configured_cap}); event was quarantined and did NOT update live scoring."
+            ),
+            _ => {
+                "Outcome feedback remains quarantined; original rate-limit metrics are unavailable."
+                    .to_owned()
+            }
+        },
         details: Some(details),
     }
 }
@@ -2237,9 +2339,13 @@ fn sprt_quarantine_degradation(
     OutcomeDegradation {
         code: SPRT_QUARANTINE_CODE.to_string(),
         severity: "warning".to_string(),
-        message: format!(
-            "SPRT outcome quarantine threshold exceeded after {classified_event_count} classified outcome events; event was quarantined and did NOT update live scoring."
-        ),
+        message: match classified_event_count {
+            Some(classified_event_count) => format!(
+                "SPRT outcome quarantine threshold exceeded after {classified_event_count} classified outcome events; event was quarantined and did NOT update live scoring."
+            ),
+            None => "Outcome feedback remains quarantined; the original classified event count is unavailable."
+                .to_owned(),
+        },
         details: Some(details),
     }
 }
@@ -2368,24 +2474,11 @@ pub fn review_feedback_quarantine(
     }
 
     if options.reject {
-        let audit_id = update_feedback_quarantine_review_audited(
-            &connection,
-            &row,
-            "rejected",
-            options.actor,
-            None,
-        )?;
+        let summary = reject_feedback_quarantine_audited(&connection, &row, options.actor)?;
         return Ok(outcome_quarantine_review_report(
             &prepared,
             &quarantine_id,
-            QuarantineReviewSummary {
-                action,
-                status: "rejected",
-                changed: true,
-                dry_run: false,
-                feedback_event_id: None,
-                audit_id: Some(audit_id),
-            },
+            summary,
         ));
     }
 
@@ -2412,7 +2505,7 @@ pub fn review_feedback_quarantine(
             repair: Some(format!("ee outcome quarantine release {} --reject", row.id)),
         });
     }
-    let audit_id = release_feedback_quarantine_audited(
+    let summary = release_feedback_quarantine_audited(
         &connection,
         &row,
         &event_id,
@@ -2422,14 +2515,7 @@ pub fn review_feedback_quarantine(
     Ok(outcome_quarantine_review_report(
         &prepared,
         &quarantine_id,
-        QuarantineReviewSummary {
-            action,
-            status: "released",
-            changed: true,
-            dry_run: false,
-            feedback_event_id: Some(event_id),
-            audit_id: Some(audit_id),
-        },
+        summary,
     ))
 }
 
@@ -2609,23 +2695,47 @@ fn feedback_quarantine_not_found(quarantine_id: &str) -> DomainError {
     }
 }
 
-fn update_feedback_quarantine_review_audited(
+fn already_reviewed_feedback_quarantine_summary(
     connection: &DbConnection,
     row: &StoredFeedbackQuarantine,
-    status: &str,
+    action: &'static str,
+) -> crate::db::Result<QuarantineReviewSummary<'static>> {
+    let current = connection
+        .get_feedback_quarantine(&row.id)?
+        .filter(|current| current.workspace_id == row.workspace_id)
+        .ok_or_else(|| crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "feedback quarantine disappeared before its review could commit".to_owned(),
+        })?;
+    if !matches!(current.status.as_str(), "released" | "rejected") {
+        return Err(crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: "feedback quarantine review claim failed without a completed review"
+                .to_owned(),
+        });
+    }
+    Ok(QuarantineReviewSummary {
+        action,
+        status: "already_reviewed",
+        changed: false,
+        dry_run: false,
+        feedback_event_id: current.released_feedback_event_id,
+        audit_id: None,
+    })
+}
+
+fn reject_feedback_quarantine_audited(
+    connection: &DbConnection,
+    row: &StoredFeedbackQuarantine,
     actor: Option<&str>,
-    released_feedback_event_id: Option<&str>,
-) -> Result<String, DomainError> {
+) -> Result<QuarantineReviewSummary<'static>, DomainError> {
     let audit_id = generate_audit_id();
-    let details = feedback_quarantine_review_audit_details(row, status, released_feedback_event_id);
+    let details = feedback_quarantine_review_audit_details(row, "rejected", None);
     connection
         .with_transaction(|| {
-            connection.update_feedback_quarantine_status(
-                &row.id,
-                status,
-                actor,
-                released_feedback_event_id,
-            )?;
+            if !connection.update_feedback_quarantine_status(&row.id, "rejected", actor, None)? {
+                return already_reviewed_feedback_quarantine_summary(connection, row, "reject");
+            }
             connection.insert_audit(
                 &audit_id,
                 &CreateAuditInput {
@@ -2633,22 +2743,25 @@ fn update_feedback_quarantine_review_audited(
                     actor: actor
                         .map(str::to_owned)
                         .or_else(|| Some("ee outcome quarantine".to_owned())),
-                    action: if status == "released" {
-                        audit_actions::FEEDBACK_QUARANTINE_RELEASE.to_owned()
-                    } else {
-                        audit_actions::FEEDBACK_QUARANTINE_REJECT.to_owned()
-                    },
+                    action: audit_actions::FEEDBACK_QUARANTINE_REJECT.to_owned(),
                     target_type: Some("feedback_quarantine".to_owned()),
                     target_id: Some(row.id.clone()),
                     details: Some(details.clone()),
                 },
-            )
+            )?;
+            Ok(QuarantineReviewSummary {
+                action: "reject",
+                status: "rejected",
+                changed: true,
+                dry_run: false,
+                feedback_event_id: None,
+                audit_id: Some(audit_id),
+            })
         })
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to review feedback quarantine: {error}"),
             repair: Some("ee doctor".to_owned()),
-        })?;
-    Ok(audit_id)
+        })
 }
 
 fn release_feedback_quarantine_audited(
@@ -2657,19 +2770,31 @@ fn release_feedback_quarantine_audited(
     event_id: &str,
     feedback_input: &CreateFeedbackEventInput,
     actor: Option<&str>,
-) -> Result<String, DomainError> {
+) -> Result<QuarantineReviewSummary<'static>, DomainError> {
     let audit_id = generate_audit_id();
     let details = feedback_quarantine_review_audit_details(row, "released", Some(event_id));
     connection
         .with_transaction(|| {
+            // The caller's pending row may predate a competing review. Claim
+            // the transition before feedback, rule updates or audit work. The
+            // event FK is attached after insertion, within this transaction.
+            if !connection.update_feedback_quarantine_status(&row.id, "released", actor, None)? {
+                return already_reviewed_feedback_quarantine_summary(connection, row, "release");
+            }
             connection.insert_feedback_event(event_id, feedback_input)?;
             apply_native_rule_outcome_in_txn(connection, feedback_input, event_id, actor)?;
-            connection.update_feedback_quarantine_status(
-                &row.id,
-                "released",
+            // Admission releases the original observation; it does not grant
+            // the separate authority needed for explicit human promotion.
+            let _ = apply_memory_outcome_in_txn(
+                connection,
+                feedback_input,
+                event_id,
                 actor,
-                Some(event_id),
+                false,
+                &mut OutcomeIdSource::Ambient,
             )?;
+            apply_procedure_outcome_in_txn(connection, feedback_input, event_id, actor)?;
+            connection.attach_released_feedback_quarantine_event_in_txn(&row.id, event_id)?;
             connection.insert_audit(
                 &audit_id,
                 &CreateAuditInput {
@@ -2682,13 +2807,20 @@ fn release_feedback_quarantine_audited(
                     target_id: Some(row.id.clone()),
                     details: Some(details.clone()),
                 },
-            )
+            )?;
+            Ok(QuarantineReviewSummary {
+                action: "release",
+                status: "released",
+                changed: true,
+                dry_run: false,
+                feedback_event_id: Some(event_id.to_owned()),
+                audit_id: Some(audit_id),
+            })
         })
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to release feedback quarantine: {error}"),
             repair: Some("ee doctor".to_owned()),
-        })?;
-    Ok(audit_id)
+        })
 }
 
 fn feedback_quarantine_review_audit_details(
@@ -2933,7 +3065,10 @@ fn current_feedback_summary(
         })
 }
 
-fn record_agent_context_profile_update(
+/// Apply per-agent learning in the transaction that admits its feedback.
+/// Reading the prior counts under the same writer fence keeps the cached bias
+/// consistent with the stored counters, including concurrent outcomes.
+fn record_agent_context_profile_update_in_txn(
     connection: &DbConnection,
     workspace_id: &str,
     memory_id: &str,
@@ -2941,7 +3076,7 @@ fn record_agent_context_profile_update(
     feedback_event_id: &str,
     agent_name: Option<&str>,
     actor: Option<&str>,
-) -> Result<(), DomainError> {
+) -> crate::db::Result<()> {
     let Some(agent_name) = agent_name.and_then(normalized_agent_name) else {
         return Ok(());
     };
@@ -2949,55 +3084,43 @@ fn record_agent_context_profile_update(
         return Ok(());
     };
 
-    let existing = connection
-        .get_agent_context_profile(workspace_id, &agent_name, memory_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to read agent context profile: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+    let existing = connection.get_agent_context_profile(workspace_id, &agent_name, memory_id)?;
     let next_counts = existing.as_ref().map_or(counts_delta, |profile| {
         add_agent_profile_counts(profile.counts, counts_delta)
     });
     let next_bias = next_counts.bias();
     let last_seen_at = Utc::now().to_rfc3339();
 
-    connection
-        .with_transaction(|| {
-            let stored =
-                connection.upsert_agent_context_profile_event(&UpsertAgentContextProfileInput {
-                    workspace_id: workspace_id.to_owned(),
-                    agent_name: agent_name.clone(),
-                    memory_id: memory_id.to_owned(),
-                    counts_delta,
-                    last_seen_at: Some(last_seen_at.clone()),
-                    weight_cached: next_bias.weight,
-                })?;
-            let audit_id = generate_audit_id();
-            connection.insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(workspace_id.to_owned()),
-                    actor: actor
-                        .map(str::to_owned)
-                        .or_else(|| Some(agent_name.clone())),
-                    action: audit_actions::AGENT_PROFILE_UPDATE.to_owned(),
-                    target_type: Some("memory".to_owned()),
-                    target_id: Some(memory_id.to_owned()),
-                    details: Some(agent_profile_update_audit_details(
-                        feedback_event_id,
-                        &agent_name,
-                        &counts_delta,
-                        &stored.counts,
-                        stored.weight_cached,
-                        next_bias.cold_start,
-                    )),
-                },
-            )
-        })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to update agent context profile: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })
+    let stored =
+        connection.upsert_agent_context_profile_event(&UpsertAgentContextProfileInput {
+            workspace_id: workspace_id.to_owned(),
+            agent_name: agent_name.clone(),
+            memory_id: memory_id.to_owned(),
+            counts_delta,
+            last_seen_at: Some(last_seen_at),
+            weight_cached: next_bias.weight,
+        })?;
+    let audit_id = generate_audit_id();
+    connection.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(workspace_id.to_owned()),
+            actor: actor
+                .map(str::to_owned)
+                .or_else(|| Some(agent_name.clone())),
+            action: audit_actions::AGENT_PROFILE_UPDATE.to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some(memory_id.to_owned()),
+            details: Some(agent_profile_update_audit_details(
+                feedback_event_id,
+                &agent_name,
+                &counts_delta,
+                &stored.counts,
+                stored.weight_cached,
+                next_bias.cold_start,
+            )),
+        },
+    )
 }
 
 fn normalized_agent_name(raw: &str) -> Option<String> {
@@ -3059,6 +3182,114 @@ fn get_existing_event(
         })
 }
 
+enum ExistingFeedbackOutcome {
+    Recorded,
+    Quarantined(OutcomeQuarantineSummary),
+}
+
+/// A proposed event ID remains reserved after quarantine review. This lookup
+/// runs under the admission write owner, before either policy stream observes
+/// the request, so a retry cannot add another observation or reopen a rejection.
+fn existing_feedback_outcome(
+    connection: &DbConnection,
+    event_id: &str,
+    input: &CreateFeedbackEventInput,
+) -> Result<Option<ExistingFeedbackOutcome>, DomainError> {
+    let live = get_existing_event(connection, event_id)?;
+    let quarantine = connection
+        .get_feedback_quarantine_by_proposed_event_id(event_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query feedback event quarantine reservation: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    let Some(row) = quarantine else {
+        return match live {
+            Some(existing) if feedback_event_matches(&existing, input) => {
+                Ok(Some(ExistingFeedbackOutcome::Recorded))
+            }
+            Some(_) => Err(feedback_event_id_conflict(event_id)),
+            None => Ok(None),
+        };
+    };
+
+    // The stored hash rounds weights for its established wire contract.
+    // Compare the actual payload too: different observations must not alias
+    // merely because their weights round to the same four decimal places.
+    if !quarantined_feedback_matches(&row, input) {
+        return Err(feedback_event_id_conflict(event_id));
+    }
+    if raw_feedback_event_hash(event_id, input)? != row.raw_event_hash {
+        return Err(DomainError::PolicyDenied {
+            message: format!("quarantined feedback payload hash mismatch for {}", row.id),
+            repair: Some("ee outcome quarantine list --json".to_owned()),
+        });
+    }
+
+    let inconsistent = || DomainError::Storage {
+        message: format!(
+            "feedback event {event_id} has inconsistent quarantine and live feedback state"
+        ),
+        repair: Some("ee doctor".to_owned()),
+    };
+    match row.status.as_str() {
+        "pending" | "rejected" if live.is_some() || row.released_feedback_event_id.is_some() => {
+            Err(inconsistent())
+        }
+        "pending" => Ok(Some(ExistingFeedbackOutcome::Quarantined(
+            OutcomeQuarantineSummary {
+                id: Some(row.id),
+                status: row.status,
+                source_id: Some(row.source_id),
+                limit: None,
+                window_seconds: None,
+                observed_count: None,
+                reason: row.reason,
+                raw_event_hash: Some(row.raw_event_hash),
+                replayed: true,
+            },
+        ))),
+        "rejected" => Err(DomainError::PolicyDenied {
+            message: format!(
+                "feedback event {event_id} was rejected in quarantine {}; its event ID cannot be reused",
+                row.id
+            ),
+            repair: Some("ee outcome quarantine list --status rejected --json".to_owned()),
+        }),
+        "released"
+            if row.released_feedback_event_id.as_deref() == Some(event_id)
+                && live.as_ref().is_some_and(|event| {
+                    feedback_event_matches(event, input) && event.weight == input.weight
+                }) =>
+        {
+            Ok(Some(ExistingFeedbackOutcome::Recorded))
+        }
+        _ => Err(inconsistent()),
+    }
+}
+
+fn feedback_event_id_conflict(event_id: &str) -> DomainError {
+    DomainError::Usage {
+        message: format!("feedback event id already exists with different content: {event_id}"),
+        repair: Some("ee outcome --event-id <new-feedback-id>".to_owned()),
+    }
+}
+
+fn quarantined_feedback_matches(
+    existing: &StoredFeedbackQuarantine,
+    input: &CreateFeedbackEventInput,
+) -> bool {
+    existing.workspace_id == input.workspace_id
+        && existing.target_type == input.target_type
+        && existing.target_id == input.target_id
+        && existing.signal == input.signal
+        && existing.weight == input.weight
+        && existing.source_type == input.source_type
+        && Some(existing.source_id.as_str()) == input.source_id.as_deref()
+        && existing.event_reason == input.reason
+        && existing.evidence_json == input.evidence_json
+        && existing.session_id == input.session_id
+}
+
 fn harmful_quarantine_preview(
     connection: &DbConnection,
     workspace_id: &str,
@@ -3098,13 +3329,14 @@ fn harmful_quarantine_preview(
         id: None,
         status: "pending".to_owned(),
         source_id: Some(source_id.to_owned()),
-        limit,
-        window_seconds,
-        observed_count,
+        limit: Some(limit),
+        window_seconds: Some(window_seconds),
+        observed_count: Some(observed_count),
         reason: format!(
             "harmful feedback rate limit exceeded: source {source_id} observed {observed_count} harmful events in {window_seconds}s (limit {limit})"
         ),
         raw_event_hash: None,
+        replayed: false,
     }))
 }
 
@@ -3176,9 +3408,9 @@ fn sprt_quarantine_summary(
         id: None,
         status: "pending".to_owned(),
         source_id: Some(decision.source_id.clone()),
-        limit,
-        window_seconds,
-        observed_count: u32::try_from(decision.evaluation.event_count).unwrap_or(u32::MAX),
+        limit: Some(limit),
+        window_seconds: Some(window_seconds),
+        observed_count: Some(u32::try_from(decision.evaluation.event_count).unwrap_or(u32::MAX)),
         reason: format!(
             "SPRT harmful-feedback quarantine threshold exceeded: source {} statistic {:.3} exceeded upper bound {:.3} after {} classified outcome events (alpha={:.2}, beta={:.2})",
             decision.source_id,
@@ -3189,6 +3421,7 @@ fn sprt_quarantine_summary(
             SPRT_BETA
         ),
         raw_event_hash: None,
+        replayed: false,
     })
 }
 
@@ -6228,11 +6461,12 @@ mod tests {
                 id: Some("fq_00000000000000000000000001".to_string()),
                 status: "pending".to_string(),
                 source_id: Some(source_id.clone()),
-                limit: 1,
-                window_seconds: 60,
-                observed_count: 2,
+                limit: Some(1),
+                window_seconds: Some(60),
+                observed_count: Some(2),
                 reason: format!("source {source_id} observed too many harmful events"),
                 raw_event_hash: Some("blake3:fixture".to_string()),
+                replayed: false,
             }),
             feedback: OutcomeFeedbackSummary {
                 positive_weight: 0.0,
@@ -6278,11 +6512,12 @@ mod tests {
             id: Some("fq_00000000000000000000000099".to_string()),
             status: "pending".to_string(),
             source_id: Some("file:///Users/alice/private/outcome.json?api_key=leaky".to_string()),
-            limit: 5,
-            window_seconds: 3600,
-            observed_count: 7,
+            limit: Some(5),
+            window_seconds: Some(3600),
+            observed_count: Some(7),
             reason: "harmful feedback rate limit exceeded".to_string(),
             raw_event_hash: Some("blake3:fixture".to_string()),
+            replayed: false,
         };
         let candidate_ids = vec!["fq_00000000000000000000000099".to_string()];
 
@@ -6404,11 +6639,12 @@ mod tests {
             id: None,
             status: "pending".to_string(),
             source_id: Some("agent-cc_1".to_string()),
-            limit: 1,
-            window_seconds: 60,
-            observed_count: 2,
+            limit: Some(1),
+            window_seconds: Some(60),
+            observed_count: Some(2),
             reason: "harmful feedback rate limit exceeded".to_string(),
             raw_event_hash: None,
+            replayed: false,
         };
 
         let degradation = harmful_burst_quarantine_degradation(&summary, &[]);
@@ -7963,7 +8199,7 @@ mod tests {
         )?;
         ensure_equal(
             &summary.observed_count,
-            &4_u32,
+            &Some(4_u32),
             "SPRT summary counts classified events",
         )?;
         let degraded = quarantined
@@ -8400,6 +8636,111 @@ mod tests {
     }
 
     #[test]
+    fn stale_quarantine_reviews_preserve_the_winning_decision_and_all_effects() -> TestResult {
+        for (winner_rejects, stale_rejects) in [(true, false), (false, true), (false, false)] {
+            let (dir, database) = seed_outcome_database("ee-stale-quarantine-review")?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            seed_native_outcome_rule(&connection, OUTCOME_TEST_WORKSPACE_ID)?;
+            connection.close().map_err(|error| error.to_string())?;
+            let mut first =
+                native_rule_outcome_options(&database, "harmful", "fb_00000000000000000000000610");
+            first.harmful_per_source_per_hour = 1;
+            assert_eq!(
+                record_outcome(&first)
+                    .map_err(|error| error.message())?
+                    .status,
+                OutcomeRecordStatus::Recorded
+            );
+            let event_id = "fb_00000000000000000000000611";
+            let mut second = native_rule_outcome_options(&database, "harmful", event_id);
+            second.harmful_per_source_per_hour = 1;
+            let quarantined = record_outcome(&second).map_err(|error| error.message())?;
+            assert_eq!(quarantined.status, OutcomeRecordStatus::Quarantined);
+            let quarantine_id = quarantined
+                .quarantine
+                .and_then(|summary| summary.id)
+                .ok_or("quarantine id")?;
+
+            // Both requests read pending before either gets the writer fence.
+            // Keep the losing request's actual row while the public winner
+            // commits, then resume its transaction without any timing race.
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let stale = connection
+                .get_feedback_quarantine(&quarantine_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("pending quarantine")?;
+            assert_eq!(stale.status, "pending");
+            connection.close().map_err(|error| error.to_string())?;
+            let winner =
+                super::review_feedback_quarantine(&super::OutcomeQuarantineReviewOptions {
+                    workspace_path: dir.path(),
+                    database_path: Some(&database),
+                    quarantine_id: &quarantine_id,
+                    reject: winner_rejects,
+                    actor: Some("winning-reviewer"),
+                    dry_run: false,
+                })
+                .map_err(|error| error.message())?;
+            assert!(winner.changed);
+            let after_winner = native_rule_feedback_state(&database)?;
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let winning_row = connection
+                .get_feedback_quarantine(&quarantine_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("reviewed quarantine")?;
+            let losing_summary = if stale_rejects {
+                super::reject_feedback_quarantine_audited(
+                    &connection,
+                    &stale,
+                    Some("stale-reviewer"),
+                )
+            } else {
+                let feedback_input = CreateFeedbackEventInput {
+                    workspace_id: stale.workspace_id.clone(),
+                    target_type: stale.target_type.clone(),
+                    target_id: stale.target_id.clone(),
+                    signal: stale.signal.clone(),
+                    weight: stale.weight,
+                    source_type: stale.source_type.clone(),
+                    source_id: Some(stale.source_id.clone()),
+                    reason: stale.event_reason.clone(),
+                    evidence_json: stale.evidence_json.clone(),
+                    session_id: stale.session_id.clone(),
+                };
+                super::release_feedback_quarantine_audited(
+                    &connection,
+                    &stale,
+                    event_id,
+                    &feedback_input,
+                    Some("stale-reviewer"),
+                )
+            }
+            .map_err(|error| error.message())?;
+            assert_eq!(losing_summary.status, "already_reviewed");
+            assert!(!losing_summary.changed);
+            assert!(losing_summary.audit_id.is_none());
+            assert_eq!(losing_summary.feedback_event_id, winner.feedback_event_id);
+            assert_eq!(
+                connection
+                    .get_feedback_quarantine(&quarantine_id)
+                    .map_err(|error| error.to_string())?,
+                Some(winning_row),
+                "a stale review cannot rewrite the winner's status, actor, timestamp or event"
+            );
+            connection.close().map_err(|error| error.to_string())?;
+            assert_eq!(
+                native_rule_feedback_state(&database)?,
+                after_winner,
+                "stale reviews cannot insert feedback, mutate rules or create jobs/audits"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn native_rule_quarantine_release_applies_once_and_rolls_back_failed_publication() -> TestResult
     {
         let (dir, database) = seed_outcome_database("ee-native-rule-quarantine")?;
@@ -8445,6 +8786,10 @@ mod tests {
         assert_eq!(native_rule_feedback_state(&database)?, quarantined);
 
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let pending_before = connection
+            .get_feedback_quarantine(&quarantine_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("pending native feedback")?;
         connection.execute_raw("CREATE TRIGGER fail_native_rule_release BEFORE INSERT ON search_index_jobs WHEN NEW.document_source = 'rule' BEGIN SELECT RAISE(ABORT, 'native rule release blocked'); END")
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
@@ -8468,6 +8813,10 @@ mod tests {
             .ok_or("pending native feedback disappeared")?;
         assert_eq!(pending.status, "pending");
         assert!(pending.released_feedback_event_id.is_none());
+        assert_eq!(
+            pending, pending_before,
+            "failed release must roll back its initial review claim"
+        );
         connection
             .execute_raw("DROP TRIGGER fail_native_rule_release")
             .map_err(|error| error.to_string())?;

@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "read_fence_generation_unavailable",
+  "introduced_by": { "bead": "bd-1n0np.8.13", "epic_letter": "R" },
+  "surfaces": ["pack", "search", "why"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A strict read fence cannot observe both the addressed database generation and search-index generation. Missing, unreadable, and partially observable stores must refuse retrieval before emitting pack content or stream frames.",
+    "setup_commands": [
+      "# Choose a workspace without an initialized store, or a database whose index generation cannot be observed."
+    ],
+    "invocation": "ee pack 'prepare release' --workspace . --read-fence latest --strict-read-fence --json"
+  },
+  "expected_emission": {
+    "code": "read_fence_generation_unavailable",
+    "severity": "high",
+    "message_contains": ["refused to serve rows", "could not both be observed"],
+    "repair_contains": "ee index status",
+    "repair_string": "Inspect `ee index status` for the same workspace, database and index directory; repair the store or rebuild the index before retrying."
+  }
+}

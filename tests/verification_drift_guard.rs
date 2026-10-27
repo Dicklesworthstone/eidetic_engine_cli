@@ -416,6 +416,10 @@ CLOSURE_LINT_STALE_BASELINE_CODE=3
 # closure_gate_status: a constant missing here kills the extracted function
 # under `set -u` before it prints anything.
 CLOSURE_LINT_EMPTY_POPULATION_CODE=4
+# bd-3ghvw: run_stage gained an ENV_UNRUNNABLE branch that reads these.
+STAGE_ENV_UNRUNNABLE_CODE=76
+STAGE_ENV_UNRUNNABLE=0
+STAGE_ENV_UNRUNNABLE_NAMES=""
 STAGE_RESULTS=""
 STAGE_PASSED=0
 STAGE_SKIPPED_CONTENTION=0
@@ -457,6 +461,10 @@ fn stage_status_for(exit_code: i32) -> String {
             r#"
 set -uo pipefail
 BEADS_LOCK_SKIP_CODE=75
+# bd-3ghvw: the classifier reads this too. Omitting it does not fall back to a
+# default -- under `set -u` it kills the extracted function and every case in
+# stage_status_names_the_kind_of_outcome_not_just_pass_or_fail fails with 127.
+STAGE_ENV_UNRUNNABLE_CODE=76
 eval "$(awk '/^stage_status_for_exit_code\(\) /,/^}/' "$VERIFY_SCRIPT")"
 stage_status_for_exit_code "$CODE"
 "#,
@@ -530,6 +538,11 @@ fn verify_declares_the_whole_stage_status_vocabulary() {
         "INFRA_ERROR",
         "TIMEOUT",
         "CANCELLED",
+        // bd-3ghvw. Pinned here for the reason in this test's own docstring: a
+        // status the script can emit but does not declare is invisible, and one
+        // declared but unemittable is an undelivered promise. This one is
+        // emitted by run_stage's environment-unrunnable branch.
+        "ENV_UNRUNNABLE",
     ] {
         assert!(
             declared.contains(status),
@@ -916,6 +929,199 @@ fn the_run_stage_harness_extracts_real_functions() {
     );
 }
 
+/// Runs the REAL `unit_contract_golden_tests` with `cargo` STUBBED (bd-mbupe).
+///
+/// Same technique as `closure_stage_through_run_stage`, applied to verify.sh's
+/// only test stage: the function is extracted with awk, `cargo` is replaced by a
+/// shell function that prints `log` and exits `cargo_rc`, and the stage's real
+/// body -- its capture-through-`||`, its real grader invocation and its real
+/// `--require-targets` list -- runs unchanged. Nothing is compiled, which is
+/// what makes this arm possible at all: `cargo test` is the one thing this
+/// stage does and the one thing a local run cannot do.
+///
+/// Returns (merged output, exit status).
+fn unit_contract_stage_with_stubbed_cargo(log: &str, cargo_rc: i32) -> (String, i32) {
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(
+            r#"
+set -euo pipefail
+fake_log="$(mktemp "${TMPDIR:-/tmp}/ee-mbupe-fake-cargo-log.XXXXXX")"
+printf '%s' "$EE_FAKE_LOG_TEXT" >"$fake_log"
+export EE_FAKE_LOG="$fake_log"
+eval "$(awk '/^unit_contract_golden_tests\(\) /,/^}/' "$VERIFY_SCRIPT")"
+cargo() {
+    cat "$EE_FAKE_LOG"
+    return "$EE_FAKE_CARGO_RC"
+}
+status=0
+unit_contract_golden_tests || status=$?
+# `rm -f` on one just-created mktemp path, which is exactly what the stage
+# under test does to its own log at verify.sh:2294. Matching the code under
+# test matters more here than preferring a narrower verb.
+rm -f "$fake_log"
+exit "$status"
+"#,
+        )
+        .env("VERIFY_SCRIPT", verify_script_path())
+        .env("REPO_ROOT", project_root())
+        .env("EE_FAKE_LOG_TEXT", log)
+        .env("EE_FAKE_CARGO_RC", cargo_rc.to_string())
+        .current_dir(project_root())
+        .output()
+        .expect("run unit_contract_golden_tests with a stubbed cargo");
+
+    let mut merged = String::from_utf8_lossy(&output.stdout).into_owned();
+    merged.push_str(&String::from_utf8_lossy(&output.stderr));
+    (merged, output.status.code().unwrap_or(-1))
+}
+
+/// A log shaped exactly like cargo's, for the three targets the stage requires.
+///
+/// THE `(binary path)` SUFFIX IS LOAD-BEARING AND IS WHY THIS HELPER EXISTS.
+/// `grade_test_log.py`'s `RUNNING_TARGET` is
+/// `^\s*Running (?:unittests )?(\S+)\s*\(([^)]+)\)` -- it takes the target NAME
+/// from the binary in parentheses, so a `Running tests/contracts.rs` line with
+/// no parenthesised binary names no target at all. Measured while writing these
+/// arms: a fixture missing it made the grader report all three required targets
+/// absent, on a log that visibly contained three `Running` lines and three
+/// reconciling summaries. The two failure arms below PASSED against that broken
+/// fixture, because they only require the stage to fail; only the success arm
+/// caught it. That is the whole argument for keeping a positive arm beside the
+/// negative ones.
+fn cargo_shaped_log(include_integration_a_d: bool) -> String {
+    let mut log = String::from("   Compiling eidetic-engine v0.18.0\n");
+    log.push_str(
+        "     Running tests/contracts.rs (/build/target/debug/deps/contracts-1a2b3c4d5e6f7890)\n\
+         running 2 tests\n\
+         test failure_mode_fixtures::alpha ... ok\n\
+         test failure_mode_fixtures::beta ... ok\n\
+         test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1508 filtered out; finished in 0.31s\n",
+    );
+    if include_integration_a_d {
+        log.push_str(
+            "     Running tests/suites/integration_a_d.rs (/build/target/debug/deps/integration_a_d-0f1e2d3c4b5a6978)\n\
+             running 8 tests\n\
+             test degraded_codes_doc_coverage::every_fixture_has_a_doc_section ... ok\n\
+             test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 540 filtered out; finished in 1.02s\n",
+        );
+    }
+    log.push_str(
+        "     Running tests/verification_drift_guard.rs (/build/target/debug/deps/verification_drift_guard-9988776655443322)\n\
+         running 3 tests\n\
+         test verify_budget_manifest_declares_every_verify_stage ... ok\n\
+         test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 97 filtered out; finished in 0.10s\n",
+    );
+    log
+}
+
+/// THE ARM bd-mbupe WAS FILED FOR, and it is not hypothetical.
+///
+/// verify.sh:2271 runs `cargo test --workspace --lib --bins --tests --examples`
+/// with no `--no-fail-fast`, so cargo stops at the first failing target and the
+/// chronically-red lib target means no `--tests` target is reached. Before
+/// `--require-targets`, the grader judged only the pairs that were PRESENT, so a
+/// target that never ran contributed no pair and could not fail any rule: the
+/// stage passed while the gates it exists to run had not executed.
+///
+/// Measured on the pinned lane 2026-10-25, which is where the fixture's shape
+/// comes from: `integration_a_d` had not COMPILED since 583aa95d4, so it
+/// announced nothing while the rest of the run looked clean, and K3 let
+/// docs/degraded_codes.md drift for three days.
+#[test]
+fn unit_contract_stage_fails_when_a_required_target_never_reported() {
+    let (output, code) = unit_contract_stage_with_stubbed_cargo(&cargo_shaped_log(false), 0);
+    assert_ne!(
+        code, 0,
+        "cargo exited 0 and the surviving targets all reconciled, so ONLY the \
+         required-target check can fail this stage; it must:\n{output}"
+    );
+    assert!(
+        output.contains("integration_a_d"),
+        "the failure must NAME the absent target, or a reader cannot act on \
+         it:\n{output}"
+    );
+    assert!(
+        output.contains("does NOT grade green"),
+        "the stage must attribute the failure to the grade rather than to \
+         cargo, which exited 0:\n{output}"
+    );
+}
+
+/// The positive control. Without it the arm above is satisfied by a stage that
+/// fails on EVERY log, which is exactly what a broken fixture produced here.
+#[test]
+fn unit_contract_stage_passes_when_every_required_target_reported() {
+    let (output, code) = unit_contract_stage_with_stubbed_cargo(&cargo_shaped_log(true), 0);
+    assert_eq!(
+        code, 0,
+        "a complete, reconciling log with cargo 0 must pass the stage:\n{output}"
+    );
+    assert!(
+        output.contains("GREEN"),
+        "the grader must report GREEN on a complete log:\n{output}"
+    );
+}
+
+/// Cargo's own exit code still wins, and is reported as cargo's.
+///
+/// `one value cannot express two states`: a green GRADE over a failing cargo run
+/// must not become a pass. This pins the precedence the stage's own comment
+/// describes, with a log that grades green so the only possible cause of
+/// failure is the exit code.
+#[test]
+fn unit_contract_stage_reports_cargos_exit_code_even_on_a_green_grade() {
+    let (output, code) = unit_contract_stage_with_stubbed_cargo(&cargo_shaped_log(true), 101);
+    assert_eq!(
+        code, 101,
+        "the stage must return cargo's exit code, not 1:\n{output}"
+    );
+    assert!(
+        output.contains("cargo test exited 101"),
+        "and must say it was cargo:\n{output}"
+    );
+}
+
+/// Vacuity guard, matching `the_run_stage_harness_extracts_real_functions`.
+///
+/// An awk range that matched nothing would define no function, the call would
+/// return 127, and the two failure arms above would pass for the wrong reason.
+#[test]
+fn the_unit_contract_stage_harness_extracts_a_real_function() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    assert!(
+        script.contains("unit_contract_golden_tests() {"),
+        "verify.sh must define unit_contract_golden_tests at column 0 for the \
+         awk extraction to find it"
+    );
+    let body: Vec<&str> = script
+        .lines()
+        .skip_while(|line| !line.starts_with("unit_contract_golden_tests() "))
+        .take_while(|line| *line != "}")
+        .collect();
+    assert!(
+        body.len() > 10,
+        "the awk range captured {} lines; a truncated extraction would make \
+         these arms vacuous",
+        body.len()
+    );
+    let (_, code) = unit_contract_stage_with_stubbed_cargo(&cargo_shaped_log(false), 0);
+    assert_ne!(
+        code, 127,
+        "exit 127 means the extracted function was never defined"
+    );
+
+    // And the stage must still be the one that names these three targets, or
+    // the arms above are about a list that has moved on without them.
+    for target in ["contracts", "integration_a_d", "verification_drift_guard"] {
+        assert!(
+            script.contains(target),
+            "verify.sh no longer mentions {target}; --require-targets has \
+             changed and these arms need re-grounding"
+        );
+    }
+}
+
 /// Runs verify.sh's own closing verdict against an injected stage tally.
 ///
 /// Extracts `verification_exit_status` and `verification_summary_banner` from
@@ -952,6 +1158,13 @@ STAGE_TRACKED_RED_NAMES=""
 # omitting it kills the extracted function under `set -u` instead of returning a
 # wrong number. 70 = EX_SOFTWARE, the code a run that attempted NOTHING returns.
 VERIFY_EXIT_NOTHING_ATTEMPTED=70
+# bd-3ghvw, and the same rule again: BOTH the exit status and the banner read
+# the environment-unrunnable counter, and the banner reads its name list. This
+# preamble's own comment predicted this -- the census change surfaced here as
+# exit 127 -- and adding the counter without these did exactly that a second
+# time, in five tests at once.
+STAGE_ENV_UNRUNNABLE=0
+STAGE_ENV_UNRUNNABLE_NAMES=""
 eval "$(awk '/^verification_exit_status\(\) /,/^}/' "$VERIFY_SCRIPT")"
 eval "$(awk '/^verification_summary_banner\(\) /,/^}/' "$VERIFY_SCRIPT")"
 verification_summary_banner
@@ -1294,10 +1507,92 @@ fn verify_budget_manifest_declares_every_verify_stage() {
     );
 }
 
+/// Stage names verify.sh gates behind an OPT-IN FLAG whose default is off
+/// (bd-2di61).
+///
+/// The readiness total used to exclude exactly one literal,
+/// `name != "Performance Benchmarks"`. Benchmarks are not special because they
+/// are benchmarks; they are special because a default run does not execute
+/// them. Keying on the name meant every OTHER opt-in stage was charged against
+/// a ceiling the default path never spends, and the budget file already
+/// recorded that happening to a gated-off stage holding 30s.
+///
+/// THE PREDICATE IS DELIBERATELY NARROW, because the obvious generalisation is
+/// wrong. `record_gated_off` carries at least four meanings in verify.sh:
+///
+///   "--include-fuzz-smoke not set"   opt-in flag, default off   -> EXCLUDE
+///   "ci-smoke"                       a FULL verify.sh runs it   -> count
+///   "ruby unavailable on this host"  a ruby host runs it        -> count
+///   "no Git metadata in this tree"   a real checkout runs it    -> count
+///
+/// Only the first is optional. Excluding the others would understate the cost
+/// on any host where they DO run, which is the retune-a-p50 defect pointed
+/// outward. `only_opt_in_flag_gating_excludes_a_stage` is the planted negative
+/// for exactly that mistake.
+///
+/// A reason wrapped onto a continuation line stops matching and the stage goes
+/// back to being counted. That direction is deliberate: it reds this guard
+/// rather than quietly dropping a cost.
+fn opt_in_gated_stage_names(verify_script: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for line in verify_script.lines() {
+        let Some(rest) = line.trim().strip_prefix("record_gated_off \"") else {
+            continue;
+        };
+        let Some((name, reason)) = rest.split_once('"') else {
+            continue;
+        };
+        if reason.contains("not set") && reason.contains("--") {
+            names.insert(name.to_owned());
+        }
+    }
+    names
+}
+
+/// bd-2di61's planted negative. A predicate that excludes everything
+/// `record_gated_off` touches would free 307s the default path actually
+/// spends; this test fails if that generalisation is ever reintroduced.
+#[test]
+fn only_opt_in_flag_gating_excludes_a_stage() {
+    let script = concat!(
+        "    record_gated_off \"Flagged\" \"--include-flagged not set\"\n",
+        "    record_gated_off \"ModeSkipped\" \"ci-smoke\"\n",
+        "    record_gated_off \"HostSkipped\" \"ruby unavailable on this host\"\n",
+    );
+    let names = opt_in_gated_stage_names(script);
+    assert!(
+        names.contains("Flagged"),
+        "a stage gated behind an opt-in flag must be excluded from the readiness total"
+    );
+    assert!(
+        !names.contains("ModeSkipped"),
+        "a ci-smoke-gated stage RUNS on a full verify.sh, so it must still count"
+    );
+    assert!(
+        !names.contains("HostSkipped"),
+        "a host-capability skip RUNS on a capable host, so it must still count"
+    );
+
+    // And the real script: the set is small and knowing it is the point.
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let real = opt_in_gated_stage_names(&verify_script);
+    assert!(
+        real.contains("Performance Benchmarks"),
+        "the stage the old literal named must still be excluded, got {real:?}"
+    );
+    assert!(
+        real.len() >= 2,
+        "bd-2di61 measured four opt-in-gated stages; finding fewer than two means \
+         the reason strings changed shape and this predicate has stopped matching: {real:?}"
+    );
+}
+
 #[test]
 fn verify_budget_manifest_has_p50_and_regression_factor_for_every_stage() {
     let budget_manifest =
         fs::read_to_string(verify_budget_path()).expect("read verify-budget.toml");
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let opt_in_gated = opt_in_gated_stage_names(&verify_script);
     let blocks = budget_stage_blocks(&budget_manifest);
 
     assert!(
@@ -1346,7 +1641,12 @@ fn verify_budget_manifest_has_p50_and_regression_factor_for_every_stage() {
             "stage {name} should keep an explicit regression factor"
         );
 
-        if name != "Performance Benchmarks" {
+        // bd-2di61: exclude on the PROPERTY, not on one literal name. A stage
+        // verify.sh gates behind an opt-in flag is not part of the default
+        // path's cost, so charging it against the readiness ceiling describes a
+        // run nobody performs. See `opt_in_gated_stage_names` for why this is
+        // narrower than "anything record_gated_off touches".
+        if !opt_in_gated.contains(name) {
             non_benchmark_p50_total += p50;
         }
     }
@@ -1561,6 +1861,72 @@ fn drift_guard_recognizes_open_closure_lint_tracking_bead() {
     let parsed: serde_json::Value = serde_json::from_str(&report).expect("parse drift report");
     assert_eq!(parsed["status"], "pass", "tracked closure-lint report");
     assert_eq!(parsed["count"], 0, "tracked closure-lint drift count");
+}
+
+/// An unrecognized `--gate` name must be REFUSED, never reported clean.
+///
+/// bd-ry56h, one keystroke further out than the three fail-opens that bead
+/// already closed. Every check in the guard is written as "return early unless
+/// `CHECK_GATE` is mine", so a name matching no check leaves `DRIFT_COUNT` at 0
+/// and exits 0 — and `closure_lint_or_tracked_drift` in verify.sh reads exactly
+/// that 0 as "the closure linter's violations are tracked, continue". So
+/// `--gate=closure_lint` with an underscore, or a gate renamed in one file and
+/// not the other, would have excused every closure violation forever, with no
+/// output to notice it by.
+///
+/// Measured before the fix: `--gate=this-gate-does-not-exist --json` exited 0
+/// having written zero bytes — byte-identical to the answer for a genuinely
+/// tracked gate. That indistinguishability IS the defect, which is why this
+/// test pins the exit code rather than only the presence of some output.
+///
+/// The known-name arm is the positive control. Without it a `case` pattern that
+/// accidentally rejected every name would satisfy all the refusal arms and look
+/// correct while breaking verify.sh outright. `forbidden-deps` is deliberately
+/// not in that arm: its probe shells out to `cargo tree`, which legitimately
+/// fails in a fixture root holding no manifest, and the guard correctly turns
+/// that into the same exit 2 — so it cannot distinguish the two conditions here.
+#[test]
+fn drift_guard_refuses_an_unknown_gate_name_and_still_admits_the_known_ones() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    for bogus in [
+        "this-gate-does-not-exist",
+        "closure_lint",
+        "cargo_test",
+        "forbidden_deps",
+        "CLOSURE-LINT",
+        "closure-lint-",
+    ] {
+        let flag = format!("--gate={bogus}");
+        let output = run_drift_guard_at(temp.path(), &[flag.as_str(), "--json"]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "--gate={bogus} must exit 2 (guard input error), not report a verdict\n{}",
+            output_excerpt(&output)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unknown --gate="),
+            "--gate={bogus} must name the rejected gate on stderr\n{}",
+            output_excerpt(&output)
+        );
+        assert!(
+            !temp.path().join(".verification-drift-report.json").exists(),
+            "--gate={bogus} must not leave a report that a caller could read as a verdict"
+        );
+    }
+
+    for known in ["closure-lint", "cargo-test"] {
+        let flag = format!("--gate={known}");
+        let output = run_drift_guard_at(temp.path(), &[flag.as_str(), "--json"]);
+        assert_ne!(
+            output.status.code(),
+            Some(2),
+            "--gate={known} is a real gate and must not be refused as unknown\n{}",
+            output_excerpt(&output)
+        );
+    }
 }
 
 #[test]
@@ -3422,6 +3788,10 @@ STAGE_TRACKED_RED="$TRACKED_RED"
 STAGE_GATED_OFF="$GATED_OFF"
 STAGE_SKIPPED_CONTENTION=0
 STAGE_SKIPPED_CONTENTION_NAMES=""
+# bd-3ghvw: the banner now reads these too, and the extracted function dies
+# under `set -u` without them -- which is this guard working as designed.
+STAGE_ENV_UNRUNNABLE=0
+STAGE_ENV_UNRUNNABLE_NAMES=""
 STAGE_GATED_OFF_NAMES=""
 STAGE_ADVISORY_NAMES=""
 STAGE_TRACKED_RED_NAMES=""
@@ -4489,5 +4859,100 @@ fn every_cargo_scan_exemption_is_still_earned() {
          look like a cargo invocation is gone. Delete the exemption -- an exemption \
          nobody can see fail is the thing that lets a real cargo stage in later \
          under a name somebody already excused."
+    );
+}
+
+/// bd-3ghvw. The "this environment cannot run this stage" exit code is written
+/// twice on purpose -- once in `scripts/verify.sh`, which classifies it, and
+/// once in `scripts/e2e_repo_hygiene.sh`, which returns it and must not source
+/// the verifier to run standalone. Two literals can drift, and the drift is
+/// SILENT in the worst direction: the hygiene script would exit a code the
+/// verifier no longer recognises, every unclassified code falls to FAIL, and a
+/// no-git tree would once again be reported as a hygiene failure. That is
+/// exactly the symptom this classification was added to remove, so the two are
+/// pinned to each other here.
+#[test]
+fn the_environment_unrunnable_exit_code_agrees_across_both_scripts() {
+    let verify = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let hygiene = fs::read_to_string(project_root().join("scripts/e2e_repo_hygiene.sh"))
+        .expect("read e2e_repo_hygiene.sh");
+
+    let read_literal = |source: &str, name: &str| -> String {
+        let needle = format!("\n{name}=");
+        let start = source.find(&needle).unwrap_or_else(|| {
+            panic!("{name} is not declared; this guard cannot verify agreement")
+        }) + needle.len();
+        source[start..]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+
+    let classifier = read_literal(&verify, "STAGE_ENV_UNRUNNABLE_CODE");
+    let emitter = read_literal(&hygiene, "STAGE_ENV_UNRUNNABLE_EXIT");
+
+    assert_eq!(
+        classifier, emitter,
+        "verify.sh classifies STAGE_ENV_UNRUNNABLE_CODE={classifier} while \
+         e2e_repo_hygiene.sh exits STAGE_ENV_UNRUNNABLE_EXIT={emitter}. A code the \
+         verifier does not recognise falls through to FAIL, so a tree with no .git \
+         would be reported as a hygiene failure again instead of as a stage this \
+         environment cannot run. Change both or neither."
+    );
+
+    // EVERY emitter, not just the first one (bd-e4ymh). This guard originally
+    // compared verify.sh against e2e_repo_hygiene.sh alone, which left any
+    // later adopter free to drift: a second script exiting 2 instead of 76
+    // would still report FAIL, and this test would stay green while saying
+    // nothing about it. scripts/e2e_overhaul.sh is gate 6.5 and adopted the
+    // code when it turned out to refuse at preflight -- it resolves a RELEASE
+    // binary that verify.sh never builds -- so a drift there silently
+    // reinstates "gate 6.5 failed" for all 23 of its epics.
+    for (relative, source) in [
+        ("scripts/e2e_repo_hygiene.sh", &hygiene),
+        (
+            "scripts/e2e_overhaul.sh",
+            &fs::read_to_string(project_root().join("scripts/e2e_overhaul.sh"))
+                .expect("read e2e_overhaul.sh"),
+        ),
+        (
+            "scripts/e2e_overhaul/tailscale_local_probe.sh",
+            &fs::read_to_string(
+                project_root().join("scripts/e2e_overhaul/tailscale_local_probe.sh"),
+            )
+            .expect("read tailscale_local_probe.sh"),
+        ),
+        (
+            "scripts/e2e_overhaul/tailscale_peer_autodiscovery.sh",
+            &fs::read_to_string(
+                project_root().join("scripts/e2e_overhaul/tailscale_peer_autodiscovery.sh"),
+            )
+            .expect("read tailscale_peer_autodiscovery.sh"),
+        ),
+    ] {
+        let declared = read_literal(source, "STAGE_ENV_UNRUNNABLE_EXIT");
+        assert_eq!(
+            declared, classifier,
+            "{relative} exits STAGE_ENV_UNRUNNABLE_EXIT={declared} while verify.sh \
+             classifies {classifier}. Unrecognised codes fall through to FAIL, so \
+             this stage would report a product failure for an environment it \
+             simply cannot run in."
+        );
+        assert!(
+            !source.contains("\n    exit 2\n"),
+            "{relative} still has a bare `exit 2` preflight. Those are environment \
+             refusals and must exit STAGE_ENV_UNRUNNABLE_EXIT, or verify.sh reports \
+             them as FAIL."
+        );
+    }
+
+    // The classifier must also still have an arm for it. Agreeing constants with
+    // no matching arm would pass the comparison above and still report FAIL.
+    assert!(
+        verify.contains("\"$STAGE_ENV_UNRUNNABLE_CODE\") printf '%s\\n' \"ENV_UNRUNNABLE\" ;;"),
+        "stage_status_for_exit_code has no arm for STAGE_ENV_UNRUNNABLE_CODE, so the \
+         code would classify as FAIL however well the two literals agree."
     );
 }

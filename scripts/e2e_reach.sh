@@ -91,17 +91,64 @@ gap_missing_kind_count() {
     ' 2>/dev/null || printf '%s\n' "0"
 }
 
+# `.expectedMemoryKind`, not the whole element.
+#
+# This used to select the missingKinds OBJECT and then squeeze it through
+# `tr -cd 'a-z0-9_-'`, which flattened the entire JSON record into one ~200
+# character token:
+#
+#     kindanti_patternexpectedmemorykindanti-patternexpectedlevelprocedural...
+#
+# instead of `anti-pattern`. That token was then handed to `--kind`, and
+# `ee remember` ACCEPTS an arbitrary kind string, so the capture reported
+# success while storing a memory of a nonsense kind that could never satisfy
+# the gap spec. The "gap capture memory stores" assertion passed throughout,
+# which is why the only visible symptom was the count refusing to drop.
 first_missing_kind() {
     local json="$1"
     local kind
     kind="$(printf '%s' "$json" | jq -r '
-        first(.. | objects | select(has("missingKinds")) | .missingKinds[]?) // "rule"
+        first(.. | objects | select(has("missingKinds")) | .missingKinds[]?)
+        | (.expectedMemoryKind // .kind // "rule")
     ' 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
     if [ -n "$kind" ]; then
         printf '%s\n' "$kind"
     else
         printf '%s\n' "rule"
     fi
+}
+
+# The level the report ASKS for, rather than a hardcoded guess. A gap spec is
+# satisfied only by a pack item in its expected section, and section placement
+# follows the memory's level, so capturing at the wrong level cannot close the
+# gap no matter what the content says.
+first_missing_level() {
+    local json="$1"
+    local level
+    level="$(printf '%s' "$json" | jq -r '
+        first(.. | objects | select(has("missingKinds")) | .missingKinds[]?)
+        | (.expectedLevel // "procedural")
+    ' 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z')"
+    if [ -n "$level" ]; then
+        printf '%s\n' "$level"
+    else
+        printf '%s\n' "procedural"
+    fi
+}
+
+# The content the report itself offers for this kind. `content_satisfies_gap_spec`
+# (src/pack/mod.rs:3255) requires one of the spec's marker terms to appear in the
+# memory's text, and those terms are not exposed in the JSON -- but the capture
+# template the report hands back is written to contain them. Using the product's
+# own template is therefore the only way for this fixture to satisfy the spec
+# without hardcoding a copy of the marker list.
+capture_template_body() {
+    local json="$1" kind="$2"
+    printf '%s' "$json" | jq -r --arg kind "$kind" '
+        (first(.. | objects | select(has("captureTemplates")) | .captureTemplates[]?
+               | select(((.memoryKind // .kind // "") | ascii_downcase) == $kind))
+         | (.contentTemplate // "")) // ""
+    ' 2>/dev/null
 }
 
 assert_number_lt() {
@@ -183,9 +230,28 @@ if printf '%s' "$doctor_out" | jq -e '
     [.. | objects | select(((.code? // "") | tostring | startswith("config_")))]
     | length >= 1
 ' >/dev/null 2>&1; then
+    # bd-zv1ux: assert severity is PRESENT and advisory, not "advisory or absent".
+    #
+    # This read `(.severity? // "advisory") == "advisory"`, where the default
+    # EQUALS the comparand, so a finding emitting no severity at all satisfied an
+    # assertion whose entire purpose is to constrain severity -- and `all` over an
+    # empty list is true, so it passed twice over for two different reasons.
+    # Demonstrated against both shapes with jq 1.7.1 before the change: the old
+    # form returns true for a findings list containing one object with no
+    # severity, and true for `[]`.
+    #
+    # Safe to tighten because severity is structurally always emitted:
+    # ConfigLintFinding.severity (src/core/config_explain.rs) is a
+    # non-Option static str whose only constructor sets it, and the hygiene
+    # classifier's four config_* constants are REASON strings inside a
+    # `reasons` array rather than `.code` values, so this selector cannot
+    # reach them.
     assert_jq "$doctor_out" '
-        all([.. | objects | select(((.code? // "") | tostring | startswith("config_")))][]; (.severity? // "advisory") == "advisory")
-    ' "doctor config-lint findings are advisory-only"
+        ([.. | objects | select(((.code? // "") | tostring | startswith("config_")))]) as $findings
+        | ($findings | length) >= 1
+          and ($findings | all(has("severity")))
+          and ($findings | all(.severity == "advisory"))
+    ' "doctor config-lint findings each carry severity and it is advisory"
     assert_jq "$doctor_out" '
         ((.data.posture // .data.overall.posture // .data.health.posture // "") | tostring) != "blocked"
     ' "doctor top-line posture is not blocked by advisory config-lint"
@@ -239,7 +305,7 @@ if ee_has_global_tier_cli; then
             --global \
             --level procedural \
             --kind rule \
-            --source "test://bd-2vq2z.13/global-rule" \
+            --source "manual://bd-2vq2z.13/global-rule" \
             --json
     )"
     assert_jq "$remember_global" '.schema == "ee.response.v2" and .success == true' \
@@ -260,7 +326,7 @@ if ee_has_global_tier_cli; then
             --workspace "$WS_B" \
             --level procedural \
             --kind rule \
-            --source "test://bd-2vq2z.13/workspace-conflict" \
+            --source "manual://bd-2vq2z.13/workspace-conflict" \
             --json
     )"
     assert_jq "$remember_conflict" '.schema == "ee.response.v2" and .success == true' \
@@ -286,7 +352,7 @@ if ee_has_global_tier_cli; then
         or ([.. | objects | select(((.databasePath? // \"\") | contains(\"/global/ee.db\")))] | length) >= 1
     " "default pack identifies the separate user-global store"
     assert_jq "$pack_default" '
-        ([.. | objects | select(((.uri? // "") == "test://bd-2vq2z.13/global-rule"))] | length) >= 1
+        ([.. | objects | select(((.uri? // "") == "manual://bd-2vq2z.13/global-rule"))] | length) >= 1
         or ((.data.pack.text // "") | contains("remote RCH verification"))
     ' "default pack includes the remembered global rule with provenance"
     assert_jq "$pack_default" '
@@ -316,7 +382,7 @@ if ee_has_global_tier_cli; then
     # would read as a pass. So prove the local rule survived first; the negative
     # then has something to be negative about.
     assert_jq "$pack_no_global" '
-        ([.. | objects | select(((.uri? // "") == "test://bd-2vq2z.13/workspace-conflict"))] | length) >= 1
+        ([.. | objects | select(((.uri? // "") == "manual://bd-2vq2z.13/workspace-conflict"))] | length) >= 1
         or ((.data.pack.text // "") | contains("wait for central verify"))
     ' "precondition: --no-global still selects the workspace-tier rule, so the exclusion below is not an empty pack"
     assert_jq "$pack_no_global" '
@@ -432,7 +498,7 @@ if ee_has_timeline_cli; then
             --level procedural \
             --kind rule \
             --tags reach,timeline,audit \
-            --source "test://bd-2vq2z.22/timeline-old-policy" \
+            --source "manual://bd-2vq2z.22/timeline-old-policy" \
             --valid-from "2026-05-01T00:00:00Z" \
             --valid-to "2026-05-03T00:00:00Z" \
             --json
@@ -443,7 +509,7 @@ if ee_has_timeline_cli; then
             --level procedural \
             --kind rule \
             --tags reach,timeline,audit \
-            --source "test://bd-2vq2z.22/timeline-new-policy" \
+            --source "manual://bd-2vq2z.22/timeline-new-policy" \
             --valid-from "2026-05-03T00:00:00Z" \
             --json
     )"
@@ -453,7 +519,7 @@ if ee_has_timeline_cli; then
             --level procedural \
             --kind decision \
             --tags reach,timeline,decision \
-            --source "test://bd-2vq2z.22/timeline-decision" \
+            --source "manual://bd-2vq2z.22/timeline-decision" \
             --valid-from "2026-05-02T00:00:00Z" \
             --json
     )"
@@ -523,17 +589,33 @@ if [ "$GAP_MODE" != "none" ]; then
 
     before_missing_count="$(gap_missing_kind_count "$gap_before")"
     capture_kind="$(first_missing_kind "$gap_before")"
+    capture_level="$(first_missing_level "$gap_before")"
+    capture_body="$(capture_template_body "$gap_before" "$capture_kind")"
+    # Assert the precondition instead of falling back to invented prose. A
+    # capture whose text carries none of the spec's marker terms cannot close
+    # the gap, and the resulting unchanged count would read as a product
+    # failure rather than as this fixture guessing.
+    assert_eq "$([ -n "$capture_body" ] && printf 'present' || printf 'absent')" \
+        "present" \
+        "gap report supplies a capture template for ${capture_kind}"
     captured_gap="$(
-        ee_json remember "Reach gap capture: $GAP_TASK now has an explicit $capture_kind memory with provenance." \
+        ee_json remember "${capture_body} Captured while verifying ${GAP_TASK}." \
             --workspace "$WS" \
-            --level procedural \
+            --level "$capture_level" \
             --kind "$capture_kind" \
             --tags reach,gaps,captured \
-            --source "test://bd-2vq2z.17/captured-gap" \
+            --source "manual://bd-2vq2z.17/captured-gap" \
             --json
     )"
     assert_jq "$captured_gap" '.schema == "ee.response.v2" and .success == true' \
         "gap capture memory stores"
+    CAPTURE_KIND="$capture_kind" assert_jq "$captured_gap" '.data.kind == env.CAPTURE_KIND' \
+        "gap capture stores the kind the report asked for"
+    # The gap report is computed from an ASSEMBLED PACK
+    # (explain_coverage_gap(task, pack), src/pack/mod.rs:3185), and pack
+    # selection is retrieval-backed, so a memory that is not in the published
+    # index cannot satisfy a spec no matter how well it matches.
+    ee_json index rebuild --workspace "$WS" --json >/dev/null
 
     gap_after="$(run_gap_report "$GAP_MODE" "$GAP_TASK" "$WS")"
     log_event "gap_report_after_capture" \

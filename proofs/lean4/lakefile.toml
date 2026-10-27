@@ -1,8 +1,19 @@
 name = "ee_proofs"
 version = "0.1.0"
-defaultTargets = ["PackDeterminism"]
+# The lib name IS the module name, and Lake resolves it to <name>.lean inside
+# srcDir. It read `PackDeterminism`, the file on disk is `pack_determinism.lean`,
+# and the two have disagreed since both were committed on 2026-05-16 -- so
+# `lake build` has never once compiled this proof. It failed with
+#   error: PackDeterminism: some modules have bad imports or could not be read
+#   error: no such file or directory ... file: .../lean4/PackDeterminism.lean
+# which scripts/e2e_overhaul/proof_verify.sh reported as
+# `proof_violation_detected`, i.e. as though the PROOF were false.
+#
+# Renaming the file would have worked equally well; matching the lakefile to the
+# file is the change that needs no deletion. Lean module names may be snake_case.
+defaultTargets = ["pack_determinism"]
 
 [[lean_lib]]
-name = "PackDeterminism"
+name = "pack_determinism"
 srcDir = "."
 

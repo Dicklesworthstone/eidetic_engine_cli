@@ -798,6 +798,21 @@ def verify_manifest(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     except AttestationError as error:
         manifest = {}
         rejections.append("manifest_unreadable")
+        # SAY WHY, not just that. `error` was bound and discarded, so a caller
+        # learned the manifest was unreadable and never which of the several
+        # causes it was -- absent file, unparseable JSON, unreadable mode. In
+        # an ATTESTATION tool, whose output is meant to be evidence, a
+        # rejection with no cause is the least useful thing it can emit.
+        #
+        # The reason goes to stderr rather than into `rejections`, because that
+        # list is a bare code vocabulary that the rest of this function appends
+        # to (manifest_schema_unsupported, manifest_hash_mismatch, ...) and the
+        # report is consumed as JSON. This matches the handler at the bottom of
+        # main(), which already prints `ci_artifact_attestation: {error}`.
+        print(
+            f"ci_artifact_attestation: manifest_unreadable: {error}",
+            file=sys.stderr,
+        )
         return verification_report(
             manifest, rejections, "missing", probe_reports, args.artifact_id
         ), 1

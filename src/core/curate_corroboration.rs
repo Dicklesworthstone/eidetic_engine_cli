@@ -8,6 +8,13 @@
 use super::*;
 use crate::db::{CassSourceCommitment, ReviewCorroborationLimits};
 use serde::{Deserialize, Serialize};
+use std::cell::OnceCell;
+
+#[path = "curate_verified_repair.rs"]
+mod verified_repair;
+
+#[path = "curate_repair_context.rs"]
+mod repair_context;
 
 const SCHEMA: &str = "ee.review.corroboration.v1";
 const SCORE_KIND: &str = "bounded_exact_session_support_heuristic";
@@ -87,9 +94,14 @@ impl ReviewCorroboration {
         !self.sessions.is_empty()
     }
 
+    fn wants_support(&self) -> bool {
+        !self.sessions.is_empty() && self.sessions.len() < MAX_SUPPORT
+    }
+
     fn confidence(&self) -> f32 {
         match self.sessions.len() {
-            0 | 1 => 0.6,
+            0 => 0.0,
+            1 => 0.6,
             2 => 0.7,
             _ => 0.8,
         }
@@ -113,7 +125,7 @@ fn issue(error: impl std::fmt::Display) -> CurateValidationIssue {
 
 /// Keep every source record as a structural barrier, but never let an
 /// instruction-risk or invalid source session supply a confidence increment.
-fn eligible_session(
+fn admitted_session(
     workspace_id: &str,
     session: &StoredSession,
     spans: &[StoredEvidenceSpan],
@@ -125,29 +137,24 @@ fn eligible_session(
                 && complete_source(span)
                 && (span.is_derivation_admitted_for_session(workspace_id, session)
                     || span.is_class_a_derivation_readable(workspace_id, session))
-                && review_learning_text(span).is_none_or(|text| !explicitly_refuted(&text))
         })
 }
 
+/// Prose has no completed-invocation proof to separate a failed attempt from
+/// a recovered episode. Its existing whole-session refutation rule is unchanged.
+fn eligible_session(
+    workspace_id: &str,
+    session: &StoredSession,
+    spans: &[StoredEvidenceSpan],
+) -> bool {
+    admitted_session(workspace_id, session, spans)
+        && spans
+            .iter()
+            .all(|span| review_learning_text(span).is_none_or(|text| !explicitly_refuted(&text)))
+}
+
 fn explicitly_refuted(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase().replace('’', "'");
-    [
-        "this rule is wrong",
-        "this advice is wrong",
-        "incorrect advice",
-        "do not follow",
-        "don't follow",
-        "retract this",
-        "retracted",
-        "refuted",
-        "failed again",
-        "did not fix",
-        "didn't fix",
-        "does not fix",
-        "doesn't fix",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    repair_context::classify(text).is_some()
 }
 
 fn complete_source(span: &StoredEvidenceSpan) -> bool {
@@ -192,11 +199,15 @@ fn full_signature(
 /// Source facts do not stop being observations when an accepted proposal
 /// attaches them to a memory. Ignore ownership only for this in-memory
 /// reconstruction; neither the row nor the resulting memory ownership changes.
-fn source_candidates(
-    workspace_id: &str,
-    session: &StoredSession,
-    spans: &[StoredEvidenceSpan],
-) -> Vec<ReviewSessionCandidate> {
+fn source_candidates(evidence: &SessionEvidence<'_>) -> Vec<ReviewSessionCandidate> {
+    let workspace_id = evidence.workspace_id;
+    let session = evidence.session;
+    let spans = evidence.spans;
+    if !eligible_session(workspace_id, session, spans) {
+        // Only the completed native episode can establish recovery after an
+        // earlier failed attempt. Do not rehabilitate ordinary prose lessons.
+        return evidence.native().candidates.clone();
+    }
     let mut grouped: BTreeMap<String, Vec<&StoredEvidenceSpan>> = BTreeMap::new();
     for span in spans {
         let Some(text) = review_learning_text(span) else {
@@ -220,46 +231,314 @@ fn source_candidates(
         spans,
         0.0,
     ));
+    candidates.extend(evidence.native().candidates.iter().cloned());
     candidates
 }
 
 fn reconstruct_support(
+    connection: &DbConnection,
     workspace_id: &str,
     session: &StoredSession,
     spans: &[StoredEvidenceSpan],
     expected: &SupportingSession,
-) -> Option<ReviewSessionCandidate> {
-    // Reconstruct the recorded source group, not a current ownership cluster.
-    // Additional unrelated turns cannot replace a named supporting source.
-    let mut sources = expected
-        .sources
-        .iter()
-        .map(|source| spans.iter().find(|span| span.id == source.evidence_span_id))
-        .collect::<Option<Vec<_>>>()?;
-    sources.sort_by(|left, right| session_arc_span_order(left, right));
-    let topic = review_topic_key(&review_learning_text(sources.first()?)?);
-    if topic != "noise"
-        && sources.iter().all(|source| {
-            review_learning_text(source).is_some_and(|text| review_topic_key(&text) == topic)
-        })
-        && let Some(candidate) = build_bootstrap_candidate(workspace_id, session, &topic, &sources)
-        && candidate.candidate_id == expected.candidate_id
+) -> Result<Option<ReviewSessionCandidate>, DomainError> {
+    let evidence = SessionEvidence::new(workspace_id, session, spans);
+    let candidate = evidence.reconstruct(expected);
+    // A directly reconstructed prose lesson has not mined native episodes.
+    // It must not acquire a feedback dependency through a shared validator.
+    let native_candidate = candidate.as_ref().is_some_and(|candidate| {
+        evidence
+            .native
+            .get()
+            .is_some_and(|native| native.candidate_ids.contains(&candidate.candidate_id))
+    });
+    if native_candidate
+        && evidence
+            .withheld_repairs(connection)?
+            .contains(&expected.candidate_id)
     {
-        return Some(candidate);
+        return Err(domain("a recorded tool repair has harmful feedback"));
     }
-    // The complete ordered transcript retains every class-A barrier, so
-    // selecting just two named endpoints cannot invent a failure/repair link.
-    build_session_arc_candidates(workspace_id, session, spans, 0.0)
-        .into_iter()
-        .find(|candidate| candidate.candidate_id == expected.candidate_id)
+    Ok(candidate)
 }
 
-fn support(
-    session: &StoredSession,
-    spans: &[StoredEvidenceSpan],
-    candidate: &ReviewSessionCandidate,
-) -> Option<SupportingSession> {
-    support_in_context(session, spans, candidate, None)
+/// Native episode bindings, never inferred from rendered proposal text.
+/// Feedback is scoped to the exact workspace, extracted error class and repair
+/// target. These locators identify observations, not admission authority.
+#[derive(Default)]
+struct NativeRepairCandidates {
+    candidates: Vec<ReviewSessionCandidate>,
+    candidate_ids: BTreeSet<String>,
+    claims: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+}
+
+impl NativeRepairCandidates {
+    fn new(workspace_id: &str, session: &StoredSession, spans: &[StoredEvidenceSpan]) -> Self {
+        let mut native = Self::default();
+        let mut boundary = repair_context::RefutationBoundary::default();
+        let mut positions = BTreeMap::new();
+        for (position, span) in spans.iter().enumerate() {
+            positions
+                .entry(span.id.as_str())
+                .or_insert((position, span.start_line));
+            if let Some(text) = review_learning_text(span) {
+                boundary.observe(position, span.end_line, &text);
+            }
+        }
+        verified_repair::visit_candidates(workspace_id, session, spans, |candidate, arc| {
+            // A later success cannot validate an explanation already denied.
+            // Every contributing turn must follow all failed-attempt notices;
+            // global retractions remain barriers regardless of chronology.
+            if candidate.source_ids.iter().any(|id| {
+                positions
+                    .get(id.as_str())
+                    .is_none_or(|&(position, start_line)| {
+                        !boundary.permits_source(position, start_line)
+                    })
+            }) {
+                return;
+            }
+            let card_id =
+                crate::core::incident_card::incident_card_id(workspace_id, &arc.failure_id);
+            for diagnostic in &arc.diagnostics {
+                let targets = native
+                    .claims
+                    .entry(diagnostic.layered_key().key)
+                    .or_default();
+                for target in candidate.source_ids.iter().chain(std::iter::once(&card_id)) {
+                    targets
+                        .entry(target.clone())
+                        .or_default()
+                        .insert(candidate.candidate_id.clone());
+                }
+            }
+            native.candidate_ids.insert(candidate.candidate_id.clone());
+            native.candidates.push(candidate);
+        });
+        native
+    }
+
+    /// Helpful upserts cannot erase independent harmful history. Read only
+    /// exact selected identities, with bounded parameters and returned rows.
+    /// The enclosing scorer or validator owns the snapshot/transaction.
+    fn withheld(
+        &self,
+        connection: &DbConnection,
+        workspace_id: &str,
+    ) -> Result<BTreeSet<String>, DomainError> {
+        use sqlmodel_core::Value as SqlValue;
+
+        const BATCH: usize = 128;
+        let unavailable = || domain("native repair feedback could not be read or validated");
+        let mut withheld = BTreeSet::new();
+        for (fingerprint, targets) in &self.claims {
+            let ids = targets.keys().map(String::as_str).collect::<Vec<_>>();
+            for batch in ids.chunks(BATCH) {
+                let placeholders = (3..3 + batch.len())
+                    .map(|index| format!("?{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT DISTINCT target_id FROM error_repair_links WHERE workspace_id = ?1 AND fingerprint_key = ?2 AND link_kind = 'repair' AND outcome = 'harmful' AND target_id IN ({placeholders}) ORDER BY target_id ASC"
+                );
+                let mut parameters = vec![
+                    SqlValue::Text(workspace_id.to_owned()),
+                    SqlValue::Text(fingerprint.clone()),
+                ];
+                parameters.extend(batch.iter().map(|id| SqlValue::Text((*id).to_owned())));
+                let rows = connection
+                    .query(&sql, &parameters)
+                    .map_err(|_| unavailable())?;
+                if rows.len() > batch.len() {
+                    return Err(unavailable());
+                }
+                let mut seen = BTreeSet::new();
+                for row in rows {
+                    let id = row
+                        .get(0)
+                        .and_then(SqlValue::as_str)
+                        .ok_or_else(&unavailable)?;
+                    if !batch.contains(&id) || !seen.insert(id.to_owned()) {
+                        return Err(unavailable());
+                    }
+                    let affected = targets.get(id).ok_or_else(&unavailable)?;
+                    withheld.extend(affected.iter().cloned());
+                }
+            }
+        }
+        Ok(withheld)
+    }
+}
+
+/// Request-local facts bound to one immutable session/snapshot. No cache can
+/// outlive these borrowed rows or substitute another session's observations.
+/// Mine all arcs only on the first fallback and hash the complete context only
+/// on the first admitted support. Neither cache filters conversation barriers.
+struct SessionEvidence<'a> {
+    workspace_id: &'a str,
+    session: &'a StoredSession,
+    spans: &'a [StoredEvidenceSpan],
+    by_id: BTreeMap<&'a str, &'a StoredEvidenceSpan>,
+    arcs: OnceCell<BTreeMap<String, ReviewSessionCandidate>>,
+    native: OnceCell<NativeRepairCandidates>,
+    repair_feedback: OnceCell<BTreeSet<String>>,
+    context: OnceCell<SupportingContext>,
+    #[cfg(test)]
+    arc_builds: std::cell::Cell<usize>,
+    #[cfg(test)]
+    context_builds: std::cell::Cell<usize>,
+}
+
+impl<'a> SessionEvidence<'a> {
+    fn new(
+        workspace_id: &'a str,
+        session: &'a StoredSession,
+        spans: &'a [StoredEvidenceSpan],
+    ) -> Self {
+        let mut by_id = BTreeMap::new();
+        for span in spans {
+            // Match the original ordered find even for malformed duplicate
+            // IDs. Do not let a later row silently replace a named source.
+            by_id.entry(span.id.as_str()).or_insert(span);
+        }
+        Self {
+            workspace_id,
+            session,
+            spans,
+            by_id,
+            arcs: OnceCell::new(),
+            native: OnceCell::new(),
+            repair_feedback: OnceCell::new(),
+            context: OnceCell::new(),
+            #[cfg(test)]
+            arc_builds: std::cell::Cell::new(0),
+            #[cfg(test)]
+            context_builds: std::cell::Cell::new(0),
+        }
+    }
+
+    fn native(&self) -> &NativeRepairCandidates {
+        self.native.get_or_init(|| {
+            NativeRepairCandidates::new(self.workspace_id, self.session, self.spans)
+        })
+    }
+
+    fn withheld_repairs(
+        &self,
+        connection: &DbConnection,
+    ) -> Result<&BTreeSet<String>, DomainError> {
+        if let Some(withheld) = self.repair_feedback.get() {
+            return Ok(withheld);
+        }
+        let withheld = self.native().withheld(connection, self.workspace_id)?;
+        Ok(self.repair_feedback.get_or_init(|| withheld))
+    }
+
+    fn reconstruct(&self, expected: &SupportingSession) -> Option<ReviewSessionCandidate> {
+        if !eligible_session(self.workspace_id, self.session, self.spans) {
+            // Reconstruct only authentic native candidates whose complete
+            // source positions prove that the denied attempt came first.
+            return self
+                .native()
+                .candidates
+                .iter()
+                .find(|candidate| candidate.candidate_id == expected.candidate_id)
+                .cloned();
+        }
+        // Reconstruct the recorded source group, not a current ownership
+        // cluster. Later unrelated turns cannot replace a named supporter.
+        let mut sources = expected
+            .sources
+            .iter()
+            .map(|source| self.by_id.get(source.evidence_span_id.as_str()).copied())
+            .collect::<Option<Vec<_>>>()?;
+        sources.sort_by(|left, right| session_arc_span_order(left, right));
+        let topic = review_topic_key(&review_learning_text(sources.first()?)?);
+        if topic != "noise"
+            && sources.iter().all(|source| {
+                review_learning_text(source).is_some_and(|text| review_topic_key(&text) == topic)
+            })
+            && let Some(candidate) =
+                build_bootstrap_candidate(self.workspace_id, self.session, &topic, &sources)
+            && candidate.candidate_id == expected.candidate_id
+        {
+            return Some(candidate);
+        }
+        let arcs = self.arcs.get_or_init(|| {
+            #[cfg(test)]
+            self.arc_builds.set(self.arc_builds.get() + 1);
+            let mut arcs = BTreeMap::new();
+            // Always pass the full transcript, including class-A barriers.
+            // Filtering to just the endpoints could invent a causal link.
+            for candidate in
+                build_session_arc_candidates(self.workspace_id, self.session, self.spans, 0.0)
+                    .into_iter()
+                    .chain(self.native().candidates.iter().cloned())
+            {
+                arcs.entry(candidate.candidate_id.clone())
+                    .or_insert(candidate);
+            }
+            arcs
+        });
+        arcs.get(&expected.candidate_id).cloned()
+    }
+
+    fn source_refs(&self, candidate: &ReviewSessionCandidate) -> Option<Vec<SupportingSource>> {
+        let mut sources = Vec::new();
+        for id in &candidate.source_ids {
+            let span = self.by_id.get(id.as_str())?;
+            if !span.is_search_admitted_for_session(&self.session.workspace_id, self.session)
+                || review_learning_text(span).is_none()
+            {
+                return None;
+            }
+            sources.push(source_reference(span));
+        }
+        sources.sort_by(|left, right| left.evidence_span_id.cmp(&right.evidence_span_id));
+        sources.dedup();
+        (!sources.is_empty()).then_some(sources)
+    }
+
+    fn support(&self, candidate: &ReviewSessionCandidate) -> Option<SupportingSession> {
+        let sources = self.source_refs(candidate)?;
+        let context = self.context.get_or_init(|| {
+            #[cfg(test)]
+            self.context_builds.set(self.context_builds.get() + 1);
+            build_support_context(self.session, self.spans, u32::MAX)
+        });
+        Some(
+            context
+                .clone()
+                .into_support(self.session, candidate, sources),
+        )
+    }
+}
+
+#[derive(Clone)]
+struct SupportingContext {
+    upstream_hash: String,
+    source_path_hash: Option<String>,
+    payload_hash: String,
+    context_sources: Vec<SupportingSource>,
+}
+
+impl SupportingContext {
+    fn into_support(
+        self,
+        session: &StoredSession,
+        candidate: &ReviewSessionCandidate,
+        sources: Vec<SupportingSource>,
+    ) -> SupportingSession {
+        SupportingSession {
+            session_id: session.id.clone(),
+            upstream_hash: self.upstream_hash,
+            source_path_hash: self.source_path_hash,
+            payload_hash: self.payload_hash,
+            candidate_id: candidate.candidate_id.clone(),
+            sources,
+            context_sources: self.context_sources,
+        }
+    }
 }
 
 fn source_reference(span: &StoredEvidenceSpan) -> SupportingSource {
@@ -290,27 +569,8 @@ fn support_in_context(
     candidate: &ReviewSessionCandidate,
     recorded: Option<&SupportingSession>,
 ) -> Option<SupportingSession> {
-    let mut sources = Vec::new();
-    for id in &candidate.source_ids {
-        let span = spans.iter().find(|span| span.id == *id)?;
-        if !span.is_search_admitted_for_session(&session.workspace_id, session)
-            || review_learning_text(span).is_none()
-        {
-            return None;
-        }
-        sources.push(source_reference(span));
-    }
-    sources.sort_by(|left, right| left.evidence_span_id.cmp(&right.evidence_span_id));
-    sources.dedup();
-    if sources.is_empty() {
-        return None;
-    }
-    // An alias carrying a byte-identical conversation is not another
-    // independent observation. Ignore local IDs and JSON envelopes for text
-    // records; preserve complete screened tool payloads as barriers.
-    let mut payload = vec!["complete_session".to_owned()];
-    let mut seen_events = BTreeSet::new();
-    let mut context_sources = Vec::new();
+    let evidence = SessionEvidence::new(&session.workspace_id, session, spans);
+    let sources = evidence.source_refs(candidate)?;
     // Capture an observed prefix, not a promise that a session will never
     // grow. New rows within that prefix fail equality; ordinary later turns
     // do not rewrite the support snapshot. The caller still screens all
@@ -324,6 +584,24 @@ fn support_in_context(
                 .max()
         })
         .unwrap_or(Some(u32::MAX))?;
+    let context = build_support_context(session, spans, last_line);
+    if recorded.is_some_and(|recorded| recorded.context_sources != context.context_sources) {
+        return None;
+    }
+    Some(context.into_support(session, candidate, sources))
+}
+
+fn build_support_context(
+    session: &StoredSession,
+    spans: &[StoredEvidenceSpan],
+    last_line: u32,
+) -> SupportingContext {
+    // An alias carrying a byte-identical conversation is not another
+    // independent observation. Ignore local IDs and JSON envelopes for text
+    // records; preserve complete screened tool payloads as barriers.
+    let mut payload = vec!["complete_session".to_owned()];
+    let mut seen_events = BTreeSet::new();
+    let mut context_sources = Vec::new();
     for span in spans.iter().filter(|span| span.start_line <= last_line) {
         context_sources.push(source_reference(span));
         let text = review_learning_text(span).unwrap_or(Cow::Borrowed(&span.excerpt));
@@ -338,21 +616,15 @@ fn support_in_context(
             payload.push(event);
         }
     }
-    if recorded.is_some_and(|recorded| recorded.context_sources != context_sources) {
-        return None;
-    }
-    Some(SupportingSession {
-        session_id: session.id.clone(),
+    SupportingContext {
         upstream_hash: digest(["upstream", session.cass_session_id.as_str()]),
         source_path_hash: session
             .source_path
             .as_deref()
             .map(|path| digest(["source_path", path])),
         payload_hash: digest(&payload),
-        candidate_id: candidate.candidate_id.clone(),
-        sources,
         context_sources,
-    })
+    }
 }
 
 fn independent(support: &SupportingSession, previous: &[SupportingSession]) -> bool {
@@ -378,6 +650,73 @@ fn rejected(
         .is_some_and(|stored| stored.status == CandidateStatus::Rejected.as_str()))
 }
 
+/// Index the still-unfilled anchors, not a Cartesian product of transcripts.
+/// Each other lesson is hashed once and its admission/proof is read only when
+/// an exact kind/signature match needs it. The source order still chooses each
+/// anchor's first independent, non-rejected observation from this session.
+/// Retire an anchor after one increment even when spare support slots remain.
+/// Only small keys and positions are indexed; source bodies are never copied.
+fn corroborate_candidates(
+    candidates: &mut [ReviewSessionCandidate],
+    others: &[ReviewSessionCandidate],
+    mut signature: impl FnMut(&ReviewSessionCandidate) -> Option<String>,
+    mut observe: impl FnMut(&ReviewSessionCandidate) -> Result<Option<SupportingSession>, DomainError>,
+) -> Result<(), DomainError> {
+    let mut targets: BTreeMap<String, BTreeMap<String, Vec<usize>>> = BTreeMap::new();
+    let mut remaining = 0;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some(proof) = &candidate.corroboration else {
+            continue;
+        };
+        if !proof.wants_support() {
+            continue;
+        }
+        targets
+            .entry(candidate.candidate_kind.clone())
+            .or_default()
+            .entry(proof.signature.clone())
+            .or_default()
+            .push(index);
+        remaining += 1;
+    }
+    for other in others {
+        if remaining == 0 {
+            break;
+        }
+        let Some(signatures) = targets.get_mut(&other.candidate_kind) else {
+            continue;
+        };
+        if signatures.is_empty() {
+            continue;
+        }
+        let Some(key) = signature(other) else {
+            continue;
+        };
+        let Some(indices) = signatures.get_mut(&key) else {
+            continue;
+        };
+        let Some(additional) = observe(other)? else {
+            continue;
+        };
+        let before = indices.len();
+        indices.retain(|&index| {
+            let Some(proof) = candidates[index].corroboration.as_mut() else {
+                return false;
+            };
+            if !independent(&additional, &proof.sessions) {
+                return true;
+            }
+            proof.sessions.push(additional.clone());
+            false
+        });
+        remaining -= before - indices.len();
+        if indices.is_empty() {
+            signatures.remove(&key);
+        }
+    }
+    Ok(())
+}
+
 /// Called before the caller's confidence floor or candidate limit. One bounded
 /// read snapshot supplies the exact source proof. Historical rows are frozen
 /// before selection, so reports cannot advertise fresh support as persisted.
@@ -389,9 +728,6 @@ pub(super) fn score_candidates(
     min_confidence: f32,
     limit: u32,
 ) -> Result<(), DomainError> {
-    if candidates.is_empty() {
-        return Ok(());
-    }
     connection.begin_read_snapshot().map_err(domain)?;
     struct Snapshot<'a>(&'a DbConnection, bool);
     impl Drop for Snapshot<'_> {
@@ -402,34 +738,50 @@ pub(super) fn score_candidates(
         }
     }
     let mut snapshot = Snapshot(connection, true);
-    let anchor = if candidates
-        .iter()
-        .any(|candidate| candidate.corroboration.is_some())
-    {
-        connection
-            .review_corroboration_sessions(
-                workspace_id,
-                &session.id,
-                &[session.id.as_str()],
-                LIMITS,
-            )
-            .map_err(domain)?
-    } else {
-        Vec::new()
-    };
+    // Tool-only failures can have an admitted fix but no prose failure recap.
+    // Read the same bounded source context even when the initial queue is empty.
+    let anchor = connection
+        .review_corroboration_sessions(workspace_id, &session.id, &[session.id.as_str()], LIMITS)
+        .map_err(domain)?;
     if let Some((anchor_session, anchor_spans, anchor_bytes)) = anchor.first()
-        && eligible_session(workspace_id, anchor_session, anchor_spans)
+        && admitted_session(workspace_id, anchor_session, anchor_spans)
     {
+        let evidence = SessionEvidence::new(workspace_id, anchor_session, anchor_spans);
+        if !eligible_session(workspace_id, anchor_session, anchor_spans) {
+            // A zero confidence floor or frozen historical score must not put
+            // a refuted prose proposal back into a recovered native episode.
+            candidates.retain(|candidate| {
+                evidence
+                    .native()
+                    .candidate_ids
+                    .contains(&candidate.candidate_id)
+            });
+        }
+        let existing: BTreeSet<_> = candidates
+            .iter()
+            .map(|candidate| candidate.candidate_id.clone())
+            .collect();
+        candidates.extend(
+            evidence
+                .native()
+                .candidates
+                .iter()
+                .filter(|candidate| !existing.contains(&candidate.candidate_id))
+                .cloned(),
+        );
+        // A successful retry does not override contrary feedback about the
+        // same repair and error. Filter before both the requested confidence
+        // floor and historical freezing, including a floor of zero.
+        let withheld = evidence.withheld_repairs(connection)?;
+        candidates.retain(|candidate| !withheld.contains(&candidate.candidate_id));
         for candidate in candidates.iter_mut() {
             if candidate.corroboration.is_none() {
                 continue;
             }
-            let Some(anchor_support) = support(anchor_session, anchor_spans, candidate) else {
+            let Some(anchor_support) = evidence.support(candidate) else {
                 continue;
             };
-            let Some(current) =
-                reconstruct_support(workspace_id, anchor_session, anchor_spans, &anchor_support)
-            else {
+            let Some(current) = evidence.reconstruct(&anchor_support) else {
                 continue;
             };
             if same_proposal(candidate, &current)
@@ -441,40 +793,62 @@ pub(super) fn score_candidates(
                 proof.sessions = vec![anchor_support];
             }
         }
+        // The mined anchor cards are no longer needed. Do not retain a second
+        // complete candidate set while examining the other source sessions.
+        drop(evidence);
         let other_limits = ReviewCorroborationLimits {
             total_bytes: LIMITS.total_bytes.saturating_sub(*anchor_bytes),
             ..LIMITS
         };
-        let others = connection
-            .review_corroboration_sessions(workspace_id, &session.id, &[], other_limits)
-            .map_err(domain)?;
+        let others = if candidates.iter().any(|candidate| {
+            candidate
+                .corroboration
+                .as_ref()
+                .is_some_and(ReviewCorroboration::wants_support)
+        }) {
+            connection
+                .review_corroboration_sessions(workspace_id, &session.id, &[], other_limits)
+                .map_err(domain)?
+        } else {
+            Vec::new()
+        };
         for (other_session, spans, _) in &others {
-            if !eligible_session(workspace_id, other_session, spans) {
+            if !candidates.iter().any(|candidate| {
+                candidate
+                    .corroboration
+                    .as_ref()
+                    .is_some_and(ReviewCorroboration::wants_support)
+            }) {
+                // More sessions cannot change any current proposal. In
+                // particular, do not mine every remaining bounded transcript
+                // after all anchors have reached the existing support cap.
+                break;
+            }
+            if !admitted_session(workspace_id, other_session, spans) {
                 continue;
             }
-            let other_candidates = source_candidates(workspace_id, other_session, spans);
-            for candidate in candidates.iter_mut() {
-                let Some(proof) = candidate.corroboration.as_mut() else {
-                    continue;
-                };
-                if proof.sessions.is_empty() || proof.sessions.len() >= MAX_SUPPORT {
-                    continue;
-                }
-                for other in &other_candidates {
-                    if other.candidate_kind != candidate.candidate_kind
-                        || full_signature(other, spans).as_ref() != Some(&proof.signature)
-                        || rejected(connection, workspace_id, other)?
+            let evidence = SessionEvidence::new(workspace_id, other_session, spans);
+            let other_candidates = source_candidates(&evidence);
+            corroborate_candidates(
+                candidates,
+                &other_candidates,
+                |other| full_signature(other, spans),
+                |other| {
+                    if rejected(connection, workspace_id, other)?
+                        || (evidence
+                            .native()
+                            .candidate_ids
+                            .contains(&other.candidate_id)
+                            && evidence
+                                .withheld_repairs(connection)?
+                                .contains(&other.candidate_id))
                     {
-                        continue;
+                        Ok(None)
+                    } else {
+                        Ok(evidence.support(other))
                     }
-                    if let Some(additional) = support(other_session, spans, other)
-                        && independent(&additional, &proof.sessions)
-                    {
-                        proof.sessions.push(additional);
-                        break;
-                    }
-                }
-            }
+                },
+            )?;
         }
     }
     for candidate in candidates.iter_mut() {
@@ -502,7 +876,7 @@ pub(super) fn score_candidates(
                 .collect::<Vec<_>>()
                 .join("; ");
             if proof.sessions.is_empty() {
-                candidate.reason.push_str(" Single-session heuristic only: complete corroboration could not be established under the admission and read bounds.");
+                candidate.reason.push_str(" Abstaining: the anchor session could not be verified as complete corroboration under the admission and read bounds.");
             } else {
                 candidate.reason.push_str(&format!(
                     " Bounded exact corroboration: {} independently identified session(s), heuristic confidence {:.2}; not a calibrated probability or exhaustive consensus. {}",
@@ -672,10 +1046,15 @@ pub(super) fn validate_draft(
         .as_ref()
         .filter(|proof| proof.recorded())
     else {
-        if candidate.candidate_type == CandidateType::CreateDerivedMemory.as_str()
+        let unverified_review_score = candidate.corroboration.is_some()
             && [candidate.confidence, candidate.proposed_confidence]
                 .into_iter()
-                .any(|score| !score.is_finite() || score > 0.6)
+                .any(|score| !score.is_finite() || score > 0.0);
+        if candidate.candidate_type == CandidateType::CreateDerivedMemory.as_str()
+            && (unverified_review_score
+                || [candidate.confidence, candidate.proposed_confidence]
+                    .into_iter()
+                    .any(|score| !score.is_finite() || score > 0.6))
         {
             // This draft type is emitted only by the review-session producer.
             // Historical rows return before draft insertion and keep their
@@ -760,10 +1139,13 @@ fn validate_proof(
                 "a supporting session is missing or exceeds the recorded proof bounds",
             ));
         };
-        if !eligible_session(workspace_id, session, spans) {
-            return Err(issue("support is no longer admitted or was refuted"));
+        if !admitted_session(workspace_id, session, spans) {
+            return Err(issue("support is no longer admitted"));
         }
-        let Some(candidate) = reconstruct_support(workspace_id, session, spans, expected) else {
+        let Some(candidate) =
+            reconstruct_support(connection, workspace_id, session, spans, expected)
+                .map_err(|error| issue(error.message()))?
+        else {
             return Err(issue(
                 "the recorded complete source lesson cannot be reconstructed",
             ));
@@ -833,3 +1215,11 @@ pub(super) fn expected_for_recorded(
     }
     Ok(expected)
 }
+
+#[cfg(test)]
+#[path = "curate_corroboration_index_tests.rs"]
+mod index_tests;
+
+#[cfg(test)]
+#[path = "curate_recovery_tests.rs"]
+mod recovery_tests;

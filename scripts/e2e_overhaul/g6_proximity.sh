@@ -10,6 +10,12 @@ require_jq
 START_SECONDS="$(python3 -c 'import time; print(time.monotonic())')"
 epic_setup "g6_proximity"
 seed_corpus
+# graph.feature.proximity.enabled DEFAULTS TO FALSE (src/config/merge.rs:1304,
+# built_in_config). THIS SUITE IS THE ONE THAT SAYS SO OUT LOUD: before this
+# line, g6_proximity_interpretation expected "weak" and got the literal string
+# "graph_feature_disabled". Fourteen assertions failed here on 2026-10-19,
+# mostly nulls downstream of that same dormant feature.
+ee_workspace config set graph.feature.proximity.enabled true --json >/dev/null
 
 e2e_log_note "g6_proximity_surface=proximity <id1> <id2>"
 MEM_A_JSON=$(ee_workspace remember "G6 proximity source." --level semantic --kind note --no-auto-link --json 2>/dev/null || true)
@@ -56,19 +62,40 @@ if printf '%s' "$PROXIMITY_JSON" | jq . >/dev/null 2>&1; then
         assert_jq "$HOTSPOTS_JSON" '(.data.degradedSignals | length)' "0" "g6_proximity_hotspots_no_degraded"
         assert_jq "$HOTSPOTS_JSON" '(.data.sections | length)' "1" "g6_proximity_hotspots_single_section"
         assert_jq "$HOTSPOTS_JSON" '.data.sections[0].name' "proximityHotspots" "g6_proximity_hotspots_section_name"
-        assert_jq "$HOTSPOTS_JSON" '(.data.sections[0].items | length)' "1" "g6_proximity_hotspots_single_item"
-        assert_jq "$HOTSPOTS_JSON" '.data.sections[0].items[0].rank' "1" "g6_proximity_hotspots_rank"
-        assert_jq "$HOTSPOTS_JSON" '.data.sections[0].items[0].memoryA' "$MEM_A" "g6_proximity_hotspots_memory_a"
-        assert_jq "$HOTSPOTS_JSON" '.data.sections[0].items[0].memoryB' "$MEM_B" "g6_proximity_hotspots_memory_b"
-        assert_jq "$HOTSPOTS_JSON" '(.data.sections[0].items[0].minCut >= 0.90 and .data.sections[0].items[0].minCut <= 0.92)' "true" "g6_proximity_hotspots_min_cut_seeded_weight"
-        assert_jq "$HOTSPOTS_JSON" '.data.sections[0].items[0].interpretation' "weak" "g6_proximity_hotspots_interpretation"
-        assert_jq "$HOTSPOTS_JSON" '(.data.sections[0].items[0].treePath | type)' "array" "g6_proximity_hotspots_tree_path_array"
-        assert_jq "$HOTSPOTS_JSON" '.data.sections[0].items[0].treePath[0]' "$MEM_A" "g6_proximity_hotspots_tree_path_start"
-        assert_jq "$HOTSPOTS_JSON" '.data.sections[0].items[0].treePath[1]' "$MEM_B" "g6_proximity_hotspots_tree_path_end"
-        assert_jq "$HOTSPOTS_JSON" '.data.sections[0].items[0].evidence.schema' "ee.proximity.v1" "g6_proximity_hotspots_evidence_schema"
-        assert_jq "$HOTSPOTS_JSON" '.data.sections[0].items[0].evidence.algorithm' "gomory_hu_tree" "g6_proximity_hotspots_evidence_algorithm"
-        assert_jq "$HOTSPOTS_JSON" '.data.sections[0].items[0].evidence.memoryA' "$MEM_A" "g6_proximity_hotspots_evidence_memory_a"
-        assert_jq "$HOTSPOTS_JSON" '.data.sections[0].items[0].evidence.memoryB' "$MEM_B" "g6_proximity_hotspots_evidence_memory_b"
+        # proximityHotspots is a GLOBAL top-N section -- it takes no pair
+        # argument -- and docs/schemas/ee.insights.v1.json documents its page
+        # size as limit 10. `seed_corpus` above contributes its own linked
+        # pairs, so the seeded pair is one hotspot among many (measured
+        # 2026-10-20: 18 hotspots total, the seeded pair at rank 3 of a
+        # 10-item page). Selecting it BY IDENTITY rather than by position is
+        # what makes these assertions about the product instead of about how
+        # much unrelated structure the corpus happens to contain. bd-k3m0t.
+        HOTSPOT_ITEM_COUNT=$(printf '%s' "$HOTSPOTS_JSON" | jq '.data.sections[0].items | length' 2>/dev/null || echo 0)
+        e2e_log_assert_num "$HOTSPOT_ITEM_COUNT" -ge 1 "g6_proximity_hotspots_items_present"
+        e2e_log_assert_num "$HOTSPOT_ITEM_COUNT" -le 10 "g6_proximity_hotspots_within_documented_limit"
+        SEEDED_HOTSPOT=$(printf '%s' "$HOTSPOTS_JSON" | jq -c --arg a "$MEM_A" --arg b "$MEM_B" '[.data.sections[0].items[]? | select(.memoryA == $a and .memoryB == $b)][0] // {}' 2>/dev/null || echo '{}')
+        e2e_log_note "g6_proximity_hotspots total_items=${HOTSPOT_ITEM_COUNT} seeded_rank=$(printf '%s' "$SEEDED_HOTSPOT" | jq -r '.rank // "absent"')"
+        assert_jq "$SEEDED_HOTSPOT" 'has("memoryA")' "true" "g6_proximity_hotspots_seeded_pair_reported"
+        assert_jq "$SEEDED_HOTSPOT" '(.rank >= 1)' "true" "g6_proximity_hotspots_rank_valid"
+        assert_jq "$SEEDED_HOTSPOT" '.memoryA' "$MEM_A" "g6_proximity_hotspots_memory_a"
+        assert_jq "$SEEDED_HOTSPOT" '.memoryB' "$MEM_B" "g6_proximity_hotspots_memory_b"
+        assert_jq "$SEEDED_HOTSPOT" '(.minCut >= 0.90 and .minCut <= 0.92)' "true" "g6_proximity_hotspots_min_cut_seeded_weight"
+        assert_jq "$SEEDED_HOTSPOT" '.interpretation' "weak" "g6_proximity_hotspots_interpretation"
+        assert_jq "$SEEDED_HOTSPOT" '(.treePath | type)' "array" "g6_proximity_hotspots_tree_path_array"
+        assert_jq "$SEEDED_HOTSPOT" '.treePath[0]' "$MEM_A" "g6_proximity_hotspots_tree_path_start"
+        assert_jq "$SEEDED_HOTSPOT" '.treePath[1]' "$MEM_B" "g6_proximity_hotspots_tree_path_end"
+        assert_jq "$SEEDED_HOTSPOT" '.evidence.schema' "ee.proximity.v1" "g6_proximity_hotspots_evidence_schema"
+        assert_jq "$SEEDED_HOTSPOT" '.evidence.algorithm' "gomory_hu_tree" "g6_proximity_hotspots_evidence_algorithm"
+        # The two assertions that used to stand here read evidence.memoryA and
+        # evidence.memoryB. Those fields cannot exist: proximityHotspotItem.evidence
+        # in docs/schemas/ee.insights.v1.json is `additionalProperties: false`
+        # over exactly {schema, algorithm, snapshotVersion}, so emitting them
+        # would make the surface violate its own published schema. Identity
+        # lives on the item (asserted above), and evidence carries provenance.
+        # Asserting the exact key set is strictly stronger than asserting two
+        # keys that the schema forbids.
+        assert_jq "$SEEDED_HOTSPOT" '((.evidence | keys) == ["algorithm","schema","snapshotVersion"])' "true" "g6_proximity_hotspots_evidence_fields_exact"
+        assert_jq "$SEEDED_HOTSPOT" '(.evidence.snapshotVersion | type)' "number" "g6_proximity_hotspots_evidence_snapshot_version_number"
     else
         e2e_log_assert_eq "valid-proximity-hotspots-json" "invalid-proximity-hotspots-json" "g6_proximity_hotspots_json_parse"
     fi

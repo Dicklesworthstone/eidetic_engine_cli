@@ -1687,6 +1687,9 @@ pub struct ContextRequest {
     /// Digest of the effective quality policy captured by search execution.
     /// Direct pack builders leave this absent instead of inventing a retrieval policy.
     pub quality_scoring_policy: Option<String>,
+    /// Normalized, captured bead-scoring input. Absent requests retain their
+    /// historical pack identity and never read the workspace tracker.
+    pub bead_affinity_identity: Option<String>,
     pub query: String,
     pub profile: ContextPackProfile,
     pub budget: TokenBudget,
@@ -1728,6 +1731,7 @@ impl ContextRequest {
             task_paths: Vec::new(),
             reference_time: None,
             quality_scoring_policy: None,
+            bead_affinity_identity: None,
             query,
             profile: input.profile.unwrap_or(ContextPackProfile::Balanced),
             budget,
@@ -3080,6 +3084,24 @@ const COVERAGE_GAP_KIND_SPECS: &[CoverageGapKindSpec] = &[
 pub fn explain_why_not_selected(
     input: WhyNotSelectedInput,
 ) -> Result<WhyNotSelectedReport, PackValidationError> {
+    explain_why_not_selected_inner(input, None)
+}
+
+/// Explain a memory against the completed production selection, including
+/// native rules, evidence, caller filters, and their shared token budget.
+/// The standalone counterfactual above remains available to library callers
+/// that deliberately provide a memory-only candidate universe.
+pub(crate) fn explain_why_not_selected_from_draft(
+    input: WhyNotSelectedInput,
+    draft: PackDraft,
+) -> Result<WhyNotSelectedReport, PackValidationError> {
+    explain_why_not_selected_inner(input, Some(draft))
+}
+
+fn explain_why_not_selected_inner(
+    input: WhyNotSelectedInput,
+    authoritative_draft: Option<PackDraft>,
+) -> Result<WhyNotSelectedReport, PackValidationError> {
     let task = trim_required(input.task, PackValidationError::EmptyQuery)?;
     input.options.validate_relevance_floor()?;
     let target = input.target;
@@ -3091,7 +3113,9 @@ pub fn explain_why_not_selected(
     let exclusions = input.exclusions;
     let degraded = input.degraded;
 
-    let draft = if target_present && exclusions.is_empty() {
+    let draft = if authoritative_draft.is_some() {
+        authoritative_draft
+    } else if target_present && exclusions.is_empty() {
         Some(assemble_draft_with_profile_and_options(
             input.profile,
             task.clone(),
@@ -3198,7 +3222,7 @@ pub fn explain_coverage_gap(task: impl Into<String>, pack: &PackDraft) -> Covera
             expected_level: spec.expected_level.to_string(),
             section: spec.section.as_str().to_string(),
             reason: format!(
-                "No selected memory in {} satisfies `{}` demand for this task.",
+                "No selected item in {} satisfies `{}` demand for this task.",
                 spec.section.as_str(),
                 spec.kind
             ),
@@ -3217,8 +3241,8 @@ pub fn explain_coverage_gap(task: impl Into<String>, pack: &PackDraft) -> Covera
         task_hash: blake3::hash(task.as_bytes()).to_hex().to_string(),
         posture: coverage_gap_posture(pack, missing_kinds.len()),
         pack_summary: CoverageGapPackSummary {
-            selected_count: pack.items.len(),
-            omitted_count: pack.omitted.len(),
+            selected_count: pack.selected_item_count(),
+            omitted_count: pack.selection_audit.omitted_count.max(pack.omitted.len()),
             used_tokens: pack.used_tokens,
             max_tokens: pack.budget.max_tokens(),
             quality: coverage_gap_quality(pack, missing_kinds.len()),
@@ -3247,9 +3271,25 @@ fn expected_gap_specs_for_task(task_lower: &str) -> Vec<&'static CoverageGapKind
 }
 
 fn pack_satisfies_gap_spec(pack: &PackDraft, spec: &CoverageGapKindSpec) -> bool {
+    // Coverage belongs to the selected pack, including native rules and
+    // evidence. Their source memories need not exist. Keep section matching:
+    // a transcript quoting a release command is not a procedural rule.
     pack.items
         .iter()
-        .any(|item| item.section == spec.section && content_satisfies_gap_spec(&item.content, spec))
+        .map(|item| (item.section, item.content.as_str()))
+        .chain(
+            pack.rule_items
+                .iter()
+                .map(|item| (item.section, item.content.as_str())),
+        )
+        .chain(
+            pack.evidence_items
+                .iter()
+                .map(|item| (item.section, item.content.as_str())),
+        )
+        .any(|(section, content)| {
+            section == spec.section && content_satisfies_gap_spec(content, spec)
+        })
 }
 
 fn content_satisfies_gap_spec(content: &str, spec: &CoverageGapKindSpec) -> bool {
@@ -3270,9 +3310,9 @@ fn coverage_gap_confidence(task_lower: &str, spec: &CoverageGapKindSpec) -> u32 
 }
 
 fn coverage_gap_quality(pack: &PackDraft, missing_count: usize) -> String {
-    if pack.items.is_empty() {
+    if pack.is_empty() {
         "empty".to_string()
-    } else if missing_count >= 2 || pack.items.len() <= 1 {
+    } else if missing_count >= 2 || pack.selected_item_count() <= 1 {
         "thin".to_string()
     } else if missing_count == 1 {
         "partial".to_string()
@@ -3282,7 +3322,7 @@ fn coverage_gap_quality(pack: &PackDraft, missing_count: usize) -> String {
 }
 
 fn coverage_gap_posture(pack: &PackDraft, missing_count: usize) -> String {
-    if pack.items.is_empty() || missing_count >= 2 {
+    if pack.is_empty() || missing_count >= 2 {
         "capture_required".to_string()
     } else if missing_count == 1 {
         "capture_recommended".to_string()
@@ -3584,16 +3624,25 @@ fn why_not_filters(
             code: omission.reason.as_str().to_string(),
             passed: false,
             detail: if omission.reason == PackOmissionReason::BelowRelevanceFloor {
-                format!(
-                    "target relevance {:.4} is below effective relevance floor {:.4} ({})",
-                    omission.relevance.into_inner(),
-                    options.effective_relevance_floor(),
-                    if options.relevance_floor.is_some() {
-                        "caller override"
-                    } else {
-                        "default coverage fill"
-                    },
-                )
+                if options.relevance_floor.is_none()
+                    && omission.rejected_at == PackRejectionStage::CandidateFilter
+                {
+                    format!(
+                        "target relevance {:.4} was excluded by the uncalibrated query-relative elbow fallback; see context_filtered_results for the per-source cutoff",
+                        omission.relevance.into_inner(),
+                    )
+                } else {
+                    format!(
+                        "target relevance {:.4} is below effective relevance floor {:.4} ({})",
+                        omission.relevance.into_inner(),
+                        options.effective_relevance_floor(),
+                        if options.relevance_floor.is_some() {
+                            "caller override"
+                        } else {
+                            "default coverage fill"
+                        },
+                    )
+                }
             } else {
                 format!("target memory was omitted at {}", omission.rejected_at)
             },
@@ -3888,10 +3937,13 @@ pub fn is_non_canonical_telemetry_degradation_code(code: &str) -> bool {
 
 /// The pack-hash input schema (ADR 0087 §8). Every component and the composite
 /// bind this tag, and the snapshot identity reports its version.
-pub const PACK_HASH_INPUT_SCHEMA_V4: &str = "ee.pack.hash_input.v4";
-pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 4;
+pub const PACK_HASH_INPUT_SCHEMA_V5: &str = "ee.pack.hash_input.v5";
+pub const PACK_SNAPSHOT_IDENTITY_VERSION: u32 = 5;
+/// The only substituted value in the v5 rendered-text digest. This value is
+/// supplied to the typed footer renderer, never replaced in arbitrary content.
+pub const PACK_HASH_TEXT_FOOTER_PLACEHOLDER: &str = "ee.pack.hash.self.v1";
 
-/// The component digests behind a v4 `pack.hash` (ADR 0087 §7). Each is a
+/// The component digests behind a v5 `pack.hash` (ADR 0087 §7). Each is a
 /// `blake3:<hex>` digest of one labeled, length-delimited component; none
 /// carries a raw input.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4216,7 +4268,6 @@ impl PackAssemblySlo {
             degradations.push(pack_assembly_budget_exceeded_degradation(
                 profile,
                 &budget_class,
-                &actuals,
             ));
             PackAssemblySloStatus::Failure
         } else if actuals.scanned_count == budget_class.candidates_scanned_max {
@@ -4275,8 +4326,6 @@ impl PackAssemblySlo {
             degradations: vec![pack_concurrent_limit_reached_degradation(
                 profile,
                 &budget_class,
-                retry_after_ms,
-                queue_depth,
             )],
         }
     }
@@ -4300,7 +4349,7 @@ impl PackAssemblySlo {
     /// Elapsed-budget degradations, reported separately from
     /// [`Self::context_degradations`] (GH49 / bd-jikgj).
     ///
-    /// **These must never enter the pack hash.** `refresh_context_pack_hash`
+    /// **These must never enter the pack hash.** `finalize_context_response`
     /// takes the response `degraded[]` as hash input, and wall-clock time is
     /// not reproducible — folding a timing entry into `self.degradations`
     /// would make the same query over the same store hash differently on a
@@ -4748,6 +4797,7 @@ impl ContextResponse {
                 request,
                 pack,
                 agent_profile: None,
+                bead_affinity: None,
                 slo: None,
                 scope_stats: None,
                 consensus: Vec::new(),
@@ -4759,6 +4809,7 @@ impl ContextResponse {
                 pagination: None,
                 degraded,
                 pack_hash_components: None,
+                finalized_text: None,
             },
         })
     }
@@ -4774,7 +4825,32 @@ impl ContextResponse {
         cached_json: String,
         command: &'static str,
     ) -> Self {
-        let embed_backend = cached_context_embed_backend(&cached_json);
+        let cached = serde_json::from_str::<serde_json::Value>(&cached_json).ok();
+        let embed_backend = cached
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .pointer("/data/embed_backend")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| value.parse().ok())
+            })
+            .unwrap_or_default();
+        let pack_hash = cached
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .pointer("/data/pack/hash")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::to_owned);
+        let finalized_text = cached
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .pointer("/data/pack/text")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::to_owned);
         Self {
             schema: RESPONSE_SCHEMA_V2,
             success: true,
@@ -4807,9 +4883,10 @@ impl ContextResponse {
                         selected_items: Vec::new(),
                         steps: Vec::new(),
                     },
-                    hash: None,
+                    hash: pack_hash,
                 },
                 agent_profile: None,
+                bead_affinity: None,
                 slo: None,
                 scope_stats: None,
                 consensus: Vec::new(),
@@ -4821,6 +4898,7 @@ impl ContextResponse {
                 pagination: None,
                 degraded: Vec::new(),
                 pack_hash_components: None,
+                finalized_text,
             },
         }
     }
@@ -4833,6 +4911,8 @@ pub struct ContextResponseData {
     pub request: ContextRequest,
     pub pack: PackDraft,
     pub agent_profile: Option<serde_json::Value>,
+    /// Optional bead-aware ranking explanation; omitted from JSON when absent.
+    pub bead_affinity: Option<serde_json::Value>,
     pub slo: Option<PackAssemblySlo>,
     pub scope_stats: Option<MemoryScopeStats>,
     pub consensus: Vec<ConsensusEntry>,
@@ -4843,22 +4923,44 @@ pub struct ContextResponseData {
     pub adaptive_budget: Option<budget_classifier::AdaptiveBudgetDecision>,
     pub pagination: Option<ContextResponsePagination>,
     pub degraded: Vec<ContextResponseDegradation>,
-    /// The per-component digests behind `pack.hash` (ADR 0087 v3), when this
+    /// The per-component digests behind `pack.hash` (ADR 0087 v5), when this
     /// process computed them. `None` for a response served from the L2 cache,
     /// whose stored JSON already carries its own snapshot identity.
     pub pack_hash_components: Option<PackHashComponentDigests>,
+    /// Immutable canonical markdown, frozen with `pack.hash` before ledger or
+    /// cache persistence. Delivery notices may still extend `degraded`, but
+    /// must not rewrite the prompt represented by this identity.
+    pub(crate) finalized_text: Option<String>,
 }
 
-fn cached_context_embed_backend(cached_json: &str) -> EmbedBackend {
-    serde_json::from_str::<serde_json::Value>(cached_json)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/data/embed_backend")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|value| value.parse().ok())
-        })
-        .unwrap_or_default()
+/// All canonical markdown inputs, borrowed so the production finalizer and
+/// pure draft-hash builders use the same renderer without cloning a pack.
+pub(crate) struct ContextMarkdownInput<'a> {
+    pub schema: &'a str,
+    pub request: &'a ContextRequest,
+    pub pack: &'a PackDraft,
+    pub degraded: &'a [ContextResponseDegradation],
+    pub embed_backend: EmbedBackend,
+    pub consensus: &'a [ConsensusEntry],
+    pub conflicts: &'a [ConflictEntry],
+    pub coordination: Option<&'a PackCoordinationSnapshot>,
+    pub pack_dna: Option<&'a serde_json::Value>,
+}
+
+impl<'a> From<&'a ContextResponse> for ContextMarkdownInput<'a> {
+    fn from(response: &'a ContextResponse) -> Self {
+        Self {
+            schema: response.schema,
+            request: &response.data.request,
+            pack: &response.data.pack,
+            degraded: &response.data.degraded,
+            embed_backend: response.data.embed_backend,
+            consensus: &response.data.consensus,
+            conflicts: &response.data.conflicts,
+            coordination: response.data.coordination.as_ref(),
+            pack_dna: response.data.pack_dna.as_ref(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4909,6 +5011,9 @@ pub fn team_pack_provenance_json(trust: &PackTrustSignal) -> Option<String> {
 /// Render a context response as the canonical Markdown prompt fragment.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
+    if let Some(text) = &response.data.finalized_text {
+        return text.clone();
+    }
     render_context_response_markdown_with_degraded(response, &response.data.degraded)
 }
 
@@ -4917,13 +5022,26 @@ pub(crate) fn render_context_response_markdown_with_degraded(
     response: &ContextResponse,
     degraded: &[ContextResponseDegradation],
 ) -> String {
-    let mut body = render_context_markdown_with_analysis(
-        &response.data.request,
-        &response.data.pack,
+    render_context_markdown_with_footer(
+        &ContextMarkdownInput::from(response),
         degraded,
-        &response.data.consensus,
-        &response.data.conflicts,
-        response.data.coordination.as_ref(),
+        response.data.pack.hash.as_deref().unwrap_or("absent"),
+    )
+}
+
+#[must_use]
+pub(crate) fn render_context_markdown_with_footer(
+    input: &ContextMarkdownInput<'_>,
+    degraded: &[ContextResponseDegradation],
+    footer_hash: &str,
+) -> String {
+    let mut body = render_context_markdown_with_analysis(
+        input.request,
+        input.pack,
+        degraded,
+        input.consensus,
+        input.conflicts,
+        input.coordination,
     );
     // Bead bd-17c65.4.3 (D3): append pack metadata as trailing HTML
     // comments. Invisible to standard markdown rendering and to LLMs
@@ -4951,10 +5069,12 @@ pub(crate) fn render_context_response_markdown_with_degraded(
     // omitting it here is a sound trade — correlation by `pack.hash`
     // is sufficient for the "find this body's structured record"
     // use case D3 describes.
-    let pack_hash = response.data.pack.hash.as_deref().unwrap_or("absent");
-    body.push_str(&format!("\n<!-- pack.hash: {pack_hash} -->\n"));
-    body.push_str(&format!("<!-- pack.schema: {} -->\n", response.schema));
+    body.push_str(&context_markdown_identity_footer(input.schema, footer_hash));
     body
+}
+
+pub(crate) fn context_markdown_identity_footer(schema: &str, hash: &str) -> String {
+    format!("\n<!-- pack.hash: {hash} -->\n<!-- pack.schema: {schema} -->\n")
 }
 
 /// Render the canonical Markdown prompt fragment from context pack parts.
@@ -5073,6 +5193,14 @@ pub fn render_context_markdown_with_analysis(
         }
 
         let mut display_index: u32 = 0;
+        render_native_rule_items(
+            &mut output,
+            pack.rule_items
+                .iter()
+                .filter(|item| item.section == PackSection::Failures),
+            "What NOT to do",
+            &mut display_index,
+        );
         for section in section_order {
             let Some(items) = by_section.get(section) else {
                 continue;
@@ -5119,41 +5247,14 @@ pub fn render_context_markdown_with_analysis(
             }
         }
 
-        if !pack.rule_items.is_empty() {
-            output.push_str("## Rules\n\n");
-            for item in &pack.rule_items {
-                display_index = display_index.saturating_add(1);
-                output.push_str(&format!(
-                    "### {}. {} ({} tokens)\n\n",
-                    display_index,
-                    escape_markdown_text(&item.rule_id),
-                    item.estimated_tokens
-                ));
-                if !item.content.is_empty() {
-                    output.push_str(&markdown_fenced_code_block(&item.content));
-                    output.push('\n');
-                }
-                if !item.why.is_empty() {
-                    output.push_str(&format!("**Why:** {}\n\n", escape_markdown_text(&item.why)));
-                }
-                output.push_str(&format!(
-                    "**Trust:** `{}` / `{}`\n\n",
-                    item.trust.class.as_str(),
-                    item.trust.posture().as_str()
-                ));
-                if !item.provenance.is_empty() {
-                    output.push_str("**Provenance:**\n");
-                    for provenance in item.rendered_provenance() {
-                        output.push_str(&format!(
-                            "- {} ({})\n",
-                            markdown_inline_code(&provenance.uri),
-                            escape_markdown_text(&provenance.scheme)
-                        ));
-                    }
-                    output.push('\n');
-                }
-            }
-        }
+        render_native_rule_items(
+            &mut output,
+            pack.rule_items
+                .iter()
+                .filter(|item| item.section != PackSection::Failures),
+            "Rules",
+            &mut display_index,
+        );
 
         if !pack.evidence_items.is_empty() {
             output.push_str("## Evidence\n\n");
@@ -5398,6 +5499,51 @@ fn context_advisory_banner(
         legacy_count: counts.legacy(),
         degradation_count: degraded.len(),
         notes,
+    }
+}
+
+fn render_native_rule_items<'a>(
+    output: &mut String,
+    items: impl Iterator<Item = &'a PackRuleItem>,
+    heading: &str,
+    display_index: &mut u32,
+) {
+    let mut heading_emitted = false;
+    for item in items {
+        if !heading_emitted {
+            output.push_str(&format!("## {heading}\n\n"));
+            heading_emitted = true;
+        }
+        *display_index = display_index.saturating_add(1);
+        output.push_str(&format!(
+            "### {}. {} ({} tokens)\n\n",
+            display_index,
+            escape_markdown_text(&item.rule_id),
+            item.estimated_tokens
+        ));
+        if !item.content.is_empty() {
+            output.push_str(&markdown_fenced_code_block(&item.content));
+            output.push('\n');
+        }
+        if !item.why.is_empty() {
+            output.push_str(&format!("**Why:** {}\n\n", escape_markdown_text(&item.why)));
+        }
+        output.push_str(&format!(
+            "**Trust:** `{}` / `{}`\n\n",
+            item.trust.class.as_str(),
+            item.trust.posture().as_str()
+        ));
+        if !item.provenance.is_empty() {
+            output.push_str("**Provenance:**\n");
+            for provenance in item.rendered_provenance() {
+                output.push_str(&format!(
+                    "- {} ({})\n",
+                    markdown_inline_code(&provenance.uri),
+                    escape_markdown_text(&provenance.scheme)
+                ));
+            }
+            output.push('\n');
+        }
     }
 }
 
@@ -5842,17 +5988,16 @@ fn pack_assembly_elapsed_degradation(
 fn pack_assembly_budget_exceeded_degradation(
     profile: PackResourceProfile,
     budget: &PackSloBudgetClass,
-    actuals: &PackAssemblySloActuals,
 ) -> PackAssemblySloDegradation {
+    // This prose is hash-bearing. Keep measurements in actuals, while the
+    // profile's fixed limits and exceeded posture remain canonical (bd-ve7c6).
     PackAssemblySloDegradation {
         code: PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
         severity: ContextResponseSeverity::Medium,
         message: format!(
-            "Pack assembly exceeded the {} resource-profile budget: scanned {}/{} candidates, traversed {}/{} graph edges.",
+            "Pack assembly exceeded the {} resource-profile budget of {} candidates or {} graph edges. See pack.slo.actuals for the measured counts.",
             profile.as_str(),
-            actuals.scanned_count,
             budget.candidates_scanned_max,
-            actuals.graph_edges_traversed,
             budget.graph_traversal_max_edges
         ),
         repair: Some(
@@ -5865,22 +6010,22 @@ fn pack_assembly_budget_exceeded_degradation(
 fn pack_concurrent_limit_reached_degradation(
     profile: PackResourceProfile,
     budget: &PackSloBudgetClass,
-    retry_after_ms: u64,
-    queue_depth: usize,
 ) -> PackAssemblySloDegradation {
+    // Admission refusal is canonical; queue depth and backoff are per-run
+    // observations retained in PackAdmissionPosture (bd-ve7c6).
     PackAssemblySloDegradation {
         code: PACK_CONCURRENT_LIMIT_REACHED_CODE,
         severity: ContextResponseSeverity::Low,
         message: format!(
-            "Concurrent pack limit reached for the {} resource profile: queue depth {} meets the configured cap of {} pack slot{}.",
+            "Concurrent pack limit reached for the {} resource profile: queue depth meets the configured cap of {} pack slot{}.",
             profile.as_str(),
-            queue_depth,
             budget.concurrent_pack_max,
             plural_s(budget.concurrent_pack_max)
         ),
-        repair: Some(format!(
-            "Wait and retry in about {retry_after_ms} ms, reduce concurrent ee context calls, or use --resource-profile swarm_heavy."
-        )),
+        repair: Some(
+            "Wait for a pack slot and retry; see pack.slo.admission.retryAfterMs for the current backoff, reduce concurrent ee pack calls, or use --resource-profile swarm_heavy."
+                .to_string(),
+        ),
     }
 }
 
@@ -15273,6 +15418,62 @@ mod tests {
                 && filter.detail.contains("0.3000")
                 && filter.detail.contains("0.5000")
                 && filter.detail.contains("caller override")
+                && !filter.detail.contains("elbow")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn why_not_selected_explains_adaptive_admission_without_inventing_a_floor() -> TestResult {
+        let target = candidate(1, 0.1936, 1.0, 10)?;
+        let selected = candidate(2, 0.3968, 1.0, 10)?;
+        let budget = TokenBudget::new(100).map_err(|error| error.to_string())?;
+        let mut draft = assemble_draft_with_profile_and_options(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            vec![selected.clone()],
+            classic_pack_options(),
+        )
+        .map_err(|error| error.to_string())?;
+        draft.omitted.push(super::PackOmission::from_candidate_at(
+            &target,
+            PackOmissionReason::BelowRelevanceFloor,
+            PackRejectionStage::CandidateFilter,
+            None,
+        ));
+        let report = super::explain_why_not_selected_from_draft(
+            super::WhyNotSelectedInput::new(
+                "prepare release",
+                target.clone(),
+                budget,
+                ContextPackProfile::Balanced,
+                vec![selected, target],
+            )
+            .with_options(classic_pack_options())
+            .with_degraded(vec![super::WhyNotSelectionDegradation::new(
+                "context_filtered_results",
+                "low",
+                "Uncalibrated query-relative elbow omitted a lexical candidate below 0.3968.",
+                Some("Pass --relevance-floor 0 to disable the heuristic.".to_owned()),
+            )]),
+            draft,
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.primary_reason, "omitted_by_score_floor");
+        assert!(report.filters_applied.iter().any(|filter| {
+            filter.code == "below_relevance_floor"
+                && filter.stage == "candidate_filter"
+                && !filter.passed
+                && filter.detail.contains("0.1936")
+                && filter.detail.contains("uncalibrated query-relative elbow")
+                && filter.detail.contains("context_filtered_results")
+                && !filter.detail.contains("0.0500")
+                && !filter.detail.contains("caller override")
+        }));
+        assert!(report.filters_applied.iter().any(|filter| {
+            filter.code == "context_filtered_results" && filter.detail.contains("0.3968")
         }));
         Ok(())
     }
@@ -15698,6 +15899,7 @@ mod tests {
                     && !filter.passed
                     && filter.detail.contains("0.0500")
                     && filter.detail.contains("default coverage fill")
+                    && !filter.detail.contains("elbow")
             }),
             "score-floor filter should name the effective default floor",
         )
@@ -15907,6 +16109,216 @@ mod tests {
                 .iter()
                 .any(|template| template.kind == "release_rule"),
             "cleared demand should not keep a stale capture template",
+        )
+    }
+
+    fn coverage_gap_native_rule(
+        seed: u128,
+        section: PackSection,
+        content: &str,
+    ) -> Result<super::PackRuleItem, String> {
+        let rule_id = super::RuleId::from_uuid(Uuid::from_u128(seed)).to_string();
+        Ok(super::PackRuleItem {
+            rank: u32::try_from(seed).map_err(|error| error.to_string())?,
+            provenance: vec![provenance(&format!("ee://rule/{rule_id}"))?],
+            rule_id,
+            entity_revision: format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
+            section,
+            content: content.to_owned(),
+            estimated_tokens: 20,
+            relevance: score(0.9)?,
+            utility: score(0.8)?,
+            why: "selected native rule".to_owned(),
+            trust: PackTrustSignal::new(TrustClass::HumanExplicit, None),
+        })
+    }
+
+    #[test]
+    fn coverage_gap_native_rules_close_demand_without_source_memories() -> TestResult {
+        let mut draft = draft_from_candidates(Vec::new())?;
+        let before = super::explain_coverage_gap("prepare release", &draft);
+        ensure_equal(
+            &before.pack_summary.quality.as_str(),
+            &"empty",
+            "empty control",
+        )?;
+
+        draft.rule_items = vec![
+            coverage_gap_native_rule(
+                1,
+                PackSection::ProceduralRules,
+                "Before release, run the verification suite and confirm rollback.",
+            )?,
+            coverage_gap_native_rule(
+                2,
+                PackSection::Failures,
+                "Avoid publishing a release before its verification suite completes.",
+            )?,
+        ];
+        draft.used_tokens = 40;
+        let native_only = super::explain_coverage_gap("prepare release", &draft);
+        ensure_equal(
+            &native_only.pack_summary.selected_count,
+            &2,
+            "native selection count",
+        )?;
+        ensure_equal(
+            &native_only.pack_summary.quality.as_str(),
+            &"partial",
+            "native pack quality",
+        )?;
+        ensure_equal(
+            &native_only.posture.as_str(),
+            &"capture_recommended",
+            "native pack posture",
+        )?;
+        ensure_equal(
+            &native_only
+                .missing_kinds
+                .iter()
+                .map(|gap| gap.kind.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["decision"],
+            "native release and warning rules satisfy their own demand",
+        )?;
+        ensure_equal(
+            &native_only
+                .capture_templates
+                .iter()
+                .map(|template| template.kind.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["decision"],
+            "no duplicate rule capture is suggested",
+        )?;
+        ensure(
+            draft.items.is_empty(),
+            "native coverage must not synthesize memories",
+        )?;
+
+        let mut mixed = draft_from_candidates(vec![candidate_in_section(
+            3,
+            PackSection::Decisions,
+            0.9,
+            0.8,
+            20,
+            "Decision: publish from the release branch because it has the verified artifacts.",
+        )?])?;
+        mixed.rule_items = draft.rule_items;
+        mixed.used_tokens += draft.used_tokens;
+        let covered = super::explain_coverage_gap("prepare release", &mixed);
+        ensure_equal(
+            &covered.pack_summary.selected_count,
+            &3,
+            "mixed selection count",
+        )?;
+        ensure_equal(
+            &covered.pack_summary.quality.as_str(),
+            &"covered",
+            "mixed pack quality",
+        )?;
+        ensure_equal(&covered.posture.as_str(), &"covered", "mixed pack posture")?;
+        ensure(
+            covered.missing_kinds.is_empty() && covered.capture_templates.is_empty(),
+            "satisfied demand must stop requesting capture",
+        )?;
+
+        mixed.rule_items.pop();
+        let withdrawn = super::explain_coverage_gap("prepare release", &mixed);
+        ensure(
+            withdrawn
+                .missing_kinds
+                .iter()
+                .any(|gap| gap.kind == "anti_pattern"),
+            "only currently selected warnings satisfy demand",
+        )
+    }
+
+    #[test]
+    fn coverage_gap_counts_native_evidence_without_promoting_it_to_a_rule() -> TestResult {
+        let mut draft = draft_from_candidates(Vec::new())?;
+        let content = "The release workflow must avoid the prior failure; the decision was recorded in the ADR.";
+        let evidence_id = super::EvidenceId::from_uuid(Uuid::from_u128(4)).to_string();
+        draft.evidence_items.push(super::PackEvidenceItem {
+            rank: 1,
+            provenance: vec![provenance(&format!("ee://evidence/{evidence_id}"))?],
+            evidence_id,
+            entity_revision: format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex()),
+            session_id: crate::models::SessionId::from_uuid(Uuid::from_u128(5)).to_string(),
+            start_line: 10,
+            end_line: 11,
+            section: PackSection::Evidence,
+            content: content.to_owned(),
+            estimated_tokens: 20,
+            relevance: score(0.9)?,
+            utility: score(0.8)?,
+            why: "selected imported transcript".to_owned(),
+            trust: PackTrustSignal::new(TrustClass::CassEvidence, None),
+        });
+        draft.used_tokens = 20;
+        let report = super::explain_coverage_gap("prepare release", &draft);
+        ensure_equal(
+            &report.pack_summary.selected_count,
+            &1,
+            "evidence selection count",
+        )?;
+        ensure_equal(
+            &report.pack_summary.quality.as_str(),
+            &"thin",
+            "evidence is not an empty pack",
+        )?;
+        ensure_equal(
+            &report.missing_kinds.len(),
+            &3,
+            "evidence cannot impersonate rules or decisions",
+        )?;
+        ensure_equal(
+            &report.capture_templates.len(),
+            &3,
+            "unmet demands keep capture templates",
+        )?;
+        ensure(draft.items.is_empty(), "evidence keeps its native identity")
+    }
+
+    #[test]
+    fn coverage_gap_native_rules_require_matching_content_and_section() -> TestResult {
+        let mut draft = draft_from_candidates(Vec::new())?;
+        draft.rule_items = vec![
+            coverage_gap_native_rule(
+                1,
+                PackSection::ProceduralRules,
+                "Document the parser grammar.",
+            )?,
+            coverage_gap_native_rule(
+                2,
+                PackSection::ProceduralRules,
+                "Avoid an undocumented schema migration.",
+            )?,
+        ];
+        let report = super::explain_coverage_gap("prepare release", &draft);
+        ensure_equal(
+            &report.missing_kinds.len(),
+            &3,
+            "unrelated or wrong-section rules do not close demand",
+        )?;
+        let first = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        let second = serde_json::to_value(super::explain_coverage_gap("prepare release", &draft))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&first, &second, "native coverage is deterministic")
+    }
+
+    #[test]
+    fn coverage_gap_counts_native_omissions_from_selection_audit() -> TestResult {
+        let mut draft = draft_from_candidates(Vec::new())?;
+        draft.selection_audit.omitted_count = 3;
+        let report = super::explain_coverage_gap("prepare release", &draft);
+        ensure_equal(
+            &report.pack_summary.omitted_count,
+            &3,
+            "native omissions are retained without fabricated memory omissions",
+        )?;
+        ensure(
+            draft.omitted.is_empty(),
+            "native omissions keep native identity",
         )
     }
 

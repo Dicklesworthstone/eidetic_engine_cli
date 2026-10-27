@@ -1,11 +1,6 @@
 {
   "dirtyPathCount": 3,
-  "stagingRecommendationsPaths": [
-    {
-      "name": "source",
-      "paths": []
-    }
-  ],
+  "stagingRecommendationsPaths": [],
   "doNotCommit": [],
   "needsHumanReview": [],
   "blockedByCoordination": [

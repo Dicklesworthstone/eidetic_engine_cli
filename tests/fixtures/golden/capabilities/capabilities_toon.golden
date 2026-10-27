@@ -23,7 +23,7 @@ data:
   unimplemented[2]{code,featureFlag,shipTarget,trackingBead}:
     diagram_backend_unavailable,franken-mermaid-adapter,v0.3,bd-17c65.5.5
     mcp_feature_disabled,mcp,v0.2,bd-17c65.5.5
-  commands[558]{name,available}:
+  commands[560]{name,available}:
     agent,true
     agent detect,true
     agent scan,true
@@ -236,6 +236,7 @@ data:
     import eidetic-legacy,true
     import jsonl,true
     index,true
+    index backfill-anchors,true
     index backfill-tags,true
     index rebuild,true
     index reembed,true
@@ -290,6 +291,7 @@ data:
     mcp serve-stdio,false
     mcp validate,true
     memory,true
+    memory anchors,true
     memory demote-global,true
     memory drift,true
     memory expire,true
@@ -587,7 +589,7 @@ data:
       source: missing
       error: "cass binary 'tests/fixtures/missing-ee-workspace/no-cass' is not allowed: CASS import binary must be configured as an absolute path"
       trusted: false
-  envOverrides[131]:
+  envOverrides[132]:
     - name: EE_AGENT_NAME
       category: output
       controls: Identify the current agent for scoped memory retrieval.
@@ -929,6 +931,12 @@ data:
       category: tuning
       controls: Override index publish advisory-lock retry attempts.
       defaultValue: "200"
+      isSet: false
+      source: registry_default
+    - name: EE_INDEX_REBUILD_TIMEOUT_SECONDS
+      category: tuning
+      controls: "Override the wall-clock budget for full index rebuilds, re-embeds, and synchronous index publication."
+      defaultValue: "3600"
       isSet: false
       source: registry_default
     - name: EE_JSON
@@ -1453,6 +1461,6 @@ data:
     enabledFeatures: 4
     totalFeatures: 8
     unimplementedCapabilities: 2
-    availableCommands: 557
-    totalCommands: 558
+    availableCommands: 559
+    totalCommands: 560
 degraded[0]:

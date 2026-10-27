@@ -1,6 +1,42 @@
 # Migrating from `ee` v0.1 to v0.2 (bd-17c65.11.5 / K5)
 
-## Production quality ranking and pack identity v4
+## Global promotion review proposals
+
+`ee memory promote-global` now emits `ee.global_promotion.report.v2`, containing
+`ee.global_promotion.plan.v2`. Exact compatible twins continue to reuse their
+global memory. When differing text passes the bounded near-duplicate gate,
+`plan.detail.action` is `propose_merge`: a pending curation candidate is stored
+in the global database, and neither memory content nor a search-index job is
+changed. Both original texts are retained in the proposed content. The additive
+report fields `mergeCandidateId` and `reviewCommand` are nullable on ordinary
+insert/exact-twin paths; the command explicitly routes review to the global
+workspace and database. Dry runs compute the same proposal ID without writes.
+
+`executed=true` on a proposal means its review record was persisted, not that
+global knowledge was merged. `alreadyPromoted` remains false until an exact
+twin exists or that same origin's reviewed merge has already been applied to
+the still-current destination. Repeated promotion reuses the candidate,
+including a previous rejection, and never resets a review decision. Approved
+merges use the existing `curate show`, `curate validate` / `curate accept`, and
+`curate apply` workflow. Application rechecks the candidate and complete target
+snapshot under the writer transaction; changes to content, trust, type,
+lifetime, seal, or structured fields require a fresh proposal.
+
+Applying a global merge records its single-document index job in that same
+transaction and publishes to the global store's `indexes/` directory. A failed
+publication reports degraded recall while retaining the approved memory and
+job. Repeating `curate apply` or promotion after application recovers the same
+job without appending content again; ordinary workspace curation routing is
+unchanged.
+
+The durable `ee.global_promotion.merge_snapshot.v1` receipt binds origin IDs,
+origin content and payload commitments, and the target/proposed-content
+commitments. These hashes detect changed inputs; they are not signatures.
+Existing `ee.global_promotion.report.v1` audit receipts and capture-start proofs
+are retained unchanged. Both historical v1 wire schemas and current v2 schemas
+remain available through `ee schema`.
+
+## Production quality ranking and pack identity v5
 
 Search now applies EE's observed recency, confidence, utility, harmful-feedback,
 native-rule maturity and scope signals after Frankensearch retrieval. Candidate
@@ -21,16 +57,28 @@ validation. Memory feedback is read from the owning database at the request's
 reference time; a future event cannot penalize a historical request.
 
 New pack responses retain `ee.pack.v2` and identify their hash input as
-`ee.pack.hash_input.v4`, with `snapshotIdentity.version=4`. The added
+`ee.pack.hash_input.v5`, with `snapshotIdentity.version=5`. The
 `qualityScoring` component binds the policy actually used by retrieval; a
 direct pack builder without search binds an explicit absence marker. Thus a
 policy change can change identity even when selected items remain equal.
 Historical pack records, ledger bytes and hashes are not rewritten.
 
-The L2 cache key is now `ee.pack.l2_cache_key.v9`. Retrieval and source
+V5 finalizes the actual prompt renderer after backend, analysis and requested
+DNA attachment, before persisting or caching its identity. The text digest
+binds every delivered byte except the terminal hash-footer value, which uses
+the declared `ee.pack.hash.self.v1` placeholder while hashing. JSON may omit
+`pack.text`, but Lean Markdown remains bound. Late delivery notices remain in
+the envelope and do not change the finalized prompt or stored hash.
+
+The L2 cache key is now `ee.pack.l2_cache_key.v10`, with payload schema
+`ee.pack.l2_context_response.v4`. Cache admission verifies finalized text and
+recomposes its v5 identity; older entries miss. Retrieval and source
 admission run before cache lookup; reuse covers assembly/rendering and binds
 the actual quality policy and scored candidate pool. Daemon pack handoffs
 with observed feedback trigger fresh retrieval, avoiding stale top-K reuse.
+Requested DNA bypasses L2 and uses the held selection snapshot. Historical
+`context show` and `pack replay` remain redacted selection projections carrying
+their original opaque hashes; they do not reconstruct original prompt bytes.
 
 > **Audience.** Agent-harness authors and integration code consuming
 > `ee`'s `--json` output. Human users of the `ee` CLI surface should

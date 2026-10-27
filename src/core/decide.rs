@@ -30,6 +30,7 @@ pub const DECIDE_RECORD_SCHEMA_V1: &str = "ee.decide.record.v1";
 pub const DECIDE_LIST_SCHEMA_V1: &str = "ee.decide.list.v1";
 pub const DECIDE_REVISIT_SCHEMA_V1: &str = "ee.decide.revisit.v1";
 pub const DEFAULT_REVISIT_WARNING_DAYS: u64 = 14;
+const CONFLICT_SUPERSESSION_AUDIT_SCHEMA: &str = "ee.conflict.supersede.v1";
 
 const DECISION_TAG: &str = "decision";
 const DECISION_TOPIC_TAG_PREFIX: &str = "decision-topic:";
@@ -123,6 +124,22 @@ pub struct DecideRecordReport {
     /// Never instruct a caller to repeat a successfully committed decision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// Evidence for one planned action, committed with the resolution rationale.
+#[derive(Clone, Debug)]
+pub(crate) struct ConflictResolutionActionResult {
+    pub action: String,
+    pub audit_ids: Vec<String>,
+    pub created_memory_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ConflictResolutionReport {
+    pub decision: DecideRecordReport,
+    pub results: Vec<ConflictResolutionActionResult>,
+    pub candidate_audit_id: Option<String>,
+    pub candidate_applied_at: Option<String>,
 }
 
 impl DecideRecordReport {
@@ -257,6 +274,23 @@ pub fn parse_revisit_by(raw: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, 
 
 pub fn decide_record(options: &DecideRecordOptions<'_>) -> Result<DecideRecordReport, DomainError> {
     atomic::record(options)
+}
+
+/// Apply a complete reviewed conflict plan in the normal decision writer's
+/// transaction. Its rationale is independent of ordinary decision ancestry.
+pub(crate) fn decide_conflict_resolution(
+    options: &DecideRecordOptions<'_>,
+    plan: &crate::core::contradiction_detect::ConflictResolutionPlan,
+) -> Result<ConflictResolutionReport, DomainError> {
+    atomic::record_resolution(options, plan)
+}
+
+pub(crate) fn decide_conflict_candidate_resolution(
+    options: &DecideRecordOptions<'_>,
+    plan: &crate::core::contradiction_detect::ConflictResolutionPlan,
+    candidate: &crate::db::StoredCurationCandidate,
+) -> Result<ConflictResolutionReport, DomainError> {
+    atomic::record_candidate_resolution(options, plan, candidate)
 }
 
 pub fn decide_list(options: &DecideListOptions<'_>) -> Result<DecideListReport, DomainError> {

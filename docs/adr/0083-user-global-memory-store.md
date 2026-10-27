@@ -76,6 +76,21 @@ rows.
   the workspace-id guard still rejects cross-store access — a workspace-scoped
   verb cannot mutate a global memory and vice versa.
 
+Promotion deduplicates current memories with identical content, type, trust,
+structured payload and compatible validity. Independent captures of the same
+knowledge can have different automatically assigned start times. Those starts
+may differ only when canonical creation or original-promotion audit evidence
+proves that both were defaults. An authored start, an unbounded start, or an
+end bound remains part of the exact-match contract. Older rows without that
+evidence retain strict start-time matching.
+
+The default-start evidence travels with the original global insertion; a
+later merge cannot redefine the destination's validity. Merging preserves the
+existing global row, provenance URI and validity window, while recording the
+new origin and its original bounds in both promotion audit trails. This
+prevents duplicate universal memories without guessing at historical author
+intent or rewriting an existing memory's lifetime.
+
 ### 4. Conflict surfacing (non-negotiable, not silent)
 
 When a global rule and a workspace rule collide on the same subject:

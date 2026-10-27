@@ -1,0 +1,3731 @@
+{
+  "claude_code_version": "2.0.14",
+  "codex_cli_version": "0.46.0",
+  "labels": {
+    "benign_ask": {
+      "line": 1,
+      "path": "home/.claude/projects/-work-ledger/996e1276-6658-4d4f-8405-6e91531bde37.jsonl",
+      "slug": "benign-curl-docs"
+    },
+    "benign_curl": {
+      "line": 2,
+      "path": "home/.claude/projects/-work-ledger/996e1276-6658-4d4f-8405-6e91531bde37.jsonl",
+      "slug": "benign-curl-docs"
+    },
+    "benign_rm": {
+      "line": 4,
+      "path": "home/.claude/projects/-work-ledger/996e1276-6658-4d4f-8405-6e91531bde37.jsonl",
+      "slug": "benign-curl-docs"
+    },
+    "benign_rm_ask": {
+      "line": 3,
+      "path": "home/.claude/projects/-work-ledger/996e1276-6658-4d4f-8405-6e91531bde37.jsonl",
+      "slug": "benign-curl-docs"
+    },
+    "cfg_grep": {
+      "line": 3,
+      "path": "home/.claude/projects/-work-ledger/826929d3-ceb4-4c9a-b7d9-30d9462a14a0.jsonl",
+      "slug": "sidechain-search"
+    },
+    "cfg_grep:call": {
+      "line": 2,
+      "path": "home/.claude/projects/-work-ledger/826929d3-ceb4-4c9a-b7d9-30d9462a14a0.jsonl",
+      "slug": "sidechain-search"
+    },
+    "cfg_plan": {
+      "line": 4,
+      "path": "home/.claude/projects/-work-ledger/826929d3-ceb4-4c9a-b7d9-30d9462a14a0.jsonl",
+      "slug": "sidechain-search"
+    },
+    "cfg_tests": {
+      "line": 6,
+      "path": "home/.claude/projects/-work-ledger/826929d3-ceb4-4c9a-b7d9-30d9462a14a0.jsonl",
+      "slug": "sidechain-search"
+    },
+    "cfg_tests:call": {
+      "line": 5,
+      "path": "home/.claude/projects/-work-ledger/826929d3-ceb4-4c9a-b7d9-30d9462a14a0.jsonl",
+      "slug": "sidechain-search"
+    },
+    "clippy_diag": {
+      "line": 4,
+      "path": "home/.claude/projects/-work-ledger/02a8cf89-9cd2-4ced-8759-7aa216a7d492.jsonl",
+      "slug": "clippy-deny-warnings"
+    },
+    "clippy_fail": {
+      "line": 3,
+      "path": "home/.claude/projects/-work-ledger/02a8cf89-9cd2-4ced-8759-7aa216a7d492.jsonl",
+      "slug": "clippy-deny-warnings"
+    },
+    "clippy_fail:call": {
+      "line": 2,
+      "path": "home/.claude/projects/-work-ledger/02a8cf89-9cd2-4ced-8759-7aa216a7d492.jsonl",
+      "slug": "clippy-deny-warnings"
+    },
+    "clippy_fix": {
+      "line": 8,
+      "path": "home/.claude/projects/-work-ledger/02a8cf89-9cd2-4ced-8759-7aa216a7d492.jsonl",
+      "slug": "clippy-deny-warnings"
+    },
+    "clippy_fix:call": {
+      "line": 7,
+      "path": "home/.claude/projects/-work-ledger/02a8cf89-9cd2-4ced-8759-7aa216a7d492.jsonl",
+      "slug": "clippy-deny-warnings"
+    },
+    "clippy_rule": {
+      "line": 9,
+      "path": "home/.claude/projects/-work-ledger/02a8cf89-9cd2-4ced-8759-7aa216a7d492.jsonl",
+      "slug": "clippy-deny-warnings"
+    },
+    "dec_sqlite": {
+      "line": 3,
+      "path": "home/.claude/projects/-work-ledger/246b27a2-40ab-4cd0-96ea-d5c654bf1d08.jsonl",
+      "slug": "storage-decision"
+    },
+    "dec_sqlite_done": {
+      "line": 7,
+      "path": "home/.claude/projects/-work-ledger/246b27a2-40ab-4cd0-96ea-d5c654bf1d08.jsonl",
+      "slug": "storage-decision"
+    },
+    "distract_espresso": {
+      "line": 2,
+      "path": "home/.claude/projects/-work-ledger/f4cc75b3-0d3f-4f7a-a275-bf5b1860f6c6.jsonl",
+      "slug": "office-chatter-distractor"
+    },
+    "distract_lunch": {
+      "line": 4,
+      "path": "home/.claude/projects/-work-ledger/f4cc75b3-0d3f-4f7a-a275-bf5b1860f6c6.jsonl",
+      "slug": "office-chatter-distractor"
+    },
+    "docker_diag": {
+      "line": 6,
+      "path": "home/.codex/sessions/2026/09/14/rollout-2026-09-01T17-28-40-2a7828c9-567f-4b54-b488-ecc8ab1a2d68.jsonl",
+      "slug": "codex-docker-cache"
+    },
+    "docker_fix": {
+      "line": 8,
+      "path": "home/.codex/sessions/2026/09/14/rollout-2026-09-01T17-28-40-2a7828c9-567f-4b54-b488-ecc8ab1a2d68.jsonl",
+      "slug": "codex-docker-cache"
+    },
+    "docker_fix:call": {
+      "line": 7,
+      "path": "home/.codex/sessions/2026/09/14/rollout-2026-09-01T17-28-40-2a7828c9-567f-4b54-b488-ecc8ab1a2d68.jsonl",
+      "slug": "codex-docker-cache"
+    },
+    "docker_read": {
+      "line": 5,
+      "path": "home/.codex/sessions/2026/09/14/rollout-2026-09-01T17-28-40-2a7828c9-567f-4b54-b488-ecc8ab1a2d68.jsonl",
+      "slug": "codex-docker-cache"
+    },
+    "docker_read:call": {
+      "line": 4,
+      "path": "home/.codex/sessions/2026/09/14/rollout-2026-09-01T17-28-40-2a7828c9-567f-4b54-b488-ecc8ab1a2d68.jsonl",
+      "slug": "codex-docker-cache"
+    },
+    "e0502_diag": {
+      "line": 4,
+      "path": "home/.claude/projects/-work-ledger/94967764-8110-4823-aef2-b0a9a0729120.jsonl",
+      "slug": "rustc-borrow-error"
+    },
+    "e0502_fail": {
+      "line": 3,
+      "path": "home/.claude/projects/-work-ledger/94967764-8110-4823-aef2-b0a9a0729120.jsonl",
+      "slug": "rustc-borrow-error"
+    },
+    "e0502_fail:call": {
+      "line": 2,
+      "path": "home/.claude/projects/-work-ledger/94967764-8110-4823-aef2-b0a9a0729120.jsonl",
+      "slug": "rustc-borrow-error"
+    },
+    "e0502_fix": {
+      "line": 8,
+      "path": "home/.claude/projects/-work-ledger/94967764-8110-4823-aef2-b0a9a0729120.jsonl",
+      "slug": "rustc-borrow-error"
+    },
+    "e0502_fix:call": {
+      "line": 7,
+      "path": "home/.claude/projects/-work-ledger/94967764-8110-4823-aef2-b0a9a0729120.jsonl",
+      "slug": "rustc-borrow-error"
+    },
+    "flaky_diag": {
+      "line": 5,
+      "path": "home/.claude/projects/-work-ledger/67915db3-5385-4bc9-8df0-45570442ff0e.jsonl",
+      "slug": "flaky-timeout-test"
+    },
+    "flaky_fail": {
+      "line": 3,
+      "path": "home/.claude/projects/-work-ledger/67915db3-5385-4bc9-8df0-45570442ff0e.jsonl",
+      "slug": "flaky-timeout-test"
+    },
+    "flaky_fail:call": {
+      "line": 2,
+      "path": "home/.claude/projects/-work-ledger/67915db3-5385-4bc9-8df0-45570442ff0e.jsonl",
+      "slug": "flaky-timeout-test"
+    },
+    "flaky_fix": {
+      "line": 9,
+      "path": "home/.claude/projects/-work-ledger/67915db3-5385-4bc9-8df0-45570442ff0e.jsonl",
+      "slug": "flaky-timeout-test"
+    },
+    "flaky_fix:call": {
+      "line": 8,
+      "path": "home/.claude/projects/-work-ledger/67915db3-5385-4bc9-8df0-45570442ff0e.jsonl",
+      "slug": "flaky-timeout-test"
+    },
+    "flaky_lesson": {
+      "line": 10,
+      "path": "home/.claude/projects/-work-ledger/67915db3-5385-4bc9-8df0-45570442ff0e.jsonl",
+      "slug": "flaky-timeout-test"
+    },
+    "fmt_fail": {
+      "line": 14,
+      "path": "home/.claude/projects/-work-ledger/e0f87cbd-59cb-4fd0-8701-bcae9c879175.jsonl",
+      "slug": "fmt-rule-and-noise"
+    },
+    "fmt_fail:call": {
+      "line": 13,
+      "path": "home/.claude/projects/-work-ledger/e0f87cbd-59cb-4fd0-8701-bcae9c879175.jsonl",
+      "slug": "fmt-rule-and-noise"
+    },
+    "fmt_fix": {
+      "line": 18,
+      "path": "home/.claude/projects/-work-ledger/e0f87cbd-59cb-4fd0-8701-bcae9c879175.jsonl",
+      "slug": "fmt-rule-and-noise"
+    },
+    "fmt_fix:call": {
+      "line": 17,
+      "path": "home/.claude/projects/-work-ledger/e0f87cbd-59cb-4fd0-8701-bcae9c879175.jsonl",
+      "slug": "fmt-rule-and-noise"
+    },
+    "fmt_rule": {
+      "line": 1,
+      "path": "home/.claude/projects/-work-ledger/e0f87cbd-59cb-4fd0-8701-bcae9c879175.jsonl",
+      "slug": "fmt-rule-and-noise"
+    },
+    "inj_readme": {
+      "line": 3,
+      "path": "home/.claude/projects/-work-ledger/40903b0a-3f6a-484a-aa48-deecb5df1007.jsonl",
+      "slug": "injection-bait"
+    },
+    "inj_readme:call": {
+      "line": 2,
+      "path": "home/.claude/projects/-work-ledger/40903b0a-3f6a-484a-aa48-deecb5df1007.jsonl",
+      "slug": "injection-bait"
+    },
+    "inj_summary": {
+      "line": 4,
+      "path": "home/.claude/projects/-work-ledger/40903b0a-3f6a-484a-aa48-deecb5df1007.jsonl",
+      "slug": "injection-bait"
+    },
+    "inj_user": {
+      "line": 5,
+      "path": "home/.claude/projects/-work-ledger/40903b0a-3f6a-484a-aa48-deecb5df1007.jsonl",
+      "slug": "injection-bait"
+    },
+    "mig_diag": {
+      "line": 4,
+      "path": "home/.claude/projects/-work-ledger/8b72c433-aa4b-4f09-8ec7-64afa0c95bfb.jsonl",
+      "slug": "migration-not-null"
+    },
+    "mig_fail": {
+      "line": 3,
+      "path": "home/.claude/projects/-work-ledger/8b72c433-aa4b-4f09-8ec7-64afa0c95bfb.jsonl",
+      "slug": "migration-not-null"
+    },
+    "mig_fail:call": {
+      "line": 2,
+      "path": "home/.claude/projects/-work-ledger/8b72c433-aa4b-4f09-8ec7-64afa0c95bfb.jsonl",
+      "slug": "migration-not-null"
+    },
+    "mig_fix": {
+      "line": 8,
+      "path": "home/.claude/projects/-work-ledger/8b72c433-aa4b-4f09-8ec7-64afa0c95bfb.jsonl",
+      "slug": "migration-not-null"
+    },
+    "mig_fix:call": {
+      "line": 7,
+      "path": "home/.claude/projects/-work-ledger/8b72c433-aa4b-4f09-8ec7-64afa0c95bfb.jsonl",
+      "slug": "migration-not-null"
+    },
+    "mig_lesson": {
+      "line": 9,
+      "path": "home/.claude/projects/-work-ledger/8b72c433-aa4b-4f09-8ec7-64afa0c95bfb.jsonl",
+      "slug": "migration-not-null"
+    },
+    "py_diag": {
+      "line": 6,
+      "path": "home/.codex/sessions/2026/09/13/rollout-2026-09-01T16-50-09-8d7cad40-f6be-4b57-b754-3df7743abffc.jsonl",
+      "slug": "codex-pytest-fixture"
+    },
+    "py_fail": {
+      "line": 5,
+      "path": "home/.codex/sessions/2026/09/13/rollout-2026-09-01T16-50-09-8d7cad40-f6be-4b57-b754-3df7743abffc.jsonl",
+      "slug": "codex-pytest-fixture"
+    },
+    "py_fail:call": {
+      "line": 4,
+      "path": "home/.codex/sessions/2026/09/13/rollout-2026-09-01T16-50-09-8d7cad40-f6be-4b57-b754-3df7743abffc.jsonl",
+      "slug": "codex-pytest-fixture"
+    },
+    "py_fix": {
+      "line": 8,
+      "path": "home/.codex/sessions/2026/09/13/rollout-2026-09-01T16-50-09-8d7cad40-f6be-4b57-b754-3df7743abffc.jsonl",
+      "slug": "codex-pytest-fixture"
+    },
+    "py_fix:call": {
+      "line": 7,
+      "path": "home/.codex/sessions/2026/09/13/rollout-2026-09-01T16-50-09-8d7cad40-f6be-4b57-b754-3df7743abffc.jsonl",
+      "slug": "codex-pytest-fixture"
+    },
+    "py_lesson": {
+      "line": 9,
+      "path": "home/.codex/sessions/2026/09/13/rollout-2026-09-01T16-50-09-8d7cad40-f6be-4b57-b754-3df7743abffc.jsonl",
+      "slug": "codex-pytest-fixture"
+    },
+    "rel_diag": {
+      "line": 7,
+      "path": "home/.claude/projects/-work-ledger/c33f4584-b23b-41d8-893c-d01609de8895.jsonl",
+      "slug": "release-publish-failure"
+    },
+    "rel_fail": {
+      "line": 6,
+      "path": "home/.claude/projects/-work-ledger/c33f4584-b23b-41d8-893c-d01609de8895.jsonl",
+      "slug": "release-publish-failure"
+    },
+    "rel_fail:call": {
+      "line": 5,
+      "path": "home/.claude/projects/-work-ledger/c33f4584-b23b-41d8-893c-d01609de8895.jsonl",
+      "slug": "release-publish-failure"
+    },
+    "rel_fix": {
+      "line": 13,
+      "path": "home/.claude/projects/-work-ledger/c33f4584-b23b-41d8-893c-d01609de8895.jsonl",
+      "slug": "release-publish-failure"
+    },
+    "rel_fix:call": {
+      "line": 12,
+      "path": "home/.claude/projects/-work-ledger/c33f4584-b23b-41d8-893c-d01609de8895.jsonl",
+      "slug": "release-publish-failure"
+    },
+    "rel_lesson": {
+      "line": 14,
+      "path": "home/.claude/projects/-work-ledger/c33f4584-b23b-41d8-893c-d01609de8895.jsonl",
+      "slug": "release-publish-failure"
+    },
+    "secret_diag": {
+      "line": 4,
+      "path": "home/.claude/projects/-work-ledger/f2b72b04-2b95-4b5a-bf8b-70633b26caa8.jsonl",
+      "slug": "secrets-in-output"
+    },
+    "secret_env": {
+      "line": 3,
+      "path": "home/.claude/projects/-work-ledger/f2b72b04-2b95-4b5a-bf8b-70633b26caa8.jsonl",
+      "slug": "secrets-in-output"
+    },
+    "secret_env:call": {
+      "line": 2,
+      "path": "home/.claude/projects/-work-ledger/f2b72b04-2b95-4b5a-bf8b-70633b26caa8.jsonl",
+      "slug": "secrets-in-output"
+    },
+    "secret_user": {
+      "line": 7,
+      "path": "home/.claude/projects/-work-ledger/f2b72b04-2b95-4b5a-bf8b-70633b26caa8.jsonl",
+      "slug": "secrets-in-output"
+    }
+  },
+  "schema": "ee.real_shape_cass.manifest.v1",
+  "seed": 43,
+  "sessions": [
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T09:03:21.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/c33f4584-b23b-41d8-893c-d01609de8895.jsonl",
+      "session_id": "c33f4584-b23b-41d8-893c-d01609de8895",
+      "slug": "release-publish-failure",
+      "started_at": "2026-09-01T09:00:00.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T09:42:55.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/02a8cf89-9cd2-4ced-8759-7aa216a7d492.jsonl",
+      "session_id": "02a8cf89-9cd2-4ced-8759-7aa216a7d492",
+      "slug": "clippy-deny-warnings",
+      "started_at": "2026-09-01T09:40:21.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T10:22:29.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/67915db3-5385-4bc9-8df0-45570442ff0e.jsonl",
+      "session_id": "67915db3-5385-4bc9-8df0-45570442ff0e",
+      "slug": "flaky-timeout-test",
+      "started_at": "2026-09-01T10:19:55.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T11:01:36.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/8b72c433-aa4b-4f09-8ec7-64afa0c95bfb.jsonl",
+      "session_id": "8b72c433-aa4b-4f09-8ec7-64afa0c95bfb",
+      "slug": "migration-not-null",
+      "started_at": "2026-09-01T10:59:29.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T11:42:24.000Z",
+      "message_count": 19,
+      "path": "home/.claude/projects/-work-ledger/e0f87cbd-59cb-4fd0-8701-bcae9c879175.jsonl",
+      "session_id": "e0f87cbd-59cb-4fd0-8701-bcae9c879175",
+      "slug": "fmt-rule-and-noise",
+      "started_at": "2026-09-01T11:38:36.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T12:21:27.000Z",
+      "message_count": 7,
+      "path": "home/.claude/projects/-work-ledger/246b27a2-40ab-4cd0-96ea-d5c654bf1d08.jsonl",
+      "session_id": "246b27a2-40ab-4cd0-96ea-d5c654bf1d08",
+      "slug": "storage-decision",
+      "started_at": "2026-09-01T12:19:24.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T13:00:32.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/f2b72b04-2b95-4b5a-bf8b-70633b26caa8.jsonl",
+      "session_id": "f2b72b04-2b95-4b5a-bf8b-70633b26caa8",
+      "slug": "secrets-in-output",
+      "started_at": "2026-09-01T12:58:27.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T13:39:21.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/40903b0a-3f6a-484a-aa48-deecb5df1007.jsonl",
+      "session_id": "40903b0a-3f6a-484a-aa48-deecb5df1007",
+      "slug": "injection-bait",
+      "started_at": "2026-09-01T13:37:32.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T14:17:38.000Z",
+      "message_count": 4,
+      "path": "home/.claude/projects/-work-ledger/996e1276-6658-4d4f-8405-6e91531bde37.jsonl",
+      "session_id": "996e1276-6658-4d4f-8405-6e91531bde37",
+      "slug": "benign-curl-docs",
+      "started_at": "2026-09-01T14:16:21.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T14:55:55.000Z",
+      "message_count": 4,
+      "path": "home/.claude/projects/-work-ledger/f4cc75b3-0d3f-4f7a-a275-bf5b1860f6c6.jsonl",
+      "session_id": "f4cc75b3-0d3f-4f7a-a275-bf5b1860f6c6",
+      "slug": "office-chatter-distractor",
+      "started_at": "2026-09-01T14:54:38.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T15:34:16.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/826929d3-ceb4-4c9a-b7d9-30d9462a14a0.jsonl",
+      "session_id": "826929d3-ceb4-4c9a-b7d9-30d9462a14a0",
+      "slug": "sidechain-search",
+      "started_at": "2026-09-01T15:32:55.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": true,
+      "ended_at": "2026-09-01T16:13:09.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/94967764-8110-4823-aef2-b0a9a0729120.jsonl",
+      "session_id": "94967764-8110-4823-aef2-b0a9a0729120",
+      "slug": "rustc-borrow-error",
+      "started_at": "2026-09-01T16:11:16.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "codex",
+      "core": true,
+      "ended_at": "2026-09-01T16:51:40.000Z",
+      "message_count": 9,
+      "path": "home/.codex/sessions/2026/09/13/rollout-2026-09-01T16-50-09-8d7cad40-f6be-4b57-b754-3df7743abffc.jsonl",
+      "session_id": "8d7cad40-f6be-4b57-b754-3df7743abffc",
+      "slug": "codex-pytest-fixture",
+      "started_at": "2026-09-01T16:50:09.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "codex",
+      "core": true,
+      "ended_at": "2026-09-01T17:29:45.000Z",
+      "message_count": 8,
+      "path": "home/.codex/sessions/2026/09/14/rollout-2026-09-01T17-28-40-2a7828c9-567f-4b54-b488-ecc8ab1a2d68.jsonl",
+      "session_id": "2a7828c9-567f-4b54-b488-ecc8ab1a2d68",
+      "slug": "codex-docker-cache",
+      "started_at": "2026-09-01T17:28:40.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-01T18:09:32.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/6d2cfe0d-60ab-47e2-aae6-b3ed4a5e7daf.jsonl",
+      "session_id": "6d2cfe0d-60ab-47e2-aae6-b3ed4a5e7daf",
+      "slug": "secrets-in-output-g00001",
+      "started_at": "2026-09-01T18:06:45.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-01T18:49:06.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/971ca585-9aa9-437b-b092-fbf787f97d8d.jsonl",
+      "session_id": "971ca585-9aa9-437b-b092-fbf787f97d8d",
+      "slug": "secrets-in-output-g00002",
+      "started_at": "2026-09-01T18:46:32.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-01T19:31:23.000Z",
+      "message_count": 25,
+      "path": "home/.claude/projects/-work-ledger/43b02fbf-58a2-43b7-bbfc-780c2adaa868.jsonl",
+      "session_id": "43b02fbf-58a2-43b7-bbfc-780c2adaa868",
+      "slug": "fmt-rule-and-noise-g00003",
+      "started_at": "2026-09-01T19:26:06.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-01T20:10:10.000Z",
+      "message_count": 12,
+      "path": "home/.codex/sessions/2026/09/18/rollout-2026-09-01T20-08-23-e0b78b4e-1509-44e3-8070-b58fcea05f3d.jsonl",
+      "session_id": "e0b78b4e-1509-44e3-8070-b58fcea05f3d",
+      "slug": "codex-docker-cache-g00004",
+      "started_at": "2026-09-01T20:08:23.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-01T20:51:34.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/a6d13e38-0056-4cb4-a40b-23ae2e4b9fda.jsonl",
+      "session_id": "a6d13e38-0056-4cb4-a40b-23ae2e4b9fda",
+      "slug": "fmt-rule-and-noise-g00005",
+      "started_at": "2026-09-01T20:47:10.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-01T21:31:08.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/deb10d2b-b5e1-4076-a2a3-fbf17ac42be8.jsonl",
+      "session_id": "deb10d2b-b5e1-4076-a2a3-fbf17ac42be8",
+      "slug": "benign-curl-docs-g00006",
+      "started_at": "2026-09-01T21:28:34.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-01T22:10:01.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/442ee220-0c22-4d44-80d8-314d39370159.jsonl",
+      "session_id": "442ee220-0c22-4d44-80d8-314d39370159",
+      "slug": "sidechain-search-g00007",
+      "started_at": "2026-09-01T22:08:08.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-01T22:51:45.000Z",
+      "message_count": 23,
+      "path": "home/.claude/projects/-work-ledger/cd3ff006-e347-4714-9ccf-42b45896ae81.jsonl",
+      "session_id": "cd3ff006-e347-4714-9ccf-42b45896ae81",
+      "slug": "fmt-rule-and-noise-g00008",
+      "started_at": "2026-09-01T22:47:01.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-01T23:33:09.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/767d9cad-15e5-4b71-94c0-2bc4306f3250.jsonl",
+      "session_id": "767d9cad-15e5-4b71-94c0-2bc4306f3250",
+      "slug": "fmt-rule-and-noise-g00009",
+      "started_at": "2026-09-01T23:28:45.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T00:12:56.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/740e59d2-2d43-470a-808b-f0d3afb517bc.jsonl",
+      "session_id": "740e59d2-2d43-470a-808b-f0d3afb517bc",
+      "slug": "injection-bait-g00010",
+      "started_at": "2026-09-02T00:10:09.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T00:51:49.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/30d43dfa-4c5b-4d09-946f-734c9d0360b6.jsonl",
+      "session_id": "30d43dfa-4c5b-4d09-946f-734c9d0360b6",
+      "slug": "sidechain-search-g00011",
+      "started_at": "2026-09-02T00:49:56.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T01:34:02.000Z",
+      "message_count": 23,
+      "path": "home/.claude/projects/-work-ledger/3014fe0d-025b-4611-9ae0-bd802195fe1b.jsonl",
+      "session_id": "3014fe0d-025b-4611-9ae0-bd802195fe1b",
+      "slug": "release-publish-failure-g00012",
+      "started_at": "2026-09-02T01:28:49.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-02T02:12:33.000Z",
+      "message_count": 9,
+      "path": "home/.codex/sessions/2026/09/27/rollout-2026-09-02T02-11-02-e8647898-ccad-4a60-9730-74b71c8dc6af.jsonl",
+      "session_id": "e8647898-ccad-4a60-9730-74b71c8dc6af",
+      "slug": "codex-pytest-fixture-g00013",
+      "started_at": "2026-09-02T02:11:02.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T02:52:20.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/40314670-5b84-47fd-a1b6-08c6d5cda123.jsonl",
+      "session_id": "40314670-5b84-47fd-a1b6-08c6d5cda123",
+      "slug": "secrets-in-output-g00014",
+      "started_at": "2026-09-02T02:49:33.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T03:32:35.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/7d337efb-ef62-42d9-83ce-f6b9c4b42e33.jsonl",
+      "session_id": "7d337efb-ef62-42d9-83ce-f6b9c4b42e33",
+      "slug": "migration-not-null-g00015",
+      "started_at": "2026-09-02T03:29:20.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T04:12:09.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/177e02c1-3c1b-4f41-9315-f3ad16f70820.jsonl",
+      "session_id": "177e02c1-3c1b-4f41-9315-f3ad16f70820",
+      "slug": "benign-curl-docs-g00016",
+      "started_at": "2026-09-02T04:09:35.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-02T04:52:00.000Z",
+      "message_count": 17,
+      "path": "home/.codex/sessions/2026/09/03/rollout-2026-09-02T04-49-09-d36da544-4b41-4b30-882e-09badde96716.jsonl",
+      "session_id": "d36da544-4b41-4b30-882e-09badde96716",
+      "slug": "codex-pytest-fixture-g00017",
+      "started_at": "2026-09-02T04:49:09.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T05:31:47.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/b4dfc083-f7f6-4501-a833-2485a2c7dc6f.jsonl",
+      "session_id": "b4dfc083-f7f6-4501-a833-2485a2c7dc6f",
+      "slug": "office-chatter-distractor-g00018",
+      "started_at": "2026-09-02T05:29:00.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T06:13:27.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/50e1d9ca-c25e-47e8-9390-d55b13927c17.jsonl",
+      "session_id": "50e1d9ca-c25e-47e8-9390-d55b13927c17",
+      "slug": "release-publish-failure-g00019",
+      "started_at": "2026-09-02T06:08:47.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T06:53:48.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/3744b412-1483-40d5-99ea-4d986dcb4cbd.jsonl",
+      "session_id": "3744b412-1483-40d5-99ea-4d986dcb4cbd",
+      "slug": "storage-decision-g00020",
+      "started_at": "2026-09-02T06:50:27.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T07:34:05.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/c5152e4c-9e17-4d7f-b3b2-4b48d2122225.jsonl",
+      "session_id": "c5152e4c-9e17-4d7f-b3b2-4b48d2122225",
+      "slug": "rustc-borrow-error-g00021",
+      "started_at": "2026-09-02T07:30:48.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T08:14:18.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/ef680640-dd96-4ea8-9dfc-9e6cec426ce3.jsonl",
+      "session_id": "ef680640-dd96-4ea8-9dfc-9e6cec426ce3",
+      "slug": "injection-bait-g00022",
+      "started_at": "2026-09-02T08:11:05.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T08:55:06.000Z",
+      "message_count": 19,
+      "path": "home/.claude/projects/-work-ledger/2c0d3d27-2138-44a8-ae04-f897142c99e5.jsonl",
+      "session_id": "2c0d3d27-2138-44a8-ae04-f897142c99e5",
+      "slug": "fmt-rule-and-noise-g00023",
+      "started_at": "2026-09-02T08:51:18.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T09:35:52.000Z",
+      "message_count": 18,
+      "path": "home/.claude/projects/-work-ledger/c4b7d4dc-ad94-4d05-979f-cac0a72ba7bc.jsonl",
+      "session_id": "c4b7d4dc-ad94-4d05-979f-cac0a72ba7bc",
+      "slug": "clippy-deny-warnings-g00024",
+      "started_at": "2026-09-02T09:32:06.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T10:14:41.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/ea4a9ad9-addb-4107-a414-03f6d2ad10e2.jsonl",
+      "session_id": "ea4a9ad9-addb-4107-a414-03f6d2ad10e2",
+      "slug": "benign-curl-docs-g00025",
+      "started_at": "2026-09-02T10:12:52.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T10:54:15.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/9d448413-d7bf-4072-8b7e-e7d7f7c8b79a.jsonl",
+      "session_id": "9d448413-d7bf-4072-8b7e-e7d7f7c8b79a",
+      "slug": "benign-curl-docs-g00026",
+      "started_at": "2026-09-02T10:51:41.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T11:34:28.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/ec2699c5-6a53-457e-90e8-0be0ed776001.jsonl",
+      "session_id": "ec2699c5-6a53-457e-90e8-0be0ed776001",
+      "slug": "secrets-in-output-g00027",
+      "started_at": "2026-09-02T11:31:15.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T12:14:43.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/f84c7db3-59c1-4af6-bff0-5cd779989ae1.jsonl",
+      "session_id": "f84c7db3-59c1-4af6-bff0-5cd779989ae1",
+      "slug": "migration-not-null-g00028",
+      "started_at": "2026-09-02T12:11:28.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T12:56:03.000Z",
+      "message_count": 19,
+      "path": "home/.claude/projects/-work-ledger/e02cc13c-8f9b-4b33-a69b-5b383ca4bbc1.jsonl",
+      "session_id": "e02cc13c-8f9b-4b33-a69b-5b383ca4bbc1",
+      "slug": "release-publish-failure-g00029",
+      "started_at": "2026-09-02T12:51:43.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-02T13:34:49.000Z",
+      "message_count": 11,
+      "path": "home/.codex/sessions/2026/09/16/rollout-2026-09-02T13-33-03-6f857875-4c73-40cc-a88b-b7b5a9c4c9e1.jsonl",
+      "session_id": "6f857875-4c73-40cc-a88b-b7b5a9c4c9e1",
+      "slug": "codex-pytest-fixture-g00030",
+      "started_at": "2026-09-02T13:33:03.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T14:16:29.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/fa942334-8df6-4f43-acaa-c38d01a1291a.jsonl",
+      "session_id": "fa942334-8df6-4f43-acaa-c38d01a1291a",
+      "slug": "release-publish-failure-g00031",
+      "started_at": "2026-09-02T14:11:49.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T14:56:03.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/6ef8fd2a-ea06-483c-8635-6942093e949d.jsonl",
+      "session_id": "6ef8fd2a-ea06-483c-8635-6942093e949d",
+      "slug": "injection-bait-g00032",
+      "started_at": "2026-09-02T14:53:29.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T15:35:50.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/f8a25a18-04e7-4f24-9f5e-40e564187687.jsonl",
+      "session_id": "f8a25a18-04e7-4f24-9f5e-40e564187687",
+      "slug": "flaky-timeout-test-g00033",
+      "started_at": "2026-09-02T15:33:03.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T16:15:41.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/f26c7045-b0f8-4ca9-95b3-7f0692272bfb.jsonl",
+      "session_id": "f26c7045-b0f8-4ca9-95b3-7f0692272bfb",
+      "slug": "sidechain-search-g00034",
+      "started_at": "2026-09-02T16:12:50.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T16:55:30.000Z",
+      "message_count": 13,
+      "path": "home/.claude/projects/-work-ledger/433a2148-f880-4693-b4f7-3f3f896e3f86.jsonl",
+      "session_id": "433a2148-f880-4693-b4f7-3f3f896e3f86",
+      "slug": "migration-not-null-g00035",
+      "started_at": "2026-09-02T16:52:41.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T17:35:04.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/8476329b-5374-4809-9a5c-c3a372fab9a4.jsonl",
+      "session_id": "8476329b-5374-4809-9a5c-c3a372fab9a4",
+      "slug": "office-chatter-distractor-g00036",
+      "started_at": "2026-09-02T17:32:30.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T18:14:55.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/a3556e34-fd88-48c7-abd0-8b4ac217cbbd.jsonl",
+      "session_id": "a3556e34-fd88-48c7-abd0-8b4ac217cbbd",
+      "slug": "sidechain-search-g00037",
+      "started_at": "2026-09-02T18:12:04.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-02T18:53:26.000Z",
+      "message_count": 9,
+      "path": "home/.codex/sessions/2026/09/24/rollout-2026-09-02T18-51-55-5d6e2398-5977-4b88-bd64-caa084fa2142.jsonl",
+      "session_id": "5d6e2398-5977-4b88-bd64-caa084fa2142",
+      "slug": "codex-pytest-fixture-g00038",
+      "started_at": "2026-09-02T18:51:55.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T19:33:13.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/2073324c-9841-4478-91a2-9ae91a58c7da.jsonl",
+      "session_id": "2073324c-9841-4478-91a2-9ae91a58c7da",
+      "slug": "benign-curl-docs-g00039",
+      "started_at": "2026-09-02T19:30:26.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T20:12:51.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/0a6b55bc-235b-457f-8e43-42ce3f1c3d4a.jsonl",
+      "session_id": "0a6b55bc-235b-457f-8e43-42ce3f1c3d4a",
+      "slug": "rustc-borrow-error-g00040",
+      "started_at": "2026-09-02T20:10:13.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T20:53:35.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/c4f90655-9449-425b-902a-ee3350646425.jsonl",
+      "session_id": "c4f90655-9449-425b-902a-ee3350646425",
+      "slug": "release-publish-failure-g00041",
+      "started_at": "2026-09-02T20:49:51.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T21:32:44.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/f26d3606-a85c-422a-96fe-e19deedddb4f.jsonl",
+      "session_id": "f26d3606-a85c-422a-96fe-e19deedddb4f",
+      "slug": "sidechain-search-g00042",
+      "started_at": "2026-09-02T21:30:35.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T22:12:16.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/787b8720-5c98-499c-ab40-127d2706c3f3.jsonl",
+      "session_id": "787b8720-5c98-499c-ab40-127d2706c3f3",
+      "slug": "storage-decision-g00043",
+      "started_at": "2026-09-02T22:09:44.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T22:51:09.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/0d15f7b3-4a2e-4933-b8dc-c1a23a0b3250.jsonl",
+      "session_id": "0d15f7b3-4a2e-4933-b8dc-c1a23a0b3250",
+      "slug": "sidechain-search-g00044",
+      "started_at": "2026-09-02T22:49:16.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-02T23:30:47.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/c8f6c24b-ef56-421d-9a78-bc42916fd79b.jsonl",
+      "session_id": "c8f6c24b-ef56-421d-9a78-bc42916fd79b",
+      "slug": "rustc-borrow-error-g00045",
+      "started_at": "2026-09-02T23:28:09.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T00:11:00.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/e3d06e39-05a0-48ce-ba56-a85d74f66417.jsonl",
+      "session_id": "e3d06e39-05a0-48ce-ba56-a85d74f66417",
+      "slug": "clippy-deny-warnings-g00046",
+      "started_at": "2026-09-03T00:07:47.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T00:50:34.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/7be22ab7-748c-45f4-8ecc-867e1faf6fbd.jsonl",
+      "session_id": "7be22ab7-748c-45f4-8ecc-867e1faf6fbd",
+      "slug": "clippy-deny-warnings-g00047",
+      "started_at": "2026-09-03T00:48:00.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T01:31:20.000Z",
+      "message_count": 18,
+      "path": "home/.claude/projects/-work-ledger/f10fd7cc-1d01-432e-9a59-9de7c7234612.jsonl",
+      "session_id": "f10fd7cc-1d01-432e-9a59-9de7c7234612",
+      "slug": "flaky-timeout-test-g00048",
+      "started_at": "2026-09-03T01:27:34.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T02:11:37.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/b47f6fcd-9d7a-4d6f-8f0b-0ad49c73227f.jsonl",
+      "session_id": "b47f6fcd-9d7a-4d6f-8f0b-0ad49c73227f",
+      "slug": "rustc-borrow-error-g00049",
+      "started_at": "2026-09-03T02:08:20.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T02:51:50.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/2a355571-aa11-4c92-91dc-1f77ca8fddb3.jsonl",
+      "session_id": "2a355571-aa11-4c92-91dc-1f77ca8fddb3",
+      "slug": "injection-bait-g00050",
+      "started_at": "2026-09-03T02:48:37.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T03:33:34.000Z",
+      "message_count": 23,
+      "path": "home/.claude/projects/-work-ledger/3cd78fa5-7c37-40d1-bd24-01a4069fa714.jsonl",
+      "session_id": "3cd78fa5-7c37-40d1-bd24-01a4069fa714",
+      "slug": "fmt-rule-and-noise-g00051",
+      "started_at": "2026-09-03T03:28:50.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T04:13:45.000Z",
+      "message_count": 13,
+      "path": "home/.claude/projects/-work-ledger/98c989df-ebe7-447b-ba7f-96b1ca74de80.jsonl",
+      "session_id": "98c989df-ebe7-447b-ba7f-96b1ca74de80",
+      "slug": "storage-decision-g00052",
+      "started_at": "2026-09-03T04:10:34.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T04:52:52.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/53ad4f59-19bc-46b9-b967-03a4ea739918.jsonl",
+      "session_id": "53ad4f59-19bc-46b9-b967-03a4ea739918",
+      "slug": "migration-not-null-g00053",
+      "started_at": "2026-09-03T04:50:45.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T05:32:26.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/c3ba01e7-7f3c-4eb5-8c28-da149336666a.jsonl",
+      "session_id": "c3ba01e7-7f3c-4eb5-8c28-da149336666a",
+      "slug": "office-chatter-distractor-g00054",
+      "started_at": "2026-09-03T05:29:52.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T06:12:47.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/5a297e92-e494-45c4-b0b7-0016d9de3b1d.jsonl",
+      "session_id": "5a297e92-e494-45c4-b0b7-0016d9de3b1d",
+      "slug": "release-publish-failure-g00055",
+      "started_at": "2026-09-03T06:09:26.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T06:51:36.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/39209b16-aa82-4170-864b-ed1c02b60d29.jsonl",
+      "session_id": "39209b16-aa82-4170-864b-ed1c02b60d29",
+      "slug": "benign-curl-docs-g00056",
+      "started_at": "2026-09-03T06:49:47.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T07:31:25.000Z",
+      "message_count": 13,
+      "path": "home/.claude/projects/-work-ledger/ca081fe7-2e07-4910-ad3f-e8607cfd4305.jsonl",
+      "session_id": "ca081fe7-2e07-4910-ad3f-e8607cfd4305",
+      "slug": "migration-not-null-g00057",
+      "started_at": "2026-09-03T07:28:36.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-03T08:10:12.000Z",
+      "message_count": 12,
+      "path": "home/.codex/sessions/2026/09/16/rollout-2026-09-03T08-08-25-8d86fea8-1ee9-42e5-95a5-07c1718fa869.jsonl",
+      "session_id": "8d86fea8-1ee9-42e5-95a5-07c1718fa869",
+      "slug": "codex-docker-cache-g00058",
+      "started_at": "2026-09-03T08:08:25.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T08:49:46.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/719eb830-1507-4959-bea6-5a3e6327d7b5.jsonl",
+      "session_id": "719eb830-1507-4959-bea6-5a3e6327d7b5",
+      "slug": "injection-bait-g00059",
+      "started_at": "2026-09-03T08:47:12.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T09:29:20.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/fef1295f-d90f-4ad5-aa68-78f6864821f3.jsonl",
+      "session_id": "fef1295f-d90f-4ad5-aa68-78f6864821f3",
+      "slug": "benign-curl-docs-g00060",
+      "started_at": "2026-09-03T09:26:46.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T10:08:09.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/0ffda49b-6fc2-420a-9d17-5d72a683c821.jsonl",
+      "session_id": "0ffda49b-6fc2-420a-9d17-5d72a683c821",
+      "slug": "benign-curl-docs-g00061",
+      "started_at": "2026-09-03T10:06:20.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T10:46:26.000Z",
+      "message_count": 4,
+      "path": "home/.claude/projects/-work-ledger/7a94327a-997f-4795-9ed0-344c9d113221.jsonl",
+      "session_id": "7a94327a-997f-4795-9ed0-344c9d113221",
+      "slug": "benign-curl-docs-g00062",
+      "started_at": "2026-09-03T10:45:09.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T11:27:10.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/c8058880-c31c-4d10-8b59-5dfb2870a792.jsonl",
+      "session_id": "c8058880-c31c-4d10-8b59-5dfb2870a792",
+      "slug": "release-publish-failure-g00063",
+      "started_at": "2026-09-03T11:23:26.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T12:07:58.000Z",
+      "message_count": 19,
+      "path": "home/.claude/projects/-work-ledger/c358141a-0459-4d34-a4a9-fa6350c684c0.jsonl",
+      "session_id": "c358141a-0459-4d34-a4a9-fa6350c684c0",
+      "slug": "fmt-rule-and-noise-g00064",
+      "started_at": "2026-09-03T12:04:10.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T12:47:32.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/c912bbc4-7767-4c6f-8eac-27422e944885.jsonl",
+      "session_id": "c912bbc4-7767-4c6f-8eac-27422e944885",
+      "slug": "office-chatter-distractor-g00065",
+      "started_at": "2026-09-03T12:44:58.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T13:27:08.000Z",
+      "message_count": 11,
+      "path": "home/.claude/projects/-work-ledger/6fbe84bb-5b19-4dd4-93a8-ef0c43b1983e.jsonl",
+      "session_id": "6fbe84bb-5b19-4dd4-93a8-ef0c43b1983e",
+      "slug": "migration-not-null-g00066",
+      "started_at": "2026-09-03T13:24:32.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T14:06:57.000Z",
+      "message_count": 13,
+      "path": "home/.claude/projects/-work-ledger/6c618558-b732-445b-ac5a-de7c91ba4781.jsonl",
+      "session_id": "6c618558-b732-445b-ac5a-de7c91ba4781",
+      "slug": "migration-not-null-g00067",
+      "started_at": "2026-09-03T14:04:08.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-03T14:45:43.000Z",
+      "message_count": 11,
+      "path": "home/.codex/sessions/2026/09/26/rollout-2026-09-03T14-43-57-83dc0d6a-c60e-4758-b2a9-0bc648a6cd15.jsonl",
+      "session_id": "83dc0d6a-c60e-4758-b2a9-0bc648a6cd15",
+      "slug": "codex-pytest-fixture-g00068",
+      "started_at": "2026-09-03T14:43:57.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T15:25:28.000Z",
+      "message_count": 11,
+      "path": "home/.claude/projects/-work-ledger/3e34455d-e84a-4cdf-b282-98fa4dfc3659.jsonl",
+      "session_id": "3e34455d-e84a-4cdf-b282-98fa4dfc3659",
+      "slug": "storage-decision-g00069",
+      "started_at": "2026-09-03T15:22:43.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T16:05:06.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/9ac50351-02a1-4690-82af-6d835bb1ee1f.jsonl",
+      "session_id": "9ac50351-02a1-4690-82af-6d835bb1ee1f",
+      "slug": "rustc-borrow-error-g00070",
+      "started_at": "2026-09-03T16:02:28.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T16:45:19.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/5e94b493-a83a-4c11-92f8-6ba662080fd1.jsonl",
+      "session_id": "5e94b493-a83a-4c11-92f8-6ba662080fd1",
+      "slug": "clippy-deny-warnings-g00071",
+      "started_at": "2026-09-03T16:42:06.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T17:25:32.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/71649a2b-8b19-4382-a40d-ecfe20af1b06.jsonl",
+      "session_id": "71649a2b-8b19-4382-a40d-ecfe20af1b06",
+      "slug": "clippy-deny-warnings-g00072",
+      "started_at": "2026-09-03T17:22:19.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T18:06:16.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/f6b498af-ae53-486a-8807-420fb19a3f2f.jsonl",
+      "session_id": "f6b498af-ae53-486a-8807-420fb19a3f2f",
+      "slug": "release-publish-failure-g00073",
+      "started_at": "2026-09-03T18:02:32.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T18:46:39.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/fca468f4-2299-4900-a0ec-7322a965e7ba.jsonl",
+      "session_id": "fca468f4-2299-4900-a0ec-7322a965e7ba",
+      "slug": "flaky-timeout-test-g00074",
+      "started_at": "2026-09-03T18:43:16.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T19:27:23.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/79304383-1c56-40d4-89d7-9c1ccab7026a.jsonl",
+      "session_id": "79304383-1c56-40d4-89d7-9c1ccab7026a",
+      "slug": "release-publish-failure-g00075",
+      "started_at": "2026-09-03T19:23:39.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T20:05:44.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/a19885a0-3e45-4eeb-9296-bac136f5328f.jsonl",
+      "session_id": "a19885a0-3e45-4eeb-9296-bac136f5328f",
+      "slug": "sidechain-search-g00076",
+      "started_at": "2026-09-03T20:04:23.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T20:47:24.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/7ad636c2-8aae-4b25-b6c8-b382d8d0ba0c.jsonl",
+      "session_id": "7ad636c2-8aae-4b25-b6c8-b382d8d0ba0c",
+      "slug": "release-publish-failure-g00077",
+      "started_at": "2026-09-03T20:42:44.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T21:26:56.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/d07e7d65-a49f-4feb-940e-8d03c559667e.jsonl",
+      "session_id": "d07e7d65-a49f-4feb-940e-8d03c559667e",
+      "slug": "storage-decision-g00078",
+      "started_at": "2026-09-03T21:24:24.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T22:06:43.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/5d6dff1c-9f82-4bc9-9590-57318897a040.jsonl",
+      "session_id": "5d6dff1c-9f82-4bc9-9590-57318897a040",
+      "slug": "office-chatter-distractor-g00079",
+      "started_at": "2026-09-03T22:03:56.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T22:45:00.000Z",
+      "message_count": 4,
+      "path": "home/.claude/projects/-work-ledger/0c00aae9-fd79-4bb5-a8c6-05449b6764c0.jsonl",
+      "session_id": "0c00aae9-fd79-4bb5-a8c6-05449b6764c0",
+      "slug": "office-chatter-distractor-g00080",
+      "started_at": "2026-09-03T22:43:43.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-03T23:25:15.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/72d35d74-ed23-44f3-bd3c-6bc83e565711.jsonl",
+      "session_id": "72d35d74-ed23-44f3-bd3c-6bc83e565711",
+      "slug": "migration-not-null-g00081",
+      "started_at": "2026-09-03T23:22:00.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T00:06:01.000Z",
+      "message_count": 18,
+      "path": "home/.claude/projects/-work-ledger/09a6e12a-1d05-4f87-a76a-deb00e11de6e.jsonl",
+      "session_id": "09a6e12a-1d05-4f87-a76a-deb00e11de6e",
+      "slug": "clippy-deny-warnings-g00082",
+      "started_at": "2026-09-04T00:02:15.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-04T00:45:28.000Z",
+      "message_count": 16,
+      "path": "home/.codex/sessions/2026/09/13/rollout-2026-09-04T00-43-01-4f21c4cf-daba-4a83-89bb-4c59499c80ce.jsonl",
+      "session_id": "4f21c4cf-daba-4a83-89bb-4c59499c80ce",
+      "slug": "codex-docker-cache-g00083",
+      "started_at": "2026-09-04T00:43:01.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T01:25:06.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/9a4c62d9-c7a0-45d5-bb7e-63cddfbd2b8e.jsonl",
+      "session_id": "9a4c62d9-c7a0-45d5-bb7e-63cddfbd2b8e",
+      "slug": "rustc-borrow-error-g00084",
+      "started_at": "2026-09-04T01:22:28.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T02:04:53.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/5f89f3d3-ee24-47a0-8c76-70777013fb73.jsonl",
+      "session_id": "5f89f3d3-ee24-47a0-8c76-70777013fb73",
+      "slug": "flaky-timeout-test-g00085",
+      "started_at": "2026-09-04T02:02:06.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T02:45:39.000Z",
+      "message_count": 18,
+      "path": "home/.claude/projects/-work-ledger/8178b369-e23c-4f42-8fed-067effa08bbc.jsonl",
+      "session_id": "8178b369-e23c-4f42-8fed-067effa08bbc",
+      "slug": "flaky-timeout-test-g00086",
+      "started_at": "2026-09-04T02:41:53.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T03:25:30.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/e50c627e-d1cc-4bc1-a037-d0223cfe666c.jsonl",
+      "session_id": "e50c627e-d1cc-4bc1-a037-d0223cfe666c",
+      "slug": "sidechain-search-g00087",
+      "started_at": "2026-09-04T03:22:39.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T04:05:17.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/c64c0f44-53dd-40b9-83f3-7a3b952aefea.jsonl",
+      "session_id": "c64c0f44-53dd-40b9-83f3-7a3b952aefea",
+      "slug": "secrets-in-output-g00088",
+      "started_at": "2026-09-04T04:02:30.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T04:45:08.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/9c918701-80b4-446f-bf07-1e434f8e6fde.jsonl",
+      "session_id": "9c918701-80b4-446f-bf07-1e434f8e6fde",
+      "slug": "sidechain-search-g00089",
+      "started_at": "2026-09-04T04:42:17.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T05:25:21.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/05e770aa-03ea-474a-8391-60e8848601ad.jsonl",
+      "session_id": "05e770aa-03ea-474a-8391-60e8848601ad",
+      "slug": "injection-bait-g00090",
+      "started_at": "2026-09-04T05:22:08.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T06:05:08.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/01a1962c-a56d-4f29-9bcb-7656840fc54e.jsonl",
+      "session_id": "01a1962c-a56d-4f29-9bcb-7656840fc54e",
+      "slug": "benign-curl-docs-g00091",
+      "started_at": "2026-09-04T06:02:21.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T06:46:32.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/42ac5624-b276-4e73-919a-17d859a57622.jsonl",
+      "session_id": "42ac5624-b276-4e73-919a-17d859a57622",
+      "slug": "fmt-rule-and-noise-g00092",
+      "started_at": "2026-09-04T06:42:08.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T07:26:19.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/0640141d-c9db-4ad7-81e2-aa84ea65cf91.jsonl",
+      "session_id": "0640141d-c9db-4ad7-81e2-aa84ea65cf91",
+      "slug": "benign-curl-docs-g00093",
+      "started_at": "2026-09-04T07:23:32.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T08:08:36.000Z",
+      "message_count": 25,
+      "path": "home/.claude/projects/-work-ledger/ae53e39d-906b-4b06-99f8-0d03811af598.jsonl",
+      "session_id": "ae53e39d-906b-4b06-99f8-0d03811af598",
+      "slug": "fmt-rule-and-noise-g00094",
+      "started_at": "2026-09-04T08:03:19.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T08:47:41.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/ed679954-f35e-440f-b377-4c53613e31be.jsonl",
+      "session_id": "ed679954-f35e-440f-b377-4c53613e31be",
+      "slug": "benign-curl-docs-g00095",
+      "started_at": "2026-09-04T08:45:36.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T09:27:15.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/76b624ff-02d1-440f-9a5f-8a3e4898acf2.jsonl",
+      "session_id": "76b624ff-02d1-440f-9a5f-8a3e4898acf2",
+      "slug": "office-chatter-distractor-g00096",
+      "started_at": "2026-09-04T09:24:41.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T10:07:38.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/6996dff5-33f9-47f7-a4f5-c16e4f6bd6ee.jsonl",
+      "session_id": "6996dff5-33f9-47f7-a4f5-c16e4f6bd6ee",
+      "slug": "flaky-timeout-test-g00097",
+      "started_at": "2026-09-04T10:04:15.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T10:46:43.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/9ab5bba2-e72a-4f8f-99c4-7679474ff15c.jsonl",
+      "session_id": "9ab5bba2-e72a-4f8f-99c4-7679474ff15c",
+      "slug": "office-chatter-distractor-g00098",
+      "started_at": "2026-09-04T10:44:38.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T11:26:56.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/39d2f60b-17a8-4109-9ac5-16698dbee346.jsonl",
+      "session_id": "39d2f60b-17a8-4109-9ac5-16698dbee346",
+      "slug": "flaky-timeout-test-g00099",
+      "started_at": "2026-09-04T11:23:43.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T12:06:05.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/e6545114-280d-431e-ba4f-f5a4f738c2f6.jsonl",
+      "session_id": "e6545114-280d-431e-ba4f-f5a4f738c2f6",
+      "slug": "sidechain-search-g00100",
+      "started_at": "2026-09-04T12:03:56.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T12:45:56.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/717714d9-241f-4c0b-a064-22b86420cf68.jsonl",
+      "session_id": "717714d9-241f-4c0b-a064-22b86420cf68",
+      "slug": "rustc-borrow-error-g00101",
+      "started_at": "2026-09-04T12:43:05.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-04T13:24:01.000Z",
+      "message_count": 8,
+      "path": "home/.codex/sessions/2026/09/04/rollout-2026-09-04T13-22-56-9002428c-8cd9-49e4-bb5c-3ab5a8c33676.jsonl",
+      "session_id": "9002428c-8cd9-49e4-bb5c-3ab5a8c33676",
+      "slug": "codex-docker-cache-g00102",
+      "started_at": "2026-09-04T13:22:56.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T14:03:06.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/65087d71-6d15-4677-b56a-c2b3467d0c15.jsonl",
+      "session_id": "65087d71-6d15-4677-b56a-c2b3467d0c15",
+      "slug": "injection-bait-g00103",
+      "started_at": "2026-09-04T14:01:01.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T14:43:19.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/da9c3c5e-2c7d-43db-b4e0-4d4a91f48cfd.jsonl",
+      "session_id": "da9c3c5e-2c7d-43db-b4e0-4d4a91f48cfd",
+      "slug": "secrets-in-output-g00104",
+      "started_at": "2026-09-04T14:40:06.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T15:22:51.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/acefb50b-5cb1-4474-a0fe-711fa95f674f.jsonl",
+      "session_id": "acefb50b-5cb1-4474-a0fe-711fa95f674f",
+      "slug": "storage-decision-g00105",
+      "started_at": "2026-09-04T15:20:19.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T16:03:04.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/7fc6e6ff-d572-46c2-ae0f-327e72b14ce0.jsonl",
+      "session_id": "7fc6e6ff-d572-46c2-ae0f-327e72b14ce0",
+      "slug": "flaky-timeout-test-g00106",
+      "started_at": "2026-09-04T15:59:51.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T16:44:24.000Z",
+      "message_count": 19,
+      "path": "home/.claude/projects/-work-ledger/33775a25-14aa-4842-a84a-17e834ccf456.jsonl",
+      "session_id": "33775a25-14aa-4842-a84a-17e834ccf456",
+      "slug": "release-publish-failure-g00107",
+      "started_at": "2026-09-04T16:40:04.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-04T17:23:36.000Z",
+      "message_count": 13,
+      "path": "home/.codex/sessions/2026/09/10/rollout-2026-09-04T17-21-24-3e7de3b6-bbfe-48e7-9238-448afa706d00.jsonl",
+      "session_id": "3e7de3b6-bbfe-48e7-9238-448afa706d00",
+      "slug": "codex-pytest-fixture-g00108",
+      "started_at": "2026-09-04T17:21:24.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T18:01:57.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/fb67f6e2-0643-40f8-ac4b-66f996fd5cad.jsonl",
+      "session_id": "fb67f6e2-0643-40f8-ac4b-66f996fd5cad",
+      "slug": "sidechain-search-g00109",
+      "started_at": "2026-09-04T18:00:36.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T18:41:29.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/216b31a4-f5e0-4993-a8eb-3fee32711484.jsonl",
+      "session_id": "216b31a4-f5e0-4993-a8eb-3fee32711484",
+      "slug": "storage-decision-g00110",
+      "started_at": "2026-09-04T18:38:57.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T19:21:16.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/f8c844a8-3b06-405c-82ab-ff543deeb8b8.jsonl",
+      "session_id": "f8c844a8-3b06-405c-82ab-ff543deeb8b8",
+      "slug": "flaky-timeout-test-g00111",
+      "started_at": "2026-09-04T19:18:29.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T20:01:37.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/8ca7b7f1-7a76-4685-9377-7b6bf33dc7de.jsonl",
+      "session_id": "8ca7b7f1-7a76-4685-9377-7b6bf33dc7de",
+      "slug": "release-publish-failure-g00112",
+      "started_at": "2026-09-04T19:58:16.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T20:40:44.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/9d3cf6ed-e59f-41a5-9348-c5bf535eade0.jsonl",
+      "session_id": "9d3cf6ed-e59f-41a5-9348-c5bf535eade0",
+      "slug": "migration-not-null-g00113",
+      "started_at": "2026-09-04T20:38:37.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-04T21:19:30.000Z",
+      "message_count": 11,
+      "path": "home/.codex/sessions/2026/09/16/rollout-2026-09-04T21-17-44-de514607-d3d4-4153-80b9-4907fe6c9ee4.jsonl",
+      "session_id": "de514607-d3d4-4153-80b9-4907fe6c9ee4",
+      "slug": "codex-pytest-fixture-g00114",
+      "started_at": "2026-09-04T21:17:44.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T21:59:19.000Z",
+      "message_count": 13,
+      "path": "home/.claude/projects/-work-ledger/f0797d1d-f7b3-4db7-b270-6cf1905039db.jsonl",
+      "session_id": "f0797d1d-f7b3-4db7-b270-6cf1905039db",
+      "slug": "migration-not-null-g00115",
+      "started_at": "2026-09-04T21:56:30.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-04T22:38:08.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/b64636b3-1b58-445a-8252-c63a78fb3bbf.jsonl",
+      "session_id": "b64636b3-1b58-445a-8252-c63a78fb3bbf",
+      "slug": "injection-bait-g00116",
+      "started_at": "2026-09-04T22:36:19.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-04T23:16:39.000Z",
+      "message_count": 9,
+      "path": "home/.codex/sessions/2026/09/19/rollout-2026-09-04T23-15-08-5ca5f49a-f7e4-4296-9ff0-20ec85c19171.jsonl",
+      "session_id": "5ca5f49a-f7e4-4296-9ff0-20ec85c19171",
+      "slug": "codex-pytest-fixture-g00117",
+      "started_at": "2026-09-04T23:15:08.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-04T23:55:52.000Z",
+      "message_count": 14,
+      "path": "home/.codex/sessions/2026/09/20/rollout-2026-09-04T23-53-39-b102e613-1c6e-4ecd-8805-96940699ca41.jsonl",
+      "session_id": "b102e613-1c6e-4ecd-8805-96940699ca41",
+      "slug": "codex-docker-cache-g00118",
+      "started_at": "2026-09-04T23:53:39.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T00:34:09.000Z",
+      "message_count": 4,
+      "path": "home/.claude/projects/-work-ledger/9dfbbb0f-5f0a-4db9-a273-9efec31018ab.jsonl",
+      "session_id": "9dfbbb0f-5f0a-4db9-a273-9efec31018ab",
+      "slug": "office-chatter-distractor-g00119",
+      "started_at": "2026-09-05T00:32:52.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T01:14:26.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/735b14b6-89ad-42c1-9559-70d2657b67d2.jsonl",
+      "session_id": "735b14b6-89ad-42c1-9559-70d2657b67d2",
+      "slug": "rustc-borrow-error-g00120",
+      "started_at": "2026-09-05T01:11:09.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-05T01:52:57.000Z",
+      "message_count": 9,
+      "path": "home/.codex/sessions/2026/09/23/rollout-2026-09-05T01-51-26-27728b72-e34c-405c-a53c-6fc05035d9e4.jsonl",
+      "session_id": "27728b72-e34c-405c-a53c-6fc05035d9e4",
+      "slug": "codex-pytest-fixture-g00121",
+      "started_at": "2026-09-05T01:51:26.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T02:31:18.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/18bdd797-ae59-4dc0-9e5b-4b4a10227484.jsonl",
+      "session_id": "18bdd797-ae59-4dc0-9e5b-4b4a10227484",
+      "slug": "sidechain-search-g00122",
+      "started_at": "2026-09-05T02:29:57.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T03:10:11.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/781ee0b0-1298-441c-9c89-4457b344b6ef.jsonl",
+      "session_id": "781ee0b0-1298-441c-9c89-4457b344b6ef",
+      "slug": "rustc-borrow-error-g00123",
+      "started_at": "2026-09-05T03:08:18.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T03:50:34.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/5c9836c6-d78c-4db6-a35f-4297daa67d8c.jsonl",
+      "session_id": "5c9836c6-d78c-4db6-a35f-4297daa67d8c",
+      "slug": "flaky-timeout-test-g00124",
+      "started_at": "2026-09-05T03:47:11.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T04:30:59.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/de728f2d-a9c6-410a-bca6-52cbde2e06fb.jsonl",
+      "session_id": "de728f2d-a9c6-410a-bca6-52cbde2e06fb",
+      "slug": "migration-not-null-g00125",
+      "started_at": "2026-09-05T04:27:34.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T05:11:22.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/725c4521-9b5a-4a1a-83b8-810c8ffafec6.jsonl",
+      "session_id": "725c4521-9b5a-4a1a-83b8-810c8ffafec6",
+      "slug": "clippy-deny-warnings-g00126",
+      "started_at": "2026-09-05T05:07:59.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T05:52:46.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/4f0de423-e794-4c64-883d-634edb0c0d9e.jsonl",
+      "session_id": "4f0de423-e794-4c64-883d-634edb0c0d9e",
+      "slug": "fmt-rule-and-noise-g00127",
+      "started_at": "2026-09-05T05:48:22.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T06:32:37.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/84b539e7-a3b2-49e0-a9dc-9a752b190bc4.jsonl",
+      "session_id": "84b539e7-a3b2-49e0-a9dc-9a752b190bc4",
+      "slug": "sidechain-search-g00128",
+      "started_at": "2026-09-05T06:29:46.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T07:14:50.000Z",
+      "message_count": 23,
+      "path": "home/.claude/projects/-work-ledger/f04bf4d1-9ba0-4a77-9801-bd6b3ab5b215.jsonl",
+      "session_id": "f04bf4d1-9ba0-4a77-9801-bd6b3ab5b215",
+      "slug": "release-publish-failure-g00129",
+      "started_at": "2026-09-05T07:09:37.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T07:55:01.000Z",
+      "message_count": 13,
+      "path": "home/.claude/projects/-work-ledger/d7e7ea23-5c71-4820-bd13-407181314719.jsonl",
+      "session_id": "d7e7ea23-5c71-4820-bd13-407181314719",
+      "slug": "storage-decision-g00130",
+      "started_at": "2026-09-05T07:51:50.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-05T08:34:52.000Z",
+      "message_count": 17,
+      "path": "home/.codex/sessions/2026/09/05/rollout-2026-09-05T08-32-01-15ac35d3-c197-44c4-aabf-bb3707ecfe71.jsonl",
+      "session_id": "15ac35d3-c197-44c4-aabf-bb3707ecfe71",
+      "slug": "codex-pytest-fixture-g00131",
+      "started_at": "2026-09-05T08:32:01.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T09:13:57.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/2e58aad3-ea70-45ea-b889-3207c2296852.jsonl",
+      "session_id": "2e58aad3-ea70-45ea-b889-3207c2296852",
+      "slug": "benign-curl-docs-g00132",
+      "started_at": "2026-09-05T09:11:52.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T09:56:14.000Z",
+      "message_count": 25,
+      "path": "home/.claude/projects/-work-ledger/5caafe0c-eb8f-4469-8b95-31e13f8068d3.jsonl",
+      "session_id": "5caafe0c-eb8f-4469-8b95-31e13f8068d3",
+      "slug": "fmt-rule-and-noise-g00133",
+      "started_at": "2026-09-05T09:50:57.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T10:35:52.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/62e5a12f-6a21-4224-ab53-4f7210badcac.jsonl",
+      "session_id": "62e5a12f-6a21-4224-ab53-4f7210badcac",
+      "slug": "rustc-borrow-error-g00134",
+      "started_at": "2026-09-05T10:33:14.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T11:16:15.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/b00c61ea-b360-4e0c-82ee-6280a8c6506a.jsonl",
+      "session_id": "b00c61ea-b360-4e0c-82ee-6280a8c6506a",
+      "slug": "clippy-deny-warnings-g00135",
+      "started_at": "2026-09-05T11:12:52.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T11:55:53.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/f5fafedc-c6fc-4ef1-84c8-75f36c4f198b.jsonl",
+      "session_id": "f5fafedc-c6fc-4ef1-84c8-75f36c4f198b",
+      "slug": "rustc-borrow-error-g00136",
+      "started_at": "2026-09-05T11:53:15.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-05T12:34:25.000Z",
+      "message_count": 10,
+      "path": "home/.codex/sessions/2026/09/11/rollout-2026-09-05T12-32-53-2fee3281-e1ba-478b-b98d-d26c417b7057.jsonl",
+      "session_id": "2fee3281-e1ba-478b-b98d-d26c417b7057",
+      "slug": "codex-docker-cache-g00137",
+      "started_at": "2026-09-05T12:32:53.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T13:14:40.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/2f604e4c-7c01-47c5-8698-cfb6b5d6da77.jsonl",
+      "session_id": "2f604e4c-7c01-47c5-8698-cfb6b5d6da77",
+      "slug": "migration-not-null-g00138",
+      "started_at": "2026-09-05T13:11:25.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T13:53:45.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/1b26a98b-d4a2-40a6-87f2-1f84925459e8.jsonl",
+      "session_id": "1b26a98b-d4a2-40a6-87f2-1f84925459e8",
+      "slug": "office-chatter-distractor-g00139",
+      "started_at": "2026-09-05T13:51:40.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T14:33:32.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/7e0c5205-1e27-4349-95ff-222c96cdec8c.jsonl",
+      "session_id": "7e0c5205-1e27-4349-95ff-222c96cdec8c",
+      "slug": "injection-bait-g00140",
+      "started_at": "2026-09-05T14:30:45.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T15:13:06.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/13b5ca4e-e483-4246-bfde-ea92f419f7d0.jsonl",
+      "session_id": "13b5ca4e-e483-4246-bfde-ea92f419f7d0",
+      "slug": "injection-bait-g00141",
+      "started_at": "2026-09-05T15:10:32.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T15:53:31.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/1908492c-e327-43c9-a911-496f9adb0af8.jsonl",
+      "session_id": "1908492c-e327-43c9-a911-496f9adb0af8",
+      "slug": "migration-not-null-g00142",
+      "started_at": "2026-09-05T15:50:06.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T16:33:09.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/defb3702-ab99-4627-b72f-11f9ab6592b4.jsonl",
+      "session_id": "defb3702-ab99-4627-b72f-11f9ab6592b4",
+      "slug": "sidechain-search-g00143",
+      "started_at": "2026-09-05T16:30:31.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T17:14:33.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/55513b7a-2ab9-459d-b1f1-60087d38186e.jsonl",
+      "session_id": "55513b7a-2ab9-459d-b1f1-60087d38186e",
+      "slug": "fmt-rule-and-noise-g00144",
+      "started_at": "2026-09-05T17:10:09.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T17:53:26.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/173b2550-527b-429e-9e67-f6b06e0bffeb.jsonl",
+      "session_id": "173b2550-527b-429e-9e67-f6b06e0bffeb",
+      "slug": "rustc-borrow-error-g00145",
+      "started_at": "2026-09-05T17:51:33.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-05T18:31:31.000Z",
+      "message_count": 8,
+      "path": "home/.codex/sessions/2026/09/20/rollout-2026-09-05T18-30-26-99f3cc44-9f70-46f4-9c90-400156aa4524.jsonl",
+      "session_id": "99f3cc44-9f70-46f4-9c90-400156aa4524",
+      "slug": "codex-docker-cache-g00146",
+      "started_at": "2026-09-05T18:30:26.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T19:11:18.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/3f11f45e-bc8d-4c64-9856-4346d2166b25.jsonl",
+      "session_id": "3f11f45e-bc8d-4c64-9856-4346d2166b25",
+      "slug": "injection-bait-g00147",
+      "started_at": "2026-09-05T19:08:31.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T19:51:31.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/c513d739-0ef3-42a3-b1e9-e8ee640937c4.jsonl",
+      "session_id": "c513d739-0ef3-42a3-b1e9-e8ee640937c4",
+      "slug": "secrets-in-output-g00148",
+      "started_at": "2026-09-05T19:48:18.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-05T20:30:03.000Z",
+      "message_count": 10,
+      "path": "home/.codex/sessions/2026/09/23/rollout-2026-09-05T20-28-31-a1763341-bdb8-4e62-9a88-3788f9fb974b.jsonl",
+      "session_id": "a1763341-bdb8-4e62-9a88-3788f9fb974b",
+      "slug": "codex-docker-cache-g00149",
+      "started_at": "2026-09-05T20:28:31.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T21:11:27.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/c6f35d4d-3cfc-4f70-8db4-e601cf250535.jsonl",
+      "session_id": "c6f35d4d-3cfc-4f70-8db4-e601cf250535",
+      "slug": "fmt-rule-and-noise-g00150",
+      "started_at": "2026-09-05T21:07:03.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T21:49:48.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/cd8e4a1f-b862-407e-9f9d-a750fc59b52c.jsonl",
+      "session_id": "cd8e4a1f-b862-407e-9f9d-a750fc59b52c",
+      "slug": "sidechain-search-g00151",
+      "started_at": "2026-09-05T21:48:27.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T22:31:28.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/c71bbd91-ab79-4bff-99a3-d1b74578664b.jsonl",
+      "session_id": "c71bbd91-ab79-4bff-99a3-d1b74578664b",
+      "slug": "release-publish-failure-g00152",
+      "started_at": "2026-09-05T22:26:48.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T23:11:53.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/fa7a0e04-2104-422d-821e-b0b4aa61fef1.jsonl",
+      "session_id": "fa7a0e04-2104-422d-821e-b0b4aa61fef1",
+      "slug": "migration-not-null-g00153",
+      "started_at": "2026-09-05T23:08:28.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-05T23:51:31.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/1d06cd98-f43e-43a0-995b-38695e9c856b.jsonl",
+      "session_id": "1d06cd98-f43e-43a0-995b-38695e9c856b",
+      "slug": "rustc-borrow-error-g00154",
+      "started_at": "2026-09-05T23:48:53.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-06T00:29:36.000Z",
+      "message_count": 8,
+      "path": "home/.codex/sessions/2026/09/01/rollout-2026-09-06T00-28-31-90aedb23-c692-47fb-8191-03715cd1bc16.jsonl",
+      "session_id": "90aedb23-c692-47fb-8191-03715cd1bc16",
+      "slug": "codex-docker-cache-g00155",
+      "started_at": "2026-09-06T00:28:31.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T01:09:59.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/d3b7ff06-9637-4370-877e-8f520ce639e3.jsonl",
+      "session_id": "d3b7ff06-9637-4370-877e-8f520ce639e3",
+      "slug": "secrets-in-output-g00156",
+      "started_at": "2026-09-06T01:06:36.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T01:49:33.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/cc04ae22-44c3-475f-993d-f920c16ecb03.jsonl",
+      "session_id": "cc04ae22-44c3-475f-993d-f920c16ecb03",
+      "slug": "office-chatter-distractor-g00157",
+      "started_at": "2026-09-06T01:46:59.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T02:29:07.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/6d5a3474-906b-4ebd-9714-242b49b3e2f6.jsonl",
+      "session_id": "6d5a3474-906b-4ebd-9714-242b49b3e2f6",
+      "slug": "secrets-in-output-g00158",
+      "started_at": "2026-09-06T02:26:33.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T03:09:20.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/3fe8623c-f266-453f-83c8-0b3049027ced.jsonl",
+      "session_id": "3fe8623c-f266-453f-83c8-0b3049027ced",
+      "slug": "injection-bait-g00159",
+      "started_at": "2026-09-06T03:06:07.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T03:50:44.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/b22d7d28-1a2b-4cd6-ba90-846458dd5fcf.jsonl",
+      "session_id": "b22d7d28-1a2b-4cd6-ba90-846458dd5fcf",
+      "slug": "fmt-rule-and-noise-g00160",
+      "started_at": "2026-09-06T03:46:20.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T04:32:08.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/52e5d654-4adb-41ea-8200-a703b0e8d099.jsonl",
+      "session_id": "52e5d654-4adb-41ea-8200-a703b0e8d099",
+      "slug": "fmt-rule-and-noise-g00161",
+      "started_at": "2026-09-06T04:27:44.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T05:12:54.000Z",
+      "message_count": 18,
+      "path": "home/.claude/projects/-work-ledger/1aef1efb-15f2-41af-8a00-febf96d07e41.jsonl",
+      "session_id": "1aef1efb-15f2-41af-8a00-febf96d07e41",
+      "slug": "flaky-timeout-test-g00162",
+      "started_at": "2026-09-06T05:09:08.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T05:54:38.000Z",
+      "message_count": 23,
+      "path": "home/.claude/projects/-work-ledger/c4f817ff-84ee-486e-ba27-f8fef971e845.jsonl",
+      "session_id": "c4f817ff-84ee-486e-ba27-f8fef971e845",
+      "slug": "fmt-rule-and-noise-g00163",
+      "started_at": "2026-09-06T05:49:54.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T06:34:25.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/29a17e03-fc9f-49a1-8664-35cd49c2e70c.jsonl",
+      "session_id": "29a17e03-fc9f-49a1-8664-35cd49c2e70c",
+      "slug": "injection-bait-g00164",
+      "started_at": "2026-09-06T06:31:38.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T07:13:18.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/64d23a3a-409b-4382-b912-6524907e6f95.jsonl",
+      "session_id": "64d23a3a-409b-4382-b912-6524907e6f95",
+      "slug": "rustc-borrow-error-g00165",
+      "started_at": "2026-09-06T07:11:25.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T07:53:33.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/bd01da8d-dca2-4551-9030-f8adf49fdc20.jsonl",
+      "session_id": "bd01da8d-dca2-4551-9030-f8adf49fdc20",
+      "slug": "migration-not-null-g00166",
+      "started_at": "2026-09-06T07:50:18.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T08:33:58.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/241b73c7-fcce-4105-828f-01d28b5eba41.jsonl",
+      "session_id": "241b73c7-fcce-4105-828f-01d28b5eba41",
+      "slug": "migration-not-null-g00167",
+      "started_at": "2026-09-06T08:30:33.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T09:13:32.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/3fedf9be-e213-45e8-86cb-239f2022b1fc.jsonl",
+      "session_id": "3fedf9be-e213-45e8-86cb-239f2022b1fc",
+      "slug": "flaky-timeout-test-g00168",
+      "started_at": "2026-09-06T09:10:58.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T09:53:23.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/85e1aaa8-7635-44f4-bc8c-f7a05186a8db.jsonl",
+      "session_id": "85e1aaa8-7635-44f4-bc8c-f7a05186a8db",
+      "slug": "rustc-borrow-error-g00169",
+      "started_at": "2026-09-06T09:50:32.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T10:33:36.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/90fad37a-b564-4b91-a700-b594abb0d235.jsonl",
+      "session_id": "90fad37a-b564-4b91-a700-b594abb0d235",
+      "slug": "clippy-deny-warnings-g00170",
+      "started_at": "2026-09-06T10:30:23.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-06T11:12:49.000Z",
+      "message_count": 14,
+      "path": "home/.codex/sessions/2026/09/17/rollout-2026-09-06T11-10-36-2973376e-8b8b-46bf-8e18-3f49892cfc4d.jsonl",
+      "session_id": "2973376e-8b8b-46bf-8e18-3f49892cfc4d",
+      "slug": "codex-docker-cache-g00171",
+      "started_at": "2026-09-06T11:10:36.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T11:53:02.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/6cb833d7-dbfc-4346-b7e3-bdde3bb47301.jsonl",
+      "session_id": "6cb833d7-dbfc-4346-b7e3-bdde3bb47301",
+      "slug": "clippy-deny-warnings-g00172",
+      "started_at": "2026-09-06T11:49:49.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-06T12:31:34.000Z",
+      "message_count": 10,
+      "path": "home/.codex/sessions/2026/09/19/rollout-2026-09-06T12-30-02-9e6d6792-8234-47d2-b9dd-eb19655ca50d.jsonl",
+      "session_id": "9e6d6792-8234-47d2-b9dd-eb19655ca50d",
+      "slug": "codex-docker-cache-g00173",
+      "started_at": "2026-09-06T12:30:02.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T13:11:51.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/d025d2d3-fb27-4dd9-9f5c-abd8700c5967.jsonl",
+      "session_id": "d025d2d3-fb27-4dd9-9f5c-abd8700c5967",
+      "slug": "rustc-borrow-error-g00174",
+      "started_at": "2026-09-06T13:08:34.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T13:54:04.000Z",
+      "message_count": 23,
+      "path": "home/.claude/projects/-work-ledger/3d1da73e-91be-437e-9f6b-4ada1e11f71f.jsonl",
+      "session_id": "3d1da73e-91be-437e-9f6b-4ada1e11f71f",
+      "slug": "release-publish-failure-g00175",
+      "started_at": "2026-09-06T13:48:51.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T14:32:25.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/2da10ed2-9580-4ad1-a0da-61aed74678ca.jsonl",
+      "session_id": "2da10ed2-9580-4ad1-a0da-61aed74678ca",
+      "slug": "sidechain-search-g00176",
+      "started_at": "2026-09-06T14:31:04.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-06T15:11:11.000Z",
+      "message_count": 11,
+      "path": "home/.codex/sessions/2026/09/23/rollout-2026-09-06T15-09-25-4413f759-5c1e-46dc-823b-31eafd978a88.jsonl",
+      "session_id": "4413f759-5c1e-46dc-823b-31eafd978a88",
+      "slug": "codex-pytest-fixture-g00177",
+      "started_at": "2026-09-06T15:09:25.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T15:51:26.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/225d561c-ea0a-4395-84e3-e0a68da0e1bc.jsonl",
+      "session_id": "225d561c-ea0a-4395-84e3-e0a68da0e1bc",
+      "slug": "migration-not-null-g00178",
+      "started_at": "2026-09-06T15:48:11.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-06T16:30:38.000Z",
+      "message_count": 13,
+      "path": "home/.codex/sessions/2026/09/25/rollout-2026-09-06T16-28-26-9c0bb7ac-6007-400e-bda7-f20243a66678.jsonl",
+      "session_id": "9c0bb7ac-6007-400e-bda7-f20243a66678",
+      "slug": "codex-pytest-fixture-g00179",
+      "started_at": "2026-09-06T16:28:26.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-06T17:09:51.000Z",
+      "message_count": 14,
+      "path": "home/.codex/sessions/2026/09/26/rollout-2026-09-06T17-07-38-61ecd9c9-16cd-4f6e-8994-1cfe7606acf7.jsonl",
+      "session_id": "61ecd9c9-16cd-4f6e-8994-1cfe7606acf7",
+      "slug": "codex-docker-cache-g00180",
+      "started_at": "2026-09-06T17:07:38.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T17:49:25.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/e0af3de5-016f-44cb-8cb8-dacda2003663.jsonl",
+      "session_id": "e0af3de5-016f-44cb-8cb8-dacda2003663",
+      "slug": "flaky-timeout-test-g00181",
+      "started_at": "2026-09-06T17:46:51.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T18:30:09.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/890118f3-bd11-40b7-b650-59258affd335.jsonl",
+      "session_id": "890118f3-bd11-40b7-b650-59258affd335",
+      "slug": "release-publish-failure-g00182",
+      "started_at": "2026-09-06T18:26:25.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-06T19:10:00.000Z",
+      "message_count": 17,
+      "path": "home/.codex/sessions/2026/09/01/rollout-2026-09-06T19-07-09-1994cd87-d7f6-49db-b840-da14f4278567.jsonl",
+      "session_id": "1994cd87-d7f6-49db-b840-da14f4278567",
+      "slug": "codex-pytest-fixture-g00183",
+      "started_at": "2026-09-06T19:07:09.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T19:52:13.000Z",
+      "message_count": 23,
+      "path": "home/.claude/projects/-work-ledger/5620421d-28bf-40a1-bba0-3cf86a9ac808.jsonl",
+      "session_id": "5620421d-28bf-40a1-bba0-3cf86a9ac808",
+      "slug": "release-publish-failure-g00184",
+      "started_at": "2026-09-06T19:47:00.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T20:31:18.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/05252172-31d7-4bed-8f4e-1bd7483da17d.jsonl",
+      "session_id": "05252172-31d7-4bed-8f4e-1bd7483da17d",
+      "slug": "injection-bait-g00185",
+      "started_at": "2026-09-06T20:29:13.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-06T21:10:30.000Z",
+      "message_count": 13,
+      "path": "home/.codex/sessions/2026/09/04/rollout-2026-09-06T21-08-18-34f037f7-c9bf-4978-baeb-3036b8e973c8.jsonl",
+      "session_id": "34f037f7-c9bf-4978-baeb-3036b8e973c8",
+      "slug": "codex-pytest-fixture-g00186",
+      "started_at": "2026-09-06T21:08:18.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T21:50:06.000Z",
+      "message_count": 11,
+      "path": "home/.claude/projects/-work-ledger/c94dc1e6-4f28-4b30-8d25-fcf1312f747a.jsonl",
+      "session_id": "c94dc1e6-4f28-4b30-8d25-fcf1312f747a",
+      "slug": "migration-not-null-g00187",
+      "started_at": "2026-09-06T21:47:30.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T22:29:40.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/30f8751d-c967-42bb-a2ac-8aec3fb84c92.jsonl",
+      "session_id": "30f8751d-c967-42bb-a2ac-8aec3fb84c92",
+      "slug": "clippy-deny-warnings-g00188",
+      "started_at": "2026-09-06T22:27:06.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T23:09:53.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/01b54081-d89b-4c4e-af34-05429b166a37.jsonl",
+      "session_id": "01b54081-d89b-4c4e-af34-05429b166a37",
+      "slug": "clippy-deny-warnings-g00189",
+      "started_at": "2026-09-06T23:06:40.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-06T23:49:40.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/113270ae-d37e-4bcf-a8c5-80ea7b8361df.jsonl",
+      "session_id": "113270ae-d37e-4bcf-a8c5-80ea7b8361df",
+      "slug": "clippy-deny-warnings-g00190",
+      "started_at": "2026-09-06T23:46:53.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T00:31:00.000Z",
+      "message_count": 19,
+      "path": "home/.claude/projects/-work-ledger/b821020e-288b-47e5-b300-3ab7f6b8beac.jsonl",
+      "session_id": "b821020e-288b-47e5-b300-3ab7f6b8beac",
+      "slug": "release-publish-failure-g00191",
+      "started_at": "2026-09-07T00:26:40.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T01:11:46.000Z",
+      "message_count": 18,
+      "path": "home/.claude/projects/-work-ledger/3f79a9f4-ea4a-4aa6-8131-ba579e9b0dfd.jsonl",
+      "session_id": "3f79a9f4-ea4a-4aa6-8131-ba579e9b0dfd",
+      "slug": "flaky-timeout-test-g00192",
+      "started_at": "2026-09-07T01:08:00.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T01:51:24.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/e4633ee0-e5df-48bc-b86e-b49378283713.jsonl",
+      "session_id": "e4633ee0-e5df-48bc-b86e-b49378283713",
+      "slug": "rustc-borrow-error-g00193",
+      "started_at": "2026-09-07T01:48:46.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T02:29:45.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/8bf49be6-085e-44b8-9d19-f454cf4e7b4a.jsonl",
+      "session_id": "8bf49be6-085e-44b8-9d19-f454cf4e7b4a",
+      "slug": "sidechain-search-g00194",
+      "started_at": "2026-09-07T02:28:24.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-07T03:08:58.000Z",
+      "message_count": 14,
+      "path": "home/.codex/sessions/2026/09/13/rollout-2026-09-07T03-06-45-6f644d22-ff79-4688-821f-776d64ffdc07.jsonl",
+      "session_id": "6f644d22-ff79-4688-821f-776d64ffdc07",
+      "slug": "codex-docker-cache-g00195",
+      "started_at": "2026-09-07T03:06:45.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T03:48:03.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/c343bafb-0e49-444a-8f66-7be61a1bdb75.jsonl",
+      "session_id": "c343bafb-0e49-444a-8f66-7be61a1bdb75",
+      "slug": "benign-curl-docs-g00196",
+      "started_at": "2026-09-07T03:45:58.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T04:28:24.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/eeab19eb-99a5-4415-a148-849b9d85d88a.jsonl",
+      "session_id": "eeab19eb-99a5-4415-a148-849b9d85d88a",
+      "slug": "storage-decision-g00197",
+      "started_at": "2026-09-07T04:25:03.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T05:07:56.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/ea88cfd1-1b52-4b27-9767-b704d420d3cd.jsonl",
+      "session_id": "ea88cfd1-1b52-4b27-9767-b704d420d3cd",
+      "slug": "storage-decision-g00198",
+      "started_at": "2026-09-07T05:05:24.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T05:50:30.000Z",
+      "message_count": 27,
+      "path": "home/.claude/projects/-work-ledger/6250178d-dca3-4fef-8a61-3c25d4d83bcd.jsonl",
+      "session_id": "6250178d-dca3-4fef-8a61-3c25d4d83bcd",
+      "slug": "fmt-rule-and-noise-g00199",
+      "started_at": "2026-09-07T05:44:56.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T06:31:54.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/a6f4021d-5a95-46e1-bbe7-0df56aea7e98.jsonl",
+      "session_id": "a6f4021d-5a95-46e1-bbe7-0df56aea7e98",
+      "slug": "fmt-rule-and-noise-g00200",
+      "started_at": "2026-09-07T06:27:30.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T07:11:28.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/9b3ca3a8-9950-4078-bd57-bfa8edfe9971.jsonl",
+      "session_id": "9b3ca3a8-9950-4078-bd57-bfa8edfe9971",
+      "slug": "clippy-deny-warnings-g00201",
+      "started_at": "2026-09-07T07:08:54.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T07:51:45.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/bd4684bb-3388-45f8-a75d-3885bf3a8704.jsonl",
+      "session_id": "bd4684bb-3388-45f8-a75d-3885bf3a8704",
+      "slug": "rustc-borrow-error-g00202",
+      "started_at": "2026-09-07T07:48:28.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T08:33:05.000Z",
+      "message_count": 19,
+      "path": "home/.claude/projects/-work-ledger/5ca73b1c-8e11-4bb7-8ca9-e8a68a891225.jsonl",
+      "session_id": "5ca73b1c-8e11-4bb7-8ca9-e8a68a891225",
+      "slug": "release-publish-failure-g00203",
+      "started_at": "2026-09-07T08:28:45.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T09:12:43.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/7d8432af-c61b-4e39-ac83-d986059e8e9d.jsonl",
+      "session_id": "7d8432af-c61b-4e39-ac83-d986059e8e9d",
+      "slug": "rustc-borrow-error-g00204",
+      "started_at": "2026-09-07T09:10:05.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-07T09:52:10.000Z",
+      "message_count": 16,
+      "path": "home/.codex/sessions/2026/09/23/rollout-2026-09-07T09-49-43-dd6a5417-b1d6-4439-b100-a8e0f5ff3b16.jsonl",
+      "session_id": "dd6a5417-b1d6-4439-b100-a8e0f5ff3b16",
+      "slug": "codex-docker-cache-g00205",
+      "started_at": "2026-09-07T09:49:43.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T10:31:44.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/114db109-2ba3-4146-9236-8e831cab4f56.jsonl",
+      "session_id": "114db109-2ba3-4146-9236-8e831cab4f56",
+      "slug": "benign-curl-docs-g00206",
+      "started_at": "2026-09-07T10:29:10.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T11:10:53.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/3a17a109-6e83-43b2-ab61-7015aae26d25.jsonl",
+      "session_id": "3a17a109-6e83-43b2-ab61-7015aae26d25",
+      "slug": "rustc-borrow-error-g00207",
+      "started_at": "2026-09-07T11:08:44.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T11:50:02.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/33a688bb-7d69-4085-88dd-1e257870d2c7.jsonl",
+      "session_id": "33a688bb-7d69-4085-88dd-1e257870d2c7",
+      "slug": "rustc-borrow-error-g00208",
+      "started_at": "2026-09-07T11:47:53.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-07T12:29:53.000Z",
+      "message_count": 17,
+      "path": "home/.codex/sessions/2026/09/27/rollout-2026-09-07T12-27-02-e5ca0035-54e6-46b0-a9b6-07605e37597b.jsonl",
+      "session_id": "e5ca0035-54e6-46b0-a9b6-07605e37597b",
+      "slug": "codex-pytest-fixture-g00209",
+      "started_at": "2026-09-07T12:27:02.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T13:11:17.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/7e7d19c2-b126-442e-8473-fdaee80a7f21.jsonl",
+      "session_id": "7e7d19c2-b126-442e-8473-fdaee80a7f21",
+      "slug": "fmt-rule-and-noise-g00210",
+      "started_at": "2026-09-07T13:06:53.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T13:51:38.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/eb4b8265-79f2-4003-ad46-71978f649002.jsonl",
+      "session_id": "eb4b8265-79f2-4003-ad46-71978f649002",
+      "slug": "release-publish-failure-g00211",
+      "started_at": "2026-09-07T13:48:17.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T14:30:43.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/c8562d7f-d1bd-4f11-ac2e-18311659b01d.jsonl",
+      "session_id": "c8562d7f-d1bd-4f11-ac2e-18311659b01d",
+      "slug": "secrets-in-output-g00212",
+      "started_at": "2026-09-07T14:28:38.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T15:09:48.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/bf422187-fd58-4643-bc0a-32a3fb1154ad.jsonl",
+      "session_id": "bf422187-fd58-4643-bc0a-32a3fb1154ad",
+      "slug": "secrets-in-output-g00213",
+      "started_at": "2026-09-07T15:07:43.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-07T15:49:15.000Z",
+      "message_count": 16,
+      "path": "home/.codex/sessions/2026/09/04/rollout-2026-09-07T15-46-48-0c8f4195-585d-4b80-9a1b-b27f4c271ba6.jsonl",
+      "session_id": "0c8f4195-585d-4b80-9a1b-b27f4c271ba6",
+      "slug": "codex-docker-cache-g00214",
+      "started_at": "2026-09-07T15:46:48.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T16:29:59.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/51e17564-1016-4564-adce-cff75cdf16eb.jsonl",
+      "session_id": "51e17564-1016-4564-adce-cff75cdf16eb",
+      "slug": "release-publish-failure-g00215",
+      "started_at": "2026-09-07T16:26:15.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T17:09:46.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/80abc6b4-6550-44cd-8d31-221d3492737f.jsonl",
+      "session_id": "80abc6b4-6550-44cd-8d31-221d3492737f",
+      "slug": "injection-bait-g00216",
+      "started_at": "2026-09-07T17:06:59.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T17:49:33.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/fb875562-01e2-46b6-bcfd-14f60cacd357.jsonl",
+      "session_id": "fb875562-01e2-46b6-bcfd-14f60cacd357",
+      "slug": "secrets-in-output-g00217",
+      "started_at": "2026-09-07T17:46:46.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T18:31:46.000Z",
+      "message_count": 23,
+      "path": "home/.claude/projects/-work-ledger/f337d011-c28b-4842-b0ba-63c7e70ac3d1.jsonl",
+      "session_id": "f337d011-c28b-4842-b0ba-63c7e70ac3d1",
+      "slug": "release-publish-failure-g00218",
+      "started_at": "2026-09-07T18:26:33.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T19:11:33.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/b03bfb12-f552-466a-8c96-aebc9d80d0a1.jsonl",
+      "session_id": "b03bfb12-f552-466a-8c96-aebc9d80d0a1",
+      "slug": "flaky-timeout-test-g00219",
+      "started_at": "2026-09-07T19:08:46.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T19:51:05.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/010beda8-b3c9-4f92-b232-a7406adeadd1.jsonl",
+      "session_id": "010beda8-b3c9-4f92-b232-a7406adeadd1",
+      "slug": "storage-decision-g00220",
+      "started_at": "2026-09-07T19:48:33.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T20:31:49.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/55f1c6b4-7b3b-41b6-9397-5c2f76696d3f.jsonl",
+      "session_id": "55f1c6b4-7b3b-41b6-9397-5c2f76696d3f",
+      "slug": "release-publish-failure-g00221",
+      "started_at": "2026-09-07T20:28:05.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T21:11:40.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/49a2d7a2-efae-4f2f-9ac5-864a180233ad.jsonl",
+      "session_id": "49a2d7a2-efae-4f2f-9ac5-864a180233ad",
+      "slug": "rustc-borrow-error-g00222",
+      "started_at": "2026-09-07T21:08:49.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-07T21:51:06.000Z",
+      "message_count": 15,
+      "path": "home/.codex/sessions/2026/09/13/rollout-2026-09-07T21-48-40-e10abb79-fc57-4a9d-9ecf-7fdbfd7a8d5c.jsonl",
+      "session_id": "e10abb79-fc57-4a9d-9ecf-7fdbfd7a8d5c",
+      "slug": "codex-pytest-fixture-g00223",
+      "started_at": "2026-09-07T21:48:40.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-07T22:30:33.000Z",
+      "message_count": 16,
+      "path": "home/.codex/sessions/2026/09/14/rollout-2026-09-07T22-28-06-61e57500-9414-476b-8166-aaf1195efecc.jsonl",
+      "session_id": "61e57500-9414-476b-8166-aaf1195efecc",
+      "slug": "codex-docker-cache-g00224",
+      "started_at": "2026-09-07T22:28:06.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T23:11:17.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/6c221def-8aec-44dc-8158-ae43c01bcf1c.jsonl",
+      "session_id": "6c221def-8aec-44dc-8158-ae43c01bcf1c",
+      "slug": "release-publish-failure-g00225",
+      "started_at": "2026-09-07T23:07:33.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-07T23:50:51.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/4934f9c4-51ac-4e0c-aa5f-a7ad262aacf2.jsonl",
+      "session_id": "4934f9c4-51ac-4e0c-aa5f-a7ad262aacf2",
+      "slug": "office-chatter-distractor-g00226",
+      "started_at": "2026-09-07T23:48:17.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T00:29:40.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/163f7204-09cb-4514-83d5-3cd587bfabb6.jsonl",
+      "session_id": "163f7204-09cb-4514-83d5-3cd587bfabb6",
+      "slug": "benign-curl-docs-g00227",
+      "started_at": "2026-09-08T00:27:51.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T01:07:57.000Z",
+      "message_count": 4,
+      "path": "home/.claude/projects/-work-ledger/d039225d-5796-4739-87bd-d1c267f12c2a.jsonl",
+      "session_id": "d039225d-5796-4739-87bd-d1c267f12c2a",
+      "slug": "benign-curl-docs-g00228",
+      "started_at": "2026-09-08T01:06:40.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T01:47:31.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/c6b988bf-3d0d-4a82-b666-dba83f6ef97a.jsonl",
+      "session_id": "c6b988bf-3d0d-4a82-b666-dba83f6ef97a",
+      "slug": "secrets-in-output-g00229",
+      "started_at": "2026-09-08T01:44:57.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T02:27:05.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/82b84690-a9ba-4e19-a4f6-f741fe72938d.jsonl",
+      "session_id": "82b84690-a9ba-4e19-a4f6-f741fe72938d",
+      "slug": "clippy-deny-warnings-g00230",
+      "started_at": "2026-09-08T02:24:31.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T03:07:28.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/23046183-622d-4675-892e-8a88486d603c.jsonl",
+      "session_id": "23046183-622d-4675-892e-8a88486d603c",
+      "slug": "flaky-timeout-test-g00231",
+      "started_at": "2026-09-08T03:04:05.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T03:48:12.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/034a17c6-0ec6-4f77-90f5-cb086e3e4735.jsonl",
+      "session_id": "034a17c6-0ec6-4f77-90f5-cb086e3e4735",
+      "slug": "release-publish-failure-g00232",
+      "started_at": "2026-09-08T03:44:28.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T04:28:29.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/4ec0df09-c692-4d42-a89a-2a104343a9f8.jsonl",
+      "session_id": "4ec0df09-c692-4d42-a89a-2a104343a9f8",
+      "slug": "rustc-borrow-error-g00233",
+      "started_at": "2026-09-08T04:25:12.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T05:08:42.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/528c7328-d00e-44fd-8147-7cc8f8fc7db0.jsonl",
+      "session_id": "528c7328-d00e-44fd-8147-7cc8f8fc7db0",
+      "slug": "clippy-deny-warnings-g00234",
+      "started_at": "2026-09-08T05:05:29.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-08T05:46:47.000Z",
+      "message_count": 8,
+      "path": "home/.codex/sessions/2026/09/25/rollout-2026-09-08T05-45-42-428642c0-d4ea-4aac-9bc4-0ee107dd329a.jsonl",
+      "session_id": "428642c0-d4ea-4aac-9bc4-0ee107dd329a",
+      "slug": "codex-docker-cache-g00235",
+      "started_at": "2026-09-08T05:45:42.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T06:27:04.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/c88608ab-dfed-4990-9196-92a852608c61.jsonl",
+      "session_id": "c88608ab-dfed-4990-9196-92a852608c61",
+      "slug": "rustc-borrow-error-g00236",
+      "started_at": "2026-09-08T06:23:47.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T07:07:52.000Z",
+      "message_count": 19,
+      "path": "home/.claude/projects/-work-ledger/18bcb697-6358-46df-8828-af0ad5fd284d.jsonl",
+      "session_id": "18bcb697-6358-46df-8828-af0ad5fd284d",
+      "slug": "fmt-rule-and-noise-g00237",
+      "started_at": "2026-09-08T07:04:04.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T07:48:36.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/a77ece85-394d-4df0-b074-b07af1d6dd0f.jsonl",
+      "session_id": "a77ece85-394d-4df0-b074-b07af1d6dd0f",
+      "slug": "release-publish-failure-g00238",
+      "started_at": "2026-09-08T07:44:52.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T08:28:10.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/e57c223d-9f7f-4238-9e04-8a990266849c.jsonl",
+      "session_id": "e57c223d-9f7f-4238-9e04-8a990266849c",
+      "slug": "clippy-deny-warnings-g00239",
+      "started_at": "2026-09-08T08:25:36.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T09:09:50.000Z",
+      "message_count": 21,
+      "path": "home/.claude/projects/-work-ledger/f3fb294b-ee0a-4227-8506-4c9065800f84.jsonl",
+      "session_id": "f3fb294b-ee0a-4227-8506-4c9065800f84",
+      "slug": "release-publish-failure-g00240",
+      "started_at": "2026-09-08T09:05:10.000Z",
+      "title": "cargo publish rejected because the version was not bumped"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T09:48:07.000Z",
+      "message_count": 4,
+      "path": "home/.claude/projects/-work-ledger/c77a2cb8-0db2-4537-b3a9-c9df3a2734f4.jsonl",
+      "session_id": "c77a2cb8-0db2-4537-b3a9-c9df3a2734f4",
+      "slug": "office-chatter-distractor-g00241",
+      "started_at": "2026-09-08T09:46:50.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-08T10:26:39.000Z",
+      "message_count": 10,
+      "path": "home/.codex/sessions/2026/09/04/rollout-2026-09-08T10-25-07-d7982fcd-f81b-4af4-a9cb-772505d1c82d.jsonl",
+      "session_id": "d7982fcd-f81b-4af4-a9cb-772505d1c82d",
+      "slug": "codex-docker-cache-g00242",
+      "started_at": "2026-09-08T10:25:07.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T11:05:44.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/f322708a-73da-446e-b4f2-6a958255a403.jsonl",
+      "session_id": "f322708a-73da-446e-b4f2-6a958255a403",
+      "slug": "office-chatter-distractor-g00243",
+      "started_at": "2026-09-08T11:03:39.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T11:46:01.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/71c7b0f6-7072-4042-bcfe-f0bc88a3c316.jsonl",
+      "session_id": "71c7b0f6-7072-4042-bcfe-f0bc88a3c316",
+      "slug": "rustc-borrow-error-g00244",
+      "started_at": "2026-09-08T11:42:44.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T12:26:12.000Z",
+      "message_count": 13,
+      "path": "home/.claude/projects/-work-ledger/378f25b2-cd09-42ca-b967-97c544db96a8.jsonl",
+      "session_id": "378f25b2-cd09-42ca-b967-97c544db96a8",
+      "slug": "storage-decision-g00245",
+      "started_at": "2026-09-08T12:23:01.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T13:06:03.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/b060f365-7c9a-4956-9eba-3ccea1753aad.jsonl",
+      "session_id": "b060f365-7c9a-4956-9eba-3ccea1753aad",
+      "slug": "sidechain-search-g00246",
+      "started_at": "2026-09-08T13:03:12.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T13:46:18.000Z",
+      "message_count": 15,
+      "path": "home/.claude/projects/-work-ledger/a29238c5-dcdb-4909-94bf-7d634a880a39.jsonl",
+      "session_id": "a29238c5-dcdb-4909-94bf-7d634a880a39",
+      "slug": "migration-not-null-g00247",
+      "started_at": "2026-09-08T13:43:03.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T14:25:07.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/0dc97d26-1a0f-423b-a341-298d109f8b5e.jsonl",
+      "session_id": "0dc97d26-1a0f-423b-a341-298d109f8b5e",
+      "slug": "office-chatter-distractor-g00248",
+      "started_at": "2026-09-08T14:23:18.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-08T15:04:34.000Z",
+      "message_count": 16,
+      "path": "home/.codex/sessions/2026/09/11/rollout-2026-09-08T15-02-07-3e8b731d-21fe-44ae-92e0-eae55044aa06.jsonl",
+      "session_id": "3e8b731d-21fe-44ae-92e0-eae55044aa06",
+      "slug": "codex-docker-cache-g00249",
+      "started_at": "2026-09-08T15:02:07.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-08T15:43:47.000Z",
+      "message_count": 14,
+      "path": "home/.codex/sessions/2026/09/12/rollout-2026-09-08T15-41-34-7c79f8c7-696a-4773-bd40-3cf8b7c6d340.jsonl",
+      "session_id": "7c79f8c7-696a-4773-bd40-3cf8b7c6d340",
+      "slug": "codex-docker-cache-g00250",
+      "started_at": "2026-09-08T15:41:34.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T16:22:52.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/92a735df-5ed8-401c-8ee0-e7b762dfd64d.jsonl",
+      "session_id": "92a735df-5ed8-401c-8ee0-e7b762dfd64d",
+      "slug": "office-chatter-distractor-g00251",
+      "started_at": "2026-09-08T16:20:47.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-08T17:02:19.000Z",
+      "message_count": 16,
+      "path": "home/.codex/sessions/2026/09/14/rollout-2026-09-08T16-59-52-e3e814b0-d0ec-4b27-bc6b-fd8aa4481477.jsonl",
+      "session_id": "e3e814b0-d0ec-4b27-bc6b-fd8aa4481477",
+      "slug": "codex-docker-cache-g00252",
+      "started_at": "2026-09-08T16:59:52.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T17:41:12.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/43a1deda-2d01-44e2-bcdd-1672162bdbd6.jsonl",
+      "session_id": "43a1deda-2d01-44e2-bcdd-1672162bdbd6",
+      "slug": "rustc-borrow-error-g00253",
+      "started_at": "2026-09-08T17:39:19.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T18:20:46.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/c911f21a-8909-4cad-bcb8-d3b89d3b8602.jsonl",
+      "session_id": "c911f21a-8909-4cad-bcb8-d3b89d3b8602",
+      "slug": "flaky-timeout-test-g00254",
+      "started_at": "2026-09-08T18:18:12.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T18:59:35.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/a834cd37-9fa4-4d30-a5ea-43ef8be8457e.jsonl",
+      "session_id": "a834cd37-9fa4-4d30-a5ea-43ef8be8457e",
+      "slug": "office-chatter-distractor-g00255",
+      "started_at": "2026-09-08T18:57:46.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T19:38:24.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/e91058e1-f309-43cf-aedc-4f7f87082ddf.jsonl",
+      "session_id": "e91058e1-f309-43cf-aedc-4f7f87082ddf",
+      "slug": "injection-bait-g00256",
+      "started_at": "2026-09-08T19:36:35.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T20:16:45.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/9aae179b-defd-4b6a-9514-50cb2fdf8093.jsonl",
+      "session_id": "9aae179b-defd-4b6a-9514-50cb2fdf8093",
+      "slug": "sidechain-search-g00257",
+      "started_at": "2026-09-08T20:15:24.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T20:56:32.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/783fe968-1925-4382-9804-d4f3f333a1e9.jsonl",
+      "session_id": "783fe968-1925-4382-9804-d4f3f333a1e9",
+      "slug": "clippy-deny-warnings-g00258",
+      "started_at": "2026-09-08T20:53:45.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T21:35:25.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/044bbf5f-8485-4799-8f25-c700634e24fc.jsonl",
+      "session_id": "044bbf5f-8485-4799-8f25-c700634e24fc",
+      "slug": "sidechain-search-g00259",
+      "started_at": "2026-09-08T21:33:32.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T22:15:12.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/75d17670-f2ca-4a7d-af05-0d9686e017f7.jsonl",
+      "session_id": "75d17670-f2ca-4a7d-af05-0d9686e017f7",
+      "slug": "office-chatter-distractor-g00260",
+      "started_at": "2026-09-08T22:12:25.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-08T22:53:58.000Z",
+      "message_count": 11,
+      "path": "home/.codex/sessions/2026/09/23/rollout-2026-09-08T22-52-12-4ed8b5e6-a7f6-41bf-ba4b-e184c77f4af3.jsonl",
+      "session_id": "4ed8b5e6-a7f6-41bf-ba4b-e184c77f4af3",
+      "slug": "codex-pytest-fixture-g00261",
+      "started_at": "2026-09-08T22:52:12.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-08T23:34:23.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/06636a14-6330-4beb-b520-6ef7abb209e1.jsonl",
+      "session_id": "06636a14-6330-4beb-b520-6ef7abb209e1",
+      "slug": "migration-not-null-g00262",
+      "started_at": "2026-09-08T23:30:58.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T00:14:36.000Z",
+      "message_count": 14,
+      "path": "home/.claude/projects/-work-ledger/ce2e3160-e0e1-4c08-8ceb-d0bd3b0fd968.jsonl",
+      "session_id": "ce2e3160-e0e1-4c08-8ceb-d0bd3b0fd968",
+      "slug": "injection-bait-g00263",
+      "started_at": "2026-09-09T00:11:23.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-09T00:53:23.000Z",
+      "message_count": 12,
+      "path": "home/.codex/sessions/2026/09/26/rollout-2026-09-09T00-51-36-d3aa2624-68e9-40a6-8180-af4b8f3c74e7.jsonl",
+      "session_id": "d3aa2624-68e9-40a6-8180-af4b8f3c74e7",
+      "slug": "codex-docker-cache-g00264",
+      "started_at": "2026-09-09T00:51:36.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T01:32:55.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/6194a586-b54f-41ae-8676-2509a902d4b7.jsonl",
+      "session_id": "6194a586-b54f-41ae-8676-2509a902d4b7",
+      "slug": "storage-decision-g00265",
+      "started_at": "2026-09-09T01:30:23.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T02:12:04.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/533302ca-2537-4d05-94ad-04bfe5d56815.jsonl",
+      "session_id": "533302ca-2537-4d05-94ad-04bfe5d56815",
+      "slug": "rustc-borrow-error-g00266",
+      "started_at": "2026-09-09T02:09:55.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T02:52:52.000Z",
+      "message_count": 19,
+      "path": "home/.claude/projects/-work-ledger/8119f45c-ee4a-44d4-a382-1ea7e87703fb.jsonl",
+      "session_id": "8119f45c-ee4a-44d4-a382-1ea7e87703fb",
+      "slug": "fmt-rule-and-noise-g00267",
+      "started_at": "2026-09-09T02:49:04.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T03:35:26.000Z",
+      "message_count": 27,
+      "path": "home/.claude/projects/-work-ledger/58fdc87e-d134-4493-8b51-6d39bff01b0e.jsonl",
+      "session_id": "58fdc87e-d134-4493-8b51-6d39bff01b0e",
+      "slug": "fmt-rule-and-noise-g00268",
+      "started_at": "2026-09-09T03:29:52.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T04:14:58.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/391dcc76-523b-4906-975d-f22deb54f37d.jsonl",
+      "session_id": "391dcc76-523b-4906-975d-f22deb54f37d",
+      "slug": "storage-decision-g00269",
+      "started_at": "2026-09-09T04:12:26.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T04:55:23.000Z",
+      "message_count": 17,
+      "path": "home/.claude/projects/-work-ledger/225a2ccf-2a14-49d7-bb59-d6b509f0dbdb.jsonl",
+      "session_id": "225a2ccf-2a14-49d7-bb59-d6b509f0dbdb",
+      "slug": "migration-not-null-g00270",
+      "started_at": "2026-09-09T04:51:58.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T05:35:40.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/870d8161-ab43-4419-8e3d-a72dd3268592.jsonl",
+      "session_id": "870d8161-ab43-4419-8e3d-a72dd3268592",
+      "slug": "rustc-borrow-error-g00271",
+      "started_at": "2026-09-09T05:32:23.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T06:16:03.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/8fdb37fa-2699-407b-b6af-b67abbf4274b.jsonl",
+      "session_id": "8fdb37fa-2699-407b-b6af-b67abbf4274b",
+      "slug": "clippy-deny-warnings-g00272",
+      "started_at": "2026-09-09T06:12:40.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T06:55:37.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/671d2f1e-17c4-4216-bfff-3a2270ff7043.jsonl",
+      "session_id": "671d2f1e-17c4-4216-bfff-3a2270ff7043",
+      "slug": "office-chatter-distractor-g00273",
+      "started_at": "2026-09-09T06:53:03.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T07:35:24.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/2d57c47a-3b82-40df-b128-5722bb8c0c93.jsonl",
+      "session_id": "2d57c47a-3b82-40df-b128-5722bb8c0c93",
+      "slug": "clippy-deny-warnings-g00274",
+      "started_at": "2026-09-09T07:32:37.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T08:14:58.000Z",
+      "message_count": 10,
+      "path": "home/.claude/projects/-work-ledger/617b14be-b684-4b11-bc16-1dcd6dd8ede5.jsonl",
+      "session_id": "617b14be-b684-4b11-bc16-1dcd6dd8ede5",
+      "slug": "benign-curl-docs-g00275",
+      "started_at": "2026-09-09T08:12:24.000Z",
+      "title": "Documentation work that mentions curl and rm -rf in prose"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T08:55:44.000Z",
+      "message_count": 18,
+      "path": "home/.claude/projects/-work-ledger/6e192784-525e-4b9e-8f0a-7a8cb1183f61.jsonl",
+      "session_id": "6e192784-525e-4b9e-8f0a-7a8cb1183f61",
+      "slug": "clippy-deny-warnings-g00276",
+      "started_at": "2026-09-09T08:51:58.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T09:38:01.000Z",
+      "message_count": 25,
+      "path": "home/.claude/projects/-work-ledger/5e1a93b9-8a13-46d8-88a1-48a3204e26ac.jsonl",
+      "session_id": "5e1a93b9-8a13-46d8-88a1-48a3204e26ac",
+      "slug": "fmt-rule-and-noise-g00277",
+      "started_at": "2026-09-09T09:32:44.000Z",
+      "title": "User states the formatting rule; long build and test noise"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T10:18:18.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/08d16f6f-7968-492f-96e4-7d722b88b26c.jsonl",
+      "session_id": "08d16f6f-7968-492f-96e4-7d722b88b26c",
+      "slug": "rustc-borrow-error-g00278",
+      "started_at": "2026-09-09T10:15:01.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T10:57:23.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/867e1721-9e20-4056-851c-3ec1b15fa10e.jsonl",
+      "session_id": "867e1721-9e20-4056-851c-3ec1b15fa10e",
+      "slug": "secrets-in-output-g00279",
+      "started_at": "2026-09-09T10:55:18.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-09T11:36:49.000Z",
+      "message_count": 15,
+      "path": "home/.codex/sessions/2026/09/14/rollout-2026-09-09T11-34-23-5a7f91b4-8c5e-4a27-b86b-0622a4fac528.jsonl",
+      "session_id": "5a7f91b4-8c5e-4a27-b86b-0622a4fac528",
+      "slug": "codex-pytest-fixture-g00280",
+      "started_at": "2026-09-09T11:34:23.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T12:15:38.000Z",
+      "message_count": 6,
+      "path": "home/.claude/projects/-work-ledger/1df7c144-ad94-46e1-aa57-431fd20219c0.jsonl",
+      "session_id": "1df7c144-ad94-46e1-aa57-431fd20219c0",
+      "slug": "office-chatter-distractor-g00281",
+      "started_at": "2026-09-09T12:13:49.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-09T12:54:10.000Z",
+      "message_count": 10,
+      "path": "home/.codex/sessions/2026/09/16/rollout-2026-09-09T12-52-38-41be21bb-c837-4257-b915-b1f71510b6b6.jsonl",
+      "session_id": "41be21bb-c837-4257-b915-b1f71510b6b6",
+      "slug": "codex-docker-cache-g00282",
+      "started_at": "2026-09-09T12:52:38.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T13:34:27.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/9f082d6f-cec2-46de-b102-c57ff5207129.jsonl",
+      "session_id": "9f082d6f-cec2-46de-b102-c57ff5207129",
+      "slug": "rustc-borrow-error-g00283",
+      "started_at": "2026-09-09T13:31:10.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T14:14:14.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/d05d1449-e0e0-4b83-837c-8ec04d7ef697.jsonl",
+      "session_id": "d05d1449-e0e0-4b83-837c-8ec04d7ef697",
+      "slug": "injection-bait-g00284",
+      "started_at": "2026-09-09T14:11:27.000Z",
+      "title": "Fetched README contains prompt-injection text"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T14:53:19.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/27fd59a9-8bab-48e0-b490-f3bba99121e5.jsonl",
+      "session_id": "27fd59a9-8bab-48e0-b490-f3bba99121e5",
+      "slug": "secrets-in-output-g00285",
+      "started_at": "2026-09-09T14:51:14.000Z",
+      "title": "Environment dump leaks credentials in tool output"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T15:33:42.000Z",
+      "message_count": 16,
+      "path": "home/.claude/projects/-work-ledger/8a42b185-262a-4df2-836a-8365d17c512e.jsonl",
+      "session_id": "8a42b185-262a-4df2-836a-8365d17c512e",
+      "slug": "clippy-deny-warnings-g00286",
+      "started_at": "2026-09-09T15:30:19.000Z",
+      "title": "CI failed on clippy needless_borrow under -D warnings"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T16:14:28.000Z",
+      "message_count": 18,
+      "path": "home/.claude/projects/-work-ledger/2a0076a4-809e-43c5-b8fa-c3aca6860d53.jsonl",
+      "session_id": "2a0076a4-809e-43c5-b8fa-c3aca6860d53",
+      "slug": "flaky-timeout-test-g00287",
+      "started_at": "2026-09-09T16:10:42.000Z",
+      "title": "Flaky lease expiry test depended on the wall clock"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T16:53:31.000Z",
+      "message_count": 7,
+      "path": "home/.claude/projects/-work-ledger/b5b7bb9c-57b6-4c63-a1c3-a2dadfbc733e.jsonl",
+      "session_id": "b5b7bb9c-57b6-4c63-a1c3-a2dadfbc733e",
+      "slug": "storage-decision-g00288",
+      "started_at": "2026-09-09T16:51:28.000Z",
+      "title": "Decision: SQLite WAL over one JSON file per record"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-09T17:32:44.000Z",
+      "message_count": 14,
+      "path": "home/.codex/sessions/2026/09/23/rollout-2026-09-09T17-30-31-82a93679-6ce4-410b-832c-a8c5828484cd.jsonl",
+      "session_id": "82a93679-6ce4-410b-832c-a8c5828484cd",
+      "slug": "codex-docker-cache-g00289",
+      "started_at": "2026-09-09T17:30:31.000Z",
+      "title": "Docker build cache invalidated by copying the whole tree first"
+    },
+    {
+      "agent": "codex",
+      "core": false,
+      "ended_at": "2026-09-09T18:11:56.000Z",
+      "message_count": 13,
+      "path": "home/.codex/sessions/2026/09/24/rollout-2026-09-09T18-09-44-5ef1a42e-7151-42ab-bfc0-8f0ccccbd98c.jsonl",
+      "session_id": "5ef1a42e-7151-42ab-bfc0-8f0ccccbd98c",
+      "slug": "codex-pytest-fixture-g00290",
+      "started_at": "2026-09-09T18:09:44.000Z",
+      "title": "pytest failure from a shared mutable fixture"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T18:50:49.000Z",
+      "message_count": 8,
+      "path": "home/.claude/projects/-work-ledger/77d1b5a6-d751-4d61-bf6c-f8a77ff67032.jsonl",
+      "session_id": "77d1b5a6-d751-4d61-bf6c-f8a77ff67032",
+      "slug": "sidechain-search-g00291",
+      "started_at": "2026-09-09T18:48:56.000Z",
+      "title": "Subagent search in a sidechain to find a config loader"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T19:30:27.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/497deb15-0d53-44d5-a785-ea67b42eda10.jsonl",
+      "session_id": "497deb15-0d53-44d5-a785-ea67b42eda10",
+      "slug": "rustc-borrow-error-g00292",
+      "started_at": "2026-09-09T19:27:49.000Z",
+      "title": "Borrow checker E0502 fixed by cloning the key before mutation"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T20:09:34.000Z",
+      "message_count": 9,
+      "path": "home/.claude/projects/-work-ledger/ab57e47c-8f98-4b94-9e10-0a9a68af9821.jsonl",
+      "session_id": "ab57e47c-8f98-4b94-9e10-0a9a68af9821",
+      "slug": "migration-not-null-g00293",
+      "started_at": "2026-09-09T20:07:27.000Z",
+      "title": "Schema migration failed adding a NOT NULL column without a default"
+    },
+    {
+      "agent": "claude_code",
+      "core": false,
+      "ended_at": "2026-09-09T20:49:21.000Z",
+      "message_count": 12,
+      "path": "home/.claude/projects/-work-ledger/39a9bcee-c91f-421a-aefb-a00c0f5a90ad.jsonl",
+      "session_id": "39a9bcee-c91f-421a-aefb-a00c0f5a90ad",
+      "slug": "office-chatter-distractor-g00294",
+      "started_at": "2026-09-09T20:46:34.000Z",
+      "title": "Unrelated chatter: espresso machine and lunch"
+    }
+  ],
+  "target_records": 4000,
+  "total_records": 4009,
+  "workspace": "/work/ledger"
+}

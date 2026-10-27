@@ -16,7 +16,9 @@ fn controls_are_literal(text: &str) -> bool {
     })
 }
 
-pub(super) fn normalize(text: &str) -> Result<Cow<'_, str>, ()> {
+pub(in crate::core::cass_error_recall::test_coverage) fn normalize(
+    text: &str,
+) -> Result<Cow<'_, str>, ()> {
     if text.len() > super::MAX_SCANNED_OUTPUT_BYTES {
         return Err(());
     }

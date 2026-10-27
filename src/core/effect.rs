@@ -1214,10 +1214,12 @@ pub(crate) const DRY_RUN_CAPABLE: &[&str] = &[
     "curate snooze",
     "curate tombstone",
     "curate untombstone",
+    "curate validate",
     "daemon",
     "decide record",
     "demo run",
     "diag pack-record",
+    "evidence withdraw",
     "export",
     "export agentsmd",
     "graph centrality-refresh",
@@ -1228,6 +1230,7 @@ pub(crate) const DRY_RUN_CAPABLE: &[&str] = &[
     "import cass",
     "import eidetic-legacy",
     "import jsonl",
+    "index backfill-anchors",
     "index backfill-tags",
     "index rebuild",
     "index reembed",
@@ -1243,6 +1246,7 @@ pub(crate) const DRY_RUN_CAPABLE: &[&str] = &[
     "maintenance graph-witnesses-prune",
     "maintenance run",
     "maintenance wal-checkpoint",
+    "memory anchors",
     "memory demote-global",
     "memory expire",
     "memory level",
@@ -1476,6 +1480,10 @@ impl EffectManifest {
                 "capture suggest",
                 "Suggest ambient capture candidates from session evidence without durable mutation",
             ),
+            CommandEffect::read_only(
+                "config explain",
+                "Explain one config key's effect and the layer that set it",
+            ),
             CommandEffect::read_only("config get", "Read one merged config key"),
             CommandEffect::read_only("config show", "Show merged config values"),
             CommandEffect::read_only_db(
@@ -1530,7 +1538,6 @@ impl EffectManifest {
                 "curate show",
                 "Inspect a single curation candidate read-only with apply preview",
             ),
-            CommandEffect::read_only_db("curate validate", "Validate curation candidate"),
             CommandEffect::read_only("demo list", "List demo manifests"),
             CommandEffect::read_only_db("demo show", "Show persisted demo audit rows"),
             CommandEffect::read_only_db("demo verify", "Verify demo artifacts"),
@@ -2527,6 +2534,7 @@ impl EffectManifest {
                 vec![
                     "sessions",
                     "evidence_spans",
+                    "curation_candidates",
                     "search_index_jobs",
                     "import_ledger",
                     "workspace_generations",
@@ -2659,13 +2667,14 @@ impl EffectManifest {
             CommandEffect::durable_write(
                 "conflict resolve",
                 vec![
+                    "curation_candidates",
                     "memories",
                     "memory_links",
                     "memory_tags",
                     "search_index_jobs",
                     "audit_log",
                 ],
-                "Resolve one live conflict pair via verb-mapped EXISTING audited atoms (decide record / memory expire / memory link / memory tags); dry-run plan by default, --apply executes (ADR 0066)",
+                "Resolve one live conflict pair via existing audited atoms; preview by default, --propose queues an immutable plan for curation review, --apply executes directly (ADR 0066)",
             ),
             CommandEffect::durable_write(
                 "diagnose-error",
@@ -2706,13 +2715,25 @@ impl EffectManifest {
                     "curation_candidates",
                     "plan_recipes",
                     "memories",
+                    "memory_tags",
+                    "memory_links",
                     "procedural_rules",
                     "rule_source_memories",
                     "rule_tags",
                     "search_index_jobs",
                     "audit_log",
                 ],
-                "Apply a curation candidate",
+                "Apply an approved curation candidate, including an atomic reviewed conflict resolution",
+            ),
+            CommandEffect::durable_write(
+                "curate candidates --propose",
+                vec!["curation_candidates", "audit_log"],
+                "Explicitly persist discovered dedup proposals; omit --propose for a read-only preview",
+            ),
+            CommandEffect::durable_write(
+                "curate validate",
+                vec!["curation_candidates", "audit_log"],
+                "Record candidate approval or rejection; --dry-run validates without mutation",
             ),
             CommandEffect::durable_write(
                 "curate disposition",
@@ -2942,6 +2963,27 @@ impl EffectManifest {
                 vec!["memories", "search_index_jobs", "audit_log"],
                 "Expire a memory through an audited tombstone without deleting data",
             ),
+            {
+                let mut withdrawal = CommandEffect::durable_write(
+                    "evidence withdraw",
+                    vec![
+                        "evidence_spans",
+                        "search_index_jobs",
+                        "workspace_generations",
+                        "audit_log",
+                    ],
+                    "Deny a retained CASS source for future retrieval and derivation, atomically auditing the withdrawal and queuing session reindexing",
+                );
+                withdrawal.idempotency = IdempotencyClass::Idempotent;
+                withdrawal.mutation_contract.idempotency_key =
+                    Some("workspace id plus evidence id with search and pack eligibility denied");
+                withdrawal.mutation_contract.db_generation_effect = "advances only on a new withdrawal; unchanged on preview, already-denied source, or rollback";
+                withdrawal.mutation_contract.index_generation_effect = "queues one session index job atomically; index publication occurs later through the existing worker";
+                withdrawal.mutation_contract.dry_run_behavior = Some(
+                    "read-only existing-store snapshot; no migrations, evidence changes, audit rows, or index jobs",
+                );
+                withdrawal
+            },
             CommandEffect::durable_write(
                 "memory reveal",
                 vec!["memories", "memory_seals", "search_index_jobs", "audit_log"],
@@ -2985,6 +3027,28 @@ impl EffectManifest {
                 "memory link",
                 vec!["memory_links", "audit_log"],
                 "List or create explicit memory links with deterministic idempotent audits",
+            ),
+            CommandEffect::durable_write(
+                "memory anchors",
+                vec![
+                    "memory_code_anchor_sources",
+                    "memory_anchors",
+                    "memory_anchor_index",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                "List code anchors read-only, or attach validated workspace-local path/symbol metadata with an audit and derived-index job without revising memory content or provenance",
+            ),
+            CommandEffect::durable_write(
+                "index backfill-anchors",
+                vec![
+                    "memory_code_anchor_sources",
+                    "memory_anchors",
+                    "memory_anchor_index",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                "Preview bounded pages of content-derived code anchors by default; --apply attaches eligible anchors through the audited metadata path",
             ),
             CommandEffect::durable_write(
                 "index backfill-tags",
@@ -4675,6 +4739,81 @@ mod tests {
                 ));
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn curation_effects_separate_discovery_from_durable_review() -> TestResult {
+        let manifest = EffectManifest::build();
+        let preview = manifest
+            .get("curate candidates")
+            .ok_or("missing candidate preview")?;
+        assert_eq!(preview.default_effect, EffectClass::ReadOnly);
+        assert!(preview.write_surfaces.is_empty());
+
+        let propose = manifest
+            .get("curate candidates --propose")
+            .ok_or("missing candidate proposal effect")?;
+        assert_eq!(propose.default_effect, EffectClass::DurableMemoryWrite);
+        assert!(propose.requires_audit);
+        assert!(
+            propose
+                .write_surfaces
+                .db_tables
+                .contains(&"curation_candidates")
+        );
+        assert!(propose.write_surfaces.db_tables.contains(&"audit_log"));
+        assert!(
+            propose.dry_run_effect.is_none(),
+            "omit --propose to preview"
+        );
+
+        let validate = manifest
+            .get("curate validate")
+            .ok_or("missing candidate validation effect")?;
+        assert_eq!(validate.default_effect, EffectClass::DurableMemoryWrite);
+        assert_eq!(validate.dry_run_effect, Some(EffectClass::ReadOnly));
+        assert!(validate.requires_audit);
+        Ok(())
+    }
+
+    #[test]
+    fn evidence_withdrawal_is_an_audited_idempotent_write_with_read_only_preview() -> TestResult {
+        let manifest = EffectManifest::build();
+        let withdrawal = manifest
+            .get("evidence withdraw")
+            .ok_or("missing evidence withdrawal effect")?;
+        assert_eq!(withdrawal.default_effect, EffectClass::DurableMemoryWrite);
+        assert_eq!(withdrawal.dry_run_effect, Some(EffectClass::ReadOnly));
+        assert_eq!(withdrawal.idempotency, IdempotencyClass::Idempotent);
+        assert!(withdrawal.requires_audit);
+        assert!(!withdrawal.is_safe_mid_task());
+        assert_eq!(
+            withdrawal.mutation_contract.side_effect_class,
+            SideEffectClass::AuditedMutation,
+        );
+        assert_eq!(
+            withdrawal.mutation_contract.audit_surface,
+            Some("audit_log")
+        );
+        assert_eq!(
+            withdrawal.write_surfaces.db_tables,
+            vec![
+                "evidence_spans",
+                "search_index_jobs",
+                "workspace_generations",
+                "audit_log",
+            ],
+        );
+        assert!(withdrawal.write_surfaces.derived_paths.is_empty());
+        assert!(withdrawal.write_surfaces.workspace_files.is_empty());
+        assert_eq!(
+            DRY_RUN_CAPABLE
+                .iter()
+                .filter(|path| **path == "evidence withdraw")
+                .count(),
+            1,
+        );
         Ok(())
     }
 

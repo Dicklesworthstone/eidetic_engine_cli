@@ -68,6 +68,11 @@ use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 #[path = "memory_revision_typed.rs"]
 mod revision_typed;
 
+#[path = "memory_creation_companions.rs"]
+mod creation_companions;
+use creation_companions::PreparedRememberCreationCompanions;
+pub(crate) use creation_companions::{RememberCreationCompanions, RememberSealInput};
+
 /// A memory with its associated tags for display.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryDetails {
@@ -1396,6 +1401,7 @@ fn remember_memory_inner_with_store(
         typed_field_assignments,
         attempt_family,
         None,
+        RememberCreationCompanions::default(),
     )? {
         RememberOutcome::Created(report) => Ok(*report),
         _ => Err(DomainError::Storage {
@@ -1418,6 +1424,7 @@ fn remember_memory_outcome_inner_with_store(
     typed_field_assignments: &[String],
     attempt_family: Option<&RememberAttemptFamily<'_>>,
     idempotency: Option<RememberIdempotencyRequest<'_>>,
+    creation_companions: RememberCreationCompanions<'_>,
 ) -> Result<RememberOutcome, DomainError> {
     let mut prepared = prepare_remember_memory_with_store(
         options,
@@ -1426,6 +1433,7 @@ fn remember_memory_outcome_inner_with_store(
         typed_field_assignments,
         attempt_family,
     )?;
+    prepared.creation_companions = creation_companions.prepare(&prepared.memory_id.to_string())?;
     if options.dry_run {
         let typed_fields =
             remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
@@ -1551,7 +1559,31 @@ fn remember_memory_outcome_inner_with_store(
         level: prepared.level.as_str().to_owned(),
         kind: prepared.kind.as_str().to_owned(),
         tags: prepared.tags.clone(),
-        source_id: None,
+        // THIS ONE `None` KILLED THE ENTIRE WRITE-IMMUNE LAYER IN PRODUCTION
+        // (bd-1n0np.8.5, ADR 0059).
+        //
+        // `WriteOperation::write_stream_observation` begins with
+        // `normalized_write_source_id(source_id.as_deref())?` -- the `?`
+        // short-circuits on None, so a write with no source produced NO
+        // observation at all. This is the only production constructor of
+        // `MemoryCreate`, so every real `ee remember` recorded nothing, and
+        // therefore:
+        //   * `WriteOwnerStats::record_operation` had nothing to retain,
+        //   * `WriteOwner::source_write_stats` computed over an empty deque,
+        //   * `evaluate_write_immune_quarantine` was never fed a real source.
+        // The per-source rolling stats, the near-duplicate detector and the
+        // quarantine evaluator were all written, unit-tested and reachable --
+        // and all of them were being handed an empty window forever. The
+        // capability existed everywhere except at the one call site that feeds it.
+        //
+        // The identity is the one the acceptance names first (EE_AGENT_NAME),
+        // read through the SAME accessor the trust_class branch three lines
+        // below already consults, so the two cannot disagree about who is
+        // writing. A write with no agent identity still yields None and still
+        // records no observation, which is correct: the sources this layer
+        // reasons about are agents, import batches and mesh peers, not an
+        // anonymous human at a terminal.
+        source_id: super::memory_scope::current_agent_name(),
         trust_class: if prepared.attempt_family.is_some()
             && super::memory_scope::current_agent_name().is_some()
         {
@@ -1604,6 +1636,7 @@ fn remember_memory_outcome_inner_with_store(
                 policy_bypass.as_ref(),
                 audit_lane,
                 idempotency,
+                &prepared.creation_companions,
             )
         },
     )?;
@@ -1613,6 +1646,7 @@ fn remember_memory_outcome_inner_with_store(
         // file append or derive links/index work for the unused candidate ID.
         write_replay_guard.mark_clean()?;
         return remember_idempotency_replay_outcome(
+            &connection,
             existing,
             idempotency.ok_or_else(|| {
                 remember_usage_error("replay identity was not prepared".to_owned())
@@ -3092,6 +3126,7 @@ struct PreparedRememberMemory {
     kind: MemoryKind,
     typed_fields_json: Option<String>,
     attempt_family: Option<crate::db::MemoryAttemptFamily>,
+    creation_companions: PreparedRememberCreationCompanions,
     confidence: f32,
     tags: Vec<String>,
     provenance_uri: Option<String>,
@@ -3317,6 +3352,7 @@ fn prepare_remember_memory_with_store(
         kind,
         typed_fields_json,
         attempt_family,
+        creation_companions: PreparedRememberCreationCompanions::default(),
         confidence,
         tags,
         provenance_uri,
@@ -4748,6 +4784,7 @@ pub(crate) fn record_prepared_remember_txn_write_in_txn(
         write.finish.policy_bypass.as_ref(),
         None,
         None,
+        &write.finish.prepared.creation_companions,
     )
 }
 
@@ -4770,6 +4807,7 @@ fn record_remembered_memory_in_txn(
     policy_bypass: Option<&RememberPolicyBypassReport>,
     audit_lane: Option<&AuditLaneHandle>,
     idempotency: Option<RememberIdempotencyRequest<'_>>,
+    creation_companions: &PreparedRememberCreationCompanions,
 ) -> crate::db::Result<()> {
     match embed_dedup_decision.content_simhash {
         Some(content_simhash) => connection.insert_memory_with_content_simhash(
@@ -4823,13 +4861,15 @@ fn record_remembered_memory_in_txn(
             memory_id: memory_id.to_owned(),
         })?;
     }
-    Ok(())
+    creation_companions.persist_in_txn(connection)
 }
 
 #[derive(Clone, Copy)]
 struct RememberIdempotencyRequest<'a> {
     key: &'a str,
     request_hash: &'a str,
+    legacy_request_hash: Option<&'a str>,
+    creation_companions: RememberCreationCompanions<'a>,
 }
 
 #[derive(Debug)]
@@ -4857,6 +4897,7 @@ fn store_remembered_memory_with_retry(
     policy_bypass: Option<&RememberPolicyBypassReport>,
     audit_lane: Option<&AuditLaneHandle>,
     idempotency: Option<RememberIdempotencyRequest<'_>>,
+    creation_companions: &PreparedRememberCreationCompanions,
 ) -> Result<RememberPrimaryWriteOutcome, DomainError> {
     for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
         match connection.with_transaction(|| {
@@ -4884,6 +4925,7 @@ fn store_remembered_memory_with_retry(
                 policy_bypass,
                 audit_lane,
                 idempotency,
+                creation_companions,
             )?;
             Ok(RememberPrimaryWriteOutcome::Created)
         }) {
@@ -5433,13 +5475,36 @@ fn emit_remember_audit_events(
     audit_details: &str,
     policy_bypass: Option<&RememberPolicyBypassReport>,
 ) -> crate::db::Result<()> {
+    // The original inputs distinguish an omitted start from an authored one.
+    // Bind them to the actual creation instant after insertion, including the
+    // audit-lane path, rather than guessing that equal timestamps imply intent.
+    let captured = connection.query(
+        "SELECT created_at FROM memories WHERE id = ?1 AND workspace_id = ?2",
+        &[
+            sqlmodel_core::Value::Text(memory_id.to_owned()),
+            sqlmodel_core::Value::Text(memory_input.workspace_id.clone()),
+        ],
+    )?;
+    let invalid_capture = || crate::db::DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: "Could not bind memory creation audit to its captured row".to_owned(),
+    };
+    let created_at = captured
+        .first()
+        .filter(|_| captured.len() == 1)
+        .and_then(|row| row.get(0))
+        .and_then(sqlmodel_core::Value::as_str)
+        .ok_or_else(invalid_capture)?;
+    let mut audit_details: serde_json::Value =
+        serde_json::from_str(audit_details).map_err(|_| invalid_capture())?;
+    audit_details["captureValidityInput"]["createdAt"] = serde_json::json!(created_at);
     let memory_audit = CreateAuditInput {
         workspace_id: Some(memory_input.workspace_id.clone()),
         actor: Some("ee remember".to_owned()),
         action: audit_actions::MEMORY_CREATE.to_owned(),
         target_type: Some("memory".to_owned()),
         target_id: Some(memory_id.to_owned()),
-        details: Some(audit_details.to_owned()),
+        details: Some(audit_details.to_string()),
     };
     emit_with_direct_fallback(
         audit_lane,
@@ -5546,6 +5611,12 @@ fn remember_audit_details(
         "provenanceUri": input.provenance_uri,
         "workflowId": input.workflow_id,
         "tagCount": input.tags.len(),
+        "captureValidityInput": {
+            "schema": "ee.memory.capture_validity_input.v1",
+            "contentHash": format!("blake3:{}", blake3::hash(input.content.as_bytes()).to_hex()),
+            "validFromInput": input.valid_from,
+            "validToInput": input.valid_to,
+        },
         "attemptFamily": attempt_family.map(|family| serde_json::json!({
             "familyAlias": crate::models::public_attempt_family_alias(&family.family_id),
             "declaredSize": family.declared_size,
@@ -7485,10 +7556,10 @@ fn remember_idempotency_conflict_error(idempotency_key: &str) -> DomainError {
     DomainError::UsageCodeWithDetails {
         code: REMEMBER_IDEMPOTENCY_CONFLICT_CODE,
         message: format!(
-            "idempotency key already exists with different content or typed fields: {idempotency_key}"
+            "idempotency key already exists with different content, typed fields, or creation guards: {idempotency_key}"
         ),
         repair: Some(
-            "Replay the original content and typed fields for this key, or supply a new --idempotency-key."
+            "Replay the original content, typed fields, and creation guards for this key, or supply a new --idempotency-key."
                 .to_owned(),
         ),
         details_json: serde_json::json!({ "idempotencyKey": idempotency_key }).to_string(),
@@ -7813,10 +7884,13 @@ fn apply_remember_reinforce_under_fence(
             remember_usage_error("reinforce replay identity was not prepared".to_owned())
         })?;
         return remember_idempotency_replay_outcome(
+            connection,
             existing,
             RememberIdempotencyRequest {
                 key,
                 request_hash: context.content_hash,
+                legacy_request_hash: None,
+                creation_companions: RememberCreationCompanions::default(),
             },
             context.database_path,
             context.dry_run,
@@ -7844,24 +7918,77 @@ fn apply_remember_reinforce_under_fence(
 }
 
 fn remember_idempotency_replay_outcome(
+    connection: &DbConnection,
     existing: StoredRememberIdempotencyKey,
     request: RememberIdempotencyRequest<'_>,
     database_path: &Path,
     dry_run: bool,
 ) -> Result<RememberOutcome, DomainError> {
-    if existing.content_hash != request.request_hash {
-        return Err(remember_idempotency_conflict_error(request.key));
+    let verify = || {
+        let has_companions = !request.creation_companions.is_empty();
+        if has_companions {
+            // The early lookup and the transaction's losing-key branch both
+            // arrive here. Refresh the binding under the same owner as the
+            // companion proof, rematerializing specs for the winning ID.
+            let current = connection
+                .get_remember_idempotency_key(&existing.workspace_id, request.key)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to refresh remember replay identity: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?
+                .ok_or_else(|| DomainError::Storage {
+                    message: "Remember replay identity disappeared before guard verification"
+                        .to_owned(),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
+            if current.memory_id != existing.memory_id
+                || current.workspace_id != existing.workspace_id
+                || current.content_hash != existing.content_hash
+                || current.idempotency_key != existing.idempotency_key
+            {
+                return Err(remember_idempotency_conflict_error(request.key));
+            }
+        }
+        let matching_hash = existing.content_hash == request.request_hash;
+        let matching_legacy_hash =
+            has_companions && request.legacy_request_hash == Some(existing.content_hash.as_str());
+        if !matching_hash && !matching_legacy_hash {
+            return Err(remember_idempotency_conflict_error(request.key));
+        }
+        if has_companions {
+            let expected = request.creation_companions.prepare(&existing.memory_id)?;
+            let matches = expected
+                .matches_persisted(connection, &existing.memory_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to verify remembered creation guards: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
+            if !matches {
+                return Err(remember_idempotency_conflict_error(request.key));
+            }
+        }
+        Ok(RememberOutcome::AlreadyRecorded(
+            RememberAlreadyRecordedReport {
+                version: env!("CARGO_PKG_VERSION"),
+                workspace_id: existing.workspace_id,
+                database_path: database_path.to_path_buf(),
+                memory_id: existing.memory_id,
+                idempotency_key: existing.idempotency_key,
+                dry_run,
+            },
+        ))
+    };
+    if request.creation_companions.is_empty() || dry_run {
+        verify()
+    } else {
+        connection.with_write_owner_fence(
+            |error| DomainError::Storage {
+                message: format!("Failed to acquire remember replay guard owner: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            },
+            verify,
+        )
     }
-    Ok(RememberOutcome::AlreadyRecorded(
-        RememberAlreadyRecordedReport {
-            version: env!("CARGO_PKG_VERSION"),
-            workspace_id: existing.workspace_id,
-            database_path: database_path.to_path_buf(),
-            memory_id: existing.memory_id,
-            idempotency_key: existing.idempotency_key,
-            dry_run,
-        },
-    ))
 }
 
 /// `remember_memory` layered with the bd-1pi9m.4 write controls:
@@ -7896,7 +8023,25 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
     typed_field_assignments: &[String],
     attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<RememberOutcome, DomainError> {
+    remember_memory_with_creation_companions(
+        options,
+        controls,
+        typed_field_assignments,
+        attempt_family,
+        RememberCreationCompanions::default(),
+    )
+}
+
+/// Create memory and its requested guards in one source transaction.
+pub(crate) fn remember_memory_with_creation_companions(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
+    creation_companions: RememberCreationCompanions<'_>,
+) -> Result<RememberOutcome, DomainError> {
     validate_remember_level_kind_cross_wire(options.level, options.kind)?;
+    creation_companions.validate_for_write(options, controls)?;
     if controls.reinforce && !typed_field_assignments.is_empty() {
         return Err(remember_usage_error(
             "--field cannot be combined with --reinforce because reinforcement does not mutate the surviving memory's typed sidecar"
@@ -7913,10 +8058,23 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
         .idempotency_key
         .map(validate_remember_idempotency_key)
         .transpose()?;
-    let idempotency_request_hash = idempotency_key
+    let original_request_hash = idempotency_key
         .as_ref()
         .map(|_| remember_request_hash(options, typed_field_assignments, attempt_family))
         .transpose()?;
+    let idempotency_request_hash = original_request_hash
+        .as_deref()
+        .map(|hash| creation_companions.request_hash(hash))
+        .transpose()?;
+    let idempotency = idempotency_key
+        .as_deref()
+        .zip(idempotency_request_hash.as_deref())
+        .map(|(key, request_hash)| RememberIdempotencyRequest {
+            key,
+            request_hash,
+            legacy_request_hash: original_request_hash.as_deref(),
+            creation_companions,
+        });
 
     if idempotency_key.is_some() || controls.reinforce {
         let canonical_content = MemoryContent::parse(options.content)
@@ -7951,30 +8109,21 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
             )
             .unwrap_or_else(|_| stable_workspace_id(&canonical));
 
-            if let Some(key) = idempotency_key.as_deref() {
+            if let Some(request) = idempotency {
                 let existing = connection
-                    .get_remember_idempotency_key(&workspace_id, key)
+                    .get_remember_idempotency_key(&workspace_id, request.key)
                     .map_err(|error| DomainError::Storage {
                         message: format!("Failed to look up idempotency key: {error}"),
                         repair: Some("ee doctor --json".to_owned()),
                     })?;
                 if let Some(existing) = existing {
-                    if idempotency_request_hash
-                        .as_deref()
-                        .is_some_and(|request_hash| existing.content_hash == request_hash)
-                    {
-                        return Ok(RememberOutcome::AlreadyRecorded(
-                            RememberAlreadyRecordedReport {
-                                version: env!("CARGO_PKG_VERSION"),
-                                workspace_id,
-                                database_path,
-                                memory_id: existing.memory_id,
-                                idempotency_key: existing.idempotency_key,
-                                dry_run: options.dry_run,
-                            },
-                        ));
-                    }
-                    return Err(remember_idempotency_conflict_error(key));
+                    return remember_idempotency_replay_outcome(
+                        &connection,
+                        existing,
+                        request,
+                        &database_path,
+                        options.dry_run,
+                    );
                 }
             }
 
@@ -8010,7 +8159,7 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
         }
     }
 
-    if idempotency_key.is_none() {
+    if idempotency_key.is_none() && creation_companions.is_empty() {
         return remember_memory_with_index_mode(
             options,
             controls.defer_index_processing,
@@ -8028,10 +8177,8 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
         None,
         typed_field_assignments,
         attempt_family,
-        idempotency_key
-            .as_deref()
-            .zip(idempotency_request_hash.as_deref())
-            .map(|(key, request_hash)| RememberIdempotencyRequest { key, request_hash }),
+        idempotency,
+        creation_companions,
     )
 }
 
@@ -8055,7 +8202,22 @@ pub fn remember_global_memory_with_controls_and_typed_fields(
     controls: &RememberWriteControls<'_>,
     typed_field_assignments: &[String],
 ) -> Result<RememberOutcome, DomainError> {
+    remember_global_memory_with_creation_companions(
+        options,
+        controls,
+        typed_field_assignments,
+        RememberCreationCompanions::default(),
+    )
+}
+
+pub(crate) fn remember_global_memory_with_creation_companions(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
+    creation_companions: RememberCreationCompanions<'_>,
+) -> Result<RememberOutcome, DomainError> {
     validate_remember_level_kind_cross_wire(options.level, options.kind)?;
+    creation_companions.validate_for_write(options, controls)?;
     if controls.reinforce {
         return Err(remember_usage_error(
             "--global cannot be combined with --reinforce".to_owned(),
@@ -8064,7 +8226,22 @@ pub fn remember_global_memory_with_controls_and_typed_fields(
 
     let paths = super::global_store::default_global_store_paths_from_env()
         .map_err(remember_global_store_error)?;
-    remember_global_memory_with_controls_at_paths(options, controls, typed_field_assignments, paths)
+    if creation_companions.is_empty() {
+        remember_global_memory_with_controls_at_paths(
+            options,
+            controls,
+            typed_field_assignments,
+            paths,
+        )
+    } else {
+        remember_global_memory_with_creation_companions_at_paths(
+            options,
+            controls,
+            typed_field_assignments,
+            paths,
+            creation_companions,
+        )
+    }
 }
 
 fn remember_global_memory_with_controls_at_paths(
@@ -8073,6 +8250,28 @@ fn remember_global_memory_with_controls_at_paths(
     typed_field_assignments: &[String],
     paths: super::global_store::GlobalStorePaths,
 ) -> Result<RememberOutcome, DomainError> {
+    remember_global_memory_with_creation_companions_at_paths(
+        options,
+        controls,
+        typed_field_assignments,
+        paths,
+        RememberCreationCompanions::default(),
+    )
+}
+
+fn remember_global_memory_with_creation_companions_at_paths(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
+    paths: super::global_store::GlobalStorePaths,
+    creation_companions: RememberCreationCompanions<'_>,
+) -> Result<RememberOutcome, DomainError> {
+    creation_companions.validate_for_write(options, controls)?;
+    if creation_companions.seal.is_some() {
+        return Err(remember_usage_error(
+            "--seal cannot be combined with --global".to_owned(),
+        ));
+    }
     let workspace_id = if options.dry_run {
         super::global_store::global_workspace_id(&paths)
     } else {
@@ -8117,37 +8316,41 @@ fn remember_global_memory_with_controls_at_paths(
         .idempotency_key
         .map(validate_remember_idempotency_key)
         .transpose()?;
-    let idempotency_request_hash = idempotency_key
+    let original_request_hash = idempotency_key
         .as_ref()
         .map(|_| remember_request_hash(&global_options, typed_field_assignments, None))
         .transpose()?;
-    if let Some(key) = idempotency_key.as_deref() {
+    let idempotency_request_hash = original_request_hash
+        .as_deref()
+        .map(|hash| creation_companions.request_hash(hash))
+        .transpose()?;
+    let idempotency = idempotency_key
+        .as_deref()
+        .zip(idempotency_request_hash.as_deref())
+        .map(|(key, request_hash)| RememberIdempotencyRequest {
+            key,
+            request_hash,
+            legacy_request_hash: original_request_hash.as_deref(),
+            creation_companions,
+        });
+    if let Some(request) = idempotency {
         if paths.database_path.exists() {
             let connection = open_remember_database_with_retry(&paths.database_path)?;
             migrate_remember_database_with_retry(&connection)?;
             if let Some(existing) = connection
-                .get_remember_idempotency_key(&workspace_id, key)
+                .get_remember_idempotency_key(&workspace_id, request.key)
                 .map_err(|error| DomainError::Storage {
                     message: format!("Failed to look up global idempotency key: {error}"),
                     repair: Some("ee doctor --json".to_owned()),
                 })?
             {
-                if idempotency_request_hash
-                    .as_deref()
-                    .is_some_and(|request_hash| existing.content_hash == request_hash)
-                {
-                    return Ok(RememberOutcome::AlreadyRecorded(
-                        RememberAlreadyRecordedReport {
-                            version: env!("CARGO_PKG_VERSION"),
-                            workspace_id,
-                            database_path: paths.database_path,
-                            memory_id: existing.memory_id,
-                            idempotency_key: existing.idempotency_key,
-                            dry_run: options.dry_run,
-                        },
-                    ));
-                }
-                return Err(remember_idempotency_conflict_error(key));
+                return remember_idempotency_replay_outcome(
+                    &connection,
+                    existing,
+                    request,
+                    &paths.database_path,
+                    options.dry_run,
+                );
             }
         }
     }
@@ -8161,10 +8364,8 @@ fn remember_global_memory_with_controls_at_paths(
         Some(&store_override),
         typed_field_assignments,
         None,
-        idempotency_key
-            .as_deref()
-            .zip(idempotency_request_hash.as_deref())
-            .map(|(key, request_hash)| RememberIdempotencyRequest { key, request_hash }),
+        idempotency,
+        creation_companions,
     )
 }
 
@@ -9281,6 +9482,42 @@ fn open_migrated_memory_database(database_path: &Path) -> Result<DbConnection, S
     Ok(conn)
 }
 
+fn open_memory_maintenance_database(
+    workspace_path: &Path,
+    database_path: &Path,
+    read_only: bool,
+) -> Result<DbConnection, DomainError> {
+    if !read_only {
+        return open_migrated_memory_database(database_path).map_err(memory_command_storage_error);
+    }
+
+    super::ensure_addressed_database_exists(database_path)?;
+    let conn = DbConnection::open_file_read_only(database_path).map_err(|error| {
+        memory_command_storage_error(format!("Failed to open database read-only: {error}"))
+    })?;
+    let addressed_args = format!(
+        "--workspace {} --database {} --json",
+        super::shell_quote_repair_arg(&workspace_path.to_string_lossy()),
+        super::shell_quote_repair_arg(&database_path.to_string_lossy()),
+    );
+    match conn.needs_migration() {
+        Ok(false) => Ok(conn),
+        Ok(true) => Err(DomainError::MigrationRequired {
+            message: "Database schema migration is required before inspecting memory maintenance. The store was not changed.".to_owned(),
+            repair: Some(format!("ee migrate run {addressed_args}")),
+        }),
+        Err(error @ crate::db::DbError::MigrationDrift { .. }) => {
+            Err(DomainError::MigrationDrift {
+                message: format!("Failed to inspect memory database schema: {error}"),
+                repair: Some(format!("ee migrate status {addressed_args}")),
+            })
+        }
+        Err(error) => Err(memory_command_storage_error(format!(
+            "Failed to inspect memory database schema: {error}"
+        ))),
+    }
+}
+
 fn truncate_content(content: &str) -> (String, bool) {
     let char_count = content.chars().count();
     if char_count <= CONTENT_PREVIEW_LEN {
@@ -9805,168 +10042,192 @@ fn expire_audit_details(reason: Option<&str>) -> String {
     .to_string()
 }
 
-/// Expire a memory by setting its validity end timestamp. No files or rows are deleted.
-pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireReport, DomainError> {
-    let conn = open_migrated_memory_database(options.database_path)
-        .map_err(memory_command_storage_error)?;
-    let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
-    let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
-    let expires_at = normalize_validity_timestamp(Utc::now());
-
-    if memory.tombstoned_at.is_some() {
-        if !options.include_tombstoned {
-            return Err(DomainError::PolicyDenied {
-                message: "Memory is tombstoned and cannot be expired.".to_owned(),
-                repair: Some("Use ee memory show to inspect the tombstoned memory.".to_owned()),
-            });
-        }
-
-        return Ok(MemoryExpireReport {
-            schema: MEMORY_EXPIRE_SCHEMA_V1,
-            version: env!("CARGO_PKG_VERSION"),
-            memory_id: options.memory_id.to_owned(),
-            workspace_id,
-            status: "already_expired".to_owned(),
-            dry_run: options.dry_run,
-            persisted: false,
-            changed: false,
-            previous_valid_to: memory.valid_to.clone(),
-            valid_to: memory.valid_to,
-            previous_tombstoned_at: memory.tombstoned_at.clone(),
-            tombstoned_at: memory.tombstoned_at,
-            audit_id: None,
-            index_job_id: None,
-            index_status: "not_scheduled".to_owned(),
-            idempotency: "no_change".to_owned(),
+fn memory_expiration_plan(
+    options: &ExpireMemoryOptions<'_>,
+    workspace_id: &str,
+    memory: &StoredMemory,
+    expires_at: DateTime<Utc>,
+) -> Result<MemoryExpireReport, DomainError> {
+    if memory.tombstoned_at.is_some() && !options.include_tombstoned {
+        return Err(DomainError::PolicyDenied {
+            message: "Memory is tombstoned and cannot be expired.".to_owned(),
+            repair: Some("Use ee memory show to inspect the tombstoned memory.".to_owned()),
         });
     }
-    if memory_validity(&memory.valid_from, &memory.valid_to).status == "expired" {
-        return Ok(MemoryExpireReport {
-            schema: MEMORY_EXPIRE_SCHEMA_V1,
-            version: env!("CARGO_PKG_VERSION"),
-            memory_id: options.memory_id.to_owned(),
-            workspace_id,
-            status: "already_expired".to_owned(),
-            dry_run: options.dry_run,
-            persisted: false,
-            changed: false,
-            previous_valid_to: memory.valid_to.clone(),
-            valid_to: memory.valid_to,
-            previous_tombstoned_at: None,
-            tombstoned_at: None,
-            audit_id: None,
-            index_job_id: None,
-            index_status: "not_scheduled".to_owned(),
-            idempotency: "no_change".to_owned(),
-        });
-    }
-
-    if options.dry_run {
-        return Ok(MemoryExpireReport {
-            schema: MEMORY_EXPIRE_SCHEMA_V1,
-            version: env!("CARGO_PKG_VERSION"),
-            memory_id: options.memory_id.to_owned(),
-            workspace_id,
-            status: "would_expire".to_owned(),
-            dry_run: true,
-            persisted: false,
-            changed: true,
-            previous_valid_to: memory.valid_to,
-            valid_to: Some(expires_at),
-            previous_tombstoned_at: None,
-            tombstoned_at: None,
-            audit_id: None,
-            index_job_id: None,
-            index_status: "dry_run_not_queued".to_owned(),
-            idempotency: "would_change".to_owned(),
-        });
-    }
-
-    let audit_id = generate_audit_id();
-    let actor = options.actor.or(Some("ee memory expire"));
-    let details = expire_audit_details(options.reason);
-    let index_job_id = generate_search_index_job_id();
-    let index_input = CreateSearchIndexJobInput {
-        workspace_id: workspace_id.clone(),
-        job_type: SearchIndexJobType::SingleDocument,
-        document_source: Some("memory".to_owned()),
-        document_id: Some(options.memory_id.to_owned()),
-        documents_total: 1,
+    // Match the database's monotonic end-marker comparison. Display validity
+    // prioritizes a future start, which must not hide an already elapsed end.
+    let changed = if memory.tombstoned_at.is_some() {
+        false
+    } else {
+        let previous_end = memory
+            .valid_to
+            .as_deref()
+            .map(DateTime::parse_from_rfc3339)
+            .transpose()
+            .map_err(|error| {
+                memory_command_storage_error(format!(
+                    "Stored memory validity end is invalid: {error}"
+                ))
+            })?;
+        previous_end.is_none_or(|end| end.with_timezone(&Utc) > expires_at)
     };
-
-    conn.with_transaction(|| {
-        let expired = conn.expire_memory_valid_to(options.memory_id, &expires_at)?;
-        if !expired {
-            return Ok(None);
-        }
-        conn.insert_audit(
-            &audit_id,
-            &CreateAuditInput {
-                workspace_id: Some(workspace_id.clone()),
-                actor: actor.map(str::to_owned),
-                action: audit_actions::MEMORY_EXPIRE.to_owned(),
-                target_type: Some("memory".to_owned()),
-                target_id: Some(options.memory_id.to_owned()),
-                details: Some(details.clone()),
-            },
-        )?;
-        if memory.level == "semantic" {
-            let mut evidence_refs = vec![expires_at.clone()];
-            if let Some(reason) = options.reason {
-                evidence_refs.push(reason.to_owned());
-            }
-            let _ = conn.apply_memory_level_transition_in_current_transaction(
-                options.memory_id,
-                &ApplyMemoryLevelTransitionInput {
-                    workspace_id: workspace_id.clone(),
-                    expected_level: Some(memory.level.clone()),
-                    level: "episodic".to_owned(),
-                    updated_at: expires_at.clone(),
-                    actor: actor.map(str::to_owned),
-                    reason: "time_bound_fact".to_owned(),
-                    automatic: true,
-                    event: "valid_to.set".to_owned(),
-                    evidence_refs,
-                    source_action: Some(audit_actions::MEMORY_EXPIRE.to_owned()),
-                },
-            )?;
-        }
-        conn.insert_search_index_job(&index_job_id, &index_input)?;
-        Ok(Some(()))
-    })
-    .map_err(|error| memory_command_storage_error(format!("Failed to expire memory: {error}")))?;
-
-    let refreshed = conn
-        .get_memory(options.memory_id)
-        .map_err(|error| {
-            memory_command_storage_error(format!("Failed to reload expired memory: {error}"))
-        })?
-        .ok_or_else(|| memory_command_not_found(options.memory_id))?;
-    let refreshed_validity = memory_validity(&refreshed.valid_from, &refreshed.valid_to);
-    let changed = refreshed_validity.status == "expired";
-
     Ok(MemoryExpireReport {
         schema: MEMORY_EXPIRE_SCHEMA_V1,
         version: env!("CARGO_PKG_VERSION"),
         memory_id: options.memory_id.to_owned(),
-        workspace_id,
+        workspace_id: workspace_id.to_owned(),
         status: if changed {
-            "expired".to_owned()
+            "would_expire".to_owned()
         } else {
             "already_expired".to_owned()
         },
-        dry_run: false,
-        persisted: changed,
+        dry_run: options.dry_run,
+        persisted: false,
         changed,
-        previous_valid_to: memory.valid_to,
-        valid_to: refreshed.valid_to,
-        previous_tombstoned_at: None,
-        tombstoned_at: refreshed.tombstoned_at,
-        audit_id: Some(audit_id),
-        index_job_id: Some(index_job_id),
-        index_status: "queued".to_owned(),
-        idempotency: "changed".to_owned(),
+        previous_valid_to: memory.valid_to.clone(),
+        valid_to: if changed {
+            Some(normalize_validity_timestamp(expires_at))
+        } else {
+            memory.valid_to.clone()
+        },
+        previous_tombstoned_at: memory.tombstoned_at.clone(),
+        tombstoned_at: memory.tombstoned_at.clone(),
+        audit_id: None,
+        index_job_id: None,
+        index_status: if changed {
+            "dry_run_not_queued".to_owned()
+        } else {
+            "not_scheduled".to_owned()
+        },
+        idempotency: if changed {
+            "would_change".to_owned()
+        } else {
+            "no_change".to_owned()
+        },
     })
+}
+
+// The caller owns the write transaction. Resolve scope, revalidate the current
+// row and retain the exact mutation result before the transaction commits.
+// Domain failures occur before writes; database failures roll all writes back.
+fn expire_memory_in_current_transaction(
+    conn: &DbConnection,
+    options: &ExpireMemoryOptions<'_>,
+) -> crate::db::Result<Result<MemoryExpireReport, DomainError>> {
+    let workspace_id = workspace_id_for_database(conn, options.workspace_path);
+    let Some(memory) = conn.get_memory(options.memory_id)? else {
+        return Ok(Err(memory_command_not_found(options.memory_id)));
+    };
+    if memory.workspace_id != workspace_id {
+        return Ok(Err(memory_command_not_found(options.memory_id)));
+    }
+    let expiry_instant = Utc::now();
+    let expires_at = normalize_validity_timestamp(expiry_instant);
+    let mut report = match memory_expiration_plan(options, &workspace_id, &memory, expiry_instant) {
+        Ok(report) => report,
+        Err(error) => return Ok(Err(error)),
+    };
+    if !report.changed {
+        return Ok(Ok(report));
+    }
+
+    if !conn.expire_memory_valid_to(options.memory_id, &expires_at)? {
+        let Some(current) = conn.get_memory(options.memory_id)? else {
+            return Ok(Err(memory_command_not_found(options.memory_id)));
+        };
+        if current.workspace_id != workspace_id {
+            return Ok(Err(memory_command_not_found(options.memory_id)));
+        }
+        let unchanged =
+            match memory_expiration_plan(options, &workspace_id, &current, expiry_instant) {
+                Ok(report) => report,
+                Err(error) => return Ok(Err(error)),
+            };
+        if unchanged.changed {
+            return Err(crate::db::DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "Memory expiry did not persist the planned validity end.".to_owned(),
+            });
+        }
+        return Ok(Ok(unchanged));
+    }
+
+    let audit_id = generate_audit_id();
+    let actor = options.actor.or(Some("ee memory expire"));
+    conn.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(workspace_id.clone()),
+            actor: actor.map(str::to_owned),
+            action: audit_actions::MEMORY_EXPIRE.to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some(options.memory_id.to_owned()),
+            details: Some(expire_audit_details(options.reason)),
+        },
+    )?;
+    if memory.level == "semantic" {
+        let mut evidence_refs = vec![expires_at.clone()];
+        if let Some(reason) = options.reason {
+            evidence_refs.push(reason.to_owned());
+        }
+        let transition = conn.apply_memory_level_transition_in_current_transaction(
+            options.memory_id,
+            &ApplyMemoryLevelTransitionInput {
+                workspace_id: workspace_id.clone(),
+                expected_level: Some(memory.level.clone()),
+                level: "episodic".to_owned(),
+                updated_at: expires_at,
+                actor: actor.map(str::to_owned),
+                reason: "time_bound_fact".to_owned(),
+                automatic: true,
+                event: "valid_to.set".to_owned(),
+                evidence_refs,
+                source_action: Some(audit_actions::MEMORY_EXPIRE.to_owned()),
+            },
+        )?;
+        if transition.is_none() {
+            return Err(crate::db::DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "Expired semantic memory did not transition to episodic.".to_owned(),
+            });
+        }
+    }
+    let index_job_id = generate_search_index_job_id();
+    conn.insert_search_index_job(
+        &index_job_id,
+        &CreateSearchIndexJobInput {
+            workspace_id,
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_owned()),
+            document_id: Some(options.memory_id.to_owned()),
+            documents_total: 1,
+        },
+    )?;
+    report.status = "expired".to_owned();
+    report.persisted = true;
+    report.audit_id = Some(audit_id);
+    report.index_job_id = Some(index_job_id);
+    report.index_status = "queued".to_owned();
+    report.idempotency = "changed".to_owned();
+    Ok(Ok(report))
+}
+
+/// Expire a memory by setting its validity end timestamp. No files or rows are deleted.
+pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireReport, DomainError> {
+    let conn = open_memory_maintenance_database(
+        options.workspace_path,
+        options.database_path,
+        options.dry_run,
+    )?;
+    if options.dry_run {
+        let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
+        let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
+        return memory_expiration_plan(options, &workspace_id, &memory, Utc::now());
+    }
+    conn.with_transaction(|| expire_memory_in_current_transaction(&conn, options))
+        .map_err(|error| {
+            memory_command_storage_error(format!("Failed to expire memory: {error}"))
+        })?
 }
 
 fn memory_lifecycle_state_from_level(level: &str) -> Option<MemoryLifecycleState> {
@@ -10064,8 +10325,11 @@ pub fn update_memory_level(
         .map(memory_level_target)
         .transpose()?
         .map(|level| level.as_str().to_owned());
-    let conn = open_migrated_memory_database(options.database_path)
-        .map_err(memory_command_storage_error)?;
+    let conn = open_memory_maintenance_database(
+        options.workspace_path,
+        options.database_path,
+        options.dry_run,
+    )?;
     let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
 
@@ -10431,8 +10695,11 @@ fn memory_link_audit_details(link: &MemoryLinkItem, metadata_json: Option<&str>)
 pub fn update_memory_link(
     options: &MemoryLinkOptions<'_>,
 ) -> Result<MemoryLinkReport, DomainError> {
-    let conn = open_migrated_memory_database(options.database_path)
-        .map_err(memory_command_storage_error)?;
+    let conn = open_memory_maintenance_database(
+        options.workspace_path,
+        options.database_path,
+        options.dry_run || matches!(options.mode, MemoryLinkMode::List { .. }),
+    )?;
     let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let source_memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
 
@@ -10628,8 +10895,11 @@ pub fn update_memory_link(
 pub fn update_memory_tags(
     options: &MemoryTagsOptions<'_>,
 ) -> Result<MemoryTagsReport, DomainError> {
-    let conn = open_migrated_memory_database(options.database_path)
-        .map_err(memory_command_storage_error)?;
+    let conn = open_memory_maintenance_database(
+        options.workspace_path,
+        options.database_path,
+        options.dry_run || matches!(options.mode, MemoryTagsMode::List),
+    )?;
     let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
 
@@ -12043,6 +12313,11 @@ where
             // the attempt-family pointer; the slot ledger inherits by
             // logical_id and is never copied.
             conn.carry_memory_attempt_family_pointer(options.original_memory_id, &new_id)?;
+            conn.carry_memory_code_anchor_sources(
+                options.original_memory_id,
+                &new_id,
+                &original.workspace_id,
+            )?;
             // bd-tmv70: mark the original as history in `superseded_at`, NOT by
             // overwriting `valid_to`. `valid_to` is the author's temporal bound
             // and supersession has no business editing it. The previous write
@@ -12919,6 +13194,10 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
 #[cfg(test)]
 #[path = "memory_git_capture_identity_tests.rs"]
 mod git_capture_identity_tests;
+
+#[cfg(test)]
+#[path = "memory_creation_companion_tests.rs"]
+mod creation_companion_tests;
 
 #[cfg(test)]
 #[path = "memory_git_capture_security_tests.rs"]
@@ -14231,6 +14510,7 @@ mod tests {
             None,
             Some(&handle),
             None,
+            &PreparedRememberCreationCompanions::default(),
         )
         .map_err(|error| error.to_string())?;
 
@@ -14489,6 +14769,7 @@ mod tests {
             None,
             None,
             None,
+            &PreparedRememberCreationCompanions::default(),
         )
         .map_err(|error| error.to_string())?;
 
@@ -14945,6 +15226,246 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
+    fn memory_maintenance_inspections(
+        workspace_path: &Path,
+        database_path: &Path,
+    ) -> Vec<(&'static str, Result<(), DomainError>)> {
+        let memory_id = "mem_00000000000000000000000001";
+        vec![
+            (
+                "expire preview",
+                expire_memory(&ExpireMemoryOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    reason: Some("obsolete"),
+                    actor: None,
+                    dry_run: true,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+            (
+                "level preview",
+                update_memory_level(&MemoryLevelOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    level: "procedural",
+                    expected_level: Some("semantic"),
+                    reason: Some("repeatedly verified"),
+                    actor: None,
+                    dry_run: true,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+            (
+                "tags preview",
+                update_memory_tags(&MemoryTagsOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    mode: MemoryTagsMode::Set(vec!["updated".to_owned()]),
+                    actor: None,
+                    dry_run: true,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+            (
+                "tags list",
+                update_memory_tags(&MemoryTagsOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    mode: MemoryTagsMode::List,
+                    actor: None,
+                    dry_run: false,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+            (
+                "link preview",
+                update_memory_link(&MemoryLinkOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    mode: MemoryLinkMode::Create {
+                        target_memory_id: "mem_00000000000000000000000002".to_owned(),
+                        relation: MemoryLinkRelation::Supports,
+                        weight: 0.75,
+                        confidence: 0.9,
+                        directed: true,
+                        evidence_count: 1,
+                        source: MemoryLinkSource::Human,
+                        metadata_json: None,
+                    },
+                    actor: None,
+                    dry_run: true,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+            (
+                "link list",
+                update_memory_link(&MemoryLinkOptions {
+                    workspace_path,
+                    database_path,
+                    memory_id,
+                    mode: MemoryLinkMode::List { relation: None },
+                    actor: None,
+                    dry_run: false,
+                    include_tombstoned: false,
+                })
+                .map(|_| ()),
+            ),
+        ]
+    }
+
+    fn memory_maintenance_fixture() -> Result<(tempfile::TempDir, PathBuf, String), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("maintenance.db");
+        let workspace_path = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&workspace_path);
+        let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        conn.insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace_path.to_string_lossy().into_owned(),
+                name: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        for memory_id in [
+            "mem_00000000000000000000000001",
+            "mem_00000000000000000000000002",
+        ] {
+            let mut input = remember_test_memory_input(&workspace_id, "A time-bound fact.");
+            input.level = "semantic".to_owned();
+            input.kind = "fact".to_owned();
+            input.tags = vec!["original".to_owned()];
+            conn.insert_memory(memory_id, &input)
+                .map_err(|error| error.to_string())?;
+        }
+        conn.close().map_err(|error| error.to_string())?;
+        Ok((temp, database_path, workspace_id))
+    }
+
+    #[test]
+    fn memory_maintenance_inspections_never_create_missing_stores() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("absent workspace");
+        let database = workspace.join(".ee/ee.db");
+        for (surface, result) in memory_maintenance_inspections(&workspace, &database) {
+            let error = result.expect_err("a missing store must remain missing");
+            ensure(error.code(), "workspace_store_missing", surface)?;
+        }
+        ensure(workspace.exists(), false, "no workspace is created")?;
+        ensure(
+            memory_list_store_snapshot(&database)?.is_empty(),
+            true,
+            "no database or sidecars are created",
+        )
+    }
+
+    #[test]
+    fn memory_maintenance_inspections_preserve_pending_schema_and_drift() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database = temp.path().join("older store's.db");
+        let migration = &crate::db::V001_INIT_SCHEMA;
+        let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        conn.ensure_migration_table()
+            .map_err(|error| error.to_string())?;
+        conn.execute_raw(migration.sql())
+            .map_err(|error| error.to_string())?;
+        conn.record_migration(
+            &crate::db::MigrationRecord::new(
+                migration.version(),
+                migration.name(),
+                migration.checksum(),
+                "2026-09-15T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        conn.close().map_err(|error| error.to_string())?;
+
+        let addressed_args = format!(
+            "--workspace {} --database {} --json",
+            crate::core::shell_quote_repair_arg(&temp.path().to_string_lossy()),
+            crate::core::shell_quote_repair_arg(&database.to_string_lossy()),
+        );
+        let before = memory_list_store_snapshot(&database)?;
+        let repair = format!("ee migrate run {addressed_args}");
+        for (surface, result) in memory_maintenance_inspections(temp.path(), &database) {
+            let error = result.expect_err("old schema must require an explicit migration");
+            ensure(error.code(), "migration_required", surface)?;
+            ensure(
+                error.repair(),
+                Some(repair.as_str()),
+                "addressed migration repair",
+            )?;
+        }
+        ensure(
+            memory_list_store_snapshot(&database)?,
+            before,
+            "previews and lists preserve pending schema, bytes and metadata",
+        )?;
+
+        let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        ensure(
+            conn.applied_migrations()
+                .map_err(|error| error.to_string())?
+                .len(),
+            1,
+            "previews never append migrations",
+        )?;
+        conn.execute_raw("UPDATE ee_schema_migrations SET name = 'tampered' WHERE version = 1")
+            .map_err(|error| error.to_string())?;
+        conn.close().map_err(|error| error.to_string())?;
+        let before_drift = memory_list_store_snapshot(&database)?;
+        let repair = format!("ee migrate status {addressed_args}");
+        for (surface, result) in memory_maintenance_inspections(temp.path(), &database) {
+            let error = result.expect_err("drift must require explicit inspection");
+            ensure(error.code(), "migration_drift", surface)?;
+            ensure(
+                error.repair(),
+                Some(repair.as_str()),
+                "addressed drift repair",
+            )?;
+        }
+        ensure(
+            memory_list_store_snapshot(&database)?,
+            before_drift,
+            "previews and lists preserve a drifted ledger",
+        )
+    }
+
+    #[test]
+    fn memory_maintenance_previews_and_lists_preserve_current_store() -> TestResult {
+        let (temp, database, _) = memory_maintenance_fixture()?;
+        let before = memory_list_store_snapshot(&database)?;
+        for (surface, result) in memory_maintenance_inspections(temp.path(), &database) {
+            result.map_err(|error| format!("{surface}: {}", error.message()))?;
+        }
+        ensure(
+            memory_list_store_snapshot(&database)?,
+            before,
+            "read-only maintenance preserves DB, WAL, SHM, audits, jobs and generation",
+        )?;
+        ensure(
+            temp.path().join(".ee").exists(),
+            false,
+            "no index or workspace side effects",
+        )
+    }
+
     #[test]
     fn expire_memory_dry_run_preserves_memory() -> TestResult {
         let (temp, created) = remember_revisable_memory("Expire dry-run target.")?;
@@ -15038,6 +15559,20 @@ mod tests {
             audit.action,
             audit_actions::MEMORY_EXPIRE.to_owned(),
             "expire audit action",
+        )?;
+        let index_job = connection
+            .get_search_index_job(
+                report
+                    .index_job_id
+                    .as_deref()
+                    .ok_or("missing index job ID")?,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or("reported index job must exist")?;
+        ensure(
+            index_job.document_id,
+            Some(created.memory_id.to_string()),
+            "reported index job targets the expired memory",
         )
     }
 
@@ -15055,6 +15590,17 @@ mod tests {
         })
         .map_err(|error| error.message())?;
         ensure(report.status, "expired".to_owned(), "initial expire status")?;
+        let connection = DbConnection::open_file_read_only(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        let audits_before = connection
+            .list_audit_by_target("memory", &created.memory_id.to_string(), None)
+            .map_err(|error| error.to_string())?
+            .len();
+        let jobs_before = connection
+            .list_search_index_jobs(&report.workspace_id, None)
+            .map_err(|error| error.to_string())?
+            .len();
+        connection.close().map_err(|error| error.to_string())?;
 
         let already = expire_memory(&ExpireMemoryOptions {
             workspace_path: temp.path(),
@@ -15072,12 +15618,281 @@ mod tests {
             "idempotent status",
         )?;
         ensure(already.persisted, false, "idempotent persisted")?;
+        ensure(already.changed, false, "idempotent changed")?;
+        ensure(already.audit_id, None, "idempotent audit ID absent")?;
+        ensure(already.index_job_id, None, "idempotent index job ID absent")?;
+        ensure(
+            already.index_status,
+            "not_scheduled".to_owned(),
+            "idempotent index status",
+        )?;
+        ensure(
+            already.idempotency,
+            "no_change".to_owned(),
+            "idempotent posture",
+        )?;
         ensure(
             already.previous_valid_to,
             report.valid_to.clone(),
             "idempotent previous valid_to",
         )?;
-        ensure(already.valid_to, report.valid_to, "idempotent valid_to")
+        ensure(already.valid_to, report.valid_to, "idempotent valid_to")?;
+        let connection = DbConnection::open_file_read_only(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .list_audit_by_target("memory", &created.memory_id.to_string(), None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            audits_before,
+            "idempotent expiry inserts no audit rows",
+        )?;
+        ensure(
+            connection
+                .list_search_index_jobs(&report.workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            jobs_before,
+            "idempotent expiry queues no index jobs",
+        )
+    }
+
+    #[test]
+    fn expire_memory_transaction_uses_current_level_and_validity() -> TestResult {
+        let (temp, database, workspace_id) = memory_maintenance_fixture()?;
+        let memory_id = "mem_00000000000000000000000001";
+        let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let options = ExpireMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: &database,
+            memory_id,
+            reason: Some("fact no longer applies"),
+            actor: Some("test"),
+            dry_run: false,
+            include_tombstoned: false,
+        };
+        conn.execute_raw(
+            "UPDATE memories SET level = 'procedural' WHERE id = 'mem_00000000000000000000000001'",
+        )
+        .map_err(|error| error.to_string())?;
+        // The same transaction can contain a newer lifecycle decision than an
+        // earlier read. Expiry must use that row, including its scheduled end.
+        let earlier = conn
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("fixture memory missing")?;
+        ensure(
+            earlier.valid_to,
+            None,
+            "earlier read had no scheduled expiry",
+        )?;
+        ensure(
+            earlier.level,
+            "procedural".to_owned(),
+            "earlier read had a different level",
+        )?;
+        let report = conn.with_transaction(|| {
+            conn.execute_raw(
+                "UPDATE memories SET level = 'semantic', valid_from = '2998-01-01T00:00:00Z', valid_to = '2999-01-01T00:00:00Z' WHERE id = 'mem_00000000000000000000000001'",
+            )?;
+            expire_memory_in_current_transaction(&conn, &options)
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.message())?;
+        ensure(report.persisted, true, "expiry committed")?;
+        ensure(
+            report.previous_valid_to,
+            Some("2999-01-01T00:00:00Z".to_owned()),
+            "report describes the row observed inside the transaction",
+        )?;
+        let expired = conn
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("expired memory missing")?;
+        ensure(
+            expired.valid_to,
+            report.valid_to,
+            "report matches committed expiry",
+        )?;
+        ensure(
+            expired.level,
+            "episodic".to_owned(),
+            "semantic expiry becomes episodic",
+        )?;
+        let audits = conn
+            .list_audit_by_target("memory", memory_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            audits.len(),
+            2,
+            "expiry and level transition are audited together",
+        )?;
+        ensure(
+            audits
+                .iter()
+                .any(|audit| audit.action == audit_actions::MEMORY_LEVEL_TRANSITION),
+            true,
+            "automatic level transition audit exists",
+        )?;
+        ensure(
+            conn.list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            1,
+            "one job covers the atomic expiry and level transition",
+        )?;
+
+        let unchanged = conn
+            .with_transaction(|| expire_memory_in_current_transaction(&conn, &options))
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.message())?;
+        ensure(
+            unchanged.changed,
+            false,
+            "a future start does not hide already expired state on the transaction recheck",
+        )?;
+        ensure(
+            unchanged.audit_id,
+            None,
+            "transaction no-op has no fabricated audit ID",
+        )?;
+        ensure(
+            unchanged.index_job_id,
+            None,
+            "transaction no-op has no fabricated index ID",
+        )
+    }
+
+    #[test]
+    fn expire_memory_transaction_rechecks_tombstones_and_scope() -> TestResult {
+        let (temp, database, _) = memory_maintenance_fixture()?;
+        let memory_id = "mem_00000000000000000000000001";
+        let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let options = ExpireMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: &database,
+            memory_id,
+            reason: None,
+            actor: None,
+            dry_run: false,
+            include_tombstoned: false,
+        };
+        let earlier = conn
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("fixture memory missing")?;
+        ensure(earlier.tombstoned_at, None, "earlier read was active")?;
+        let rejected = conn
+            .with_transaction(|| {
+                conn.tombstone_memory(memory_id)?;
+                expire_memory_in_current_transaction(&conn, &options)
+            })
+            .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(rejected, Err(DomainError::PolicyDenied { .. })),
+            true,
+            "transaction refuses a newly tombstoned memory",
+        )?;
+        let visible = conn
+            .with_transaction(|| {
+                expire_memory_in_current_transaction(
+                    &conn,
+                    &ExpireMemoryOptions {
+                        include_tombstoned: true,
+                        ..options.clone()
+                    },
+                )
+            })
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.message())?;
+        ensure(visible.changed, false, "included tombstone is a no-op")?;
+        ensure(
+            visible.tombstoned_at.is_some(),
+            true,
+            "included tombstone remains visible",
+        )?;
+        ensure(
+            visible.audit_id,
+            None,
+            "included tombstone has no expiry audit",
+        )?;
+        let foreign_workspace = temp.path().join("other workspace");
+        let foreign = conn
+            .with_transaction(|| {
+                expire_memory_in_current_transaction(
+                    &conn,
+                    &ExpireMemoryOptions {
+                        workspace_path: &foreign_workspace,
+                        include_tombstoned: true,
+                        ..options.clone()
+                    },
+                )
+            })
+            .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(foreign, Err(DomainError::NotFound { .. })),
+            true,
+            "transaction does not expose another workspace's memory",
+        )?;
+        ensure(
+            conn.list_audit_by_target("memory", memory_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            true,
+            "rejected and no-op expirations create no audit rows",
+        )
+    }
+
+    #[test]
+    fn expire_memory_rolls_back_validity_level_and_audit_when_index_queue_fails() -> TestResult {
+        let (temp, database, workspace_id) = memory_maintenance_fixture()?;
+        let memory_id = "mem_00000000000000000000000001";
+        let conn = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let before = conn
+            .get_memory(memory_id)
+            .map_err(|error| error.to_string())?;
+        conn.execute_raw(
+            "CREATE TRIGGER test_expiry_index_failure BEFORE INSERT ON search_index_jobs \
+             BEGIN SELECT RAISE(ABORT, 'intentional expiry queue failure'); END",
+        )
+        .map_err(|error| error.to_string())?;
+        conn.close().map_err(|error| error.to_string())?;
+        let result = expire_memory(&ExpireMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: &database,
+            memory_id,
+            reason: Some("obsolete"),
+            actor: None,
+            dry_run: false,
+            include_tombstoned: false,
+        });
+        ensure(
+            matches!(result, Err(DomainError::Storage { .. })),
+            true,
+            "queue failure is reported as a failed transaction",
+        )?;
+        let conn =
+            DbConnection::open_file_read_only(&database).map_err(|error| error.to_string())?;
+        ensure(
+            conn.get_memory(memory_id)
+                .map_err(|error| error.to_string())?,
+            before,
+            "queue failure restores validity, level, provenance and timestamps",
+        )?;
+        ensure(
+            conn.list_audit_by_target("memory", memory_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            true,
+            "expiry and level audits roll back",
+        )?;
+        ensure(
+            conn.list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            true,
+            "no index job is left behind",
+        )
     }
 
     #[test]
@@ -21532,7 +22347,10 @@ mod tests {
                 Some(RememberIdempotencyRequest {
                     key: "rollback-key",
                     request_hash: if fail_key { "" } else { "blake3:rollback" },
+                    legacy_request_hash: None,
+                    creation_companions: RememberCreationCompanions::default(),
                 }),
+                &PreparedRememberCreationCompanions::default(),
             );
             ensure(
                 result.is_err(),
@@ -21595,7 +22413,10 @@ mod tests {
                 Some(RememberIdempotencyRequest {
                     key: "rollback-key",
                     request_hash: "blake3:rollback",
+                    legacy_request_hash: None,
+                    creation_companions: RememberCreationCompanions::default(),
                 }),
+                &PreparedRememberCreationCompanions::default(),
             )
             .map_err(|error| error.message())?;
             ensure(
@@ -21641,7 +22462,10 @@ mod tests {
                     Some(RememberIdempotencyRequest {
                         key: "concurrent-key",
                         request_hash: &request_hash,
+                        legacy_request_hash: None,
+                        creation_companions: RememberCreationCompanions::default(),
                     }),
+                    RememberCreationCompanions::default(),
                 )
                 .map_err(|error| error.message())
             }));
@@ -21705,7 +22529,10 @@ mod tests {
             Some(RememberIdempotencyRequest {
                 key: "concurrent-key",
                 request_hash: &changed_hash,
+                legacy_request_hash: None,
+                creation_companions: RememberCreationCompanions::default(),
             }),
+            RememberCreationCompanions::default(),
         )
         .expect_err("changed payload must conflict inside source fence");
         ensure(

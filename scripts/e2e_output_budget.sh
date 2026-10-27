@@ -28,6 +28,14 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 EE_BINARY="$(ee_resolve_binary debug)"
+# bd-resolve-without-require-binary-guard-jqiws: resolving a binary is not the
+# same as being able to run it. Refuse a missing, foreign-format or stale one
+# here, so a single environment fault does not read as N product failures.
+# Exit 76 is verify.sh's STAGE_ENV_UNRUNNABLE_CODE, deliberately not 2:
+# verify.sh invokes this script and maps unrecognised codes to FAIL.
+if ! ee_require_current_binary "$EE_BINARY" "e2e_output_budget"; then
+    exit 76
+fi
 if [[ ! -x "${EE_BINARY}" ]]; then
     echo "output_budget: ee binary not found or not executable: ${EE_BINARY}" >&2
     echo "output_budget: build via the normal RCH-backed gate first or set EE_BINARY" >&2

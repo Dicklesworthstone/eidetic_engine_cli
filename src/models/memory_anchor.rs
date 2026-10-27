@@ -11,6 +11,9 @@
 //! reverse lookup cannot run against hashes. [`extract_memory_anchor_surfaces`]
 //! is the single extraction walk both consumers share, so the search-document
 //! metadata and the reverse index cannot drift from each other.
+//! Explicit code-anchor attachments retain those same restricted normalized
+//! values in `memory_code_anchor_sources`, so rebuilding the derived index
+//! never requires rewriting the original memory body.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -255,6 +258,68 @@ impl CreateMemoryAnchorInput {
         )
     }
 
+    /// Validate an explicitly attached code locator. The caller supplies the
+    /// relationship, so extraction heuristics do not restrict repository layout
+    /// or historical missing files. Paths must remain inside the workspace,
+    /// including through existing symlinks.
+    #[must_use]
+    pub fn from_code_surface(
+        memory_id: &str,
+        anchor_kind: MemoryAnchorKind,
+        raw_value: &str,
+        workspace_root: &std::path::Path,
+        provenance: &str,
+    ) -> Option<ExtractedAnchorSurface> {
+        let normalized = normalize_code_anchor_value(anchor_kind, raw_value, Some(workspace_root))?;
+        let (anchor, normalized_value) = Self::finish_from_normalized(
+            memory_id,
+            anchor_kind,
+            normalized,
+            1.0,
+            MemoryAnchorSource::Explicit,
+            provenance,
+            0,
+        );
+        Some(ExtractedAnchorSurface {
+            anchor,
+            normalized_value,
+        })
+    }
+
+    /// Rehydrate a previously validated source binding without consulting the
+    /// current filesystem. A deleted source file must not erase its memory's
+    /// locator during rebuild. Storage callers still verify the stored hash.
+    pub fn from_stored_code_surface(
+        memory_id: &str,
+        kind: MemoryAnchorKind,
+        normalized: &str,
+        source: MemoryAnchorSource,
+        provenance: &str,
+    ) -> Option<ExtractedAnchorSurface> {
+        let valid = match kind {
+            MemoryAnchorKind::Path => safe_code_path(normalized),
+            MemoryAnchorKind::Symbol => normalize_code_anchor_value(kind, normalized, None)
+                .is_some_and(|value| value == normalized),
+            _ => false,
+        };
+        if !valid {
+            return None;
+        }
+        let (anchor, normalized_value) = Self::finish_from_normalized(
+            memory_id,
+            kind,
+            normalized.to_owned(),
+            1.0,
+            source,
+            provenance,
+            0,
+        );
+        Some(ExtractedAnchorSurface {
+            anchor,
+            normalized_value,
+        })
+    }
+
     fn finish_from_normalized(
         memory_id: &str,
         anchor_kind: MemoryAnchorKind,
@@ -303,10 +368,87 @@ fn existing_workspace_file_path(workspace_root: &std::path::Path, raw: &str) -> 
     {
         return None;
     }
-    workspace_root
-        .join(stripped)
-        .is_file()
-        .then(|| stripped.to_owned())
+    let root = workspace_root.canonicalize().ok()?;
+    let path = workspace_root.join(stripped);
+    (path.is_file() && path.canonicalize().ok()?.starts_with(root)).then(|| stripped.to_owned())
+}
+
+/// Restricted path/symbol grammar for durable code-anchor source bindings.
+/// Query globs, URLs, host paths, traversal and arbitrary text are not locators.
+/// Normalization preserves case and strips only the documented leading `./`
+/// (or a symbol's trailing `()`), matching recall and existing anchor hashes.
+#[must_use]
+pub fn normalize_code_anchor_value(
+    kind: MemoryAnchorKind,
+    raw: &str,
+    workspace_root: Option<&std::path::Path>,
+) -> Option<String> {
+    let value = raw.trim();
+    match kind {
+        MemoryAnchorKind::Path => {
+            let value = value.strip_prefix("./").unwrap_or(value);
+            if !safe_code_path(value) {
+                return None;
+            }
+            if let Some(root) = workspace_root {
+                let canonical_root = root.canonicalize().ok()?;
+                let joined = root.join(value);
+                // A missing leaf may be a historical source path. Check its
+                // nearest existing ancestor to reject escaping symlinks too.
+                let mut ancestor = joined.as_path();
+                while !ancestor.exists() {
+                    if ancestor.symlink_metadata().is_ok() {
+                        return None; // broken symlink cannot establish scope
+                    }
+                    ancestor = ancestor.parent()?;
+                }
+                if !ancestor.canonicalize().ok()?.starts_with(&canonical_root) {
+                    return None;
+                }
+            }
+            Some(value.to_owned())
+        }
+        MemoryAnchorKind::Symbol => {
+            let symbol = value.strip_suffix("()").unwrap_or(value);
+            if symbol.is_empty() || symbol.len() > 512 {
+                return None;
+            }
+            symbol
+                .split("::")
+                .flat_map(|part| part.split('.'))
+                .all(|part| {
+                    let mut chars = part.chars();
+                    chars
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+                        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                })
+                .then(|| symbol.to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// A locator must pass the same public screen at ingress and recall egress.
+/// Keep legacy source reconstruction separate: private stored bindings remain
+/// readable as hashed identities, but cannot be newly attached or transported.
+#[must_use]
+pub(crate) fn code_anchor_locator_is_public(value: &str) -> bool {
+    !value
+        .char_indices()
+        .any(|(index, _)| crate::util::sensitive_path_starts_at(value, index))
+        && !crate::policy::redact_public_replay_text(value).redacted
+}
+
+fn safe_code_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 1024
+        && !value.starts_with('/')
+        && !value.contains("..")
+        && value
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | '@' | '+'))
+        && value.split('/').all(|part| !part.is_empty() && part != ".")
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -508,6 +650,77 @@ pub fn extract_precision_memory_anchors(
         .collect()
 }
 
+/// Conservative historical backfill: reuse explicit/code-fragment extraction,
+/// then recognize bare lexical repo paths or path-shaped references to real
+/// workspace files. Ordinary prose words are not inferred as paths or symbols.
+/// Callers still screen secrets and validate every candidate's workspace scope.
+#[must_use]
+pub fn extract_backfill_code_anchor_surfaces(
+    memory_id: &str,
+    content: &str,
+    workspace_root: Option<&std::path::Path>,
+) -> Vec<ExtractedAnchorSurface> {
+    let mut surfaces: BTreeMap<_, _> = extract_memory_anchor_surfaces(
+        memory_id,
+        content,
+        MemoryAnchorSource::IndexRebuild,
+        Some("index.backfill_anchors"),
+    )
+    .into_iter()
+    .filter(|surface| {
+        matches!(
+            surface.anchor.anchor_kind,
+            MemoryAnchorKind::Path | MemoryAnchorKind::Symbol
+        )
+    })
+    .map(|surface| {
+        (
+            (
+                surface.anchor.anchor_kind,
+                surface.anchor.anchor_value_hash.clone(),
+            ),
+            surface,
+        )
+    })
+    .collect();
+    for token in content.split_whitespace() {
+        let cleaned = trim_code_path_token(token);
+        let path_shaped = cleaned.contains('/')
+            || cleaned
+                .rsplit_once('.')
+                .is_some_and(|(_, extension)| !extension.is_empty());
+        if !path_shaped && !looks_like_repo_path(cleaned) {
+            continue;
+        }
+        let Some(normalized) =
+            normalize_code_anchor_value(MemoryAnchorKind::Path, cleaned, workspace_root)
+        else {
+            continue;
+        };
+        let existing_file =
+            path_shaped && workspace_root.is_some_and(|root| root.join(&normalized).is_file());
+        if !looks_like_repo_path(&normalized) && !existing_file {
+            continue;
+        }
+        let (anchor, normalized_value) = CreateMemoryAnchorInput::finish_from_normalized(
+            memory_id,
+            MemoryAnchorKind::Path,
+            normalized,
+            0.92,
+            MemoryAnchorSource::IndexRebuild,
+            "index.backfill_anchors",
+            0,
+        );
+        surfaces
+            .entry((anchor.anchor_kind, anchor.anchor_value_hash.clone()))
+            .or_insert(ExtractedAnchorSurface {
+                anchor,
+                normalized_value,
+            });
+    }
+    surfaces.into_values().collect()
+}
+
 fn extract_explicit_anchors(
     memory_id: &str,
     content: &str,
@@ -528,6 +741,32 @@ fn extract_explicit_anchors(
         let Some(anchor_kind) = MemoryAnchorKind::parse(kind) else {
             continue;
         };
+        if anchor_kind == MemoryAnchorKind::Path {
+            // The explicit marker supplies intent. Preserve leading dots and
+            // accept safe relative locators across repository layouts, without
+            // making rebuilds depend on whether a historical file still exists.
+            let Some(normalized) =
+                normalize_code_anchor_value(anchor_kind, trim_code_path_token(value), None)
+            else {
+                continue;
+            };
+            let (anchor, normalized_value) = CreateMemoryAnchorInput::finish_from_normalized(
+                memory_id,
+                anchor_kind,
+                normalized,
+                1.0,
+                MemoryAnchorSource::Explicit,
+                provenance,
+                0,
+            );
+            anchors
+                .entry((anchor_kind, anchor.anchor_value_hash.clone()))
+                .or_insert(ExtractedAnchorSurface {
+                    anchor,
+                    normalized_value,
+                });
+            continue;
+        }
         push_raw_anchor(
             anchors,
             memory_id,
@@ -830,6 +1069,19 @@ fn trim_token(token: &str) -> &str {
     })
 }
 
+/// Strip prose delimiters without destroying `./`, dotfiles, or a leading
+/// traversal attempt that the strict path validator must reject intact.
+fn trim_code_path_token(token: &str) -> &str {
+    token
+        .trim_matches(|character: char| {
+            matches!(
+                character,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
+            )
+        })
+        .trim_end_matches('.')
+}
+
 fn looks_like_repo_path(token: &str) -> bool {
     let token = token.strip_prefix("./").unwrap_or(token);
     if token.contains("://") || token.contains("..") || token.starts_with('/') {
@@ -1034,6 +1286,201 @@ impl SurfaceCoverageFacet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attached_code_locators_preserve_extraction_hashes_and_case() {
+        let root = tempfile::tempdir().unwrap();
+        for (kind, raw, normalized) in [
+            (MemoryAnchorKind::Path, "./src/db/mod.rs", "src/db/mod.rs"),
+            (MemoryAnchorKind::Path, "src/café.rs", "src/café.rs"),
+            (MemoryAnchorKind::Symbol, "Store::open()", "Store::open"),
+            (MemoryAnchorKind::Symbol, "store.open", "store.open"),
+            (MemoryAnchorKind::Symbol, "open", "open"),
+        ] {
+            let surface = CreateMemoryAnchorInput::from_code_surface(
+                "mem_fixture",
+                kind,
+                raw,
+                root.path(),
+                "memory.anchors",
+            )
+            .unwrap();
+            let legacy = CreateMemoryAnchorInput::from_raw(
+                "mem_fixture",
+                kind,
+                normalized,
+                1.0,
+                MemoryAnchorSource::Explicit,
+                "memory.anchors",
+                0,
+            )
+            .unwrap();
+            assert_eq!(surface.normalized_value, normalized);
+            assert_eq!(surface.anchor.anchor_value_hash, legacy.anchor_value_hash);
+            assert!(!surface.anchor.redacted_anchor_value.contains(normalized));
+        }
+    }
+
+    #[test]
+    fn new_attachment_validation_does_not_rewrite_legacy_symbol_extraction() {
+        let content = "anchor:symbol:language.special$name";
+        let surfaces = extract_memory_anchor_surfaces(
+            "mem_fixture",
+            content,
+            MemoryAnchorSource::Remember,
+            None,
+        );
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0].normalized_value, "language.special$name");
+        assert!(
+            normalize_code_anchor_value(MemoryAnchorKind::Symbol, "name with spaces", None)
+                .is_none()
+        );
+        for invalid in [
+            "123name",
+            "Store::::open",
+            "::open",
+            "Store::",
+            "store..open",
+            "()",
+        ] {
+            assert!(
+                normalize_code_anchor_value(MemoryAnchorKind::Symbol, invalid, None).is_none(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_path_attachment_rejects_traversal_globs_and_host_paths() {
+        let root = tempfile::tempdir().unwrap();
+        for invalid in [
+            "",
+            "../outside.rs",
+            "src/../../outside.rs",
+            "/tmp/outside.rs",
+            "src/*.rs",
+            "src/[ab].rs",
+            "https://example.invalid/src/a.rs",
+            "C:\\src\\a.rs",
+            "src//a.rs",
+            "src/./a.rs",
+        ] {
+            assert!(
+                normalize_code_anchor_value(MemoryAnchorKind::Path, invalid, Some(root.path()))
+                    .is_none(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_historical_paths_work_across_repository_layouts_without_files() {
+        let root = tempfile::tempdir().unwrap();
+        for value in [
+            "CLAUDE.md",
+            "package.json",
+            "app/deleted.py",
+            "lib/widget.ts",
+            ".github/workflows/test.yml",
+        ] {
+            let attached = CreateMemoryAnchorInput::from_code_surface(
+                "mem_fixture",
+                MemoryAnchorKind::Path,
+                value,
+                root.path(),
+                "memory.anchors",
+            )
+            .unwrap();
+            let stored = CreateMemoryAnchorInput::from_stored_code_surface(
+                "mem_fixture",
+                MemoryAnchorKind::Path,
+                &attached.normalized_value,
+                MemoryAnchorSource::Explicit,
+                "memory.anchors",
+            )
+            .unwrap();
+            assert_eq!(stored, attached);
+            assert!(!root.path().join(value).exists());
+        }
+    }
+
+    #[test]
+    fn explicit_path_tokens_preserve_layout_dots_and_reject_unsafe_locators() {
+        let content = "ee-anchor:path:./app/controller.py anchor:path:lib/widget.ts \
+            ee-anchor:path:.github/workflows/test.yml anchor:path:package.json \
+            ee-anchor:path:../escape.py anchor:path:/outside.py \
+            anchor:path:https://example.invalid/file.py anchor:path:app/*.py";
+        let surfaces = extract_memory_anchor_surfaces(
+            "mem_fixture",
+            content,
+            MemoryAnchorSource::Remember,
+            None,
+        );
+        let mut values = surfaces
+            .iter()
+            .map(|surface| surface.normalized_value.as_str())
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            [
+                ".github/workflows/test.yml",
+                "app/controller.py",
+                "lib/widget.ts",
+                "package.json",
+            ]
+        );
+        assert!(surfaces.iter().all(|surface| {
+            surface.anchor.anchor_kind == MemoryAnchorKind::Path
+                && surface.anchor.source == MemoryAnchorSource::Explicit
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_paths_reject_existing_and_missing_leaves_below_escaping_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("present.rs"), "fn main() {}").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("src")).unwrap();
+        for value in ["src/present.rs", "src/missing.rs"] {
+            assert!(
+                normalize_code_anchor_value(MemoryAnchorKind::Path, value, Some(root.path()))
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn backfill_uses_explicit_code_and_bare_paths_without_guessing_prose_symbols() {
+        let content = "Review src/db/mod.rs. Then `src/db/mod.rs` and `Store::open()`; \
+            anchor:path:src/legacy.rs anchor:symbol:Legacy::restore. OrdinaryName is prose.";
+        let surfaces = extract_backfill_code_anchor_surfaces("mem_fixture", content, None);
+        let mut values = surfaces
+            .iter()
+            .map(|surface| {
+                (
+                    surface.anchor.anchor_kind,
+                    surface.normalized_value.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(
+            values,
+            vec![
+                (MemoryAnchorKind::Path, "src/db/mod.rs"),
+                (MemoryAnchorKind::Path, "src/legacy.rs"),
+                (MemoryAnchorKind::Symbol, "Legacy::restore"),
+                (MemoryAnchorKind::Symbol, "Store::open")
+            ]
+        );
+        assert_eq!(
+            surfaces,
+            extract_backfill_code_anchor_surfaces("mem_fixture", content, None)
+        );
+    }
 
     #[test]
     fn query_surface_binds_real_workspace_file_outside_lexical_allowlist() {

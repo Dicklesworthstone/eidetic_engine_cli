@@ -71,8 +71,43 @@ SURFACES: list[tuple[str, str]] = [
     ("src/search/scoring.rs", r"(?:anchor_match_score|bead_affinity_score|final_score|stale_anchor_floor|freshness_drift_multiplier)"),
 ]
 
-DEF_RE_TEMPLATE = r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+({name})\s*[(<]"
+# `[ \t]*`, NOT `\s*`, after the `^`. Under re.M, `\s` matches newlines, so
+# `^\s*fn` could anchor on a BLANK LINE ABOVE the definition and consume the
+# newline -- making `m.start()` land one line early and `def_line` one too
+# small. The consequence was a silent FALSE NEGATIVE, in the direction that
+# hides findings: the `idx == def_line` guard then failed to skip the real
+# definition line, so the fn counted as referencing itself from production and
+# could never be reported as test-only. Any surface fn preceded by a blank
+# line was exempt from this gate. It stayed invisible because Rust style puts
+# a doc comment immediately above most fns, and `\s*` cannot cross a `///`
+# line -- so the bug only fires on the undocumented ones.
+DEF_RE_TEMPLATE = r"^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+({name})\s*[(<]"
 CFG_TEST_RE = re.compile(r"#\[cfg\(test\)\]")
+
+
+def strip_line_comment(line: str) -> str:
+    """Drop a Rust `//` line comment so a MENTION cannot pass as a CALL.
+
+    A name written in a comment is not a caller. Without this, documenting why
+    a fn is NOT wired marks it as wired, and the gate reports the opposite of
+    the truth. That is not hypothetical: commit 5b09b76f9 added a comment to
+    the dispatch table in src/core/doctor_fixers.rs naming
+    `fix_graph_snapshot_stale` and `fix_policy_safety_inconsistent` -- to
+    record that nothing dispatches them -- and this gate immediately reported
+    both as "now reachable" and failed, demanding their baseline lines be
+    deleted. Deleting them would have retired two true findings on the
+    strength of a comment that says they are true.
+
+    scripts/e2e_invocation_audit.sh reached the same conclusion for shell and
+    states it the same way: "Invoked is NOT the same as mentioned."
+
+    KNOWN LIMITATION, stated rather than hidden: this splits on the first `//`
+    without tracking string literals, so `let u = "http://x"; fix_y();` loses
+    its real call. That direction is the safe one -- the fn is then reported as
+    test-only, which is a visible false finding rather than a silent miss.
+    Block comments are not handled; every current surface uses `//`.
+    """
+    return line.split("//", 1)[0]
 MOD_RE = re.compile(r"\bmod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{")
 
 
@@ -145,11 +180,13 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
 
     findings = []
     examined = 0
+    resolved = 0
     for rel, name_pat in surfaces:
         path = root / rel
         if path not in cache:
             findings.append({"surface": rel, "name": None, "issue": "surface file not found"})
             continue
+        resolved += 1
         text, lines, tranges = cache[path]
         def_re = re.compile(DEF_RE_TEMPLATE.format(name=name_pat), re.M)
         for m in def_re.finditer(text):
@@ -170,6 +207,11 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
                         continue
                     if f == path and idx == def_line:
                         continue  # the definition itself is not a caller
+                    # A MENTION IS NOT A REFERENCE, in either direction, so
+                    # this is checked before the test/production split rather
+                    # than inside one branch of it.
+                    if not word.search(strip_line_comment(line)):
+                        continue
                     if in_ranges(idx, franges):
                         test_refs += 1
                         continue
@@ -189,6 +231,23 @@ def audit(root: Path, surfaces: list[tuple[str, str]]) -> dict:
     return {
         "schema": "ee.production_reachability.v1",
         "surfacesExamined": examined,
+        # SCOPE, reported because this gate's pass is scoped and its wording
+        # was not. `SURFACES` is a hand-maintained list of file/pattern pairs,
+        # one per bead that already suspected a defect, so a green here means
+        # "no test-only fn among the surfaces someone already enumerated" and
+        # NOT "nothing in this tree is test-only". On 2026-10-18 the gate
+        # reported `OK` across 31 surfaces drawn from 2 of 672 scanned .rs
+        # files, while src/core/explanation_latency_budget.rs (572 lines, 8
+        # inline tests) had no production consumer at all -- outside the
+        # population, so invisible by construction rather than by oversight.
+        #
+        # This mirrors the defect bd-vejqk fixed in the fleet-identifier guard
+        # one layer down: a count that reads as "the published set" while
+        # describing a subset of it. The repair there is the repair here --
+        # report the source and the denominator so it cannot be misread.
+        "surfaceFilesDeclared": len(surfaces),
+        "surfaceFilesResolved": resolved,
+        "rustFilesScanned": len(files),
         "testOnly": findings,
     }
 
@@ -237,6 +296,14 @@ def main() -> int:
             f"[reachability] surfaces examined: {report['surfacesExamined']}; "
             f"test-only: {len(found)}; baseline: {len(baseline)}"
         )
+        print(
+            f"[reachability] SCOPE: those surfaces come from "
+            f"{report['surfaceFilesResolved']} of {report['surfaceFilesDeclared']} "
+            f"declared surface file(s), against {report['rustFilesScanned']} .rs "
+            f"file(s) scanned for references. Every other file in the tree is "
+            f"OUTSIDE this gate's population, so a pass is NOT a tree-wide "
+            f"reachability result."
+        )
         for f in report["testOnly"]:
             mark = "NEW" if f.get("name") in new else "baselined"
             print(f"   [{mark}] {f.get('name')}  ({f.get('defined_at')}) "
@@ -259,7 +326,12 @@ def main() -> int:
         print("  A baseline that keeps wired entries is an ignore-list.", file=sys.stderr)
         status = 1
     if status == 0:
-        print("[reachability] OK -- no test-only surface beyond the accepted baseline")
+        print(
+            "[reachability] OK -- no test-only surface beyond the accepted baseline, "
+            f"WITHIN the {report['surfaceFilesResolved']} declared surface file(s). "
+            "Unlisted files were not examined; add a (path, pattern) pair to "
+            "SURFACES to bring one into scope."
+        )
     return status
 
 
@@ -309,6 +381,42 @@ def self_test() -> int:
             "mod more_tests {\n"
             "    #[test]\n"
             "    fn t4() { assert!(true); }\n"
+            "}\n"
+            "\n"
+            # D: called only from tests, but NAMED in a production comment.
+            # The comment is the shape that broke this gate for real: a note
+            # explaining that the fn is not dispatched. A mention must not
+            # count as a call, or documenting a hole closes the report of it.
+            "fn fix_mentioned_in_comment() -> u32 { 4 }\n"
+            "pub fn table_v2(which: &str) -> u32 {\n"
+            "    // fix_mentioned_in_comment would fit here but nothing emits\n"
+            "    // its finding, so an arm would be dead code.\n"
+            "    match which { \"x\" => 0, _ => 1 }\n"
+            "}\n"
+            "\n"
+            "#[cfg(test)]\n"
+            "mod comment_tests {\n"
+            "    use super::*;\n"
+            "    #[test]\n"
+            "    fn t5() { assert_eq!(fix_mentioned_in_comment(), 4); }\n"
+            "}\n"
+            "\n"
+            # E: a real call that happens to carry a trailing comment. The
+            # comment strip must not eat the call sitting before it.
+            "fn fix_called_with_trailing_comment() -> u32 { 5 }\n"
+            "pub fn table_v3() -> u32 { fix_called_with_trailing_comment() } // see above\n",
+            encoding="utf-8",
+        )
+        # F: an UNLISTED file carrying the same shape of defect. This is the
+        # positive control for the scope report: the gate must not flag it
+        # (it is outside SURFACES), and the scope numbers must say so. Without
+        # this arm the scope line is an unchecked claim.
+        (root / "src" / "unlisted.rs").write_text(
+            "fn fix_unlisted_and_test_only() -> u32 { 9 }\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    #[test]\n"
+            "    fn t() { assert_eq!(super::fix_unlisted_and_test_only(), 9); }\n"
             "}\n",
             encoding="utf-8",
         )
@@ -325,10 +433,35 @@ def self_test() -> int:
             "production code AFTER a test module is seen (no split-on-first bug)",
             "fix_after_tests" not in names,
         )
-        arm("all three surface fns were examined", rep["surfacesExamined"] == 3)
+        arm(
+            "a fn only MENTIONED in a production comment is still flagged",
+            "fix_mentioned_in_comment" in names,
+        )
+        arm(
+            "a real call with a trailing comment is NOT flagged",
+            "fix_called_with_trailing_comment" not in names,
+        )
+        arm("all five surface fns were examined", rep["surfacesExamined"] == 5)
+
+        # SCOPE ARMS. The three together are what make the pass line's new
+        # wording true rather than decorative: a defect of exactly the flagged
+        # shape, in a file nobody listed, is invisible to this gate -- and the
+        # denominator has to admit that the file was there to be missed.
+        arm(
+            "a test-only fn in an UNLISTED file is NOT flagged (the scope limit is real)",
+            "fix_unlisted_and_test_only" not in names,
+        )
+        arm(
+            "the scope report names the declared surface count, not the tree",
+            rep["surfaceFilesDeclared"] == 1 and rep["surfaceFilesResolved"] == 1,
+        )
+        arm(
+            "the reference denominator counts the unlisted file it did not examine",
+            rep["rustFilesScanned"] >= 2,
+        )
 
         ranges = test_line_ranges(read(root / "src" / "surface.rs"))
-        arm("both test modules are found, not just the first", len(ranges) == 2)
+        arm("every test module is found, not just the first", len(ranges) == 3)
         arm(
             "the ranges do not overlap the production tail",
             all(not (lo <= 1 <= hi) for lo, hi in ranges),

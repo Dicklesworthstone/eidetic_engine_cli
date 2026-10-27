@@ -223,18 +223,22 @@ fn search_index_repair_steps(workspace_root: &Path) -> Vec<String> {
     ]
 }
 
-/// FM-GS-01: graph snapshot is stale relative to memory_links activity.
-/// Auto-fix dispatches a graph snapshot refresh plan.
+/// FM-GS-01: graph snapshot is missing, stale, invalid, or unverified.
+/// The database owns snapshots, archives, and audit rows. Until doctor has a
+/// transaction-aware database undo operation, this records refresh guidance;
+/// the existing graph command performs the audited publication itself.
 #[must_use]
 pub fn fix_graph_snapshot_stale(workspace_root: &Path) -> FixerDispatch {
+    let workspace = shell_quote_arg(&workspace_root.to_string_lossy());
     FixerDispatch {
         finding_code: "graph_snapshot_stale",
         severity: "warning",
-        path: workspace_root.join(".ee/graph"),
+        path: workspace_root.join(".ee/ee.db"),
         op: Op::RunGraphRefresh {
             steps: vec![
-                "ee graph centrality-refresh --workspace .".to_string(),
-                "Confirm `graph_snapshot_high_watermark` advances past the latest memory_links.created_at.".to_string(),
+                format!("ee graph centrality-refresh --workspace {workspace} --json"),
+                format!("ee doctor --workspace {workspace} --json"),
+                "Confirm the graph_snapshot check reports that the selected source links match the snapshot. Refresh publication archives the prior snapshot and invalidates its algorithm cache.".to_owned(),
             ],
         },
     }
@@ -486,6 +490,7 @@ pub const FIX_DISPATCHED_FINDINGS: &[&str] = &[
     "search_index_missing",
     "search_index_stale",
     "schema_migration_pending",
+    "graph_snapshot_stale",
     "cass_integration_drift",
     // bd-223vl joined this one; it is listed because fix_finding_for_check can
     // now return it.
@@ -560,10 +565,10 @@ pub fn fix_finding_for_check(
         }
     }
     if store_unreadable
-        && (check_name == "search_index"
+        && (matches!(check_name, "search_index" | "graph_snapshot")
             || matches!(
                 error_code,
-                Some("EE-E300" | "EE-E301" | "EE-E700" | "EE-E205")
+                Some("EE-E300" | "EE-E301" | "EE-E304" | "EE-E700" | "EE-E205")
             ))
     {
         return None;
@@ -571,6 +576,7 @@ pub fn fix_finding_for_check(
     match error_code {
         Some("EE-E300") => Some("search_index_missing"),
         Some("EE-E301") => Some("search_index_stale"),
+        Some("EE-E304") if check_name == "graph_snapshot" => Some("graph_snapshot_stale"),
         // bd-tgz18: EE-E700 is MIGRATION_REQUIRED, and the advisory
         // `shard_fanout` check reuses it for "the catalog or workspace shard
         // is not ready" (src/core/doctor.rs:3448). Unguarded, that routed a
@@ -657,14 +663,26 @@ pub fn fix_dispatch_for_finding(workspace_root: &Path, finding: &str) -> Option<
         "database_missing" => Some(fix_database_missing(workspace_root)),
         "search_index_missing" => Some(fix_search_index_missing(workspace_root)),
         "search_index_stale" => Some(fix_search_index_stale(workspace_root)),
+        "graph_snapshot_stale" => Some(fix_graph_snapshot_stale(workspace_root)),
         "schema_migration_pending" => {
             Some(fix_schema_migration_pending(workspace_root, "V_LATEST"))
         }
         "cass_integration_drift" => Some(fix_cass_integration_drift(workspace_root)),
         // bd-223vl. Takes only `workspace_root`, which is why this one of the
-        // nine unwired fixers fits the table as it stands; the others need
-        // check-derived arguments (a row count, a summary, a label, a path)
-        // that this signature cannot carry.
+        // nine unwired fixers fits the table as it stands. FIVE of the others
+        // need check-derived arguments (a row count, a summary, a label, a
+        // path) that this signature cannot carry.
+        //
+        // The policy-safety fixer also takes only `workspace_root`, but has
+        // no detector. Graph snapshot inspection now emits EE-E304 and is
+        // dispatched above; its operation remains explicitly advisory.
+        //
+        // EDITING THIS BODY: never write a fixer name immediately followed by
+        // an open paren inside a comment here. `dispatched_fixers` in the test
+        // module scans this body for any `fix_` token directly followed by one,
+        // and counts it as dispatched -- so a parenthesised mention of an
+        // unwired fixer would make the guard believe it is wired. That is why
+        // the two names above are written bare.
         "wal_checkpoint_pending" => Some(fix_wal_checkpoint_pending(workspace_root)),
         // bd-bigu7. Also takes only `workspace_root`, so like the WAL fixer it
         // fits this signature as it stands.
@@ -842,6 +860,7 @@ mod tests {
         let checks = [
             (Some("EE-E300"), "search_index", false),
             (Some("EE-E301"), "search_index", false),
+            (Some("EE-E304"), "graph_snapshot", false),
             (Some("EE-E700"), "database", false),
             (Some("EE-E507"), "cass", false),
             (Some("EE-E999"), "search_index", false),
@@ -887,7 +906,14 @@ mod tests {
             "with no dispatch, --fix must report the shard problem as Manual"
         );
         assert_eq!(fix_finding_for_check(None, "database", false), None);
-        assert!(fix_dispatch_for_finding(&root(), "graph_snapshot_stale").is_none());
+        assert_eq!(
+            fix_finding_for_check(Some("EE-E304"), "database", false),
+            None
+        );
+        assert_eq!(
+            fix_finding_for_check(Some("EE-E207"), "graph_snapshot", false),
+            None
+        );
     }
 
     /// Exhaustive over the error-code registry: the dispatch table can only
@@ -907,7 +933,14 @@ mod tests {
             // reached-equals-listed assertion below fails. Any future arm
             // guarded on a new check name must extend this list too -- that
             // coupling is the point of the assertion.
-            for name in ["database", "search_index", "cass", "runtime", "workspace"] {
+            for name in [
+                "database",
+                "search_index",
+                "graph_snapshot",
+                "cass",
+                "runtime",
+                "workspace",
+            ] {
                 for unreadable in [false, true] {
                     if let Some(finding) = fix_finding_for_check(code, name, unreadable) {
                         assert!(
@@ -950,6 +983,7 @@ mod tests {
         for (code, name) in [
             (Some("EE-E300"), "search_index"),
             (Some("EE-E301"), "search_index"),
+            (Some("EE-E304"), "graph_snapshot"),
             (Some("EE-E999"), "search_index"),
             (Some("EE-E700"), "database"),
         ] {
@@ -1173,8 +1207,26 @@ mod tests {
     #[test]
     fn graph_snapshot_stale_dispatches_run_graph_refresh() {
         let dispatch = fix_graph_snapshot_stale(&root());
-        assert!(matches!(dispatch.op, Op::RunGraphRefresh { .. }));
+        let Op::RunGraphRefresh { steps } = &dispatch.op else {
+            panic!("expected RunGraphRefresh");
+        };
+        assert_eq!(dispatch.path, root().join(".ee/ee.db"));
+        assert_eq!(
+            steps[0],
+            "ee graph centrality-refresh --workspace '/tmp/doctor-fixers-test' --json"
+        );
+        assert_eq!(
+            steps[1],
+            "ee doctor --workspace '/tmp/doctor-fixers-test' --json"
+        );
+        assert!(!steps.join(" ").contains("high_watermark"));
         assert_eq!(dispatch.op.kind_str(), "run_graph_refresh");
+        assert!(dispatch.op.is_advisory());
+        assert!(!dispatch.op.is_writing());
+        assert_eq!(
+            fix_mode_for_check(Some("EE-E304"), "graph_snapshot", false),
+            (FixMode::AutoGuidance, Some("graph_snapshot_stale")),
+        );
     }
 
     #[test]

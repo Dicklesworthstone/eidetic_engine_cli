@@ -66,9 +66,17 @@ assert_jq "$ROTATED_RESUME" '.capsule_id[0:5]' "hcap_" "m5_rotated_resume_succes
 TAMPERED_CAPSULE=$(capsule_path "tampered")
 ee_workspace handoff create --out "$TAMPERED_CAPSULE" --profile resume --json >/dev/null
 tamper_capsule_section "$TAMPERED_CAPSULE"
+# `|| RC=$?` IS LOAD-BEARING, NOT STYLE. This is a NEGATIVE-path case: resume of
+# a tampered capsule is EXPECTED to exit 6. Under the `set -e` at :4 a bare
+# `VAR=$(...)` assignment aborts the script the moment the command fails, so
+# `TAMPERED_RC=$?` never ran and the assertion below never reported -- the test
+# could not pass on the exact path it exists to test. Putting the assignment
+# left of `||` suspends -e for the whole call chain, which also matters INSIDE
+# e2e_log_command: its own `"$@"` runs bare, so without this its `local rc=$?`
+# and `return "$rc"` were equally dead.
+TAMPERED_RC=0
 TAMPERED_JSON=$(e2e_log_command "$EE_BINARY" handoff resume "$TAMPERED_CAPSULE" \
-    --workspace "$EPIC_WORKSPACE" --json)
-TAMPERED_RC=$?
+    --workspace "$EPIC_WORKSPACE" --json) || TAMPERED_RC=$?
 e2e_log_assert_eq "$TAMPERED_RC" "6" "m5_tampered_resume_exit"
 assert_jq "$TAMPERED_JSON" '.error.code // empty' \
     "handoff_capsule_tampered" "m5_tampered_resume_code"
@@ -89,9 +97,11 @@ HOME="$STRICT_HOME_A" ee_workspace handoff create \
     --json >/dev/null
 STRICT_OK_JSON=$(HOME="$STRICT_HOME_A" ee_workspace handoff resume "$STRICT_CAPSULE" --json)
 assert_jq "$STRICT_OK_JSON" '.capsule_id[0:5]' "hcap_" "m5_strict_same_home_resume"
+# Same negative-path shape as the tampered case above: a missing machine salt is
+# EXPECTED to exit 6, so a bare assignment aborted before the rc was captured.
+STRICT_MISSING_RC=0
 STRICT_MISSING_JSON=$(HOME="$STRICT_HOME_B" e2e_log_command "$EE_BINARY" handoff resume \
-    "$STRICT_CAPSULE" --workspace "$EPIC_WORKSPACE" --json)
-STRICT_MISSING_RC=$?
+    "$STRICT_CAPSULE" --workspace "$EPIC_WORKSPACE" --json) || STRICT_MISSING_RC=$?
 e2e_log_assert_eq "$STRICT_MISSING_RC" "6" "m5_strict_missing_salt_exit"
 assert_jq "$STRICT_MISSING_JSON" '.error.code // empty' \
     "strict_mode_no_salt_file" "m5_strict_missing_salt_code"

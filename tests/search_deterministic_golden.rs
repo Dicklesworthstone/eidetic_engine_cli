@@ -4,7 +4,6 @@
 //! Frankensearch index with the hash embedder fallback, and compares the
 //! canonicalized CLI JSON output byte-for-byte against a committed golden file.
 
-use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::search::{Embedder, HashEmbedder};
@@ -355,27 +354,120 @@ fn seed_tie_workspace(workspace: &Path, database: &Path) -> TestResult {
     connection.close().map_err(|error| error.to_string())
 }
 
+/// A private HOME for every `ee` child this fixture spawns.
+///
+/// bd-hwye2. Without it the child resolves the RUNNING ACCOUNT'S user-global
+/// memory lane, and on an RCH worker that account's lane needs migrating, so
+/// the response grew an extra degradation:
+///
+///     { "code": "global_lane_migration_required", "severity": "info", ... }
+///
+/// which is a true statement about the worker's home directory and has nothing
+/// to do with deterministic search ranking. The golden has 906 lines, the
+/// actual had 924, and that entry was the difference.
+///
+/// tests/json_contract_snapshots.rs:569 already does exactly this for exactly
+/// this reason (bd-28kky), having been bitten by the same degradation carrying
+/// the worker account's home path into a committed contract. HOME only --
+/// that file records that also moving XDG_DATA_HOME broke the embedding
+/// registry resolution and took the fixture's own precondition with it.
+fn private_home(workspace: &Path) -> Result<PathBuf, String> {
+    let home = workspace.join(".home");
+    std::fs::create_dir_all(&home)
+        .map_err(|error| format!("failed to create private HOME {}: {error}", home.display()))?;
+    Ok(home)
+}
+
+/// Rebuild through the BINARY, with the same embedder environment the search
+/// child gets.
+///
+/// This used to call the library `rebuild_index` IN PROCESS while the search
+/// below runs `ee` as a child configured with
+///
+///     EE_EMBED_DOWNLOAD=off
+///     EE_EMBED_MODEL_DIR=<workspace>/.ee/empty-model-cache
+///     EE_EMBED_MODEL_PATH removed
+///
+/// None of which the cargo test process has. So the two halves could resolve
+/// DIFFERENT EMBEDDERS, and that is not a cosmetic difference: a read lease
+/// validates a generation against an identity carrying the embedder id and
+/// dimension (src/core/search.rs:9752 ->
+/// index_for_snapshot_with_identity). An index written under one identity
+/// cannot satisfy a read under another, and the failure surfaces as
+///
+///     "No complete index generation is available for the source snapshot;
+///      rebuild the index"
+///
+/// which is the opposite of actionable -- rebuilding is exactly what the
+/// fixture already did. Observed on bd-hwye2 as a search exit 4.
+///
+/// Building through the same binary with the same environment removes the
+/// asymmetry at its source rather than pinning whichever embedder happens to
+/// win. IndexRebuildOptions has no embedder override, so there is no in-process
+/// way to state the intent.
 fn rebuild_search_index_with_expected(
     workspace: &Path,
     database: &Path,
     index_dir: &Path,
     expected_documents: u32,
 ) -> TestResult {
-    let report = rebuild_index(&IndexRebuildOptions {
-        workspace_path: workspace.to_path_buf(),
-        database_path: Some(database.to_path_buf()),
-        index_dir: Some(index_dir.to_path_buf()),
-        dry_run: false,
-    })
-    .map_err(|error| error.to_string())?;
+    let home = private_home(workspace)?;
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env(
+            "EE_EMBED_MODEL_DIR",
+            workspace.join(".ee").join("empty-model-cache"),
+        )
+        .env_remove("EE_EMBED_MODEL_PATH")
+        .env("HOME", &home)
+        .arg("--json")
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("index")
+        .arg("rebuild")
+        .arg("--database")
+        .arg(database)
+        .arg("--index-dir")
+        .arg(index_dir)
+        .output()
+        .map_err(|error| format!("failed to run ee index rebuild: {error}"))?;
 
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("index rebuild stdout was not UTF-8: {error}"))?;
+    // bd-w5bza: this printed exit code and stdout but not stderr, so a
+    // cancellation (exit 130, Outcome::Cancelled) was indistinguishable from a
+    // rejection. All three facts now.
+    ensure(
+        output.status.success(),
+        format!(
+            "index rebuild should succeed; exit {:?}; stdout: {}; stderr: {}",
+            output.status.code(),
+            if stdout.trim().is_empty() {
+                "<empty>".to_owned()
+            } else {
+                stdout.chars().take(400).collect::<String>()
+            },
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(400)
+                .collect::<String>()
+        ),
+    )?;
+
+    let parsed: JsonValue = serde_json::from_str(&stdout)
+        .map_err(|error| format!("index rebuild stdout must be JSON: {error}; got {stdout}"))?;
     ensure_equal(
-        &report.status,
-        &IndexRebuildStatus::Success,
+        &parsed["data"]["status"].as_str().unwrap_or("<missing>"),
+        &"success",
         "index rebuild status",
     )?;
     ensure_equal(
-        &report.documents_total,
+        &u32::try_from(
+            parsed["data"]["documents_total"]
+                .as_u64()
+                .unwrap_or(u64::MAX),
+        )
+        .unwrap_or(u32::MAX),
         &expected_documents,
         "indexed document count",
     )
@@ -407,6 +499,7 @@ fn run_search_json_for_query(
     query: &str,
     limit: u32,
 ) -> Result<String, String> {
+    let home = private_home(workspace)?;
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .env("EE_EMBED_DOWNLOAD", "off")
         .env(
@@ -414,6 +507,7 @@ fn run_search_json_for_query(
             workspace.join(".ee").join("empty-model-cache"),
         )
         .env_remove("EE_EMBED_MODEL_PATH")
+        .env("HOME", &home)
         .arg("--json")
         .arg("--workspace")
         .arg(workspace)
@@ -438,9 +532,29 @@ fn run_search_json_for_query(
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("search stderr was not UTF-8: {error}"))?;
 
+    // Print STDOUT too, and the exit code.
+    //
+    // This runs with `--json`, and `ee` puts its structured error envelope on
+    // STDOUT in that mode -- stderr is deliberately kept clean, which other
+    // tests in this repo assert outright. So a failure message carrying only
+    // stderr is structurally blind: it reported
+    //
+    //     "search --json should succeed; stderr: "
+    //
+    // on bd-hwye2, an empty string, and the actual reason was sitting unread
+    // in stdout. Exit status alone could not even distinguish a usage refusal
+    // from a storage error.
     ensure(
         output.status.success(),
-        format!("search --json should succeed; stderr: {stderr}"),
+        format!(
+            "search --json should succeed; exit {:?}; stderr: {stderr}; stdout: {}",
+            output.status.code(),
+            if stdout.trim().is_empty() {
+                "<empty>".to_owned()
+            } else {
+                stdout.chars().take(600).collect::<String>()
+            }
+        ),
     )?;
     ensure(
         stderr.is_empty(),

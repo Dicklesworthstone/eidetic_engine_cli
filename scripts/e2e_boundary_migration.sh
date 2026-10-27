@@ -32,6 +32,15 @@ fi
 # shellcheck source=scripts/lib/ee_binary_resolution.sh
 source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
 EE_BINARY="$(ee_resolve_binary debug)"
+# bd-resolve-without-require-binary-guard-jqiws: this suite was the bead's
+# measured example -- its `[[ -x "${EE_BINARY}" ]]` gate passed a Linux ELF on
+# Darwin/arm64 and reported 7 of 8 steps as schema_mismatch:missing for that
+# one fault. `-x` tests the executable BIT, not the FORMAT.
+# Exit 76 is verify.sh's STAGE_ENV_UNRUNNABLE_CODE, deliberately not 2:
+# verify.sh invokes this script and maps unrecognised codes to FAIL.
+if ! ee_require_current_binary "$EE_BINARY" "e2e_boundary_migration"; then
+    exit 76
+fi
 CORPUS_PATH="${REPO_ROOT}/tests/fixtures/boundary_corpus/corpus.json"
 RUN_ID="${EE_E2E_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
@@ -195,7 +204,21 @@ snapshot_workspace_files() {
 #      explicit check does not depend on that invariant holding.
 capture_worktrees() {
     local output_path="$1" err
-    err="$(git -C "${REPO_ROOT}" worktree list --porcelain >"${output_path}" 2>&1)" || {
+    # `2>&1 >file`, NOT `>file 2>&1`, AND THE ORDER IS THE WHOLE POINT.
+    # Redirections apply left to right. The old form sent stdout to the file
+    # FIRST, so the following `2>&1` pointed stderr at the file as well: `$err`
+    # captured NOTHING and the snapshot gained the error text. Both halves of
+    # this function's contract broke silently --
+    #   - the CANNOT RUN message below printed an EMPTY reason, so an
+    #     environment failure reported itself as having no cause;
+    #   - stderr landed in "${output_path}", i.e. in the snapshot that the
+    #     NO-WORKTREES assertion compares, which is exactly the vacuity the
+    #     comment above this function exists to prevent.
+    # This order dups stderr to the substitution's pipe while it is still the
+    # pipe, then points stdout at the file. Proven by execution: the old form
+    # captures '' with both streams in the file; this one captures the stderr
+    # text with only stdout in the file. shellcheck SC2328.
+    err="$(git -C "${REPO_ROOT}" worktree list --porcelain 2>&1 >"${output_path}")" || {
         printf 'boundary_migration: CANNOT RUN -- `git worktree list` failed in %s: %s\n' \
             "${REPO_ROOT}" "${err}" >&2
         printf 'boundary_migration: this is an ENVIRONMENT error, not a worktree finding.\n' >&2
