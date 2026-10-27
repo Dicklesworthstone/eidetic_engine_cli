@@ -5881,7 +5881,7 @@ pub fn validate_curation_candidate(
     .map(|c| c.value == "true")
     .unwrap_or(true);
     let parsed_candidate_type = CandidateType::from_str(&stored.candidate_type);
-    let decision = match parsed_candidate_type {
+    let mut decision = match parsed_candidate_type {
         Ok(CandidateType::CreateDerivedMemory) => evaluate_create_derived_candidate_for_validation(
             &connection,
             &stored,
@@ -5905,6 +5905,19 @@ pub fn validate_curation_candidate(
             )
         }
     };
+    if let Err(message) =
+        crate::core::global_promotion::validate_merge_candidate(&connection, &stored)
+    {
+        decision = blocked_validation(
+            &stored,
+            vec![validation_issue(
+                "global_merge_snapshot_changed",
+                message,
+                "Review the live global memory and propose the promotion again.",
+            )],
+            Vec::new(),
+        );
+    }
     let from_status = stored.status.clone();
     let mut reviewed_at = None;
     let mut persisted = false;
@@ -6009,32 +6022,52 @@ pub fn show_curation_candidate(
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
 
-    let planned_application = match CandidateType::from_str(&stored.candidate_type) {
-        Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
-            let decision =
-                evaluate_link_candidate_for_apply(&connection, &stored, &Utc::now().to_rfc3339());
-            Some(planned_application_from_decision(&stored, &decision))
+    let planned_application = if let Err(message) =
+        crate::core::global_promotion::validate_merge_candidate(&connection, &stored)
+    {
+        let decision = blocked_apply(
+            &stored,
+            None,
+            vec![validation_issue(
+                "global_merge_snapshot_changed",
+                message,
+                "Review the live global memory and propose the promotion again.",
+            )],
+            Vec::new(),
+            "ee curate candidates --json".to_owned(),
+        );
+        Some(planned_application_from_decision(&stored, &decision))
+    } else {
+        match CandidateType::from_str(&stored.candidate_type) {
+            Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
+                let decision = evaluate_link_candidate_for_apply(
+                    &connection,
+                    &stored,
+                    &Utc::now().to_rfc3339(),
+                );
+                Some(planned_application_from_decision(&stored, &decision))
+            }
+            Ok(CandidateType::CreateDerivedMemory) => {
+                let now = Utc::now().to_rfc3339();
+                let prompt_injection_guard = crate::core::config_surface::get_config(
+                    &crate::core::config_surface::ConfigSurfaceOptions {
+                        workspace_root: options.workspace_path.to_path_buf(),
+                        config_path: None,
+                    },
+                    crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
+                )
+                .map(|c| c.value == "true")
+                .unwrap_or(true);
+                let decision = evaluate_create_derived_candidate_for_apply(
+                    &connection,
+                    &stored,
+                    &now,
+                    prompt_injection_guard,
+                );
+                Some(planned_application_from_decision(&stored, &decision))
+            }
+            _ => None,
         }
-        Ok(CandidateType::CreateDerivedMemory) => {
-            let now = Utc::now().to_rfc3339();
-            let prompt_injection_guard = crate::core::config_surface::get_config(
-                &crate::core::config_surface::ConfigSurfaceOptions {
-                    workspace_root: options.workspace_path.to_path_buf(),
-                    config_path: None,
-                },
-                crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
-            )
-            .map(|c| c.value == "true")
-            .unwrap_or(true);
-            let decision = evaluate_create_derived_candidate_for_apply(
-                &connection,
-                &stored,
-                &now,
-                prompt_injection_guard,
-            );
-            Some(planned_application_from_decision(&stored, &decision))
-        }
-        _ => None,
     };
 
     let candidate = candidate_summary_from_database(&connection, stored, &prepared.workspace_path)?;
@@ -6236,6 +6269,18 @@ fn apply_curation_candidate_with_recipe(
             id: candidate_id.clone(),
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
+    let global_merge_index_paths = crate::core::global_promotion::merge_index_paths(
+        &connection,
+        &stored,
+        &prepared.workspace_path,
+        &prepared.database_path,
+    )
+    .map_err(|message| DomainError::Usage {
+        message,
+        repair: Some(
+            "Use the global promotion report's review command and apply that candidate.".to_owned(),
+        ),
+    })?;
     let now = Utc::now().to_rfc3339();
     let parsed_candidate_type = CandidateType::from_str(&stored.candidate_type);
     if recipe_output.is_some()
@@ -6327,6 +6372,21 @@ fn apply_curation_candidate_with_recipe(
             decision
         }
     };
+    if let Err(message) =
+        crate::core::global_promotion::validate_merge_candidate(&connection, &stored)
+    {
+        decision = blocked_apply(
+            &stored,
+            decision.target_before.clone(),
+            vec![validation_issue(
+                "global_merge_snapshot_changed",
+                message,
+                "Review the live global memory and propose the promotion again.",
+            )],
+            Vec::new(),
+            "ee curate candidates --json".to_owned(),
+        );
+    }
     let source_memory_ids =
         if decision.should_persist && (decision.rule_create.is_some() || recipe_output.is_some()) {
             let ids = audited_source_memory_ids_for_rule_candidate(&connection, &stored)?;
@@ -6526,6 +6586,40 @@ fn apply_curation_candidate_with_recipe(
         })
         .into_iter()
         .collect();
+
+    if !options.dry_run
+        && decision.application.errors.is_empty()
+        && (persisted || decision.application.status == "already_applied")
+        && let Some(paths) = &global_merge_index_paths
+        && let Some(job_id) = crate::core::global_promotion::merge_index_job_id(&stored)
+    {
+        let report = crate::core::memory::reconcile_committed_memory_index_job(
+            &connection,
+            &prepared.workspace_id,
+            &job_id,
+            &paths.index_dir,
+        );
+        let provisional = crate::core::memory::remember_index_status(&report);
+        let status = crate::core::memory::authoritative_remember_index_status(
+            &prepared.workspace_id,
+            &paths.root,
+            &paths.database_path,
+            &paths.index_dir,
+            std::slice::from_ref(&job_id),
+            &provisional,
+        );
+        if status != "indexed" {
+            let mut failure =
+                curate_apply_index_publish_failed(&job_id, &status, "reviewed global memory");
+            failure.repair = format!(
+                "ee curate apply {} --workspace {} --database {} --json",
+                stored.id,
+                shell_quote_command_arg(&paths.root.display().to_string()),
+                shell_quote_command_arg(&paths.database_path.display().to_string()),
+            );
+            degraded.push(failure);
+        }
+    }
 
     if !options.dry_run
         && recipe_output.is_none()
@@ -6751,7 +6845,7 @@ fn curate_apply_index_publish_failed(
     outcome: &str,
     subject: &str,
 ) -> CurateCandidatesDegradation {
-    let entity = if subject == "create-derived memory" {
+    let entity = if matches!(subject, "create-derived memory" | "reviewed global memory") {
         "memory"
     } else {
         "rule"
@@ -6805,6 +6899,9 @@ pub fn review_curation_candidate(
     };
 
     let now = Utc::now().to_rfc3339();
+    if options.action == CurateReviewAction::Accept {
+        validate_guarded_candidate_for_review(&connection, &stored)?;
+    }
     let decision = evaluate_candidate_for_review(
         &stored,
         options.action,
@@ -10514,6 +10611,23 @@ struct ReviewDecision {
     snoozed_until: Option<String>,
     merged_into_candidate_id: Option<String>,
     next_action: String,
+}
+
+fn validate_guarded_candidate_for_review(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+) -> Result<(), DomainError> {
+    crate::core::global_promotion::validate_merge_candidate(connection, stored).map_err(
+        |message| DomainError::UsageCodeWithDetails {
+            code: "global_merge_snapshot_changed",
+            message,
+            repair: Some(
+                "Review the live global memory and propose the promotion again.".to_owned(),
+            ),
+            details_json: "{}".to_owned(),
+        },
+    )?;
+    Ok(())
 }
 
 fn evaluate_candidate_for_validation(
@@ -14556,6 +14670,7 @@ fn persist_candidate_validation_inner(
     decision: &ValidationDecision,
 ) -> Result<String, DomainError> {
     if to_status == CandidateStatus::Approved.as_str() {
+        validate_guarded_candidate_for_review(connection, stored)?;
         corroboration::validate_recorded(connection, stored)
             .map_err(session_arc::pair_domain_error)?;
     }
@@ -14681,6 +14796,9 @@ fn persist_candidate_review_inner(
     reviewed_by: &str,
     reason: Option<&str>,
 ) -> Result<String, DomainError> {
+    if action == CurateReviewAction::Accept {
+        validate_guarded_candidate_for_review(connection, stored)?;
+    }
     let updated = connection
         .update_curation_candidate_review(
             workspace_id,
@@ -14804,6 +14922,16 @@ fn persist_candidate_application_inner(
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
+    crate::core::global_promotion::validate_merge_candidate(connection, stored).map_err(
+        |message| DomainError::UsageCodeWithDetails {
+            code: "global_merge_snapshot_changed",
+            message,
+            repair: Some(
+                "Review the live global memory and propose the promotion again.".to_owned(),
+            ),
+            details_json: "{}".to_owned(),
+        },
+    )?;
     if decision.rule_create.is_some() || recipe.is_some() {
         let sources = audited_source_memory_ids_for_rule_candidate(connection, stored)?;
         let sources_changed = if let Some(rule) = &decision.rule_create {
@@ -14976,6 +15104,16 @@ fn persist_candidate_application_inner(
     } else {
         false
     };
+    if memory_changed {
+        crate::core::global_promotion::persist_merge_index_job(connection, stored).map_err(
+            |error| DomainError::Storage {
+                message: format!("Failed to queue reviewed global memory indexing: {error}"),
+                repair: Some(
+                    "Retry the reviewed global candidate after inspecting storage.".to_owned(),
+                ),
+            },
+        )?;
+    }
     let mut created_rule_id = None;
     let mut created_procedure_id = None;
     if let Some(recipe) = recipe {

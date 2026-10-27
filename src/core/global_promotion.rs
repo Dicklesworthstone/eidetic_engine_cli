@@ -20,9 +20,17 @@ mod payload;
 #[path = "global_promotion_validity.rs"]
 mod validity;
 
+#[path = "global_promotion_merge.rs"]
+mod merge;
+
+pub(crate) use merge::{
+    merge_index_job_id, merge_index_paths, persist_merge_index_job, validate_merge_candidate,
+};
+
 use payload::PromotionPayload;
 
 pub const GLOBAL_PROMOTION_PLAN_SCHEMA_V1: &str = "ee.global_promotion.plan.v1";
+pub const GLOBAL_PROMOTION_PLAN_SCHEMA_V2: &str = "ee.global_promotion.plan.v2";
 
 /// Degraded/refusal code emitted when secret-like content blocks promotion.
 /// A workspace memory may legitimately hold workspace-scoped secret mentions
@@ -199,6 +207,11 @@ pub enum PromotionAction {
     /// Reinforce the existing near-duplicate global row instead of
     /// inserting a twin (dup-merge-at-promotion).
     MergeInto { global_memory_id: String },
+    /// Queue a review of differing text; no global memory changes until apply.
+    ProposeMerge {
+        global_memory_id: String,
+        merge_candidate_id: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -236,6 +249,16 @@ impl PromotionPlan {
                 "allow",
                 json!({ "action": "merge_into", "globalMemoryId": global_memory_id }),
             ),
+            PromotionVerdict::Allow {
+                action:
+                    PromotionAction::ProposeMerge {
+                        global_memory_id,
+                        merge_candidate_id,
+                    },
+            } => (
+                "allow",
+                json!({ "action": "propose_merge", "globalMemoryId": global_memory_id, "mergeCandidateId": merge_candidate_id }),
+            ),
             PromotionVerdict::Refuse { refusal } => (
                 "refuse",
                 json!({
@@ -246,7 +269,7 @@ impl PromotionPlan {
             ),
         };
         json!({
-            "schema": GLOBAL_PROMOTION_PLAN_SCHEMA_V1,
+            "schema": GLOBAL_PROMOTION_PLAN_SCHEMA_V2,
             "memoryId": self.memory_id,
             "originWorkspaceId": self.origin_workspace_id,
             "verdict": verdict,
@@ -320,6 +343,7 @@ use crate::db::{
 };
 
 pub const GLOBAL_PROMOTION_REPORT_SCHEMA_V1: &str = "ee.global_promotion.report.v1";
+pub const GLOBAL_PROMOTION_REPORT_SCHEMA_V2: &str = "ee.global_promotion.report.v2";
 pub const GLOBAL_DEMOTION_REPORT_SCHEMA_V1: &str = "ee.global_demotion.report.v1";
 
 /// Feedback-event ids must satisfy the schema CHECK (`fb_` + 26-char
@@ -368,9 +392,8 @@ pub struct PromotionReport {
     pub executed: bool,
     /// The global row this promotion created or matched.
     pub global_memory_id: Option<String>,
-    /// True when an exact-content global twin already existed: the
-    /// promotion is a no-op re-promotion (idempotence == merge for the
-    /// exact-match case).
+    /// True when an exact twin or a still-current, previously applied merge
+    /// already contains this origin's content. Pending proposals are false.
     pub already_promoted: bool,
     /// New index job or unfinished receipt recovered for an existing global row.
     pub index_job_id: Option<String>,
@@ -380,13 +403,17 @@ pub struct PromotionReport {
     /// Derived-index error detail when immediate reconciliation did not
     /// converge. The durable global memory remains committed.
     pub index_error: Option<String>,
+    /// Pending or previously reviewed merge proposal in the global store.
+    pub merge_candidate_id: Option<String>,
+    /// Inspect the destination proposal, with its explicit database routing.
+    pub review_command: Option<String>,
 }
 
 impl PromotionReport {
     #[must_use]
     pub fn data_json(&self) -> Value {
         json!({
-            "schema": GLOBAL_PROMOTION_REPORT_SCHEMA_V1,
+            "schema": GLOBAL_PROMOTION_REPORT_SCHEMA_V2,
             "plan": self.plan.data_json(),
             "executed": self.executed,
             "globalMemoryId": self.global_memory_id,
@@ -394,6 +421,8 @@ impl PromotionReport {
             "indexJobId": self.index_job_id,
             "indexStatus": self.index_status,
             "indexError": self.index_error,
+            "mergeCandidateId": self.merge_candidate_id,
+            "reviewCommand": self.review_command,
         })
     }
 }
@@ -461,6 +490,7 @@ fn promotion_index_receipt_error() -> crate::db::DbError {
 /// Publish all destination obligations under one transaction. The caller has
 /// already admitted a coherent source snapshot; these are separate databases,
 /// not a distributed transaction. Index reconciliation happens after commit.
+#[cfg(test)]
 fn persist_global_promotion(
     connection: &DbConnection,
     workspace: &str,
@@ -470,84 +500,154 @@ fn persist_global_promotion(
     reference: chrono::DateTime<chrono::Utc>,
 ) -> crate::db::Result<(String, bool, Option<String>)> {
     connection.with_transaction(|| {
-        // Select the twin inside the write transaction, not in a snapshot
-        // released before publication. Never trust a stale preview decision.
-        let twin = admission::find_twin(connection, workspace, memory, payload, reference)?;
-        let (id, already_promoted, job) = match twin {
-            Some(id) => {
-                let job = unfinished_promotion_index_job(connection, workspace, &id)?;
-                (id, true, job)
-            }
-            None => {
-                let id = crate::models::MemoryId::now().to_string();
-                let job = promotion_index_job_id();
-                connection.insert_memory(
-                    &id,
-                    &CreateMemoryInput {
-                        workspace_id: workspace.to_owned(),
-                        level: memory.level.clone(),
-                        kind: memory.kind.clone(),
-                        content: memory.content.clone(),
-                        workflow_id: None,
-                        confidence: memory.confidence,
-                        utility: memory.utility,
-                        importance: memory.importance,
-                        provenance_uri: Some(promotion_provenance_uri(
-                            &memory.workspace_id,
-                            &memory.id,
-                        )),
-                        trust_class: memory.trust_class.clone(),
-                        trust_subclass: memory.trust_subclass.clone(),
-                        tags: vec![
-                            "scope:global".to_owned(),
-                            format!("origin:{}", memory.workspace_id),
-                        ],
-                        valid_from: memory.valid_from.clone(),
-                        valid_to: memory.valid_to.clone(),
-                    },
-                )?;
-                // insert_memory(None) defaults to capture time. Restore the
-                // source's genuinely unbounded start before committing. The
-                // interpolated ID is freshly generated, never supplied SQL.
-                if memory.valid_from.is_none() {
-                    connection.execute_raw(&format!(
-                        "UPDATE memories SET valid_from = NULL WHERE id = '{id}'"
-                    ))?;
-                }
-                // Preserve the validated structured payload before a search job or
-                // success receipt can make the new row visible as complete.
-                payload.apply(connection, &id)?;
-                connection.insert_search_index_job(
-                    &job,
-                    &CreateSearchIndexJobInput {
-                        workspace_id: workspace.to_owned(),
-                        job_type: SearchIndexJobType::SingleDocument,
-                        document_source: Some("memory".to_owned()),
-                        document_id: Some(id.clone()),
-                        documents_total: 1,
-                    },
-                )?;
-                (id, false, Some(job))
-            }
-        };
-        let destination = connection.get_memory(&id)?.ok_or_else(|| {
-            global_mutation_error("Promoted destination is missing from its transaction")
-        })?;
-        let mut details = promotion_audit_details(memory, &id, already_promoted, payload);
-        details["destinationCreatedAt"] = json!(destination.created_at);
-        connection.insert_audit(
-            &generate_audit_id(),
-            &CreateAuditInput {
-                workspace_id: Some(workspace.to_owned()),
-                actor: actor.map(str::to_owned),
-                action: "memory.promote_global".to_owned(),
-                target_type: Some("memory".to_owned()),
-                target_id: Some(id.clone()),
-                details: Some(details.to_string()),
-            },
-        )?;
-        Ok((id, already_promoted, job))
+        persist_global_promotion_inner(connection, workspace, memory, payload, actor, reference)
     })
+}
+
+fn persist_global_promotion_inner(
+    connection: &DbConnection,
+    workspace: &str,
+    memory: &crate::db::StoredMemory,
+    payload: &PromotionPayload,
+    actor: Option<&str>,
+    reference: chrono::DateTime<chrono::Utc>,
+) -> crate::db::Result<(String, bool, Option<String>)> {
+    // Select the twin inside the write transaction, not in a snapshot
+    // released before publication. Never trust a stale preview decision.
+    let twin = admission::find_twin(connection, workspace, memory, payload, reference)?;
+    let (id, already_promoted, job) = match twin {
+        Some(id) => {
+            let job = unfinished_promotion_index_job(connection, workspace, &id)?;
+            (id, true, job)
+        }
+        None => {
+            let id = crate::models::MemoryId::now().to_string();
+            let job = promotion_index_job_id();
+            connection.insert_memory(
+                &id,
+                &CreateMemoryInput {
+                    workspace_id: workspace.to_owned(),
+                    level: memory.level.clone(),
+                    kind: memory.kind.clone(),
+                    content: memory.content.clone(),
+                    workflow_id: None,
+                    confidence: memory.confidence,
+                    utility: memory.utility,
+                    importance: memory.importance,
+                    provenance_uri: Some(promotion_provenance_uri(
+                        &memory.workspace_id,
+                        &memory.id,
+                    )),
+                    trust_class: memory.trust_class.clone(),
+                    trust_subclass: memory.trust_subclass.clone(),
+                    tags: vec![
+                        "scope:global".to_owned(),
+                        format!("origin:{}", memory.workspace_id),
+                    ],
+                    valid_from: memory.valid_from.clone(),
+                    valid_to: memory.valid_to.clone(),
+                },
+            )?;
+            // insert_memory(None) defaults to capture time. Restore the
+            // source's genuinely unbounded start before committing. The
+            // interpolated ID is freshly generated, never supplied SQL.
+            if memory.valid_from.is_none() {
+                connection.execute_raw(&format!(
+                    "UPDATE memories SET valid_from = NULL WHERE id = '{id}'"
+                ))?;
+            }
+            // Preserve the validated structured payload before a search job or
+            // success receipt can make the new row visible as complete.
+            payload.apply(connection, &id)?;
+            connection.insert_search_index_job(
+                &job,
+                &CreateSearchIndexJobInput {
+                    workspace_id: workspace.to_owned(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(id.clone()),
+                    documents_total: 1,
+                },
+            )?;
+            (id, false, Some(job))
+        }
+    };
+    let destination = connection.get_memory(&id)?.ok_or_else(|| {
+        global_mutation_error("Promoted destination is missing from its transaction")
+    })?;
+    let mut details = promotion_audit_details(memory, &id, already_promoted, payload);
+    details["destinationCreatedAt"] = json!(destination.created_at);
+    connection.insert_audit(
+        &generate_audit_id(),
+        &CreateAuditInput {
+            workspace_id: Some(workspace.to_owned()),
+            actor: actor.map(str::to_owned),
+            action: "memory.promote_global".to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some(id.clone()),
+            details: Some(details.to_string()),
+        },
+    )?;
+    Ok((id, already_promoted, job))
+}
+
+enum PromotionWrite {
+    Memory(String, bool, Option<String>),
+    Proposal(merge::MergeProposal),
+}
+
+fn persist_promotion_or_proposal(
+    connection: &DbConnection,
+    workspace: &str,
+    memory: &crate::db::StoredMemory,
+    payload: &PromotionPayload,
+    actor: Option<&str>,
+    reference: chrono::DateTime<chrono::Utc>,
+) -> crate::db::Result<PromotionWrite> {
+    connection.with_transaction(|| {
+        if admission::find_twin(connection, workspace, memory, payload, reference)?.is_none()
+            && let Some(proposal) =
+                merge::find_proposal(connection, workspace, memory, payload, reference)?
+        {
+            merge::persist_proposal(connection, workspace, &proposal, actor)?;
+            return Ok(PromotionWrite::Proposal(proposal));
+        }
+        let (id, already_promoted, job) = persist_global_promotion_inner(
+            connection, workspace, memory, payload, actor, reference,
+        )?;
+        Ok(PromotionWrite::Memory(id, already_promoted, job))
+    })
+}
+
+fn proposal_report(
+    mut plan: PromotionPlan,
+    proposal: &merge::MergeProposal,
+    paths: &super::global_store::GlobalStorePaths,
+    executed: bool,
+) -> PromotionReport {
+    let action = if proposal.already_applied {
+        PromotionAction::MergeInto {
+            global_memory_id: proposal.global_memory_id.clone(),
+        }
+    } else {
+        PromotionAction::ProposeMerge {
+            global_memory_id: proposal.global_memory_id.clone(),
+            merge_candidate_id: proposal.candidate_id.clone(),
+        }
+    };
+    plan.verdict = PromotionVerdict::Allow { action };
+    plan.audit_action = "memory.promote_global_proposed";
+    PromotionReport {
+        plan,
+        executed,
+        global_memory_id: Some(proposal.global_memory_id.clone()),
+        already_promoted: proposal.already_applied,
+        index_job_id: None,
+        index_status: "not_applicable".to_owned(),
+        index_error: None,
+        merge_candidate_id: Some(proposal.candidate_id.clone()),
+        review_command: Some(merge::review_command(paths, &proposal.candidate_id)),
+    }
 }
 
 /// Promote one workspace memory into the user-global store.
@@ -566,7 +666,16 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
         return Ok(admission::preview_report(plan, None));
     }
     if options.dry_run {
-        let twin = admission::preview_twin(options.global_paths, &memory, &payload, reference)?;
+        let (twin, proposal) =
+            admission::preview_destination(options.global_paths, &memory, &payload, reference)?;
+        if let Some(proposal) = proposal {
+            return Ok(proposal_report(
+                plan,
+                &proposal,
+                options.global_paths,
+                false,
+            ));
+        }
         admission::set_duplicate(&mut plan, twin.as_deref());
         return Ok(admission::preview_report(plan, twin));
     }
@@ -577,7 +686,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
         super::global_store::open_or_create_global_store(options.global_paths)
             .map_err(|error| format!("open global store: {error}"))?;
     // Destination state is one durable unit; a preview cannot reserve a twin.
-    let (global_memory_id, already_promoted, index_job_id) = persist_global_promotion(
+    let publication = persist_promotion_or_proposal(
         &global_connection,
         &global_workspace_id,
         &memory,
@@ -588,6 +697,53 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
     .map_err(|_| {
         "Global promotion transaction failed; inspect the destination before retrying".to_owned()
     })?;
+    let (global_memory_id, already_promoted, index_job_id) = match publication {
+        PromotionWrite::Memory(id, already_promoted, job) => (id, already_promoted, job),
+        PromotionWrite::Proposal(proposal) => {
+            let mut report = proposal_report(plan, &proposal, options.global_paths, true);
+            if proposal.already_applied {
+                let job_id = format!(
+                    "sidx_{}",
+                    proposal.candidate_id.trim_start_matches("curate_")
+                );
+                let index = super::memory::reconcile_committed_memory_index_job(
+                    &global_connection,
+                    &global_workspace_id,
+                    &job_id,
+                    &options.global_paths.index_dir,
+                );
+                let provisional = super::memory::remember_index_status(&index);
+                report.index_status = super::memory::authoritative_remember_index_status(
+                    &global_workspace_id,
+                    &options.global_paths.root,
+                    &options.global_paths.database_path,
+                    &options.global_paths.index_dir,
+                    std::slice::from_ref(&job_id),
+                    &provisional,
+                );
+                report.index_job_id = Some(job_id);
+                report.index_error = index.error;
+            }
+            let audit = workspace_connection.insert_audit(
+                &generate_audit_id(),
+                &CreateAuditInput {
+                    workspace_id: Some(memory.workspace_id.clone()),
+                    actor: options.actor.map(str::to_owned),
+                    action: report.plan.audit_action.to_owned(),
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some(memory.id.clone()),
+                    details: Some(report.data_json().to_string()),
+                },
+            );
+            let _ = global_connection.close();
+            let _ = workspace_connection.close();
+            audit.map_err(|_| format!(
+                "global_promotion_origin_audit_pending: merge candidate {} is committed; retry promotion to repair the origin audit",
+                proposal.candidate_id
+            ))?;
+            return Ok(report);
+        }
+    };
     if already_promoted {
         admission::set_duplicate(&mut plan, Some(&global_memory_id));
     }
@@ -653,6 +809,8 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
         index_job_id,
         index_status,
         index_error,
+        merge_candidate_id: None,
+        review_command: None,
     })
 }
 
@@ -1691,7 +1849,7 @@ mod tests {
     fn plan_json_is_stable_and_actionable() {
         let plan = plan_promotion(&input(candidate("agent_validated")));
         let value = plan.data_json();
-        assert_eq!(value["schema"], GLOBAL_PROMOTION_PLAN_SCHEMA_V1);
+        assert_eq!(value["schema"], GLOBAL_PROMOTION_PLAN_SCHEMA_V2);
         assert_eq!(value["verdict"], "allow");
         assert_eq!(value["detail"]["action"], "insert");
 

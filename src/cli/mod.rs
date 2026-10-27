@@ -41080,7 +41080,7 @@ where
         };
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
-    let human = format!(
+    let mut human = format!(
         "Global promotion\n  Memory: {}\n  Executed: {}\n  Global memory: {}\n  Already promoted: {}\n  Index status: {}\n",
         args.memory_id,
         report.executed,
@@ -41088,6 +41088,15 @@ where
         report.already_promoted,
         report.index_status,
     );
+    if let Some(candidate) = &report.merge_candidate_id {
+        human.push_str(&format!("  Merge proposal: {candidate}\n"));
+        if !report.already_promoted {
+            human.push_str("  Global content awaits review.\n");
+        }
+        if let Some(command) = &report.review_command {
+            human.push_str(&format!("  Review: {command}\n"));
+        }
+    }
     render_global_lane_report(
         cli,
         "memory promote-global",

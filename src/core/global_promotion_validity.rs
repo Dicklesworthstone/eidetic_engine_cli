@@ -226,7 +226,21 @@ pub(super) fn default_starts_compatible(
     proof: &DefaultStartProof,
     target: &StoredMemory,
 ) -> crate::db::Result<bool> {
-    if !proof.matches_capture(source) || source.content != target.content {
+    if source.content != target.content {
+        return Ok(false);
+    }
+    independent_default_starts(db, source, proof, target)
+}
+
+/// Similarity may propose review across independently captured default starts;
+/// it does not relax exact twin equality or admit differing authored bounds.
+pub(super) fn independent_default_starts(
+    db: &DbConnection,
+    source: &StoredMemory,
+    proof: &DefaultStartProof,
+    target: &StoredMemory,
+) -> crate::db::Result<bool> {
+    if !proof.matches_capture(source) {
         return Ok(false);
     }
     if capture_default_start(db, target)?.is_some() {

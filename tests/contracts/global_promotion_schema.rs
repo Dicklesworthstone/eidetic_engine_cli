@@ -58,6 +58,7 @@ fn required_set(schema: &Value, pointer: &str) -> Result<BTreeSet<String>, Strin
 
 struct SchemaCase {
     id: &'static str,
+    version: &'static str,
     file: &'static str,
     category: &'static str,
     required: &'static [&'static str],
@@ -66,6 +67,7 @@ struct SchemaCase {
 const CASES: &[SchemaCase] = &[
     SchemaCase {
         id: "ee.global_promotion.plan.v1",
+        version: "1",
         file: "docs/schemas/ee.global_promotion.plan.v1.json",
         category: "memory",
         required: &[
@@ -79,6 +81,7 @@ const CASES: &[SchemaCase] = &[
     },
     SchemaCase {
         id: "ee.global_promotion.report.v1",
+        version: "1",
         file: "docs/schemas/ee.global_promotion.report.v1.json",
         category: "memory",
         required: &[
@@ -93,7 +96,40 @@ const CASES: &[SchemaCase] = &[
         ],
     },
     SchemaCase {
+        id: "ee.global_promotion.plan.v2",
+        version: "2",
+        file: "docs/schemas/ee.global_promotion.plan.v2.json",
+        category: "memory",
+        required: &[
+            "schema",
+            "memoryId",
+            "originWorkspaceId",
+            "verdict",
+            "detail",
+            "auditAction",
+        ],
+    },
+    SchemaCase {
+        id: "ee.global_promotion.report.v2",
+        version: "2",
+        file: "docs/schemas/ee.global_promotion.report.v2.json",
+        category: "memory",
+        required: &[
+            "schema",
+            "plan",
+            "executed",
+            "globalMemoryId",
+            "alreadyPromoted",
+            "indexJobId",
+            "indexStatus",
+            "indexError",
+            "mergeCandidateId",
+            "reviewCommand",
+        ],
+    },
+    SchemaCase {
         id: "ee.global_demotion.report.v1",
+        version: "1",
         file: "docs/schemas/ee.global_demotion.report.v1.json",
         category: "memory",
         required: &[
@@ -110,6 +146,7 @@ const CASES: &[SchemaCase] = &[
     },
     SchemaCase {
         id: "ee.global_promotion.backflow.v1",
+        version: "1",
         file: "docs/schemas/ee.global_promotion.backflow.v1.json",
         category: "memory",
         required: &[
@@ -147,8 +184,8 @@ fn global_lane_schema_identity_and_registry_are_pinned() -> TestResult {
             .find(|entry| entry.id == case.id)
             .ok_or_else(|| format!("public schema registry missing {}", case.id))?;
         ensure(
-            entry.version == "1",
-            format!("{}: registry version must be 1", case.id),
+            entry.version == case.version,
+            format!("{}: registry version must be {}", case.id, case.version),
         )?;
         ensure(
             entry.category == case.category,
@@ -179,4 +216,38 @@ fn global_lane_schema_required_fields_are_pinned() -> TestResult {
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn global_merge_proposal_contract_requires_review_identity() -> TestResult {
+    let plan = load_json("docs/schemas/ee.global_promotion.plan.v2.json")?;
+    let detail = plan
+        .pointer("/properties/detail/oneOf")
+        .and_then(Value::as_array)
+        .ok_or("promotion detail alternatives are missing")?;
+    let proposal = detail
+        .iter()
+        .find(|alternative| {
+            alternative
+                .pointer("/properties/action/const")
+                .and_then(Value::as_str)
+                == Some("propose_merge")
+        })
+        .ok_or("propose_merge action is missing")?;
+    ensure(
+        required_set(proposal, "/required")?
+            == ["action", "globalMemoryId", "mergeCandidateId"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        "merge proposals must identify both the global target and review candidate",
+    )?;
+    let report = load_json("docs/schemas/ee.global_promotion.report.v2.json")?;
+    ensure(
+        report
+            .pointer("/properties/plan/$ref")
+            .and_then(Value::as_str)
+            == Some("ee.global_promotion.plan.v2.json"),
+        "v2 promotion reports must reference the v2 plan",
+    )
 }

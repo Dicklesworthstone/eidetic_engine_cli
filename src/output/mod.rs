@@ -12298,6 +12298,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: global_promotion_report_schema_definition,
         },
         SchemaEntry {
+            id: "ee.global_promotion.plan.v2",
+            version: "2",
+            description: "Workspace-to-global promotion plan with explicit near-duplicate merge review proposals and typed refusals.",
+            category: "memory",
+            definition: global_promotion_plan_v2_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.global_promotion.report.v2",
+            version: "2",
+            description: "Global promotion receipt with durable merge-candidate review, idempotent applied-merge replay, and index publication status.",
+            category: "memory",
+            definition: global_promotion_report_v2_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.global_demotion.report.v1",
             version: "1",
             description: "Execution report for ee memory demote-global: tombstone of a promoted global row with origin parsed from promotion provenance.",
@@ -12327,6 +12341,14 @@ fn global_promotion_plan_schema_definition() -> String {
 
 fn global_promotion_report_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.global_promotion.report.v1.json").to_string()
+}
+
+fn global_promotion_plan_v2_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.global_promotion.plan.v2.json").to_string()
+}
+
+fn global_promotion_report_v2_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.global_promotion.report.v2.json").to_string()
 }
 
 fn global_demotion_report_schema_definition() -> String {

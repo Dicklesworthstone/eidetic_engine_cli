@@ -1479,7 +1479,7 @@ entity too; stored secrets and private paths are redacted on output.
 | `ee memory expire <id> [--dry-run]` | Audited soft expiration without deleting memory rows |
 | `ee memory link <id> [target-id] --relation <type> [--dry-run]` | Deterministic memory link listing and audited explicit link creation |
 | `ee memory tags <id> [--add <tags>] [--remove <tags>] [--set <tags>] [--clear]` | Deterministic audited tag listing and mutation |
-| `ee memory promote-global <id> [--dry-run]` | Evidence-gated copy-with-link promotion of a workspace memory into the user-global lane; refusals are typed exit-7 plans (`ee.global_promotion.plan.v1`) |
+| `ee memory promote-global <id> [--dry-run]` | Evidence-gated promotion into the user-global lane: reuse an exact twin, queue a near-duplicate merge for review, or insert new knowledge; refusals are typed exit-7 plans (`ee.global_promotion.plan.v2`) |
 | `ee memory demote-global <global-id>` | Audited tombstone of a promoted global row (`ee.global_demotion.report.v1`); tombstoned rows never re-enter candidate pools |
 | `ee memory outcome-global <global-id> --signal helpful\|harmful [--dry-run]` | Feedback on a global row with clamped confidence backflow to the origin workspace row (`ee.global_promotion.backflow.v1`) |
 
@@ -2104,6 +2104,16 @@ origin workspace keeps its row and audit history; the global copy carries
 **evidence-gated**: only `human_explicit` or `agent_validated` memories
 qualify, everything else gets a typed exit-7 refusal plan
 (`--dry-run` previews the verdict without writing).
+
+Promotion reuses an eligible exact-content twin. A sufficiently similar but
+different lesson produces a pending merge candidate instead of another global
+row. The proposal retains both texts and their origin provenance for review;
+it changes neither the workspace memory nor the existing global memory.
+The promotion report names the `mergeCandidateId` and provides a
+`reviewCommand` selecting the global store. Inspect and approve the proposal
+there before applying it. Apply rechecks the destination snapshot and refuses
+stale proposals, so intervening edits cannot be overwritten by an older
+approval. Dry-run reports the proposed action without creating a queue entry.
 
 Precedence at retrieval is fixed: global rows compete in the same
 pack/recall/primer/search sections as workspace rows, always labeled

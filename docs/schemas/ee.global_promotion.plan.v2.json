@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.global_promotion.plan.v2.json",
+  "title": "ee.global_promotion.plan.v2",
+  "description": "Workspace-to-global promotion decision: insert, reuse an exact compatible global twin or an applied reviewed merge, propose a near-duplicate merge for review, or refuse on source policy. A propose_merge action creates a curation candidate without changing either memory. Execution and review receipts live in ee.global_promotion.report.v2.",
+  "type": "object",
+  "required": ["schema", "memoryId", "originWorkspaceId", "verdict", "detail", "auditAction"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.global_promotion.plan.v2"},
+    "memoryId": {"type": "string", "description": "The workspace source memory."},
+    "originWorkspaceId": {"type": "string", "description": "Workspace containing the source memory."},
+    "verdict": {"type": "string", "enum": ["allow", "refuse"]},
+    "detail": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["action"],
+          "additionalProperties": false,
+          "properties": {"action": {"const": "insert"}}
+        },
+        {
+          "type": "object",
+          "required": ["action", "globalMemoryId"],
+          "additionalProperties": false,
+          "properties": {
+            "action": {"const": "merge_into"},
+            "globalMemoryId": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["action", "globalMemoryId", "mergeCandidateId"],
+          "additionalProperties": false,
+          "properties": {
+            "action": {"const": "propose_merge"},
+            "globalMemoryId": {"type": "string"},
+            "mergeCandidateId": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["code", "message", "repair"],
+          "additionalProperties": false,
+          "properties": {
+            "code": {"type": "string"},
+            "message": {"type": "string"},
+            "repair": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "auditAction": {"type": "string", "description": "Audit action for this decision."}
+  }
+}

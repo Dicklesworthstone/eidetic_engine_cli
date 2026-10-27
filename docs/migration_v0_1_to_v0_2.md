@@ -1,5 +1,34 @@
 # Migrating from `ee` v0.1 to v0.2 (bd-17c65.11.5 / K5)
 
+## Global promotion review proposals
+
+`ee memory promote-global` now emits `ee.global_promotion.report.v2`, containing
+`ee.global_promotion.plan.v2`. Exact compatible twins continue to reuse their
+global memory. When differing text passes the bounded near-duplicate gate,
+`plan.detail.action` is `propose_merge`: a pending curation candidate is stored
+in the global database, and neither memory content nor a search-index job is
+changed. Both original texts are retained in the proposed content. The additive
+report fields `mergeCandidateId` and `reviewCommand` are nullable on ordinary
+insert/exact-twin paths; the command explicitly routes review to the global
+workspace and database. Dry runs compute the same proposal ID without writes.
+
+`executed=true` on a proposal means its review record was persisted, not that
+global knowledge was merged. `alreadyPromoted` remains false until an exact
+twin exists or that same origin's reviewed merge has already been applied to
+the still-current destination. Repeated promotion reuses the candidate,
+including a previous rejection, and never resets a review decision. Approved
+merges use the existing `curate show`, `curate validate` / `curate accept`, and
+`curate apply` workflow. Application rechecks the candidate and complete target
+snapshot under the writer transaction; changes to content, trust, type,
+lifetime, seal, or structured fields require a fresh proposal.
+
+The durable `ee.global_promotion.merge_snapshot.v1` receipt binds origin IDs,
+origin content and payload commitments, and the target/proposed-content
+commitments. These hashes detect changed inputs; they are not signatures.
+Existing `ee.global_promotion.report.v1` audit receipts and capture-start proofs
+are retained unchanged. Both historical v1 wire schemas and current v2 schemas
+remain available through `ee schema`.
+
 ## Production quality ranking and pack identity v5
 
 Search now applies EE's observed recency, confidence, utility, harmful-feedback,
