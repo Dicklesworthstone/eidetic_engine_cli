@@ -5,6 +5,20 @@ oracle (`tests/retrieval_index_regression_oracle.rs`) against an attested
 candidate. Every file is named for the BLAKE3 of the `ee.test_event.v1` event
 stream it holds or describes.
 
+> **Worker names in this directory are redacted placeholders** (bd-42puv,
+> 2026-10-27). AGENTS.md forbids real worker, host or routable-address
+> identifiers in anything this repository tracks, and
+> `tests/fleet_identifier_guard.rs` enforces it. The three machines this
+> evidence was produced on are written here as `worker-01`, `worker-02` and
+> `worker-03`. The mapping is one-to-one, so every statement about whether two
+> runs shared a machine still reads correctly — which matters for the
+> same-worker comparisons in the concurrency and attribution tables below — but
+> the placeholders are NOT the literal host names and must not be used to
+> address a worker. Nothing else was altered: the BLAKE3 file names, bases,
+> verdicts, receipts and event streams are as captured, and the `.bundle.json`
+> is named for the BLAKE3 of the stream it describes rather than of itself, so
+> redacting its `worker` field leaves the naming scheme intact.
+
 ## Files
 
 | File | What it is |
@@ -33,7 +47,7 @@ rch exec --clean-overlay --no-overlay --base f1cbd6327a4bf066535099ab900e0c57e83
   --exact --ignored --test-threads=1 --nocapture
 ```
 
-The run went to worker vmi1227854, 2026-09-23T16:22:00Z to 16:38:24Z. Receipt:
+The run went to worker-01, 2026-09-23T16:22:00Z to 16:38:24Z. Receipt:
 `[RCH] clean-overlay receipt: base=f1cbd6327a4bf066535099ab900e0c57e83b1ca0`.
 Verdict: `RACE_ABSENT`, from 3 rounds × {search, pack}, 8 probes each, quorum 7.
 
@@ -99,9 +113,9 @@ file and `src/db/mod.rs` as overlays. The overlays make these runs
 
 | File | Run | What it holds |
 | --- | --- | --- |
-| `577dae27da9a343fbd4b4a6d3da864426c2d9887f4ee8956d0e7f2558da8178b.ee-test-event.jsonl` | Attribution run 1. Base `70c459bca8028e5871482931be7e24389ff1d6c9`, worker hz4, 2026-09-23T19:37-20:07Z. | Byte and WAL results per arm. The row digest FAILED in every arm: a read-only open of a copied WAL database is refused ("recovery in progress"). No row classification. |
-| `c5dbda5eff2c36a3da292b5288d9364ae85979f72d0e7f4c4808b0397cb98f57.ee-test-event.jsonl` | Attribution run 2. Base `4510aeee3f1a2a97a88626af70338afe13da77e5`, hz4, 20:08-20:35Z. | The attribution the ruling rests on. PS changed only `audit_log` (8 -> 56 rows = 8 probes × 6 audit rows). S and PP changed no rows. W changed `audit_log`, `memories`, `search_index_jobs` and `workspace_generations`. |
-| `999b1a27f48546f7769410bcbed5b789e1b22f670b774322e024a2866829bdf9.ee-test-event.jsonl` | Live oracle, default config, rows check in place. Base `8952b4bfa923bf8d594a9acb80e91578c8113e06`, worker vmi1227854, 21:14-21:31Z. Receipt overlay fingerprint `8ec1db2aed691628242700e8eebb404ca680f7155243a268d97c8369a2342cc5`. | `RACE_ABSENT`. The derived allowlist is `[audit_log, context_packs, pack_items]`. Only `audit_log` changed, with no append-only finding. The lock epoch went 357 -> 436. `ee.db` bytes changed and are recorded as `db-bytes-UNEXPLAINED`. |
+| `577dae27da9a343fbd4b4a6d3da864426c2d9887f4ee8956d0e7f2558da8178b.ee-test-event.jsonl` | Attribution run 1. Base `70c459bca8028e5871482931be7e24389ff1d6c9`, worker worker-03, 2026-09-23T19:37-20:07Z. | Byte and WAL results per arm. The row digest FAILED in every arm: a read-only open of a copied WAL database is refused ("recovery in progress"). No row classification. |
+| `c5dbda5eff2c36a3da292b5288d9364ae85979f72d0e7f4c4808b0397cb98f57.ee-test-event.jsonl` | Attribution run 2. Base `4510aeee3f1a2a97a88626af70338afe13da77e5`, worker-03, 20:08-20:35Z. | The attribution the ruling rests on. PS changed only `audit_log` (8 -> 56 rows = 8 probes × 6 audit rows). S and PP changed no rows. W changed `audit_log`, `memories`, `search_index_jobs` and `workspace_generations`. |
+| `999b1a27f48546f7769410bcbed5b789e1b22f670b774322e024a2866829bdf9.ee-test-event.jsonl` | Live oracle, default config, rows check in place. Base `8952b4bfa923bf8d594a9acb80e91578c8113e06`, worker worker-01, 21:14-21:31Z. Receipt overlay fingerprint `8ec1db2aed691628242700e8eebb404ca680f7155243a268d97c8369a2342cc5`. | `RACE_ABSENT`. The derived allowlist is `[audit_log, context_packs, pack_items]`. Only `audit_log` changed, with no append-only finding. The lock epoch went 357 -> 436. `ee.db` bytes changed and are recorded as `db-bytes-UNEXPLAINED`. |
 | `a36718c8cca175bfc948e7274f3d4acdf7819d7a9f33f33cfcd69beb8a8db944.ee-test-event.jsonl` | Attribution, same job as `999b1a27`. | The per-arm row judgment is empty in N1, S, PS, PP and N2. W is not judged. |
 
 **Retention disclosure for `577dae27` and `c5dbda5e`.** These two bodies were
@@ -159,8 +173,8 @@ locations were probed, and there were no build-environment hits.
 
 | File | Run | What it holds |
 | --- | --- | --- |
-| `3a216754ed5d565f25dd6fd21635877f4515020558aea42c5100faec2c8ec73e.ee-test-event.jsonl` | Run A, the default order: serial-cold first touch, then 3 concurrent rounds. Worker hz4, 2026-09-23T21:36-22:17Z. | `RACE_ABSENT`. Every round agreed (quorum 7 of 8). |
-| `51003314b443b392264996e8b7cf345b821b2a50e20bda501f2cabfd36818091.ee-test-event.jsonl` | Run B, `ORACLE_COLD_CONCURRENT=1`: a concurrent-cold search round and pack round as the first touch, then 3 concurrent rounds. Worker hz3, 22:17-23:28Z. | `RACE_ABSENT`. The cold rounds and every warm round agreed, 8 of 8 each. |
+| `3a216754ed5d565f25dd6fd21635877f4515020558aea42c5100faec2c8ec73e.ee-test-event.jsonl` | Run A, the default order: serial-cold first touch, then 3 concurrent rounds. Worker worker-03, 2026-09-23T21:36-22:17Z. | `RACE_ABSENT`. Every round agreed (quorum 7 of 8). |
+| `51003314b443b392264996e8b7cf345b821b2a50e20bda501f2cabfd36818091.ee-test-event.jsonl` | Run B, `ORACLE_COLD_CONCURRENT=1`: a concurrent-cold search round and pack round as the first touch, then 3 concurrent rounds. Worker worker-02, 22:17-23:28Z. | `RACE_ABSENT`. The cold rounds and every warm round agreed, 8 of 8 each. |
 
 Together, the two runs cover the four no-model cells of ruling 17:12Z item 3
 (serial or concurrent, cold or warm) at this base. The rows check gave the
@@ -216,8 +230,8 @@ product verdict.
 
 | File | Run | What it holds |
 | --- | --- | --- |
-| `8da0c30d327e83cf8e6c7fe1311c60c2544c9d868ca3a22e5e1599f5d2d669e8.ee-test-event.jsonl` | PL4: the corrected plant BEFORE P1. Base `db8300c59318411b5cb573573fea5ff7769d68fa`, worker vmi1227854, 2026-09-24T02:06-02:36Z. | The class shown, but not named. `ee index status` reported `"dbGeneration":"8"`, and `ee search` exited 4 with `search_index` / "Search index not found". The oracle filed all 24 search refusals as resource signals (`INCONCLUSIVE`). Its `RACE_REPRODUCED` came only from pack probes compared with a baseline taken before the plant. |
-| `a9d2e3909e7df9e772d2194ace16884326f3f13bb852af16d4c4183ed240a058.ee-test-event.jsonl` | J4: the corrected plant WITH P1. Base `426e207d918526ddb22c8bf90601fc8abaaae659`, vmi1227854, 04:56-05:29Z. | Search rounds 0-2 red, 8 of 8 each: "index invisible: search_index while dbGeneration=8". Pack rounds `RACE_ABSENT` against the in-window baseline. The in-window `ee index status` reported health `missing` and dbGeneration 8. Both lines were quoted, the plant was restored, and only `audit_log` changed. |
+| `8da0c30d327e83cf8e6c7fe1311c60c2544c9d868ca3a22e5e1599f5d2d669e8.ee-test-event.jsonl` | PL4: the corrected plant BEFORE P1. Base `db8300c59318411b5cb573573fea5ff7769d68fa`, worker worker-01, 2026-09-24T02:06-02:36Z. | The class shown, but not named. `ee index status` reported `"dbGeneration":"8"`, and `ee search` exited 4 with `search_index` / "Search index not found". The oracle filed all 24 search refusals as resource signals (`INCONCLUSIVE`). Its `RACE_REPRODUCED` came only from pack probes compared with a baseline taken before the plant. |
+| `a9d2e3909e7df9e772d2194ace16884326f3f13bb852af16d4c4183ed240a058.ee-test-event.jsonl` | J4: the corrected plant WITH P1. Base `426e207d918526ddb22c8bf90601fc8abaaae659`, worker-01, 04:56-05:29Z. | Search rounds 0-2 red, 8 of 8 each: "index invisible: search_index while dbGeneration=8". Pack rounds `RACE_ABSENT` against the in-window baseline. The in-window `ee index status` reported health `missing` and dbGeneration 8. Both lines were quoted, the plant was restored, and only `audit_log` changed. |
 | `fcacab3a84dafb7ee8f84639efc4915f97e186812f2aff6fc02a507166df2613.ee-test-event.jsonl` | J3: the untouched twin WITH P1, no plant. Same base and worker, 04:26-04:56Z. | `RACE_ABSENT` in every round, with `indexInvisible: []` throughout: the new rule does not fire on a healthy index. |
 
 In the same verification, the classifier's P1 unit tests were first run against
@@ -277,11 +291,11 @@ equals its name, and each was echoed on the worker and extracted unmodified.
 
 | File | Run | What it holds |
 | --- | --- | --- |
-| `1c5e1175403a73609fe6eb6e1ed645019562b9cc05905b8cb1bdb4e17b256af2.ee-test-event.jsonl` | T3: the healthy twin, item 4 (`68618af6`). Worker vmi1227854, 2026-09-24T15:16-15:49Z. Receipt overlay-fingerprint `424d593e…`. | `RACE_ABSENT`. In every pack round, 0 of 8 probes carried `context_lexical_fallback`. The run's unit tests passed, 34 of 34. |
-| `cc2cf0d764dc5ce5119d6bc89523d4492a3856eb71b1ede48477225b3fc07b30.ee-test-event.jsonl` | P3: the plant, item 4 (`68618af6`). vmi1227854, 15:49-16:12Z. | Search rounds red, 8 of 8 each: "index invisible: search_index while dbGeneration=8". Pack rounds `RACE_ABSENT`, with `context_lexical_fallback` in 8 of 8 probes every round, so there was no pack-signal finding. The plant was restored. |
-| `3515682cab4cc26f3587e1d3455d8da41a0a1875fe67a29dd7f41a64ef2288c9.ee-test-event.jsonl` | N3c: the model cells, item 4 (`68618af6`). vmi1227854, 16:12-17:00Z. | Warm and cold search `RACE_ABSENT`, all `neural_local`. Cold pack `INCONCLUSIVE`: all 24 probes exited 130, and the reason was not recorded (the gap P-a closes). |
-| `fe1868b0f32b02f553fa8382912691be2e2051c492134c5598966fae4be2ccf6.ee-test-event.jsonl` | T4: the healthy twin, P-a (`ecfb9939`). vmi1227854, 17:43-18:11Z. Receipt overlay-fingerprint `3db32e61…`. | `RACE_ABSENT`, with fallback 0 of 8 in every pack round. The run's unit tests passed, 35 of 35, including the new envelope test. |
-| `017e77e7294b308091c2fe70bdadf18e4db2b86faede860e383927440b3fbfe4.ee-test-event.jsonl` | N4: the model cells, P-a (`ecfb9939`). vmi1227854, 18:11-18:55Z. | Warm `RACE_ABSENT`. Cold search `RACE_ABSENT`, 88-130 s. Cold pack `INCONCLUSIVE`: all 24 probes read "exited Some(130); envelope: code=cancelled message=Deadline exceeded. cancelKind=deadline cancelClass=budget_exhausted", at 96.2-116.7 s. |
+| `1c5e1175403a73609fe6eb6e1ed645019562b9cc05905b8cb1bdb4e17b256af2.ee-test-event.jsonl` | T3: the healthy twin, item 4 (`68618af6`). Worker worker-01, 2026-09-24T15:16-15:49Z. Receipt overlay-fingerprint `424d593e…`. | `RACE_ABSENT`. In every pack round, 0 of 8 probes carried `context_lexical_fallback`. The run's unit tests passed, 34 of 34. |
+| `cc2cf0d764dc5ce5119d6bc89523d4492a3856eb71b1ede48477225b3fc07b30.ee-test-event.jsonl` | P3: the plant, item 4 (`68618af6`). worker-01, 15:49-16:12Z. | Search rounds red, 8 of 8 each: "index invisible: search_index while dbGeneration=8". Pack rounds `RACE_ABSENT`, with `context_lexical_fallback` in 8 of 8 probes every round, so there was no pack-signal finding. The plant was restored. |
+| `3515682cab4cc26f3587e1d3455d8da41a0a1875fe67a29dd7f41a64ef2288c9.ee-test-event.jsonl` | N3c: the model cells, item 4 (`68618af6`). worker-01, 16:12-17:00Z. | Warm and cold search `RACE_ABSENT`, all `neural_local`. Cold pack `INCONCLUSIVE`: all 24 probes exited 130, and the reason was not recorded (the gap P-a closes). |
+| `fe1868b0f32b02f553fa8382912691be2e2051c492134c5598966fae4be2ccf6.ee-test-event.jsonl` | T4: the healthy twin, P-a (`ecfb9939`). worker-01, 17:43-18:11Z. Receipt overlay-fingerprint `3db32e61…`. | `RACE_ABSENT`, with fallback 0 of 8 in every pack round. The run's unit tests passed, 35 of 35, including the new envelope test. |
+| `017e77e7294b308091c2fe70bdadf18e4db2b86faede860e383927440b3fbfe4.ee-test-event.jsonl` | N4: the model cells, P-a (`ecfb9939`). worker-01, 18:11-18:55Z. | Warm `RACE_ABSENT`. Cold search `RACE_ABSENT`, 88-130 s. Cold pack `INCONCLUSIVE`: all 24 probes read "exited Some(130); envelope: code=cancelled message=Deadline exceeded. cancelKind=deadline cancelClass=budget_exhausted", at 96.2-116.7 s. |
 
 Controls seen red first, each with the real code's copy differing only in
 the stated way:
