@@ -45,6 +45,21 @@ floor, not a population:
      shape is plausibly MORE common, since testing the captured value reads as
      more natural than testing `$?`.
 
+THERE IS A SIBLING GATE. `scripts/check-dead-exit-code-handlers.py` (2026-10-27)
+covers shape 1 ONLY, narrowly, and FAILS CLOSED on a new site rather than
+reporting it -- which is the thing this file deliberately declines to do. It
+does not reimplement shape 4 or the swallow shape, so this file stays the
+census of record and there is no second parse of those to disagree with the
+first. The two differ on one clause: this file exempts a function when ANY call
+site tests it (:345), the gate flags when ANY call site is BARE. Execution
+settles it against this file -- a function called `f || ...` and then bare runs
+its handler at the first call and ABORTS at the second, because suppression
+belongs to the invocation. That over-exemption is why
+e2e_lib/agent_ergonomics_lib.sh assert_jq never appeared here despite matching
+ASSIGN+HANDLER exactly and having been live since 2026-09-18. Fixing it would
+move EXEMPT rows to DEAD and red the gate, so it is tracked rather than done
+here; see bd-q726t.
+
 SCREEN NEGATIVE TESTS FIRST. Where a positive test's substitution fails only when
 something is broken, a negative test's substitution is DESIGNED to fail on every
 healthy run, so its handler is dead every time rather than rarely -- and the
@@ -88,6 +103,39 @@ IF_COND = re.compile(r"^\s*(?:if|while|until|elif)\s")
 # spelled in the UPPERCASE convention the e2e scripts use. A detector that
 # flags its own fix shape trains people to revert correct code.
 GUARDED = re.compile(r"\|\|\s*(?:true|:|echo)|\|\|\s*[A-Za-z_][A-Za-z0-9_]*=|\|\|\s*\{")
+# A line ending in `||`, `&&` or `|` is syntactically INCOMPLETE and continues
+# on the next line, exactly as a trailing `\` does. Every GUARDED alternative
+# requires text after the `||`, so without this the prescribed repair written
+# across two lines --
+#     /usr/bin/xattr -w ... >/dev/null 2>&1 ||
+#         planted_write_rc=$?
+# -- read as a bare command followed by a dead handler. Measured 2026-10-27:
+# appledouble_sidecar_probe_test.sh:134 was the ONLY blocking row in the whole
+# census, so `--gate` exited 1 and the self-test arm "the gate is clean on the
+# live tree" failed, against a file whose error handling is correct. A gate
+# that reds when the code is right teaches its readers to ignore it.
+OPEN_OPERATOR = re.compile(r"(?:\|\||&&|\|)\s*$")
+
+
+def join_continuations(lines, i):
+    """(logical line, index of its last physical line) starting at `lines[i]`.
+
+    ONE joiner for both censuses. Two copies of this loop existed and the
+    trailing-operator case had to be fixed in both or they would disagree,
+    which is the hazard this repo keeps paying for elsewhere: there must be no
+    second parse to disagree with the first.
+    """
+    logical, last = lines[i], i
+    while last + 1 < len(lines):
+        tail = logical.rstrip()
+        if tail.endswith("\\"):
+            logical = tail[:-1] + " " + lines[last + 1]
+        elif OPEN_OPERATOR.search(tail):
+            logical = tail + " " + lines[last + 1]
+        else:
+            break
+        last += 1
+    return logical, last
 
 
 FUNC_DEF = re.compile(r"^([A-Za-z_][A-Za-z0-9_:-]*)\s*\(\)\s*\{")
@@ -278,10 +326,7 @@ def census(root):
             # `line` alone declared a guarded assignment unguarded -- the shape
             # produced by wrapping a long `ee` invocation, which is most of
             # them.
-            logical, last = line, i
-            while logical.rstrip().endswith("\\") and last + 1 < len(lines):
-                last += 1
-                logical = logical.rstrip()[:-1] + " " + lines[last]
+            logical, last = join_continuations(lines, i)
             if IF_COND.match(logical) or GUARDED.search(logical):
                 continue
             # AND LOOK FOR THE HANDLER IN CODE, NOT PROSE. This window read raw
@@ -448,10 +493,7 @@ def swallow_census(root):
             # Join continuations BEFORE judging either the guard or the
             # command, because a wrapped `ee` invocation carries both its
             # `--json` and its `|| rc=$?` on later physical lines.
-            logical, last = line, i
-            while logical.rstrip().endswith("\\") and last + 1 < len(lines):
-                last += 1
-                logical = logical.rstrip()[:-1] + " " + lines[last]
+            logical, last = join_continuations(lines, i)
             logical = _decomment(logical)
             if not STDOUT_DIAGNOSTIC.search(logical):
                 continue
@@ -530,6 +572,26 @@ def self_test():
         # this unguarded.
         open(os.path.join(d, "cont.sh"), "w").write(
             'set -e\nOUT="$(some_cmd --flag \\\n    --other)" || RC=$?\necho "$RC"\n')
+        # NEGATIVE 8b: the line ends with a BARE `||` and the handler is the
+        # next physical line. Every GUARDED alternative requires text after the
+        # `||`, so this -- the prescribed repair, split because the command is
+        # long -- was read as a bare command plus a dead handler. It was the
+        # only blocking row in the live census on 2026-10-27
+        # (appledouble_sidecar_probe_test.sh:134), so `--gate` exited 1 against
+        # code that is right. Both shapes are covered: shape 4 (bare command)
+        # and shape 1 (assignment).
+        open(os.path.join(d, "openop_cmd.sh"), "w").write(
+            'set -e\n/usr/bin/xattr -w k 1 "$f" >/dev/null 2>&1 ||\n'
+            '    WRITE_RC=$?\necho "$WRITE_RC"\n')
+        open(os.path.join(d, "openop_assign.sh"), "w").write(
+            'set -e\nOUT="$(some_cmd)" ||\n    RC=$?\necho "$RC"\n')
+        # And the POSITIVE control for that clause: the same two lines with the
+        # `||` REMOVED is genuinely dead, so the joiner must not swallow it.
+        # Without this arm, joining every line to its successor would pass
+        # negative 8b while detecting nothing at all.
+        open(os.path.join(d, "openop_control.sh"), "w").write(
+            'set -e\n/usr/bin/xattr -w k 1 "$f" >/dev/null 2>&1\n'
+            '    WRITE_RC=$?\necho "$WRITE_RC"\n')
         # NEGATIVE 9: the only nearby `$?` is inside a COMMENT. Prose about a
         # handler is not a handler -- and a comment EXPLAINING this repair was
         # what manufactured a real false positive.
@@ -572,6 +634,15 @@ def self_test():
             "scripts/upper.sh" not in got)
         arm("a guard on a CONTINUATION line is recognised",
             "scripts/cont.sh" not in got)
+        arm("a bare command ending in `||` with the handler on the next line "
+            "is NOT flagged",
+            "scripts/openop_cmd.sh" not in got)
+        arm("an assignment ending in `||` with the handler on the next line "
+            "is NOT flagged",
+            "scripts/openop_assign.sh" not in got)
+        arm("the SAME two lines without the `||` ARE flagged, so the joiner "
+            "did not simply swallow the clause",
+            "scripts/openop_control.sh" in got)
         arm("a $? inside a COMMENT is not counted as a handler",
             "scripts/comment.sh" not in got)
         arm("a real handler with a TRAILING comment is still flagged",
@@ -582,7 +653,10 @@ def self_test():
         arm("a handler whose only call site is under `set +e` is EXEMPT, not DEAD",
             bool(setpluse_rows)
             and all("EXEMPT" in r["verdict"] for r in setpluse_rows))
-        arm("exactly three candidates across the fixtures", len(rows) == 3)
+        # The count pin, which is what stops a new clause silently widening the
+        # predicate: the positives are the originals plus openop_control.sh,
+        # the deliberate positive for the trailing-`||` clause.
+        arm("exactly four candidates across the fixtures", len(rows) == 4)
 
         # --- SWALLOW SHAPE (bd-v918u) --------------------------------------
         # A separate fixture root, so these arms cannot perturb the three

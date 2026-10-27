@@ -62,6 +62,31 @@ FIVE INSTRUMENT FAULTS, EACH FOUND BY A CONTROL FIRING
        Statements are joined on trailing `\` and on unbalanced `$(` before
        matching. Arm `continuation_guard_seen`.
 
+THERE IS A SIBLING INSTRUMENT, AND IT IS NOT A DUPLICATE OF THIS ONE
+    `scripts/audit-set-e-dead-handlers.py` landed 2026-10-19 for the same bead
+    and is wired to `tests/set_e_dead_handler_gate.rs`. It is BROADER and
+    deliberately advisory: it implements shape 4 (`<cmd>` then `$?`, no
+    assignment) and the bd-v918u swallow shape, and it reports every candidate
+    including ones it cannot adjudicate, calling its output "a floor, not a
+    population". It is the CENSUS OF RECORD. This file implements only shape 1
+    and does not try to reproduce shape 4, because two parses of the same
+    shape would eventually disagree and the disagreement would be the bug.
+
+    The two differ on one clause, and the difference is settled by execution,
+    not by preference. That file exempts a whole function when ANY call site
+    tests it (`if "tested" in kinds: EXEMPT`). This file flags when ANY call
+    site is bare. Measured 2026-10-27, one function called both ways in that
+    order:
+
+        f || echo "outer=$?"   HANDLER rc=1, outer=7, continued
+        f                      ABORTED -- nothing after it ran, exit 1
+
+    Suppression is a property of the INVOCATION and does not carry to the next
+    call, so a function with twenty bare call sites and one tested one has a
+    dead handler at the twenty. That over-exemption is why `assert_jq` was
+    never reported by the sibling census despite being present since
+    2026-09-18 and matching its predicate exactly.
+
 WHAT THIS CHECK DOES NOT CLAIM
     A finding is a CANDIDATE, not a confirmed defect: proving one needs a
     planted failure at the real site. What the three clauses buy is that the
@@ -564,6 +589,50 @@ output=$("$EE_BINARY" run --workspace "$WS" 2>"$err") \\
 echo "$command_status"
 """,
         0,
+    ),
+    # A line ending in a BARE `||` with the handler on the next physical line.
+    # This passes here because a trailing `||` reads as a top-level `||` in
+    # statement_is_guarded, which is correct but incidental -- so it is pinned.
+    # The same shape red-lit the sibling census
+    # (scripts/audit-set-e-dead-handlers.py) on 2026-10-27, where every
+    # "guarded" alternative required text AFTER the `||`:
+    #     /usr/bin/xattr -w ... >/dev/null 2>&1 ||
+    #         planted_write_rc=$?
+    # It was the only blocking row in that census, against correct code.
+    (
+        "open_operator_guard_not_flagged",
+        """#!/bin/bash
+set -euo pipefail
+WRITE_RC=0
+/usr/bin/xattr -w k 1 "$f" >/dev/null 2>&1 ||
+    WRITE_RC=$?
+echo "$WRITE_RC"
+""",
+        0,
+    ),
+    (
+        "open_operator_assign_not_flagged",
+        """#!/bin/bash
+set -euo pipefail
+rc=0
+out="$(some_cmd)" ||
+    rc=$?
+echo "$rc"
+""",
+        0,
+    ),
+    # The positive control for the clause above: the same two lines with the
+    # `||` removed. Without it, a joiner that swallowed every line into its
+    # successor would pass both arms above while detecting nothing.
+    (
+        "open_operator_control_still_flagged",
+        """#!/bin/bash
+set -euo pipefail
+out="$(some_cmd)"
+rc=$?
+echo "$rc"
+""",
+        1,
     ),
     (
         "if_guard_not_flagged",
