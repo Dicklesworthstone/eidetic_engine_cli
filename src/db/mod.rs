@@ -620,7 +620,7 @@ thread_local! {
 
 /// Run `f` and return the SQL text of every query it issued on this thread.
 #[cfg(test)]
-fn capture_query_sql_for_test<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+pub(crate) fn capture_query_sql_for_test<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
     QUERY_SQL_LOG.with(|log| *log.borrow_mut() = Some(Vec::new()));
     let value = f();
     let captured = QUERY_SQL_LOG.with(|log| log.borrow_mut().take().unwrap_or_default());
@@ -26982,6 +26982,41 @@ impl DbConnection {
         rows.first().map(stored_memory_seal_from_row).transpose()
     }
 
+    /// Read seal authority for candidate memories in bounded pages. Missing
+    /// rows mean unsealed only when the complete read succeeds; storage and
+    /// malformed-row failures remain errors, as with [`Self::get_memory_seal`].
+    /// The caller owns any snapshot spanning this read and memory hydration.
+    pub fn get_memory_seals_batch(
+        &self,
+        memory_ids: &[&str],
+    ) -> Result<BTreeMap<String, MemorySeal>> {
+        let ids: Vec<_> = memory_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut seals = BTreeMap::new();
+        for page in ids.chunks(256) {
+            let placeholders = (1..=page.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT memory_id, content_commitment, sealed_at, revealed_at, reveal_verified FROM memory_seals WHERE memory_id IN ({placeholders}) ORDER BY memory_id ASC"
+            );
+            let params: Vec<_> = page
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect();
+            for row in self.query_for(DbOperation::Query, &sql, &params)? {
+                let seal = stored_memory_seal_from_row(&row)?;
+                seals.insert(seal.memory_id.clone(), seal);
+            }
+        }
+        Ok(seals)
+    }
+
     /// Include sealed and revealed history, including tombstoned memories.
     pub fn list_memory_seals_for_recovery(&self, workspace_id: &str) -> Result<Vec<MemorySeal>> {
         self.query_for(DbOperation::Query,
@@ -31973,6 +32008,41 @@ impl DbConnection {
         rows.first()
             .map(stored_procedural_rule_from_row)
             .transpose()
+    }
+
+    /// Batch-load the exact native rule rows requested by a candidate set.
+    /// Duplicate IDs are coalesced, statements stay below the bind limit,
+    /// and the same row validation as the point getter applies. This method
+    /// does not acquire or release the caller's source snapshot.
+    pub fn get_procedural_rules_batch(
+        &self,
+        rule_ids: &[&str],
+    ) -> Result<BTreeMap<String, StoredProceduralRule>> {
+        let ids: Vec<_> = rule_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut rules = BTreeMap::new();
+        for page in ids.chunks(256) {
+            let placeholders = (1..=page.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, positive_feedback_count, negative_feedback_count, validation_passes, validation_contradictions, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE id IN ({placeholders}) ORDER BY id ASC"
+            );
+            let params: Vec<_> = page
+                .iter()
+                .map(|id| Value::Text((*id).to_owned()))
+                .collect();
+            for row in self.query_for(DbOperation::Query, &sql, &params)? {
+                let rule = stored_procedural_rule_from_row(&row)?;
+                rules.insert(rule.id.clone(), rule);
+            }
+        }
+        Ok(rules)
     }
 
     /// List procedural rules in stable order, optionally filtering by maturity,
@@ -45375,6 +45445,70 @@ mod tests {
                 .insert_memory_seal(&memory_id, "blake3:short", "2026-08-08T09:00:00Z")
                 .is_err(),
             "malformed commitments must be rejected before SQL",
+        )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_seal_batch_pages_ids_and_distinguishes_absence_from_failure() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 98)?;
+        setup_workspace(&connection)?;
+        let ids: Vec<_> = (0..257).map(|index| format!("mem_{index:026}")).collect();
+        let commitment = crate::models::memory_seal_commitment(b"batched seal authority");
+        for id in [&ids[0], &ids[1], &ids[256]] {
+            connection.insert_memory(
+                id,
+                &test_memory_input(
+                    "wsp_01234567890123456789012345",
+                    crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+                ),
+            )?;
+        }
+        for id in [&ids[0], &ids[256]] {
+            connection.insert_memory_seal(id, &commitment, "2026-08-08T06:00:00Z")?;
+        }
+        connection.mark_memory_seal_revealed(&ids[256], "2026-08-08T07:00:00Z")?;
+        let mut requested: Vec<_> = ids.iter().rev().map(String::as_str).collect();
+        requested.extend([ids[0].as_str(), ids[256].as_str()]);
+        let (seals, queries) =
+            super::capture_query_sql_for_test(|| connection.get_memory_seals_batch(&requested));
+        let seals = seals?;
+        ensure_equal(
+            &queries.len(),
+            &2,
+            "257 distinct IDs require two bounded reads",
+        )?;
+        ensure(
+            queries
+                .iter()
+                .all(|sql| sql.contains("WHERE memory_id IN (") && !sql.contains("?257")),
+            "seal reads must use bounded candidate-ID pages",
+        )?;
+        ensure_equal(&seals.len(), &2, "missing and unsealed rows stay absent")?;
+        for id in [&ids[0], &ids[256]] {
+            ensure_equal(
+                &seals.get(id),
+                &connection.get_memory_seal(id)?.as_ref(),
+                "batch and point seal authority must agree",
+            )?;
+        }
+        ensure(seals[&ids[0]].is_sealed(), "closed seal remains closed")?;
+        ensure(
+            !seals[&ids[256]].is_sealed(),
+            "verified reveal remains revealed",
+        )?;
+        connection.execute_raw("ALTER TABLE memory_seals RENAME TO unavailable_batch_seals")?;
+        ensure(
+            connection.get_memory_seals_batch(&requested).is_err(),
+            "unreadable authority must never become an empty successful batch",
+        )?;
+        let (empty, queries) =
+            super::capture_query_sql_for_test(|| connection.get_memory_seals_batch(&[]));
+        ensure(
+            empty?.is_empty() && queries.is_empty(),
+            "empty requests do not query storage",
         )?;
         connection.close()?;
         Ok(())

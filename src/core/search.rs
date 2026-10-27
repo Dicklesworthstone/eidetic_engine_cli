@@ -14542,6 +14542,20 @@ fn apply_tombstone_visibility_with_connection(
         .into_iter()
         .collect();
     let batch_memories = connection.get_memories_batch(&hit_doc_ids).ok();
+    // Seal authority is hydrated beside source bodies in the caller's pinned
+    // snapshot, not once per hit. A failed batch retains the point getter's
+    // fail-closed semantics while isolating any single malformed sidecar.
+    let batch_seals = match connection.get_memory_seals_batch(&hit_doc_ids) {
+        Ok(seals) => Some(seals),
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::search::visibility",
+                error = %error,
+                "batched seal hydration failed; falling back to per-hit reads"
+            );
+            None
+        }
+    };
     if let (Some(memories), Some(preloaded)) =
         (batch_memories.as_ref(), preloaded_memories.as_deref_mut())
     {
@@ -14572,7 +14586,11 @@ fn apply_tombstone_visibility_with_connection(
                 // malformed row carries ordinary body text. Neither the
                 // placeholder spelling nor a cached projection proves that
                 // content was revealed; a failed lookup cannot grant access.
-                match connection.get_memory_seal(&memory.id) {
+                let seal = match batch_seals.as_ref() {
+                    Some(seals) if memory.id == hit.doc_id => Ok(seals.get(&memory.id).cloned()),
+                    _ => connection.get_memory_seal(&memory.id),
+                };
+                match seal {
                     Ok(Some(seal)) if seal.is_sealed() => {
                         sealed_filtered = sealed_filtered.saturating_add(1);
                         return None;
@@ -20290,8 +20308,19 @@ mod tests {
             memory_visibility_hit(PLACEHOLDER, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT),
         ];
         let mut degraded = Vec::new();
-        let visible =
-            apply_tombstone_visibility(&options, hits.clone(), &mut degraded, Some(&connection));
+        let (visible, queries) = crate::db::capture_query_sql_for_test(|| {
+            apply_tombstone_visibility(&options, hits.clone(), &mut degraded, Some(&connection))
+        });
+        let seal_reads: Vec<_> = queries
+            .iter()
+            .filter(|sql| sql.contains("FROM memory_seals WHERE"))
+            .collect();
+        assert_eq!(
+            seal_reads.len(),
+            1,
+            "seal checks must be batched across candidates"
+        );
+        assert!(seal_reads[0].contains("WHERE memory_id IN ("));
         assert_eq!(visible.len(), 1);
         assert_eq!(
             visible[0].doc_id, PLACEHOLDER,
@@ -20308,6 +20337,28 @@ mod tests {
                 .len(),
             2
         );
+
+        // A corrupt sidecar fails the batch, then the point-read fallback
+        // still admits its healthy neighbor without exposing the bad row.
+        connection
+            .execute_raw(&format!(
+                "UPDATE memory_seals SET content_commitment = 'blake3:{}' WHERE memory_id = '{SEALED}'",
+                "S".repeat(64)
+            ))
+            .map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .get_memory_seals_batch(&[SEALED, PLACEHOLDER])
+                .is_err()
+        );
+        let mut corrupt = Vec::new();
+        let visible =
+            apply_tombstone_visibility(&options, hits.clone(), &mut corrupt, Some(&connection));
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].doc_id, PLACEHOLDER);
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(corrupt[0].code, "tombstone_visibility_unavailable");
+        assert!(!serde_json::json!(visible).to_string().contains(BODY));
 
         connection
             .execute_raw("ALTER TABLE memory_seals RENAME TO temporarily_unavailable_seals")

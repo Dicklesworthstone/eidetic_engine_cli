@@ -87,14 +87,39 @@ fn projections(
     .flatten() else {
         return BTreeMap::new();
     };
-    let rules: Vec<_> = ids
+    let canonical_ids: Vec<_> = ids
         .iter()
         .filter_map(|id| {
             let canonical = RuleId::from_str(id).ok()?.to_string();
-            if canonical != *id {
-                return None;
-            }
-            let rule = connection.get_procedural_rule(id).ok()??;
+            (canonical == *id).then_some(*id)
+        })
+        .collect();
+    let rows = match connection.get_procedural_rules_batch(&canonical_ids) {
+        Ok(rows) => rows,
+        Err(error) => {
+            // Preserve the point reader's isolation: one malformed row must
+            // not hide unrelated valid rules. Both paths use the same pinned
+            // source view; no indexed body is accepted as a fallback.
+            tracing::warn!(
+                target: "ee::search::rule",
+                error = %error,
+                "batched native rule hydration failed; falling back to per-hit reads"
+            );
+            canonical_ids
+                .iter()
+                .filter_map(|id| {
+                    connection
+                        .get_procedural_rule(id)
+                        .ok()
+                        .flatten()
+                        .map(|rule| (rule.id.clone(), rule))
+                })
+                .collect()
+        }
+    };
+    let rules: Vec<_> = rows
+        .into_iter()
+        .filter_map(|(canonical, rule)| {
             if rule.workspace_id != workspace.id || RuleMaturity::from_str(&rule.maturity).is_err()
             {
                 return None;
@@ -786,8 +811,24 @@ mod tests {
         assert_eq!(relations.sources.len(), RULE_RELATION_PAGE_SIZE + 1);
         assert!(relations.invalid_lineage.is_empty());
         let candidates = refs.iter().copied().collect::<BTreeSet<_>>();
-        let actual = load_projections(&options, &candidates, None, || {});
+        let (actual, queries) = crate::db::capture_query_sql_for_test(|| {
+            load_projections(&options, &candidates, None, || {})
+        });
         assert_eq!(actual.len(), ids.len());
+        let body_reads: Vec<_> = queries
+            .iter()
+            .filter(|sql| sql.contains("FROM procedural_rules WHERE"))
+            .collect();
+        assert_eq!(
+            body_reads.len(),
+            2,
+            "257 rule bodies require two reads, not 257"
+        );
+        assert!(
+            body_reads
+                .iter()
+                .all(|sql| sql.contains("WHERE id IN (") && !sql.contains("?257"))
+        );
         for id in &ids {
             let tags = db.get_rule_tags(id).map_err(|e| e.to_string())?;
             let sources = db
@@ -809,6 +850,75 @@ mod tests {
                 canonical_metadata(&expected)
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_rule_in_a_batch_does_not_authorize_it_or_hide_valid_neighbors() -> TestResult {
+        let (_temp, options, db) = fixture()?;
+        insert(&db, RULE, WORKSPACE, "validated")?;
+        insert(&db, SECOND, WORKSPACE, "validated")?;
+        db.execute_raw(&format!(
+            "UPDATE procedural_rules SET validation_passes = 4294967296 WHERE id = '{SECOND}'"
+        ))
+        .map_err(|error| error.to_string())?;
+        assert!(
+            db.get_procedural_rule(SECOND).is_err(),
+            "the planted row must fail the native parser"
+        );
+        assert!(db.get_procedural_rules_batch(&[RULE, SECOND]).is_err());
+        let mut degraded = Vec::new();
+        let hits = admit_hits(
+            &options,
+            vec![
+                hit(SECOND),
+                hit("evidence-unrelated"),
+                hit(RULE),
+                hit("rule_00000000000000000000000999"),
+            ],
+            &mut degraded,
+            Some(&db),
+        );
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["evidence-unrelated", RULE]
+        );
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "rule_live_admission_filtered");
+        assert_eq!(
+            hits[1]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata["content"].as_str()),
+            Some(BODY)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rule_body_batch_failure_withholds_native_rules_and_empty_batch_does_no_work() -> TestResult {
+        let (_temp, options, db) = fixture()?;
+        insert(&db, RULE, WORKSPACE, "validated")?;
+        db.execute_raw("ALTER TABLE procedural_rules RENAME TO unavailable_batch_rules")
+            .map_err(|error| error.to_string())?;
+        assert!(db.get_procedural_rules_batch(&[RULE]).is_err());
+        let (empty, queries) =
+            crate::db::capture_query_sql_for_test(|| db.get_procedural_rules_batch(&[]));
+        assert!(empty.map_err(|error| error.to_string())?.is_empty());
+        assert!(queries.is_empty());
+        let mut degraded = Vec::new();
+        let hits = admit_hits(
+            &options,
+            vec![hit(RULE), hit("evidence-unrelated")],
+            &mut degraded,
+            Some(&db),
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc_id, "evidence-unrelated");
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "rule_live_admission_filtered");
         Ok(())
     }
 
