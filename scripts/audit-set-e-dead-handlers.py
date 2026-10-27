@@ -50,15 +50,24 @@ covers shape 1 ONLY, narrowly, and FAILS CLOSED on a new site rather than
 reporting it -- which is the thing this file deliberately declines to do. It
 does not reimplement shape 4 or the swallow shape, so this file stays the
 census of record and there is no second parse of those to disagree with the
-first. The two differ on one clause: this file exempts a function when ANY call
-site tests it (:345), the gate flags when ANY call site is BARE. Execution
-settles it against this file -- a function called `f || ...` and then bare runs
-its handler at the first call and ABORTS at the second, because suppression
-belongs to the invocation. That over-exemption is why
-e2e_lib/agent_ergonomics_lib.sh assert_jq never appeared here despite matching
-ASSIGN+HANDLER exactly and having been live since 2026-09-18. Fixing it would
-move EXEMPT rows to DEAD and red the gate, so it is tracked rather than done
-here; see bd-q726t.
+first. The two differ on one clause, and NEITHER one-level rule is correct.
+This file exempts a function when ANY call site tests it (:345). That
+over-exempts: suppression does not carry to the next call, so a function
+called `f || ...` and then bare runs its handler at the first and ABORTS at
+the second. It is why e2e_lib/agent_ergonomics_lib.sh assert_jq never appeared
+here despite matching ASSIGN+HANDLER exactly and being live since 2026-09-18 --
+one `|| true` call site exempted twenty bare ones.
+
+But the obvious repair, "bare wins", OVER-FLAGS, because suppression IS
+inherited through a nested bare call. Executed 2026-10-27: with f holding the
+handler and g calling f BARE, `g` aborts and `g || ...` runs the handler.
+e2e_overhaul/determinism.sh:584 is that shape -- run_rerank_json called bare
+inside remember_rerank_fixture, whose every call site is `|| return 1` -- so a
+one-level flip would red correct code. Reachability is a CALL-GRAPH question: a
+handler is dead iff some chain of BARE calls reaches a top-level invocation.
+The sibling gate computes that closure; this file still reads one level, which
+is tolerable only because it ADVISES. Correcting it here is tracked on
+bd-q726t, and it must land as the closure, not as a flipped boolean.
 
 SCREEN NEGATIVE TESTS FIRST. Where a positive test's substitution fails only when
 something is broken, a negative test's substitution is DESIGNED to fail on every

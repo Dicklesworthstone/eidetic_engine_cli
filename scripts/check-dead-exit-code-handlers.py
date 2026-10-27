@@ -72,20 +72,40 @@ THERE IS A SIBLING INSTRUMENT, AND IT IS NOT A DUPLICATE OF THIS ONE
     and does not try to reproduce shape 4, because two parses of the same
     shape would eventually disagree and the disagreement would be the bug.
 
-    The two differ on one clause, and the difference is settled by execution,
-    not by preference. That file exempts a whole function when ANY call site
-    tests it (`if "tested" in kinds: EXEMPT`). This file flags when ANY call
-    site is bare. Measured 2026-10-27, one function called both ways in that
-    order:
+    The two differ on one clause, and NEITHER one-level rule is right. That
+    file exempts a whole function when ANY call site tests it
+    (`if "tested" in kinds: EXEMPT`). An obvious "fix" is to make bare win.
+    Both are wrong, in opposite directions, and execution says why.
+
+    Suppression does not carry to the NEXT call, so over-exemption is real.
+    Measured 2026-10-27, one function called both ways in that order:
 
         f || echo "outer=$?"   HANDLER rc=1, outer=7, continued
         f                      ABORTED -- nothing after it ran, exit 1
 
-    Suppression is a property of the INVOCATION and does not carry to the next
-    call, so a function with twenty bare call sites and one tested one has a
-    dead handler at the twenty. That over-exemption is why `assert_jq` was
-    never reported by the sibling census despite being present since
-    2026-09-18 and matching its predicate exactly.
+    A function with twenty bare call sites and one tested one has a dead
+    handler at the twenty. That is why `assert_jq` was never reported by the
+    sibling census despite being live since 2026-09-18 and matching its
+    predicate exactly: it has one `|| true` call site in
+    e2e_overhaul/workspace_hygiene.sh and bare calls everywhere else.
+
+    But suppression IS inherited through a nested bare call, so "any bare call
+    site means dead" over-flags. Same day, f holding the handler, g calling f
+    BARE:
+
+        g                      ABORTED, handler never ran
+        g || echo "outer=$?"   HANDLER rc=1, g continued
+        h() { g || return 1; } HANDLER rc=1, g continued
+
+    e2e_overhaul/determinism.sh:584 is exactly that: run_rerank_json called
+    bare inside remember_rerank_fixture, whose every call site is
+    `|| return 1`. A one-level reading calls that handler dead; it is live.
+
+    So reachability is a CALL-GRAPH question -- a handler is dead iff some
+    chain of bare calls reaches a top-level invocation -- and
+    classify_call_sites() below computes exactly that. The sibling census still
+    reads one level, which is safe there because it only advises; this file
+    BLOCKS, so it cannot afford either error.
 
 WHAT THIS CHECK DOES NOT CLAIM
     A finding is a CANDIDATE, not a confirmed defect: proving one needs a
@@ -375,44 +395,92 @@ def enclosing_function(spans: list[tuple[str, int, int]], idx: int) -> str | Non
 # ---------------------------------------------------------------------------
 
 
-def classify_call_sites(name: str, corpus: dict[str, list[str]]) -> str:
-    """'BARE' / 'TESTED' / 'UNKNOWN' for every invocation of `name`.
+def bare_call_sites(name: str, corpus: dict[str, list[str]]) -> tuple[int, list[str | None]]:
+    """(total call sites, enclosing function of each BARE one).
 
-    BARE    at least one call site runs it with its status untested, so `-e`
-            applies inside the body and the handler is dead there.
-    TESTED  every call site tests it (`if f`, `f ||`, `f &&`, `! f`), so `-e`
-            is suppressed throughout the body and the handler is live.
-    UNKNOWN no syntactic call site at all -- fault 4. Most often a function
-            dispatched by NAME as a string, which verify.sh runs under an
-            injected `set +e`. Never guessed as BARE.
+    `None` in the list means a bare call at script top level, where nothing can
+    suppress `-e`. A total of 0 is fault 4: a function dispatched by NAME as a
+    string has no syntactic call site, and verify.sh runs those under an
+    injected `set +e`, so it must never be guessed as bare.
     """
     word = re.compile(r"(?<![A-Za-z0-9_./-])" + re.escape(name) + r"(?![A-Za-z0-9_-])")
-    saw_any = False
-    saw_bare = False
+    total = 0
+    bare_in: list[str | None] = []
     for path, lines in corpus.items():
         hd = heredoc_body_lines(lines)
         code = [code_line(l, i in hd) for i, l in enumerate(lines)]
         spans = function_spans(code)
+        stmt_start = {i: s for i, s in logical_statements(lines, hd)}
         for i, line in enumerate(code):
-            if not line.strip() or not word.search(strip_quoted(line) if '"' not in line else line):
+            if not line.strip() or not word.search(
+                strip_quoted(line) if '"' not in line else line
+            ):
                 continue
             # a definition is not a call
             m = FUNC_DEF.match(line)
             if m and m.group(1) == name:
                 continue
+            enclosing = enclosing_function(spans, i)
             # self-recursion inside the function body is not an external caller
-            if path and enclosing_function(spans, i) == name:
+            if enclosing == name:
                 continue
             quoted = re.search(r"[\"']" + re.escape(name) + r"[\"']", line)
             bare_word = word.search(re.sub(r"[\"'][^\"']*[\"']", "", line))
             if quoted and not bare_word:
                 continue  # string dispatch: no syntactic call site here
-            saw_any = True
-            if not statement_is_guarded(line):
-                saw_bare = True
-    if not saw_any:
+            total += 1
+            # A CALL SITE WRAPS, and its `|| return 1` can sit on the next
+            # physical line, so judge the whole logical statement.
+            if not statement_is_guarded(stmt_start.get(i, line)):
+                bare_in.append(enclosing)
+    return total, bare_in
+
+
+def classify_call_sites(
+    name: str,
+    corpus: dict[str, list[str]],
+    _seen: frozenset[str] = frozenset(),
+) -> str:
+    """'BARE' / 'TESTED' / 'UNKNOWN' for `name`, TRANSITIVELY.
+
+    `set -e` suppression for a tested command is inherited by the whole
+    function body, AND BY EVERYTHING THAT BODY CALLS. So a one-level call-site
+    predicate cannot decide reachability. Executed 2026-10-27, f holding the
+    handler and g calling f BARE:
+
+        g                       ABORTED, handler never ran, exit 1
+        g || echo "outer=$?"    HANDLER rc=1, g continued, exit 0
+        if g; then ...          HANDLER rc=1, g continued, exit 0
+        h() { g || return 1; }  HANDLER rc=1, g continued, exit 0
+
+    This is not academic: e2e_overhaul/determinism.sh:584 calls
+    run_rerank_json BARE inside remember_rerank_fixture, and every call site of
+    THAT is `|| return 1`. A one-level reading calls the handler dead; it is
+    live. This gate BLOCKS, so getting that wrong would red correct code --
+    which is the failure the sibling census had on 2026-10-27, in the opposite
+    direction.
+
+    So: BARE iff some chain of bare calls reaches a top-level invocation. The
+    recursion is memo-free but cycle-guarded by `_seen`; a function reachable
+    only through a cycle has no top-level bare path and is not BARE.
+    """
+    total, bare_in = bare_call_sites(name, corpus)
+    if total == 0:
         return "UNKNOWN"
-    return "BARE" if saw_bare else "TESTED"
+    if not bare_in:
+        return "TESTED"
+    nxt = _seen | {name}
+    for enclosing in bare_in:
+        if enclosing is None:
+            # Bare at top level: nothing above it can suppress `-e`.
+            return "BARE"
+        if enclosing in nxt:
+            continue  # cycle: this path cannot reach a top-level invocation
+        if classify_call_sites(enclosing, corpus, nxt) == "BARE":
+            return "BARE"
+    # Every bare call sits inside a function that is itself never reached with
+    # `-e` active, so the handler runs.
+    return "TESTED"
 
 
 # ---------------------------------------------------------------------------
@@ -728,6 +796,60 @@ run_case() {
     echo "$status"
 }
 ! run_case
+""",
+        0,
+    ),
+    # TRANSITIVITY. The bare call is one level down, inside a function whose
+    # every call site is tested, so the suppression reaches the handler. A
+    # one-level predicate reds this, and it is the shape
+    # e2e_overhaul/determinism.sh:584 actually has.
+    (
+        "bare_call_inside_tested_caller_exempt",
+        """#!/bin/bash
+set -euo pipefail
+inner() {
+    output="$(some_cmd)"
+    status=$?
+    echo "$status"
+}
+middle() {
+    inner
+}
+middle || return 1
+""",
+        0,
+    ),
+    # And the control: the SAME two functions where the outer one is called
+    # bare. Without this, a classifier that answered TESTED for every nested
+    # call would pass the arm above while detecting nothing.
+    (
+        "bare_call_inside_bare_caller_is_dead",
+        """#!/bin/bash
+set -euo pipefail
+inner() {
+    output="$(some_cmd)"
+    status=$?
+    echo "$status"
+}
+middle() {
+    inner
+}
+middle
+""",
+        1,
+    ),
+    (
+        "mutual_recursion_does_not_hang",
+        """#!/bin/bash
+set -euo pipefail
+a() {
+    output="$(some_cmd)"
+    status=$?
+    b
+}
+b() {
+    a
+}
 """,
         0,
     ),
