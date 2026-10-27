@@ -2667,13 +2667,14 @@ impl EffectManifest {
             CommandEffect::durable_write(
                 "conflict resolve",
                 vec![
+                    "curation_candidates",
                     "memories",
                     "memory_links",
                     "memory_tags",
                     "search_index_jobs",
                     "audit_log",
                 ],
-                "Resolve one live conflict pair via verb-mapped EXISTING audited atoms (decide record / memory expire / memory link / memory tags); dry-run plan by default, --apply executes (ADR 0066)",
+                "Resolve one live conflict pair via existing audited atoms; preview by default, --propose queues an immutable plan for curation review, --apply executes directly (ADR 0066)",
             ),
             CommandEffect::durable_write(
                 "diagnose-error",
@@ -2714,13 +2715,15 @@ impl EffectManifest {
                     "curation_candidates",
                     "plan_recipes",
                     "memories",
+                    "memory_tags",
+                    "memory_links",
                     "procedural_rules",
                     "rule_source_memories",
                     "rule_tags",
                     "search_index_jobs",
                     "audit_log",
                 ],
-                "Apply a curation candidate",
+                "Apply an approved curation candidate, including an atomic reviewed conflict resolution",
             ),
             CommandEffect::durable_write(
                 "curate candidates --propose",

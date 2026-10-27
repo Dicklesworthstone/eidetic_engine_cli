@@ -73,6 +73,23 @@ fn record_resolution_with_boundary(
     plan: &ConflictResolutionPlan,
     boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
 ) -> Result<ConflictResolutionReport, DomainError> {
+    record_resolution_candidate_with_boundary(options, plan, None, boundary)
+}
+
+pub(super) fn record_candidate_resolution(
+    options: &DecideRecordOptions<'_>,
+    plan: &ConflictResolutionPlan,
+    candidate: &crate::db::StoredCurationCandidate,
+) -> Result<ConflictResolutionReport, DomainError> {
+    record_resolution_candidate_with_boundary(options, plan, Some(candidate), |_, _| Ok(()))
+}
+
+fn record_resolution_candidate_with_boundary(
+    options: &DecideRecordOptions<'_>,
+    plan: &ConflictResolutionPlan,
+    candidate: Option<&crate::db::StoredCurationCandidate>,
+    boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
+) -> Result<ConflictResolutionReport, DomainError> {
     let decisions: Vec<_> = plan
         .actions
         .iter()
@@ -132,19 +149,21 @@ fn record_resolution_with_boundary(
     // exact head, topic and hidden-source authority before accepting it.
     decision_options.supersedes = predecessor.as_deref();
     decision_options.now = Some(now);
-    record_with_optional_resolution_boundary(&decision_options, Some(plan), boundary)
+    record_with_optional_resolution_boundary(&decision_options, Some(plan), candidate, boundary)
 }
 
 fn record_with_boundary(
     options: &DecideRecordOptions<'_>,
     boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
 ) -> Result<DecideRecordReport, DomainError> {
-    record_with_optional_resolution_boundary(options, None, boundary).map(|report| report.decision)
+    record_with_optional_resolution_boundary(options, None, None, boundary)
+        .map(|report| report.decision)
 }
 
 fn record_with_optional_resolution_boundary(
     options: &DecideRecordOptions<'_>,
     resolution: Option<&ConflictResolutionPlan>,
+    candidate: Option<&crate::db::StoredCurationCandidate>,
     mut boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
 ) -> Result<ConflictResolutionReport, DomainError> {
     let mut scope = decide_scope(
@@ -227,6 +246,8 @@ fn record_with_optional_resolution_boundary(
                 warnings: Vec::new(),
             },
             results: Vec::new(),
+            candidate_audit_id: None,
+            candidate_applied_at: None,
         });
     }
 
@@ -253,6 +274,14 @@ fn record_with_optional_resolution_boundary(
                 .into());
             }
             if let Some(plan) = resolution {
+                if let Some(candidate) = candidate {
+                    crate::core::conflict_proposal::validate_in_transaction(
+                        &connection,
+                        candidate,
+                        plan,
+                        options.rationale,
+                    )?;
+                }
                 validate_conflict_resolution(
                     &connection,
                     write.workspace_id(),
@@ -329,6 +358,17 @@ fn record_with_optional_resolution_boundary(
             } else {
                 Vec::new()
             };
+            let candidate_audit_id = candidate
+                .map(|candidate| {
+                    crate::core::conflict_proposal::complete_in_transaction(
+                        &connection,
+                        candidate,
+                        write.memory_id(),
+                        &stored.updated_at,
+                        options.actor,
+                    )
+                })
+                .transpose()?;
             // All fallible source-dependent report construction is pre-COMMIT.
             report.decision.chain_depth =
                 lineage::chain_depth(&connection, write.workspace_id(), write.memory_id())?;
@@ -336,6 +376,8 @@ fn record_with_optional_resolution_boundary(
             Ok::<_, RecordError>(ConflictResolutionReport {
                 decision: report,
                 results,
+                candidate_audit_id,
+                candidate_applied_at: candidate.map(|_| stored.updated_at.clone()),
             })
         })
         .map_err(|error| error.0)?;

@@ -1516,13 +1516,25 @@ entity too; stored secrets and private paths are redacted on output.
 | Command | Purpose |
 |---|---|
 | `ee conflict list` / `explain <id>` / `cluster` | Read-only ranked contradiction surface: conflicting pairs with both bodies + the preferred side, and k-truss/Louvain clusters (`ee.conflict.v1`) |
-| `ee conflict resolve <a> <b> --verb supersede\|reject-one\|scope-split\|both-valid [--keep ID] [--reason "..."] [--apply]` | Audited resolution against the LIVE surface; dry-run plan by default. Every mutation maps onto existing audited atoms and the rationale persists as a `kind=decision` memory (`ee.conflict.resolve.v1`) |
+| `ee conflict resolve <a> <b> --verb supersede\|reject-one\|scope-split\|both-valid [--keep ID] [--reason "..."] [--propose\|--apply]` | Preview a resolution, save it in the curation queue with `--propose`, or apply it directly with `--apply`. Resolutions use the existing atomic decision writer and preserve an audited rationale (`ee.conflict.resolve.v1`; queued proposal: `ee.conflict.proposal.v1`) |
 
 Resolution is terminal: a tombstoned side (superseded or rejected) drops the
 pair from the actionable surface, and re-running against a moved surface
 refuses with `conflict_resolve_stale_surface` plus the focused live state.
 See [`docs/agent-ux/graph-intelligence.md`](docs/agent-ux/graph-intelligence.md)
 for the full densification and resolution loop.
+
+Use `--propose` when a resolution needs review before it changes memory.
+The response includes the durable `candidateId` and commands for inspecting
+and reviewing it. `ee curate show <candidate-id>` previews the resolution;
+`ee curate validate <candidate-id> --dry-run` checks it without approving it;
+`ee curate accept <candidate-id>` approves it; and `ee curate apply
+<candidate-id>` performs the approved resolution. `--propose` and `--apply`
+are mutually exclusive. Repeating an unchanged proposal reuses its queue
+entry. Apply checks the live conflict and the captured source state again,
+so approval cannot overwrite a later resolution or silently act on changed
+memories. A scope split keeps both bodies and applies the corresponding scope
+tags; it does not tombstone either side.
 
 ### Index
 

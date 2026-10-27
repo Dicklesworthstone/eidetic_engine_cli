@@ -19,6 +19,61 @@ type TestResult = Result<(), String>;
 const SCHEMA_ID: &str = "ee.conflict.resolve.v1";
 const SCHEMA_REL: &str = "docs/schemas/ee.conflict.resolve.v1.json";
 
+#[test]
+fn conflict_proposal_has_an_independent_registered_review_contract() -> TestResult {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../docs/schemas/ee.conflict.proposal.v1.json"
+    ))
+    .map_err(|error| error.to_string())?;
+    ensure(
+        schema["properties"]["schema"]["const"] == "ee.conflict.proposal.v1",
+        "proposal identity",
+    )?;
+    ensure(
+        schema["properties"]["status"]["const"] == "proposed",
+        "proposal is not an applied resolution",
+    )?;
+    ensure(
+        schema["properties"]["dryRun"]["const"] == false,
+        "proposal persists a queue entry",
+    )?;
+    ensure(
+        schema["properties"]["persisted"]["const"] == true,
+        "proposal acknowledges its durable queue entry",
+    )?;
+    let required = string_set(&schema, "/required")?;
+    for field in [
+        "candidateId",
+        "candidateStatus",
+        "created",
+        "plan",
+        "nextCommands",
+    ] {
+        ensure(
+            required.contains(field),
+            format!("proposal must expose {field}"),
+        )?;
+    }
+    ensure(
+        string_set(&schema, "/properties/plan/properties/verb/enum")?
+            == string_set(&load_schema()?, "/properties/verb/enum")?,
+        "queued review must use the same four explicit resolution verbs",
+    )?;
+    ensure(
+        public_schemas()
+            .iter()
+            .any(|entry| entry.id == "ee.conflict.proposal.v1"),
+        "proposal schema registry entry",
+    )?;
+    let exported: Value =
+        serde_json::from_str(&render_schema_export_json(Some("ee.conflict.proposal.v1")))
+            .map_err(|error| error.to_string())?;
+    ensure(
+        exported == schema,
+        "registered proposal schema must match its standalone artifact",
+    )
+}
+
 fn load_schema() -> Result<Value, String> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SCHEMA_REL);
     let bytes =

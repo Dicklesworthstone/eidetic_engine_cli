@@ -9849,6 +9849,15 @@ pub fn render_curate_show_human(report: &CurateShowReport) -> String {
     } else {
         lines.push("  targetMemoryId: (none — create-derived candidate)".to_owned());
     }
+    if let Some(plan) = report
+        .candidate
+        .proposed_content
+        .as_deref()
+        .and_then(crate::core::conflict_proposal::public_reviewed_plan_text)
+    {
+        lines.push("  reviewedConflictPlan:".to_owned());
+        lines.extend(plan.lines().map(|line| format!("    {line}")));
+    }
     if let Some(planned) = &report.planned_application {
         lines.push(format!(
             "  plannedApplication: status={} decision={}",
@@ -11529,6 +11538,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: conflict_resolve_schema_definition,
         },
         SchemaEntry {
+            id: "ee.conflict.proposal.v1",
+            version: "1",
+            description: "Pending conflict-resolution proposal with an immutable source receipt and explicit curation review commands.",
+            category: "graph",
+            definition: conflict_proposal_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.context.agent_profile.v1",
             version: "1",
             description: "Agent-specific retrieval bias summary emitted by ee context --explain --json.",
@@ -12846,6 +12862,10 @@ fn graph_suggest_links_schema_definition() -> String {
 
 fn conflict_resolve_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.conflict.resolve.v1.json").to_string()
+}
+
+fn conflict_proposal_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.conflict.proposal.v1.json").to_string()
 }
 
 fn graph_diff_schema_definition() -> String {

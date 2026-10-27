@@ -138,6 +138,8 @@ pub(crate) struct ConflictResolutionActionResult {
 pub(crate) struct ConflictResolutionReport {
     pub decision: DecideRecordReport,
     pub results: Vec<ConflictResolutionActionResult>,
+    pub candidate_audit_id: Option<String>,
+    pub candidate_applied_at: Option<String>,
 }
 
 impl DecideRecordReport {
@@ -281,6 +283,14 @@ pub(crate) fn decide_conflict_resolution(
     plan: &crate::core::contradiction_detect::ConflictResolutionPlan,
 ) -> Result<ConflictResolutionReport, DomainError> {
     atomic::record_resolution(options, plan)
+}
+
+pub(crate) fn decide_conflict_candidate_resolution(
+    options: &DecideRecordOptions<'_>,
+    plan: &crate::core::contradiction_detect::ConflictResolutionPlan,
+    candidate: &crate::db::StoredCurationCandidate,
+) -> Result<ConflictResolutionReport, DomainError> {
+    atomic::record_candidate_resolution(options, plan, candidate)
 }
 
 pub fn decide_list(options: &DecideListOptions<'_>) -> Result<DecideListReport, DomainError> {

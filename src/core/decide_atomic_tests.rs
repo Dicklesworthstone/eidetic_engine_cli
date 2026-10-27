@@ -56,6 +56,7 @@ impl Fixture {
             "memory_links",
             "search_index_jobs",
             "audit_log",
+            "curation_candidates",
             "memory_anchors",
             "memory_anchor_index",
         ]
@@ -189,6 +190,49 @@ impl Fixture {
         request.supersedes = supersedes.as_deref();
         request.rationale = "A reviewed replacement.";
         request
+    }
+
+    fn approved_conflict_proposal(
+        &self,
+        keeper: &str,
+        loser: &str,
+        verb: ResolveVerb,
+    ) -> (crate::db::StoredCurationCandidate, ConflictResolutionPlan) {
+        let workspace = stable_workspace_id(&self.root.path().canonicalize().unwrap());
+        let proposal = self
+            .db
+            .with_transaction_error(|| {
+                crate::core::conflict_proposal::create_in_transaction(
+                    &self.db,
+                    &workspace,
+                    &ConflictResolveRequest {
+                        memory_a: keeper,
+                        memory_b: loser,
+                        verb,
+                        keep: Some(keeper),
+                        reason: "A reviewed replacement.",
+                        scope_a_tags: vec!["scope-a".to_owned()],
+                        scope_b_tags: vec!["scope-b".to_owned()],
+                    },
+                    Some("decision-test"),
+                )
+                .map_err(RecordError::from)
+            })
+            .unwrap();
+        // The public validate/accept flows have separate CLI coverage. Here
+        // seed their durable result to isolate the writer's transaction boundary.
+        self.db
+            .execute_raw(&format!(
+                "UPDATE curation_candidates SET status = 'approved', review_state = 'accepted' WHERE id = '{}'",
+                proposal.candidate_id
+            ))
+            .unwrap();
+        let candidate = self
+            .db
+            .get_curation_candidate(&workspace, &proposal.candidate_id)
+            .unwrap()
+            .unwrap();
+        (candidate, proposal.plan)
     }
 }
 
@@ -947,6 +991,169 @@ fn every_precommit_interruption_rolls_back_the_entire_conflict_supersession() {
         assert_eq!(fixture.state(), before, "{stop:?}");
         assert!(!fixture.root.path().join(".ee/audit.jsonl").exists());
     }
+}
+
+#[test]
+fn conflict_candidate_completion_and_resolution_roll_back_together() {
+    for verb in [
+        ResolveVerb::Supersede,
+        ResolveVerb::RejectOne,
+        ResolveVerb::ScopeSplit,
+        ResolveVerb::BothValid,
+    ] {
+        let fixture = Fixture::new();
+        let keeper = fixture.seed_conflict_memory("fact", "semantic");
+        let loser = fixture.seed_conflict_memory("fact", "semantic");
+        fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+        let (candidate, plan) = fixture.approved_conflict_proposal(&keeper, &loser, verb);
+        let request = fixture.conflict_options(&plan);
+        let before = fixture.state();
+
+        // Completion is immediately before the candidate receipt; Report is
+        // after it. Both failures must restore the entire reviewed proposal,
+        // decision, source mutations, links, audits and queued index work.
+        for stop in [Stage::Completion, Stage::Report] {
+            let mut reached = false;
+            let failed = record_resolution_candidate_with_boundary(
+                &request,
+                &plan,
+                Some(&candidate),
+                |stage, connection| {
+                    if stage != stop {
+                        return Ok(());
+                    }
+                    reached = true;
+                    let current = connection
+                        .get_curation_candidate(&candidate.workspace_id, &candidate.id)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        current.status,
+                        if stop == Stage::Report {
+                            "applied"
+                        } else {
+                            "approved"
+                        },
+                        "the test must reach the intended side of candidate completion"
+                    );
+                    Err(injected_error())
+                },
+            );
+            assert!(reached && failed.is_err(), "{verb:?} {stop:?}");
+            assert_eq!(fixture.state(), before, "{verb:?} {stop:?}");
+            assert!(!fixture.root.path().join(".ee/audit.jsonl").exists());
+        }
+
+        let committed = record_candidate_resolution(&request, &plan, &candidate).unwrap();
+        let applied = fixture
+            .db
+            .get_curation_candidate(&candidate.workspace_id, &candidate.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied.status, "applied");
+        assert_eq!(applied.review_state, "applied");
+        assert!(applied.applied_at.is_some());
+        let audit_id = committed.candidate_audit_id.as_deref().unwrap();
+        let rows = fixture
+            .db
+            .query(
+                "SELECT action, target_id, details FROM audit_log WHERE id = ?1",
+                &[Value::Text(audit_id.to_owned())],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get(0).and_then(Value::as_str),
+            Some(audit_actions::CURATION_CANDIDATE_APPLY)
+        );
+        assert_eq!(
+            rows[0].get(1).and_then(Value::as_str),
+            Some(candidate.id.as_str())
+        );
+        let details: JsonValue =
+            serde_json::from_str(rows[0].get(2).and_then(Value::as_str).unwrap()).unwrap();
+        assert_eq!(
+            details["resolutionDecisionId"],
+            committed.decision.decision.memory_id
+        );
+        let surface =
+            assemble_conflict_surface(&fixture.db, ContradictionDetectionConfig::default());
+        assert!(surface.pairs.is_empty(), "{verb:?}");
+    }
+}
+
+#[test]
+fn conflict_candidate_review_and_source_races_refuse_before_any_write() {
+    for mutation in ["reject", "candidate_content", "source_authority"] {
+        let fixture = Fixture::new();
+        let keeper = fixture.seed_conflict_memory("fact", "semantic");
+        let loser = fixture.seed_conflict_memory("fact", "semantic");
+        fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+        let (candidate, plan) =
+            fixture.approved_conflict_proposal(&keeper, &loser, ResolveVerb::BothValid);
+        let request = fixture.conflict_options(&plan);
+        let mut expected = None;
+        let failed = record_resolution_candidate_with_boundary(
+            &request,
+            &plan,
+            Some(&candidate),
+            |stage, connection| {
+                if stage == Stage::Prepared {
+                    let sql = match mutation {
+                        "reject" => format!(
+                            "UPDATE curation_candidates SET status = 'rejected', review_state = 'rejected' WHERE id = '{}'",
+                            candidate.id
+                        ),
+                        "candidate_content" => format!(
+                            "UPDATE curation_candidates SET proposed_content = '{{}}' WHERE id = '{}'",
+                            candidate.id
+                        ),
+                        _ => format!(
+                            "UPDATE memories SET trust_class = 'agent_assertion' WHERE id = '{keeper}'"
+                        ),
+                    };
+                    connection.execute_raw(&sql).map_err(|_| injected_error())?;
+                    expected = Some(fixture.state());
+                }
+                Ok(())
+            },
+        );
+        assert!(
+            matches!(
+                failed,
+                Err(DomainError::UsageCodeWithDetails {
+                    code: "conflict_proposal_stale",
+                    ..
+                })
+            ),
+            "{mutation}: {failed:?}"
+        );
+        assert_eq!(fixture.state(), expected.unwrap(), "{mutation}");
+        assert_eq!(fixture.list(false).total_count, 0);
+    }
+}
+
+#[test]
+fn conflict_candidate_apply_cannot_replace_the_reviewed_rationale() {
+    let fixture = Fixture::new();
+    let keeper = fixture.seed_conflict_memory("fact", "semantic");
+    let loser = fixture.seed_conflict_memory("fact", "semantic");
+    fixture.seed_conflict_link(&keeper, &loser, MemoryLinkRelation::Contradicts);
+    let (candidate, plan) =
+        fixture.approved_conflict_proposal(&keeper, &loser, ResolveVerb::BothValid);
+    let mut request = fixture.conflict_options(&plan);
+    request.rationale = "A different rationale that was never reviewed.";
+    let before = fixture.state();
+    let result = record_candidate_resolution(&request, &plan, &candidate);
+    assert!(matches!(
+        result,
+        Err(DomainError::UsageCodeWithDetails {
+            code: "conflict_proposal_stale",
+            ..
+        })
+    ));
+    assert_eq!(fixture.state(), before);
+    assert!(!fixture.root.path().join(".ee/audit.jsonl").exists());
 }
 
 #[test]

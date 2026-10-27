@@ -150,6 +150,33 @@ the same-commit rule. Schemas `ee.graph.suggest_links.v1`,
 `ee.conflict.resolution.v1`, `ee.graph.diff.v1` ship standalone with those
 commits; the field shapes in this ADR are normative.
 
+### Explicit queued conflict review (bd-1n0np.7.4)
+
+`ee conflict resolve ... --propose` queues any of the four existing explicit
+verbs for `ee curate show`, `validate` or `accept`, and `apply`. Proposal
+creation changes only the review queue and its audit. Repeating the same
+request against the same source snapshots returns the same candidate.
+`--propose` and `--apply` are mutually exclusive; the default remains a
+read-only plan, and direct `--apply` retains its existing behavior.
+
+The queue receipt binds both source bodies, revisions, scopes, trust and
+provenance, lifetime, typed fields, and seal authority. Raw source bodies are
+represented by hashes in the receipt. The live conflict and the complete
+receipt are revalidated during review and again inside the decision writer
+transaction. Changes to a source, candidate, review status, TTL, or conflict
+resolution invalidate the prepared application. Candidate completion and
+its apply audit commit with the resolution decision, source effects, lineage,
+and index obligations; any failure rolls back the complete transition.
+Scope-split preserves both sources and adds their explicitly supplied tags.
+No replacement prose or merge content is invented.
+
+The new response schema is `ee.conflict.proposal.v1`; the existing
+`ee.conflict.resolve.v1` planned/applied contract remains unchanged. Storage
+uses the existing `contradiction_review` candidate type with the reserved
+`conflict-resolution:` producer family and a typed receipt. That family is
+dispatched before generic contradiction-link candidates and rejects unknown
+versions. No database schema migration is required.
+
 ## Consequences
 
 - **Easier**: the graph densifies through reviewed suggestions (improving

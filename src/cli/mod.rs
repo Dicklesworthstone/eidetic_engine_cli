@@ -19206,6 +19206,38 @@ where
     };
 
     let database_path = workspace.join(".ee").join("ee.db");
+    if args.propose {
+        let report = match crate::core::curate::propose_conflict_resolution(
+            workspace,
+            Some(&database_path),
+            &request,
+            args.actor.as_deref(),
+        ) {
+            Ok(report) => report,
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        };
+        return match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let mut text = format!(
+                    "Conflict proposal {} ({})\n",
+                    report.candidate_id, report.candidate_status
+                );
+                for command in &report.next_commands {
+                    text.push_str(&format!("  {command}\n"));
+                }
+                write_stdout(stdout, &text)
+            }
+            _ => write_stdout(
+                stdout,
+                &(serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2, "success": true,
+                    "data": report, "degraded": [],
+                })
+                .to_string()
+                    + "\n"),
+            ),
+        };
+    }
     let mut results: Option<Vec<conflict::ResolutionActionResult>> = None;
     let mut status = "planned";
     if args.apply {

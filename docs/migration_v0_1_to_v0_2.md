@@ -22,6 +22,13 @@ merges use the existing `curate show`, `curate validate` / `curate accept`, and
 snapshot under the writer transaction; changes to content, trust, type,
 lifetime, seal, or structured fields require a fresh proposal.
 
+Applying a global merge records its single-document index job in that same
+transaction and publishes to the global store's `indexes/` directory. A failed
+publication reports degraded recall while retaining the approved memory and
+job. Repeating `curate apply` or promotion after application recovers the same
+job without appending content again; ordinary workspace curation routing is
+unchanged.
+
 The durable `ee.global_promotion.merge_snapshot.v1` receipt binds origin IDs,
 origin content and payload commitments, and the target/proposed-content
 commitments. These hashes detect changed inputs; they are not signatures.

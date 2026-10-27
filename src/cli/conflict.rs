@@ -56,9 +56,12 @@ pub struct ConflictResolveArgs {
     /// scope-split only: comma-separated tags scoping memory B.
     #[arg(long, value_name = "TAGS")]
     pub scope_b_tags: Option<String>,
-    /// Execute the plan. Without this flag the command is a dry-run report.
+    /// Execute the plan immediately. Without --apply or --propose, only preview it.
     #[arg(long)]
     pub apply: bool,
+    /// Queue the explicit plan for curate show/validate/accept/apply review.
+    #[arg(long, conflicts_with = "apply")]
+    pub propose: bool,
     /// Actor recorded in audit rows.
     #[arg(long, value_name = "ACTOR")]
     pub actor: Option<String>,

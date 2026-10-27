@@ -38,6 +38,7 @@ pub mod claims;
 pub mod completion_audit;
 pub mod config_explain;
 pub mod config_surface;
+pub(crate) mod conflict_proposal;
 pub mod conformal;
 pub mod contention;
 pub mod context;
