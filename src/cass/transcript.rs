@@ -91,6 +91,16 @@ pub fn project_transcript(excerpt: &str) -> Option<Vec<TranscriptProjection<'_>>
     project_with(excerpt, ProjectionPurpose::Reader)
 }
 
+/// Decode one bounded object without granting it reader authority. Tool-only
+/// derivations use the same duplicate-key checks as ordinary projections.
+pub(crate) fn decode_unique_object(text: &str) -> Option<Value> {
+    if text.len() > MAX_SOURCE_BYTES {
+        return None;
+    }
+    let value = serde_json::from_str::<UniqueValue>(text).ok()?.0;
+    value.is_object().then_some(value)
+}
+
 /// Preserve each conversation turn's role for learning. Validate the complete
 /// window before exposing any turns: summaries, reasoning and refused records
 /// must not be skipped to manufacture a lesson from the remaining text.
@@ -305,7 +315,7 @@ fn append_bounded(text: &mut String, body: &str) -> Option<()> {
     Some(())
 }
 
-fn safe_decoded_window(text: &str) -> bool {
+pub(crate) fn safe_decoded_window(text: &str) -> bool {
     if !safe_decoded_text(text) {
         return false;
     }

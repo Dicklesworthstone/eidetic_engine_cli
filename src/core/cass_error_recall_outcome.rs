@@ -255,20 +255,7 @@ pub(super) fn succeeded(output: &ToolOutput) -> bool {
     if !super::structured_output_allows_completion(&text) {
         return false;
     }
-    let lower = text.to_ascii_lowercase();
-    if [
-        "process running with session id",
-        "command running in background",
-        "command is running in the background",
-        "command timed out",
-        "execution timed out",
-        "output truncated",
-        "output has been truncated",
-        "truncated output",
-    ]
-    .iter()
-    .any(|marker| lower.contains(*marker))
-    {
+    if incomplete_execution_text(&text) {
         return false;
     }
     // Claude's explicit is_error=false is a tool-level success observation,
@@ -282,18 +269,51 @@ pub(super) fn succeeded(output: &ToolOutput) -> bool {
         || exit_report(&output.text) == ExitReport::Success
 }
 
+/// A completed-error observation is distinct from a success proof, but both
+/// must refuse incomplete execution and truncated presentation.
+pub(super) fn incomplete_execution_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "process running with session id",
+        "command running in background",
+        "command is running in the background",
+        "command timed out",
+        "execution timed out",
+        "output truncated",
+        "output has been truncated",
+        "truncated output",
+    ]
+    .iter()
+    .any(|marker| lower.contains(*marker))
+}
+
+pub(super) fn execution_controls_allow_completion(raw: &Value) -> bool {
+    !execution::refuses_complete_observation(raw)
+}
+
 /// Decode both object-valued and JSON-string-valued Codex execution wrappers.
 /// Unknown output shapes are not empty successful commands. Malformed or
 /// contradictory status fields veto proof even if the text contains a zero.
 pub(super) fn codex_output(raw: &Value) -> Option<ToolOutput> {
+    codex_output_with_purpose(raw, true)
+}
+
+/// Decode the same execution representation while distinguishing a completed
+/// error from malformed controls. Callers still require independent terminal
+/// status, and this result must never replace a successful repair proof.
+pub(super) fn codex_interlude_output(raw: &Value) -> Option<ToolOutput> {
+    codex_output_with_purpose(raw, false)
+}
+
+fn codex_output_with_purpose(raw: &Value, require_success: bool) -> Option<ToolOutput> {
     match raw {
-        Value::Object(_) => structured_output(raw),
+        Value::Object(_) => structured_output(raw, require_success),
         Value::String(text) => {
             if let Ok(structured) = serde_json::from_str::<Value>(text)
                 && structured.is_object()
                 && (structured.get("output").is_some() || structured.get("metadata").is_some())
             {
-                let mut output = structured_output(&structured)?;
+                let mut output = structured_output(&structured, require_success)?;
                 if !execution::unique_control_fields(text) {
                     output.is_error = Some(true);
                 }
@@ -311,9 +331,13 @@ pub(super) fn codex_output(raw: &Value) -> Option<ToolOutput> {
     }
 }
 
-fn structured_output(raw: &Value) -> Option<ToolOutput> {
+fn structured_output(raw: &Value, require_success: bool) -> Option<ToolOutput> {
     let text = content_text(raw.get("output")?)?;
-    let mut invalid = execution::refuses_completion(raw);
+    let mut invalid = if require_success {
+        execution::refuses_completion(raw)
+    } else {
+        execution::refuses_complete_observation(raw)
+    };
     let mut exit_code = None;
     let metadata = raw.get("metadata");
     for value in [

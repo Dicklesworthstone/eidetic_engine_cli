@@ -2269,6 +2269,24 @@ line-range provenance, and never receive a synthetic `memoryId`. Curation is
 still how an excerpt becomes a durable memory or procedural rule; rebuilding
 the derived index after curation makes that new linkage visible to retrieval.
 
+When a pack selects an ordinary imported user or assistant message, it can use
+remaining token and result capacity to include the other half of that exchange.
+The companion keeps its own evidence ID, content revision, and exact source
+lines; `relevance: 0` and its `why` explanation identify it as unscored
+conversation context. This works for adjacent messages and across up to 16
+verified command-tool records in a bounded 256 KiB source window, including
+completed execution/poll sequences. A completed tool failure can still provide
+the context for an assistant's explanation.
+
+Every source row is checked against its live CASS session and current admission
+policy. Missing or overlapping lines, unsupported or mixed records, unfinished
+tool calls, ambiguous call IDs, and instruction-risk or explicitly denied tool
+records prevent completion. Tool bodies remain excluded from the pack. Explicit
+pagination and positive relevance floors disable these unscored additions;
+query filters, normal selection, and selected incident cards retain priority.
+Search continues to return the original evidence spans, while pack assembly
+adds an eligible conversational companion.
+
 Required `cass` commands consumed (all with stable contracts):
 
 - `cass health --json`

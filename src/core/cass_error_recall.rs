@@ -83,6 +83,9 @@ const MAX_DIAGNOSTICS_PER_FAILURE: usize = 4;
 const MAX_PENDING_FAILURES: usize = 32;
 /// Admitted assistant turns linked as the repair of one failure.
 const MAX_REPAIR_TURNS: usize = 2;
+/// Conversation completion inspects a small, complete tool interlude only.
+pub(crate) const MAX_TOOL_INTERLUDE_ROWS: usize = 16;
+pub(crate) const MAX_TOOL_INTERLUDE_BYTES: usize = 256 * 1024;
 
 /// What one session contributed to the error-fingerprint store.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -582,6 +585,345 @@ fn execution_chunk(raw: &ToolOutput) -> std::result::Result<Option<ExecutionChun
             exit_code,
         },
     }))
+}
+
+/// Verify a bounded tool-only interval between two admitted conversation
+/// endpoints. This grants no retrieval authority to tool bodies and returns
+/// none of their text. The caller retains the native endpoint identities and
+/// verifies the complete source range, including overlapping or absent rows.
+pub(crate) fn complete_tool_interlude(
+    workspace_id: &str,
+    session: &StoredSession,
+    spans: &[StoredEvidenceSpan],
+    before: &str,
+    after: &str,
+) -> bool {
+    if spans.is_empty() || spans.len() > MAX_TOOL_INTERLUDE_ROWS {
+        return false;
+    }
+    let mut bytes = before
+        .len()
+        .saturating_add(after.len())
+        .saturating_add(spans.len() + 1);
+    for span in spans {
+        let row_bytes = span
+            .excerpt
+            .len()
+            .saturating_add(span.metadata_json.as_deref().map_or(0, str::len));
+        if row_bytes > 128 * 1024 {
+            return false;
+        }
+        bytes = bytes.saturating_add(row_bytes);
+    }
+    if bytes > MAX_TOOL_INTERLUDE_BYTES {
+        return false;
+    }
+    let mut decoded = String::with_capacity(bytes);
+    decoded.push_str(before);
+    let mut visible = String::with_capacity(bytes);
+    visible.push_str(before);
+    let mut ledger = InvocationLedger::default();
+    let mut formats = std::collections::BTreeMap::new();
+    let mut source_ids = BTreeSet::new();
+    let mut previous_line: Option<u32> = None;
+    let mut started = 0_usize;
+    let mut completed = 0_usize;
+    for (index, span) in spans.iter().enumerate() {
+        if span.id.parse::<crate::models::EvidenceId>().is_err()
+            || !source_ids.insert(span.id.as_str())
+            || span.start_line == 0
+            || span.start_line != span.end_line
+            || previous_line.is_some_and(|line| line.checked_add(1) != Some(span.start_line))
+            || !span.is_class_a_derivation_readable(workspace_id, session)
+        {
+            return false;
+        }
+        previous_line = Some(span.end_line);
+        let Some((event, format)) = complete_tool_event(span) else {
+            return false;
+        };
+        match &event {
+            ToolEvent::Call { id, .. } | ToolEvent::Poll { id, .. } => {
+                if id.trim().is_empty() || ledger.seen_calls.contains(id) {
+                    return false;
+                }
+                let id = id.clone();
+                let is_start = matches!(&event, ToolEvent::Call { .. });
+                if let ToolEvent::Call { command, .. } = &event {
+                    let Some(command) = command.as_deref() else {
+                        return false;
+                    };
+                    decoded.push('\n');
+                    decoded.push_str(command);
+                    visible.push('\n');
+                    visible.push_str(command);
+                }
+                if let ToolEvent::Poll { process_id, .. } = &event
+                    && *process_id <= 0
+                {
+                    return false;
+                }
+                // observe returns None for both accepted calls and refused
+                // events. Demand the actual transition, not just no output.
+                let _ = ledger.observe(event, index, true);
+                if !ledger.calls.contains_key(&id) {
+                    return false;
+                }
+                formats.insert(id, format);
+                started += usize::from(is_start);
+            }
+            ToolEvent::Result { id, output } => {
+                let Some(id) = id.as_ref() else {
+                    return false;
+                };
+                let Some(call) = ledger.calls.get(id) else {
+                    return false;
+                };
+                if formats.remove(id) != Some(format) {
+                    return false;
+                }
+                let body = match execution_chunk(output) {
+                    Err(()) => return false,
+                    Ok(Some(chunk))
+                        if !call.can_poll || chunk.process_id.is_some_and(|id| id <= 0) =>
+                    {
+                        return false;
+                    }
+                    Ok(Some(chunk)) => chunk.output.text,
+                    Ok(None) => output.text.clone(),
+                };
+                decoded.push('\n');
+                decoded.push_str(&body);
+                let Some(observed) = ledger.observe(event, index, true) else {
+                    return false;
+                };
+                if observed.complete {
+                    let Ok(text) = outcome::terminal_text(&observed.output.text) else {
+                        return false;
+                    };
+                    if outcome::incomplete_execution_text(&text)
+                        || !crate::cass::transcript::safe_decoded_window(&text)
+                    {
+                        return false;
+                    }
+                    // Normalize only complete streams: an ANSI sequence may
+                    // itself cross a poll boundary. Never insert exec headers
+                    // into either decoded screening representation.
+                    visible.push('\n');
+                    visible.push_str(&text);
+                    completed += 1;
+                }
+            }
+        }
+    }
+    decoded.push('\n');
+    decoded.push_str(after);
+    visible.push('\n');
+    visible.push_str(after);
+    started != 0
+        && completed == started
+        && ledger.calls.is_empty()
+        && ledger.running.is_empty()
+        && ledger.invalid_processes.is_empty()
+        && formats.is_empty()
+        && decoded.len() <= MAX_TOOL_INTERLUDE_BYTES
+        && visible.len() <= MAX_TOOL_INTERLUDE_BYTES
+        && crate::cass::transcript::safe_decoded_window(&decoded)
+        && crate::cass::transcript::safe_decoded_window(&visible)
+}
+
+/// A completion interval cannot silently skip unknown blocks or salvage a
+/// valid event from a mixed record. Reuse the ordinary tool decoders only
+/// after proving the complete envelope names exactly one supported event.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ToolRecordFormat {
+    Claude,
+    Codex,
+}
+
+fn complete_tool_event(span: &StoredEvidenceSpan) -> Option<(ToolEvent, ToolRecordFormat)> {
+    use crate::cass::transcript::decode_unique_object;
+
+    let record = decode_unique_object(&span.excerpt)?;
+    let class = crate::policy::classify_transcript_record(&span.excerpt);
+    if !matches!(class.span_kind, "tool_call" | "tool_result")
+        || span.span_kind != class.span_kind
+        || [
+            "channel",
+            "text",
+            "summary",
+            "reasoning",
+            "thinking",
+            "analysis",
+        ]
+        .iter()
+        .any(|field| record.get(*field).is_some())
+    {
+        return None;
+    }
+    let (event, expected_role, format) = if let Some(payload) = record.get("payload") {
+        if record.get("type").and_then(Value::as_str) != Some("response_item")
+            || record.get("message").is_some()
+            || record.get("content").is_some()
+            || !payload.is_object()
+            || [
+                "message",
+                "content",
+                "text",
+                "summary",
+                "channel",
+                "reasoning",
+                "thinking",
+            ]
+            .iter()
+            .any(|field| payload.get(*field).is_some())
+        {
+            return None;
+        }
+        let mut payload = payload.clone();
+        match payload.get("type").and_then(Value::as_str)? {
+            "function_call" => {
+                if !matches!(
+                    payload.get("name").and_then(Value::as_str),
+                    Some(
+                        "exec_command"
+                            | "functions.exec_command"
+                            | "shell"
+                            | "functions.shell"
+                            | "write_stdin"
+                            | "functions.write_stdin"
+                    )
+                ) || payload.get("action").is_some()
+                {
+                    return None;
+                }
+                let arguments = match payload.get("arguments")? {
+                    Value::String(text) => decode_unique_object(text)?,
+                    arguments if arguments.is_object() => arguments.clone(),
+                    _ => return None,
+                };
+                payload["arguments"] = arguments;
+                (
+                    codex_payload_event(&payload)?,
+                    "assistant",
+                    ToolRecordFormat::Codex,
+                )
+            }
+            "function_call_output" => {
+                let raw = match payload.get("output")? {
+                    Value::String(text) if text.trim_start().starts_with('{') => {
+                        decode_unique_object(text)?
+                    }
+                    output => output.clone(),
+                };
+                let output = outcome::codex_interlude_output(&raw)?;
+                // The ordinary decoder intentionally retains malformed output
+                // as failure evidence. It cannot establish a complete bridge.
+                if output.is_error == Some(true)
+                    || (output.exit_code.is_none()
+                        && !matches!(execution_chunk(&output), Ok(Some(_))))
+                {
+                    return None;
+                }
+                payload["output"] = raw;
+                (
+                    codex_payload_event(&payload)?,
+                    "tool",
+                    ToolRecordFormat::Codex,
+                )
+            }
+            _ => return None,
+        }
+    } else {
+        if !matches!(
+            record.get("type").and_then(Value::as_str),
+            None | Some("assistant" | "user" | "message")
+        ) {
+            return None;
+        }
+        let message = if let Some(message) = record.get("message") {
+            if record.get("content").is_some() || !message.is_object() {
+                return None;
+            }
+            message
+        } else {
+            &record
+        };
+        if [
+            "payload",
+            "text",
+            "summary",
+            "channel",
+            "reasoning",
+            "thinking",
+        ]
+        .iter()
+        .any(|field| message.get(*field).is_some())
+            || record.get("toolUseResult").is_some_and(|value| {
+                !outcome::execution_controls_allow_completion(value)
+                    || value.get("backgroundTaskId").is_some()
+            })
+        {
+            return None;
+        }
+        let [block] = message.get("content")?.as_array()?.as_slice() else {
+            return None;
+        };
+        let expected_role = match block.get("type").and_then(Value::as_str)? {
+            "tool_use" if block.get("name").and_then(Value::as_str) == Some("Bash") => {
+                if block
+                    .as_object()?
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "type" | "id" | "name" | "input"))
+                    || block.get("input")?.get("cmd").is_some()
+                    || block
+                        .get("input")?
+                        .get("run_in_background")
+                        .is_some_and(|value| value.as_bool() != Some(false))
+                {
+                    return None;
+                }
+                "assistant"
+            }
+            "tool_result" => {
+                if block.as_object()?.keys().any(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "type" | "tool_use_id" | "content" | "is_error"
+                    )
+                }) || block
+                    .get("is_error")
+                    .is_some_and(|value| !value.is_boolean())
+                {
+                    return None;
+                }
+                "user"
+            }
+            _ => return None,
+        };
+        if class.role != Some(expected_role) {
+            return None;
+        }
+        (
+            claude_block_event(block)?,
+            expected_role,
+            ToolRecordFormat::Claude,
+        )
+    };
+    if class.role.is_some_and(|role| role != expected_role)
+        || (class.role.is_some() && span.role.as_deref() != class.role)
+        || span
+            .role
+            .as_deref()
+            .is_some_and(|role| role != expected_role)
+        || match &event {
+            ToolEvent::Call { .. } | ToolEvent::Poll { .. } => span.span_kind != "tool_call",
+            ToolEvent::Result { .. } => span.span_kind != "tool_result",
+        }
+    {
+        return None;
+    }
+    Some((event, format))
 }
 
 /// Walk a session in transcript order and pair failures with the success that

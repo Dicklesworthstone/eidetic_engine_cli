@@ -10,13 +10,22 @@ use serde_json::Value;
 /// must have the declared type and a non-adverse value. Contradictions cannot
 /// be resolved by preferring the outer object, a later field, or a green footer.
 pub(super) fn refuses_completion(raw: &Value) -> bool {
+    refuses_execution_controls(raw, true)
+}
+
+/// Turn structure needs a completed observation, including a completed error;
+/// it does not grant the successful-process authority required by repair proof.
+pub(super) fn refuses_complete_observation(raw: &Value) -> bool {
+    refuses_execution_controls(raw, false)
+}
+
+fn refuses_execution_controls(raw: &Value, require_success: bool) -> bool {
     [Some(raw), raw.get("metadata")]
         .into_iter()
         .flatten()
         .any(|scope| {
             !scope.is_object()
                 || [
-                    "is_error",
                     "timed_out",
                     "cancelled",
                     "canceled",
@@ -31,16 +40,23 @@ pub(super) fn refuses_completion(raw: &Value) -> bool {
                         .get(*field)
                         .is_some_and(|value| value.as_bool() != Some(false))
                 })
-                || ["completed", "success"].iter().any(|field| {
-                    scope
-                        .get(*field)
-                        .is_some_and(|value| value.as_bool() != Some(true))
-                })
+                || scope
+                    .get("completed")
+                    .is_some_and(|value| value.as_bool() != Some(true))
+                || [("is_error", false), ("success", true)]
+                    .iter()
+                    .any(|(field, successful)| {
+                        scope.get(*field).is_some_and(|value| {
+                            value
+                                .as_bool()
+                                .is_none_or(|value| require_success && value != *successful)
+                        })
+                    })
                 || scope.get("status").is_some_and(|value| {
                     !matches!(
                         value.as_str(),
                         Some("completed" | "finished" | "exited" | "success" | "succeeded" | "ok")
-                    )
+                    ) && (require_success || !matches!(value.as_str(), Some("failed" | "error")))
                 })
         })
 }

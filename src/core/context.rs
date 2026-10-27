@@ -8730,8 +8730,9 @@ fn context_pack_l2_feature_flags_hash(
     // Reassemble older packs that filled the budget with an uncalibrated tail
     // before query-relative admission reached the complete candidate universe.
     hash_labeled_bytes(&mut hasher, "pack_relevance_floor_policy", b"v2");
-    // Reassemble older cached packs without bounded conversational companions.
-    hash_labeled_bytes(&mut hasher, "conversation_turn_completion_policy", b"v1");
+    // Reassemble adjacency-only packs so verified command-tool interludes can
+    // supply the opposite native message under the current admission policy.
+    hash_labeled_bytes(&mut hasher, "conversation_turn_completion_policy", b"v2");
     // Graph expansion now uses the canonical quality scorer; older cached
     // packs did not apply confidence or harmful-feedback penalties to graph hints.
     hash_labeled_bytes(&mut hasher, "graph_hint_quality_policy", b"v1");
