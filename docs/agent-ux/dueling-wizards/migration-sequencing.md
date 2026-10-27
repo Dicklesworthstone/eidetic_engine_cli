@@ -120,6 +120,15 @@ ee job run evidence_rescreen --workspace . --item-limit 500 --dry-run --json
 ee job run evidence_rescreen --workspace . --item-limit 500 --json
 ```
 
+The item limit bounds decisions and source-row updates, not the reads needed
+to count all pending candidates. Counting uses bounded pages and loads reader
+projections only for selected rows. If a large workspace exhausts the default
+60-second job budget during the read-only preview, increase the time override
+for both preview and apply, for example `--time-limit-ms 300000`. Reducing the
+item limit alone does not shorten the full count scan. The evidence job's
+maximum batch size remains 500 even when another maintenance job permits a
+larger item-budget override.
+
 Repeat the apply command while `pendingAfter` is greater than zero. Each
 rewritten row gets one redaction-safe `evidence.security_rescreen` audit record;
 reruns skip completed rows. Recognized producers are re-screened under the

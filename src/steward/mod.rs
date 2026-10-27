@@ -3320,6 +3320,25 @@ impl ManualRunner {
         create_job(&mut self.ledger, job_type, priority, timestamp, context)
     }
 
+    /// CLI limits replace defaults for their resource before work starts.
+    /// Keep `add_budget` additive for callers that need several independent
+    /// constraints, such as a soft warning followed by a hard time limit.
+    fn create_run_budget(&self, job_id: &str, job_type: JobType, now: &str) -> JobBudgetState {
+        let mut budget = create_job_budget(job_id, job_type, now);
+        budget.budgets.retain(|limit| match limit.resource {
+            ResourceType::TimeMs => self.options.time_limit_ms.is_none(),
+            ResourceType::Items => self.options.item_limit.is_none(),
+            _ => true,
+        });
+        if let Some(time_limit) = self.options.time_limit_ms {
+            budget.add_budget(ResourceBudget::time_limit_ms(time_limit));
+        }
+        if let Some(item_limit) = self.options.item_limit {
+            budget.add_budget(ResourceBudget::item_limit(item_limit));
+        }
+        budget
+    }
+
     /// Run a single job by ID.
     pub fn run_job(&mut self, job_id: &str, now: &str) -> Option<JobRunResult> {
         let cancellation_requested = self.cancellation_requested();
@@ -3363,13 +3382,7 @@ impl ManualRunner {
 
         job.start(now);
 
-        let mut budget = create_job_budget(job_id, job_type, now);
-        if let Some(time_limit) = self.options.time_limit_ms {
-            budget.add_budget(ResourceBudget::time_limit_ms(time_limit));
-        }
-        if let Some(item_limit) = self.options.item_limit {
-            budget.add_budget(ResourceBudget::item_limit(item_limit));
-        }
+        let mut budget = self.create_run_budget(job_id, job_type, now);
 
         let (outcome, items, error, details) = self.execute_job_work(job_type, &mut budget);
 
@@ -10317,6 +10330,36 @@ mod tests {
     }
 
     #[test]
+    fn job_budget_keeps_independent_warning_and_cancellation_constraints() {
+        let mut state = create_custom_budget(
+            "layered-budget",
+            "2026-04-30T12:00:00Z",
+            vec![ResourceBudget::time_soft_limit_ms(100)],
+        );
+        state.add_budget(ResourceBudget::time_limit_ms(200));
+        state.record(ResourceType::TimeMs, 150);
+        assert_eq!(state.budgets.len(), 2);
+        assert!(!state.should_cancel());
+        let warnings = state.check_budgets();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].action, BudgetExceedAction::Warn);
+
+        state.record(ResourceType::TimeMs, 51);
+        assert!(state.should_cancel());
+        assert_eq!(
+            state
+                .check_budgets()
+                .iter()
+                .map(|violation| (violation.limit, violation.action))
+                .collect::<Vec<_>>(),
+            vec![
+                (100, BudgetExceedAction::Warn),
+                (200, BudgetExceedAction::Cancel)
+            ],
+        );
+    }
+
+    #[test]
     fn job_budget_state_remaining() {
         let mut state = JobBudgetState::new("job-002", "2026-04-30T12:00:00Z");
         state.add_budget(ResourceBudget::item_limit(100));
@@ -10664,6 +10707,150 @@ mod tests {
         assert_eq!(opts.actor, Some("runner-test".to_owned()));
         assert!(!opts.structural_decay);
         assert_eq!(opts.decay_settings, decay_settings);
+    }
+
+    #[test]
+    fn manual_runner_budget_overrides_control_admission_and_reporting() {
+        for (options, job_type, resource, limit, consumed) in [
+            (
+                RunnerOptions::new().with_time_limit(120_000),
+                JobType::EvidenceRescreen,
+                ResourceType::TimeMs,
+                120_000,
+                60_001,
+            ),
+            (
+                RunnerOptions::new().with_time_limit(1000),
+                JobType::EvidenceRescreen,
+                ResourceType::TimeMs,
+                1000,
+                1000,
+            ),
+            (
+                RunnerOptions::new().with_item_limit(250),
+                JobType::CurationReview,
+                ResourceType::Items,
+                250,
+                101,
+            ),
+            (
+                RunnerOptions::new().with_item_limit(2),
+                JobType::CurationReview,
+                ResourceType::Items,
+                2,
+                2,
+            ),
+            (
+                RunnerOptions::new().with_time_limit(20_000),
+                JobType::HealthCheck,
+                ResourceType::TimeMs,
+                20_000,
+                10_001,
+            ),
+        ] {
+            let runner = ManualRunner::new(options);
+            let mut budget =
+                runner.create_run_budget("override-budget", job_type, "2026-04-30T12:00:00Z");
+            let constraints = budget
+                .budgets
+                .iter()
+                .filter(|constraint| constraint.resource == resource)
+                .collect::<Vec<_>>();
+            assert_eq!(constraints.len(), 1);
+            assert_eq!(constraints[0].limit, limit);
+            assert_eq!(constraints[0].on_exceed, BudgetExceedAction::Cancel);
+            for default in default_budgets_for_job_type(job_type)
+                .into_iter()
+                .filter(|default| default.resource != resource)
+            {
+                assert!(budget.budgets.iter().any(|constraint| {
+                    constraint.resource == default.resource
+                        && constraint.limit == default.limit
+                        && constraint.on_exceed == default.on_exceed
+                }));
+            }
+
+            // Virtual consumption crosses the old limit in the raised cases;
+            // neither an old cancellation nor an old soft warning may survive.
+            budget.record(resource, consumed);
+            assert!(!budget_cancels_before_mutation(&budget));
+            assert_eq!(budget.remaining(resource), Some(limit - consumed));
+            let summary = budget.summary();
+            assert!(summary.violations.is_empty());
+            let resources = summary
+                .resources
+                .iter()
+                .filter(|entry| entry.resource == resource)
+                .collect::<Vec<_>>();
+            assert_eq!(resources.len(), 1);
+            assert_eq!(resources[0].limit, limit);
+            assert_eq!(resources[0].consumed, consumed);
+            assert_eq!(resources[0].remaining, limit - consumed);
+            assert!(!resources[0].exceeded);
+
+            budget.record(resource, limit - consumed + 1);
+            assert!(budget_cancels_before_mutation(&budget));
+            assert_eq!(budget.remaining(resource), Some(0));
+            let violations = budget.check_budgets();
+            assert_eq!(violations.len(), 1);
+            assert_eq!(violations[0].resource, resource);
+            assert_eq!(violations[0].limit, limit);
+            assert_eq!(violations[0].action, BudgetExceedAction::Cancel);
+        }
+    }
+
+    #[test]
+    fn manual_runner_budget_preserves_defaults_and_honors_zero_and_combined_overrides() {
+        let runner = ManualRunner::new(RunnerOptions::new());
+        for job_type in JobType::all() {
+            let budget =
+                runner.create_run_budget("default-budget", *job_type, "2026-04-30T12:00:00Z");
+            let constraints = |budgets: Vec<ResourceBudget>| {
+                budgets
+                    .into_iter()
+                    .map(|budget| (budget.resource, budget.limit, budget.on_exceed))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                constraints(budget.budgets),
+                constraints(default_budgets_for_job_type(*job_type)),
+            );
+        }
+        for (options, resource) in [
+            (
+                RunnerOptions::new().with_time_limit(0),
+                ResourceType::TimeMs,
+            ),
+            (RunnerOptions::new().with_item_limit(0), ResourceType::Items),
+        ] {
+            let runner = ManualRunner::new(options);
+            let budget = runner.create_run_budget(
+                "zero-budget",
+                JobType::EvidenceRescreen,
+                "2026-04-30T12:00:00Z",
+            );
+            assert!(budget_cancels_before_mutation(&budget));
+            assert_eq!(budget.remaining(resource), Some(0));
+        }
+
+        let runner = ManualRunner::new(
+            RunnerOptions::new()
+                .with_time_limit(120_000)
+                .with_item_limit(250),
+        );
+        let mut budget = runner.create_run_budget(
+            "combined-budget",
+            JobType::EvidenceRescreen,
+            "2026-04-30T12:00:00Z",
+        );
+        assert_eq!(budget.budgets.len(), 2);
+        budget.record(ResourceType::TimeMs, 60_001);
+        budget.record(ResourceType::Items, 200);
+        assert!(!budget_cancels_before_mutation(&budget));
+        assert_eq!(budget.remaining(ResourceType::TimeMs), Some(59_999));
+        assert_eq!(budget.remaining(ResourceType::Items), Some(50));
+        budget.record(ResourceType::Items, 51);
+        assert!(budget_cancels_before_mutation(&budget));
     }
 
     #[test]
