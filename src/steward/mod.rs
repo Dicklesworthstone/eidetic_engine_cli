@@ -502,7 +502,7 @@ pub enum JobType {
     CurationReview,
     /// Inspect quarantined harmful feedback rows.
     QuarantineSweep,
-    /// Re-screen a bounded batch of fail-closed legacy evidence rows.
+    /// Re-screen legacy evidence and recover eligible imported CASS evidence.
     EvidenceRescreen,
     /// Run health checks and generate diagnostics.
     HealthCheck,
@@ -606,7 +606,7 @@ impl JobType {
             Self::CurationReview => "Process pending curation candidates",
             Self::QuarantineSweep => "Inspect quarantined harmful feedback rows",
             Self::EvidenceRescreen => {
-                "Re-screen a bounded batch of fail-closed legacy evidence rows"
+                "Re-screen legacy evidence and recover eligible imported CASS evidence"
             }
             Self::HealthCheck => "Run health checks and generate diagnostics",
             Self::CachePruning => "Prune derived caches without deleting source-of-truth data",
@@ -5166,7 +5166,7 @@ impl ManualRunner {
                 );
             }
         };
-        let required_schema_version = crate::db::V085_EVIDENCE_SECURITY_POSTURE.version();
+        let required_schema_version = crate::db::V127_EVIDENCE_ADMISSION_VERDICTS.version();
         let observed_schema_version = match opened.connection.schema_version() {
             Ok(Some(version)) => version,
             Ok(None) => 0,
@@ -5216,7 +5216,10 @@ impl ManualRunner {
                     "nextCommand".to_owned(),
                     JsonValue::String(if report.pending_after > 0 {
                         "ee job run evidence_rescreen --workspace . --json".to_owned()
-                    } else if report.index_rebuild_required {
+                    } else if report.index_rebuild_required || report.durable_mutation {
+                        // A receipt-only final batch may follow an earlier
+                        // promotion. Conservatively rebuild after a completed,
+                        // nonempty apply; the report's flag stays batch-local.
                         "ee index rebuild --workspace . --json".to_owned()
                     } else {
                         "ee index status --workspace . --json".to_owned()
@@ -5227,7 +5230,7 @@ impl ManualRunner {
         };
 
         let started = Instant::now();
-        let preview = match opened.connection.rescreen_legacy_evidence_for_workspace(
+        let preview = match opened.connection.rescreen_evidence_for_workspace(
             &opened.workspace_id,
             limit,
             false,
@@ -5235,7 +5238,7 @@ impl ManualRunner {
         ) {
             Ok(report) => report,
             Err(error) => {
-                let message = format!("Failed to preview legacy evidence rescreen: {error}");
+                let message = format!("Failed to preview evidence rescreen: {error}");
                 return steward_job_failure(
                     "ee.steward.evidence_rescreen.error.v1",
                     "evidence_rescreen_preview_failed",
@@ -5267,7 +5270,7 @@ impl ManualRunner {
         }
 
         let apply_started = Instant::now();
-        let applied = match opened.connection.rescreen_legacy_evidence_for_workspace(
+        let applied = match opened.connection.rescreen_evidence_for_workspace(
             &opened.workspace_id,
             limit,
             true,
@@ -5275,7 +5278,7 @@ impl ManualRunner {
         ) {
             Ok(report) => report,
             Err(error) => {
-                let message = format!("Failed to apply legacy evidence rescreen: {error}");
+                let message = format!("Failed to apply evidence rescreen: {error}");
                 return steward_job_failure(
                     "ee.steward.evidence_rescreen.error.v1",
                     "evidence_rescreen_apply_failed",
@@ -5290,7 +5293,9 @@ impl ManualRunner {
 
         (
             RunOutcome::Success,
-            Some(applied.updated),
+            // Retained decisions write receipts and advance the sweep too;
+            // the detailed report separately counts source-row updates.
+            Some(applied.selected),
             None,
             Some(details(&applied, "applied")),
         )
@@ -11342,7 +11347,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_runner_evidence_rescreen_previews_then_applies_one_bounded_batch() -> TestResult {
+    fn manual_runner_evidence_rescreen_applies_legacy_and_mixed_cass_batches() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let database_path = temp.path().join("ee.db");
         let session_id =
@@ -11463,7 +11468,7 @@ mod tests {
         )?;
 
         let connection =
-            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         let span = connection
             .get_evidence_span(&evidence_id)
             .map_err(|error| error.to_string())?
@@ -11486,7 +11491,118 @@ mod tests {
             audits[0].actor.as_deref(),
             Some("evidence-rescreen-runner-test"),
             "rescreen audit actor",
+        )?;
+
+        // The final batch can contain only retained CASS decisions even
+        // though an earlier batch promoted evidence that needs indexing.
+        let mut cass_ids = [
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x85_902)).to_string(),
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x85_903)).to_string(),
+        ];
+        cass_ids.sort();
+        for (id, role, line) in [(&cass_ids[0], "assistant", 2), (&cass_ids[1], "tool", 3)] {
+            let excerpt = json!({
+                "role": role,
+                "content": "The release verification passed.",
+            })
+            .to_string();
+            let content_hash = format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex());
+            let metadata = json!({
+                "schema": crate::models::CASS_EVIDENCE_SPAN_SCHEMA_V1,
+                "cassSource": {
+                    "schema": crate::db::CASS_SOURCE_COMMITMENT_SCHEMA_V1,
+                    "contentHash": &content_hash,
+                    "byteLength": excerpt.len(),
+                    "excerptProducerVersion": 1,
+                },
+            });
+            connection
+                .insert_evidence_span(
+                    id,
+                    &crate::db::CreateEvidenceSpanInput {
+                        workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                        session_id: session_id.clone(),
+                        memory_id: None,
+                        producer_kind: crate::db::EvidenceProducerKind::CassImport,
+                        cass_span_id: format!("runner-source:{id}"),
+                        span_kind: "message".to_owned(),
+                        start_line: line,
+                        end_line: line,
+                        start_byte: None,
+                        end_byte: None,
+                        role: Some(role.to_owned()),
+                        excerpt,
+                        content_hash,
+                        metadata_json: Some(metadata.to_string()),
+                        inherited_redaction_classes: Vec::new(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let recoverable = connection
+            .get_evidence_span(&cass_ids[0])
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "recoverable CASS fixture missing".to_owned())?;
+        let mut metadata: JsonValue = serde_json::from_str(
+            recoverable
+                .metadata_json
+                .as_deref()
+                .ok_or_else(|| "CASS security metadata missing".to_owned())?,
         )
+        .map_err(|error| error.to_string())?;
+        metadata["instructionRisk"] = json!("high");
+        metadata["searchEligibility"] = json!("quarantined");
+        metadata["packEligibility"] = json!("quarantined");
+        connection
+            .execute_raw(&format!(
+                "UPDATE evidence_spans SET instruction_risk = 'high', \
+                 search_eligibility = 'quarantined', pack_eligibility = 'quarantined', \
+                 metadata_json = '{}' WHERE id = '{}'",
+                metadata.to_string().replace('\'', "''"),
+                cass_ids[0],
+            ))
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let mut runner = ManualRunner::new(
+            RunnerOptions::new()
+                .with_database_path(database_path.clone())
+                .with_workspace_id(SCORE_WORKSPACE_ID)
+                .with_item_limit(1),
+        );
+        for (updated, pending_after, next_command) in [
+            (1, 1, "ee job run evidence_rescreen --workspace . --json"),
+            (0, 0, "ee index rebuild --workspace . --json"),
+        ] {
+            let result = runner.run_job_type(JobType::EvidenceRescreen, None);
+            ensure(result.outcome, RunOutcome::Success, "CASS batch outcome")?;
+            ensure(result.items_processed, Some(1), "CASS decisions processed")?;
+            let details = result
+                .details
+                .ok_or_else(|| "CASS batch details missing".to_owned())?;
+            assert_eq!(details["selected"], json!(1));
+            assert_eq!(details["updated"], json!(updated));
+            assert_eq!(details["pendingAfter"], json!(pending_after));
+            assert_eq!(details["durableMutation"], json!(true));
+            assert_eq!(details["indexRebuildRequired"], json!(updated > 0));
+            assert_eq!(details["nextCommand"], json!(next_command));
+        }
+        let completed = runner.run_job_type(JobType::EvidenceRescreen, None);
+        ensure(
+            completed.outcome,
+            RunOutcome::Success,
+            "completed sweep outcome",
+        )?;
+        ensure(completed.items_processed, Some(0), "completed sweep items")?;
+        let details = completed
+            .details
+            .ok_or_else(|| "completed sweep details missing".to_owned())?;
+        assert_eq!(details["durableMutation"], json!(false));
+        assert_eq!(
+            details["nextCommand"],
+            json!("ee index status --workspace . --json")
+        );
+        Ok(())
     }
 
     #[test]

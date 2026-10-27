@@ -105,7 +105,9 @@ this registry in the same change that adds the runtime migration.
 `V085_EVIDENCE_SECURITY_POSTURE` immediately denies pre-migration evidence and
 removes its raw upstream references. It does not silently infer trust or
 rewrite stored excerpts. An operator can then re-screen legacy rows through the
-bounded maintenance job:
+bounded maintenance job. The current job also recovers eligible imported CASS
+evidence and requires `V127_EVIDENCE_ADMISSION_VERDICTS` or newer, so migrate
+before either kind of recovery:
 
 ```bash
 # Apply the fail-closed posture before requesting a rescreen preview.
@@ -125,6 +127,29 @@ current policy, supporting evidence remains denied from direct retrieval, and
 ambiguous, malformed, instruction-like, or cross-workspace rows remain
 quarantined. The report exposes IDs, dispositions, reason codes, and counts,
 never the raw excerpt or upstream path.
+
+Imported CASS rows are selected when quarantined or screened under an older
+revision, unless either search or pack eligibility is explicitly denied. The
+job verifies workspace/session ownership, any attached memory, the stored
+security envelope, and the original full-source commitment before applying
+current screening. Recovery requires the retained excerpt's hash and byte
+length to match that complete-source commitment. Missing commitments,
+truncated sources, and sources whose original bytes were redacted cannot be
+recovered from the retained excerpt alone; verify the complete original source
+through import instead. Tool records and instruction-bearing content that
+still fail screening remain unavailable to direct search and packs. Explicitly
+withdrawn evidence is never selected for recovery.
+
+An imported row that cannot be recovered has disposition `retained`: its source
+row remains unchanged, and apply records an audit receipt bound to that source,
+the current policy revision, and its live ownership. Reruns skip an unchanged
+refusal so later batches can progress; changed source or ownership is
+reconsidered. `selected` counts all evaluated rows, while `updated` counts only
+rewritten evidence rows. A receipt-only batch can therefore have
+`durableMutation: true` with `updated: 0` and `indexRebuildRequired: false`.
+The latter flag describes only that batch. After a nonempty sweep completes,
+the job recommends rebuilding the index even when its final batch only
+retained rows, because an earlier batch may have recovered searchable evidence.
 
 Applying the job can permanently replace secrets in legacy excerpts with
 redaction markers, while the V085 migration itself permanently replaces raw
