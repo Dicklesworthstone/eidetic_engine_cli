@@ -211,9 +211,19 @@ assert_jq() {
         return 2
     fi
 
-    local got rc
-    got="$(printf '%s' "$json" | jq -r "$filter" 2>&1)"
-    rc=$?
+    local got rc=0
+    # `|| rc=$?` IS LOAD-BEARING, NOT STYLE (bd-q726t). Under the
+    # `set -euo pipefail` at :7 a bare assignment adopts the pipeline's status
+    # and ABORTS HERE, so `rc=$?` and the whole harness-error branch below
+    # were dead -- the diagnostic bd-82aq1 exists to print could never print.
+    # Executed on planted failures at this exact site, before and after:
+    #     invalid JSON in $json   before: exit 5, no diagnostic
+    #                              after: HARNESS ERROR: jq exited 5, return 2
+    #     filter does not compile before: exit 3, no diagnostic
+    #                              after: HARNESS ERROR: jq exited 3, return 2
+    # Note the before-exit codes: the script died with JQ's status, which a
+    # runner reads as a product failure rather than a broken test.
+    got="$(printf '%s' "$json" | jq -r "$filter" 2>&1)" || rc=$?
     # jq's exit codes are distinct and were being collapsed: 1 is a false
     # property, 3 is a filter that did not compile, 4 is no output, 5 is
     # input that is not JSON. Only a zero exit means the filter ran and
