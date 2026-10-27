@@ -395,7 +395,9 @@ def classify_call_sites(name: str, corpus: dict[str, list[str]]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def scan_file(path: str, lines: list[str], corpus: dict[str, list[str]]) -> tuple[list[dict], list[dict]]:
+def scan_file(
+    path: str, lines: list[str], corpus: dict[str, list[str]]
+) -> tuple[list[dict], list[dict], dict[str, int]]:
     hd = heredoc_body_lines(lines)
     code = [code_line(l, i in hd) for i, l in enumerate(lines)]
     if not any(SET_E_ON.match(l) for l in code):
@@ -408,6 +410,18 @@ def scan_file(path: str, lines: list[str], corpus: dict[str, list[str]]) -> tupl
     stmts = logical_statements(lines, hd)
     dead: list[dict] = []
     always_zero: list[dict] = []
+    # A gate that prints "0 findings" and nothing else is indistinguishable
+    # from a gate whose scan collapsed. Every pair this predicate SAW is
+    # counted, and every clause says how many it excluded, so the zero carries
+    # its own denominator.
+    census: dict[str, int] = {
+        "adjacent_pairs": 0,
+        "excluded_guarded": 0,
+        "excluded_no_shell_set_e": 0,
+        "excluded_set_plus_e_in_scope": 0,
+        "excluded_call_site_tested": 0,
+        "excluded_call_site_unknown": 0,
+    }
 
     for n, (idx, stmt) in enumerate(stmts):
         decl = DECL_SUBST.match(stmt)
@@ -437,9 +451,19 @@ def scan_file(path: str, lines: list[str], corpus: dict[str, list[str]]) -> tupl
             always_zero.append(record)
             continue
 
+        census["adjacent_pairs"] += 1
         if statement_is_guarded(stmt):
+            census["excluded_guarded"] += 1
             continue
-        if not set_e_file or not set_e_state(code, idx):
+        if not set_e_file:
+            # The complementary half of the question lives here: a script with
+            # no `set -e` reports success PAST an internal failure instead of
+            # aborting before the handler. That is
+            # bd-verify-scripts-no-set-e-fault-injection-wpphx, not this bead.
+            census["excluded_no_shell_set_e"] += 1
+            continue
+        if not set_e_state(code, idx):
+            census["excluded_set_plus_e_in_scope"] += 1
             continue
 
         fn = record["function"]
@@ -447,12 +471,16 @@ def scan_file(path: str, lines: list[str], corpus: dict[str, list[str]]) -> tupl
             record["call_context"] = "TOP_LEVEL"
         else:
             record["call_context"] = classify_call_sites(fn, corpus)
-        if record["call_context"] in ("TESTED", "UNKNOWN"):
+        if record["call_context"] == "TESTED":
+            census["excluded_call_site_tested"] += 1
+            continue
+        if record["call_context"] == "UNKNOWN":
+            census["excluded_call_site_unknown"] += 1
             continue
         record["class"] = "dead_handler"
         dead.append(record)
 
-    return dead, always_zero
+    return dead, always_zero, census
 
 
 def shell_files(root: str = "scripts") -> dict[str, list[str]]:
@@ -474,13 +502,17 @@ def audit(corpus: dict[str, list[str]], minimum: int = MINIMUM_PLAUSIBLE_SHELL_F
         )
     dead: list[dict] = []
     zero: list[dict] = []
+    census: dict[str, int] = {}
     for path, lines in corpus.items():
-        d, z = scan_file(path, lines, corpus)
+        d, z, c = scan_file(path, lines, corpus)
         dead.extend(d)
         zero.extend(z)
+        for k, v in c.items():
+            census[k] = census.get(k, 0) + v
     dead.sort(key=lambda r: (r["file"], r["line"]))
     zero.sort(key=lambda r: (r["file"], r["line"]))
-    return dead, zero
+    census["flagged"] = len(dead)
+    return dead, zero, census
 
 
 def read_baseline() -> set[str]:
@@ -743,7 +775,7 @@ def self_test() -> int:
     for name, body, want in ARMS:
         lines = body.splitlines()
         corpus = {"arm.sh": lines}
-        dead, _ = audit(corpus, minimum=1)
+        dead, _, _ = audit(corpus, minimum=1)
         got = len(dead)
         ok = got == want
         failures += 0 if ok else 1
@@ -755,7 +787,7 @@ def self_test() -> int:
     print("\n  always-zero arms")
     for name, body, want in ZERO_ARMS:
         corpus = {"arm.sh": body.splitlines()}
-        _, zero = audit(corpus, minimum=1)
+        _, zero, _ = audit(corpus, minimum=1)
         got = len(zero)
         ok = got == want
         failures += 0 if ok else 1
@@ -800,7 +832,7 @@ def control() -> int:
             print(f"  SKIP  {treeish}: cannot read the blob ({exc})")
             print("  REFUSING: a control that did not run is not a control.")
             return 2
-        dead, _ = audit({path: blob.splitlines()}, minimum=1)
+        dead, _, _ = audit({path: blob.splitlines()}, minimum=1)
         got = len(dead)
         ok = got == want
         failures += 0 if ok else 1
@@ -829,7 +861,7 @@ def main() -> int:
 
     corpus = shell_files()
     try:
-        dead, zero = audit(corpus)
+        dead, zero, census = audit(corpus)
     except LookupError as exc:
         print(f"[dead-handlers] REFUSING: {exc}", file=sys.stderr)
         return 2
@@ -845,6 +877,7 @@ def main() -> int:
                 {
                     "schema": "ee.check.dead_exit_code_handlers.v1",
                     "shell_files": len(corpus),
+                    "census": census,
                     "dead_handler": dead,
                     "always_zero": zero,
                     "baseline": sorted(baseline),
@@ -861,6 +894,25 @@ def main() -> int:
         f"{len(zero)} always-zero site(s) across {len(corpus)} shell file(s); "
         f"baseline holds {len(baseline)}"
     )
+    # The denominator, so a zero is a measurement rather than a status.
+    print(
+        f"[dead-handlers] saw {census.get('adjacent_pairs', 0)} capture->$? "
+        f"pair(s); excluded: "
+        f"{census.get('excluded_guarded', 0)} guarded, "
+        f"{census.get('excluded_no_shell_set_e', 0)} no shell set -e, "
+        f"{census.get('excluded_set_plus_e_in_scope', 0)} set +e in scope, "
+        f"{census.get('excluded_call_site_tested', 0)} tested call site, "
+        f"{census.get('excluded_call_site_unknown', 0)} unresolved call site"
+    )
+    if census.get("adjacent_pairs", 0) == 0:
+        print(
+            "[dead-handlers] REFUSING: zero capture->$? pairs across "
+            f"{len(corpus)} file(s). This repository has always had some; a "
+            "zero denominator means the statement joiner collapsed, not that "
+            "the hazard is gone.",
+            file=sys.stderr,
+        )
+        return 2
     for d in dead:
         mark = "NEW " if f"{d['file']}:{d['line']}" in new else "    "
         print(f"  {mark}{d['file']}:{d['line']}  fn={d['function']} ctx={d['call_context']}")
