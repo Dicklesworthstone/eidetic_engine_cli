@@ -512,23 +512,56 @@ harness_summary() {
     end_ns="$(_harness_now_ns)"
     elapsed_ms="$(python3 -c "print(round(($end_ns-$HARNESS_START_NS)/1e6,3))")"
     e2e_log_end
-    python3 - "$LOG_DIR/summary.json" "$HARNESS_TEST_NAME" "$HARNESS_PASS" "$HARNESS_FAIL" "$HARNESS_STEP" "$HARNESS_DROPS" "$elapsed_ms" "$EE_TEST_LOG_PATH" <<'PYEOF'
+    python3 - "$LOG_DIR/summary.json" "$HARNESS_TEST_NAME" "$HARNESS_PASS" "$HARNESS_FAIL" "$HARNESS_STEP" "$HARNESS_DROPS" "$elapsed_ms" "$EE_TEST_LOG_PATH" "${EE_E2E_REFUSE_VACUOUS_PASS:-0}" <<'PYEOF'
 import json, sys
-path, name, p, f, steps, drops, ms, events = sys.argv[1:9]
+path, name, p, f, steps, drops, ms, events, refuse = sys.argv[1:10]
+# `asserted` is ALWAYS emitted; the verdict only changes when asked to.
+#
+# A run with 0 pass and 0 fail verified nothing, and verdict PASS said so for
+# as long as this file has existed: a script that drops every arm for a missing
+# prerequisite exits 0 and reports PASS. That is right for an ad-hoc run on a
+# host that genuinely cannot answer the question, and wrong for a gate, so the
+# REFUSAL is opt-in while the FACT is not. A grader that reads `verdict` alone
+# cannot tell the two apart; one that also reads `asserted` can, without any
+# caller changing behaviour.
+asserted = int(p) > 0
+verdict = "FAIL" if int(f) else ("VACUOUS" if refuse == "1" and not asserted else "PASS")
 doc = {"schema":"ee.test_event.v1.summary","test":name,
        "steps":int(steps),"pass":int(p),"fail":int(f),"drops":int(drops),
+       "asserted":asserted,
        "elapsed_ms":float(ms),"events":events,
-       "verdict":("PASS" if int(f)==0 else "FAIL")}
+       "verdict":verdict}
 open(path,"w").write(json.dumps(doc,indent=2)+"\n")
 print(json.dumps(doc))
 PYEOF
+    local human_verdict="PASS"
+    if [ "$HARNESS_FAIL" -ne 0 ]; then
+        human_verdict="FAIL"
+    elif [ "$HARNESS_PASS" -eq 0 ]; then
+        # Reported whether or not refusal is enabled: a reader of the log should
+        # never have to know which flag was set to learn that nothing asserted.
+        human_verdict="PASS (VACUOUS: nothing asserted)"
+        if [ "${EE_E2E_REFUSE_VACUOUS_PASS:-0}" = "1" ]; then
+            human_verdict="VACUOUS"
+        fi
+    fi
     printf '[harness] %s: %d pass, %d fail, %d steps, %d drops, %sms -> %s\n' \
         "$HARNESS_TEST_NAME" "$HARNESS_PASS" "$HARNESS_FAIL" "$HARNESS_STEP" "$HARNESS_DROPS" "$elapsed_ms" \
-        "$([ "$HARNESS_FAIL" -eq 0 ] && echo PASS || echo FAIL)" >&2
+        "$human_verdict" >&2
     if [ "$HARNESS_FAIL" -ne 0 ]; then
         printf '[harness] failures:\n' >&2
         local fmsg; for fmsg in "${HARNESS_FAILURES[@]}"; do printf '  - %s\n' "$fmsg" >&2; done
         return 1
+    fi
+    if [ "${EE_E2E_REFUSE_VACUOUS_PASS:-0}" = "1" ] && [ "$HARNESS_PASS" -eq 0 ]; then
+        # 2, not 1: a caller distinguishing "the system is wrong" from "this run
+        # answered nothing" needs two codes, and 1 already means real failures.
+        printf '[harness] REFUSING a vacuous pass: 0 assertions succeeded (%d drops). \n' \
+            "$HARNESS_DROPS" >&2
+        printf '[harness] Set EE_E2E_REFUSE_VACUOUS_PASS=0 for an ad-hoc run on a host that\n' >&2
+        printf '[harness] cannot satisfy this script, or gate the call site so it declines\n' >&2
+        printf '[harness] to run instead of collecting a pass it did not earn.\n' >&2
+        return 2
     fi
     return 0
 }
