@@ -2033,6 +2033,10 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         return;
     };
     let graph_explain_start = Instant::now();
+    let mut explanation_budget =
+        crate::core::explanation_latency_budget::ExplanationWorkBudget::for_workspace(
+            workspace_path.as_deref(),
+        );
     let connection = match DbConnection::open_file_read_only(database_path) {
         Ok(connection) => connection,
         Err(error) => {
@@ -2053,7 +2057,149 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         }
     };
 
-    attach_pack_dna_from_snapshot(&connection, response, pack_dna_config, graph_explain_start);
+    attach_pack_dna_from_snapshot(
+        &connection,
+        response,
+        pack_dna_config,
+        graph_explain_start,
+        &mut explanation_budget,
+    );
+    append_pack_explanation_budget_notices(
+        response,
+        &mut explanation_budget,
+        workspace_path.as_deref(),
+        database_path,
+        None,
+    );
+}
+
+fn pack_explanation_replay_command(
+    response: &ContextResponse,
+    options: Option<&ContextPackOptions>,
+    workspace: Option<&Path>,
+    database: &Path,
+) -> String {
+    const ORIGINAL_REQUEST_REPAIR: &str = "Repeat the original pack/context request with EE_EXPLANATION_BUDGET_MS=0, retaining its original filters, lens, pagination and admission options; the captured request cannot be represented faithfully by a standalone context command.";
+    let Some(options) = options else {
+        return ORIGINAL_REQUEST_REPAIR.to_owned();
+    };
+    // The context CLI can replay the scalar/graph controls below, but arbitrary
+    // query-file filters, max-results, pagination and resolved lenses have no
+    // equivalent context arguments. Never replace those with broader defaults.
+    let mut remaining_filters = options.filters.clone();
+    remaining_filters.temporal.as_of = None;
+    let conflicting_clocks = options
+        .as_of
+        .zip(options.filters.temporal.as_of)
+        .is_some_and(|(validity, query)| validity != query);
+    if !remaining_filters.is_empty()
+        || options.max_results.is_some()
+        || options.pagination.is_some()
+        || options.task_lens.is_some()
+        || options.redaction_level == crate::models::RedactionLevel::Full
+        || conflicting_clocks
+    {
+        return ORIGINAL_REQUEST_REPAIR.to_owned();
+    }
+    let mut replay = crate::core::explanation_latency_budget::ExplanationReplayCommand::new(
+        "context",
+        &response.data.request.query,
+        workspace,
+        database,
+    );
+    replay.flag("explain");
+    replay.flag("read-only");
+    replay.option(
+        "max-tokens",
+        &response.data.request.budget.max_tokens().to_string(),
+    );
+    replay.option(
+        "candidate-pool",
+        &response.data.request.candidate_pool.to_string(),
+    );
+    replay.option("profile", response.data.request.profile.as_str());
+    replay.option("speed", options.speed.as_str());
+    replay.option("source-mode", options.source_mode.as_str());
+    replay.option("memory-scope", options.memory_scope.as_str());
+    replay.option("redaction", options.redaction_level.as_str());
+    if let Some(index) = &options.index_dir {
+        replay.option("index-dir", &index.to_string_lossy());
+    }
+    if let Some(bead) = &options.bead_id {
+        replay.option("bead-id", bead);
+    }
+    for task_path in &options.task_paths {
+        replay.option("task-path", task_path);
+    }
+    if let Some(reference_time) = options.filters.temporal.as_of.or(options.as_of) {
+        replay.option("as-of", &reference_time.to_rfc3339());
+    }
+    if let Some(floor) = options.relevance_floor {
+        replay.option("relevance-floor", &floor.to_string());
+    }
+    if let Some(weight) = options.ppr_weight {
+        replay.option("ppr-weight", &weight.to_string());
+    }
+    for symbol in &options.changed_symbols {
+        replay.option("changed-symbol", symbol);
+    }
+    if let Some(snapshot) = &options.coordination_snapshot_path {
+        replay.option("coordination-snapshot", &snapshot.to_string_lossy());
+    }
+    replay.option(
+        "coordination-stale-after-ms",
+        &options.coordination_stale_after_ms.to_string(),
+    );
+    for (enabled, flag) in [
+        (options.strict_source_mode, "strict-source-mode"),
+        (options.strict_scope, "strict-scope"),
+        (options.include_tombstoned, "include-tombstoned"),
+        (options.include_expired, "include-expired"),
+        (options.include_future, "include-future"),
+        (options.include_stale, "include-stale"),
+        (options.changed_symbols_from_git, "changed-symbols-from-git"),
+        (options.require_fresh_sentinels, "require-fresh-sentinels"),
+        (options.no_lod, "no-lod"),
+    ] {
+        if enabled {
+            replay.flag(flag);
+        }
+    }
+    let output = options.output_options;
+    replay.option("pack-profile", output.profile.as_str());
+    replay.option("resource-profile", output.resource_profile.as_str());
+    for (name, value) in [
+        ("no-coverage-fill", !output.include_coverage_fill),
+        ("no-rendered-text", !output.include_rendered_text),
+        ("no-skipped", !output.include_skipped),
+        ("no-meta", !output.include_meta),
+        (
+            "include-non-affecting-degradations",
+            output.include_non_affecting_degradations,
+        ),
+    ] {
+        replay.option(name, &value.to_string());
+    }
+    replay.finish()
+}
+
+fn append_pack_explanation_budget_notices(
+    response: &mut ContextResponse,
+    budget: &mut crate::core::explanation_latency_budget::ExplanationWorkBudget,
+    workspace: Option<&Path>,
+    database: &Path,
+    options: Option<&ContextPackOptions>,
+) {
+    let repair = pack_explanation_replay_command(response, options, workspace, database);
+    for notice in budget.take_notices(&repair) {
+        push_degradation(
+            &mut response.data.degraded,
+            notice.code,
+            ContextResponseSeverity::Low,
+            notice.message,
+            Some(notice.repair),
+        );
+    }
 }
 
 fn attach_pack_dna_from_snapshot(
@@ -2061,7 +2207,12 @@ fn attach_pack_dna_from_snapshot(
     response: &mut ContextResponse,
     pack_dna_config: ContextPackDnaConfig,
     graph_explain_start: Instant,
+    budget: &mut crate::core::explanation_latency_budget::ExplanationWorkBudget,
 ) {
+    if !budget.allows(crate::core::explanation_latency_budget::ExplanationComponent::PackDna) {
+        response.data.pack_dna = None;
+        return;
+    }
     let pack_memory_ids = response
         .data
         .pack
@@ -2128,6 +2279,12 @@ fn attach_pack_dna_from_snapshot(
             return;
         }
     };
+    // Projection may itself spend the allowance. Do not start graph algorithms
+    // after optional work has run out of budget.
+    if !budget.allows(crate::core::explanation_latency_budget::ExplanationComponent::PackDna) {
+        response.data.pack_dna = None;
+        return;
+    }
     let mut pack_dna = match compute_context_pack_dna(&projection, &input) {
         Ok(pack_dna) => pack_dna,
         Err(crate::graph::GraphError::AlgorithmTimeout { timeout_ms, .. }) => {
@@ -4140,11 +4297,23 @@ async fn run_context_pack_with_performance_inner(
         if let Some(config) =
             resolve_pack_dna_config_for_response(Some(&options.workspace_path), &mut response)
         {
+            let mut explanation_budget =
+                crate::core::explanation_latency_budget::ExplanationWorkBudget::for_workspace(
+                    Some(&options.workspace_path),
+                );
             attach_pack_dna_from_snapshot(
                 checked_context_read_snapshot(&read_pool, &read_snapshot)?,
                 &mut response,
                 config,
                 Instant::now(),
+                &mut explanation_budget,
+            );
+            append_pack_explanation_budget_notices(
+                &mut response,
+                &mut explanation_budget,
+                Some(&options.workspace_path),
+                &database_path,
+                Some(options),
             );
         }
         control.check()?;

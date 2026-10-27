@@ -22,6 +22,9 @@ use crate::core::conformal::{
     WhyConformalCandidate, WhyConformalConfidenceIntervals, why_conformal_confidence_intervals,
 };
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
+use crate::core::explanation_latency_budget::{
+    ExplanationComponent, ExplanationReplayCommand, ExplanationWorkBudget,
+};
 use crate::core::influence::{
     WhyCounterfactualInfluence, WhyInfluenceCandidate, WhyInfluenceDirection,
     why_counterfactual_influence,
@@ -1746,6 +1749,65 @@ fn explain_memory_in_scope(
     conn: &DbConnection,
     workspace_path: Option<&Path>,
 ) -> WhyReport {
+    let inferred_workspace = workspace_root_from_database_path(options.database_path);
+    let workspace = workspace_path.or(inferred_workspace.as_deref());
+    let mut budget = ExplanationWorkBudget::for_workspace(workspace);
+    let mut report =
+        explain_memory_in_scope_with_budget(options, conn, workspace_path, &mut budget);
+    append_explanation_budget_notices(&mut report, &mut budget, options, workspace);
+    report
+}
+
+/// Share the optional-work clock with CLI-only enrichment such as causal paths.
+/// The caller appends notices after its final optional component.
+pub fn explain_memory_for_workspace_with_connection_and_budget(
+    options: &WhyOptions<'_>,
+    conn: &DbConnection,
+    workspace_path: &Path,
+    budget: &mut ExplanationWorkBudget,
+) -> WhyReport {
+    explain_memory_in_scope_with_budget(options, conn, Some(workspace_path), budget)
+}
+
+pub fn explanation_replay_command(
+    options: &WhyOptions<'_>,
+    workspace: Option<&Path>,
+) -> ExplanationReplayCommand {
+    let mut replay =
+        ExplanationReplayCommand::new("why", options.memory_id, workspace, options.database_path);
+    replay.option(
+        "confidence-threshold",
+        &options.confidence_threshold.to_string(),
+    );
+    replay
+}
+
+pub fn append_explanation_budget_notices(
+    report: &mut WhyReport,
+    budget: &mut ExplanationWorkBudget,
+    options: &WhyOptions<'_>,
+    workspace: Option<&Path>,
+) {
+    let repair = explanation_replay_command(options, workspace).finish();
+    report.degraded.extend(
+        budget
+            .take_notices(&repair)
+            .into_iter()
+            .map(|notice| WhyDegradation {
+                code: notice.code,
+                severity: "low",
+                message: notice.message,
+                repair: Some(notice.repair),
+            }),
+    );
+}
+
+fn explain_memory_in_scope_with_budget(
+    options: &WhyOptions<'_>,
+    conn: &DbConnection,
+    workspace_path: Option<&Path>,
+    budget: &mut ExplanationWorkBudget,
+) -> WhyReport {
     let started = Instant::now();
     let target = resolve_why_target(options.memory_id);
     let memory_id = target.document_id;
@@ -1792,14 +1854,34 @@ fn explain_memory_in_scope(
     let history_fetch = fetch_history(&conn, memory_id);
 
     // Fetch rationale traces (EE-RATIONALE-TRACE-001)
-    let rationale_trace_fetch = fetch_rationale_traces(&conn, &memory.workspace_id, memory_id);
-    let verification_fetch = fetch_verification_evidence(&conn, "memory", memory_id);
-    let coordination_fallback_fetch = fetch_coordination_fallback_evidence(
-        options.database_path,
-        &memory,
-        &tags,
-        &verification_fetch.items,
-    );
+    let rationale_trace_fetch = budget
+        .run(ExplanationComponent::RationaleTraces, || {
+            fetch_rationale_traces(&conn, &memory.workspace_id, memory_id)
+        })
+        .unwrap_or_else(|| WhyEvidenceFetch::available(Vec::new()));
+    // Verification-sensitive findings are required, including missing evidence.
+    let verification_required = tags.iter().any(|tag| {
+        tag == "verification" || tag == "verification-required" || tag == "bead-closure"
+    });
+    let verification_fetch = if verification_required {
+        fetch_verification_evidence(&conn, "memory", memory_id)
+    } else {
+        budget
+            .run(ExplanationComponent::VerificationEvidence, || {
+                fetch_verification_evidence(&conn, "memory", memory_id)
+            })
+            .unwrap_or_else(|| WhyEvidenceFetch::available(Vec::new()))
+    };
+    let coordination_fallback_fetch = budget
+        .run(ExplanationComponent::CoordinationFallbackEvidence, || {
+            fetch_coordination_fallback_evidence(
+                options.database_path,
+                &memory,
+                &tags,
+                &verification_fetch.items,
+            )
+        })
+        .unwrap_or_else(|| WhyEvidenceFetch::available(Vec::new()));
     let mut evidence_degradations = Vec::new();
     if let Some(degradation) = contradiction_fetch.degradation {
         evidence_degradations.push(degradation);
@@ -1819,7 +1901,11 @@ fn explain_memory_in_scope(
     if let Some(degradation) = coordination_fallback_fetch.degradation {
         evidence_degradations.push(degradation);
     }
-    let attestation_manifest = match crate::core::attest::build_memory_attestation(&conn, memory_id)
+    let attestation_manifest = match budget
+        .run(ExplanationComponent::ProvenanceEnrichment, || {
+            crate::core::attest::build_memory_attestation(&conn, memory_id)
+        })
+        .unwrap_or(Ok(None))
     {
         Ok(Some(bundle)) => Some(crate::core::attest::attestation_surface_manifest(&bundle)),
         Ok(None) => None,
@@ -1833,11 +1919,7 @@ fn explain_memory_in_scope(
             None
         }
     };
-    if verification_fetch.items.is_empty()
-        && tags.iter().any(|tag| {
-            tag == "verification" || tag == "verification-required" || tag == "bead-closure"
-        })
-    {
+    if verification_fetch.items.is_empty() && verification_required {
         evidence_degradations.push(WhyDegradation {
             code: "verification_evidence_not_found",
             severity: "low",
@@ -1870,15 +1952,21 @@ fn explain_memory_in_scope(
     let coordination_fallback_evidence = coordination_fallback_fetch.items;
 
     let validity = memory_validity(&memory.valid_from, &memory.valid_to);
-    let graph_retrieval = build_graph_retrieval_explanation(
-        &conn,
-        &memory.workspace_id,
-        memory_id,
-        &links,
-        &contradictions,
-        &validity.status,
-    );
-    let load_bearing = build_load_bearing_why_explanation(&conn, &memory.workspace_id, memory_id);
+    let graph_retrieval = budget.run(ExplanationComponent::GraphRetrieval, || {
+        build_graph_retrieval_explanation(
+            &conn,
+            &memory.workspace_id,
+            memory_id,
+            &links,
+            &contradictions,
+            &validity.status,
+        )
+    });
+    let load_bearing = budget
+        .run(ExplanationComponent::BipartiteLoadBearing, || {
+            build_load_bearing_why_explanation(&conn, &memory.workspace_id, memory_id)
+        })
+        .flatten();
     let storage = StorageExplanation {
         origin: determine_origin(&memory.trust_class),
         trust_class: memory.trust_class.clone(),
@@ -2014,7 +2102,12 @@ fn explain_memory_in_scope(
     // failing the entire `ee why` response. The runtime
     // `update_memory_bayes_posterior` path is the source of truth;
     // `ee why` is a read-only consumer.
-    let report = match conn.get_memory_bayes_posterior(memory_id) {
+    let report = match budget
+        .run(ExplanationComponent::BayesPosterior, || {
+            conn.get_memory_bayes_posterior(memory_id)
+        })
+        .unwrap_or(Ok(None))
+    {
         Ok(Some((alpha, beta))) => {
             let summary = crate::core::bayes::BetaPosterior::new(alpha, beta)
                 .map(|posterior| BayesPosteriorSummary::from_posterior(&posterior));
@@ -2023,7 +2116,12 @@ fn explain_memory_in_scope(
         Ok(None) | Err(_) => report,
     };
     let report = if revision_dominance_feature_enabled(options.database_path) {
-        match revision_lineage_for_why(&conn, &memory.workspace_id, memory_id) {
+        match budget
+            .run(ExplanationComponent::RevisionLineage, || {
+                revision_lineage_for_why(&conn, &memory.workspace_id, memory_id)
+            })
+            .flatten()
+        {
             Some(revision_lineage) => report.with_revision_lineage(revision_lineage),
             None => report,
         }
@@ -2618,7 +2716,7 @@ struct ReportSelectionInputs {
     verification_evidence: Vec<VerificationEvidenceRecord>,
     coordination_fallback_evidence: Vec<CoordinationFallbackEvidenceSummary>,
     attestation_manifest: Option<JsonValue>,
-    graph_retrieval: GraphRetrievalExplanation,
+    graph_retrieval: Option<GraphRetrievalExplanation>,
     load_bearing: Option<LoadBearingWhyExplanation>,
     degraded: Vec<WhyDegradation>,
     agent_profile: Option<AgentProfileSelectionExplanation>,
@@ -2699,13 +2797,12 @@ fn build_report(
         latest_pack_selection: selection_inputs.latest_pack_selection,
     };
 
-    WhyReport::found(memory_id.to_string(), storage, retrieval, selection)
+    let report = WhyReport::found(memory_id.to_string(), storage, retrieval, selection)
         .with_agent_profile(selection_inputs.agent_profile)
         .with_lifecycle(selection_inputs.lifecycle)
         .with_contradictions(selection_inputs.contradictions)
         .with_links(selection_inputs.links)
         .with_optional_history(selection_inputs.history)
-        .with_graph_retrieval(selection_inputs.graph_retrieval)
         .with_optional_load_bearing(selection_inputs.load_bearing)
         .with_rationale_traces(selection_inputs.rationale_traces)
         .with_verification_evidence(selection_inputs.verification_evidence)
@@ -2713,7 +2810,11 @@ fn build_report(
         .with_attestation_manifest(selection_inputs.attestation_manifest)
         .with_degradations(selection_inputs.degraded)
         .with_optional_dedup_link(selection_inputs.dedup_link)
-        .with_optional_seal(selection_inputs.seal)
+        .with_optional_seal(selection_inputs.seal);
+    match selection_inputs.graph_retrieval {
+        Some(graph) => report.with_graph_retrieval(graph),
+        None => report,
+    }
 }
 
 /// Load the seal-state block for `ee why` when the memory was written
@@ -3935,6 +4036,91 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
+    #[test]
+    fn explanation_budget_preserves_primary_findings_and_skips_optional_queries() -> TestResult {
+        let (conn, workspace_id, _) = native_rule_why_fixture()?;
+        let memory_id = canonical_memory_id(930);
+        conn.insert_memory(
+            &memory_id,
+            &CreateMemoryInput {
+                workspace_id,
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                content: "Retain the release verification record.".to_owned(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                provenance_uri: None,
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: vec!["verification-required".to_owned()],
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let options = native_rule_why_options(&memory_id);
+        let mut disabled = ExplanationWorkBudget::new(None);
+        let baseline = explain_memory_in_scope_with_budget(&options, &conn, None, &mut disabled);
+        for limit in [Some(0), Some(u64::MAX)] {
+            let mut generous = ExplanationWorkBudget::new(limit);
+            generous.set_elapsed_ms(0);
+            let unchanged =
+                explain_memory_in_scope_with_budget(&options, &conn, None, &mut generous);
+            assert_eq!(
+                crate::output::render_why_json(&baseline),
+                crate::output::render_why_json(&unchanged)
+            );
+        }
+        // Poison the optional query: a cosmetic omission would still emit the
+        // unavailable-table finding, proving work was not actually skipped.
+        conn.execute_raw("ALTER TABLE rationale_traces RENAME TO withheld_rationale_traces")
+            .map_err(|error| error.to_string())?;
+        let mut expired = ExplanationWorkBudget::new(Some(10));
+        expired.set_elapsed_ms(10);
+        let mut limited = explain_memory_in_scope_with_budget(&options, &conn, None, &mut expired);
+        append_explanation_budget_notices(&mut limited, &mut expired, &options, None);
+        assert!(limited.found);
+        assert_eq!(limited.content, baseline.content);
+        assert_eq!(limited.storage, baseline.storage);
+        assert_eq!(limited.retrieval, baseline.retrieval);
+        assert_eq!(limited.selection, baseline.selection);
+        assert_eq!(limited.lifecycle, baseline.lifecycle);
+        assert_eq!(limited.contradictions, baseline.contradictions);
+        assert!(limited.graph_retrieval.is_none());
+        assert!(limited.attestation_manifest.is_none());
+        assert!(
+            limited
+                .degraded
+                .iter()
+                .any(|d| d.code == "verification_evidence_not_found")
+        );
+        assert!(
+            !limited
+                .degraded
+                .iter()
+                .any(|d| d.code == "why_rationale_traces_unavailable")
+        );
+        assert!(
+            limited
+                .degraded
+                .iter()
+                .any(|d| d.code == "explanation_budget_exhausted"
+                    && d.message.contains("rationale_traces"))
+        );
+        let mut no_cap = ExplanationWorkBudget::new(None);
+        let control = explain_memory_in_scope_with_budget(&options, &conn, None, &mut no_cap);
+        assert!(
+            control
+                .degraded
+                .iter()
+                .any(|d| d.code == "why_rationale_traces_unavailable"),
+            "negative control must exercise the broken optional table"
+        );
+        Ok(())
+    }
+
     fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
         if actual == expected {
             Ok(())
@@ -4771,7 +4957,7 @@ mod tests {
                 verification_evidence: Vec::new(),
                 coordination_fallback_evidence: Vec::new(),
                 attestation_manifest: None,
-                graph_retrieval: graph_retrieval_unavailable(
+                graph_retrieval: Some(graph_retrieval_unavailable(
                     "wsp_01234567890123456789012345",
                     "graph_snapshot_missing",
                     "medium",
@@ -4779,7 +4965,7 @@ mod tests {
                     "ee graph centrality-refresh",
                     &[],
                     &[],
-                ),
+                )),
                 load_bearing: None,
                 degraded: Vec::new(),
                 agent_profile: None,

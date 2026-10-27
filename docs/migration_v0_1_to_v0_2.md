@@ -1,5 +1,17 @@
 # Migrating from `ee` v0.1 to v0.2 (bd-17c65.11.5 / K5)
 
+## Optional explanation budgets
+
+`runtime.explanation_budget_ms` and `EE_EXPLANATION_BUDGET_MS` opt into a
+cooperative cap on optional `why` enrichment and Pack DNA work. Absent or zero
+keeps the existing path. Required findings and pack selection are not gated;
+omissions and invalid optional environment settings use existing `degraded[]`
+entries with repair instructions. No response schema changes. An enabled cap
+can change optional detail with timing; if DNA is omitted, the delivered text
+and its existing v5 pack identity both reflect that omission. Replay guidance
+preserves the original selection constraints, using the original request when
+its options cannot be faithfully expressed as a simple CLI command.
+
 ## Global promotion review proposals
 
 `ee memory promote-global` now emits `ee.global_promotion.report.v2`, containing

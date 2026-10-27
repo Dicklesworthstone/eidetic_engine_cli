@@ -117,6 +117,8 @@ pub enum EnvVar {
     DisableRememberSearchNeighbors,
     /// `EE_DOCTOR_BLAST_RADIUS`
     DoctorBlastRadius,
+    /// Optional explanation work budget in milliseconds.
+    ExplanationBudgetMs,
     /// `EE_E2E_RETENTION_MANIFEST`
     E2eRetentionManifest,
     /// `EE_EMBED_BACKEND`
@@ -362,6 +364,7 @@ impl EnvVar {
             Self::DisableToon,
             Self::DisableRememberSearchNeighbors,
             Self::DoctorBlastRadius,
+            Self::ExplanationBudgetMs,
             Self::E2eRetentionManifest,
             Self::EmbedBackend,
             Self::EmbedDedupCosineFloor,
@@ -501,6 +504,7 @@ impl EnvVar {
             Self::DisableToon => "EE_DISABLE_TOON",
             Self::DisableRememberSearchNeighbors => "EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS",
             Self::DoctorBlastRadius => "EE_DOCTOR_BLAST_RADIUS",
+            Self::ExplanationBudgetMs => "EE_EXPLANATION_BUDGET_MS",
             Self::E2eRetentionManifest => "EE_E2E_RETENTION_MANIFEST",
             Self::EmbedBackend => "EE_EMBED_BACKEND",
             Self::EmbedDedupCosineFloor => "EE_EMBED_DEDUP_COSINE_FLOOR",
@@ -692,6 +696,9 @@ impl EnvVar {
             }
             Self::DoctorBlastRadius => {
                 "Override the doctor fix blast-radius roots with colon-separated absolute paths."
+            }
+            Self::ExplanationBudgetMs => {
+                "Bound optional why and pack explanation work in milliseconds; 0 disables the budget."
             }
             Self::E2eRetentionManifest => {
                 "Override the retained-artifact manifest path used by diagnostics."
@@ -1054,9 +1061,10 @@ impl EnvVar {
             | Self::Workspace
             | Self::WorkspaceRegistry => "paths",
             Self::DaemonEnableEcho | Self::DiagForceCapabilityGap => "diagnostics",
-            Self::DaemonSearchTimeoutMs | Self::DaemonWarm | Self::NearbyStoreScanBudgetMs => {
-                "performance"
-            }
+            Self::DaemonSearchTimeoutMs
+            | Self::DaemonWarm
+            | Self::NearbyStoreScanBudgetMs
+            | Self::ExplanationBudgetMs => "performance",
             Self::AgentMode
             | Self::AgentName
             | Self::DisableToon

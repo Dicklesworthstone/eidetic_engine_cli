@@ -902,6 +902,11 @@ struct GraphKeySpec {
 
 fn config_key_spec(key: &str) -> Option<GraphKeySpec> {
     match key {
+        crate::config::RUNTIME_EXPLANATION_BUDGET_MS_KEY => Some(GraphKeySpec {
+            key: crate::config::RUNTIME_EXPLANATION_BUDGET_MS_KEY,
+            path: &["runtime", "explanation_budget_ms"],
+            kind: GraphValueKind::UnsignedInteger,
+        }),
         SCORING_RECENCY_TAU_DAYS_KEY => Some(GraphKeySpec {
             key: SCORING_RECENCY_TAU_DAYS_KEY,
             path: &["scoring", "recency_tau_days"],
@@ -2121,6 +2126,71 @@ cache_results = 120
         // Validation must serialize it as a float, without accidentally rejecting it.
         set_config(&options, "scoring.recency_tau_days", "1e30", true)
             .map_err(|error| format!("large finite tau must remain valid: {error}"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn explanation_budget_set_round_trips_and_zero_disables_it() -> TestResult {
+        let temp = workspace()?;
+        let options = options(temp.path());
+        let key = crate::config::RUNTIME_EXPLANATION_BUDGET_MS_KEY;
+        for invalid in ["-1", "1.5", "not-a-number"] {
+            assert!(matches!(
+                set_config(&options, key, invalid, false),
+                Err(super::ConfigSurfaceError::InvalidValue { .. })
+            ));
+        }
+        assert!(!temp.path().join(".ee").exists());
+        for value in ["100", "0"] {
+            let written =
+                set_config(&options, key, value, false).map_err(|error| error.to_string())?;
+            assert!(written.applied);
+            let observed = get_config(&options, key).map_err(|error| error.to_string())?;
+            assert_eq!(observed.value, value);
+            assert_eq!(observed.source, "project");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_explanation_override_does_not_abort_primary_search_configuration() -> TestResult {
+        let temp = workspace()?;
+        let root = temp.path().join("workspace");
+        let home = temp.path().join("home");
+        fs::create_dir_all(root.join(".ee")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&home).map_err(|error| error.to_string())?;
+        fs::write(root.join(".ee/config.toml"),
+            "[search]\nlexical_weight = 0.8\nsemantic_weight = 0.2\n[scoring]\nconfidence_floor = 0.7\n[runtime]\nexplanation_budget_ms = 100\n"
+        ).map_err(|error| error.to_string())?;
+        let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let mut environment = BTreeMap::from([(home_variable.to_owned(), home.into_os_string())]);
+        let baseline = merged_config_with_environment(&options(&root), &environment)
+            .map_err(|error| error.to_string())?;
+        for invalid in ["invalid", "-1", "1.5", "", "18446744073709551616"] {
+            environment.insert(
+                "EE_EXPLANATION_BUDGET_MS".to_owned(),
+                OsString::from(invalid),
+            );
+            // This is the shared resolver used before primary search computes
+            // fusion weights and quality policy, prior to optional explanations.
+            let observed =
+                merged_config_with_environment(&options(&root), &environment).map_err(|error| {
+                    format!("optional budget must not abort primary config: {error}")
+                })?;
+            assert_eq!(observed.values.search, baseline.values.search);
+            assert_eq!(observed.values.scoring, baseline.values.scoring);
+            assert_eq!(observed.values.storage, baseline.values.storage);
+        }
+        environment.insert(
+            crate::config::EnvVar::ReadPoolAcquireTimeoutMs
+                .name()
+                .to_owned(),
+            OsString::from("invalid"),
+        );
+        assert!(
+            merged_config_with_environment(&options(&root), &environment).is_err(),
+            "required configuration errors must still fail closed"
+        );
         Ok(())
     }
 

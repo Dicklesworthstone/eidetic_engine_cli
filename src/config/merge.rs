@@ -43,6 +43,7 @@ pub const STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY: &str = "storage.read_pool.ac
 pub const STORAGE_READ_POOL_PIN_SNAPSHOT_KEY: &str = "storage.read_pool.pin_snapshot";
 pub const RUNTIME_DAEMON_KEY: &str = "runtime.daemon";
 pub const RUNTIME_JOB_BUDGET_MS_KEY: &str = "runtime.job_budget_ms";
+pub const RUNTIME_EXPLANATION_BUDGET_MS_KEY: &str = "runtime.explanation_budget_ms";
 pub const RUNTIME_IMPORT_BATCH_SIZE_KEY: &str = "runtime.import_batch_size";
 pub const WRITE_GROUP_COMMIT_ENABLED_KEY: &str = "write.group_commit_enabled";
 pub const WRITE_BATCH_WINDOW_MS_KEY: &str = "write.batch_window_ms";
@@ -311,6 +312,13 @@ impl MergedConfig {
                 RUNTIME_JOB_BUDGET_MS_KEY,
                 budget.to_string(),
                 self.source(RUNTIME_JOB_BUDGET_MS_KEY),
+            ));
+        }
+        if let Some(budget) = self.values.runtime.explanation_budget_ms {
+            entries.push(ConfigShowEntry::new(
+                RUNTIME_EXPLANATION_BUDGET_MS_KEY,
+                budget.to_string(),
+                self.source(RUNTIME_EXPLANATION_BUDGET_MS_KEY),
             ));
         }
         if let Some(batch) = self.values.runtime.import_batch_size {
@@ -1184,6 +1192,7 @@ pub fn built_in_config(expander: &PathExpander) -> ConfigFile {
         runtime: RuntimeConfig {
             daemon: Some(false),
             job_budget_ms: Some(5000),
+            explanation_budget_ms: None,
             import_batch_size: Some(200),
         },
         write: WriteConfig {
@@ -1435,7 +1444,14 @@ pub fn config_from_env(
                     .map(|disabled| !disabled),
             },
         },
-        runtime: RuntimeConfig::default(),
+        runtime: RuntimeConfig {
+            // Optional explanation tuning must not make primary search fail to
+            // load config. Its owner validates the raw override separately and
+            // reports an advisory degradation when the value is malformed.
+            explanation_budget_ms: optional_env_u64(env, EnvVar::ExplanationBudgetMs.name())
+                .unwrap_or(None),
+            ..RuntimeConfig::default()
+        },
         write: WriteConfig {
             group_commit_enabled: optional_env_bool_flag(
                 env,
@@ -1732,6 +1748,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.runtime.import_batch_size,
                 &layers.user.runtime.import_batch_size,
                 &layers.defaults.runtime.import_batch_size,
+            ),
+            explanation_budget_ms: pick_field(
+                &mut sources,
+                RUNTIME_EXPLANATION_BUDGET_MS_KEY,
+                &layers.cli.runtime.explanation_budget_ms,
+                &layers.environment.runtime.explanation_budget_ms,
+                &layers.project.runtime.explanation_budget_ms,
+                &layers.user.runtime.explanation_budget_ms,
+                &layers.defaults.runtime.explanation_budget_ms,
             ),
         },
         write: WriteConfig {

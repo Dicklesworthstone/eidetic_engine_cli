@@ -197,6 +197,8 @@ impl ReadPoolConfig {
 pub struct RuntimeConfig {
     pub daemon: Option<bool>,
     pub job_budget_ms: Option<u64>,
+    /// Optional explanation work budget shared by why and pack; zero disables it.
+    pub explanation_budget_ms: Option<u64>,
     pub import_batch_size: Option<u64>,
 }
 
@@ -205,6 +207,7 @@ impl RuntimeConfig {
         Ok(Self {
             daemon: optional_bool(document, "runtime", "daemon")?,
             job_budget_ms: optional_u64(document, "runtime", "job_budget_ms")?,
+            explanation_budget_ms: optional_u64(document, "runtime", "explanation_budget_ms")?,
             import_batch_size: optional_u64(document, "runtime", "import_batch_size")?,
         })
     }
@@ -1673,7 +1676,12 @@ fn config_key_policy(table_path: &str) -> Option<ConfigKeyPolicy> {
             "acquire_timeout_ms",
             "pin_snapshot",
         ]),
-        "runtime" => ConfigKeyPolicy::Closed(&["daemon", "job_budget_ms", "import_batch_size"]),
+        "runtime" => ConfigKeyPolicy::Closed(&[
+            "daemon",
+            "job_budget_ms",
+            "explanation_budget_ms",
+            "import_batch_size",
+        ]),
         "write" => ConfigKeyPolicy::Closed(&[
             "group_commit_enabled",
             "batch_window_ms",

@@ -56063,10 +56063,15 @@ where
         }
     }
 
-    let mut report = crate::core::why::explain_memory_for_workspace_with_connection(
+    let mut explanation_budget =
+        crate::core::explanation_latency_budget::ExplanationWorkBudget::for_workspace(Some(
+            &workspace_path,
+        ));
+    let mut report = crate::core::why::explain_memory_for_workspace_with_connection_and_budget(
         &options,
         connection,
         &workspace_path,
+        &mut explanation_budget,
     );
 
     if let Some(ref error) = report.error {
@@ -56093,7 +56098,11 @@ where
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
-    if args.causal_explain {
+    if args.causal_explain
+        && explanation_budget.allows(
+            crate::core::explanation_latency_budget::ExplanationComponent::CausalExplanation,
+        )
+    {
         let causal_explanation = match causal_explain_feature_enabled(cli) {
             Ok(true) => why_causal_explanation_json(connection, &args.memory_id),
             Ok(false) => why_causal_explanation_feature_disabled_json(&args.memory_id),
@@ -56103,6 +56112,41 @@ where
             }
         };
         report = report.with_causal_explanation(causal_explanation);
+    }
+    crate::core::why::append_explanation_budget_notices(
+        &mut report,
+        &mut explanation_budget,
+        &options,
+        Some(&workspace_path),
+    );
+    let mut replay = crate::core::why::explanation_replay_command(&options, Some(&workspace_path));
+    if args.causal_explain {
+        replay.flag("causal-explain");
+    }
+    if args.include_sentinel {
+        replay.flag("include-sentinel");
+    }
+    let read_fence = match args.read_fence {
+        crate::core::read_fence::ReadFence::Snapshot(generation) => {
+            format!("snapshot:{generation}")
+        }
+        fence => fence.mode_str().to_owned(),
+    };
+    replay.option("read-fence", &read_fence);
+    if args.strict_read_fence {
+        replay.flag("strict-read-fence");
+    }
+    replay.option("mesh", args.mesh_mode.as_str());
+    let repair = replay.finish();
+    for notice in &mut report.degraded {
+        if notice.code.starts_with("explanation_")
+            && notice
+                .repair
+                .as_deref()
+                .is_some_and(|value| value.starts_with("EE_EXPLANATION_BUDGET_MS=0 "))
+        {
+            notice.repair = Some(repair.clone());
+        }
     }
     let sentinel_data = if args.include_sentinel {
         match why_sentinel_data(connection, &args.memory_id) {

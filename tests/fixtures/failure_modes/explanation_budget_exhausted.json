@@ -1,0 +1,19 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "explanation_budget_exhausted",
+  "introduced_by": { "bead": "bd-1nxz4.4", "epic_letter": "S" },
+  "surfaces": ["why", "context", "pack"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Elapsed explanation work reaches the cap before another optional component starts. Deterministic unit controls pin elapsed time to 10ms at a 10ms cap and poison the rationale or graph tables to prove skipped work is not executed.",
+    "setup_commands": ["ee init --workspace .", "ee config set runtime.explanation_budget_ms 1 --workspace ."],
+    "invocation": "ee why <memory-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "explanation_budget_exhausted",
+    "severity": "low",
+    "message_contains": ["explanation was omitted", "primary answer was retained"],
+    "repair_contains": "EE_EXPLANATION_BUDGET_MS=0"
+  }
+}

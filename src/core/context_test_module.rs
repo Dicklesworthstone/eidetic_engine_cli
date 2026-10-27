@@ -5030,6 +5030,222 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn explanation_budget_preserves_pack_and_prevents_graph_projection() -> Result<(), String> {
+        use crate::core::explanation_latency_budget::ExplanationWorkBudget;
+
+        // An unmigrated connection poisons graph projection. The uncapped
+        // negative control proves omission prevents the query from executing.
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        let original =
+            context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(940)))?;
+        let primary = original.data.pack.clone();
+        let config = super::ContextPackDnaConfig {
+            enabled: true,
+            max_items: 10,
+            max_edges: 30,
+        };
+        let mut limited = original.clone();
+        let mut expired = ExplanationWorkBudget::new(Some(10));
+        expired.set_elapsed_ms(10);
+        super::attach_pack_dna_from_snapshot(
+            &connection,
+            &mut limited,
+            config,
+            std::time::Instant::now(),
+            &mut expired,
+        );
+        super::append_pack_explanation_budget_notices(
+            &mut limited,
+            &mut expired,
+            Some(Path::new("/test/workspace")),
+            Path::new("/test/workspace/.ee/ee.db"),
+            None,
+        );
+        assert_eq!(limited.data.pack, primary);
+        assert!(limited.data.pack_dna.is_none());
+        assert_eq!(limited.data.degraded.len(), 1);
+        assert_eq!(
+            limited.data.degraded[0].code,
+            "explanation_budget_exhausted"
+        );
+        let repair = limited.data.degraded[0].repair.as_deref().unwrap_or("");
+        assert!(repair.contains("Repeat the original pack/context request"));
+        assert!(repair.contains("EE_EXPLANATION_BUDGET_MS=0"));
+
+        let mut uncapped = original.clone();
+        let mut disabled = ExplanationWorkBudget::new(None);
+        super::attach_pack_dna_from_snapshot(
+            &connection,
+            &mut uncapped,
+            config,
+            std::time::Instant::now(),
+            &mut disabled,
+        );
+        assert_eq!(uncapped.data.pack, primary);
+        assert!(
+            uncapped
+                .data
+                .degraded
+                .iter()
+                .any(|entry| { entry.code == "context_graph_snapshot_unavailable" }),
+            "negative control must exercise the unavailable graph tables"
+        );
+
+        let mut generous_response = original;
+        let mut generous = ExplanationWorkBudget::new(Some(u64::MAX));
+        generous.set_elapsed_ms(0);
+        super::attach_pack_dna_from_snapshot(
+            &connection,
+            &mut generous_response,
+            config,
+            std::time::Instant::now(),
+            &mut generous,
+        );
+        assert_eq!(
+            uncapped, generous_response,
+            "an unspent budget must preserve the ordinary response"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explanation_replay_retains_store_scope_time_and_graph_controls() -> Result<(), String> {
+        let response =
+            context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(941)))?;
+        let mut options =
+            context_options_with_coordination_snapshot(PathBuf::from("/test/snapshot's.json"));
+        options.query = response.data.request.query.clone();
+        options.workspace_path = PathBuf::from("/test/workspace with space");
+        let database = PathBuf::from("/test/store's/other.db");
+        options.database_path = Some(database.clone());
+        options.index_dir = Some(PathBuf::from("/test/derived index"));
+        options.source_mode = crate::core::search::SearchSourceMode::LexicalOnly;
+        options.strict_source_mode = true;
+        options.memory_scope = MemoryScope::SelfOnly;
+        options.strict_scope = true;
+        options.speed = crate::search::SpeedMode::Quality;
+        options.redaction_level = crate::models::RedactionLevel::Standard;
+        let as_of = "2026-08-01T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .map_err(|error| error.to_string())?;
+        options.as_of = Some(as_of);
+        options.filters.temporal.as_of = Some(as_of);
+        options.task_paths = vec!["src/release.rs".to_owned(), "src/quote's.rs".to_owned()];
+        options.bead_id = Some("bd-replay".to_owned());
+        options.include_tombstoned = true;
+        options.include_expired = true;
+        options.include_future = true;
+        options.include_stale = true;
+        options.require_fresh_sentinels = true;
+        options.ppr_weight = Some(0.25);
+        options.changed_symbols = vec!["crate::release".to_owned()];
+        options.changed_symbols_from_git = true;
+        options.relevance_floor = Some(0.1);
+        options.no_lod = true;
+        options.output_options.include_coverage_fill = false;
+        let repair = super::pack_explanation_replay_command(
+            &response,
+            Some(&options),
+            Some(&options.workspace_path),
+            &database,
+        );
+        assert!(repair.starts_with("EE_EXPLANATION_BUDGET_MS=0 ee context "));
+        for preserved in [
+            "--database='/test/store'\\''s/other.db'",
+            "--workspace='/test/workspace with space'",
+            "--index-dir='/test/derived index'",
+            "--source-mode='lexical_only'",
+            "--strict-source-mode",
+            "--memory-scope='self'",
+            "--strict-scope",
+            "--speed='quality'",
+            "--redaction='standard'",
+            "--as-of='2026-08-01T12:00:00+00:00'",
+            "--task-path='src/release.rs'",
+            "--task-path='src/quote'\\''s.rs'",
+            "--bead-id='bd-replay'",
+            "--max-tokens='64'",
+            "--candidate-pool='1'",
+            "--profile='balanced'",
+            "--include-tombstoned",
+            "--include-expired",
+            "--include-future",
+            "--include-stale",
+            "--require-fresh-sentinels",
+            "--ppr-weight='0.25'",
+            "--changed-symbol='crate::release'",
+            "--changed-symbols-from-git",
+            "--relevance-floor='0.1'",
+            "--coordination-snapshot='/test/snapshot'\\''s.json'",
+            "--no-lod",
+            "--no-coverage-fill='true'",
+            "--read-only",
+            "--explain",
+        ] {
+            assert!(repair.contains(preserved), "missing {preserved}: {repair}");
+        }
+        assert!(repair.ends_with(" -- 'pack dna disabled contract'"));
+        Ok(())
+    }
+
+    #[test]
+    fn explanation_replay_does_not_broaden_unrepresentable_requests() -> Result<(), String> {
+        let response =
+            context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(942)))?;
+        let base = context_options_with_coordination_snapshot(PathBuf::from("/test/snapshot.json"));
+        let as_of = "2026-08-01T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .map_err(|error| error.to_string())?;
+        let mut filtered = base.clone();
+        filtered.filters.temporal.after = Some(as_of);
+        let mut capped = base.clone();
+        capped.max_results = Some(2);
+        let mut paginated = base.clone();
+        paginated.pagination = Some(ContextPagination {
+            limit: 2,
+            offset: 3,
+            query_hash: "blake3:replay-fixture".to_owned(),
+        });
+        let mut lensed = base.clone();
+        lensed.task_lens = Some(super::ContextTaskLens {
+            id: "release".to_owned(),
+            version: 1,
+            lens_hash: "blake3:lens-fixture".to_owned(),
+        });
+        let mut legacy_redaction = base.clone();
+        legacy_redaction.redaction_level = crate::models::RedactionLevel::Full;
+        let mut conflicting_time = base;
+        conflicting_time.as_of = Some(as_of);
+        conflicting_time.filters.temporal.as_of = Some(as_of + chrono::Duration::hours(1));
+        for (reason, options) in [
+            ("filter", Some(&filtered)),
+            ("max results", Some(&capped)),
+            ("pagination", Some(&paginated)),
+            ("lens", Some(&lensed)),
+            ("legacy redaction", Some(&legacy_redaction)),
+            ("conflicting clocks", Some(&conflicting_time)),
+            ("missing options", None),
+        ] {
+            let repair = super::pack_explanation_replay_command(
+                &response,
+                options,
+                Some(Path::new("/test/workspace")),
+                Path::new("/test/workspace/.ee/ee.db"),
+            );
+            assert!(
+                repair.starts_with("Repeat the original pack/context request"),
+                "{reason}: {repair}"
+            );
+            assert!(repair.contains("EE_EXPLANATION_BUDGET_MS=0"));
+            assert!(
+                !repair.starts_with("EE_EXPLANATION_BUDGET_MS=0 ee "),
+                "must not silently broaden {reason}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn context_pack_dna_timeout_emits_cataloged_degradation() -> Result<(), String> {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();

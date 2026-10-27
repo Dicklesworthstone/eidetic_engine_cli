@@ -1,0 +1,23 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "explanation_budget_config_invalid",
+  "introduced_by": { "bead": "bd-1nxz4.4", "epic_letter": "S" },
+  "surfaces": ["why", "context", "pack"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A malformed optional budget override does not abort primary search configuration or pack assembly. The explanation owner reports the invalid value and continues without a cap.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee config set graph.feature.pack_dna.enabled true --workspace .",
+      "ee remember 'Release checklist requires passing verification.' --workspace . --level semantic --kind fact --json"
+    ],
+    "invocation": "EE_EXPLANATION_BUDGET_MS=invalid ee context 'release checklist' --workspace . --read-only --explain --json"
+  },
+  "expected_emission": {
+    "code": "explanation_budget_config_invalid",
+    "severity": "low",
+    "message_contains": ["configuration could not be read", "primary answer"],
+    "repair_contains": "EE_EXPLANATION_BUDGET_MS=0"
+  }
+}

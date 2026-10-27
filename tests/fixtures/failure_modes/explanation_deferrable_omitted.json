@@ -1,0 +1,19 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "explanation_deferrable_omitted",
+  "introduced_by": { "bead": "bd-1nxz4.4", "epic_letter": "S" },
+  "surfaces": ["why"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Elapsed work reaches 30% of the cap before deferrable rationale, non-required verification, coordination, causal or Bayes detail starts. The policy unit control pins 30ms elapsed at a 100ms cap.",
+    "setup_commands": ["ee init --workspace .", "ee config set runtime.explanation_budget_ms 100 --workspace ."],
+    "invocation": "ee why <memory-id> --workspace . --causal-explain --json"
+  },
+  "expected_emission": {
+    "code": "explanation_deferrable_omitted",
+    "severity": "low",
+    "message_contains": ["explanation was omitted", "primary answer was retained"],
+    "repair_contains": "EE_EXPLANATION_BUDGET_MS=0"
+  }
+}

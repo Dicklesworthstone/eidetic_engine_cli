@@ -678,6 +678,30 @@ Current top-level groups:
 | `ee preflight check --cmd "<shell command>" --json` | Retrieve advisory risk, failure, and anti-pattern memory for a command; never block execution |
 | `ee verify proofs --json` | Check committed Lean4 and TLA+ proof artifacts |
 
+### Optional explanation budgets
+
+Set `runtime.explanation_budget_ms` to bound optional detail in `ee why` and
+Pack DNA (`ee pack --explain` / `ee context --explain`). The default is disabled;
+`0` also disables the cap. For example:
+
+```bash
+ee config set runtime.explanation_budget_ms 20 --workspace .
+EE_EXPLANATION_BUDGET_MS=20 ee pack "investigate the retry policy" --explain --json
+EE_EXPLANATION_BUDGET_MS=0 ee why <memory-id> --json
+```
+
+The gate runs before optional queries and graph work. Primary pack selection
+and required `why` findings remain available. Omitted components appear in
+`degraded[]`, with an uncapped replay command retaining the request's store and
+scope, or an instruction to repeat the original request when its full options
+cannot be represented by a simple CLI replay. Invalid environment overrides
+produce an advisory on explanation surfaces instead of blocking normal search.
+
+This is a cooperative admission budget: an operation already running can finish
+after the limit. Enabled caps can omit different optional details as timing
+changes. If Pack DNA is omitted, the delivered pack text and its content hash
+change together. Leave the cap disabled when identical optional detail matters.
+
 ### Agent integration
 
 | Command | Purpose |
@@ -1785,6 +1809,7 @@ jsonl_export  = false                # auto-export memory.jsonl on each commit
 daemon            = false            # one-shot CLI mode
 job_budget_ms     = 5000             # cancel any in-process job after this
 import_batch_size = 200
+explanation_budget_ms = 0            # optional why / Pack DNA work; 0 disables
 
 [cass]
 enabled = true

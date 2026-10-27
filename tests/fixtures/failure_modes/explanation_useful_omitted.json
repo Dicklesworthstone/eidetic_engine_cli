@@ -1,0 +1,19 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "explanation_useful_omitted",
+  "introduced_by": { "bead": "bd-1nxz4.4", "epic_letter": "S" },
+  "surfaces": ["why", "context", "pack"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Elapsed work reaches 60% of the cap before optional graph, attestation, load-bearing, lineage or Pack DNA work starts. The policy unit control pins 60ms elapsed at a 100ms cap.",
+    "setup_commands": ["ee init --workspace .", "ee config set runtime.explanation_budget_ms 100 --workspace ."],
+    "invocation": "ee pack 'explain the release checklist' --workspace . --read-only --explain --json"
+  },
+  "expected_emission": {
+    "code": "explanation_useful_omitted",
+    "severity": "low",
+    "message_contains": ["explanation was omitted", "primary answer was retained"],
+    "repair_contains": "EE_EXPLANATION_BUDGET_MS=0"
+  }
+}
