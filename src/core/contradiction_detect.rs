@@ -34,7 +34,7 @@ use crate::graph::health::{
     ContradictionCluster, ContradictionClusterPolicy, ContradictionSeverity,
     detect_contradiction_clusters_with_policy,
 };
-use crate::models::TrustClass;
+use crate::models::{Tag, TrustClass};
 
 /// An explicit, DB-recorded conflict signal between two memories. Each variant is
 /// evidence the store already holds — never an inferred/fuzzy guess.
@@ -1235,12 +1235,34 @@ pub fn plan_conflict_resolution(
                     ),
                 };
             }
+            // Tag insertion can silently ignore invalid storage values. Build
+            // both the effects and rationale from validated canonical tags
+            // before permitting a terminal resolution.
+            let canonical_scope_tags = |tags: &[String]| {
+                tags.iter()
+                    .map(|raw| Tag::parse(raw).map(|tag| tag.to_string()))
+                    .collect::<Result<BTreeSet<_>, _>>()
+                    .map(|tags| tags.into_iter().collect::<Vec<_>>())
+            };
+            let (Ok(positional_a_tags), Ok(positional_b_tags)) = (
+                canonical_scope_tags(&request.scope_a_tags),
+                canonical_scope_tags(&request.scope_b_tags),
+            ) else {
+                return ConflictResolutionOutcome::InvalidRequest {
+                    message: format!(
+                        "--verb scope-split requires valid memory tags of at most {} UTF-8 bytes in both scopes.",
+                        crate::models::MAX_TAG_BYTES,
+                    ),
+                    repair: "Use comma-separated labels such as --scope-a-tags scope:production --scope-b-tags scope:development; labels cannot contain spaces or path delimiters."
+                        .to_owned(),
+                };
+            };
             // Scopes name the positional CLI arguments, which may be reversed
             // relative to the canonical pair ordering used by the surface.
             let (scope_a_tags, scope_b_tags) = if request.memory_a == pair.memory_a.id {
-                (&request.scope_a_tags, &request.scope_b_tags)
+                (&positional_a_tags, &positional_b_tags)
             } else {
-                (&request.scope_b_tags, &request.scope_a_tags)
+                (&positional_b_tags, &positional_a_tags)
             };
             vec![
                 PlannedResolutionAction::AddTags {
@@ -2358,6 +2380,85 @@ mod tests {
     }
 
     #[test]
+    fn scope_split_rejects_invalid_tags_on_either_side_before_planning_effects() {
+        for invalid in [
+            String::new(),
+            "   ".to_owned(),
+            "x".repeat(65),
+            "é".repeat(33),
+            "scope/team".to_owned(),
+            "scope team".to_owned(),
+            "scope,team".to_owned(),
+            "*".to_owned(),
+        ] {
+            for invalid_a in [true, false] {
+                let mut req = request(ResolveVerb::ScopeSplit, None);
+                req.scope_a_tags = vec!["scope:production".to_owned()];
+                req.scope_b_tags = vec!["scope:development".to_owned()];
+                if invalid_a {
+                    req.scope_a_tags = vec![invalid.clone()];
+                } else {
+                    req.scope_b_tags = vec![invalid.clone()];
+                }
+                let outcome = plan_conflict_resolution(&fixture_surface(), &req);
+                assert!(
+                    matches!(outcome, ConflictResolutionOutcome::InvalidRequest { .. }),
+                    "invalid scope label {invalid:?} on side a={invalid_a} must not yield resolution effects: {outcome:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scope_split_uses_canonical_tags_for_effects_rationale_and_writer_replanning() {
+        let mut req = request(ResolveVerb::ScopeSplit, None);
+        req.scope_a_tags = vec![
+            " Scope:PROD ".to_owned(),
+            "Team:OPS".to_owned(),
+            "scope:prod".to_owned(),
+            "Cafe\u{301}".to_owned(),
+        ];
+        req.scope_b_tags = vec![" PYTHON ".to_owned(), "python".to_owned()];
+        let outcome = plan_conflict_resolution(&fixture_surface(), &req);
+        let ConflictResolutionOutcome::Plan(plan) = outcome else {
+            panic!("expected a canonical scope plan, got {outcome:?}");
+        };
+        let PlannedResolutionAction::AddTags {
+            memory_id: memory_a,
+            tags: tags_a,
+        } = &plan.actions[0]
+        else {
+            panic!("first effect must scope the first canonical memory");
+        };
+        let PlannedResolutionAction::AddTags {
+            memory_id: memory_b,
+            tags: tags_b,
+        } = &plan.actions[1]
+        else {
+            panic!("second effect must scope the second canonical memory");
+        };
+        assert_eq!(memory_a, MEM_A);
+        assert_eq!(memory_b, MEM_B);
+        assert_eq!(tags_a, &["café", "scope:prod", "team:ops"]);
+        assert_eq!(tags_b, &["python"]);
+        let PlannedResolutionAction::RecordDecision { chosen, .. } = &plan.actions[3] else {
+            panic!("scope resolution must record its canonical rationale");
+        };
+        assert_eq!(
+            chosen,
+            &format!("scope-split: {MEM_A} → [café,scope:prod,team:ops]; {MEM_B} → [python]"),
+        );
+        // The writer reconstructs its request from these exact AddTags effects.
+        // It must reproduce the reviewed plan after acquiring the transaction.
+        req.scope_a_tags = tags_a.clone();
+        req.scope_b_tags = tags_b.clone();
+        assert_eq!(
+            plan_conflict_resolution(&fixture_surface(), &req),
+            ConflictResolutionOutcome::Plan(plan),
+        );
+    }
+
+    #[test]
     fn every_resolution_decision_has_a_distinct_alternative_without_copying_bodies() {
         let mut surface = fixture_surface();
         surface.pairs[0].memory_a.content = "password=conflict-private-canary".to_owned();
@@ -2395,16 +2496,31 @@ mod tests {
     #[test]
     fn scope_split_keeps_scopes_bound_to_positional_memories_when_reversed() {
         let mut forward = request(ResolveVerb::ScopeSplit, None);
-        forward.scope_a_tags = vec!["rust".to_owned()];
-        forward.scope_b_tags = vec!["python".to_owned()];
+        forward.scope_a_tags = vec![
+            " Rust ".to_owned(),
+            "scope:ALL".to_owned(),
+            "RUST".to_owned(),
+        ];
+        forward.scope_b_tags = vec![
+            " Python ".to_owned(),
+            "scope:dev".to_owned(),
+            "PYTHON".to_owned(),
+        ];
         let mut reversed = forward.clone();
         reversed.memory_a = MEM_B;
         reversed.memory_b = MEM_A;
-        reversed.scope_a_tags = forward.scope_b_tags.clone();
-        reversed.scope_b_tags = forward.scope_a_tags.clone();
+        reversed.scope_a_tags = vec!["SCOPE:DEV".to_owned(), "python".to_owned()];
+        reversed.scope_b_tags = vec!["rust".to_owned(), "scope:all".to_owned()];
+        let forward_outcome = plan_conflict_resolution(&fixture_surface(), &forward);
+        let reversed_outcome = plan_conflict_resolution(&fixture_surface(), &reversed);
+        let ConflictResolutionOutcome::Plan(forward_plan) = forward_outcome else {
+            panic!("expected a forward scope plan, got {forward_outcome:?}");
+        };
+        let ConflictResolutionOutcome::Plan(reversed_plan) = reversed_outcome else {
+            panic!("expected a reversed scope plan, got {reversed_outcome:?}");
+        };
         assert_eq!(
-            plan_conflict_resolution(&fixture_surface(), &reversed),
-            plan_conflict_resolution(&fixture_surface(), &forward),
+            reversed_plan, forward_plan,
             "the same positional bindings must yield the same canonical plan and rationale"
         );
     }
