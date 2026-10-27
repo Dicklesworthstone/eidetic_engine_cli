@@ -537,6 +537,136 @@ fn closure_lint_scrubs_abstention_false_positives() -> TestResult {
     Ok(())
 }
 
+// Rule 3 asks whether a closed implements-surface bead shipped a golden
+// snapshot, and for most of this project's life it answered that question with a
+// SUBSTRING match over the flattened file list of the three golden directories,
+// never opening the file. Two shapes therefore satisfied it while asserting
+// nothing, and the next three tests are the controls for them. Both were
+// measured live on 2026-10-27: 14 closed surfaces had no artifact of their own
+// name anywhere -- among them `remember`, `search`, `claim`, `audit` and
+// `proximity`, because a common word matches many fixture paths, so the hole
+// covered hardest for the most load-bearing commands -- and 22 pointed at a
+// zero-byte file. All 22 of those files arrived in one commit, 4ee54186e
+// "test(closure): track required lint artifacts", and 21 are read by nothing.
+//
+// A test that only proves the linter still ACCEPTS good evidence cannot fail
+// when the predicate stops discriminating, which is how this went unnoticed; the
+// rejection arms below are the ones that carry the signal.
+#[test]
+fn closure_lint_rejects_zero_byte_golden_snapshot() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-empty-golden","title":"[implements-surface:empty-golden] closed against a placeholder","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:empty-golden"]}"#,
+        ],
+        "",
+        // Deliberately NOT via write_workspace's golden_surfaces, which writes
+        // real bytes. This file is created empty, the way `touch` leaves it.
+        &[],
+    )?;
+    write_text_file(temp.path(), "tests/golden/empty-golden.snap", "")?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter must reject a zero-byte golden snapshot\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "report status")?;
+    ensure_eq(report_count(&report)?, 1, "report count")?;
+    ensure_eq(
+        violation_keys(&report)?,
+        vec![(
+            "closed-empty-golden".to_owned(),
+            "empty-golden".to_owned(),
+            "zero-byte tests/golden/empty-golden.snap asserts nothing".to_owned(),
+        )],
+        "a zero-byte snapshot must be named as such, not reported as missing",
+    )
+}
+
+#[test]
+fn closure_lint_rejects_substring_only_golden_match() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-substring","title":"[implements-surface:search] closed with no artifact of its own","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:search"]}"#,
+        ],
+        "",
+        &[],
+    )?;
+    // An unrelated artifact, with real bytes, whose PATH contains the surface
+    // name. This is the exact shape that covered for `search` and `remember` in
+    // the live tree: no golden of their own, and the gate green anyway.
+    write_text_file(
+        temp.path(),
+        "tests/fixtures/golden/unrelated/prefix_search_suffix.golden",
+        "bytes about something else\n",
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter must reject a substring-only golden match\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "report status")?;
+    ensure_eq(report_count(&report)?, 1, "report count")?;
+    ensure_eq(
+        violation_keys(&report)?,
+        vec![(
+            "closed-substring".to_owned(),
+            "search".to_owned(),
+            "missing tests/golden/search.snap".to_owned(),
+        )],
+        "an unrelated path containing the surface name must not satisfy Rule 3",
+    )
+}
+
+// The acceptance control for the pair above. Without it, a predicate that
+// rejected EVERYTHING would pass both rejection arms while detecting nothing --
+// and `tests/fixtures/golden/**` is a location CLAUDE.md declares canonical, so
+// tightening Rule 3 must not quietly drop it.
+#[test]
+fn closure_lint_accepts_exact_fixtures_golden_artifact() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-fixture-golden","title":"[implements-surface:fixture-golden] real implementation","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:fixture-golden"]}"#,
+        ],
+        "",
+        &[],
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/fixtures/golden/commands/fixture-golden.golden",
+        "golden bytes\n",
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        output.status.success(),
+        format!(
+            "linter must accept an exact, non-empty tests/fixtures/golden artifact\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "pass", "report status")?;
+    ensure_eq(report_count(&report)?, 0, "report count")?;
+    ensure_eq(
+        violation_keys(&report)?,
+        Vec::<(String, String, String)>::new(),
+        "tests/fixtures/golden/<category>/<surface>.golden must satisfy Rule 3",
+    )
+}
+
 // CLAUDE.md lists three canonical golden artifact locations: tests/golden/*.snap,
 // tests/snapshots/*.snap (insta), and tests/fixtures/golden/**. The closure
 // linter must accept a real insta snapshot under tests/snapshots/ as evidence

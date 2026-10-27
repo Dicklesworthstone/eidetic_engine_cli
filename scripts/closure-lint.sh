@@ -775,8 +775,41 @@ $SURFACE_STATUS_SETS
 EOF
 IFS="$saved_ifs"
 
-GOLDEN_ARTIFACT_PATHS=$(
-    find "$GOLDEN_DIR" "$SNAPSHOT_DIR" "tests/fixtures/golden" -type f 2>/dev/null || true
+# EXACT BASENAMES, SPLIT BY WHETHER THE FILE CARRIES BYTES.
+#
+# Rule 3 used to be a SUBSTRING match over the flattened `find` output of these
+# three directories, and both halves of that were wrong:
+#
+#   substring  a surface named `search` was satisfied by any of the 282 fixture
+#              paths that happen to contain that word, so the artifact did not
+#              have to relate to the surface at all;
+#   existence  the predicate never opened the file, so a ZERO-BYTE placeholder
+#              satisfied it.
+#
+# Measured 2026-10-27 over the 162 closed `implements-surface:` beads: 12 had no
+# artifact of their name anywhere under the three roots and passed purely on
+# substring, and 23 pointed at a zero-byte snap. 22 of the 113 files in
+# tests/golden are empty, 21 of those are read by nothing, and all of them
+# arrived in ONE commit -- 4ee54186e "test(closure): track required lint
+# artifacts" -- which is precisely the closure an existence-only check rewards.
+#
+# A "some test must READ it" clause deliberately does NOT belong here. The
+# GoldenTest harness (tests/golden.rs:22) builds
+# `tests/fixtures/golden/<category>/<name>.golden` out of its struct fields, so
+# no literal-filename search can see its consumers and such a clause would
+# condemn 282 live fixtures. That dimension is bd-qzr0v's, which measured 88% of
+# the convention backed by a real consumer; the defect here is narrower and
+# fully decidable from the filesystem.
+#
+# Both inventories are captured once because audit mode checks hundreds of
+# surfaces and the artifacts do not change during one lint invocation.
+GOLDEN_NONEMPTY_BASENAMES=$(
+    find "$GOLDEN_DIR" "$SNAPSHOT_DIR" "tests/fixtures/golden" -type f ! -size 0 2>/dev/null |
+        sed 's|.*/||' | sort -u || true
+)
+GOLDEN_EMPTY_BASENAMES=$(
+    find "$GOLDEN_DIR" "$SNAPSHOT_DIR" "tests/fixtures/golden" -type f -size 0 2>/dev/null |
+        sed 's|.*/||' | sort -u || true
 )
 
 SENTINEL_DECLARATIONS=$(
@@ -879,18 +912,58 @@ surface_has_closed_implementation() {
     esac
 }
 
-surface_has_golden_snapshot() {
-    local surface="$1"
-    local underscored
-    underscored=${surface//-/_}
+# Whole-line membership of a basename in one of the inventories above.
+#
+# The newline sentinels are what make this an EXACT test rather than the
+# substring test Rule 3 used to be, so they are load-bearing. `grep -Fxq` would
+# read better and is not usable: a `printf | grep -q` pipeline reports FAILURE
+# on a match once the input is large enough for grep's early exit to SIGPIPE the
+# writer, so the membership test would fail open on exactly the big inventories
+# it exists to search.
+golden_basename_is_present() {
+    local name="$1"
+    local haystack=$'\n'"$2"$'\n'
 
-    # CLAUDE.md lists three canonical golden artifact locations. Their file
-    # inventory is captured once above because audit mode checks hundreds of
-    # surfaces and the artifacts do not change during one lint invocation.
-    case "$GOLDEN_ARTIFACT_PATHS" in
-        *"$surface"*|*"$underscored"*) return 0 ;;
+    case "$haystack" in
+        *$'\n'"$name"$'\n'*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# CLAUDE.md lists three canonical golden artifact locations, with two
+# extensions: `.snap` under tests/golden and tests/snapshots, `.golden` under
+# tests/fixtures/golden. Both spellings of the surface name are tried because
+# the tracker uses hyphens and the filesystem uses either -- a single-spelling
+# check returns 29 and is WRONG, which bd-qzr0v measured before this did.
+surface_has_golden_snapshot() {
+    local surface="$1"
+    local underscored=${surface//-/_}
+    local name
+
+    for name in "$surface.snap" "$underscored.snap" \
+        "$surface.golden" "$underscored.golden"; do
+        if golden_basename_is_present "$name" "$GOLDEN_NONEMPTY_BASENAMES"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Separates "no artifact of that name exists" from "the artifact exists and is a
+# zero-byte placeholder", so the violation names the real defect instead of
+# telling an operator to create a file that is already on disk.
+surface_golden_is_empty_placeholder() {
+    local surface="$1"
+    local underscored=${surface//-/_}
+    local name
+
+    for name in "$surface.snap" "$underscored.snap" \
+        "$surface.golden" "$underscored.golden"; do
+        if golden_basename_is_present "$name" "$GOLDEN_EMPTY_BASENAMES"; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 bead_is_bd3usjw_family() {
@@ -2039,9 +2112,15 @@ while IFS= read -r bead_row; do
                 add_violation "$bead_id" "implements-surface" "$surface" "${constant} sentinel still exists"
             fi
 
-            # Rule 3: Implements-surface closures need a public golden snapshot.
+            # Rule 3: Implements-surface closures need a public golden snapshot
+            # that exists under its own name and carries bytes.
             if ! surface_has_golden_snapshot "$surface"; then
-                add_violation "$bead_id" "implements-surface" "$surface" "missing $GOLDEN_DIR/$surface.snap"
+                if surface_golden_is_empty_placeholder "$surface"; then
+                    add_violation "$bead_id" "implements-surface" "$surface" \
+                        "zero-byte $GOLDEN_DIR/$surface.snap asserts nothing"
+                else
+                    add_violation "$bead_id" "implements-surface" "$surface" "missing $GOLDEN_DIR/$surface.snap"
+                fi
             fi
 
             # Rule 4: New bd-3usjw e2e implementation tests must emit the

@@ -1,13 +1,31 @@
 {
   "generatedFrom": ".closure-lint-report.json",
-  "note": "Known historical closure-lint audit debt. Audit mode fails on violations not listed here.",
+  "note": "Known historical closure-lint audit debt. Audit mode fails on violations not listed here, and exits CLOSURE_LINT_STALE_BASELINE_CODE on any entry here that no longer matches a live violation -- so this file can only shrink. 2026-10-27: 36 entries added when Rule 3 stopped accepting a substring match against an unrelated path (14 surfaces, including remember, search, claim, audit and proximity -- common words match many fixture paths, so the hole covered hardest for the most load-bearing commands) and stopped accepting a zero-byte placeholder (22 surfaces). The 22 zero-byte entries name files that exist on disk and assert nothing; they are a list of goldens to CAPTURE, not a list of surfaces to excuse.",
   "schema": "ee.closure_lint.audit_baseline.v1",
   "violations": [
+    {
+      "bead": "bd-1538u",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/query-file-graph.snap",
+      "surface": "query-file-graph"
+    },
     {
       "bead": "bd-17bob",
       "label": "implements-surface",
       "reason": "missing tests/golden/external_derivation_candidates.snap",
       "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-1e8v3",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/audit.snap",
+      "surface": "audit"
+    },
+    {
+      "bead": "bd-1iltv",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/embed_dedup.snap",
+      "surface": "embed_dedup"
     },
     {
       "bead": "bd-1prrl.2",
@@ -58,10 +76,22 @@
       "surface": "adaptive_pack_budget"
     },
     {
+      "bead": "bd-1zb7k.16",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/ownership_posture.snap asserts nothing",
+      "surface": "ownership_posture"
+    },
+    {
       "bead": "bd-21xbi.2",
       "label": "implements-surface",
       "reason": "close_reason contains abstention language",
       "surface": "lexical_ram_tier"
+    },
+    {
+      "bead": "bd-2caru.1",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/read_pool_core.snap asserts nothing",
+      "surface": "read_pool_core"
     },
     {
       "bead": "bd-2dc25",
@@ -96,7 +126,25 @@
     {
       "bead": "bd-2xdom.2",
       "label": "implements-surface",
+      "reason": "missing tests/golden/remember.snap",
+      "surface": "remember"
+    },
+    {
+      "bead": "bd-2xdom.2",
+      "label": "implements-surface",
       "reason": "referenced test path missing: tests/static",
+      "surface": "remember"
+    },
+    {
+      "bead": "bd-2xdom.3",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/search.snap",
+      "surface": "search"
+    },
+    {
+      "bead": "bd-2xdom.4",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/remember.snap",
       "surface": "remember"
     },
     {
@@ -128,6 +176,24 @@
       "label": "implements-surface",
       "reason": "missing tests/golden/zero_touch_tailscale_mesh.snap",
       "surface": "zero_touch_tailscale_mesh"
+    },
+    {
+      "bead": "bd-36bbk.1.1",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/tailscale_local_probe.snap asserts nothing",
+      "surface": "tailscale_local_probe"
+    },
+    {
+      "bead": "bd-36bbk.1.1.1",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/tailscale_local_probe.snap asserts nothing",
+      "surface": "tailscale_local_probe"
+    },
+    {
+      "bead": "bd-36bbk.1.10",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/fake_tailscale_e2e_harness.snap asserts nothing",
+      "surface": "fake_tailscale_e2e_harness"
     },
     {
       "bead": "bd-36bbk.1.11",
@@ -238,10 +304,28 @@
       "surface": "ee_mesh_auto_status_view"
     },
     {
+      "bead": "bd-36bbk.1.5",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/auto_enrollment_safety_snapshot.snap asserts nothing",
+      "surface": "auto_enrollment_safety_snapshot"
+    },
+    {
       "bead": "bd-36bbk.1.6",
       "label": "implements-surface",
       "reason": "missing tests/golden/mesh_hello_handshake_protocol.snap",
       "surface": "mesh_hello_handshake_protocol"
+    },
+    {
+      "bead": "bd-36bbk.1.7",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/peer_discovery_policy.snap asserts nothing",
+      "surface": "peer_discovery_policy"
+    },
+    {
+      "bead": "bd-36bbk.1.8",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/tailnet_change_guard.snap asserts nothing",
+      "surface": "tailnet_change_guard"
     },
     {
       "bead": "bd-36bbk.1.9",
@@ -304,6 +388,12 @@
       "surface": "external_derivation_candidates"
     },
     {
+      "bead": "bd-3usjw.1",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/db_inspect.snap asserts nothing",
+      "surface": "db_inspect"
+    },
+    {
       "bead": "bd-3usjw.11",
       "label": "implements-surface",
       "reason": "missing tests/golden/franken_dep_publishing.snap",
@@ -340,6 +430,12 @@
       "surface": "close_the_gap_archive"
     },
     {
+      "bead": "bd-3usjw.2",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/graph_centrality_read.snap asserts nothing",
+      "surface": "graph_centrality_read"
+    },
+    {
       "bead": "bd-3usjw.25",
       "label": "implements-surface",
       "reason": "missing tests/golden/cross_platform_determinism.snap",
@@ -356,6 +452,18 @@
       "label": "implements-surface",
       "reason": "referenced test path missing: tests/mcp_parity/*.rs",
       "surface": "mcp_parity_test_suite"
+    },
+    {
+      "bead": "bd-3usjw.3",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/mcp_top_level.snap asserts nothing",
+      "surface": "mcp_top_level"
+    },
+    {
+      "bead": "bd-3usjw.4",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/serve_localhost.snap asserts nothing",
+      "surface": "serve_localhost"
     },
     {
       "bead": "bd-3usjw.43",
@@ -388,6 +496,12 @@
       "surface": "rejection_criteria"
     },
     {
+      "bead": "bd-3usjw.46",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/minhash_rank_centrality.snap asserts nothing",
+      "surface": "minhash_rank_centrality"
+    },
+    {
       "bead": "bd-3usjw.47",
       "label": "implements-surface",
       "reason": "missing tests/golden/sprt_quarantine.snap",
@@ -416,6 +530,12 @@
       "label": "math-ambition",
       "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields",
       "surface": "rejection_criteria"
+    },
+    {
+      "bead": "bd-3usjw.5",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/swarm_subcommand.snap asserts nothing",
+      "surface": "swarm_subcommand"
     },
     {
       "bead": "bd-3usjw.50",
@@ -448,10 +568,28 @@
       "surface": "e2e_backup_restore_roundtrip"
     },
     {
+      "bead": "bd-3usjw.6",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/trauma_guard_preflight.snap asserts nothing",
+      "surface": "trauma_guard_preflight"
+    },
+    {
       "bead": "bd-3usjw.69",
       "label": "implements-surface",
       "reason": "missing tests/golden/mcp_serve_stdio_subcommand.snap",
       "surface": "mcp_serve_stdio_subcommand"
+    },
+    {
+      "bead": "bd-3usjw.7",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/trauma_guard_hook_helper.snap asserts nothing",
+      "surface": "trauma_guard_hook_helper"
+    },
+    {
+      "bead": "bd-3usjw.70",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/mcp_validate_subcommand.snap asserts nothing",
+      "surface": "mcp_validate_subcommand"
     },
     {
       "bead": "bd-3usjw.9",
@@ -460,10 +598,40 @@
       "surface": "first_signed_release"
     },
     {
+      "bead": "bd-5vqr",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/proximity.snap",
+      "surface": "proximity"
+    },
+    {
+      "bead": "bd-8jvg",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/graph-determinism-harness.snap asserts nothing",
+      "surface": "graph-determinism-harness"
+    },
+    {
       "bead": "bd-8k9gh",
       "label": "implements-surface",
       "reason": "missing tests/golden/external_derivation_candidates.snap",
       "surface": "external_derivation_candidates"
+    },
+    {
+      "bead": "bd-a7mm",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/memory-impact-analysis.snap",
+      "surface": "memory-impact-analysis"
+    },
+    {
+      "bead": "bd-ar5o",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/audit.snap",
+      "surface": "audit"
+    },
+    {
+      "bead": "bd-bzwu",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/query-file-graph.snap",
+      "surface": "query-file-graph"
     },
     {
       "bead": "bd-f6jfs",
@@ -476,6 +644,42 @@
       "label": "implements-surface",
       "reason": "close_reason contains abstention language",
       "surface": "context-pack-dna"
+    },
+    {
+      "bead": "bd-fdvt",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/context-pack-dna.snap",
+      "surface": "context-pack-dna"
+    },
+    {
+      "bead": "bd-fvu0",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/claim.snap",
+      "surface": "claim"
+    },
+    {
+      "bead": "bd-igvt",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/graph-algorithm-witnesses.snap asserts nothing",
+      "surface": "graph-algorithm-witnesses"
+    },
+    {
+      "bead": "bd-k2p52",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/tailscale_local_probe.snap asserts nothing",
+      "surface": "tailscale_local_probe"
+    },
+    {
+      "bead": "bd-mhc1",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/status-skyline.snap",
+      "surface": "status-skyline"
+    },
+    {
+      "bead": "bd-mvld",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/curate-structural-decay.snap asserts nothing",
+      "surface": "curate-structural-decay"
     },
     {
       "bead": "bd-oja31",
@@ -512,6 +716,18 @@
       "label": "implements-surface",
       "reason": "missing tests/golden/context-ppr.snap",
       "surface": "context-ppr"
+    },
+    {
+      "bead": "bd-qigqt",
+      "label": "implements-surface",
+      "reason": "missing tests/golden/claim.snap",
+      "surface": "claim"
+    },
+    {
+      "bead": "bd-qnfw",
+      "label": "implements-surface",
+      "reason": "zero-byte tests/golden/why-causal-explain.snap asserts nothing",
+      "surface": "why-causal-explain"
     },
     {
       "bead": "bd-uxcej",
