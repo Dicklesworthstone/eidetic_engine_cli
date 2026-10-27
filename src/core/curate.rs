@@ -5840,6 +5840,18 @@ fn review_state_rank(review_state: &str) -> u8 {
     }
 }
 
+/// Preview the same live source scope and authority required by proposal and
+/// apply, using a bound read-only snapshot without queue or audit mutations.
+pub(crate) fn preview_conflict_resolution(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    request: &crate::core::contradiction_detect::ConflictResolveRequest<'_>,
+) -> Result<crate::core::contradiction_detect::ConflictResolutionPlan, DomainError> {
+    let mut prepared = prepare_curate_read(workspace_path, database_path)?;
+    let connection = open_bound_curate_snapshot(&mut prepared)?;
+    crate::core::conflict_proposal::live_plan(&connection, &prepared.workspace_id, request)
+}
+
 /// Persist an explicit conflict plan as a reviewable pending proposal.
 pub(crate) fn propose_conflict_resolution(
     workspace_path: &Path,
@@ -6589,8 +6601,12 @@ fn apply_curation_candidate_with_recipe(
                 &checked,
                 Some(&applied_by),
             )?;
-            decision.application.created_memory_id =
-                Some(report.decision.decision.memory_id.clone());
+            decision.application.created_memory_id = report
+                .results
+                .iter()
+                .find(|result| result.action == "mergeMemories")
+                .and_then(|result| result.created_memory_id.clone())
+                .or_else(|| Some(report.decision.decision.memory_id.clone()));
             for warning in report.decision.warnings {
                 decision.application.warnings.push(validation_issue(
                     "conflict_resolution_followup_pending", warning,
@@ -6649,6 +6665,22 @@ fn apply_curation_candidate_with_recipe(
         })
         .into_iter()
         .collect();
+
+    if !options.dry_run
+        && decision.application.errors.is_empty()
+        && (persisted || decision.application.status == "already_applied")
+        && crate::core::conflict_proposal::is_merge_candidate(&stored)
+        && let Some(memory_id) = decision.application.created_memory_id.as_deref()
+        && let Some(failure) = reconcile_curation_index_job(
+            &connection,
+            &prepared.workspace_id,
+            &prepared.workspace_path,
+            &crate::core::conflict_proposal::merge_index_job_id(memory_id),
+            "reviewed conflict merge",
+        )
+    {
+        degraded.push(failure);
+    }
 
     if !options.dry_run
         && decision.application.errors.is_empty()
@@ -10715,12 +10747,15 @@ fn evaluate_conflict_candidate_for_apply(
         format!("ee curate show {} --json", stored.id),
     );
     if stored.status == "applied" && stored.applied_at.is_some() {
-        if let Err(error) = crate::core::conflict_proposal::validate_receipt(stored) {
-            decision
-                .application
-                .errors
-                .push(conflict_proposal_validation_issue(&error));
-            return decision;
+        match crate::core::conflict_proposal::applied_merge_memory_id(connection, stored) {
+            Ok(memory_id) => decision.application.created_memory_id = memory_id,
+            Err(error) => {
+                decision
+                    .application
+                    .errors
+                    .push(conflict_proposal_validation_issue(&error));
+                return decision;
+            }
         }
         decision.application.status = "already_applied".to_owned();
         decision.next_action = "no action required".to_owned();

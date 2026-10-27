@@ -13,7 +13,7 @@ use crate::core::memory::{
     remember_memory,
 };
 use crate::db::{
-    ApplyMemoryLevelTransitionInput, CreateAuditInput, CreateMemoryLinkInput,
+    ApplyMemoryLevelTransitionInput, CreateAuditInput, CreateMemoryInput, CreateMemoryLinkInput,
     CreateSearchIndexJobInput, DbError, MemoryLinkSource, SearchIndexJobType, audit_actions,
     generate_audit_id,
 };
@@ -25,6 +25,8 @@ enum Stage {
     Prepared,
     Memory,
     Fields,
+    MergeMemory,
+    MergeSource,
     Link,
     Predecessor,
     Index,
@@ -90,6 +92,14 @@ fn record_resolution_candidate_with_boundary(
     candidate: Option<&crate::db::StoredCurationCandidate>,
     boundary: impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
 ) -> Result<ConflictResolutionReport, DomainError> {
+    if plan.verb == ResolveVerb::Merge && candidate.is_none() {
+        return Err(DomainError::UsageCodeWithDetails {
+            code: "conflict_merge_requires_review",
+            message: "Merging conflict sources requires an approved curation proposal.".to_owned(),
+            repair: Some("Use ee conflict resolve --verb merge --merge-content <TEXT> --propose, then validate and apply its candidate.".to_owned()),
+            details_json: "{}".to_owned(),
+        });
+    }
     let decisions: Vec<_> = plan
         .actions
         .iter()
@@ -350,6 +360,7 @@ fn record_with_optional_resolution_boundary(
                     &connection,
                     &write,
                     plan,
+                    candidate,
                     options.actor,
                     &stored.updated_at,
                     &mut report,
@@ -364,6 +375,11 @@ fn record_with_optional_resolution_boundary(
                         &connection,
                         candidate,
                         write.memory_id(),
+                        results.iter().find_map(|result| {
+                            (result.action == "mergeMemories")
+                                .then_some(result.created_memory_id.as_deref())
+                                .flatten()
+                        }),
                         &stored.updated_at,
                         options.actor,
                     )
@@ -479,9 +495,18 @@ fn validate_conflict_resolution(
         reason,
         scope_a_tags,
         scope_b_tags,
+        merge_content: plan.actions.iter().find_map(|action| match action {
+            PlannedResolutionAction::MergeMemories { content } => Some(content.as_str()),
+            _ => None,
+        }),
     };
     match plan_conflict_resolution(&surface, &request) {
-        ConflictResolutionOutcome::Plan(current) if &current == plan => Ok(()),
+        ConflictResolutionOutcome::Plan(current) if &current == plan => {
+            if plan.verb == ResolveVerb::Merge {
+                crate::core::conflict_proposal::merge_sources(connection, workspace_id, plan)?;
+            }
+            Ok(())
+        }
         ConflictResolutionOutcome::StaleSurface { .. } => Err(stale_conflict().into()),
         ConflictResolutionOutcome::PolicyDenied { message, repair } => {
             Err(DomainError::PolicyDenied {
@@ -509,12 +534,13 @@ fn apply_resolution(
     connection: &DbConnection,
     write: &PreparedRememberTxnWrite,
     plan: &ConflictResolutionPlan,
+    candidate: Option<&crate::db::StoredCurationCandidate>,
     actor: Option<&str>,
     at: &str,
     report: &mut DecideRecordReport,
     boundary: &mut impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
 ) -> Result<Vec<ConflictResolutionActionResult>, RecordError> {
-    let details = json!({
+    let mut details = json!({
         "schema": CONFLICT_RESOLUTION_AUDIT_SCHEMA,
         "conflictId": plan.conflict_id,
         "memoryA": plan.memory_a,
@@ -525,6 +551,14 @@ fn apply_resolution(
     let mut results = Vec::with_capacity(plan.actions.len());
     for action in &plan.actions {
         let result = match action {
+            PlannedResolutionAction::MergeMemories { content } => {
+                let candidate = candidate.ok_or_else(invalid_conflict_plan)?;
+                let result = merge_memories(
+                    connection, write, plan, candidate, content, actor, at, report, boundary,
+                )?;
+                details["mergedMemoryId"] = json!(result.created_memory_id);
+                result
+            }
             PlannedResolutionAction::RecordDecision { .. } => {
                 let mut audit_ids: Vec<_> = [
                     report.memory_audit_id.clone(),
@@ -684,6 +718,136 @@ fn apply_resolution(
     decision.audit_ids.push(audit_id);
     boundary(Stage::Completion, connection)?;
     Ok(results)
+}
+
+#[allow(clippy::too_many_arguments, reason = "one reviewed merge transaction")]
+fn merge_memories(
+    connection: &DbConnection,
+    write: &PreparedRememberTxnWrite,
+    plan: &ConflictResolutionPlan,
+    candidate: &crate::db::StoredCurationCandidate,
+    content: &str,
+    actor: Option<&str>,
+    at: &str,
+    report: &DecideRecordReport,
+    boundary: &mut impl FnMut(Stage, &DbConnection) -> Result<(), DomainError>,
+) -> Result<ConflictResolutionActionResult, RecordError> {
+    // Re-read complete sources under the same writer fence that creates the
+    // output and closes both active lifetimes. Never transplant peer signatures
+    // or source trust into a newly authored summary.
+    let sources =
+        crate::core::conflict_proposal::merge_sources(connection, write.workspace_id(), plan)?;
+    let memory_id = MemoryId::now().to_string();
+    let confidence = 0.5_f32
+        .min(sources.source_a.confidence)
+        .min(sources.source_b.confidence);
+    let memory = CreateMemoryInput {
+        workspace_id: write.workspace_id().to_owned(),
+        level: "semantic".to_owned(),
+        kind: "summary".to_owned(),
+        content: content.to_owned(),
+        workflow_id: sources.source_a.workflow_id.clone(),
+        confidence,
+        utility: 0.5_f32
+            .min(sources.source_a.utility)
+            .min(sources.source_b.utility),
+        importance: 0.5_f32
+            .min(sources.source_a.importance)
+            .min(sources.source_b.importance),
+        provenance_uri: Some(format!("ee://curation-candidate/{}", candidate.id)),
+        trust_class: "agent_assertion".to_owned(),
+        trust_subclass: crate::core::memory_scope::remember_trust_subclass("conflict_merge"),
+        tags: sources.tags,
+        valid_from: Some(at.to_owned()),
+        valid_to: sources.valid_to,
+    };
+    connection.insert_memory_with_timestamps(&memory_id, &memory, at, at, &memory_id)?;
+    let details = json!({
+        "schema": "ee.conflict.merge.v1",
+        "candidateId": candidate.id,
+        "sourceId": candidate.source_id,
+        "conflictId": plan.conflict_id,
+        "mergedMemoryId": memory_id,
+        "sourceMemoryIds": [&plan.memory_a, &plan.memory_b],
+        "resolutionDecisionId": write.memory_id(),
+        "trustClass": memory.trust_class,
+        "confidence": confidence,
+        "validTo": memory.valid_to,
+    });
+    let creation_audit = generate_audit_id();
+    connection.insert_audit(
+        &creation_audit,
+        &CreateAuditInput {
+            workspace_id: Some(write.workspace_id().to_owned()),
+            actor: actor.map(str::to_owned),
+            action: audit_actions::MEMORY_CREATE.to_owned(),
+            target_type: Some("memory".to_owned()),
+            target_id: Some(memory_id.clone()),
+            details: Some(details.to_string()),
+        },
+    )?;
+    boundary(Stage::MergeMemory, connection)?;
+    let mut audit_ids = vec![creation_audit];
+    for source in [&plan.memory_a, &plan.memory_b] {
+        audit_ids.extend(record_resolution_link(
+            connection,
+            write,
+            CreateMemoryLinkInput {
+                src_memory_id: memory_id.clone(),
+                dst_memory_id: source.clone(),
+                relation: MemoryLinkRelation::DerivedFrom,
+                weight: 1.0,
+                confidence,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: None,
+                source: MemoryLinkSource::Agent,
+                created_by: actor.map(str::to_owned),
+                metadata_json: None,
+            },
+            &details,
+        )?);
+        // The rationale's own revision report must not be overwritten by either
+        // source replacement; both source transitions belong to this action.
+        let mut replacement = report.clone();
+        replacement.link_audit_id = None;
+        replacement.expire_audit_id = None;
+        replace_memory(
+            connection,
+            write,
+            Supersession {
+                from_memory_id: &memory_id,
+                to_memory_id: source,
+                details: details.clone(),
+            },
+            actor,
+            at,
+            &mut replacement,
+            boundary,
+        )?;
+        audit_ids.extend(
+            [replacement.link_audit_id, replacement.expire_audit_id]
+                .into_iter()
+                .flatten(),
+        );
+        boundary(Stage::MergeSource, connection)?;
+    }
+    connection.insert_search_index_job(
+        &crate::core::conflict_proposal::merge_index_job_id(&memory_id),
+        &CreateSearchIndexJobInput {
+            workspace_id: write.workspace_id().to_owned(),
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_owned()),
+            document_id: Some(memory_id.clone()),
+            documents_total: 1,
+        },
+    )?;
+    boundary(Stage::Index, connection)?;
+    Ok(ConflictResolutionActionResult {
+        action: "mergeMemories".to_owned(),
+        audit_ids,
+        created_memory_id: Some(memory_id),
+    })
 }
 
 fn queue_conflict_source_index(

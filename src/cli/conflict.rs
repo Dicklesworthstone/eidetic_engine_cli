@@ -41,12 +41,15 @@ pub struct ConflictResolveArgs {
     /// The other side of the conflicting pair.
     #[arg(value_name = "MEMORY_B")]
     pub memory_b: String,
-    /// Resolution verb: supersede | reject-one | scope-split | both-valid.
+    /// Resolution verb: supersede | reject-one | scope-split | both-valid | merge.
     #[arg(long, value_name = "VERB")]
     pub verb: String,
     /// Surviving memory id (required by supersede and reject-one).
     #[arg(long, value_name = "MEMORY_ID")]
     pub keep: Option<String>,
+    /// merge only: exact reviewed summary text (at most 16 KiB).
+    #[arg(long, value_name = "TEXT")]
+    pub merge_content: Option<String>,
     /// Rationale persisted as the decision memory's rationale.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
@@ -56,7 +59,7 @@ pub struct ConflictResolveArgs {
     /// scope-split only: comma-separated tags scoping memory B.
     #[arg(long, value_name = "TAGS")]
     pub scope_b_tags: Option<String>,
-    /// Execute the plan immediately. Without --apply or --propose, only preview it.
+    /// Execute a non-merge plan immediately. Merges require --propose and curation review.
     #[arg(long)]
     pub apply: bool,
     /// Queue the explicit plan for curate show/validate/accept/apply review.

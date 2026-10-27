@@ -57,7 +57,7 @@ fn conflict_proposal_has_an_independent_registered_review_contract() -> TestResu
     ensure(
         string_set(&schema, "/properties/plan/properties/verb/enum")?
             == string_set(&load_schema()?, "/properties/verb/enum")?,
-        "queued review must use the same four explicit resolution verbs",
+        "queued review must use the same explicit resolution verbs",
     )?;
     ensure(
         public_schemas()
@@ -159,12 +159,18 @@ fn conflict_resolve_verbs_plan_and_evidence_are_pinned() -> TestResult {
         format!("report required set drifted: {required:?}"),
     )?;
 
-    // The ADR 0066 verb table, exactly.
+    // The public resolution vocabulary, including reviewed two-source merges.
     let verbs = string_set(&schema, "/properties/verb/enum")?;
-    let expected_verbs: BTreeSet<String> = ["supersede", "reject-one", "scope-split", "both-valid"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let expected_verbs: BTreeSet<String> = [
+        "supersede",
+        "reject-one",
+        "scope-split",
+        "both-valid",
+        "merge",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
     ensure(
         verbs == expected_verbs,
         format!("verb vocabulary drifted: {verbs:?}"),
@@ -199,16 +205,21 @@ fn conflict_resolve_verbs_plan_and_evidence_are_pinned() -> TestResult {
         format!("plan shape drifted: {plan:?}"),
     )?;
 
-    // Every planned atom names one of the four EXISTING audited operations.
+    // Every planned atom names an explicit audited operation.
     let actions = string_set(
         &schema,
         "/properties/plan/properties/actions/items/properties/action/enum",
     )?;
-    let expected_actions: BTreeSet<String> =
-        ["recordDecision", "tombstoneMemory", "createLink", "addTags"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+    let expected_actions: BTreeSet<String> = [
+        "recordDecision",
+        "tombstoneMemory",
+        "createLink",
+        "addTags",
+        "mergeMemories",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
     ensure(
         actions == expected_actions,
         format!("audited-atom vocabulary drifted: {actions:?}"),

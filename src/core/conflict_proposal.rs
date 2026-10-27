@@ -10,15 +10,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::core::contradiction_detect::{
-    ConflictResolutionOutcome, ConflictResolutionPlan, ConflictResolveRequest,
-    ContradictionDetectionConfig, PlannedResolutionAction, ResolveVerb,
-    assemble_conflict_surface_for_workspace, plan_conflict_resolution,
+    CONFLICT_MERGE_MAX_BYTES, ConflictResolutionOutcome, ConflictResolutionPlan,
+    ConflictResolveRequest, ContradictionDetectionConfig, PlannedResolutionAction, ResolveVerb,
+    assemble_conflict_surface_for_workspace, merge_source_is_supported, plan_conflict_resolution,
 };
 use crate::db::{
     CreateAuditInput, CreateCurationCandidateInput, DbConnection, StoredCurationCandidate,
-    audit_actions, generate_audit_id,
+    StoredMemory, audit_actions, generate_audit_id,
 };
-use crate::models::{CandidateId, DomainError, Tag};
+use crate::models::{CandidateId, DomainError, MemoryId, Tag};
+use sqlmodel_core::Value as DbValue;
 
 pub const REPORT_SCHEMA: &str = "ee.conflict.proposal.v1";
 const RECEIPT_SCHEMA: &str = "ee.conflict.proposal_receipt.v1";
@@ -37,6 +38,8 @@ struct ProposalReceipt {
     reason: String,
     scope_a_tags: Vec<String>,
     scope_b_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    merge_content: Option<String>,
     source_a_hash: String,
     source_b_hash: String,
     plan_hash: String,
@@ -184,7 +187,7 @@ fn source_hash(
     }))
 }
 
-fn live_plan(
+pub(crate) fn live_plan(
     connection: &DbConnection,
     workspace_id: &str,
     request: &ConflictResolveRequest<'_>,
@@ -201,7 +204,12 @@ fn live_plan(
         ));
     }
     match plan_conflict_resolution(&surface, request) {
-        ConflictResolutionOutcome::Plan(plan) => Ok(plan),
+        ConflictResolutionOutcome::Plan(plan) => {
+            if plan.verb == ResolveVerb::Merge {
+                merge_sources(connection, workspace_id, &plan)?;
+            }
+            Ok(plan)
+        }
         ConflictResolutionOutcome::StaleSurface { .. } => Err(refusal(
             STALE_CODE,
             "This conflict was resolved or its source surface changed after proposal.",
@@ -217,6 +225,104 @@ fn live_plan(
             repair: Some(repair),
         }),
     }
+}
+
+/// The source facts and exact scope a reviewed textual merge may preserve.
+/// Callers still bind the complete source snapshots and the live conflict;
+/// this additional check prevents a summary from replacing typed behavior or
+/// silently widening a workflow, tag scope, or validity window.
+pub(crate) struct MergeSources {
+    pub source_a: StoredMemory,
+    pub source_b: StoredMemory,
+    pub tags: Vec<String>,
+    pub valid_to: Option<String>,
+}
+
+pub(crate) fn merge_sources(
+    connection: &DbConnection,
+    workspace_id: &str,
+    plan: &ConflictResolutionPlan,
+) -> Result<MergeSources, DomainError> {
+    let incompatible = || {
+        refusal(
+            "conflict_merge_sources_incompatible",
+            "Merge requires current textual facts or summaries with the same workflow and tags; typed or procedural sources need their dedicated resolution workflow.",
+        )
+    };
+    let load = |id: &str| {
+        // Source authority includes seals and outstanding human review, not
+        // merely the visibility of a source body on an earlier conflict list.
+        source_hash(connection, workspace_id, id)?;
+        connection
+            .get_memory(id)
+            .map_err(storage_error)?
+            .ok_or_else(incompatible)
+    };
+    let source_a = load(&plan.memory_a)?;
+    let source_b = load(&plan.memory_b)?;
+    let now = Utc::now();
+    let mut earliest_end: Option<(DateTime<Utc>, String)> = None;
+    for source in [&source_a, &source_b] {
+        if source.workspace_id != workspace_id
+            || source.tombstoned_at.is_some()
+            || !merge_source_is_supported(&source.level, &source.kind)
+            || connection
+                .get_memory_superseded_at(&source.id)
+                .map_err(storage_error)?
+                .is_some()
+            || [source.confidence, source.utility, source.importance]
+                .into_iter()
+                .any(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            return Err(incompatible());
+        }
+        if let Some(fields) = connection
+            .get_memory_typed_fields_json(&source.id)
+            .map_err(storage_error)?
+            && !serde_json::from_str::<serde_json::Value>(&fields)
+                .ok()
+                .and_then(|value| value.as_object().map(|fields| fields.is_empty()))
+                .unwrap_or(false)
+        {
+            return Err(incompatible());
+        }
+        if let Some(start) = source.valid_from.as_deref() {
+            let start = DateTime::parse_from_rfc3339(start)
+                .map_err(|_| incompatible())?
+                .with_timezone(&Utc);
+            if start > now {
+                return Err(incompatible());
+            }
+        }
+        if let Some(end) = source.valid_to.as_deref() {
+            let parsed = DateTime::parse_from_rfc3339(end)
+                .map_err(|_| incompatible())?
+                .with_timezone(&Utc);
+            if parsed <= now {
+                return Err(incompatible());
+            }
+            if earliest_end
+                .as_ref()
+                .is_none_or(|(earliest, _)| parsed < *earliest)
+            {
+                earliest_end = Some((parsed, end.to_owned()));
+            }
+        }
+    }
+    let source_tags = |id: &str| {
+        let tags = connection.get_memory_tags(id).map_err(storage_error)?;
+        normalized_scope_tags(&tags)
+    };
+    let tags = source_tags(&source_a.id)?;
+    if source_a.workflow_id != source_b.workflow_id || tags != source_tags(&source_b.id)? {
+        return Err(incompatible());
+    }
+    Ok(MergeSources {
+        source_a,
+        source_b,
+        tags,
+        valid_to: earliest_end.map(|(_, original)| original),
+    })
 }
 
 fn check_text(text: &str) -> Result<(), DomainError> {
@@ -294,6 +400,10 @@ pub(crate) fn create_in_transaction(
         reason: request.reason.to_owned(),
         scope_a_tags: tags_for(&plan.memory_a),
         scope_b_tags: tags_for(&plan.memory_b),
+        merge_content: plan.actions.iter().find_map(|action| match action {
+            PlannedResolutionAction::MergeMemories { content } => Some(content.clone()),
+            _ => None,
+        }),
         source_a_hash: source_hash(connection, workspace_id, &plan.memory_a)?,
         source_b_hash: source_hash(connection, workspace_id, &plan.memory_b)?,
         plan_hash: digest(&plan)?,
@@ -412,6 +522,15 @@ fn decode_receipt(candidate: &StoredCurationCandidate) -> Result<ProposalReceipt
     {
         return Err(invalid());
     }
+    match (receipt.verb.as_str(), receipt.merge_content.as_deref()) {
+        ("merge", Some(content))
+            if !content.is_empty()
+                && content == content.trim()
+                && content.len() <= CONFLICT_MERGE_MAX_BYTES
+                && !crate::policy::redact_public_replay_body(content).redacted => {}
+        ("merge", _) | (_, Some(_)) => return Err(invalid()),
+        (_, None) => {}
+    }
     Ok(receipt)
 }
 
@@ -489,6 +608,7 @@ pub(crate) fn validate_candidate(
         reason: &receipt.reason,
         scope_a_tags: receipt.scope_a_tags.clone(),
         scope_b_tags: receipt.scope_b_tags.clone(),
+        merge_content: receipt.merge_content.as_deref(),
     };
     let plan = live_plan(connection, &receipt.workspace_id, &request)?;
     if digest(&plan)? != receipt.plan_hash
@@ -579,9 +699,19 @@ pub(crate) fn complete_in_transaction(
     connection: &DbConnection,
     candidate: &StoredCurationCandidate,
     decision_id: &str,
+    merged_memory_id: Option<&str>,
     at: &str,
     actor: Option<&str>,
 ) -> Result<String, DomainError> {
+    let receipt = decode_receipt(candidate)?;
+    if (receipt.verb == "merge") != merged_memory_id.is_some()
+        || merged_memory_id.is_some_and(|id| id == decision_id || id.parse::<MemoryId>().is_err())
+    {
+        return Err(refusal(
+            "conflict_proposal_invalid",
+            "Conflict completion does not match the reviewed output identities.",
+        ));
+    }
     if !connection
         .mark_curation_candidate_applied(&candidate.workspace_id, &candidate.id, at)
         .map_err(storage_error)?
@@ -592,13 +722,144 @@ pub(crate) fn complete_in_transaction(
         ));
     }
     let audit_id = generate_audit_id();
-    connection.insert_audit(&audit_id, &CreateAuditInput {
-        workspace_id: Some(candidate.workspace_id.clone()), actor: actor.map(str::to_owned),
-        action: audit_actions::CURATION_CANDIDATE_APPLY.to_owned(),
-        target_type: Some("curation_candidate".to_owned()), target_id: Some(candidate.id.clone()),
-        details: Some(json!({"schema": RECEIPT_SCHEMA, "candidateId": candidate.id, "decision": "resolve_conflict", "fromStatus": "approved", "toStatus": "applied", "resolutionDecisionId": decision_id, "sourceId": candidate.source_id}).to_string()),
-    }).map_err(storage_error)?;
+    let mut details = json!({"schema": RECEIPT_SCHEMA, "candidateId": candidate.id, "decision": "resolve_conflict", "fromStatus": "approved", "toStatus": "applied", "resolutionDecisionId": decision_id, "sourceId": candidate.source_id});
+    if let Some(memory_id) = merged_memory_id {
+        details["mergedMemoryId"] = json!(memory_id);
+    }
+    connection
+        .insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(candidate.workspace_id.clone()),
+                actor: actor.map(str::to_owned),
+                action: audit_actions::CURATION_CANDIDATE_APPLY.to_owned(),
+                target_type: Some("curation_candidate".to_owned()),
+                target_id: Some(candidate.id.clone()),
+                details: Some(details.to_string()),
+            },
+        )
+        .map_err(storage_error)?;
     Ok(audit_id)
+}
+
+pub(crate) fn is_merge_candidate(candidate: &StoredCurationCandidate) -> bool {
+    decode_receipt(candidate).is_ok_and(|receipt| receipt.verb == "merge")
+}
+
+/// Stable publication identity lets a completed apply retry indexing without
+/// repeating source mutation or creating another summary.
+pub(crate) fn merge_index_job_id(memory_id: &str) -> String {
+    let hash = blake3::hash(format!("conflict-merge|{memory_id}").as_bytes())
+        .to_hex()
+        .to_string();
+    format!("sidx_{}", &hash[..26])
+}
+
+/// Replaying an applied merge reports the canonical output recorded by the
+/// same atomic completion that owns its source effects. It never creates a
+/// replacement or substitutes the independently recorded rationale memory.
+pub(crate) fn applied_merge_memory_id(
+    connection: &DbConnection,
+    candidate: &StoredCurationCandidate,
+) -> Result<Option<String>, DomainError> {
+    let receipt = decode_receipt(candidate)?;
+    if receipt.verb != "merge" {
+        return Ok(None);
+    }
+    let invalid = || {
+        refusal(
+            "conflict_merge_completion_invalid",
+            "The applied merge does not have one matching durable output receipt; no merge was repeated.",
+        )
+    };
+    if candidate.status != "applied" || candidate.applied_at.is_none() {
+        return Err(invalid());
+    }
+    let rows = connection
+        .query(
+            "SELECT details FROM audit_log WHERE workspace_id = ?1 AND action = ?2 AND target_type = 'curation_candidate' AND target_id = ?3 ORDER BY id LIMIT 2",
+            &[
+                DbValue::Text(candidate.workspace_id.clone()),
+                DbValue::Text(audit_actions::CURATION_CANDIDATE_APPLY.to_owned()),
+                DbValue::Text(candidate.id.clone()),
+            ],
+        )
+        .map_err(storage_error)?;
+    let [row] = rows.as_slice() else {
+        return Err(invalid());
+    };
+    let details: serde_json::Value =
+        serde_json::from_str(row.get(0).and_then(DbValue::as_str).ok_or_else(invalid)?)
+            .map_err(|_| invalid())?;
+    let memory_id = details
+        .get("mergedMemoryId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(invalid)?;
+    let decision_id = details
+        .get("resolutionDecisionId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(invalid)?;
+    if details.get("schema").and_then(serde_json::Value::as_str) != Some(RECEIPT_SCHEMA)
+        || details
+            .get("candidateId")
+            .and_then(serde_json::Value::as_str)
+            != Some(candidate.id.as_str())
+        || details.get("sourceId").and_then(serde_json::Value::as_str)
+            != candidate.source_id.as_deref()
+        || details.get("decision").and_then(serde_json::Value::as_str) != Some("resolve_conflict")
+        || decision_id == memory_id
+        || decision_id.parse::<MemoryId>().is_err()
+        || memory_id.parse::<MemoryId>().is_err()
+    {
+        return Err(invalid());
+    }
+    let memory = connection
+        .get_memory(memory_id)
+        .map_err(storage_error)?
+        .ok_or_else(invalid)?;
+    if memory.workspace_id != candidate.workspace_id {
+        return Err(invalid());
+    }
+    let decision = connection
+        .get_memory(decision_id)
+        .map_err(storage_error)?
+        .ok_or_else(invalid)?;
+    if decision.workspace_id != candidate.workspace_id {
+        return Err(invalid());
+    }
+    // Completion may only point at this proposal's original output. The
+    // current body can legitimately evolve later, so bind immutable creation
+    // provenance instead of comparing mutable content or trust fields.
+    let creations = connection
+        .query(
+            "SELECT details FROM audit_log WHERE workspace_id = ?1 AND action = ?2 AND target_type = 'memory' AND target_id = ?3 ORDER BY id LIMIT 2",
+            &[
+                DbValue::Text(candidate.workspace_id.clone()),
+                DbValue::Text(audit_actions::MEMORY_CREATE.to_owned()),
+                DbValue::Text(memory_id.to_owned()),
+            ],
+        )
+        .map_err(storage_error)?;
+    let [creation] = creations.as_slice() else {
+        return Err(invalid());
+    };
+    let creation: serde_json::Value = serde_json::from_str(
+        creation
+            .get(0)
+            .and_then(DbValue::as_str)
+            .ok_or_else(invalid)?,
+    )
+    .map_err(|_| invalid())?;
+    if creation["schema"] != "ee.conflict.merge.v1"
+        || creation["candidateId"] != candidate.id
+        || creation["sourceId"] != json!(candidate.source_id)
+        || creation["mergedMemoryId"] != memory_id
+        || creation["resolutionDecisionId"] != decision_id
+        || creation["sourceMemoryIds"] != json!([receipt.memory_a, receipt.memory_b])
+    {
+        return Err(invalid());
+    }
+    Ok(Some(memory_id.to_owned()))
 }
 
 #[cfg(test)]
@@ -683,6 +944,7 @@ mod tests {
                 reason: "These configurations remain valid in different contexts.",
                 scope_a_tags: Vec::new(),
                 scope_b_tags: Vec::new(),
+                merge_content: None,
             },
             Some("test"),
         )
@@ -741,6 +1003,7 @@ mod tests {
                     reason: "These configurations have explicit deployment scopes.",
                     scope_a_tags: vec![invalid_tag],
                     scope_b_tags: vec!["development".to_owned()],
+                    merge_content: None,
                 },
                 Some("test"),
             );
@@ -773,6 +1036,7 @@ mod tests {
             reason: "These configurations have explicit deployment scopes.",
             scope_a_tags: vec![" Production ".to_owned(), "PRODUCTION".to_owned()],
             scope_b_tags: vec!["Development".to_owned()],
+            merge_content: None,
         };
         let proposed =
             create_in_transaction(&connection, WORKSPACE, &request, Some("test")).unwrap();
@@ -834,5 +1098,135 @@ mod tests {
                 .code(),
             STALE_CODE
         );
+    }
+
+    #[test]
+    fn merge_receipts_bind_canonical_content_and_equivalent_requests_are_idempotent() {
+        let (connection, _) = fixture();
+        let request = ConflictResolveRequest {
+            memory_a: MEMORY_A,
+            memory_b: MEMORY_B,
+            verb: ResolveVerb::Merge,
+            keep: None,
+            reason: "The configurations are combined into one reviewed summary.",
+            scope_a_tags: Vec::new(),
+            scope_b_tags: Vec::new(),
+            merge_content: Some("  Production uses alpha; local checks use beta.  "),
+        };
+        let first = create_in_transaction(&connection, WORKSPACE, &request, Some("test")).unwrap();
+        let repeated = create_in_transaction(
+            &connection,
+            WORKSPACE,
+            &ConflictResolveRequest {
+                memory_a: MEMORY_B,
+                memory_b: MEMORY_A,
+                merge_content: Some("Production uses alpha; local checks use beta."),
+                ..request
+            },
+            Some("test"),
+        )
+        .unwrap();
+        assert!(first.created && !repeated.created);
+        assert_eq!(first.candidate_id, repeated.candidate_id);
+        let candidate = connection
+            .get_curation_candidate(WORKSPACE, &first.candidate_id)
+            .unwrap()
+            .unwrap();
+        let receipt = decode_receipt(&candidate).unwrap();
+        assert_eq!(
+            receipt.merge_content.as_deref(),
+            Some("Production uses alpha; local checks use beta.")
+        );
+        assert_eq!(receipt.memory_a, first.plan.memory_a);
+        assert_eq!(receipt.memory_b, first.plan.memory_b);
+        validate_candidate(&connection, &candidate, false).unwrap();
+    }
+
+    #[test]
+    fn merge_source_scope_type_and_lifetime_refusals_do_not_write_proposals() {
+        for change in [
+            "workflow",
+            "tags",
+            "typed",
+            "procedural",
+            "specialized",
+            "future",
+            "expired",
+        ] {
+            let (connection, _) = fixture();
+            match change {
+                "tags" => connection
+                    .add_memory_tags(MEMORY_A, &["global".to_owned()])
+                    .unwrap(),
+                "typed" => {
+                    // A legacy or damaged sidecar must not be discarded by
+                    // summary synthesis even though new fact writes reject it.
+                    connection
+                        .execute(
+                            "UPDATE memories SET typed_fields_json = ?1 WHERE id = ?2",
+                            &[
+                                Value::Text(r#"{"scope":"specialized"}"#.to_owned()),
+                                Value::Text(MEMORY_A.to_owned()),
+                            ],
+                        )
+                        .unwrap();
+                }
+                _ => {
+                    let (field, value) = match change {
+                        "workflow" => ("workflow_id", "deployment"),
+                        "procedural" => ("level", "procedural"),
+                        "specialized" => ("kind", "risk"),
+                        "future" => ("valid_from", "2999-01-01T00:00:00Z"),
+                        "expired" => ("valid_to", "2000-01-01T00:00:00Z"),
+                        _ => unreachable!(),
+                    };
+                    connection
+                        .execute_raw(&format!(
+                            "UPDATE memories SET {field} = '{value}' WHERE id = '{MEMORY_A}'"
+                        ))
+                        .unwrap();
+                }
+            }
+            let before_candidates = connection.count_table_rows("curation_candidates").unwrap();
+            let before_audits = connection.count_table_rows("audit_log").unwrap();
+            let before_a = connection.get_memory(MEMORY_A).unwrap();
+            let before_b = connection.get_memory(MEMORY_B).unwrap();
+            let result = create_in_transaction(
+                &connection,
+                WORKSPACE,
+                &ConflictResolveRequest {
+                    memory_a: MEMORY_A,
+                    memory_b: MEMORY_B,
+                    verb: ResolveVerb::Merge,
+                    keep: None,
+                    reason: "The configurations require an explicit reviewed summary.",
+                    scope_a_tags: Vec::new(),
+                    scope_b_tags: Vec::new(),
+                    merge_content: Some("Production uses alpha; local checks use beta."),
+                },
+                Some("test"),
+            );
+            assert!(result.is_err(), "{change}");
+            assert_eq!(
+                connection.count_table_rows("curation_candidates").unwrap(),
+                before_candidates,
+                "{change}"
+            );
+            assert_eq!(
+                connection.count_table_rows("audit_log").unwrap(),
+                before_audits,
+                "{change}"
+            );
+            assert_eq!(
+                connection.get_memory(MEMORY_A).unwrap(),
+                before_a,
+                "{change}"
+            );
+            assert_eq!(
+                connection.get_memory(MEMORY_B).unwrap(),
+                before_b,
+                "{change}"
+            );
+        }
     }
 }

@@ -7,6 +7,9 @@ use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
 type RowState = Vec<(String, Value)>;
 type TableState = (&'static str, Vec<RowState>);
 
+const MERGED_CONTENT: &str =
+    "The deployment uses configuration alpha for production and beta for local checks.";
+
 fn row_state(row: &sqlmodel_core::Row) -> RowState {
     // Row's Debug includes a randomized name-to-index lookup map. Compare
     // ordered column names and typed SQL values, not that implementation detail.
@@ -157,10 +160,19 @@ impl Fixture {
                 memory_a: keeper,
                 memory_b: loser,
                 verb,
-                keep: Some(keeper),
+                keep: (verb != ResolveVerb::Merge).then_some(keeper),
                 reason: "A reviewed replacement.",
-                scope_a_tags: vec!["scope-a".to_owned()],
-                scope_b_tags: vec!["scope-b".to_owned()],
+                scope_a_tags: if verb == ResolveVerb::Merge {
+                    Vec::new()
+                } else {
+                    vec!["scope-a".to_owned()]
+                },
+                scope_b_tags: if verb == ResolveVerb::Merge {
+                    Vec::new()
+                } else {
+                    vec!["scope-b".to_owned()]
+                },
+                merge_content: (verb == ResolveVerb::Merge).then_some(MERGED_CONTENT),
             },
         );
         let ConflictResolutionOutcome::Plan(plan) = outcome else {
@@ -209,10 +221,19 @@ impl Fixture {
                         memory_a: keeper,
                         memory_b: loser,
                         verb,
-                        keep: Some(keeper),
+                        keep: (verb != ResolveVerb::Merge).then_some(keeper),
                         reason: "A reviewed replacement.",
-                        scope_a_tags: vec!["scope-a".to_owned()],
-                        scope_b_tags: vec!["scope-b".to_owned()],
+                        scope_a_tags: if verb == ResolveVerb::Merge {
+                            Vec::new()
+                        } else {
+                            vec!["scope-a".to_owned()]
+                        },
+                        scope_b_tags: if verb == ResolveVerb::Merge {
+                            Vec::new()
+                        } else {
+                            vec!["scope-b".to_owned()]
+                        },
+                        merge_content: (verb == ResolveVerb::Merge).then_some(MERGED_CONTENT),
                     },
                     Some("decision-test"),
                 )
@@ -1000,6 +1021,7 @@ fn conflict_candidate_completion_and_resolution_roll_back_together() {
         ResolveVerb::RejectOne,
         ResolveVerb::ScopeSplit,
         ResolveVerb::BothValid,
+        ResolveVerb::Merge,
     ] {
         let fixture = Fixture::new();
         let keeper = fixture.seed_conflict_memory("fact", "semantic");
@@ -1079,6 +1101,278 @@ fn conflict_candidate_completion_and_resolution_roll_back_together() {
         let surface =
             assemble_conflict_surface(&fixture.db, ContradictionDetectionConfig::default());
         assert!(surface.pairs.is_empty(), "{verb:?}");
+    }
+}
+
+#[test]
+fn reviewed_merge_preserves_both_histories_and_creates_a_conservative_canonical_summary() {
+    let fixture = Fixture::new();
+    let source_a = fixture.seed_conflict_memory("fact", "semantic");
+    let source_b = fixture.seed_conflict_memory("summary", "episodic");
+    fixture.seed_conflict_link(&source_a, &source_b, MemoryLinkRelation::Contradicts);
+    for (id, end, confidence) in [
+        (&source_a, "2098-01-01T00:00:00Z", "0.3"),
+        (&source_b, "2099-01-01T00:00:00Z", "0.8"),
+    ] {
+        fixture.db.execute_raw(&format!(
+            "UPDATE memories SET valid_to = '{end}', confidence = {confidence}, workflow_id = 'deployment', trust_subclass = 'source-attestation' WHERE id = '{id}'"
+        )).unwrap();
+        fixture
+            .db
+            .add_memory_tags(id, &["deployment".to_owned(), "project".to_owned()])
+            .unwrap();
+    }
+    let before_a = fixture.db.get_memory(&source_a).unwrap().unwrap();
+    let before_b = fixture.db.get_memory(&source_b).unwrap().unwrap();
+    let (candidate, plan) =
+        fixture.approved_conflict_proposal(&source_a, &source_b, ResolveVerb::Merge);
+    let report =
+        record_candidate_resolution(&fixture.conflict_options(&plan), &plan, &candidate).unwrap();
+    let merged_id = report
+        .results
+        .iter()
+        .find(|result| result.action == "mergeMemories")
+        .unwrap()
+        .created_memory_id
+        .as_deref()
+        .unwrap();
+    assert_ne!(merged_id, source_a);
+    assert_ne!(merged_id, source_b);
+    assert_ne!(merged_id, report.decision.decision.memory_id);
+    let merged = fixture.db.get_memory(merged_id).unwrap().unwrap();
+    assert_eq!(merged.content, MERGED_CONTENT);
+    assert_eq!(merged.kind, "summary");
+    assert_eq!(merged.level, "semantic");
+    assert_eq!(merged.trust_class, "agent_assertion");
+    assert_eq!(merged.confidence, 0.3);
+    assert_eq!(merged.workflow_id.as_deref(), Some("deployment"));
+    assert_eq!(merged.valid_to.as_deref(), Some("2098-01-01T00:00:00Z"));
+    assert!(merged.valid_from.is_some());
+    assert_ne!(merged.trust_subclass, before_a.trust_subclass);
+    assert!(merged.provenance_chain_hash.is_some());
+    assert_eq!(
+        merged.provenance_uri,
+        Some(format!("ee://curation-candidate/{}", candidate.id))
+    );
+    assert_eq!(
+        fixture.db.get_memory_tags(merged_id).unwrap(),
+        vec!["deployment", "project"]
+    );
+    for source in [before_a, before_b] {
+        let retired = fixture.db.get_memory(&source.id).unwrap().unwrap();
+        assert_eq!(retired.content, source.content);
+        assert_eq!(retired.trust_class, source.trust_class);
+        assert_eq!(retired.trust_subclass, source.trust_subclass);
+        assert!(retired.tombstoned_at.is_none());
+        assert!(retired.valid_to.is_some());
+        assert!(
+            fixture
+                .db
+                .get_memory_superseded_at(&source.id)
+                .unwrap()
+                .is_some()
+        );
+        for relation in [
+            MemoryLinkRelation::DerivedFrom,
+            MemoryLinkRelation::Supersedes,
+        ] {
+            assert!(
+                fixture
+                    .db
+                    .get_memory_link_by_edge(merged_id, &source.id, relation)
+                    .unwrap()
+                    .unwrap()
+                    .directed
+            );
+        }
+    }
+    assert!(
+        fixture
+            .db
+            .get_memory_link_by_edge(&source_a, &source_b, MemoryLinkRelation::Contradicts)
+            .unwrap()
+            .is_some()
+    );
+    let jobs = fixture
+        .db
+        .list_search_index_jobs(&candidate.workspace_id, None)
+        .unwrap();
+    assert_eq!(
+        jobs.len(),
+        4,
+        "summary, rationale, and both source index obligations"
+    );
+    for id in [
+        &source_a,
+        &source_b,
+        &merged.id,
+        &report.decision.decision.memory_id,
+    ] {
+        assert!(
+            jobs.iter()
+                .any(|job| job.document_id.as_deref() == Some(id.as_str()))
+        );
+    }
+    let applied = fixture
+        .db
+        .get_curation_candidate(&candidate.workspace_id, &candidate.id)
+        .unwrap()
+        .unwrap();
+    let before_replay = fixture.state();
+    assert_eq!(
+        crate::core::conflict_proposal::applied_merge_memory_id(&fixture.db, &applied)
+            .unwrap()
+            .as_deref(),
+        Some(merged_id)
+    );
+    assert_eq!(fixture.state(), before_replay);
+    assert_eq!(fixture.list(false).total_count, 1);
+    let completed = crate::core::contradiction_detect::gather_explicit_conflict_edges(&fixture.db);
+    assert!(completed.read_error.is_none());
+    assert!(
+        completed
+            .resolved_pairs
+            .contains(&(plan.memory_a.clone(), plan.memory_b.clone()))
+    );
+    assert!(
+        assemble_conflict_surface(&fixture.db, ContradictionDetectionConfig::default())
+            .pairs
+            .is_empty()
+    );
+    let completion = fixture
+        .db
+        .query(
+            "SELECT details FROM audit_log WHERE id = ?1",
+            &[Value::Text(report.candidate_audit_id.clone().unwrap())],
+        )
+        .unwrap();
+    let receipt: JsonValue =
+        serde_json::from_str(completion[0].get(0).and_then(Value::as_str).unwrap()).unwrap();
+    for unrelated in [&source_a, &report.decision.decision.memory_id] {
+        let mut corrupt = receipt.clone();
+        corrupt["mergedMemoryId"] = json!(unrelated);
+        fixture
+            .db
+            .execute(
+                "UPDATE audit_log SET details = ?1 WHERE id = ?2",
+                &[
+                    Value::Text(corrupt.to_string()),
+                    Value::Text(report.candidate_audit_id.clone().unwrap()),
+                ],
+            )
+            .unwrap();
+        let before_refusal = fixture.state();
+        assert_eq!(
+            crate::core::conflict_proposal::applied_merge_memory_id(&fixture.db, &applied)
+                .unwrap_err()
+                .code(),
+            "conflict_merge_completion_invalid"
+        );
+        assert_eq!(fixture.state(), before_refusal);
+    }
+}
+
+#[test]
+fn merge_refuses_direct_apply_and_rolls_back_every_source_and_output_boundary() {
+    let fixture = Fixture::new();
+    let source_a = fixture.seed_conflict_memory("fact", "semantic");
+    let source_b = fixture.seed_conflict_memory("fact", "semantic");
+    fixture.seed_conflict_link(&source_a, &source_b, MemoryLinkRelation::Contradicts);
+    let (candidate, plan) =
+        fixture.approved_conflict_proposal(&source_a, &source_b, ResolveVerb::Merge);
+    let request = fixture.conflict_options(&plan);
+    let before = fixture.state();
+    assert_eq!(
+        record_resolution(&request, &plan).unwrap_err().code(),
+        "conflict_merge_requires_review"
+    );
+    assert_eq!(fixture.state(), before);
+    for (stop, occurrence) in [
+        (Stage::Memory, 1),
+        (Stage::Fields, 1),
+        (Stage::MergeMemory, 1),
+        (Stage::Link, 1),
+        (Stage::Predecessor, 1),
+        (Stage::MergeSource, 1),
+        (Stage::Link, 2),
+        (Stage::Predecessor, 2),
+        (Stage::MergeSource, 2),
+        (Stage::Index, 3),
+        (Stage::ResolutionAction, 2),
+        (Stage::Provenance, 2),
+        (Stage::Completion, 1),
+        (Stage::Report, 1),
+    ] {
+        let mut seen = 0;
+        let failed = record_resolution_candidate_with_boundary(
+            &request,
+            &plan,
+            Some(&candidate),
+            |stage, _| {
+                if stage == stop {
+                    seen += 1;
+                    if seen == occurrence {
+                        return Err(injected_error());
+                    }
+                }
+                Ok(())
+            },
+        );
+        assert!(failed.is_err(), "{stop:?} #{occurrence}");
+        assert_eq!(
+            seen, occurrence,
+            "the merge failure boundary must be reached"
+        );
+        assert_eq!(fixture.state(), before, "{stop:?} #{occurrence}");
+        assert!(!fixture.root.path().join(".ee/index").exists());
+        assert!(!fixture.root.path().join(".ee/audit.jsonl").exists());
+    }
+}
+
+#[test]
+fn merge_revalidates_source_scope_and_the_exact_reviewed_summary_under_the_writer() {
+    for change in ["scope", "body", "summary"] {
+        let fixture = Fixture::new();
+        let source_a = fixture.seed_conflict_memory("fact", "semantic");
+        let source_b = fixture.seed_conflict_memory("fact", "semantic");
+        fixture.seed_conflict_link(&source_a, &source_b, MemoryLinkRelation::Contradicts);
+        let (candidate, mut plan) =
+            fixture.approved_conflict_proposal(&source_a, &source_b, ResolveVerb::Merge);
+        if change == "summary" {
+            let PlannedResolutionAction::MergeMemories { content } = &mut plan.actions[0] else {
+                panic!("merge action");
+            };
+            *content = "A different summary that was never approved.".to_owned();
+        }
+        let mut expected = fixture.state();
+        let failed = record_resolution_candidate_with_boundary(
+            &fixture.conflict_options(&plan),
+            &plan,
+            Some(&candidate),
+            |stage, connection| {
+                if stage == Stage::Prepared && change != "summary" {
+                    let field = if change == "scope" {
+                        "workflow_id"
+                    } else {
+                        "content"
+                    };
+                    connection
+                        .execute_raw(&format!(
+                            "UPDATE memories SET {field} = 'changed source' WHERE id = '{source_b}'"
+                        ))
+                        .map_err(|_| injected_error())?;
+                    expected = fixture.state();
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(
+            failed.unwrap_err().code(),
+            "conflict_proposal_stale",
+            "{change}"
+        );
+        assert_eq!(fixture.state(), expected, "{change}");
+        assert_eq!(fixture.list(false).total_count, 0);
     }
 }
 

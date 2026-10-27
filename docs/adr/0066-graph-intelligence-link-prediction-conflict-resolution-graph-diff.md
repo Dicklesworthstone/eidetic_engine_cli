@@ -90,8 +90,8 @@ CHECK constraint uses the family identifiers `memory_links`,
 ### 3. Conflict resolution verbs (`ee conflict resolve`)
 
 `ee conflict resolve <a> <b> --verb <v> [--keep <id>] [--reason <text>]
-[--apply]` — **dry-run is the default**; `--apply` is required to mutate
-(the curate-disposition convention for all new write verbs in this wave).
+[--apply | --propose]` — **dry-run is the default**. Existing resolutions can
+use direct `--apply`; merge requires an explicit curation proposal and review.
 
 | Verb | Durable effect (existing decision/lifecycle primitives, one writer transaction, full audit) |
 |---|---|
@@ -99,6 +99,7 @@ CHECK constraint uses the family identifiers `memory_links`,
 | `scope-split` | both survive; `--scope-a-tags/--scope-b-tags` annotate the positional sides; audited coexistence settles the pair |
 | `both-valid` | audited coexistence with rationale settles the pair; original conflict edges remain history |
 | `reject-one` | requires `--keep`; loser tombstoned via the existing curation path |
+| `merge` | requires `--merge-content` and curation review; creates a new summary, links both sources through `derived_from` and `supersedes`, and closes their active lifetimes while preserving both bodies |
 
 - Stale-surface guard: the live conflict surface is re-derived first; if
   the pair is no longer in conflict, refuse with
@@ -152,12 +153,13 @@ commits; the field shapes in this ADR are normative.
 
 ### Explicit queued conflict review (bd-1n0np.7.4)
 
-`ee conflict resolve ... --propose` queues any of the four existing explicit
+`ee conflict resolve ... --propose` queues explicit
 verbs for `ee curate show`, `validate` or `accept`, and `apply`. Proposal
 creation changes only the review queue and its audit. Repeating the same
 request against the same source snapshots returns the same candidate.
 `--propose` and `--apply` are mutually exclusive; the default remains a
-read-only plan, and direct `--apply` retains its existing behavior.
+read-only plan. Direct `--apply` retains its existing behavior for the original
+four verbs; merge cannot bypass review through that path.
 
 The queue receipt binds both source bodies, revisions, scopes, trust and
 provenance, lifetime, typed fields, and seal authority. Raw source bodies are
@@ -170,8 +172,26 @@ and index obligations; any failure rolls back the complete transition.
 Scope-split preserves both sources and adds their explicitly supplied tags.
 No replacement prose or merge content is invented.
 
+Reviewed merge uses `--merge-content` to bind the exact normalized summary text
+into the proposal receipt and plan. Text is nonempty, screened, and bounded to
+16 KiB. Both sources must be current non-procedural facts or summaries with
+identical normalized tags and workflow scope; typed rules, decisions, risks and
+other specialized memories are refused so summary synthesis cannot erase their
+behavior. The new summary receives fresh local `agent_assertion` attribution,
+confidence capped by 0.5 and both sources, and the earliest non-null source
+expiry. Source attestations do not transfer to newly authored prose.
+
+The same decision writer transaction creates the summary and separate rationale,
+records both source lineages and supersessions, closes both source lifetimes,
+queues index jobs for all changed memories, and completes the candidate and
+terminal conflict audit. The terminal candidate receipt retains the new
+summary ID so both the first apply and an idempotent replay return
+`application.createdMemoryId`. Partial failures and post-approval source or
+candidate changes commit no merge effects.
+
 The new response schema is `ee.conflict.proposal.v1`; the existing
-`ee.conflict.resolve.v1` planned/applied contract remains unchanged. Storage
+`ee.conflict.resolve.v1` contract adds the merge verb and `mergeMemories` plan
+action while keeping its planned/applied envelope. Storage
 uses the existing `contradiction_review` candidate type with the reserved
 `conflict-resolution:` producer family and a typed receipt. That family is
 dispatched before generic contradiction-link candidates and rejects unknown

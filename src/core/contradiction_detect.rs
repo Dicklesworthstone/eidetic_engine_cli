@@ -322,7 +322,7 @@ fn load_completed_conflict_pairs(
           AND decision.kind = 'decision' AND decision.workspace_id = resolution.workspace_id \
          WHERE json_extract(resolution.details, '$.schema') = ?2 \
            AND json_extract(resolution.details, '$.verb') IN \
-               ('supersede', 'reject-one', 'scope-split', 'both-valid') \
+               ('supersede', 'reject-one', 'scope-split', 'both-valid', 'merge') \
            AND json_extract(resolution.details, '$.conflictId') = resolution.target_id \
            AND first.id < second.id AND decision.id <> first.id AND decision.id <> second.id \
            AND EXISTS (SELECT 1 FROM memory_links AS provenance \
@@ -976,6 +976,15 @@ fn assemble_conflict_surface_in_snapshot(
 /// Wire schema id for the `ee conflict resolve` report.
 pub const CONFLICT_RESOLVE_SCHEMA_V1: &str = "ee.conflict.resolve.v1";
 
+/// A reviewed merge must fit in the bounded curation receipt with both source
+/// commitments and its complete mutation plan.
+pub const CONFLICT_MERGE_MAX_BYTES: usize = 16 * 1024;
+
+/// Summary synthesis cannot replace a specialized memory's typed behavior.
+pub(crate) fn merge_source_is_supported(level: &str, kind: &str) -> bool {
+    level != "procedural" && matches!(kind, "fact" | "summary")
+}
+
 /// Resolution verb vocabulary (ADR 0066 verb table).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -988,6 +997,8 @@ pub enum ResolveVerb {
     ScopeSplit,
     /// The tension is legitimate: record a `related` link + the decision.
     BothValid,
+    /// Reviewed synthesis creates a new summary with both sources as lineage.
+    Merge,
 }
 
 impl ResolveVerb {
@@ -997,6 +1008,7 @@ impl ResolveVerb {
             "reject-one" => Some(Self::RejectOne),
             "scope-split" => Some(Self::ScopeSplit),
             "both-valid" => Some(Self::BothValid),
+            "merge" => Some(Self::Merge),
             _ => None,
         }
     }
@@ -1008,6 +1020,7 @@ impl ResolveVerb {
             Self::RejectOne => "reject-one",
             Self::ScopeSplit => "scope-split",
             Self::BothValid => "both-valid",
+            Self::Merge => "merge",
         }
     }
 }
@@ -1043,6 +1056,10 @@ pub enum PlannedResolutionAction {
         memory_id: String,
         tags: Vec<String>,
     },
+    /// Only the approved curation writer may create this summary and close
+    /// both source lifetimes, preserving their bodies and native provenance.
+    #[serde(rename_all = "camelCase")]
+    MergeMemories { content: String },
 }
 
 /// The dry-run-visible mutation plan for one conflict pair.
@@ -1065,6 +1082,7 @@ pub struct ConflictResolveRequest<'a> {
     pub memory_b: &'a str,
     pub verb: ResolveVerb,
     pub keep: Option<&'a str>,
+    pub merge_content: Option<&'a str>,
     pub reason: &'a str,
     pub scope_a_tags: Vec<String>,
     pub scope_b_tags: Vec<String>,
@@ -1105,6 +1123,13 @@ pub fn plan_conflict_resolution(
     surface: &ConflictSurface,
     request: &ConflictResolveRequest<'_>,
 ) -> ConflictResolutionOutcome {
+    if request.verb != ResolveVerb::Merge && request.merge_content.is_some() {
+        return ConflictResolutionOutcome::InvalidRequest {
+            message: "--merge-content requires --verb merge.".to_owned(),
+            repair: "Use --verb merge to propose a combined summary, or omit --merge-content."
+                .to_owned(),
+        };
+    }
     let pair = surface.pairs.iter().find(|pair| {
         (pair.memory_a.id == request.memory_a && pair.memory_b.id == request.memory_b)
             || (pair.memory_a.id == request.memory_b && pair.memory_b.id == request.memory_a)
@@ -1305,6 +1330,68 @@ pub fn plan_conflict_resolution(
                 supersedes: None,
             },
         ],
+        ResolveVerb::Merge => {
+            if request.keep.is_some()
+                || !request.scope_a_tags.is_empty()
+                || !request.scope_b_tags.is_empty()
+            {
+                return ConflictResolutionOutcome::InvalidRequest {
+                    message: "--verb merge combines both sources and does not accept --keep or scope-split tags.".to_owned(),
+                    repair: "Provide --merge-content with the reviewed summary and use --propose."
+                        .to_owned(),
+                };
+            }
+            let Some(content) = request
+                .merge_content
+                .map(str::trim)
+                .filter(|content| !content.is_empty() && content.len() <= CONFLICT_MERGE_MAX_BYTES)
+            else {
+                return ConflictResolutionOutcome::InvalidRequest {
+                    message: format!(
+                        "--verb merge requires non-empty --merge-content of at most {CONFLICT_MERGE_MAX_BYTES} UTF-8 bytes."
+                    ),
+                    repair:
+                        "Supply the complete reviewed summary with --merge-content and --propose."
+                            .to_owned(),
+                };
+            };
+            if crate::policy::redact_public_replay_body(content).redacted {
+                return ConflictResolutionOutcome::InvalidRequest {
+                    message: "Merged content contains secret-like values or embedded instruction attacks."
+                        .to_owned(),
+                    repair: "Remove unsafe content before proposing the merge.".to_owned(),
+                };
+            }
+            if [&pair.memory_a, &pair.memory_b]
+                .iter()
+                .any(|source| !merge_source_is_supported(&source.level, &source.kind))
+            {
+                return ConflictResolutionOutcome::PolicyDenied {
+                    message: "Reviewed merge accepts non-procedural facts and summaries; specialized memories require a resolution that preserves their typed behavior."
+                        .to_owned(),
+                    repair: "Use supersede, scope-split, or both-valid for rules, decisions, risks, and other specialized memories."
+                        .to_owned(),
+                };
+            }
+            vec![
+                PlannedResolutionAction::MergeMemories {
+                    content: content.to_owned(),
+                },
+                PlannedResolutionAction::RecordDecision {
+                    topic: decision_topic(pair),
+                    chosen: format!(
+                        "merge {} and {} into a reviewed summary",
+                        pair.memory_a.id, pair.memory_b.id
+                    ),
+                    alternatives: vec![
+                        format!("keep {}", pair.memory_a.id),
+                        format!("keep {}", pair.memory_b.id),
+                        "leave the conflict unresolved".to_owned(),
+                    ],
+                    supersedes: None,
+                },
+            ]
+        }
     };
 
     ConflictResolutionOutcome::Plan(ConflictResolutionPlan {
@@ -2236,6 +2323,7 @@ mod tests {
             memory_b: MEM_B,
             verb,
             keep,
+            merge_content: None,
             reason: "test rationale",
             scope_a_tags: Vec::new(),
             scope_b_tags: Vec::new(),
@@ -2314,6 +2402,7 @@ mod tests {
                 memory_b: MEM_C, // (a,c) is NOT a live pair; (a,b) is
                 verb: ResolveVerb::BothValid,
                 keep: None,
+                merge_content: None,
                 reason: "r",
                 scope_a_tags: Vec::new(),
                 scope_b_tags: Vec::new(),
@@ -2543,6 +2632,155 @@ mod tests {
                 supersedes: None,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn merge_plans_exact_reviewed_content_and_canonical_two_source_lineage() {
+        let mut surface = fixture_surface();
+        surface.pairs[0].memory_a.content = "password=merge-source-private-canary".to_owned();
+        surface.pairs[0].memory_b.content = "private source body".to_owned();
+        let mut req = request(ResolveVerb::Merge, None);
+        req.merge_content = Some("  The service uses the current endpoint after the migration.\n");
+        let ConflictResolutionOutcome::Plan(plan) = plan_conflict_resolution(&surface, &req) else {
+            panic!("expected a merge plan");
+        };
+        assert_eq!(plan.verb, ResolveVerb::Merge);
+        assert_eq!(ResolveVerb::parse("merge"), Some(ResolveVerb::Merge));
+        assert_eq!(ResolveVerb::Merge.as_str(), "merge");
+        assert_eq!(plan.keep, None);
+        assert_eq!(plan.lose, None);
+        assert_eq!(plan.actions.len(), 2);
+        assert!(matches!(
+            &plan.actions[0],
+            PlannedResolutionAction::MergeMemories { content }
+                if content == "The service uses the current endpoint after the migration."
+        ));
+        assert!(matches!(
+            &plan.actions[1],
+            PlannedResolutionAction::RecordDecision { supersedes: None, alternatives, .. }
+                if alternatives.len() == 3
+        ));
+        let serialized = serde_json::to_string(&plan).unwrap();
+        assert!(!serialized.contains("merge-source-private-canary"));
+        assert!(!serialized.contains("private source body"));
+        let mut reversed = req;
+        reversed.memory_a = MEM_B;
+        reversed.memory_b = MEM_A;
+        assert_eq!(
+            plan_conflict_resolution(&surface, &reversed),
+            ConflictResolutionOutcome::Plan(plan),
+        );
+    }
+
+    #[test]
+    fn merge_requires_bounded_safe_content_and_unambiguous_arguments() {
+        let surface = fixture_surface();
+        for content in [None, Some(""), Some(" \n\t ")] {
+            let mut req = request(ResolveVerb::Merge, None);
+            req.merge_content = content;
+            assert!(matches!(
+                plan_conflict_resolution(&surface, &req),
+                ConflictResolutionOutcome::InvalidRequest { .. }
+            ));
+        }
+        let mut exact = "A bounded reviewed summary. ".repeat(1024);
+        exact.truncate(super::CONFLICT_MERGE_MAX_BYTES);
+        // Do not let trailing-whitespace normalization hide the byte boundary.
+        exact.replace_range(exact.len() - 1.., ".");
+        let mut req = request(ResolveVerb::Merge, None);
+        req.merge_content = Some(&exact);
+        assert!(matches!(
+            plan_conflict_resolution(&surface, &req),
+            ConflictResolutionOutcome::Plan(_)
+        ));
+        let oversized = format!("{exact}x");
+        req.merge_content = Some(&oversized);
+        assert!(matches!(
+            plan_conflict_resolution(&surface, &req),
+            ConflictResolutionOutcome::InvalidRequest { .. }
+        ));
+        req.merge_content = Some("password=merge-proposal-private-canary");
+        assert!(matches!(
+            plan_conflict_resolution(&surface, &req),
+            ConflictResolutionOutcome::InvalidRequest { .. }
+        ));
+        req.merge_content = Some("The migration retained the verified configuration.");
+        req.keep = Some(MEM_A);
+        assert!(matches!(
+            plan_conflict_resolution(&surface, &req),
+            ConflictResolutionOutcome::InvalidRequest { .. }
+        ));
+        req.keep = None;
+        req.scope_a_tags = vec!["scope:production".to_owned()];
+        assert!(matches!(
+            plan_conflict_resolution(&surface, &req),
+            ConflictResolutionOutcome::InvalidRequest { .. }
+        ));
+        req.scope_a_tags.clear();
+        req.scope_b_tags = vec!["scope:development".to_owned()];
+        assert!(matches!(
+            plan_conflict_resolution(&surface, &req),
+            ConflictResolutionOutcome::InvalidRequest { .. }
+        ));
+        req.scope_b_tags.clear();
+        for verb in [
+            ResolveVerb::Supersede,
+            ResolveVerb::RejectOne,
+            ResolveVerb::ScopeSplit,
+            ResolveVerb::BothValid,
+        ] {
+            req.verb = verb;
+            assert!(matches!(
+                plan_conflict_resolution(&surface, &req),
+                ConflictResolutionOutcome::InvalidRequest { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn merge_preserves_specialized_memory_behavior_by_refusing_summary_replacement() {
+        let mut req = request(ResolveVerb::Merge, None);
+        req.merge_content = Some("The reviewed summary preserves the current facts.");
+        for source in [0, 1] {
+            for kind in [
+                "rule",
+                "decision",
+                "failure",
+                "command",
+                "convention",
+                "anti-pattern",
+                "risk",
+                "playbook-step",
+                "unknown-custom",
+            ] {
+                let mut surface = fixture_surface();
+                let pair = &mut surface.pairs[0];
+                let member = if source == 0 {
+                    &mut pair.memory_a
+                } else {
+                    &mut pair.memory_b
+                };
+                member.kind = kind.to_owned();
+                assert!(
+                    matches!(
+                        plan_conflict_resolution(&surface, &req),
+                        ConflictResolutionOutcome::PolicyDenied { .. }
+                    ),
+                    "{kind} must retain its specialized behavior"
+                );
+            }
+        }
+        let mut surface = fixture_surface();
+        surface.pairs[0].memory_a.kind = "summary".to_owned();
+        assert!(matches!(
+            plan_conflict_resolution(&surface, &req),
+            ConflictResolutionOutcome::Plan(_)
+        ));
+        surface.pairs[0].memory_a.level = "procedural".to_owned();
+        assert!(matches!(
+            plan_conflict_resolution(&surface, &req),
+            ConflictResolutionOutcome::PolicyDenied { .. }
         ));
     }
 }

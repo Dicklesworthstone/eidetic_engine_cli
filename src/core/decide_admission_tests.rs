@@ -208,6 +208,7 @@ impl Fixture {
                 reason: self.request().rationale,
                 scope_a_tags: vec!["rust".to_owned()],
                 scope_b_tags: vec!["python".to_owned()],
+                merge_content: None,
             },
         );
         let ConflictResolutionOutcome::Plan(plan) = outcome else {

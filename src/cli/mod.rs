@@ -19137,10 +19137,22 @@ where
     let Some(verb) = ResolveVerb::parse(&args.verb) else {
         let error = DomainError::Usage {
             message: format!("Unknown resolution verb `{}`.", args.verb),
-            repair: Some("--verb supersede | reject-one | scope-split | both-valid".to_owned()),
+            repair: Some(
+                "--verb supersede | reject-one | scope-split | both-valid | merge".to_owned(),
+            ),
         };
         return write_domain_error(&error, cli.renderer(), stdout, stderr);
     };
+    if verb == ResolveVerb::Merge && args.apply {
+        let error = DomainError::UsageCodeWithDetails {
+            code: "conflict_merge_requires_review",
+            message: "Merging creates a new memory and retires both sources; it requires curation review."
+                .to_owned(),
+            repair: Some("Use --verb merge --merge-content <text> --propose, inspect the candidate, then ee curate accept and ee curate apply.".to_owned()),
+            details_json: "{}".to_owned(),
+        };
+        return write_domain_error(&error, cli.renderer(), stdout, stderr);
+    }
     let surface = match conflict::build_conflict_surface(workspace) {
         Ok(surface) => surface,
         Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
@@ -19166,6 +19178,7 @@ where
         memory_b: &args.memory_b,
         verb,
         keep: args.keep.as_deref(),
+        merge_content: args.merge_content.as_deref(),
         reason: &reason,
         scope_a_tags: split_tags(args.scope_a_tags.as_ref()),
         scope_b_tags: split_tags(args.scope_b_tags.as_ref()),
@@ -19238,6 +19251,18 @@ where
             ),
         };
     }
+    let plan = if verb == ResolveVerb::Merge {
+        match crate::core::curate::preview_conflict_resolution(
+            workspace,
+            Some(&database_path),
+            &request,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
+        }
+    } else {
+        plan
+    };
     let mut results: Option<Vec<conflict::ResolutionActionResult>> = None;
     let mut status = "planned";
     if args.apply {
@@ -19282,7 +19307,11 @@ where
                 ));
             }
             if !args.apply {
-                text.push_str("  (dry-run: pass --apply to execute)\n");
+                if verb == ResolveVerb::Merge {
+                    text.push_str("  (dry-run: pass --propose, then review and apply the curation candidate)\n");
+                } else {
+                    text.push_str("  (dry-run: pass --apply to execute)\n");
+                }
             }
             write_stdout(stdout, &text)
         }

@@ -1541,6 +1541,7 @@ entity too; stored secrets and private paths are redacted on output.
 |---|---|
 | `ee conflict list` / `explain <id>` / `cluster` | Read-only ranked contradiction surface: conflicting pairs with both bodies + the preferred side, and k-truss/Louvain clusters (`ee.conflict.v1`) |
 | `ee conflict resolve <a> <b> --verb supersede\|reject-one\|scope-split\|both-valid [--keep ID] [--reason "..."] [--propose\|--apply]` | Preview a resolution, save it in the curation queue with `--propose`, or apply it directly with `--apply`. Resolutions use the existing atomic decision writer and preserve an audited rationale (`ee.conflict.resolve.v1`; queued proposal: `ee.conflict.proposal.v1`) |
+| `ee conflict resolve <a> <b> --verb merge --merge-content "..." [--reason "..."] [--propose]` | Preview or propose a new summary from two conflicting facts/summaries. Curation review is required before both source lifetimes are closed; source bodies and provenance remain available. |
 
 Resolution is terminal: a tombstoned side (superseded or rejected) drops the
 pair from the actionable surface, and re-running against a moved surface
@@ -1559,6 +1560,32 @@ entry. Apply checks the live conflict and the captured source state again,
 so approval cannot overwrite a later resolution or silently act on changed
 memories. A scope split keeps both bodies and applies the corresponding scope
 tags; it does not tombstone either side.
+
+To combine two conflicting facts into new text, supply the exact summary with
+`--verb merge --merge-content`. A merge first previews or creates a review
+candidate; direct `--apply` is refused. For example:
+
+```bash
+ee conflict resolve <memory-a> <memory-b> --verb merge \
+  --merge-content "The service uses the new endpoint after the migration." \
+  --reason "The two records describe the same transition." --propose --json
+ee curate show <candidate-id> --json
+ee curate accept <candidate-id> --json
+ee curate apply <candidate-id> --json
+```
+
+Merge currently accepts non-procedural `fact` and `summary` memories with
+matching workflow and tag scope. The reviewed text is bounded to 16 KiB and
+screened before it enters the queue. Applying it creates a new semantic summary
+with fresh `agent_assertion` provenance, confidence no greater than 0.5 or either
+source, and the earliest source expiry. Both original bodies remain in history;
+the new summary has `derived_from` and `supersedes` links to each source. The
+summary, rationale, source retirement, audits, candidate completion and indexing
+jobs commit together. The apply response identifies the new summary through
+`application.createdMemoryId`, and retrying an applied candidate returns that
+same ID without duplicating the merge. Rules, decisions, risks, and other
+specialized memories retain their existing resolution choices so their typed
+behavior is preserved.
 
 ### Index
 

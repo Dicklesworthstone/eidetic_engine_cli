@@ -21,7 +21,7 @@
       "additionalProperties": false,
       "properties": {
         "conflictId": {"type": "string"},
-        "verb": {"type": "string", "enum": ["supersede", "reject-one", "scope-split", "both-valid"]},
+        "verb": {"type": "string", "enum": ["supersede", "reject-one", "scope-split", "both-valid", "merge"]},
         "memoryA": {"type": "string"},
         "memoryB": {"type": "string"},
         "keep": {"type": ["string", "null"]},
@@ -33,8 +33,22 @@
             "type": "object",
             "required": ["action"],
             "properties": {
-              "action": {"type": "string", "enum": ["recordDecision", "tombstoneMemory", "createLink", "addTags"]}
-            }
+              "action": {"type": "string", "enum": ["recordDecision", "tombstoneMemory", "createLink", "addTags", "mergeMemories"]}
+            },
+            "allOf": [{
+              "if": {"properties": {"action": {"const": "mergeMemories"}}},
+              "then": {
+                "required": ["content"],
+                "properties": {
+                  "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16384,
+                    "description": "Exact reviewed summary text; runtime additionally enforces the 16 KiB UTF-8 byte bound and content screening."
+                  }
+                }
+              }
+            }]
           }
         }
       }
