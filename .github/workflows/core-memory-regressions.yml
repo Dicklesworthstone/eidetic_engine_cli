@@ -338,6 +338,10 @@ jobs:
             printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
           done <<'CASES'
           index-repair-serial core::index::tests::requested_index_repair_
+          index-empty-producer core::index::delta_source::tests::streamed_empty_index_keeps_producer_through_first_memory_and_feedback
+          index-feedback-producer core::index::delta_source::tests::streamed_feedback_repairs_populated_index_with_unbound_producer
+          index-producer-readiness core::index::tests::index_readiness_checks_quality_and_requires_verified_producer_identity
+          index-empty-readiness core::index::tests::empty_index_readiness_does_not_require_loading_an_embedding_producer
           index-backend-identity core::index::remote_embedding_space_tests::
           index-backend-selection core::index::tests::explicit_remote_backend_outranks_rejected_workspace_registration
           search-empty-generation-serial core::search::tests::empty_generations::

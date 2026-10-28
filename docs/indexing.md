@@ -148,6 +148,14 @@ When a local neural model is available, successful publication permits hybrid
 retrieval again. Text and embeddings need not change for the source generation
 to require this publication.
 
+Empty vector tiers record their embedding producer before the first memory is
+appended. Before reusing a generation for a delta, the worker checks the actual
+fast and quality vector headers against the selected producers. Older tiers
+with an absent producer revision, or tiers from a different producer, go
+through the existing full staged publisher. The ordinary queued worker can
+therefore repair this compatibility gap without a manual rebuild; matching
+database and index generations alone never bypass producer validation.
+
 ## Session Generation Invalidation
 
 `V097_SESSION_INDEX_GENERATIONS` makes the session source family obey the same

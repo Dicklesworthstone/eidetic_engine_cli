@@ -3550,6 +3550,13 @@ async fn stage_planned_index_delta(
     digests: delta::DocDigests,
     document_counts: IndexDocumentCounts,
 ) -> Result<(UnpublishedIndexStage, delta::Delta), DeltaStageError> {
+    // Digest metadata alone cannot prove that the native vector tiers belong
+    // to this producer. In particular, older empty generations omitted their
+    // producer revision; appending into them kept that empty header forever.
+    // Refuse before staging so the ordinary full publisher repairs those
+    // generations, as well as any actual fast/quality producer drift.
+    verify_index_vector_producers(index_dir, &stack_descriptors(stack))
+        .map_err(DeltaStageError::Refused)?;
     let producer = delta::embedder_identity(stack);
     let staging = UnpublishedIndexStage::create(index_dir)
         .map_err(|error| DeltaStageError::Refused(error.to_string()))?;
@@ -6845,10 +6852,19 @@ async fn build_empty_index(
 
     let has_quality_index = stack.quality().is_some();
     let fast_embedder = stack.fast_arc();
-    let fast_writer = VectorIndex::create(
+    // The first indexed document can enter through the delta path. Bind the
+    // empty native header to the same producer as its document digests so that
+    // append/compaction cannot leave populated vectors under an empty revision.
+    // An unverified producer may still represent emptiness; delta reuse will
+    // require its complete identity before any content is appended.
+    let fast_revision =
+        delta::verified_embedder_identity(fast_embedder.as_ref()).unwrap_or_default();
+    let fast_writer = VectorIndex::create_with_revision(
         &index_dir.join(VECTOR_INDEX_FAST_FILE),
         fast_embedder.id(),
+        &fast_revision,
         fast_embedder.dimension(),
+        frankensearch::index::Quantization::F16,
     )
     .map_err(|error| {
         IndexRebuildError::Index(format!("failed to create empty fast vector tier: {error}"))
@@ -6859,10 +6875,14 @@ async fn build_empty_index(
     index_checkpoint(cx)?;
 
     if let Some(quality_embedder) = stack.quality_arc() {
-        let quality_writer = VectorIndex::create(
+        let quality_revision =
+            delta::verified_embedder_identity(quality_embedder.as_ref()).unwrap_or_default();
+        let quality_writer = VectorIndex::create_with_revision(
             &index_dir.join(VECTOR_INDEX_QUALITY_FILE),
             quality_embedder.id(),
+            &quality_revision,
             quality_embedder.dimension(),
+            frankensearch::index::Quantization::F16,
         )
         .map_err(|error| {
             IndexRebuildError::Index(format!(
@@ -11514,25 +11534,31 @@ fn verify_selected_index_producers(
         if index_generation_is_verified_empty(index_dir)? {
             return Ok(());
         }
-        let (fast, quality) = embedders.ok_or_else(|| {
+        let selected = embedders.ok_or_else(|| {
             "selected embedding producer is unavailable; a full index rebuild is required"
                 .to_owned()
         })?;
-        let fast_index =
-            open_fast_vector_index_read_only(index_dir).map_err(|error| error.detail)?;
-        verify_vector_producer(&fast_index, fast, "fast")?;
-        if let Some(quality) = quality {
-            let quality_index = open_quality_vector_index_read_only(index_dir)
-                .map_err(|error| error.detail)?
-                .ok_or_else(|| {
-                    "selected quality embedding producer has no vector tier; a full index rebuild is required"
-                        .to_owned()
-                })?;
-            verify_vector_producer(&quality_index, quality, "quality")?;
-        }
-        Ok(())
+        verify_index_vector_producers(index_dir, selected)
     })();
     status.compatibility_error = verification.err();
+}
+
+fn verify_index_vector_producers(
+    index_dir: &Path,
+    (fast, quality): &(EmbedderDescriptor, Option<EmbedderDescriptor>),
+) -> Result<(), String> {
+    let fast_index = open_fast_vector_index_read_only(index_dir).map_err(|error| error.detail)?;
+    verify_vector_producer(&fast_index, fast, "fast")?;
+    if let Some(quality) = quality {
+        let quality_index = open_quality_vector_index_read_only(index_dir)
+            .map_err(|error| error.detail)?
+            .ok_or_else(|| {
+                "selected quality embedding producer has no vector tier; a full index rebuild is required"
+                    .to_owned()
+            })?;
+        verify_vector_producer(&quality_index, quality, "quality")?;
+    }
+    Ok(())
 }
 
 fn verify_vector_producer(

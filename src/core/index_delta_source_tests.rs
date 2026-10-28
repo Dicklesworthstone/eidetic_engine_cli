@@ -218,6 +218,152 @@ fn assert_delta(report: &IndexProcessingJobReport) {
 }
 
 #[test]
+fn streamed_empty_index_keeps_producer_through_first_memory_and_feedback() {
+    for legacy in [false, true] {
+        let fixture = Fixture::new(0);
+        let stack = hash_fallback_embedder_stack();
+        fixture.seed_index();
+        if legacy {
+            // Older empty generations had matching digests but an unbound header.
+            VectorIndex::create(
+                &fixture.index_dir.join(VECTOR_INDEX_FAST_FILE),
+                stack.fast().id(),
+                stack.fast().dimension(),
+            )
+            .expect("legacy empty header")
+            .finish()
+            .expect("legacy empty tier");
+        }
+        assert!(index_generation_is_verified_empty(&fixture.index_dir).expect("empty seed"));
+        let id = memory_id(0);
+        for round in 1..=2 {
+            if round == 1 {
+                insert_memory(
+                    &fixture.db,
+                    &fixture.workspace_id,
+                    &id,
+                    "Staff sign in with a one-time email code.",
+                    Vec::new(),
+                )
+                .expect("first memory");
+            } else {
+                assert!(
+                    fixture
+                        .db
+                        .update_memory_bayes_posterior(&id, 1.5, 0.5)
+                        .expect("feedback posterior")
+                );
+            }
+            let job = fixture.queue(round, &id);
+            let reports = process_pending_index_jobs_coalesced(
+                &fixture.db,
+                &fixture.workspace_id,
+                &fixture.index_dir,
+                None,
+            )
+            .expect("ordinary coalescer");
+            assert_eq!(reports.len(), 1, "{reports:?}");
+            if legacy && round == 1 {
+                assert!(
+                    reports[0]
+                        .fallback_to_full
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("producer_revision")),
+                    "{reports:?}",
+                );
+            } else {
+                assert_delta(&reports[0]);
+            }
+            assert_eq!(reports[0].outcome, "completed", "{reports:?}");
+            assert_eq!(reports[0].documents_indexed, 1);
+            assert_eq!(
+                fixture
+                    .db
+                    .get_search_index_job(&job.id)
+                    .expect("job")
+                    .expect("queued job")
+                    .status,
+                "completed",
+            );
+            fixture.assert_published(&fixture.snapshot());
+            let selected = stack_descriptors(&stack);
+            let status =
+                read_index_metadata_for_selection(&fixture.index_dir, None, Some(&selected));
+            assert!(
+                status.present
+                    && status.corruption_error.is_none()
+                    && status.compatibility_error.is_none(),
+                "{status:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn streamed_feedback_repairs_populated_index_with_unbound_producer() {
+    let fixture = Fixture::new(1);
+    let stack = hash_fallback_embedder_stack();
+    fixture.seed_index();
+    let rows = vector_rows(&fixture.index_dir);
+    let mut writer = VectorIndex::create(
+        &fixture.index_dir.join(VECTOR_INDEX_FAST_FILE),
+        stack.fast().id(),
+        stack.fast().dimension(),
+    )
+    .expect("legacy populated header");
+    for (id, bits) in rows {
+        let vector: Vec<_> = bits.into_iter().map(f32::from_bits).collect();
+        writer.write_record(&id, &vector).expect("legacy vector");
+    }
+    writer.finish().expect("legacy populated tier");
+
+    let id = memory_id(0);
+    assert!(
+        fixture
+            .db
+            .update_memory_bayes_posterior(&id, 1.5, 0.5)
+            .expect("feedback posterior")
+    );
+    let snapshot = fixture.snapshot();
+    let plan = delta::plan(&fixture.index_dir, &stack, &snapshot.documents)
+        .expect("matching document digests alone still accept the legacy generation");
+    assert!(plan.upserts.is_empty() && plan.removals.is_empty());
+    let job = fixture.queue(1, &id);
+    let reports = process_pending_index_jobs_coalesced(
+        &fixture.db,
+        &fixture.workspace_id,
+        &fixture.index_dir,
+        None,
+    )
+    .expect("feedback coalescer repairs legacy producer");
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].outcome, "completed", "{reports:?}");
+    assert!(
+        reports[0]
+            .fallback_to_full
+            .as_deref()
+            .is_some_and(|reason| reason.contains("producer_revision")),
+        "{reports:?}",
+    );
+    assert_eq!(
+        fixture
+            .db
+            .get_search_index_job(&job.id)
+            .expect("job")
+            .expect("queued job")
+            .status,
+        "completed",
+    );
+    fixture.assert_published(&snapshot);
+    let selected = stack_descriptors(&stack);
+    let status = read_index_metadata_for_selection(&fixture.index_dir, None, Some(&selected));
+    assert!(
+        status.present && status.corruption_error.is_none() && status.compatibility_error.is_none(),
+        "{status:?}",
+    );
+}
+
+#[test]
 fn streamed_publication_reconciles_unqueued_writes_and_global_withdrawals() {
     let fixture = Fixture::new(16);
     let foreign = fixture.other_workspace();
