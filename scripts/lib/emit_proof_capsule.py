@@ -79,8 +79,11 @@ def build_capsule(
 
     pairs: list[dict] = []
     problems: list[str] = []
+    announced_targets: list[str] = []
     if log is not None and log.is_file():
-        pairs, problems = parse(log.read_text(errors="replace").splitlines())
+        pairs, problems, announced_targets = parse(
+            log.read_text(errors="replace").splitlines()
+        )
     else:
         unestablished.append("results: no readable log was supplied")
 
@@ -115,6 +118,36 @@ def build_capsule(
                 "reason": problem,
                 "workerHost": host,
             }
+        )
+
+    # ATTRIBUTION IS ADVISORY ON A MULTI-TARGET RUN, so the capsule says so
+    # rather than presenting `stage`/`target` as established facts.
+    #
+    # `grade_test_log.parse` assigns each summary to the Nth `Running` line.
+    # That is correct for a sequential run and WRONG under `-j N`, where
+    # several test binaries interleave their announcements: its own comment
+    # records measuring three targets each passing one test and producing
+    # three pairs that ALL RECONCILED with every label wrong. Nothing in the
+    # log ties a summary to a target under interleaving -- the information is
+    # absent, not merely unparsed -- so this cannot be repaired here either.
+    #
+    # What it can do is refuse to launder the uncertainty. A release decision
+    # reading `stage: contracts, status: PASS` out of this capsule would be
+    # taking a label the grader calls advisory as a verified identity, and this
+    # file's whole premise is that a field whose empty state is
+    # indistinguishable from its verified one is the empty-digest defect with
+    # more fields. The announced target list does NOT depend on attribution, so
+    # it is the reliable half and is named here with the caveat.
+    if len(announced_targets) > 1:
+        unestablished.append(
+            "results[].stage/target: "
+            f"{len(announced_targets)} targets announced in one log "
+            f"({', '.join(announced_targets)}), so each summary's attribution to "
+            "a target is ADVISORY -- cargo interleaves `Running` lines under "
+            "`-j N` and nothing in the log binds a summary to a target. The "
+            "target list is reliable; the pairing of counts to targets is not. "
+            "Dispatch one target per invocation when per-target attribution "
+            "has to be established."
         )
 
     if host is None:
@@ -260,6 +293,18 @@ ZERO_LOG = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
 running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out
 """
+# Two `Running` lines BEFORE any announcement: the buffered multi-target shape
+# cargo emits when one invocation names several targets, which is the case
+# grade_test_log measured misattributing every label while every pair
+# reconciled. Both pairs here are green, so nothing in the numbers hints that
+# the labels are advisory -- that is the point of the arm it drives.
+MULTI_TARGET_LOG = """     Running unittests src/lib.rs (target/debug/deps/ee-aaa)
+     Running tests/contracts.rs (target/debug/deps/contracts-bbb)
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+"""
 
 
 def self_test() -> int:
@@ -303,6 +348,56 @@ def self_test() -> int:
         )
         check("hostedCi is null, not invented", capsule["runIdentifiers"]["hostedCi"] is None)
         check("a green run reports PASS", capsule["results"][0]["status"] == "PASS")
+
+        # bd-uaonk-adjacent regression pin: `parse` returns THREE values since
+        # 21a273248 and this caller unpacked two, so every call raised
+        # ValueError and this whole self-test exited 1 for two days. Nothing
+        # saw it, because the stage that runs it lives in verify.sh, which
+        # cannot execute on this host and whose hosted lane is switched off.
+        # The arms below all call build_capsule, so any of them would catch a
+        # recurrence -- this one just names the cause.
+        check(
+            "build_capsule survives grade_test_log.parse's return arity",
+            isinstance(capsule.get("results"), list),
+        )
+        # BOTH POLARITIES of the attribution caveat. A single-target log must
+        # NOT carry it, or the caveat becomes noise that readers learn to skip.
+        single_caveat = [
+            u for u in capsule["completeness"]["unestablished"] if "ADVISORY" in u
+        ]
+        check(
+            "a SINGLE-target log does not claim attribution is advisory",
+            single_caveat == [],
+        )
+        multi = pathlib.Path(directory) / "multi.log"
+        multi.write_text(MULTI_TARGET_LOG)
+        multi_capsule = build_capsule(multi, "abc123", 0, "worker-a", 0, "rch exec ...")
+        multi_caveat = [
+            u for u in multi_capsule["completeness"]["unestablished"] if "ADVISORY" in u
+        ]
+        # The caveat must NAME the targets, because "attribution is advisory"
+        # without the list leaves a reader unable to tell which results to
+        # distrust. `parse` records the BINARY path from each `Running` line
+        # (its `bin` group), not the source name, so these are the strings it
+        # actually produced -- this arm failed first against `tests/contracts.rs`
+        # and `unittests`, which is what the log says and not what the parser
+        # keeps.
+        check(
+            "a MULTI-target log names per-target attribution as advisory",
+            len(multi_caveat) == 1
+            and "2 targets announced" in multi_caveat[0]
+            and "target/debug/deps/ee-aaa" in multi_caveat[0]
+            and "target/debug/deps/contracts-bbb" in multi_caveat[0],
+        )
+        check(
+            "the multi-target caveat does not suppress the results themselves",
+            len(multi_capsule["results"]) == 2
+            and all(r["status"] == "PASS" for r in multi_capsule["results"]),
+        )
+        check(
+            "a multi-target capsule still validates against the schema",
+            not validate(multi_capsule),
+        )
 
         vacuous = build_capsule(zero, "abc123", 0, "worker-a", 0, "rch exec ...")
         check(

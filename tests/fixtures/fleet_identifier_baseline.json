@@ -1,0 +1,30 @@
+{
+  "note": "Known fleet-identifier debt, as a DOWN-ONLY ratchet. Read by scripts/check-fleet-identifier-census.py, which mirrors tests/fleet_identifier_guard.rs on a rail that runs without a toolchain. This file records COUNTS AND PATHS ONLY and must never contain an identifier value. A carrying file that is not listed here fails the check (exit 1); a listed file over its ceiling fails (exit 1); a listed file that reaches ZERO also fails, with exit 3, so the entry gets deleted and the ratchet can only tighten.",
+  "bead": "bd-42puv",
+  "observed_at": "2026-10-27",
+  "observed_by": "scripts/check-fleet-identifier-census.py at 24530c773",
+  "total_carrying_lines": 1159,
+  "files": [
+    {
+      "path": ".beads/issues.jsonl",
+      "ceiling": 1200,
+      "observed": 1159,
+      "reason": "The tracker export is generated from .beads/beads.db, so scrubbing the JSONL is undone by the next `br sync` flush. The identifiers live in SQLite across 90 issue descriptions and 1088 comments, which makes the repair ~1178 `br` writes against a live multi-agent tracker -- an operator-scheduled, quiesced migration, not a text pass. Tracked as the tracker half of bd-42puv.",
+      "ceiling_rationale": "A ceiling with headroom, not an equality, because this file is regenerated on every flush and its count moves with ordinary tracker churn: measured 1149 on 2026-10-14, 1150 on 2026-10-19 and 1159 on 2026-10-27, so roughly +10 per fortnight as beads are filed. 1200 is about five weeks of that drift. It is loose enough not to fire on churn and tight enough to catch a bulk re-introduction, which is the failure this entry is actually guarding against. The entry that matters for new disclosures is the ABSENCE of any other path from this list -- that arm has no headroom at all."
+    }
+  ],
+  "cleared": [
+    {
+      "path": "proofs/oracle/1azkt10/README.md",
+      "cleared_at": "2026-10-27",
+      "commit": "24530c773",
+      "note": "13 carrying lines redacted one-to-one to worker-01/-02/-03 placeholders, preserving the same-worker comparisons the evidence depends on."
+    },
+    {
+      "path": "proofs/oracle/1azkt10/28cf9693f0ab261b6e237f43ace8f4636b9d0e6095e7ab01f5a6756afd887266.bundle.json",
+      "cleared_at": "2026-10-27",
+      "commit": "24530c773",
+      "note": "1 carrying line (a single `worker` field) redacted. Kept in `cleared` rather than deleted so a reappearance reads as a regression against a recorded clean state rather than as a first offence."
+    }
+  ]
+}
