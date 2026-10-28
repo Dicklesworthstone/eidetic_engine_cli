@@ -193,7 +193,30 @@ def run_gate(root: Path, as_json: bool) -> int:
             for name in recovered:
                 print(f"  src/graph/{name}", file=sys.stderr)
         if not new and not recovered:
-            print("PASS: every metric-named file routes through fnx.")
+            # `new` and `recovered` are both empty exactly when flagged ==
+            # baseline, so every remaining FLAG row above is a reviewed
+            # exception. SAY SO. This line used to read "every metric-named
+            # file routes through fnx", which contradicted its own FLAG rows
+            # four lines earlier -- two of sixteen do not route and are
+            # baselined. A reader who trusts the summary over the rows
+            # concludes there are no exceptions, which is the same defect the
+            # fleet guard's ScanReport comment argues against: a verdict that
+            # reads as "the whole set" while describing a subset of it.
+            accepted = sorted(flagged)
+            total = report["metricNamedFiles"]
+            if accepted:
+                print(
+                    f"PASS: no NEW unrouted file. {total - len(accepted)} of {total} "
+                    f"metric-named file(s) route through fnx; {len(accepted)} reviewed "
+                    f"exception(s) do NOT and are baselined:"
+                )
+                for name in accepted:
+                    print(f"    src/graph/{name}  fnx(code)=0, accepted in scripts/{BASELINE_NAME}")
+            else:
+                print(
+                    f"PASS: all {total} metric-named file(s) route through fnx, "
+                    "with no baselined exception."
+                )
     return 1 if (new or recovered) else 0
 
 
@@ -226,6 +249,22 @@ def self_test() -> int:
         sink = io.StringIO()
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             return run_gate(root, as_json=False)
+
+    def gate_output(root: Path) -> tuple[int, str]:
+        """As `quiet_gate`, but hands back what the gate PRINTED.
+
+        The arms below assert on exit codes, which cannot see a verdict line
+        that overstates its own result -- the defect that line carried until
+        2026-10-27 was invisible to every arm here precisely because they all
+        read the code and never the text.
+        """
+        import contextlib
+        import io
+
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            code = run_gate(root, as_json=False)
+        return code, sink.getvalue()
 
     with tempfile.TemporaryDirectory(prefix="graph-fnx-selftest-") as tmp:
         root = Path(tmp)
@@ -278,8 +317,19 @@ def self_test() -> int:
 
         # The baseline suppresses a reviewed exception, and only that one.
         (root / "scripts" / BASELINE_NAME).write_text("skyline.rs\n", encoding="utf-8")
-        code = quiet_gate(root)
+        code, text = gate_output(root)
         arm("a baselined file does not fail the gate", code == 0)
+        # The verdict LINE, not just the code. A green that claims every file
+        # routes through fnx while one is baselined is how a reviewed
+        # exception becomes invisible, and no exit code can detect it.
+        arm(
+            "a baselined exception is NAMED in the pass line, not absorbed into it",
+            "skyline.rs" in text and "reviewed exception" in text,
+        )
+        arm(
+            "the pass line does not claim EVERY file routes while one is baselined",
+            "every metric-named file routes through fnx" not in text,
+        )
 
         # SHRINK-ONLY: a baselined file that starts routing through fnx must fail,
         # so the baseline cannot accumulate stale entries that hide a later
@@ -290,6 +340,15 @@ def self_test() -> int:
         )
         code = quiet_gate(root)
         arm("a baselined file that now routes through fnx FAILS (shrink-only)", code == 1)
+
+        # NEGATIVE HALF of the two verdict arms above: with an EMPTY baseline
+        # and every metric-named file routing, the strong claim is TRUE and
+        # must appear. Without this, a summary that never made the strong
+        # claim at all would satisfy the arms above and say less than it knows.
+        (root / "scripts" / BASELINE_NAME).write_text("", encoding="utf-8")
+        code, text = gate_output(root)
+        arm("with no exception, the pass line DOES claim every file routes", code == 0
+            and "route through fnx, with no baselined exception" in text)
 
     with tempfile.TemporaryDirectory(prefix="graph-fnx-empty-") as tmp:
         root = Path(tmp)
