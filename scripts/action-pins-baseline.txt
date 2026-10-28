@@ -17,6 +17,25 @@
 #
 # release.yml is deliberately ABSENT: it is 14 of 14 pinned and must stay that
 # way, so any mutable reference appearing there fails on sight.
+#
+# REMEDIATION, bd-8plmk, 2026-10-28. The `actions/cache` SUB-PATH family -- the
+# mechanism this gate's header calls out, one blind spot repeated across 15
+# files that pinned `actions/cache@` and never matched `actions/cache/restore@`
+# or `actions/cache/save@` -- is pinned. 179 mutable -> 150.
+#
+# EVERY SHA USED IS ONE THIS REPO ALREADY TRUSTED. No new upstream commit was
+# introduced and no version was changed: measured before the pass, 8 of the 10
+# mutable actions already had EXACTLY ONE SHA pinned elsewhere in this tree,
+# with ZERO existing drift, and every action carried exactly ONE mutable tag, so
+# each replacement was determined by the repo rather than chosen. The two with
+# no existing pin -- actions/setup-python@v5 and ilammy/msvc-dev-cmd@v1, one
+# occurrence each in ci.yml -- would require a NEW trust decision and are
+# deliberately left mutable inside ci.yml's row.
+#
+# A ROW AT 0 IS NOT A DELETED ROW, AND IT IS DOING WORK. It hard-gates that
+# file: the next mutable reference there fails on sight, the same property
+# release.yml gets from being absent. typed-memory-recovery.yml was already
+# carried this way before this pass.
 
 29	ci.yml
 0	typed-memory-recovery.yml
@@ -43,20 +62,20 @@
 4	verify-ask-admission-20260917.yml
 3	index-rollback-durability-20260919.yml
 3	macos-ee-artifact.yml
-2	cass-prefetch-execution-20260920.yml
-2	cass-prefetch-residency-20260920.yml
 2	ci-static.yml
-2	evidence-export-20260919.yml
-2	external-ingestion-20260919.yml
-2	git-capture-20260919.yml
-2	git-capture-mcp-20260919.yml
-2	git-capture-offline-20260919.yml
-2	journal-ingestion-20260919.yml
 2	recovery-source-snapshot.yml
-2	resume-coherence-20260919.yml
-2	resume-current-state-20260919.yml
-2	resume-indexed-projection-20260919.yml
-2	session-arc-learning-20260919.yml
-2	trust-recovery-20260919.yml
-2	workflow-recovery-20260920.yml
-1	outcome-atomic-learning-20260920.yml
+0	cass-prefetch-execution-20260920.yml
+0	cass-prefetch-residency-20260920.yml
+0	evidence-export-20260919.yml
+0	external-ingestion-20260919.yml
+0	git-capture-20260919.yml
+0	git-capture-mcp-20260919.yml
+0	git-capture-offline-20260919.yml
+0	journal-ingestion-20260919.yml
+0	outcome-atomic-learning-20260920.yml
+0	resume-coherence-20260919.yml
+0	resume-current-state-20260919.yml
+0	resume-indexed-projection-20260919.yml
+0	session-arc-learning-20260919.yml
+0	trust-recovery-20260919.yml
+0	workflow-recovery-20260920.yml

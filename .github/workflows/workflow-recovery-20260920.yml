@@ -36,7 +36,7 @@ jobs:
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt, clippy
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: cache
         with:
           path: |
@@ -56,7 +56,7 @@ jobs:
           name: workflow-recovery-source-and-results
           path: ${{ runner.temp }}/workflow-*
           retention-days: 7
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
         with:
           path: |
