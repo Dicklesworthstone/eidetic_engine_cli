@@ -31,15 +31,15 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: main
           fetch-depth: 1
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
@@ -224,7 +224,7 @@ jobs:
           git diff -- src/core/ask.rs src/core/ask_corpus.rs src/core/ask_native_tests.rs src/core/ask_evidence_tests.rs src/cli/mod.rs tests/contracts/ask_native.rs docs/adr/0067-extractive-ask.md > "$RUNNER_TEMP/ask-path-uncommitted.patch"
           git archive --format=tar.gz --output="$RUNNER_TEMP/ask-path-source.tar.gz" HEAD
           for file in ask.rs ask_corpus.rs ask_native_tests.rs ask_evidence_tests.rs; do cp "src/core/$file" "$RUNNER_TEMP/ask-path-$file"; done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
           name: path-scoped-ask-verification

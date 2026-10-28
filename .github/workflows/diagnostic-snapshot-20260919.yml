@@ -34,8 +34,16 @@ jobs:
           # bd-niay4. SINGLE-HALF PIN, AND IT IS CORRECT HERE. "Pin both halves"
           # is CONDITIONAL on a job-level RUSTUP_TOOLCHAIN existing to override
           # the action at invocation time. This workflow sets none, so there is
-          # no second half and this is not d315cdc7f. The ref `@nightly` selects
-          # FLOATING nightly by itself; this input is what dates the install.
+          # no second half and this is not d315cdc7f. This input is what dates
+          # the install; the action does not read rust-toolchain.toml.
+          #
+          # bd-8plmk: the ref above was the `@nightly` BRANCH until 2026-10-28,
+          # and this comment used to say so -- "the ref `@nightly` selects
+          # FLOATING nightly by itself". It is now a SHA, and the sentence was
+          # corrected rather than left describing a line that no longer exists.
+          # Pinning it changes nothing here because this input overrides the
+          # branch default, which was measured across all 84
+          # dtolnay/rust-toolchain usages in .github/workflows before the pin.
           toolchain: nightly-2026-08-31
           components: rustfmt, clippy
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830

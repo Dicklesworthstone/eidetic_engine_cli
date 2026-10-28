@@ -41,15 +41,15 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt, clippy
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
@@ -156,7 +156,7 @@ jobs:
           rustfmt --edition 2024 --config skip_children=true --check src/core/jsonl_import.rs src/core/jsonl_recovery.rs src/core/jsonl_revisions.rs src/core/jsonl_recovery_regression_tests.rs src/core/jsonl_revision_heads_tests.rs src/core/search_rule_admission.rs src/core/search_revision_admission.rs src/core/search_revision_admission_tests.rs src/core/search_diagnostic_snapshot.rs src/core/backup_revision_recovery_tests.rs tests/search_conformal_e2e.rs tests/support/revision_search_cli.rs > "$RUNNER_TEMP/recovery-fmt.log" 2>&1 || status=$?
           cat "$RUNNER_TEMP/recovery-fmt.log"
           exit "$status"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
           name: recovery-headship-admission-verification

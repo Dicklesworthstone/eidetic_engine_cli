@@ -25,11 +25,11 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: main
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           # bd-niay4. SINGLE-HALF PIN, AND IT IS CORRECT HERE. "Pin both halves"
           # is CONDITIONAL on a job-level RUSTUP_TOOLCHAIN existing to override
@@ -38,7 +38,7 @@ jobs:
           # FLOATING nightly by itself; this input is what dates the install.
           toolchain: nightly-2026-08-31
           components: rustfmt, clippy
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: cache
         with:
           path: |
@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
           cargo clippy --locked --all-targets -- -D warnings > "$RUNNER_TEMP/runtime-clippy.log" 2>&1 || { tail -n 160 "$RUNNER_TEMP/runtime-clippy.log"; exit 1; }
           cargo fmt --check > "$RUNNER_TEMP/runtime-format.log" 2>&1 || { tail -n 100 "$RUNNER_TEMP/runtime-format.log"; exit 1; }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
           name: runtime-recovery-source-and-verification
@@ -141,7 +141,7 @@ jobs:
             ${{ runner.temp }}/runtime-*.log
             ${{ runner.temp }}/runtime-*-source.tar.gz
           retention-days: 7
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
         with:
           path: |

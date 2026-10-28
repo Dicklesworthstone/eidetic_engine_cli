@@ -54,7 +54,7 @@ jobs:
       EE_EMBED_MODEL_FIXTURE_DIR: .ci/model-fixture
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 2
 
@@ -70,11 +70,20 @@ jobs:
           ' Cargo.toml
 
       - name: Install nightly Rust
-        # bd-niay4. `@nightly` is the ACTION REF, not the toolchain. Without an
-        # explicit `toolchain:` the action installs a floating nightly and
-        # exports RUSTUP_TOOLCHAIN, which overrides rust-toolchain.toml. Keep
-        # this equal to that file's `channel`; the action does not read it.
-        uses: dtolnay/rust-toolchain@nightly
+        # bd-niay4. THE ACTION REF AND THE TOOLCHAIN ARE DIFFERENT KNOBS, and
+        # this step pins both. Without an explicit `toolchain:` the action
+        # installs a floating nightly and exports RUSTUP_TOOLCHAIN, which
+        # overrides rust-toolchain.toml. Keep the input below equal to that
+        # file's `channel`; the action does not read it.
+        #
+        # bd-8plmk: the ref was the `@nightly` BRANCH until 2026-10-28, which is
+        # why pinning it needed checking rather than doing -- that action
+        # selects its default toolchain by branch name. It is safe here because
+        # the input below overrides whatever default the branch carried, and
+        # that was measured across the tree first: all 84 dtolnay/rust-toolchain
+        # usages in .github/workflows, 32 then-mutable and 52 already pinned,
+        # supply an explicit `toolchain:`, so the branch default is never read.
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
 
@@ -90,7 +99,7 @@ jobs:
           df -T "$RUNNER_TEMP"
 
       - name: Restore pinned Model2Vec fixture
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: .ci/model-fixture
           key: ee-model2vec-${{ runner.os }}-${{ hashFiles('franken-stack.lock') }}
@@ -172,7 +181,7 @@ jobs:
 
       - name: Upload daemon search observational evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: daemon-search-slo-observation-${{ github.sha }}
           path: ${{ runner.temp }}/ee-daemon-search-artifacts/
@@ -189,7 +198,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 2
 
@@ -213,7 +222,7 @@ jobs:
 
       - name: Install nightly Rust
         # bd-niay4: pin to rust-toolchain.toml's channel; the action does not read it.
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
 
@@ -284,7 +293,7 @@ jobs:
       # acceptable in a shipped binary. A one-line allow-list edit does not
       # fix it, which is what the old note implied.
       - name: RustSec advisory audit (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
           command: check advisories
 
@@ -293,7 +302,7 @@ jobs:
       # sources regression could sit unnoticed behind an unrelated advisory
       # failure. Each gate reports its own verdict.
       - name: Ban and source audit (cargo-deny)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
           command: check bans sources
 
@@ -379,7 +388,7 @@ jobs:
       TEST_SHARD: ${{ matrix.shard }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 2
 
@@ -396,7 +405,7 @@ jobs:
 
       - name: Install nightly Rust
         # bd-niay4: pin to rust-toolchain.toml's channel; the action does not read it.
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
 
@@ -600,7 +609,7 @@ jobs:
             binary: ee.exe
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 2
 
@@ -642,7 +651,7 @@ jobs:
 
       - name: Install nightly Rust
         # bd-niay4: pin to rust-toolchain.toml's channel; the action does not read it.
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
           targets: ${{ matrix.target }}
@@ -1308,7 +1317,7 @@ jobs:
 
       - name: Upload per-target native-reranker evidence
         if: ${{ always() && matrix.release_target }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: bd-1nl13.7-${{ matrix.target }}
           path: ${{ runner.temp }}/bd-1nl13.7/${{ matrix.target }}
@@ -1332,7 +1341,7 @@ jobs:
 
       - name: Upload macOS ee artifact
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ee-${{ matrix.target }}-debug
           path: |
@@ -1350,7 +1359,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download all per-target proof artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         continue-on-error: true
         with:
           pattern: bd-1nl13.7-*
@@ -1515,7 +1524,7 @@ jobs:
 
       - name: Upload aggregate five-target proof
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: bd-1nl13.7-five-target-proof
           path: ${{ runner.temp }}/bd-1nl13.7-aggregate
@@ -1529,7 +1538,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 2
 
@@ -1550,7 +1559,7 @@ jobs:
 
       - name: Upload Windows installer static conformance log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-installer-static-conformance-log
           path: ${{ runner.temp }}/windows-installer-static-conformance.jsonl
@@ -1562,7 +1571,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 2
 
@@ -1577,7 +1586,7 @@ jobs:
 
       - name: Upload Windows installer mocked flow log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-installer-mocked-flow-log
           path: |
@@ -1593,7 +1602,7 @@ jobs:
       EE_TEST_SEED: bd-3tprq.4-windows-installer-live-smoke
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 2
 
@@ -1611,7 +1620,7 @@ jobs:
 
       - name: Upload Windows live installer smoke log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-installer-live-smoke-log
           path: |
@@ -1628,7 +1637,7 @@ jobs:
       EE_EMBED_DOWNLOAD: "off"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 2
 
@@ -1655,7 +1664,7 @@ jobs:
 
       - name: Install nightly Rust
         # bd-niay4: pin to rust-toolchain.toml's channel; the action does not read it.
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
           targets: x86_64-pc-windows-msvc
@@ -1678,7 +1687,7 @@ jobs:
 
       - name: Upload Windows smoke log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-msvc-cli-smoke-log
           path: ${{ runner.temp }}/ee-windows-msvc-cli-smoke.jsonl
@@ -1696,7 +1705,7 @@ jobs:
           - macos-14
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Install jq
         if: runner.os == 'Linux'
@@ -1723,7 +1732,7 @@ jobs:
           echo "Latest release tag: ${LATEST_TAG:-none}"
 
       - name: Upload install audit
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: install-pipeline-audit-${{ runner.os }}
           path: tests/audit_artifacts/install_pipeline_*.json

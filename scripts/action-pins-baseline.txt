@@ -18,64 +18,80 @@
 # release.yml is deliberately ABSENT: it is 14 of 14 pinned and must stay that
 # way, so any mutable reference appearing there fails on sight.
 #
-# REMEDIATION, bd-8plmk, 2026-10-28. The `actions/cache` SUB-PATH family -- the
-# mechanism this gate's header calls out, one blind spot repeated across 15
-# files that pinned `actions/cache@` and never matched `actions/cache/restore@`
-# or `actions/cache/save@` -- is pinned. 179 mutable -> 150.
+# ============================================================================
+# REMEDIATED 2026-10-28, bd-8plmk. 179 mutable -> 2, and the two that remain
+# are the only ones that could not be done mechanically.
+# ============================================================================
+#
+#     88 workflow files, 429 pinnable references
+#     before   250 pinned, 179 mutable across 41 files
+#     after    427 pinned,   2 mutable across  1 file
 #
 # EVERY SHA USED IS ONE THIS REPO ALREADY TRUSTED. No new upstream commit was
-# introduced and no version was changed: measured before the pass, 8 of the 10
-# mutable actions already had EXACTLY ONE SHA pinned elsewhere in this tree,
-# with ZERO existing drift, and every action carried exactly ONE mutable tag, so
-# each replacement was determined by the repo rather than chosen. The two with
-# no existing pin -- actions/setup-python@v5 and ilammy/msvc-dev-cmd@v1, one
-# occurrence each in ci.yml -- would require a NEW trust decision and are
-# deliberately left mutable inside ci.yml's row.
+# introduced and no version changed. Measured before the pass:
+#
+#     8 of the 10 mutable actions already had EXACTLY ONE SHA pinned
+#       elsewhere in this tree
+#     0 actions carried more than one SHA, so there was no existing drift
+#       to pick a side in
+#     every action carried exactly ONE mutable tag, so no version decision
+#       was hiding inside a pin
+#
+# so each replacement was determined by the repository rather than chosen.
+#
+# THE TWO SURVIVORS ARE A DELIBERATE REFUSAL, NOT AN OVERSIGHT.
+# actions/setup-python@v5 and ilammy/msvc-dev-cmd@v1 appear once each, in
+# ci.yml, and neither is pinned anywhere in this tree. Pinning them would mean
+# choosing an upstream commit this repository has never run -- a NEW trust
+# decision, which is the operator's to make, not a mechanical substitution.
+# Resolving a tag to a SHA also needs network access the pinning pass did not
+# use. They stay on ci.yml's row so the gate still fails if a THIRD appears.
 #
 # A ROW AT 0 IS NOT A DELETED ROW, AND IT IS DOING WORK. It hard-gates that
-# file: the next mutable reference there fails on sight, the same property
-# release.yml gets from being absent. typed-memory-recovery.yml was already
-# carried this way before this pass.
+# file: the next mutable reference there fails on sight, which is the same
+# property release.yml gets from being absent. typed-memory-recovery.yml was
+# already carried this way before this pass, which is the precedent followed
+# here rather than deleting 40 rows.
 
-29	ci.yml
+2	ci.yml
 0	typed-memory-recovery.yml
-7	diagnostic-snapshot-20260919.yml
-7	global-authority-20260919.yml
-7	learned-history-recovery-20260919.yml
-7	primer-admission-20260919.yml
-7	seed-authority-20260919.yml
-6	contradiction-graph-20260919.yml
-6	diagnostic-generation-20260919.yml
-6	session-arc-20260919.yml
-5	ask-numeric-20260919.yml
-5	primary-recovery-20260919.yml
-5	recorded-provenance-20260919.yml
-5	revision-record-recovery-20260919.yml
-5	runtime-retrieval-20260919.yml
-5	snapshot-recovery-20260919.yml
-4	ask-evidence-20260918.yml
-4	ask-paths-20260918.yml
-4	ask-semantic-20260918.yml
-4	index-publication-20260918.yml
-4	mcp-ask-20260918.yml
-4	recovery-headship-admission-20260919.yml
-4	verify-ask-admission-20260917.yml
-3	index-rollback-durability-20260919.yml
-3	macos-ee-artifact.yml
-2	ci-static.yml
-2	recovery-source-snapshot.yml
+0	ask-evidence-20260918.yml
+0	ask-numeric-20260919.yml
+0	ask-paths-20260918.yml
+0	ask-semantic-20260918.yml
 0	cass-prefetch-execution-20260920.yml
 0	cass-prefetch-residency-20260920.yml
+0	ci-static.yml
+0	contradiction-graph-20260919.yml
+0	diagnostic-generation-20260919.yml
+0	diagnostic-snapshot-20260919.yml
 0	evidence-export-20260919.yml
 0	external-ingestion-20260919.yml
 0	git-capture-20260919.yml
 0	git-capture-mcp-20260919.yml
 0	git-capture-offline-20260919.yml
+0	global-authority-20260919.yml
+0	index-publication-20260918.yml
+0	index-rollback-durability-20260919.yml
 0	journal-ingestion-20260919.yml
+0	learned-history-recovery-20260919.yml
+0	macos-ee-artifact.yml
+0	mcp-ask-20260918.yml
 0	outcome-atomic-learning-20260920.yml
+0	primary-recovery-20260919.yml
+0	primer-admission-20260919.yml
+0	recorded-provenance-20260919.yml
+0	recovery-headship-admission-20260919.yml
+0	recovery-source-snapshot.yml
 0	resume-coherence-20260919.yml
 0	resume-current-state-20260919.yml
 0	resume-indexed-projection-20260919.yml
+0	revision-record-recovery-20260919.yml
+0	runtime-retrieval-20260919.yml
+0	seed-authority-20260919.yml
+0	session-arc-20260919.yml
 0	session-arc-learning-20260919.yml
+0	snapshot-recovery-20260919.yml
 0	trust-recovery-20260919.yml
+0	verify-ask-admission-20260917.yml
 0	workflow-recovery-20260920.yml
