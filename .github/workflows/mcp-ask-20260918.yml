@@ -29,11 +29,11 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: main
           fetch-depth: 1
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
@@ -183,7 +183,7 @@ jobs:
           git diff --check
           git diff --stat
           git diff > "$RUNNER_TEMP/mcp-ask-integration.patch"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
@@ -295,7 +295,7 @@ jobs:
             fi
           fi
           git rev-parse HEAD | tee "$RUNNER_TEMP/mcp-ask-source.log"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
           name: scoped-mcp-ask-verification

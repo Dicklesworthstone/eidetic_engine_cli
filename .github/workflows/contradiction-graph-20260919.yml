@@ -25,7 +25,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       EE_EMBED_DOWNLOAD: 'off'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: main
           fetch-depth: 0
@@ -33,14 +33,14 @@ jobs:
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/guard-source-sha.log"
           git archive HEAD | gzip > "$RUNNER_TEMP/guard-source.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: contradiction-graph-inspection-source
           path: |
             ${{ runner.temp }}/guard-source.tar.gz
             ${{ runner.temp }}/guard-source-sha.log
           retention-days: 7
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           # bd-niay4. SINGLE-HALF PIN, AND IT IS CORRECT HERE. The "pin both
           # halves" rule is CONDITIONAL: it applies when a job-level
@@ -52,7 +52,7 @@ jobs:
           # rust-toolchain.toml's `channel`.
           toolchain: nightly-2026-08-31
           components: rustfmt, clippy
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: cache
         with:
           path: |
@@ -144,7 +144,7 @@ jobs:
           fi
           git rev-parse HEAD > "$RUNNER_TEMP/guard-integrated-sha.log"
           git archive HEAD | gzip > "$RUNNER_TEMP/guard-integrated-source.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
           name: contradiction-graph-rust-results
@@ -152,7 +152,7 @@ jobs:
             ${{ runner.temp }}/guard-*.log
             ${{ runner.temp }}/guard-integrated-source.tar.gz
           retention-days: 7
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: ${{ !cancelled() && steps.cache.outcome == 'success' }}
         with:
           path: |

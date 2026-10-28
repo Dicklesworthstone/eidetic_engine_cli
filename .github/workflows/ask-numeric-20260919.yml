@@ -29,14 +29,14 @@ jobs:
       EE_EMBED_DOWNLOAD: 'off'
       CARGO_TERM_COLOR: never
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
           fetch-depth: 1
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
@@ -144,13 +144,13 @@ jobs:
           assert_log "$RUNNER_TEMP/numeric-engine.log" 'numeric_answer_tests::polarity_tests::compatible_negation_cannot_steal_the_numeric_opposition_slot ... ok' 'compatible_negation_cannot_steal_the_numeric_opposition_slot'
           assert_log "$RUNNER_TEMP/numeric-engine.log" 'independent_corroboration_survives_a_corpus_larger_than_the_scan_cap ... ok' 'independent_corroboration_survives_a_corpus_larger_than_the_scan_cap'
           exit "$failed"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
           name: numeric-setting-verification-${{ github.run_attempt }}
           path: ${{ runner.temp }}/numeric-*.log
           retention-days: 7
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: ${{ !cancelled() }}
         continue-on-error: true
         with:

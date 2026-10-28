@@ -111,7 +111,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 2
 
@@ -140,7 +140,7 @@ jobs:
         # exact form, so the duplication is the established convention here, not
         # a new one -- but it IS a second source of truth and it will drift.
         # Keep it equal to rust-toolchain.toml's `channel`.
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296
         with:
           toolchain: nightly-2026-08-31
           components: rustfmt
