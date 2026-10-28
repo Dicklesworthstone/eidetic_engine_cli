@@ -32,6 +32,40 @@ set -euo pipefail
 if [ "${1:-}" = "--self-test" ]; then
     self_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     self_script="$self_root/scripts/check-include-fmt.sh"
+
+    # PRECONDITION, NOT AN ARM, and the distinction is the whole point.
+    #
+    # Every arm below invokes the real script, which exits 3 before it reads a
+    # single path when rustfmt is unavailable under the pinned toolchain -- and
+    # it says so in those words: "this is an ENVIRONMENT error, not a
+    # formatting verdict". Without this probe all six arms collect rc=3 and the
+    # summary reads "6/6 arms failed", so the self-test erases exactly the
+    # distinction the script it tests is careful to draw. Measured on this host
+    # 2026-10-27, where ~/.rustup/toolchains is a dangling symlink: six arm
+    # failures, none of them about this script's logic.
+    #
+    # The failure direction is the expensive one. A reader who believes that
+    # summary concludes the logic is broken, and the obvious repair -- teach the
+    # arms to accept rc=3 -- would make every arm pass without ever reaching
+    # the behaviour it was written to pin, including the listed-but-missing arm
+    # this self-test exists for. An environment skip is recoverable; a vacuous
+    # green is not.
+    #
+    # Exits 3, reusing this script's own documented code for "the pinned
+    # toolchain or rustfmt is unavailable; NOT a pass", rather than inventing a
+    # fourth meaning or returning 0.
+    self_toolchain="$(grep -oE 'nightly-[0-9-]+' "$self_root/rust-toolchain.toml" | head -1 || true)"
+    if [ -z "$self_toolchain" ] ||
+        ! rustup run "$self_toolchain" rustfmt --version >/dev/null 2>&1; then
+        printf 'check-include-fmt self-test: INCONCLUSIVE, not run.\n' >&2
+        printf 'check-include-fmt self-test: rustfmt is unavailable under %s.\n' \
+            "${self_toolchain:-<unreadable pin>}" >&2
+        printf 'check-include-fmt self-test: every arm drives the real script, which exits 3\n' >&2
+        printf 'check-include-fmt self-test: on that condition, so no arm can reach its logic.\n' >&2
+        printf 'check-include-fmt self-test: this is NOT a pass and NOT an arm failure.\n' >&2
+        exit 3
+    fi
+
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/include-fmt-selftest.XXXXXX")"
     printf 'fn ok() {}\n' >"$tmp/good.rs"
     printf 'fn   bad (  ) {let x=1;}\n' >"$tmp/bad.rs"
