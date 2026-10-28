@@ -6220,6 +6220,27 @@ def selector_admission_probe(proof, degraded_codes, combined_tail):
     }
 
 def remediation_guidance_for(blocker_kind):
+    # Every kind carries EITHER a live bead OR an explicit unmapped_reason,
+    # never both and never neither; scripts/check-rch-remediation-guidance.py
+    # enforces that and plants a negative for each half. A cited bead must be
+    # live, so when one closes this gate goes red.
+    #
+    # THAT RATCHET POINTS ONE WAY, and on 2026-10-27 it had run to completion:
+    # `mapped` was 0 of 12. The reasons themselves recorded it -- nine of the
+    # twelve said some variant of "the historical implementation is closed" or
+    # "the former citation concerned ...", i.e. each had once been a bead and
+    # had been replaced with prose when that bead closed. That is the cheapest
+    # way to turn this gate green and nothing ever pushes the other way, so the
+    # table decays from owners toward explanations of why there is no owner.
+    # Zero citations IS legal (the checker blesses it with its own arm, and
+    # intentional absence is a real answer), which is why nothing caught it.
+    #
+    # Four kinds have since acquired live owners that name their condition
+    # exactly, so they are re-pointed below; the other eight stay unmapped and
+    # two of those carry a note saying which tempting bead was declined and
+    # why. Re-check this table when a cited bead closes: the repair is to
+    # re-point it at the current owner, NOT to replace it with a sentence
+    # explaining that the old one is gone.
     mapping = {
         "cargo_workspace_inheritance": {
             "unmapped_reason": "The historical workspace-sync implementation is closed; no current remediation owner is established for this inheritance failure.",
@@ -6230,26 +6251,70 @@ def remediation_guidance_for(blocker_kind):
         "client_daemon_version_skew": {
             "unmapped_reason": "The historical 2.0.0-client against 1.0.64-daemon skew is closed; both are 2.1.34 as of 2026-10-15. A NEW skew is a different condition with a different owner, so read the two version strings from rch --version and rchd --version and name the pair before selecting remediation.",
         },
+        # RE-POINTED 2026-10-27, not re-worded. The former reason said "the
+        # historical dependency-closure implementation is closed; identify the
+        # missing remote checkout" -- true when written, and the condition has
+        # since acquired a live owner that names it exactly: the closure
+        # preflight requires source entrypoints its own transfer layer
+        # excludes, which is the RCH-E410 AppleDouble refusal CLAUDE.md
+        # documents at length. A reader who follows the bead gets the whole
+        # diagnosis, which is more than the one-line reason carried.
         "remote_checkout_incomplete": {
-            "unmapped_reason": "The historical dependency-closure implementation is closed; identify the missing remote checkout before selecting remediation.",
+            "bead": "bd-rch-closure-ignores-transfer-rules-ihe6d",
         },
+        # Former reason: "The historical fleet ENOSPC incident was resolved;
+        # current disk failures need the affected worker and filesystem
+        # identified." The successor incident is open and fleet-wide rather
+        # than per-worker: rch gc would free ZERO bytes because the ~106 GB is
+        # legitimate shared cargo cache plus co-tenants.
         "worker_disk_full": {
-            "unmapped_reason": "The historical fleet ENOSPC incident was resolved; current disk failures need the affected worker and filesystem identified.",
+            "bead": "bd-fleet-disk-starved-no-verify-host-gafft",
         },
+        # DELIBERATELY LEFT UNMAPPED, and the reason below is why. The obvious
+        # move is to point this at the same fleet-disk bead as
+        # `worker_disk_full`, because the historical incident here WAS disk
+        # pressure. That is the mistake this reason already warns against: a
+        # general all-worker preflight failure does not identify its cause, so
+        # citing a disk bead would send every future reader to look for disk
+        # pressure, which is the misattribution class CLAUDE.md records costing
+        # a full rebuild (exit 137 blamed on exhaustion when it was a timeout).
         "all_workers_preflight_failed": {
             "unmapped_reason": "The historical all-worker disk-pressure incident was resolved; this general preflight failure does not identify the current cause.",
         },
+        # ALSO LEFT UNMAPPED ON PURPOSE. bd-45ydu looks like a match -- a
+        # worker reporting healthy at speed 75.5 while delivering ~1/100th of
+        # a peer's throughput -- but it is the INVERSE condition: that box
+        # passes health admission and then underperforms, whereas this kind is
+        # a refusal AT the health threshold. Citing it would point a reader at
+        # a throughput investigation for an admission refusal.
         "worker_health_threshold": {
             "unmapped_reason": "The former citation concerned artifact return after Cargo, not worker-health admission; no matching remediation owner is established.",
         },
+        # RE-POINTED 2026-10-27. The former reason's advice -- identify the
+        # failed transfer phase first -- is preserved in the bead rather than
+        # dropped: bd-o7q3t is the multi-worker source-authority lock failure
+        # that surfaces as "completion unconfirmed" and SSH timeouts, which is
+        # the signature CLAUDE.md assigns to this exact degraded-code pair
+        # ("that is bd-o7q3t / bd-s5v42 territory, not your change"). Mapped to
+        # o7q3t rather than s5v42 because transport timeouts here are not
+        # per-box: s5v42 is one worker failing three ways, o7q3t is the class
+        # across workers, and this kind fires on the class.
         "remote_transport_timeout": {
-            "unmapped_reason": "Upload, execution, and artifact-return timeouts have different causes; identify the failed transfer phase before selecting remediation.",
+            "bead": "bd-o7q3t",
         },
         "active_project_exclusion": {
             "unmapped_reason": "The former citation shipped blocker reporting, not a repair for exclusion; use the active-build details to coordinate with its owner.",
         },
+        # RE-POINTED 2026-10-27. The former reason told the reader to inspect
+        # requested slots and admission evidence, which is exactly what
+        # bd-qi3qx is about and documents in full: rch enqueues a job no worker
+        # can host (-j 16 against a maximum total_slots of 10) and then reports
+        # it queued indefinitely rather than naming the arithmetic. That is the
+        # reporting defect behind most exit-103 and exit-124 readings on this
+        # fleet, so a reader who follows the bead learns to cap -j instead of
+        # waiting for capacity that cannot arrive.
         "capacity_or_timeout": {
-            "unmapped_reason": "The historical disk/routing incident does not identify this capacity or timeout cause; inspect requested slots and admission evidence.",
+            "bead": "bd-qi3qx",
         },
         "topology_blocked": {
             "unmapped_reason": "The historical outer-workspace isolation implementation is closed; match the current canonical-root or workspace error before selecting remediation.",
