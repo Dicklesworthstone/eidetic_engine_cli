@@ -34,40 +34,77 @@ a control fired on real repository code. Do not simplify them away:
      sites). Dispatchers count too: verify.sh:1360 runs every stage function as
      `{ set +e; eval "$cmd"; }`, so stage functions are all exempt.
 
-Two further shapes are KNOWN AND NOT YET IMPLEMENTED here. Treat the output as a
-floor, not a population:
+ONE further shape is KNOWN AND NOT IMPLEMENTED here, so treat the output as a
+floor rather than a population:
 
-  4. `<cmd>` then `$?` with no assignment -- e.g. scripts/lib/e2e_logger.sh:617
-     runs `"$@" >out 2>err` then `local rc=$?`.
   5. a later guard on the ASSIGNED VARIABLE instead of on `$?` -- e.g.
      e2e_overhaul/determinism.sh:353 assigns from a pipeline and the emptiness
      check that exists to catch no-output sits at :362, past the abort. This
      shape is plausibly MORE common, since testing the captured value reads as
      more natural than testing `$?`.
 
+     IT IS EXCLUDED ON PURPOSE, and the reasoning is worth keeping because the
+     omission looks like an oversight. Its claim is STRICTLY WEAKER than shapes
+     1 and 4: a guard on the assigned variable still fires when the command
+     SUCCEEDS and prints nothing, so the handler is dead only on the failure
+     path rather than unconditionally. The population is roughly 140 rows, each
+     needing a per-row judgement about whether the empty-output path is the one
+     that matters -- which would bury the DEAD-0 signal `--gate` exists to
+     protect under an untriaged list. The narrower exception is a NEGATIVE test,
+     where the command is expected to fail on every healthy run and the shape is
+     as fatal as shape 1; those are worth probing individually when one is
+     suspected, not enumerated wholesale.
+
+  Shape 4 -- `<cmd>` then `$?` with no assignment, e.g. scripts/lib/e2e_logger.sh
+  running `"$@" >out 2>err` then `local rc=$?` -- used to be listed here as
+  unimplemented. It IS implemented; those rows print with `<bare-cmd>` in the
+  variable column, and they are the majority of the census.
+
 THERE IS A SIBLING GATE. `scripts/check-dead-exit-code-handlers.py` (2026-10-27)
 covers shape 1 ONLY, narrowly, and FAILS CLOSED on a new site rather than
 reporting it -- which is the thing this file deliberately declines to do. It
 does not reimplement shape 4 or the swallow shape, so this file stays the
 census of record and there is no second parse of those to disagree with the
-first. The two differ on one clause, and NEITHER one-level rule is correct.
-This file exempts a function when ANY call site tests it (:345). That
-over-exempts: suppression does not carry to the next call, so a function
-called `f || ...` and then bare runs its handler at the first and ABORTS at
-the second. It is why e2e_lib/agent_ergonomics_lib.sh assert_jq never appeared
-here despite matching ASSIGN+HANDLER exactly and being live since 2026-09-18 --
-one `|| true` call site exempted twenty bare ones.
+first.
 
-But the obvious repair, "bare wins", OVER-FLAGS, because suppression IS
-inherited through a nested bare call. Executed 2026-10-27: with f holding the
-handler and g calling f BARE, `g` aborts and `g || ...` runs the handler.
-e2e_overhaul/determinism.sh:584 is that shape -- run_rerank_json called bare
-inside remember_rerank_fixture, whose every call site is `|| return 1` -- so a
-one-level flip would red correct code. Reachability is a CALL-GRAPH question: a
-handler is dead iff some chain of BARE calls reaches a top-level invocation.
-The sibling gate computes that closure; this file still reads one level, which
-is tolerable only because it ADVISES. Correcting it here is tracked on
-bd-q726t, and it must land as the closure, not as a flipped boolean.
+REACHABILITY IS A CALL-GRAPH QUESTION, AND NEITHER ONE-LEVEL RULE WAS RIGHT.
+Until 2026-10-28 this file exempted a function when ANY call site tested it,
+which OVER-EXEMPTS: suppression does not carry to the next call, so a function
+called `f || ...` and then bare runs its handler at the first and ABORTS at the
+second. But the obvious repair, "bare wins", OVER-FLAGS, because suppression IS
+inherited through a nested bare call -- executed 2026-10-27, with `f` holding
+the handler and `g` calling `f` BARE, `g` aborts while `g || ...` runs the
+handler. e2e_overhaul/determinism.sh is the specimen: `run_rerank_json` is
+called bare inside `remember_rerank_fixture`, whose every call site is
+`|| return 1`, so a one-level flip would red correct code. `reachability()` now
+walks the chain -- bare iff some path of bare calls reaches a top-level
+invocation -- and that row is still EXEMPT, which is the control for it.
+
+AND THE NAME WAS RESOLVED OVER THE WRONG SET OF FILES, which is the half nobody
+had measured. Call sites used to be gathered from every shell file under
+scripts/, and 138 of this tree's 1255 function names are defined in more than
+one file: `run_ee_json` in 18, `run_ee` in 14, `assert_jq` in 13. So a verdict
+about one script's `run_ee` was assembled from unrelated scripts' functions of
+the same name. Measured 2026-10-28: `run_ee_json` has 62 bare call sites, every
+one of them inside a file that defines its own copy, against 35 suppressed
+sites in six OTHER scripts -- and it was those 35 that produced the EXEMPT on
+e2e_rerank.sh:154. `visible_scope()` now restricts resolution to the defining
+file plus whatever transitively sources it.
+
+This is also the real reason e2e_lib/agent_ergonomics_lib.sh `assert_jq` never
+appeared here despite matching ASSIGN+HANDLER exactly and being live since
+2026-09-18. The note that used to sit here blamed "one `|| true` call site
+exempting twenty bare ones"; the measurement says `assert_jq` is defined in 13
+files and had 778 suppressed call sites across 46 of them, so the exemption was
+never about one call site and was never about this file's `assert_jq`.
+
+THE TWO CORRECTIONS MOVED NINE VERDICTS AND NO BLOCKING ROW. Both land in the
+same place for the same nine rows (`run_ee`, `run_ee_json`, `self_test` in
+seven e2e scripts and package-artifact-leak-check.sh), EXEMPT -> DEAD, and
+every one of the nine already sits inside `set +e` scope -- so `--gate` was 0
+before and is 0 after. The value is durability rather than a finding today: if
+anyone removes one of those `set +e` brackets, the old rule would still have
+answered EXEMPT from another file's evidence, and now it answers DEAD.
 
 SCREEN NEGATIVE TESTS FIRST. Where a positive test's substitution fails only when
 something is broken, a negative test's substitution is DESIGNED to fail on every
@@ -192,11 +229,51 @@ def function_ranges(lines):
     return out
 
 
-def call_contexts(name, all_lines):
-    """How is `name` invoked across the tree? -> set of 'bare' / 'tested'."""
-    kinds = set()
+#: A stage FUNCTION dispatched as a quoted string.
+#:
+#: `verify.sh` runs every stage as
+#:     run_stage "Unit, Contract, and Golden Tests" "unit_contract_golden_tests"
+#: and `run_stage` executes it as `{ set +e; eval "$cmd"; }` (verify.sh:1360),
+#: so `-e` is suppressed through the whole body. The call-site regex below
+#: requires the name to be preceded by whitespace, `(`, `;` or an operator, and
+#: a name wrapped in double quotes matches none of those -- which is why
+#: `unit_contract_golden_tests()` was this census's one UNKNOWN row, reported as
+#: "no call site found" while its call site sat 39 lines below it.
+STRING_DISPATCH = re.compile(r'^\s*run_stage\s+"[^"]*"\s+"([A-Za-z_][A-Za-z0-9_]*)"')
+
+#: A `source` / `.` statement, and the file basename inside it.
+SOURCE_STMT = re.compile(r"^\s*(?:source|\.)\s+(\S.*)$")
+SOURCE_BASENAME = re.compile(r"([A-Za-z0-9_.-]+\.(?:sh|bash))")
+
+
+def call_sites(name, scope, corpus):
+    """Every invocation of `name` within `scope` -> [(kind, enclosing_fn, file)].
+
+    WHY THIS REPLACED `call_contexts`, WHICH RETURNED ONLY A SET OF KINDS.
+    That set discarded the two facts a verdict needs, and discarded them in
+    opposite directions:
+
+      WHICH FILE HOLDS THE CALL. Name resolution used to be GLOBAL over every
+        shell file under scripts/. Measured 2026-10-28: 138 of 1255 function
+        names in this tree are defined in MORE THAN ONE file -- `run_ee_json`
+        in 18 of them, `run_ee` in 14, `assert_jq` in 13. `run_ee_json` has 62
+        bare call sites, every single one inside a file that defines its own
+        copy, against 35 suppressed sites spread over six OTHER scripts. So the
+        EXEMPT verdict on e2e_rerank.sh:154 was not a reading of that script at
+        all; it was inherited from e2e_doctor_concise.sh's unrelated function of
+        the same name. `scope` is now the files that can actually SEE this
+        definition.
+
+      WHICH FUNCTION HOLDS THE CALL. `set -e` suppression is inherited by
+        everything a tested call reaches, so reachability is a CALL-GRAPH
+        question and no one-level reading can answer it. Carrying the enclosing
+        function per site is what lets `reachability()` walk the chain.
+    """
+    sites = []
     call = re.compile(r"(?:^|\s|\(|;|&&|\|\|)" + re.escape(name) + r"(?:\s|$|;|\))")
-    for lines in all_lines:
+    for rel in sorted(scope):
+        lines = corpus.get(rel) or []
+        fns = function_ranges(lines)
         # -e STATE AT THE CALL SITE, NOT AT THE DEFINITION. A function's
         # runtime errexit state comes from wherever it is invoked, so a call
         # bracketed by `set +e` / `set -e` suppresses -e through the whole body
@@ -221,10 +298,19 @@ def call_contexts(name, all_lines):
             s = l.strip()
             if not s or s.startswith("#") or FUNC_DEF.match(l):
                 continue
+            # The quoted string-dispatch shape has to be tried BEFORE the call
+            # regex, because the regex cannot match a name in quotes and would
+            # `continue` past it. This clause can only move a row from UNKNOWN
+            # to tested, never to bare, so it cannot make the gate block.
+            sd = STRING_DISPATCH.match(s)
+            if sd and sd.group(1) == name:
+                sites.append(("tested", None, rel))
+                continue
             if not call.search(s):
                 continue
+            enc = next((n for n, st, en in fns if st < idx <= en), None)
             if not errexit:
-                kinds.add("tested")
+                sites.append(("tested", enc, rel))
                 continue
             # A CALL SITE WRAPS TOO, and judging its first physical line alone
             # read `|| return 1` on the continuation as absent. Measured
@@ -242,13 +328,190 @@ def call_contexts(name, all_lines):
             if tested or re.match(
                 r"^\s*" + re.escape(name) + r"\b[^|&]*(\|\||&&)", logical
             ):
-                kinds.add("tested")
+                sites.append(("tested", enc, rel))
             else:
-                kinds.add("bare")
-    return kinds
+                sites.append(("bare", enc, rel))
+    return sites
+
+
+def source_graph(corpus):
+    """{target_file: {files that `source` it directly}}, resolved by BASENAME.
+
+    Measured 2026-10-28 over scripts/: 233 `source`/`.` statements, 208 of them
+    naming a literal `*.sh`, every one resolving to EXACTLY ONE corpus file,
+    and ZERO basename-ambiguous. The rest carry a variable path
+    (`"$FIXTURES_SRC/lib.sh"`). An unresolved edge only ever SHRINKS a scope,
+    which moves a verdict toward UNKNOWN, and UNKNOWN does not block -- so the
+    approximation fails in the safe direction.
+
+    HEREDOC BODIES ARE MASKED FIRST, and that is load-bearing rather than
+    tidiness. This repo embeds Python constantly, and a Python line
+        source = json.loads(os.environ["SOURCE_STATE_JSON_INPUT"])
+    matches `^\\s*source\\s+` exactly. A jq filter line `. as $event` matches the
+    `.` form just as well. Both appeared in the first measurement and both are
+    excluded here: the heredoc mask removes the Python, and requiring a literal
+    `*.sh` basename removes the jq.
+    """
+    by_base = {}
+    for rel in corpus:
+        by_base.setdefault(os.path.basename(rel), []).append(rel)
+    sourced_by = {}
+    for rel, lines in corpus.items():
+        for masked in shell_lines(lines):
+            if masked is None:
+                continue
+            s = masked.strip()
+            if not s or s.startswith("#"):
+                continue
+            m = SOURCE_STMT.match(s)
+            if not m:
+                continue
+            bases = SOURCE_BASENAME.findall(m.group(1))
+            if not bases:
+                continue
+            target = by_base.get(bases[-1])
+            if target and len(target) == 1:
+                sourced_by.setdefault(target[0], set()).add(rel)
+    return sourced_by
+
+
+def visible_scope(defining_file, name, sourced_by, defines):
+    """The files whose call sites can reach `name` as defined in `defining_file`.
+
+    That is the defining file plus every file that TRANSITIVELY sources it,
+    minus any file that defines `name` itself -- in which case a call there
+    resolves to the local definition, not this one. Shell resolution is
+    last-definition-wins at runtime, so a file that sources this one AND
+    defines its own copy is genuinely ambiguous; excluding it drops call sites,
+    i.e. moves toward UNKNOWN, which does not block.
+    """
+    seen, stack = {defining_file}, [defining_file]
+    while stack:
+        for up in sourced_by.get(stack.pop(), ()):
+            if up not in seen:
+                seen.add(up)
+                stack.append(up)
+    return {
+        f
+        for f in seen
+        if f == defining_file or name not in defines.get(f, frozenset())
+    }
+
+
+def reachability(name, defining_file, corpus, sourced_by, defines,
+                 _seen=frozenset()):
+    """'tested' / 'bare' / 'unknown' for the handler inside `name`.
+
+    `bare` iff some chain of BARE calls reaches a top-level invocation, because
+    `set -e` suppression for a tested command is inherited by the whole function
+    body AND BY EVERYTHING THAT BODY CALLS. Executed 2026-10-27 with `f` holding
+    the handler and `g` calling `f` bare:
+
+        g                       ABORTED, handler never ran, exit 1
+        g || echo "outer=$?"    HANDLER rc=1, g continued, exit 0
+        if g; then ...          HANDLER rc=1, g continued, exit 0
+        h() { g || return 1; }  HANDLER rc=1, g continued, exit 0
+
+    So NEITHER one-level rule is right. "Any tested call site exempts" misses a
+    function whose one guarded caller is irrelevant to twenty bare ones; "any
+    bare call site condemns" reds correct code, and this tree has the specimen:
+    e2e_overhaul/determinism.sh calls `run_rerank_json` BARE inside
+    `remember_rerank_fixture`, whose every call site is `|| return 1`, so the
+    handler is live.
+
+    UNKNOWN propagates rather than collapsing to tested: if every bare path
+    dead-ends in a function with no discoverable call site, the honest answer is
+    that this census cannot tell, and UNKNOWN is reported without blocking.
+    """
+    scope = visible_scope(defining_file, name, sourced_by, defines)
+    sites = call_sites(name, scope, corpus)
+    if not sites:
+        return "unknown"
+    bare = [(enc, rel) for kind, enc, rel in sites if kind == "bare"]
+    if not bare:
+        return "tested"
+    dead_end_unknown = False
+    for enc, rel in bare:
+        if enc is None:
+            # Bare at top level: nothing above it can suppress -e.
+            return "bare"
+        if enc == name or enc in _seen:
+            continue  # a cycle reaches no top-level invocation by this path
+        verdict = reachability(
+            enc, rel, corpus, sourced_by, defines, _seen | {name}
+        )
+        if verdict == "bare":
+            return "bare"
+        if verdict == "unknown":
+            dead_end_unknown = True
+    return "unknown" if dead_end_unknown else "tested"
 
 
 HEREDOC = re.compile(r"<<-?\s*'?\"?([A-Za-z_][A-Za-z0-9_]*)'?\"?\s*(?:$|[|&;])")
+
+
+def load_corpus(root):
+    """(corpus, defines, sourced_by) for every shell file under `root/scripts`.
+
+    Keyed by path RELATIVE to root, which is what makes the fixture trees in
+    `self_test()` behave like the real one.
+    """
+    corpus, defines = {}, {}
+    for p in sorted(
+        set(glob.glob(os.path.join(root, "scripts", "**", "*.sh"), recursive=True))
+    ):
+        try:
+            lines = open(p, encoding="utf-8", errors="replace").read().splitlines()
+        except OSError:
+            continue
+        rel = os.path.relpath(p, root)
+        corpus[rel] = lines
+        defines[rel] = {n for n, _s, _e in function_ranges(lines)}
+    return corpus, defines, source_graph(corpus)
+
+
+def assign_verdicts(rows, root, top_level=None, bare_label="DEAD"):
+    """Attribute each candidate to its enclosing function and classify it.
+
+    `top_level` and `bare_label` differ between the two censuses -- the abort
+    shape loses a HANDLER, the swallow shape loses a DIAGNOSTIC -- so the
+    wording is a parameter and the reachability computation is shared. Two
+    copies of a call-graph walk eventually disagree, and the disagreement
+    becomes the bug.
+
+    One cache per call, keyed by (function, defining file), because the rows
+    repeat the same enclosing function many times -- `ee_binary_resolution_test.sh`
+    alone contributes seventeen. Caching only these TOP-LEVEL queries is sound;
+    a memo of a recursive result would be keyed on the wrong thing, since an
+    inner answer depends on the cycle guard it was computed under.
+    """
+    corpus, defines, sourced_by = load_corpus(root)
+    cache = {}
+    for r in rows:
+        fns = function_ranges(r["_lines"])
+        enclosing = next((n for n, s, e in fns if s < r["line"] - 1 <= e), None)
+        r["fn"] = enclosing
+        if enclosing is None:
+            r["verdict"] = top_level or "TOP-LEVEL: -e applies, handler DEAD"
+        else:
+            key = (enclosing, r["file"])
+            if key not in cache:
+                cache[key] = reachability(
+                    enclosing, r["file"], corpus, sourced_by, defines
+                )
+            if cache[key] == "tested":
+                r["verdict"] = (
+                    f"EXEMPT: {enclosing}() is only ever reached with -e suppressed"
+                )
+            elif cache[key] == "bare":
+                r["verdict"] = (
+                    f"{bare_label}: {enclosing}() is reachable by a chain of "
+                    "bare calls"
+                )
+            else:
+                r["verdict"] = f"UNKNOWN: no call site found for {enclosing}()"
+        del r["_lines"]
+    return rows
 
 
 def shell_lines(lines):
@@ -392,29 +655,8 @@ def census(root):
                          "live": active[i], "_lines": lines,
                          "snippet": line.strip()[:78]})
     # Second pass: attribute each candidate to its enclosing function and decide
-    # whether that function is ever invoked in a context that suppresses -e.
-    corpus = []
-    for p in sorted(set(glob.glob(os.path.join(root, "scripts", "**", "*.sh"), recursive=True))):
-        try:
-            corpus.append(open(p, encoding="utf-8", errors="replace").read().splitlines())
-        except OSError:
-            pass
-    for r in rows:
-        fns = function_ranges(r["_lines"])
-        enclosing = next((n for n, s, e in fns if s < r["line"] - 1 <= e), None)
-        r["fn"] = enclosing
-        if enclosing is None:
-            r["verdict"] = "TOP-LEVEL: -e applies, handler DEAD"
-        else:
-            kinds = call_contexts(enclosing, corpus)
-            if "tested" in kinds:
-                r["verdict"] = f"EXEMPT: {enclosing}() is called in a tested context"
-            elif kinds:
-                r["verdict"] = f"DEAD: {enclosing}() only ever called bare"
-            else:
-                r["verdict"] = f"UNKNOWN: no call site found for {enclosing}()"
-        del r["_lines"]
-    return rows
+    # whether that function is ever reached with -e still live.
+    return assign_verdicts(rows, root)
 
 
 #: Commands whose DIAGNOSTIC goes to stdout rather than stderr.
@@ -480,12 +722,6 @@ def swallow_census(root):
     """
     rows = []
     paths = sorted(set(glob.glob(os.path.join(root, "scripts", "**", "*.sh"), recursive=True)))
-    corpus = []
-    for p in paths:
-        try:
-            corpus.append(open(p, encoding="utf-8", errors="replace").read().splitlines())
-        except OSError:
-            pass
     for path in paths:
         try:
             lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
@@ -523,22 +759,12 @@ def swallow_census(root):
             rows.append({"file": os.path.relpath(path, root), "line": i + 1,
                          "var": m.group(1), "live": active[i],
                          "_lines": lines, "snippet": line.strip()[:78]})
-    for r in rows:
-        fns = function_ranges(r["_lines"])
-        enclosing = next((n for n, s, e in fns if s < r["line"] - 1 <= e), None)
-        r["fn"] = enclosing
-        if enclosing is None:
-            r["verdict"] = "TOP-LEVEL: -e aborts here, diagnostic SWALLOWED"
-        else:
-            kinds = call_contexts(enclosing, corpus)
-            if "tested" in kinds:
-                r["verdict"] = f"EXEMPT: {enclosing}() is called in a tested context"
-            elif kinds:
-                r["verdict"] = f"SWALLOWED: {enclosing}() only ever called bare"
-            else:
-                r["verdict"] = f"UNKNOWN: no call site found for {enclosing}()"
-        del r["_lines"]
-    return rows
+    return assign_verdicts(
+        rows,
+        root,
+        top_level="TOP-LEVEL: -e aborts here, diagnostic SWALLOWED",
+        bare_label="SWALLOWED",
+    )
 
 
 def self_test():
