@@ -658,13 +658,27 @@ jobs:
 
       - name: Install Python for target evidence checks
         if: matrix.release_target == true
-        uses: actions/setup-python@v5
+        # bd-8plmk. THE ONLY TWO PINS IN THIS TREE THAT CANNOT BE CROSS-CHECKED
+        # AGAINST AN EXISTING IN-REPO SHA, this one and msvc-dev-cmd below: the
+        # other 427 references reuse a SHA some other workflow already carried,
+        # so a typo shows up as a SHA no other file uses. These two were pinned
+        # nowhere, so the tag target was resolved from GitHub and confirmed
+        # through two independent endpoints that agree:
+        #     repos/actions/setup-python/commits/v5
+        #     repos/actions/setup-python/git/refs/tags  -> refs/tags/v5
+        # Both report a5; the ref is type `commit`, not an annotated tag, so
+        # there is no dereference step to get wrong. This pins the SAME commit
+        # `@v5` resolved to on 2026-10-28, so it is not a version bump -- note
+        # that v6 and v7 exist upstream and are deliberately NOT taken here.
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
 
       - name: Activate MSVC developer tools
         if: runner.os == 'Windows' && matrix.release_target == true
-        uses: ilammy/msvc-dev-cmd@v1
+        # bd-8plmk: same as above. refs/tags/v1 is type `commit` and both
+        # endpoints agree on 0b201ec7; v1 is the only version tag upstream.
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
 
       - name: Install cross
         if: matrix.runner == 'cross'

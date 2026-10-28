@@ -19,13 +19,14 @@
 # way, so any mutable reference appearing there fails on sight.
 #
 # ============================================================================
-# REMEDIATED 2026-10-28, bd-8plmk. 179 mutable -> 2, and the two that remain
-# are the only ones that could not be done mechanically.
+# REMEDIATED 2026-10-28, bd-8plmk. 179 mutable -> 0. EVERY ROW IS NOW 0, so
+# this file has stopped being a tolerance and become a hard gate: any mutable
+# `uses:` reference in any listed workflow fails on sight.
 # ============================================================================
 #
 #     88 workflow files, 429 pinnable references
 #     before   250 pinned, 179 mutable across 41 files
-#     after    427 pinned,   2 mutable across  1 file
+#     after    429 pinned,   0 mutable
 #
 # EVERY SHA USED IS ONE THIS REPO ALREADY TRUSTED. No new upstream commit was
 # introduced and no version changed. Measured before the pass:
@@ -39,13 +40,29 @@
 #
 # so each replacement was determined by the repository rather than chosen.
 #
-# THE TWO SURVIVORS ARE A DELIBERATE REFUSAL, NOT AN OVERSIGHT.
-# actions/setup-python@v5 and ilammy/msvc-dev-cmd@v1 appear once each, in
-# ci.yml, and neither is pinned anywhere in this tree. Pinning them would mean
-# choosing an upstream commit this repository has never run -- a NEW trust
-# decision, which is the operator's to make, not a mechanical substitution.
-# Resolving a tag to a SHA also needs network access the pinning pass did not
-# use. They stay on ci.yml's row so the gate still fails if a THIRD appears.
+# TWO REFERENCES NEEDED A DIFFERENT KIND OF CHECK, and an earlier version of
+# this note talked me out of them on a bad argument. It said pinning
+# actions/setup-python@v5 and ilammy/msvc-dev-cmd@v1 "would mean choosing an
+# upstream commit this repository has never run". That is wrong: a workflow on
+# `@v5` runs whatever `v5` points to, so pinning to the tag's CURRENT target
+# changes nothing about what runs -- it only stops the target moving later.
+# Recorded rather than quietly replaced, because the reasoning is the part
+# worth not repeating.
+#
+# What is genuinely different about those two is the VERIFICATION, not the
+# trust. The other 427 reuse a SHA some other workflow already carried, so a
+# typo surfaces as a SHA no other file uses. These two were pinned nowhere, so
+# the tag target came from GitHub and was confirmed through two independent
+# endpoints that agree, with the ref type checked as `commit` rather than an
+# annotated tag so no dereference step could be got wrong:
+#
+#     actions/setup-python   v5 -> a26af69be951a213d495a4c3e4e4022e16d87065
+#     ilammy/msvc-dev-cmd    v1 -> 0b201ec74fa43914dc39ae48a89fd1d8cb592756
+#
+# Neither is a version bump: setup-python v6 and v7 exist upstream and were
+# deliberately not taken. ci.yml carries the provenance beside each pin,
+# because that is the one place a future reader cannot re-derive it from
+# another file in this tree.
 #
 # A ROW AT 0 IS NOT A DELETED ROW, AND IT IS DOING WORK. It hard-gates that
 # file: the next mutable reference there fails on sight, which is the same
@@ -53,7 +70,7 @@
 # already carried this way before this pass, which is the precedent followed
 # here rather than deleting 40 rows.
 
-2	ci.yml
+0	ci.yml
 0	typed-memory-recovery.yml
 0	ask-evidence-20260918.yml
 0	ask-numeric-20260919.yml
