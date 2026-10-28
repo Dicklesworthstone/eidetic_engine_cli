@@ -306,7 +306,7 @@ jobs:
           remember-audit-lane core::memory::tests::store_remembered_memory_queues_audit_when_lane_is_enabled
           remember-dedup-transaction core::memory::tests::store_remembered_memory_persists_simhash_and_dedup_link
           outcome-atomic core::outcome::atomic_learning_tests::
-          index-repair-destination steward::tests::background_index_rebuild_preserves_request_for_custom_database_or_index
+          index-repair-destination steward::implementation::tests::background_index_rebuild_preserves_request_for_custom_database_or_index
           CASES
           exit "$failed"
       - name: Exercise repair identity, search freshness, and diagnostics serially

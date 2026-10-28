@@ -947,10 +947,14 @@ fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promot
         ))
         .unwrap();
     let release = fixture.release_options(&quarantine_id);
-    assert!(matches!(
-        review_feedback_quarantine(&release),
-        Err(DomainError::Storage { .. })
-    ));
+    let error = review_feedback_quarantine(&release)
+        .expect_err("the injected release audit failure must abort review");
+    assert!(matches!(&error, DomainError::Storage { .. }));
+    assert!(
+        error.message().contains("release audit failure"),
+        "{}",
+        error.message()
+    );
     assert_eq!(fixture.posterior(), prior);
     assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory);
     assert_eq!(
@@ -970,10 +974,14 @@ fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promot
         generation
     );
 
-    fixture
-        .db
+    // Use an independent writer for fault cleanup, as a new CLI invocation
+    // would. The long-lived observation connection can otherwise hit a stale
+    // schema-write snapshot at DROP TRIGGER before this test reaches retry.
+    let cleanup = DbConnection::open_file(&fixture.database).unwrap();
+    cleanup
         .execute_raw("DROP TRIGGER reject_memory_release_audit")
         .unwrap();
+    cleanup.close().unwrap();
     assert_eq!(
         review_feedback_quarantine(&release).unwrap().status,
         "released"
@@ -1014,20 +1022,25 @@ fn memory_index_insert_failure_leaves_quarantine_pending_until_retry() {
          WHEN NEW.document_source = 'memory' BEGIN SELECT RAISE(ABORT, 'released memory index failure'); END;"
     ).unwrap();
     let release = fixture.release_options(&quarantine_id);
-    assert!(matches!(
-        review_feedback_quarantine(&release),
-        Err(DomainError::Storage { .. })
-    ));
+    let error = review_feedback_quarantine(&release)
+        .expect_err("the injected index failure must abort review");
+    assert!(matches!(&error, DomainError::Storage { .. }));
+    assert!(
+        error.message().contains("released memory index failure"),
+        "{}",
+        error.message()
+    );
     assert_eq!(
         fixture.feedback_state(),
         before,
         "a rejected index insert must preserve pending review and all prior committed learning"
     );
 
-    fixture
-        .db
+    let cleanup = DbConnection::open_file(&fixture.database).unwrap();
+    cleanup
         .execute_raw("DROP TRIGGER reject_released_memory_index")
         .unwrap();
+    cleanup.close().unwrap();
     let report = review_feedback_quarantine(&release).unwrap();
     assert_eq!(report.status, "released");
     assert_eq!(report.feedback_event_id.as_deref(), Some(HELD_EVENT));
