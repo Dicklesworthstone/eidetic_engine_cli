@@ -13,6 +13,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `check`, `test`, `bench`, `clippy`, `doc`, `run`, `install`, `rustc` and `fix`.
 `fmt` is the one exception, so it is also the only local syntax check you have.
 
+**AND IT IS UNAVAILABLE WHENEVER THE USB VOLUME IS NOT MOUNTED, which is most
+of the time. Do not read its failure as a formatting verdict.** `~/.rustup/toolchains`
+is a symlink to `/Volumes/USBNVME16TB/rustup_toolchains`, so with the volume
+absent rustup tries to install the pinned nightly and dies:
+
+```text
+error: could not create component directory:
+  '.../toolchains/nightly-2026-08-31-aarch64-apple-darwin/bin': File exists (os error 17)
+```
+
+**That message names the wrong cause.** `mkdir` through a DANGLING symlink
+returns EEXIST, so "File exists" is reporting the broken link, not a leftover
+directory, and hunting for a stale directory to clear finds nothing. Confirmed
+exhaustively 2026-10-27: no `rustfmt` binary exists anywhere on this machine --
+every `cargo`, `rustc` and `rustfmt` on PATH is a rustup shim symlinked to
+`rustup`. So while the volume is absent there is NO local syntax gate at all,
+and `cargo fmt --check` is UNRUN rather than clean or red. Mount the volume, or
+treat Rust edits as unverified and say so.
+
 **But it is not the only local GATE, and treating it as such is how three
 features shipped past a red assertion.** `scripts/check-*.py` are pure-Python
 checks over tracked files: they need no toolchain, no USB volume and no lane,
@@ -30,6 +49,41 @@ because `verify.sh` exits 1 before any stage on this host, hosted Actions is off
 repo-wide, and nobody pays for a pinned dispatch to check a markdown table
 (bd-no-compile-gate-before-a-commit-lands-qdxc0). Run the family before a commit
 that touches docs or the CLI surface; it is the cheapest gate in the repository.
+
+**THE FAMILY IS NOT THE WHOLE LOCALLY-RUNNABLE SET, and the gap is where the
+red was hiding.** Of verify.sh's 134 stages, **30** run here with no toolchain,
+no binary and no lane: 15 `python3` stages and 15 shell `--self-test` stages.
+**Two of those Python stages are not named `check-*.py`**, so the glob above
+cannot see them — and one of the two was the red. Enumerate from verify.sh
+itself rather than from the glob:
+
+```bash
+grep -oE 'run_stage "[^"]*" "(python3 [^"]*|\./scripts/[^"]*--self-test[^"]*)"' scripts/verify.sh
+```
+
+Do not widen that to a bare `\./scripts` alternative: it matches 85 of the 134
+stages, most of which need the `ee` binary or a dispatch, so the list stops
+being the locally-runnable set and you cannot tell a real red from an absent
+rail. (`fuzz_target_audit_self_test` is a shell FUNCTION stage, not a script
+path, so it is outside this enumeration and was not run.)
+
+Measured 2026-10-27 by running all 30: **29 green, one hard red.**
+`scripts/lib/emit_proof_capsule.py --self-test` had been exiting 1 for two days
+with `ValueError: too many values to unpack (expected 2, got 3)` — a sibling
+caller of `grade_test_log.parse` was updated when it gained a third return
+value and this one was not, so every call to `build_capsule` raised and no
+`rch_run.sh` run emitted a capsule. Fixed in 3e40c02c9. Nothing saw it because
+its stage only ever runs inside verify.sh, which exits before stage one here.
+
+All 30 `--self-test` invocations are green at that commit. The LINT halves of
+the shell gates are a separate matter: three exit non-zero for ENVIRONMENT
+reasons and are not defects. `check-forbidden-deps.sh` (rc 3) and
+`package-artifact-leak-check.sh` (rc 1) both shell out to `cargo
+metadata`/`cargo package`, so they fail CLOSED while the toolchain is absent,
+which is the correct direction and is a second place the dangling-symlink error
+above surfaces. `check-local-cargo-tripwire.sh` exits 2 with a usage block
+unless you pass `--cmd`, the way verify.sh calls it. Read those three before
+reporting a red.
 
 ```bash
 cargo fmt --check                   # The ONLY cargo subcommand allowed locally
