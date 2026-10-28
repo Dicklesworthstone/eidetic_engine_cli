@@ -436,6 +436,28 @@ def bare_call_sites(name: str, corpus: dict[str, list[str]]) -> tuple[int, list[
     return total, bare_in
 
 
+def definition_files(name: str, corpus: dict[str, list[str]]) -> list[str]:
+    """Which corpus files DEFINE `name`.
+
+    Cached against the corpus OBJECT rather than its id: `scan_file` runs once
+    per file with the same corpus, and rebuilding this index inside the
+    recursion would re-parse every file for every classification. Keying on
+    `id()` would be unsound if a corpus were freed and its address reused, so
+    the cache holds the dict itself and compares with `is`.
+    """
+    cache = definition_files.__dict__
+    if cache.get("_corpus") is not corpus:
+        index: dict[str, list[str]] = {}
+        for path, lines in corpus.items():
+            hd = heredoc_body_lines(lines)
+            code = [code_line(l, i in hd) for i, l in enumerate(lines)]
+            for fn, _s, _e in function_spans(code):
+                index.setdefault(fn, []).append(path)
+        cache["_corpus"] = corpus
+        cache["_index"] = index
+    return cache["_index"].get(name, [])
+
+
 def classify_call_sites(
     name: str,
     corpus: dict[str, list[str]],
@@ -464,6 +486,30 @@ def classify_call_sites(
     recursion is memo-free but cycle-guarded by `_seen`; a function reachable
     only through a cycle has no top-level bare path and is not BARE.
     """
+    if len(definition_files(name, corpus)) > 1:
+        # AN AMBIGUOUS NAME IS NOT A CALL GRAPH, AND THIS GATE BLOCKS.
+        #
+        # `bare_call_sites` resolves a name over the WHOLE corpus, and in this
+        # tree that is not a safe assumption: measured 2026-10-28, 136 of the
+        # function names under scripts/ are defined in more than one file --
+        # `run_ee_json` in 18 of them, `run_ee` in 14, `assert_jq` in 13. So a
+        # bare call to one script's `run_ee` would be read as evidence about a
+        # different script's `run_ee`, and because this gate BLOCKS on BARE
+        # that inference reds correct code. That exact failure -- a wired gate
+        # red on code that was right -- already cost this family a session on
+        # 2026-10-27.
+        #
+        # Refusing to classify is the only honest answer, and UNKNOWN is the
+        # verdict that does not block. The advisory census next door
+        # (`audit-set-e-dead-handlers.py`) resolves the name properly instead,
+        # by scoping it to the files that can SEE the definition; this gate
+        # declines to guess rather than carrying a second copy of that walk.
+        #
+        # It changes nothing today, and that was measured before it shipped:
+        # the only name this gate classifies at HEAD is
+        # `canonical_hash_for_run`, defined once, with all three of its call
+        # sites in its own file.
+        return "UNKNOWN"
     total, bare_in = bare_call_sites(name, corpus)
     if total == 0:
         return "UNKNOWN"
@@ -992,7 +1038,46 @@ def self_test() -> int:
     except LookupError:
         print("    ok    empty_corpus_refused                 refused a zero-file census")
 
-    total = len(ARMS) + len(ZERO_ARMS) + 1
+    # AMBIGUOUS-NAME ARMS, AS A POLARITY PAIR SHARING ONE MECHANISM.
+    #
+    # Both arms use the SAME carrying file, with the SAME shape, called bare at
+    # top level. The only thing that differs is whether a second file defines a
+    # function of the same name. Without the pair, a clause that simply stopped
+    # reporting everything would pass the first arm; the second is what proves
+    # the gate still blocks when the name does resolve.
+    carrier = """#!/bin/bash
+set -euo pipefail
+run_ee() {
+    output="$(git check-ignore -v -- "$path")"
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "no git"
+    fi
+}
+run_ee
+"""
+    twin = """#!/bin/bash
+set -euo pipefail
+run_ee() {
+    echo other
+}
+run_ee || true
+"""
+    for name, other, want in (
+        ("ambiguous_name_not_blocked", twin, 0),
+        ("unambiguous_name_still_flagged",
+         twin.replace("run_ee", "run_ee_other"), 1),
+    ):
+        dead, _, _ = audit(
+            {"a.sh": carrier.splitlines(), "b.sh": other.splitlines()},
+            minimum=1,
+        )
+        got = len(dead)
+        ok = got == want
+        failures += 0 if ok else 1
+        print(f"    {'ok  ' if ok else 'FAIL'}  {name:36} want={want} got={got}")
+
+    total = len(ARMS) + len(ZERO_ARMS) + 3
     print()
     if failures:
         print(f"self-test: {failures} of {total} arm(s) FAILED")
