@@ -1650,8 +1650,9 @@ fn apply_native_rule_outcome_in_txn(
 /// Apply memory learning inside the transaction that records its evidence.
 ///
 /// The caller owns both the write-intake fence and transaction. An accepted
-/// feedback event must never survive without its posterior and trust changes:
-/// retries use that event as their idempotency key and will not learn it again.
+/// feedback event must never survive without its posterior, trust changes and
+/// index work: retries use that event as their idempotency key and will not
+/// learn it again.
 fn apply_memory_outcome_in_txn(
     connection: &DbConnection,
     feedback: &CreateFeedbackEventInput,
@@ -1753,6 +1754,24 @@ fn apply_memory_outcome_in_txn(
             feedback.reason.as_deref(),
             actor,
             id_source,
+        )?;
+
+        // Even unchanged text needs publication after learning invalidates the
+        // workspace generation. Commit the repair with the observation so a
+        // replay cannot leave learning permanently separated from index work.
+        let hash = blake3::hash(format!("ee.outcome.memory_index.v1:{event_id}").as_bytes())
+            .to_hex()
+            .to_string();
+        let index_job_id = format!("sidx_{}", &hash[..26]);
+        connection.insert_search_index_job(
+            &index_job_id,
+            &crate::db::CreateSearchIndexJobInput {
+                workspace_id: feedback.workspace_id.clone(),
+                job_type: crate::db::SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some(feedback.target_id.clone()),
+                documents_total: 1,
+            },
         )?;
     }
     Ok(Some((prior.mean() as f32, posterior.mean() as f32)))

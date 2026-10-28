@@ -100,6 +100,39 @@ run, `search_live_snapshot_unavailable` explicitly warns that newly committed
 content may be absent. Background publication or an explicit index rebuild is
 still needed to restore full indexed retrieval.
 
+## Memory Feedback Publication
+
+Memory outcomes that change the Bayesian posterior also enqueue a
+`single_document` memory index job in the feedback transaction. The event,
+posterior, trust transition, audits and index work commit together. A failed
+queue insert rolls them back, so retrying the same event can apply the complete
+change. A later failure in that transaction also rolls back the queued job.
+
+The job ID is deterministic for the feedback event. Replaying an explicit
+`--event-id` neither relearns nor creates another job, including after the first
+job completes. Distinct observations of the same memory receive distinct jobs.
+Neutral signals, unchanged posteriors and dry runs create no index work.
+Quarantined observations queue work only when released and applied; rejection
+and repeated review leave the existing queue unchanged.
+
+The normal worker publishes the updated source generation without a manual
+full rebuild:
+
+```bash
+ee outcome <memory-id> --signal helpful --workspace . --json
+ee job run index_coalesce --workspace . --json
+ee index status --workspace . --json
+ee search "related question" --workspace . --json
+```
+
+Publication remains asynchronous: a successful outcome means the required work
+is durable, not that the index is already current. Ordinary search may perform
+bounded pre-read reconciliation before the next worker run. Until publication
+succeeds, generation checks continue to report the index's actual freshness.
+When a local neural model is available, successful publication permits hybrid
+retrieval again. Text and embeddings need not change for the source generation
+to require this publication.
+
 ## Session Generation Invalidation
 
 `V097_SESSION_INDEX_GENERATIONS` makes the session source family obey the same

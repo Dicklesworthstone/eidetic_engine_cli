@@ -124,7 +124,8 @@ struct FeedbackState {
     profile: Option<crate::db::StoredAgentContextProfile>,
     profile_rows: i64,
     audits: Vec<crate::db::StoredAuditEntry>,
-    index_jobs: i64,
+    index_jobs: Vec<crate::db::StoredSearchIndexJob>,
+    workspace_generation: Option<u64>,
 }
 
 impl Fixture {
@@ -214,6 +215,30 @@ impl Fixture {
         self.db.get_memory_bayes_posterior(MEMORY).unwrap().unwrap()
     }
 
+    fn index_jobs(&self) -> Vec<crate::db::StoredSearchIndexJob> {
+        let mut jobs = self.db.list_search_index_jobs(WORKSPACE, None).unwrap();
+        jobs.sort_by(|left, right| left.id.cmp(&right.id));
+        jobs
+    }
+
+    fn assert_pending_memory_jobs(&self, count: usize) -> Vec<crate::db::StoredSearchIndexJob> {
+        let jobs = self.index_jobs();
+        assert_eq!(jobs.len(), count);
+        for job in &jobs {
+            assert_eq!(job.workspace_id, WORKSPACE);
+            assert_eq!(
+                job.job_type_enum(),
+                Some(crate::db::SearchIndexJobType::SingleDocument)
+            );
+            assert_eq!(job.document_source.as_deref(), Some("memory"));
+            assert_eq!(job.document_id.as_deref(), Some(MEMORY));
+            assert_eq!(job.documents_total, 1);
+            assert_eq!(job.documents_indexed, 0);
+            assert_eq!(job.status, "pending");
+        }
+        jobs
+    }
+
     fn harmful_options(&self) -> OutcomeRecordOptions<'_> {
         let mut options = self.options();
         options.signal = "harmful".to_owned();
@@ -270,7 +295,8 @@ impl Fixture {
                 .unwrap(),
             profile_rows: self.db.count_table_rows("agent_context_profiles").unwrap(),
             audits,
-            index_jobs: self.db.count_table_rows("search_index_jobs").unwrap(),
+            index_jobs: self.index_jobs(),
+            workspace_generation: self.db.get_workspace_generation(WORKSPACE).unwrap(),
         }
     }
 
@@ -326,7 +352,112 @@ impl Fixture {
             0
         );
         assert_eq!(self.audit_count(), audits);
+        self.assert_pending_memory_jobs(0);
     }
+}
+
+#[test]
+fn memory_index_jobs_are_event_stable_and_distinct_after_completed_work() {
+    let mut expected_job_id = None;
+    for seed in [SEED, SEED + 1] {
+        let fixture = Fixture::new();
+        let prior = fixture.posterior();
+        let mut options = fixture.options();
+        let report = record_outcome_seeded(&options, &mut Deterministic::from_seed(seed)).unwrap();
+        assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+        assert_eq!(fixture.posterior(), (prior.0 + 1.0, prior.1));
+        let job = fixture.assert_pending_memory_jobs(1).remove(0);
+        if let Some(expected) = &expected_job_id {
+            assert_eq!(
+                &job.id, expected,
+                "job identity must not depend on the audit ID stream"
+            );
+        } else {
+            expected_job_id = Some(job.id.clone());
+        }
+
+        // A retained terminal job must neither block a new observation nor be
+        // reactivated by a replay of the observation it already covered.
+        assert!(fixture.db.start_search_index_job(&job.id).unwrap());
+        assert!(fixture.db.complete_search_index_job(&job.id, 1).unwrap());
+        let completed = fixture.db.get_search_index_job(&job.id).unwrap().unwrap();
+        let before = fixture.feedback_state();
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::AlreadyRecorded
+        );
+        assert_eq!(fixture.feedback_state(), before);
+
+        options.event_id = Some(HELD_EVENT.to_owned());
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::Recorded
+        );
+        assert_eq!(fixture.posterior(), (prior.0 + 2.0, prior.1));
+        let jobs = fixture.index_jobs();
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.contains(&completed));
+        let pending = jobs
+            .iter()
+            .find(|candidate| candidate.status == "pending")
+            .unwrap();
+        assert_ne!(pending.id, completed.id);
+        assert_eq!(pending.document_id.as_deref(), Some(MEMORY));
+        let learned = fixture.feedback_state();
+        assert_eq!(
+            record_outcome(&options).unwrap().status,
+            OutcomeRecordStatus::AlreadyRecorded
+        );
+        assert_eq!(fixture.feedback_state(), learned);
+    }
+}
+
+#[test]
+fn memory_index_insert_failure_rolls_back_event_trust_generation_and_retry() {
+    let fixture = Fixture::new();
+    fixture.seed_agent_validated();
+    let mut options = fixture.options();
+    options.source_type = "human_explicit".to_owned();
+    let before = fixture.feedback_state();
+    fixture.db.execute_raw(
+        "CREATE TRIGGER reject_memory_index BEFORE INSERT ON search_index_jobs \
+         WHEN NEW.document_source = 'memory' BEGIN SELECT RAISE(ABORT, 'memory index failure'); END;"
+    ).unwrap();
+    let result = record_outcome(&options);
+    assert!(matches!(result, Err(DomainError::Storage { .. })));
+    assert_eq!(
+        fixture.feedback_state(),
+        before,
+        "queue failure must roll back the feedback key, posterior, trust, audits and generation"
+    );
+
+    fixture
+        .db
+        .execute_raw("DROP TRIGGER reject_memory_index")
+        .unwrap();
+    assert_eq!(
+        record_outcome(&options).unwrap().status,
+        OutcomeRecordStatus::Recorded
+    );
+    assert_eq!(
+        fixture.posterior(),
+        (before.posterior.0 + 1.0, before.posterior.1)
+    );
+    assert_eq!(
+        fixture
+            .db
+            .get_memory_trust_class(MEMORY)
+            .unwrap()
+            .as_deref(),
+        Some("human_explicit")
+    );
+    fixture.assert_pending_memory_jobs(1);
+    let learned = fixture.feedback_state();
+    assert_eq!(
+        record_outcome(&options).unwrap().status,
+        OutcomeRecordStatus::AlreadyRecorded
+    );
+    assert_eq!(fixture.feedback_state(), learned);
 }
 
 #[test]
@@ -374,6 +505,7 @@ fn agent_profile_audit_failure_rolls_back_all_learning_and_same_id_retry_applies
         .unwrap();
     let prior = fixture.posterior();
     let memory_before = fixture.db.get_memory(MEMORY).unwrap();
+    let generation_before = fixture.db.get_workspace_generation(WORKSPACE).unwrap();
     let audits = fixture.audit_count();
     fixture
         .db
@@ -395,6 +527,10 @@ fn agent_profile_audit_failure_rolls_back_all_learning_and_same_id_retry_applies
     fixture.assert_unrecorded(prior, audits);
     assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory_before);
     assert_eq!(
+        fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
+        generation_before
+    );
+    assert_eq!(
         fixture
             .db
             .get_agent_context_profile(WORKSPACE, agent, MEMORY)
@@ -408,6 +544,7 @@ fn agent_profile_audit_failure_rolls_back_all_learning_and_same_id_retry_applies
         .unwrap();
     let recorded = record_outcome(&options).unwrap();
     assert_eq!(recorded.status, OutcomeRecordStatus::Recorded);
+    let jobs = fixture.assert_pending_memory_jobs(1);
     assert_eq!(fixture.posterior(), (prior.0 + 1.0, prior.1));
     assert_eq!(
         fixture
@@ -461,6 +598,7 @@ fn agent_profile_audit_failure_rolls_back_all_learning_and_same_id_retry_applies
         1
     );
     assert_eq!(fixture.audit_count(), audits);
+    assert_eq!(fixture.index_jobs(), jobs);
 }
 
 #[test]
@@ -524,6 +662,8 @@ fn ordinary_signals_keep_the_existing_bayesian_update_contract() {
     ] {
         let fixture = Fixture::new();
         let prior = fixture.posterior();
+        let memory = fixture.db.get_memory(MEMORY).unwrap();
+        let generation = fixture.db.get_workspace_generation(WORKSPACE).unwrap();
         let mut options = fixture.options();
         options.signal = signal.to_owned();
         let report = record_outcome(&options).unwrap();
@@ -539,6 +679,40 @@ fn ordinary_signals_keep_the_existing_bayesian_update_contract() {
             Some((expected.0 / (expected.0 + expected.1)) as f32)
         );
         assert!(get_existing_event(&fixture.db, EVENT).unwrap().is_some());
+        if expected == prior {
+            fixture.assert_pending_memory_jobs(0);
+            assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory);
+            assert_eq!(
+                fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
+                generation
+            );
+        } else {
+            fixture.assert_pending_memory_jobs(1);
+            assert!(fixture.db.get_workspace_generation(WORKSPACE).unwrap() > generation);
+        }
+    }
+}
+
+#[test]
+fn neutral_feedback_does_not_promote_or_queue_index_work() {
+    for source_type in ["outcome_observed", "human_explicit"] {
+        let fixture = Fixture::new();
+        fixture.seed_agent_validated();
+        let memory = fixture.db.get_memory(MEMORY).unwrap();
+        let generation = fixture.db.get_workspace_generation(WORKSPACE).unwrap();
+        let mut options = fixture.options();
+        options.signal = "neutral".to_owned();
+        options.source_type = source_type.to_owned();
+        let report = record_outcome(&options).unwrap();
+        assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+        assert_eq!(report.confidence_before, report.confidence_after);
+        assert!(fixture.db.get_feedback_event(EVENT).unwrap().is_some());
+        assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory);
+        assert_eq!(
+            fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
+            generation
+        );
+        fixture.assert_pending_memory_jobs(0);
     }
 }
 
@@ -571,6 +745,8 @@ fn quarantine_does_not_learn_or_install_a_live_feedback_event() {
         OutcomeRecordStatus::Recorded
     );
     let prior = fixture.posterior();
+    let jobs = fixture.assert_pending_memory_jobs(1);
+    let generation = fixture.db.get_workspace_generation(WORKSPACE).unwrap();
     let second = "fb_00000000000000000000000072";
     options.event_id = Some(second.to_owned());
     let report = record_outcome(&options).unwrap();
@@ -587,6 +763,11 @@ fn quarantine_does_not_learn_or_install_a_live_feedback_event() {
     );
     assert_eq!(report.confidence_before, None);
     assert_eq!(report.confidence_after, None);
+    assert_eq!(fixture.index_jobs(), jobs);
+    assert_eq!(
+        fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
+        generation
+    );
 }
 
 #[test]
@@ -607,6 +788,40 @@ fn successful_human_promotion_and_its_feedback_commit_together() {
     );
     assert!(get_existing_event(&fixture.db, EVENT).unwrap().is_some());
     assert!(report.confidence_after.unwrap() > report.confidence_before.unwrap());
+    fixture.assert_pending_memory_jobs(1);
+}
+
+#[test]
+fn harmful_trust_demotion_and_posterior_share_one_memory_index_job() {
+    let fixture = Fixture::new();
+    fixture.seed_agent_validated();
+    fixture
+        .db
+        .update_memory_bayes_posterior(MEMORY, 0.5, 100.0)
+        .unwrap();
+    let generation = fixture
+        .db
+        .get_workspace_generation(WORKSPACE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record_outcome(&fixture.harmful_options()).unwrap().status,
+        OutcomeRecordStatus::Recorded
+    );
+    assert_eq!(fixture.posterior(), (0.5, 100.0 + DEFAULT_HARMFUL_WEIGHT));
+    assert_eq!(
+        fixture
+            .db
+            .get_memory_trust_class(MEMORY)
+            .unwrap()
+            .as_deref(),
+        Some("agent_assertion")
+    );
+    assert_eq!(
+        fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
+        Some(generation + 2)
+    );
+    fixture.assert_pending_memory_jobs(1);
 }
 
 #[test]
@@ -628,6 +843,8 @@ fn quarantine_release_matches_direct_memory_learning_and_applies_once() {
     let pending = fixture.db.get_feedback_quarantine(&quarantine_id).unwrap();
     let prior = fixture.posterior();
     let audits = fixture.audit_count();
+    let jobs = fixture.assert_pending_memory_jobs(1);
+    let generation = fixture.db.get_workspace_generation(WORKSPACE).unwrap();
     let mut release = fixture.release_options(&quarantine_id);
     release.dry_run = true;
     assert_eq!(
@@ -641,6 +858,11 @@ fn quarantine_release_matches_direct_memory_learning_and_applies_once() {
         pending
     );
     assert!(fixture.db.get_feedback_event(HELD_EVENT).unwrap().is_none());
+    assert_eq!(fixture.index_jobs(), jobs);
+    assert_eq!(
+        fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
+        generation
+    );
 
     release.dry_run = false;
     let report = review_feedback_quarantine(&release).unwrap();
@@ -675,6 +897,16 @@ fn quarantine_release_matches_direct_memory_learning_and_applies_once() {
         })
         .expect("released feedback must carry its posterior audit");
     assert_eq!(release_audit.actor.as_deref(), release.actor);
+    let jobs = fixture.assert_pending_memory_jobs(2);
+    assert_eq!(
+        jobs.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        direct
+            .index_jobs()
+            .iter()
+            .map(|job| &job.id)
+            .collect::<Vec<_>>(),
+        "quarantine release preserves the original observation's index-job identity"
+    );
 
     let learned = fixture.posterior();
     let memory = fixture.db.get_memory(MEMORY).unwrap();
@@ -686,6 +918,7 @@ fn quarantine_release_matches_direct_memory_learning_and_applies_once() {
     assert_eq!(fixture.db.get_memory(MEMORY).unwrap(), memory);
     assert_eq!(fixture.audit_count(), audits);
     assert_eq!(fixture.db.count_table_rows("feedback_events").unwrap(), 2);
+    assert_eq!(fixture.index_jobs(), jobs);
 }
 
 #[test]
@@ -703,6 +936,8 @@ fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promot
     let memory = fixture.db.get_memory(MEMORY).unwrap();
     let prior = fixture.posterior();
     let audits = fixture.audit_count();
+    let jobs = fixture.assert_pending_memory_jobs(1);
+    let generation = fixture.db.get_workspace_generation(WORKSPACE).unwrap();
     fixture
         .db
         .execute_raw(&format!(
@@ -725,6 +960,15 @@ fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promot
     assert!(fixture.db.get_feedback_event(HELD_EVENT).unwrap().is_none());
     assert_eq!(fixture.audit_count(), audits);
     assert_eq!(fixture.db.count_table_rows("feedback_events").unwrap(), 1);
+    assert_eq!(
+        fixture.index_jobs(),
+        jobs,
+        "a later review audit failure must undo its new job"
+    );
+    assert_eq!(
+        fixture.db.get_workspace_generation(WORKSPACE).unwrap(),
+        generation
+    );
 
     fixture
         .db
@@ -757,6 +1001,43 @@ fn failed_memory_release_rolls_back_learning_and_retry_cannot_grant_human_promot
             .source_type,
         "human_explicit"
     );
+    fixture.assert_pending_memory_jobs(2);
+}
+
+#[test]
+fn memory_index_insert_failure_leaves_quarantine_pending_until_retry() {
+    let fixture = Fixture::new();
+    let quarantine_id = fixture.queue_harmful_feedback("outcome_observed");
+    let before = fixture.feedback_state();
+    fixture.db.execute_raw(
+        "CREATE TRIGGER reject_released_memory_index BEFORE INSERT ON search_index_jobs \
+         WHEN NEW.document_source = 'memory' BEGIN SELECT RAISE(ABORT, 'released memory index failure'); END;"
+    ).unwrap();
+    let release = fixture.release_options(&quarantine_id);
+    assert!(matches!(
+        review_feedback_quarantine(&release),
+        Err(DomainError::Storage { .. })
+    ));
+    assert_eq!(
+        fixture.feedback_state(),
+        before,
+        "a rejected index insert must preserve pending review and all prior committed learning"
+    );
+
+    fixture
+        .db
+        .execute_raw("DROP TRIGGER reject_released_memory_index")
+        .unwrap();
+    let report = review_feedback_quarantine(&release).unwrap();
+    assert_eq!(report.status, "released");
+    assert_eq!(report.feedback_event_id.as_deref(), Some(HELD_EVENT));
+    fixture.assert_pending_memory_jobs(2);
+    let learned = fixture.feedback_state();
+    assert_eq!(
+        review_feedback_quarantine(&release).unwrap().status,
+        "already_reviewed"
+    );
+    assert_eq!(fixture.feedback_state(), learned);
 }
 
 #[test]

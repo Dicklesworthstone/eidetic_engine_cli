@@ -3199,6 +3199,404 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
     network_tripwire.assert_unused()
 }
 
+#[cfg(unix)]
+#[test]
+fn helpful_outcome_index_coalesce_restores_freshness_offline() -> TestResult {
+    helpful_outcome_index_coalesce_workflow(false, false)
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires the real potion-multilingual-128M fixture"]
+fn helpful_outcome_index_coalesce_restores_neural_hybrid_in_fresh_workspace() -> TestResult {
+    helpful_outcome_index_coalesce_workflow(true, false)
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires the real potion-multilingual-128M fixture"]
+fn helpful_outcome_index_coalesce_restores_neural_hybrid_in_existing_explicit_store() -> TestResult
+{
+    helpful_outcome_index_coalesce_workflow(true, true)
+}
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq)]
+struct OutcomeIndexState {
+    generation: u64,
+    posterior: (f64, f64),
+    trust_class: String,
+    feedback_count: usize,
+    jobs: Vec<ee::db::StoredSearchIndexJob>,
+}
+
+#[cfg(unix)]
+fn outcome_index_state(database: &Path, memory_id: &str) -> TestResult<OutcomeIndexState> {
+    let connection = DbConnection::open_file_read_only(database)
+        .map_err(|error| format!("open outcome index evidence: {error}"))?;
+    let memory = connection
+        .get_memory(memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("missing outcome target {memory_id}"))?;
+    let generation = connection
+        .get_workspace_generation(&memory.workspace_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "missing outcome workspace generation".to_string())?;
+    let posterior = connection
+        .get_memory_bayes_posterior(memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "missing outcome posterior".to_string())?;
+    let feedback_count = connection
+        .list_feedback_events_for_target("memory", memory_id)
+        .map_err(|error| error.to_string())?
+        .len();
+    let mut jobs = connection
+        .list_search_index_jobs(&memory.workspace_id, None)
+        .map_err(|error| error.to_string())?;
+    jobs.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(OutcomeIndexState {
+        generation,
+        posterior,
+        trust_class: memory.trust_class,
+        feedback_count,
+        jobs,
+    })
+}
+
+#[cfg(unix)]
+fn copy_outcome_index_fixture(source: &Path, destination: &Path) -> TestResult {
+    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        let target = destination.join(entry.file_name());
+        if kind.is_dir() {
+            copy_outcome_index_fixture(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), target).map_err(|error| error.to_string())?;
+        } else {
+            return Err(format!(
+                "unexpected non-regular store fixture entry: {}",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_outcome_index_ready(value: &Value, generation: u64) -> TestResult {
+    let data = response_data(value, "outcome index status")?;
+    ensure_eq_str(
+        string_member(data, "health")?,
+        "ready",
+        "outcome index health",
+    )?;
+    ensure_eq_u64(
+        u64_member(data, "dbGeneration")?,
+        generation,
+        "outcome database generation",
+    )?;
+    ensure_eq_u64(
+        u64_member(data, "indexGeneration")?,
+        generation,
+        "outcome published generation",
+    )
+}
+
+#[cfg(unix)]
+fn ensure_outcome_index_search(value: &Value, memory_id: &str, neural: bool) -> TestResult {
+    let data = response_data(value, "outcome search")?;
+    let results = data
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "outcome search results missing".to_string())?;
+    let hit = results
+        .iter()
+        .find(|hit| hit.get("memoryId").and_then(Value::as_str) == Some(memory_id))
+        .ok_or_else(|| format!("outcome search omitted {memory_id}: {value}"))?;
+    let degraded = value
+        .get("degraded")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "outcome search degraded array missing".to_string())?;
+    assert!(
+        !degraded.iter().any(|entry| {
+            matches!(
+                entry.get("code").and_then(Value::as_str),
+                Some("search_index_stale" | "search_live_snapshot_lexical")
+            )
+        }),
+        "worker did not restore usable indexed retrieval: {value}"
+    );
+    if neural {
+        assert_eq!(data["embed_backend"], "neural_local", "{value}");
+        assert_eq!(data["metrics"]["sourceModeApplied"], "hybrid", "{value}");
+        assert_eq!(data["metrics"]["fallbackApplied"], false, "{value}");
+        assert!(
+            hit.get("fastScore").and_then(Value::as_f64).is_some(),
+            "{hit}"
+        );
+        assert!(
+            data["metrics"]["sourceCounts"]["hybrid"]
+                .as_u64()
+                .is_some_and(|count| count > 0),
+            "neural hybrid returned no hybrid hits: {value}"
+        );
+    } else {
+        assert_eq!(data["embed_backend"], "hash_fallback", "{value}");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> TestResult {
+    let workspace = E2eWorkspace::create(&format!("outcome-index-{neural}-{copied_store}"))?;
+    let network_tripwire = NetworkTripwire::start()?;
+    let mut env = network_tripwire.proxy_env();
+    env.push(("EE_EMBED_DOWNLOAD".to_owned(), "off".to_owned()));
+    if neural {
+        let fixture = resolve_fixture_model_dir(&isolated_ee::model_fixture_root()?)?;
+        let model_dir = workspace
+            .path
+            .join("model-fixture")
+            .join(BUNDLED_EMBEDDING_MODEL_ID);
+        materialize_regular_model_fixture(&fixture, &model_dir, &ModelManifest::potion_128m())?;
+        env.push(("EE_EMBED_MODEL_DIR".to_owned(), path_string(&model_dir)));
+    }
+    let workspace_arg = workspace.workspace_arg()?;
+    let init = run_ee_with_env(
+        &workspace,
+        "outcome_init",
+        &[
+            "init",
+            "--skip-boilerplate",
+            "--workspace",
+            workspace_arg,
+            "--json",
+        ],
+        &env,
+    )?;
+    ensure_success(&init, "outcome fixture init")?;
+    let remember = run_ee_with_env(
+        &workspace,
+        "outcome_remember",
+        &[
+            "remember",
+            "Staff sign in with a one-time email code. Creating an assignment directory entry is separate from enabling authentication.",
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            "--no-auto-link",
+            "--no-propose-candidates",
+            "--workspace",
+            workspace_arg,
+            "--json",
+        ],
+        &env,
+    )?;
+    ensure_success(&remember, "outcome fixture remember")?;
+    let remembered = stdout_json(&remember, "outcome fixture remember")?;
+    let memory_id = string_member(response_data(&remembered, "remember")?, "memoryId")?;
+    let original_database = workspace.path.join(".ee/ee.db");
+    let original_state = outcome_index_state(&original_database, memory_id)?;
+    assert!(
+        !original_state.jobs.is_empty(),
+        "remember must have published index work"
+    );
+    assert!(
+        original_state
+            .jobs
+            .iter()
+            .all(|job| job.status == "completed")
+    );
+
+    let store = if copied_store {
+        let destination = workspace.path.join("existing-store/.ee");
+        copy_outcome_index_fixture(&workspace.path.join(".ee"), &destination)?;
+        destination
+    } else {
+        workspace.path.join(".ee")
+    };
+    let database = store.join("ee.db");
+    let database_arg = path_string(&database);
+    let index_arg = path_string(&store.join("index"));
+    let run = |phase: &str, command: &[&str]| -> TestResult<Value> {
+        let mut args = vec!["--workspace", workspace_arg, "--json"];
+        args.extend_from_slice(command);
+        args.extend(["--database", database_arg.as_str()]);
+        if matches!(command.first().copied(), Some("index" | "search")) {
+            args.extend(["--index-dir", index_arg.as_str()]);
+        }
+        let output = run_ee_with_env(&workspace, phase, &args, &env)?;
+        ensure_success(&output, phase)?;
+        stdout_json(&output, phase)
+    };
+    let query = ["search", "staff sign in email code", "--limit", "1"];
+    ensure_outcome_index_ready(
+        &run("outcome_before_index", &["index", "status"])?,
+        original_state.generation,
+    )?;
+    ensure_outcome_index_search(&run("outcome_before_search", &query)?, memory_id, neural)?;
+
+    let dry_run = run(
+        "outcome_dry_run",
+        &["outcome", memory_id, "--signal", "helpful", "--dry-run"],
+    )?;
+    assert_eq!(dry_run["data"]["status"], "dry_run");
+    assert_eq!(outcome_index_state(&database, memory_id)?, original_state);
+    let neutral = run(
+        "outcome_neutral",
+        &["outcome", memory_id, "--signal", "neutral"],
+    )?;
+    assert_eq!(neutral["data"]["status"], "recorded");
+    let mut before = outcome_index_state(&database, memory_id)?;
+    assert_eq!(before.generation, original_state.generation);
+    assert_eq!(before.posterior, original_state.posterior);
+    assert_eq!(before.jobs, original_state.jobs);
+
+    // The second round reopens an already updated store, queues two new events
+    // for the same document, and must retain each event's independent job.
+    for (round, events) in [(0, &[86_u64][..]), (1, &[87_u64, 88][..])] {
+        let mut job_ids = Vec::new();
+        for event in events {
+            let event_id = format!("fb_{event:026}");
+            let args = [
+                "outcome",
+                memory_id,
+                "--signal",
+                "helpful",
+                "--event-id",
+                &event_id,
+            ];
+            let recorded = run(&format!("outcome_record_{event}"), &args)?;
+            assert_eq!(recorded["data"]["status"], "recorded", "{recorded}");
+            let state = outcome_index_state(&database, memory_id)?;
+            assert!(state.generation > before.generation);
+            let new_jobs: Vec<_> = state
+                .jobs
+                .iter()
+                .filter(|job| {
+                    !before.jobs.iter().any(|old| old.id == job.id) && !job_ids.contains(&job.id)
+                })
+                .collect();
+            assert_eq!(
+                new_jobs.len(),
+                1,
+                "one committed job per helpful event: {state:?}"
+            );
+            let job = new_jobs[0];
+            assert_eq!(
+                job.job_type_enum(),
+                Some(ee::db::SearchIndexJobType::SingleDocument)
+            );
+            assert_eq!(job.document_source.as_deref(), Some("memory"));
+            assert_eq!(job.document_id.as_deref(), Some(memory_id));
+            assert_eq!(job.status, "pending");
+            assert_eq!(job.documents_total, 1);
+            assert_eq!(job.documents_indexed, 0);
+            job_ids.push(job.id.clone());
+            let replay = run(&format!("outcome_pending_replay_{event}"), &args)?;
+            assert_eq!(replay["data"]["status"], "already_recorded", "{replay}");
+            assert_eq!(outcome_index_state(&database, memory_id)?, state);
+        }
+        let pending = outcome_index_state(&database, memory_id)?;
+        assert_eq!(pending.jobs.len(), before.jobs.len() + events.len());
+        assert_eq!(pending.feedback_count, before.feedback_count + events.len());
+        let event_count = u32::try_from(events.len()).map_err(|error| error.to_string())?;
+        assert_eq!(
+            pending.posterior,
+            (
+                before.posterior.0 + f64::from(event_count),
+                before.posterior.1
+            )
+        );
+        let stale = run(
+            &format!("outcome_stale_index_{round}"),
+            &["index", "status"],
+        )?;
+        assert_eq!(stale["data"]["health"], "stale", "{stale}");
+        assert_eq!(stale["data"]["dbGeneration"], pending.generation);
+        assert_eq!(stale["data"]["indexGeneration"], before.generation);
+
+        // Search can perform bounded read repair on current main. Run the
+        // normal worker first so its nonzero work, not that repair, is proved.
+        let coalesce = run(
+            &format!("outcome_coalesce_{round}"),
+            &["job", "run", "index_coalesce", "--time-limit-ms", "300000"],
+        )?;
+        assert_eq!(coalesce["data"]["job"]["outcome"], "success", "{coalesce}");
+        assert_eq!(
+            coalesce["data"]["job"]["itemsProcessed"],
+            events.len(),
+            "{coalesce}"
+        );
+        assert_eq!(
+            coalesce["data"]["job"]["durableMutation"], true,
+            "{coalesce}"
+        );
+        let completed = outcome_index_state(&database, memory_id)?;
+        assert_eq!(completed.generation, pending.generation);
+        assert_eq!(completed.posterior, pending.posterior);
+        assert_eq!(completed.feedback_count, pending.feedback_count);
+        assert_eq!(completed.jobs.len(), pending.jobs.len());
+        for id in &job_ids {
+            let job = completed
+                .jobs
+                .iter()
+                .find(|job| &job.id == id)
+                .ok_or_else(|| format!("worker lost index job {id}"))?;
+            assert_eq!(job.status, "completed");
+            assert_eq!(job.documents_indexed, 1);
+        }
+        ensure_outcome_index_ready(
+            &run(
+                &format!("outcome_ready_index_{round}"),
+                &["index", "status"],
+            )?,
+            completed.generation,
+        )?;
+        ensure_outcome_index_search(
+            &run(&format!("outcome_repaired_search_{round}"), &query)?,
+            memory_id,
+            neural,
+        )?;
+        let event_id = format!("fb_{:026}", events[0]);
+        let replay = run(
+            &format!("outcome_completed_replay_{round}"),
+            &[
+                "outcome",
+                memory_id,
+                "--signal",
+                "helpful",
+                "--event-id",
+                &event_id,
+            ],
+        )?;
+        assert_eq!(replay["data"]["status"], "already_recorded", "{replay}");
+        assert_eq!(outcome_index_state(&database, memory_id)?, completed);
+        before = completed;
+    }
+    if copied_store {
+        assert_eq!(
+            outcome_index_state(&original_database, memory_id)?,
+            original_state
+        );
+        let original_index = run_ee_with_env(
+            &workspace,
+            "outcome_original_index_unchanged",
+            &["index", "status", "--workspace", workspace_arg, "--json"],
+            &env,
+        )?;
+        ensure_success(&original_index, "original store index status")?;
+        ensure_outcome_index_ready(
+            &stdout_json(&original_index, "original store index status")?,
+            original_state.generation,
+        )?;
+    }
+    network_tripwire.assert_unused()
+}
+
 /// Bead bd-reality-core-convergence-1azkt.11.1 (N4). Under Model2Vec, a hybrid
 /// hit's relevance is its RRF rank position, so every candidate clears the
 /// 0.05 floor and an unrelated query used to come back as 8 of 8 with
