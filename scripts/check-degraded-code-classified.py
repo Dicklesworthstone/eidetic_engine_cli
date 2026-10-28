@@ -65,6 +65,34 @@ BASELINE = "scripts/degraded-code-classification-baseline.txt"
 #: a string that could never be emitted as a degradation.
 NOT_DEGRADED_CODES = ("TEAM_INVITE_CODE_PREFIX",)
 
+#: A code written INLINE at the push site rather than declared as a constant.
+#:
+#: This closes half of the blind spot this gate's own SCOPE line admits to:
+#: "codes built by an enum as_str() or written inline are not declared this way
+#: and are NOT counted". Measured 2026-10-27, that admission was hiding ten
+#: codes in two coherent families -- four `regression_evidence_*` from
+#: src/models/regression_causality.rs and six `swarm_replay_*` from
+#: src/core/lab.rs -- none of them in the taxonomy, all of them reaching a
+#: user-visible `degradedCodes` channel (the families appear in src/cli/mod.rs,
+#: src/output/mod.rs and src/obs/volatile_fields.rs, the last of which is the
+#: registry governing what gets scrubbed from goldens). The gate reported OK
+#: over all ten because none is a `pub const`.
+#:
+#: The pattern is deliberately TIGHT: the literal must be pushed into a
+#: receiver named `degraded` or `degraded_codes`. A looser rule that took any
+#: code-shaped literal near the word "degraded" was tried first and returned
+#: 135 "absent" codes, most of them field names -- `command`, `details`,
+#: `degraded_codes` itself. That is an instrument failure, not a finding, so
+#: the narrow form is the one that ships.
+#:
+#: The enum `as_str()` half of the admission is still NOT covered, and the
+#: SCOPE line below still says so.
+INLINE_PUSH = re.compile(
+    r"\bdegraded(?:_codes)?\s*\.push\(\s*"
+    r'"([a-z][a-z0-9_]*)"'
+    r"(?:\s*\.to_(?:string|owned)\(\))?\s*\)"
+)
+
 
 def read(path):
     with open(path, encoding="utf-8", errors="replace") as handle:
@@ -80,6 +108,19 @@ def declared_codes(root):
                 continue
             rel = os.path.relpath(path, root).replace("\\", "/")
             out.setdefault(value, []).append((rel, name))
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def inline_pushed_codes(root):
+    """value -> sorted [(relative path, "inline push")] for every inline literal
+    pushed into a degraded channel."""
+    out = {}
+    for path in sorted(glob.glob(os.path.join(root, "src", "**", "*.rs"), recursive=True)):
+        for value in INLINE_PUSH.findall(read(path)):
+            rel = os.path.relpath(path, root).replace("\\", "/")
+            entry = (rel, "inline push")
+            if entry not in out.setdefault(value, []):
+                out[value].append(entry)
     return {k: sorted(v) for k, v in out.items()}
 
 
@@ -136,8 +177,18 @@ def load_baseline(root):
 
 def audit(root):
     declared = declared_codes(root)
+    inline = inline_pushed_codes(root)
     classified = taxonomy_codes(read(os.path.join(root, TAXONOMY)))
     missing = unclassified(declared, classified)
+    # The two populations are kept SEPARATE in the report and merged only for
+    # the verdict. Folding inline codes into `declaredDistinctValues` would
+    # silently move every number this gate has ever printed, so a reader
+    # comparing against an older run could not tell a new code from a widened
+    # predicate.
+    inline_missing = sorted(value for value in inline if value not in classified)
+    sites = {value: declared[value] for value in missing}
+    for value in inline_missing:
+        sites.setdefault(value, []).extend(inline[value])
     return {
         "schema": "ee.degraded_code_classification.v1",
         "declaredConstants": sum(len(v) for v in declared.values()),
@@ -147,8 +198,10 @@ def audit(root):
         # for the extraction: if this were 0 the predicate would be inverted and
         # every code would look unclassified.
         "classifiedDeclaredValues": len(declared) - len(missing),
-        "unclassified": missing,
-        "sites": {value: declared[value] for value in missing},
+        "inlinePushedValues": len(inline),
+        "inlineUnclassified": inline_missing,
+        "unclassified": sorted(set(missing) | set(inline_missing)),
+        "sites": sites,
     }
 
 
@@ -205,9 +258,37 @@ def self_test():
         arm("an invite-code prefix is excluded, a real code is kept",
             "eeteam1-" not in found and "real_thing" in found)
 
+    # INLINE PUSHES, both polarities plus the receiver negative. The receiver
+    # arm is the one that matters: a predicate keyed on "a code-shaped literal
+    # near the word degraded" returned 135 hits, nearly all field names, so the
+    # tightness is load-bearing rather than incidental.
+    with tempfile.TemporaryDirectory(prefix="degraded-inline-") as tmp:
+        os.makedirs(os.path.join(tmp, "src"))
+        with open(os.path.join(tmp, "src", "y.rs"), "w", encoding="utf-8") as handle:
+            handle.write(
+                'degraded.push("plain_form");\n'
+                'degraded_codes.push("owned_form".to_owned());\n'
+                'degraded_codes.push("string_form".to_string());\n'
+                'other_vec.push("not_a_degraded_channel");\n'
+                'degraded.push(SOME_CONST);\n'
+            )
+        inline = inline_pushed_codes(tmp)
+        arm("a bare inline push is caught", "plain_form" in inline)
+        arm("a .to_owned() inline push is caught", "owned_form" in inline)
+        arm("a .to_string() inline push is caught", "string_form" in inline)
+        arm("a push into another receiver is NOT caught",
+            "not_a_degraded_channel" not in inline)
+        arm("a non-literal push contributes nothing", len(inline) == 3)
+
     # 10-11: END-TO-END on the live tree. The gate must be green at HEAD and
     # its classified count must be non-zero, or "unclassified" means nothing.
     report = audit(".")
+    # The inline population must be NON-EMPTY on the live tree, or the new
+    # predicate could have stopped matching and the gate would report a clean
+    # inline axis having scanned nothing -- the same empty-world failure the
+    # arms above guard for the declared axis.
+    arm("the live tree has a non-zero inline-pushed count",
+        report["inlinePushedValues"] > 0)
     arm("the live tree has a non-zero classified count (predicate not inverted)",
         report["classifiedDeclaredValues"] > 0)
     baseline = load_baseline(".")
@@ -246,21 +327,31 @@ def main():
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(
-            "[degraded-classified] predicate: a `pub const *CODE*: &str` in src/ "
+            "[degraded-classified] predicate: a `pub const *CODE*: &str` in src/, "
+            "OR a literal pushed into a `degraded`/`degraded_codes` channel, "
             "whose value is absent from the taxonomy"
         )
         print(
             f"[degraded-classified] {report['declaredConstants']} constant(s), "
             f"{report['declaredDistinctValues']} distinct value(s), "
             f"{report['classifiedDeclaredValues']} classified, "
-            f"{len(found)} not; taxonomy carries {report['taxonomyCodes']} code(s); "
+            f"{len(report['unclassified']) - len(report['inlineUnclassified'])} not; "
+            f"taxonomy carries {report['taxonomyCodes']} code(s); "
             f"baseline {len(baseline)}"
         )
         print(
-            "[degraded-classified] SCOPE: codes built by an enum as_str() or "
-            "written inline are not declared this way and are NOT counted, so "
-            "a pass means no newly DECLARED constant is unclassified -- never "
-            "that every emittable code is classified."
+            f"[degraded-classified] inline-pushed: "
+            f"{report['inlinePushedValues']} distinct value(s), "
+            f"{report['inlinePushedValues'] - len(report['inlineUnclassified'])} "
+            f"classified, {len(report['inlineUnclassified'])} not"
+        )
+        print(
+            "[degraded-classified] SCOPE: an inline literal counts only when "
+            "pushed into a receiver named `degraded`/`degraded_codes`. Codes "
+            "built by an enum as_str(), or pushed through any other receiver, "
+            "are still NOT counted -- so a pass means no newly declared constant "
+            "and no newly inlined push is unclassified, never that every "
+            "emittable code is classified."
         )
 
     status = 0
