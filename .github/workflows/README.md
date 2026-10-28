@@ -138,3 +138,53 @@ Assume your commits will not be gated on push. Either:
   rather than at authorship.
 
 Do not assume `ci-static.yml`'s `push` trigger covers you. It does not.
+
+### And your `paths:` filter decides whether your red can ever be cleared
+
+This is the second half of the same problem and it is easy to write by accident,
+because copying a neighbouring delivery workflow copies it. If your `push`
+filter lists only your own workflow file and your delivery payload, then a
+repair to the source your workflow exercises **cannot re-trigger it**. The last
+run stays on display, and whatever reads that run reports it as the state of
+`main`.
+
+The worked case is `global-authority-20260919.yml`. It triggers on exactly its
+own file plus two `scripts/delivery/*.patch` paths. Its failing runs described a
+defect that `ef658b7c3` then fixed in `src/core/search.rs`,
+`src/core/search_diagnostic_snapshot.rs` and
+`tests/support/revision_search_cli.rs` — none of which it watches. So it could
+not re-fire, and it kept showing red for a tree that no longer existed.
+
+Measured over this directory on 2026-10-27, with the definitions spelled out
+because two of them are easy to conflate:
+
+| | |
+|---|---|
+| workflow files | 88 |
+| with a `push` `paths:` filter | 71 |
+| of those, narrow (<= 3 entries) | 47 |
+| watching **only their own workflow file** | 20 |
+| watching only their own file and/or `scripts/delivery/` | 44 |
+| carrying `workflow_dispatch` | 85 |
+| carrying a `schedule:` | **2** |
+
+Read those last three rows together, because they are the whole point. Half the
+directory cannot be re-fired by repairing the source it exercises, 85 of 88 can
+be cleared by a manual dispatch, and 2 have any automatic re-evaluation. **The
+missing thing is not a mechanism, it is an automatic path** — a red here is
+clearable in principle and frozen in practice, because nothing ever dispatches
+it and nothing prompts anyone to.
+
+So when you write `paths:`, pick one deliberately:
+
+- list the source your workflow actually exercises, so a repair to it
+  re-triggers the check — this is the only option that clears a red by itself;
+- or add a `schedule:`, as `ci-static.yml` does, accepting that it evaluates
+  HEAD rather than your commit;
+- or keep the narrow filter knowingly, and expect your last run to be read as a
+  verdict on `main` long after it stopped being one.
+
+Tracked at `bd-5glwp`. The 20 in the fourth row is unchanged since 2026-09-20
+while the directory grew from 49 files to 88, so the narrow pattern is not
+spreading — but it is also not being repaired, and the population it sits in has
+nearly doubled.
