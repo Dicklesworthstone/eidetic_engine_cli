@@ -2085,9 +2085,26 @@ fn actionable_queue_evidence_from_brief_fallback(
         .iter()
         .find(|source| source.source == SwarmBriefSourceKind::Beads);
     let (queue_state, exit_class) = match beads_source {
+        // `"current"`, NOT `"fresh"`. `SwarmBriefSourceFreshness::state` is a
+        // `&'static str` whose value domain is exactly {"current", "unknown",
+        // "stale"} -- every construction goes through
+        // `SwarmBriefSourceFreshness::current()` (state "current"),
+        // `::unknown()` (state "unknown"), or one of the two struct literals in
+        // swarm_brief.rs that set "stale"/"current". Nothing anywhere produces
+        // "fresh", so this guard could never be true and this arm was
+        // unreachable: a Ready AND current Beads source fell through to the
+        // `stale_fallback` arm below.
+        //
+        // That was not a cosmetic mislabel. `stale_fallback` sets
+        // `stale_source_kind` (:3181) and maps to `external_state_required`
+        // (:4842), and `authoritative` requires READY (:5188) -- so the brief
+        // fallback asked for external state and declined to call its own
+        // evidence authoritative even on a perfectly healthy brief. The
+        // sibling check on the AgentMail source in handoff.rs:175 compares
+        // against "current", which is the correct vocabulary.
         Some(source)
             if source.status == SwarmBriefSourceStatus::Ready
-                && source.freshness.state == "fresh" =>
+                && source.freshness.state == "current" =>
         {
             (ACTIONABLE_QUEUE_STATE_READY, "ok")
         }
