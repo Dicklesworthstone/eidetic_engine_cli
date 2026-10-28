@@ -6012,11 +6012,22 @@ fn dispatch_context_with_admission(
     // prefetch history and ask the coordinator for gated warm-fetch
     // candidates. Deliberately placed after the pack is assembled so it can
     // only ever add an envelope degraded code, never change the pack.
+    //
+    // The SLO field is preferred when a producer filled it. Today's pack
+    // builder still leaves it null, which made every real context call skip
+    // prefetch. The published meta.json generation is the same value the warm
+    // lease rechecks, so filling it from disk is not a placeholder.
+    let prefetch_index_dir = crate::config::workspace::resolve_store_index_dir(
+        &options.workspace_path,
+        options.database_path.as_deref(),
+        options.index_dir.as_deref(),
+    );
     let prefetch_generation = context_response
         .data
         .slo
         .as_ref()
-        .and_then(|slo| slo.actuals.index_generation);
+        .and_then(|slo| slo.actuals.index_generation)
+        .or_else(|| crate::core::index::published_index_generation(&prefetch_index_dir));
     let prefetch_prediction = plan_and_observe_cass_prefetch(
         cass_prefetch,
         shutdown,
@@ -6117,11 +6128,7 @@ fn dispatch_context_with_admission(
         && let Some(ticket) = prefetch_ticket
     {
         worker.submit(
-            crate::config::workspace::resolve_store_index_dir(
-                &options.workspace_path,
-                options.database_path.as_deref(),
-                options.index_dir.as_deref(),
-            ),
+            prefetch_index_dir,
             generation,
             prefetch_prediction.candidates,
             // Keyed exactly as `plan_and_observe_cass_prefetch` keys its
@@ -7480,6 +7487,58 @@ mod tests {
     }
 
     #[test]
+    fn cass_prefetch_caps_candidates_at_configured_top_k_bd_16pwc_4() {
+        let shutdown = AtomicBool::new(false);
+        // Schedule runs before observe, and the predictor skips the newest
+        // topic. The fourth call is the first one that can see two eligible
+        // topics, which is what makes a top_k of 1 observable.
+        let topics = [
+            "alpha deploy",
+            "beta release",
+            "gamma rollback",
+            "delta recover",
+        ];
+
+        let run = |top_k: Option<u64>| {
+            let coordinator = prefetch_coordinator();
+            let ticket = refresh_cass_prefetch_policy(&coordinator, || {
+                CassPrefetchPolicy::from_config(&crate::config::SwarmAdaptiveConfig {
+                    enabled: Some(true),
+                    prefetch_top_k: top_k,
+                    similarity_threshold: Some(0.0),
+                    ..Default::default()
+                })
+            });
+            let mut last = crate::core::cass_prefetch::GatedPrediction::default();
+            for topic in topics {
+                last = plan_and_observe_cass_prefetch(
+                    &coordinator,
+                    &shutdown,
+                    TEST_AGENT_ID,
+                    PREFETCH_WORKSPACE,
+                    topic,
+                    Some(7),
+                    ticket,
+                );
+            }
+            (last.candidates.len(), prefetch_metrics(&coordinator).candidates_emitted)
+        };
+
+        let (uncapped_len, uncapped_emitted) = run(None);
+        let (capped_len, capped_emitted) = run(Some(1));
+        assert_eq!(
+            (uncapped_len, uncapped_emitted),
+            (2, 3),
+            "default top_k must emit the one eligible topic on call 3 and both topics behind the newest one on call 4"
+        );
+        assert_eq!(
+            (capped_len, capped_emitted),
+            (1, 2),
+            "prefetch_top_k of 1 must reach schedule: call 3 still emits its only topic, call 4 emits one"
+        );
+    }
+
+    #[test]
     fn cass_prefetch_drops_history_after_index_regeneration_bd_16pwc_4() {
         let coordinator = prefetch_coordinator();
         let shutdown = AtomicBool::new(false);
@@ -7567,9 +7626,10 @@ mod tests {
     /// Before this leg existed, `record_warm_fetch` had no production caller at
     /// all, so these counters could not move no matter what traffic arrived.
     ///
-    /// NO-CLAIM: this covers the credit site on the request path. It does not
-    /// drive a full `ee.daemon.context` call with pack content, so it is not
-    /// yet the end-to-end daemon-traffic proof bd-16pwc.4 asks for.
+    /// This covers the credit site on the request path. The end-to-end proof,
+    /// a real `ee.daemon.context` pack that stays byte-identical to the cold
+    /// path while the next call records the hit, is
+    /// `context_dispatch_prefetch_hit_matches_the_cold_pack_bd_16pwc_4`.
     #[test]
     fn cass_prefetch_awards_a_hit_through_the_request_path_bd_16pwc_7() {
         let coordinator = prefetch_coordinator();

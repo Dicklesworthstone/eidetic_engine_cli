@@ -1709,6 +1709,15 @@ impl DbConnection {
             .map_err(|source| DbError::sqlmodel(DbOperation::Execute, source))
     }
 
+    /// Execute one parameterized statement and return how many rows changed.
+    ///
+    /// `execute_raw` cannot bind parameters. Fixture updates that address a
+    /// row by id go through the same owner gate, statement epoch, and
+    /// contention retry as every other parameterized write.
+    pub(crate) fn execute(&self, sql: &str, params: &[Value]) -> Result<u64> {
+        self.execute_for(DbOperation::Execute, sql, params)
+    }
+
     /// Run SQLite's opportunistic query planner/index optimization while
     /// holding the file writer ownership gate.
     pub fn optimize_storage(&self) -> Result<()> {

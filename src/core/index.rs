@@ -5820,6 +5820,23 @@ struct ParsedIndexMetadata {
     stored_dimension: Option<u32>,
 }
 
+/// Generation stamped in `meta.json`, when that file parses and the warm
+/// lease would accept it.
+///
+/// Pack SLO actuals still leave `index_generation` unset. Prefetch must use
+/// this published value rather than inventing generation zero: the lexical
+/// warm lease rejects any other generation, and a missing or incompatible
+/// file stays `None` so the caller can fail closed.
+pub(crate) fn published_index_generation(index_dir: &Path) -> Option<u64> {
+    let metadata = parse_index_metadata(index_dir).ok().flatten()?;
+    let generation = metadata.generation?;
+    let metadata_path = index_dir.join(INDEX_METADATA_FILE);
+    if index_metadata_compatibility_error(&metadata_path, &metadata).is_some() {
+        return None;
+    }
+    Some(generation)
+}
+
 fn parse_index_metadata(index_dir: &Path) -> Result<Option<ParsedIndexMetadata>, String> {
     let metadata_path = index_dir.join(INDEX_METADATA_FILE);
     let Some(content) = read_index_metadata_contents(&metadata_path)? else {

@@ -1111,6 +1111,205 @@ mod tests {
         }
     }
 
+    /// bd-16pwc.4: a real daemon context call records the request, the idle
+    /// worker stages the predicted topic, and the next context call for that
+    /// topic reports one hit. The pack text and hash stay the cold-path
+    /// values. Prefetch never sees the response body.
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
+    fn context_dispatch_prefetch_hit_matches_the_cold_pack_bd_16pwc_4() {
+        use std::sync::Arc;
+
+        use super::super::{
+            DaemonDispatchPolicy, METHOD_CONTEXT, dispatch_context_with_admission,
+        };
+        use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus};
+        use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
+
+        const HIT: &str = "quasar release checksums";
+        const MID: &str = "beta release checklist";
+        const LAST: &str = "gamma rollback checklist";
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().canonicalize().unwrap();
+        let init = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: workspace.clone(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        assert!(
+            !matches!(init.status, crate::core::init::InitStatus::Failed),
+            "{:?}",
+            init.action_errors
+        );
+        let connection = crate::db::DbConnection::open_file(&init.database_path).unwrap();
+        let workspace_id = connection
+            .get_workspace_by_path(&workspace.to_string_lossy())
+            .unwrap()
+            .unwrap()
+            .id;
+        let _embedder = crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+        const MEMORY_ID: &str = "mem_00000000000000000000005916";
+        connection
+            .insert_memory_with_timestamps(
+                MEMORY_ID,
+                &crate::db::CreateMemoryInput {
+                    workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Check quasar release checksums before publication.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("test://prefetch-context".to_owned()),
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+                "2020-01-01T00:00:00+00:00",
+                "2020-01-01T00:00:00+00:00",
+                MEMORY_ID,
+            )
+            .unwrap();
+        connection.close().unwrap();
+        let rebuilt = crate::core::index::rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(init.database_path.clone()),
+            index_dir: None,
+            dry_run: false,
+        })
+        .unwrap();
+        assert_eq!(rebuilt.status, IndexRebuildStatus::Success);
+
+        let mut policy = DaemonDispatchPolicy::for_workspace(workspace.display().to_string());
+        let shutdown = AtomicBool::new(false);
+        let pool = InflightPool::new(1);
+        let worker = super::super::cass_prefetch_worker::CassPrefetchWorker::new(
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&pool),
+            Arc::clone(&policy.cass_prefetch),
+        );
+        policy.cass_prefetch_worker = Some(worker);
+        let runtime = &policy.adaptive_scheduler;
+        let prefetch = policy.cass_prefetch();
+
+        let request = |id: &str, task: &str| {
+            let mut request = DaemonRequest::new(
+                id,
+                "agent-prefetch",
+                METHOD_CONTEXT,
+                serde_json::json!({
+                    "task": task,
+                    "workspacePath": workspace,
+                    "databasePath": init.database_path,
+                    "sourceMode": "lexical_only",
+                    "speed": "instant",
+                    "readOnly": true,
+                    "maxTokens": 800,
+                }),
+            );
+            request.workspace_id = Some(workspace.display().to_string());
+            request
+        };
+        let dispatch = |request: &DaemonRequest, warm: bool| {
+            dispatch_context_with_admission(
+                request,
+                &shutdown,
+                &policy,
+                false,
+                None,
+                |authorized, _, _, _| {
+                    if !warm {
+                        return Ok((AdaptivePolicyTickets::default(), false));
+                    }
+                    let tickets = runtime.refresh_policy(
+                        prefetch,
+                        authorized,
+                        "agent-prefetch",
+                        || SwarmAdaptiveConfig {
+                            enabled: Some(true),
+                            prefetch_top_k: Some(1),
+                            prefetch_budget_ms: Some(5_000),
+                            similarity_threshold: Some(0.0),
+                            ..SwarmAdaptiveConfig::default()
+                        },
+                    );
+                    Ok((tickets, false))
+                },
+            )
+        };
+        let pack_fields = |response: &DaemonResponse| {
+            assert!(response.error.is_none(), "{response:?}");
+            let result = response.result.as_ref().expect("context result");
+            let text = result
+                .pointer("/data/pack/text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let hash = result
+                .pointer("/data/pack/hash")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            assert!(!hash.is_empty(), "canonical pack hash missing: {result}");
+            assert!(
+                result.to_string().contains(MEMORY_ID),
+                "the pack must retrieve the seeded memory"
+            );
+            (text, hash)
+        };
+
+        let (cold_text, cold_hash) = pack_fields(&dispatch(&request("req-cold", HIT), false));
+        assert!(dispatch(&request("req-observe-hit", HIT), true).error.is_none());
+        assert!(dispatch(&request("req-observe-mid", MID), true).error.is_none());
+        let mark = policy
+            .cass_prefetch_worker
+            .as_ref()
+            .expect("worker")
+            .batches_settled();
+        let scheduled = dispatch(&request("req-schedule", LAST), true);
+        assert!(scheduled.error.is_none(), "{scheduled:?}");
+        let advisory = crate::core::workspace::bound_workspace_id_from_path(&workspace);
+        let emitted = prefetch
+            .lock()
+            .unwrap()
+            .metrics_for(&advisory)
+            .map(|metrics| metrics.candidates_emitted)
+            .unwrap_or(0);
+        assert!(
+            emitted >= 1,
+            "the third context call must schedule the earlier topic, got {scheduled:?}"
+        );
+        assert!(
+            policy
+                .cass_prefetch_worker
+                .as_ref()
+                .expect("worker")
+                .wait_for_batch_settle(mark, Duration::from_secs(8)),
+            "the speculative batch did not settle"
+        );
+        let (hit_text, hit_hash) = pack_fields(&dispatch(&request("req-hit", HIT), true));
+        assert_eq!(hit_text, cold_text, "prefetch must not change pack text");
+        assert_eq!(hit_hash, cold_hash, "prefetch must not change pack hash");
+        let metrics = prefetch
+            .lock()
+            .unwrap()
+            .metrics_for(&advisory)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            metrics.hits, 1,
+            "the later context call must record the warmed topic as one hit: {metrics:?}"
+        );
+        assert_eq!(metrics.misses, 0, "{metrics:?}");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn another_framed_request_completes_while_hot_agent_waits() {
