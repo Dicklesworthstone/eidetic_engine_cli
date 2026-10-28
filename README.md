@@ -2858,6 +2858,25 @@ per-command fixed cost the table omits. Treat the table as a
 target until `bd-reality-core-convergence-1azkt.6` regenerates it from
 attested raw samples.
 
+**One row needs more than that blanket caveat, because hardware class cannot
+explain it.** `ee import cass --limit 50` is listed below at a 4.1 s p50, and
+the Quick Start above tells a first-time user to run exactly that command. A
+probe of the public v0.16.0 binary measured `ee import cass --limit 3` at
+**53.99 s** — about 18 s per session, for 3 real Claude Code sessions producing
+4,919 spans — which extrapolates to roughly **15 minutes** for the 50 the Quick
+Start suggests, around 200x the row. Moving between hardware classes does not
+produce a 200x gap; something in the per-session path does. Root-causing,
+batching and re-measurement are tracked at
+`bd-reality-core-convergence-1azkt.48`, whose acceptance includes updating or
+removing this row.
+
+Stated precisely, because the correction deserves the same discipline as the
+claim: that 53.99 s measurement is from **v0.16.0** and has not been reproduced
+against this tree. So what is established is that the 4.1 s figure is not
+reproducible at the documented scale — NOT that the current cost is 18 s per
+session. If you are importing a real history for the first time, budget minutes
+and use `--limit 3` first to measure your own rate.
+
 <!-- perf:begin hardware-class=mac-m3-pro baseline=benches/baselines/perf_v0_2.json -->
 | Operation | Hardware class | p50 | p99 |
 |---|---|---:|---:|
