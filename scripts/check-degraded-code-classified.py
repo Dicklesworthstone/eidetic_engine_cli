@@ -357,8 +357,8 @@ def main():
     status = 0
     if new:
         print(
-            f"\n[degraded-classified] FAIL: {len(new)} degraded code(s) declared "
-            f"in src/ but absent from {TAXONOMY}:",
+            f"\n[degraded-classified] FAIL: {len(new)} degraded code(s) emitted "
+            f"from src/ but absent from {TAXONOMY}:",
             file=sys.stderr,
         )
         for value in new:
@@ -386,7 +386,7 @@ def main():
         status = 1
     if status == 0:
         print(
-            f"[degraded-classified] OK -- no unclassified degraded-code constant "
+            f"[degraded-classified] OK -- no unclassified degraded code "
             f"beyond the {len(baseline)} baselined"
         )
     return status

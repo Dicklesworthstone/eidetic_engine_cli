@@ -83,3 +83,39 @@ shard_fanout_target_hash_mismatch
 unauthenticated_native_import_trust
 
 # src/config/mod.rs and src/config/path_resolver.rs -- declared in both
+
+# ---------------------------------------------------------------------------
+# A SECOND POPULATION, added 2026-10-27: codes written INLINE at the push site
+# rather than declared as `pub const`.
+#
+# This gate's SCOPE line admitted the hole in so many words -- "codes built by
+# an enum as_str() or written inline are not declared this way and are NOT
+# counted" -- and the admission was hiding ten codes in two coherent families.
+# Both reach a user-visible `degradedCodes` channel: the families appear in
+# src/cli/mod.rs, src/output/mod.rs and src/obs/volatile_fields.rs, the last
+# being the registry that governs what is scrubbed from goldens. The gate
+# reported OK over all ten because none of them is a constant.
+#
+# They are BASELINED, not classified, for the same reason as every line above:
+# a severity and an owner are a judgment about user impact that belongs with
+# whoever owns the surface, and inventing ten of them to make a gate green is
+# the opposite of what the taxonomy is for. What the predicate buys immediately
+# is that the ELEVENTH inline push cannot ship unnoticed.
+#
+# Classification is tracked as its own bead. Delete a line here when its code
+# is classified -- the gate fails if a baselined line has been classified, so a
+# line cannot be left behind once the work is done.
+
+# src/models/regression_causality.rs -- evidence redaction and materialisation
+regression_evidence_private_path_redacted
+regression_evidence_raw_output_suppressed
+regression_evidence_schema_missing
+regression_evidence_source_not_materialized
+
+# src/core/lab.rs -- swarm replay host/environment preconditions
+swarm_replay_cpu_count_unknown
+swarm_replay_host_profile_too_small
+swarm_replay_memory_unknown
+swarm_replay_rch_unavailable
+swarm_replay_target_dir_not_external
+swarm_replay_tmpdir_not_external
