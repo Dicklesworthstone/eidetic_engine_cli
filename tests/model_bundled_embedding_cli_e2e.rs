@@ -3207,6 +3207,13 @@ fn helpful_outcome_index_coalesce_restores_freshness_offline() -> TestResult {
 
 #[cfg(unix)]
 #[test]
+fn helpful_outcome_index_coalesce_restores_freshness_in_existing_custom_store_offline() -> TestResult
+{
+    helpful_outcome_index_coalesce_workflow(false, true)
+}
+
+#[cfg(unix)]
+#[test]
 #[ignore = "requires the real potion-multilingual-128M fixture"]
 fn helpful_outcome_index_coalesce_restores_neural_hybrid_in_fresh_workspace() -> TestResult {
     helpful_outcome_index_coalesce_workflow(true, false)
@@ -3420,12 +3427,25 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
     };
     let database = store.join("ee.db");
     let database_arg = path_string(&database);
-    let index_arg = path_string(&store.join("index"));
+    let implicit_index = store.join("index");
+    let index_dir = if copied_store {
+        let destination = workspace.path.join("selected-index");
+        copy_outcome_index_fixture(&implicit_index, &destination)?;
+        destination
+    } else {
+        implicit_index.clone()
+    };
+    let untouched_index = copied_store
+        .then(|| model_cache_artifact_state(&implicit_index))
+        .transpose()?;
+    let index_arg = path_string(&index_dir);
     let run = |phase: &str, command: &[&str]| -> TestResult<Value> {
         let mut args = vec!["--workspace", workspace_arg, "--json"];
         args.extend_from_slice(command);
         args.extend(["--database", database_arg.as_str()]);
-        if matches!(command.first().copied(), Some("index" | "search")) {
+        if matches!(command.first().copied(), Some("index" | "search"))
+            || (copied_store && matches!(command.first().copied(), Some("job" | "maintenance")))
+        {
             args.extend(["--index-dir", index_arg.as_str()]);
         }
         let output = run_ee_with_env(&workspace, phase, &args, &env)?;
@@ -3519,6 +3539,41 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         assert_eq!(stale["data"]["dbGeneration"], pending.generation);
         assert_eq!(stale["data"]["indexGeneration"], before.generation);
 
+        let index_before_dry_run = model_cache_artifact_state(&index_dir)?;
+        let mut dry_run_command = if copied_store && round == 1 {
+            vec!["maintenance", "run", "--job", "index_coalesce"]
+        } else {
+            vec!["job", "run", "index_coalesce"]
+        };
+        dry_run_command.extend(["--time-limit-ms", "300000", "--dry-run"]);
+        let coalesce_dry_run = run(
+            &format!("outcome_coalesce_dry_run_{round}"),
+            &dry_run_command,
+        )?;
+        let dry_run_job = &coalesce_dry_run["data"]["job"];
+        assert_eq!(dry_run_job["outcome"], "success", "{coalesce_dry_run}");
+        assert_eq!(dry_run_job["dryRun"], true, "{coalesce_dry_run}");
+        assert_eq!(dry_run_job["durableMutation"], false, "{coalesce_dry_run}");
+        assert_eq!(
+            dry_run_job["details"]["preflight"]["pending_jobs"],
+            events.len(),
+            "{coalesce_dry_run}"
+        );
+        assert_eq!(
+            dry_run_job["details"]["preflight"]["database_path"], database_arg,
+            "{coalesce_dry_run}"
+        );
+        assert_eq!(
+            dry_run_job["details"]["preflight"]["index_dir"], index_arg,
+            "{coalesce_dry_run}"
+        );
+        assert_eq!(outcome_index_state(&database, memory_id)?, pending);
+        assert_eq!(
+            model_cache_artifact_state(&index_dir)?,
+            index_before_dry_run,
+            "worker dry-run changed the selected index"
+        );
+
         // Search can perform bounded read repair on current main. Run the
         // normal worker first so its nonzero work, not that repair, is proved.
         let coalesce = run(
@@ -3533,6 +3588,10 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         );
         assert_eq!(
             coalesce["data"]["job"]["durableMutation"], true,
+            "{coalesce}"
+        );
+        assert_eq!(
+            coalesce["data"]["job"]["details"]["result"]["index_dir"], index_arg,
             "{coalesce}"
         );
         let completed = outcome_index_state(&database, memory_id)?;
@@ -3578,6 +3637,39 @@ fn helpful_outcome_index_coalesce_workflow(neural: bool, copied_store: bool) -> 
         before = completed;
     }
     if copied_store {
+        let implicit_index_arg = path_string(&implicit_index);
+        let implicit_status = run_ee_with_env(
+            &workspace,
+            "outcome_implicit_index_unchanged",
+            &[
+                "index",
+                "status",
+                "--database",
+                &database_arg,
+                "--index-dir",
+                &implicit_index_arg,
+                "--workspace",
+                workspace_arg,
+                "--json",
+            ],
+            &env,
+        )?;
+        ensure_success(&implicit_status, "unselected sibling index status")?;
+        let implicit_status = stdout_json(&implicit_status, "unselected sibling index status")?;
+        assert_eq!(
+            implicit_status["data"]["health"], "stale",
+            "{implicit_status}"
+        );
+        assert_eq!(implicit_status["data"]["dbGeneration"], before.generation);
+        assert_eq!(
+            implicit_status["data"]["indexGeneration"],
+            original_state.generation
+        );
+        assert_eq!(
+            Some(model_cache_artifact_state(&implicit_index)?),
+            untouched_index,
+            "worker targeting the custom index changed the inferred sibling index"
+        );
         assert_eq!(
             outcome_index_state(&original_database, memory_id)?,
             original_state

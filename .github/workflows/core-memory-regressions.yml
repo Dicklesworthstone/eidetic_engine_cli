@@ -306,6 +306,7 @@ jobs:
           remember-audit-lane core::memory::tests::store_remembered_memory_queues_audit_when_lane_is_enabled
           remember-dedup-transaction core::memory::tests::store_remembered_memory_persists_simhash_and_dedup_link
           outcome-atomic core::outcome::atomic_learning_tests::
+          index-repair-destination steward::tests::background_index_rebuild_preserves_request_for_custom_database_or_index
           CASES
           exit "$failed"
       - name: Exercise repair identity, search freshness, and diagnostics serially
@@ -614,7 +615,7 @@ jobs:
           backup-contract contracts backup_import_roundtrip::
           core-cli e2e_core_workflow core_workflow_init_remember_search_context_why
           learning-cli session_arc_learning_cli public_cli_
-          memory-outcome-index model_bundled_embedding_cli_e2e helpful_outcome_index_coalesce_restores_freshness_offline
+          memory-outcome-index model_bundled_embedding_cli_e2e helpful_outcome_index_coalesce_restores_freshness
           native-rule-pack integration_n_r rule_mark_update_e2e::sourced_rule_pack_replay_and_item_outcome_preserve_native_identity
           native-rule-outcome integration_n_r rule_mark_update_e2e::native_rule_outcome_changes_rule_once_without_changing_source_memory
           model-lifecycle integration_g_m model_lifecycle_readiness_integration::

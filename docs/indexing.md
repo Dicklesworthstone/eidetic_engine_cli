@@ -125,6 +125,21 @@ ee index status --workspace . --json
 ee search "related question" --workspace . --json
 ```
 
+For an explicitly selected store or custom index, pass the same paths to the
+worker and retrieval commands. Both `ee job run` and `ee maintenance run` accept
+`--index-dir` for index jobs; dry runs report the selected path without claiming
+queued work:
+
+```bash
+ee job run index_coalesce --workspace . --database /path/to/store/.ee/ee.db --index-dir /path/to/search-index --json
+ee search "related question" --workspace . --database /path/to/store/.ee/ee.db --index-dir /path/to/search-index --json
+```
+
+Completing jobs for one explicitly selected index does not refresh other index
+directories for that database. Their generation checks remain stale until they
+are published separately. A custom index rebuild also leaves the workspace's
+default-index repair request pending.
+
 Publication remains asynchronous: a successful outcome means the required work
 is durable, not that the index is already current. Ordinary search may perform
 bounded pre-read reconciliation before the next worker run. Until publication

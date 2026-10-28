@@ -3083,6 +3083,11 @@ pub struct JobRunArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
+    /// Search index directory for index_rebuild or index_coalesce.
+    /// Defaults to the selected standard store or workspace index.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
+
     /// Report planned work without mutating memory scores or job history.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
@@ -3140,6 +3145,11 @@ pub struct MaintenanceRunArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Search index directory for index_rebuild or index_coalesce.
+    /// Defaults to the selected standard store or workspace index.
+    #[arg(long, value_name = "PATH")]
+    pub index_dir: Option<PathBuf>,
 
     /// Report planned work without mutating memory scores.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -66464,6 +66474,7 @@ where
             command: "job run",
             job_type: args.kind,
             database: args.database.as_ref(),
+            index_dir: args.index_dir.as_ref(),
             dry_run: args.dry_run,
             include_decay: false,
             structural_decay: true,
@@ -66489,6 +66500,7 @@ where
             command: "maintenance run",
             job_type: args.job,
             database: args.database.as_ref(),
+            index_dir: args.index_dir.as_ref(),
             dry_run: args.dry_run,
             include_decay: args.include_decay,
             structural_decay: !args.no_structural_decay,
@@ -66514,6 +66526,7 @@ where
             command: "maintenance graph-snapshot-prune",
             job_type: JobType::GraphSnapshotPrune,
             database: args.database.as_ref(),
+            index_dir: None,
             dry_run: args.dry_run,
             include_decay: false,
             structural_decay: true,
@@ -67019,6 +67032,7 @@ struct MaintenanceJobRunRequest<'a> {
     command: &'static str,
     job_type: JobType,
     database: Option<&'a PathBuf>,
+    index_dir: Option<&'a PathBuf>,
     dry_run: bool,
     include_decay: bool,
     structural_decay: bool,
@@ -67133,6 +67147,9 @@ where
     if let Some(database) = request.database {
         runner_options = runner_options.with_database_path(database.clone());
     }
+    if let Some(index_dir) = request.index_dir {
+        runner_options = runner_options.with_index_dir(index_dir.clone());
+    }
     if let Some(as_of) = request.as_of {
         runner_options = runner_options.with_as_of(as_of.to_owned());
     }
@@ -67199,6 +67216,20 @@ where
             crate::steward::RunOutcome::Skipped => "maintenance_job_skipped",
             crate::steward::RunOutcome::Success => "maintenance_job_failed",
         };
+        let mut repair = format!("ee job run {}", request.job_type.as_str());
+        for (flag, path) in [
+            ("workspace", selected_workspace.as_deref()),
+            ("database", request.database.map(PathBuf::as_path)),
+            ("index-dir", request.index_dir.map(PathBuf::as_path)),
+        ] {
+            if let Some(path) = path {
+                repair.push_str(&format!(
+                    " --{flag} {}",
+                    shell_quote_cli_arg(&path.to_string_lossy())
+                ));
+            }
+        }
+        repair.push_str(" --json");
         degraded.push(serde_json::json!({
             "code": code,
             "severity": "medium",
@@ -67209,7 +67240,7 @@ where
                     "{} did not complete successfully",
                     request.job_type.as_str()
                 )),
-            "repair": format!("ee job run {} --json", request.job_type.as_str()),
+            "repair": repair,
         }));
     }
 

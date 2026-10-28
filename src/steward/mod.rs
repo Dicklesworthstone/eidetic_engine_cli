@@ -2987,6 +2987,8 @@ pub struct RunnerOptions {
     pub workspace_path: Option<PathBuf>,
     /// Explicit database path for maintenance handlers.
     pub database_path: Option<PathBuf>,
+    /// Explicit search index directory for index maintenance handlers.
+    pub index_dir: Option<PathBuf>,
     /// Explicit workspace ID for handlers that need durable workspace scope.
     pub workspace_id: Option<String>,
     /// Deterministic timestamp used by maintenance handlers that support it.
@@ -3053,6 +3055,12 @@ impl RunnerOptions {
     #[must_use]
     pub fn with_database_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.database_path = Some(path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_index_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.index_dir = Some(path.into());
         self
     }
 
@@ -3515,7 +3523,7 @@ impl ManualRunner {
         let mut preflight_options = crate::core::index::IndexRebuildOptions {
             workspace_path: workspace_path.clone(),
             database_path: Some(database_path.clone()),
-            index_dir: None,
+            index_dir: self.options.index_dir.clone(),
             dry_run: true,
         };
         let preflight = match crate::core::index::rebuild_index(&preflight_options) {
@@ -3599,8 +3607,12 @@ impl ManualRunner {
         // the next tick retries and `requestCount` keeps accumulating as
         // evidence. Marking never fails the job — the rebuild itself is the
         // durable outcome, and a state-dir problem must not turn a successful
-        // rebuild into a reported failure.
-        if durable_mutation {
+        // rebuild into a reported failure. The marker carries no store/index
+        // identity, so publishing an explicitly selected alternate destination
+        // must not acknowledge the default workspace's outstanding repair.
+        if durable_mutation
+            && rebuilt_default_workspace_index(&workspace_path, &database_path, &report.index_dir)
+        {
             if let Err(reason) = crate::core::index::mark_index_rebuild_request_satisfied(
                 &workspace_path,
                 &chrono::Utc::now().to_rfc3339(),
@@ -3702,7 +3714,7 @@ impl ManualRunner {
         let mut options = crate::core::index::IndexProcessingOptions {
             workspace_path,
             database_path: Some(database_path.clone()),
-            index_dir: None,
+            index_dir: self.options.index_dir.clone(),
             dry_run: true,
             job_limit,
         };
@@ -3774,13 +3786,28 @@ impl ManualRunner {
             Ok(report) => report,
             Err(error) => {
                 let message = format!("Index coalesce failed: {error}");
+                let repair = if self.options.database_path.is_some()
+                    || self.options.index_dir.is_some()
+                {
+                    let quote = |path: &Path| {
+                        format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+                    };
+                    format!(
+                        "ee job run index_coalesce --workspace {} --database {} --index-dir {} --json",
+                        quote(&options.workspace_path),
+                        quote(&preflight.database_path),
+                        quote(&preflight.index_dir),
+                    )
+                } else {
+                    INDEX_COALESCE_REPAIR_COMMAND.to_owned()
+                };
                 return steward_job_failure(
                     "ee.steward.index_coalesce.error.v1",
                     "index_coalesce_failed",
                     message,
                     false,
                     Some(&database_path),
-                    INDEX_COALESCE_REPAIR_COMMAND,
+                    &repair,
                 );
             }
         };
@@ -6755,6 +6782,28 @@ impl ManualRunner {
     }
 }
 
+/// A workspace-level repair marker refers to its default database and index.
+/// Compare resolved identities only after publication has applied its normal
+/// path checks. Explicit arguments naming those same defaults still qualify.
+fn rebuilt_default_workspace_index(
+    workspace_path: &Path,
+    database_path: &Path,
+    index_dir: &Path,
+) -> bool {
+    let store = workspace_path.join(".ee");
+    [
+        (database_path, store.join("ee.db")),
+        (index_dir, store.join("index")),
+    ]
+    .into_iter()
+    .all(|(published, expected)| {
+        fs::canonicalize(published)
+            .ok()
+            .zip(fs::canonicalize(expected).ok())
+            .is_some_and(|(published, expected)| published == expected)
+    })
+}
+
 fn normalize_runner_workspace_path(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -7180,7 +7229,7 @@ fn steward_job_failure(
     message: String,
     dry_run: bool,
     database_path: Option<&Path>,
-    repair: &'static str,
+    repair: &str,
 ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
     (
         RunOutcome::Failed,
@@ -8437,6 +8486,144 @@ mod tests {
         fn scheduled(&self) -> Vec<JobType> {
             background_scheduler_job_types(&self.workspace.to_string_lossy())
         }
+    }
+
+    #[test]
+    fn background_index_rebuild_preserves_request_for_custom_database_or_index() -> TestResult {
+        for custom_database in [false, true] {
+            let fixture = BackgroundIndexFixture::new()?;
+            let _embedder =
+                crate::core::index::install_test_hash_workspace_embedder(&fixture.workspace_id);
+            let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::now_v7()).to_string();
+            let memory = CreateMemoryInput {
+                workspace_id: fixture.workspace_id.clone(),
+                level: "semantic".to_owned(),
+                kind: "fact".to_owned(),
+                content: "The requested workspace index needs its own publication.".to_owned(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: Some("manual://index-request-destination".to_owned()),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            };
+            let connection =
+                DbConnection::open_file(&fixture.database).map_err(|e| e.to_string())?;
+            connection
+                .insert_memory(&memory_id, &memory)
+                .map_err(|e| e.to_string())?;
+            connection.close().map_err(|e| e.to_string())?;
+
+            let default_index = fixture.workspace.join(".ee/index");
+            let (selected_database, selected_index) = if custom_database {
+                let database = fixture.workspace.join("alternate-store/ee.db");
+                fs::create_dir_all(database.parent().ok_or("alternate store parent missing")?)
+                    .map_err(|e| e.to_string())?;
+                let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+                connection.migrate().map_err(|e| e.to_string())?;
+                connection
+                    .insert_workspace(
+                        &fixture.workspace_id,
+                        &CreateWorkspaceInput {
+                            path: fixture.workspace.to_string_lossy().into_owned(),
+                            name: Some("alternate repair source".to_owned()),
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
+                connection
+                    .insert_memory(&memory_id, &memory)
+                    .map_err(|e| e.to_string())?;
+                connection.close().map_err(|e| e.to_string())?;
+                (database, default_index.clone())
+            } else {
+                (
+                    fixture.database.clone(),
+                    fixture.workspace.join("selected-index"),
+                )
+            };
+            crate::core::index::record_index_rebuild_request(
+                &fixture.workspace,
+                crate::core::index::IndexRebuildTrigger::IndexMissing,
+                "context_lexical_fallback",
+                "2026-10-28T12:00:00Z",
+                crate::core::index::DEFAULT_INDEX_REBUILD_REQUEST_COOLDOWN_SECS,
+            );
+            let pending = crate::core::index::pending_index_rebuild_request(&fixture.workspace)
+                .ok_or("workspace repair request was not recorded")?;
+            let mut custom = ManualRunner::new(
+                RunnerOptions::new()
+                    .with_workspace_path(&fixture.workspace)
+                    .with_database_path(&selected_database)
+                    .with_index_dir(&selected_index),
+            );
+            let result = custom.run_job_type(JobType::IndexRebuild, None);
+            assert_eq!(result.outcome, RunOutcome::Success, "{result:?}");
+            let details = result.details.ok_or("custom rebuild details missing")?;
+            assert_eq!(
+                details["databasePath"],
+                selected_database.display().to_string()
+            );
+            assert_eq!(
+                details["result"]["index_dir"],
+                selected_index.display().to_string()
+            );
+            assert_eq!(details["durableMutation"], true);
+            let selected_status =
+                crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                    workspace_path: fixture.workspace.clone(),
+                    database_path: Some(selected_database),
+                    index_dir: Some(selected_index),
+                })
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                selected_status.health,
+                crate::core::index::IndexHealth::Ready
+            );
+            assert_eq!(
+                selected_status.index_generation,
+                selected_status.db_generation
+            );
+            assert_eq!(
+                crate::core::index::pending_index_rebuild_request(&fixture.workspace),
+                Some(pending),
+                "an alternate database or index must not clear the workspace repair request"
+            );
+            assert!(fixture.scheduled().contains(&JobType::IndexRebuild));
+            if !custom_database {
+                assert!(!default_index.exists());
+            }
+
+            let mut defaults = RunnerOptions::new().with_workspace_path(&fixture.workspace);
+            if custom_database {
+                // Lexically different explicit defaults have the same identity
+                // as omitted overrides once the safe publication has completed.
+                defaults = defaults
+                    .with_database_path(fixture.workspace.join(".ee/./ee.db"))
+                    .with_index_dir(fixture.workspace.join(".ee/./index"));
+            }
+            let mut defaults = ManualRunner::new(defaults);
+            let result = defaults.run_job_type(JobType::IndexRebuild, None);
+            assert_eq!(result.outcome, RunOutcome::Success, "{result:?}");
+            assert!(
+                crate::core::index::pending_index_rebuild_request(&fixture.workspace).is_none(),
+                "publication to the actual defaults must satisfy their pending request"
+            );
+            let status =
+                crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                    workspace_path: fixture.workspace.clone(),
+                    database_path: None,
+                    index_dir: None,
+                })
+                .map_err(|e| e.to_string())?;
+            assert_eq!(status.health, crate::core::index::IndexHealth::Ready);
+            assert_eq!(status.index_generation, status.db_generation);
+            assert!(!fixture.scheduled().contains(&JobType::IndexRebuild));
+        }
+        Ok(())
     }
 
     #[test]
