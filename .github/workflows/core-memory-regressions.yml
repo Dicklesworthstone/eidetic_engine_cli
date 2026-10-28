@@ -164,6 +164,50 @@ jobs:
             echo "Real smaller-model qualification did not execute exactly one passing test."
             exit 1
           fi
+      - name: Exercise feedback index maintenance with the real neural model
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          fixture_dir="$RUNNER_TEMP/ee-outcome-model-fixture/potion-multilingual-128M"
+          mkdir -p "$fixture_dir"
+          # Immutable assets match the pinned ModelManifest::potion_128m().
+          # Each regression also verifies its own materialized model fixture.
+          model_url='https://huggingface.co/minishlab/potion-multilingual-128M/resolve/a28f4eebecd4dc585034f605e52d414878a0417c'
+          while read -r filename size sha; do
+            curl --fail --location --silent --show-error --retry 3 --max-time 300 \
+              --user-agent 'eidetic_engine_cli-agent (+https://github.com/Dicklesworthstone/eidetic_engine_cli)' \
+              "$model_url/$filename" --output "$fixture_dir/$filename"
+            actual_size=$(stat -c %s "$fixture_dir/$filename")
+            if test "$actual_size" -ne "$size"; then
+              echo "Fixture $filename size mismatch: expected $size, got $actual_size."
+              exit 1
+            fi
+            printf '%s  %s\n' "$sha" "$fixture_dir/$filename" | sha256sum --check --strict
+          done <<'MODEL_FILES'
+          tokenizer.json 18616131 19f1909063da3cfe3bd83a782381f040dccea475f4816de11116444a73e1b6a1
+          model.safetensors 512361560 14b5eb39cb4ce5666da8ad1f3dc6be4346e9b2d601c073302fa0a31bf7943397
+          MODEL_FILES
+          export EE_EMBED_MODEL_FIXTURE_DIR="$fixture_dir"
+          failed=0
+          while read -r label filter; do
+            log="$RUNNER_TEMP/core-memory/$label.log"
+            status=0
+            timeout 12m cargo test --locked --test model_bundled_embedding_cli_e2e \
+              "$filter" -- --ignored --exact --test-threads=1 > "$log" 2>&1 || status=$?
+            tail -n 150 "$log"
+            printf '%s exit=%s\n' "$label" "$status" >> "$RUNNER_TEMP/core-memory/results.log"
+            if test "$status" -ne 0; then
+              echo "Case '$label' failed with exit $status."
+              failed=1
+            elif ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"; then
+              echo "Case '$label' did not execute exactly one passing neural regression."
+              failed=1
+            fi
+          done <<'CASES'
+          memory-outcome-neural-fresh helpful_outcome_index_coalesce_restores_neural_hybrid_in_fresh_workspace
+          memory-outcome-neural-existing helpful_outcome_index_coalesce_restores_neural_hybrid_in_existing_explicit_store
+          CASES
+          exit "$failed"
       - name: Exercise configuration and isolated global hydration
         if: ${{ !cancelled() }}
         run: |
