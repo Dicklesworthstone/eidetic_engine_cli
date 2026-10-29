@@ -541,6 +541,23 @@ expected_seconds_p50 = 1
 regression_factor = 1.5
 
 [[stage]]
+name = "Golden Consumption Floor (bd-qzr0v)"
+# MEASURED, not estimated. Five runs on the Mac checkout, 2026-10-28:
+#   1.090  1.060  1.060  1.067  1.090      median 1.067   max 1.090
+#
+# DECLARES 2, NOT THIS BLOCK'S 1, and it is just over the line that convention
+# is for. 1 would put the hard-fail ceiling at 1.5s against a 1.090s max -- only
+# 0.41s of headroom on a check that reads 113 artifacts plus ~1900 code files, so
+# a cold page cache is its realistic worst case rather than a regression. 2
+# follows the precedent already in this block: check-production-reachability,
+# timed at 1.99s, declares 2.
+#
+# Non-benchmark readiness total 598 -> 600 against the 608 ceiling. No ceiling
+# raise was taken and no neighbour's p50 was retuned.
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
 name = "Fleet Identifier Census Ratchet"
 # MEASURED, not estimated, and deliberately the one stage in the sub-second
 # Python contract block that does not take that block's "declares 1s"

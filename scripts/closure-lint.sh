@@ -793,13 +793,31 @@ IFS="$saved_ifs"
 # arrived in ONE commit -- 4ee54186e "test(closure): track required lint
 # artifacts" -- which is precisely the closure an existence-only check rewards.
 #
-# A "some test must READ it" clause deliberately does NOT belong here. The
-# GoldenTest harness (tests/golden.rs:22) builds
-# `tests/fixtures/golden/<category>/<name>.golden` out of its struct fields, so
-# no literal-filename search can see its consumers and such a clause would
-# condemn 282 live fixtures. That dimension is bd-qzr0v's, which measured 88% of
-# the convention backed by a real consumer; the defect here is narrower and
-# fully decidable from the filesystem.
+# A "some test must READ it" clause deliberately does NOT belong here, and the
+# reason is SPECIFIC TO ONE OF THE THREE DIRECTORIES. The GoldenTest harness
+# (tests/golden.rs:22) builds `tests/fixtures/golden/<category>/<name>.golden`
+# out of its struct fields, so no literal-filename search can see those
+# consumers and such a clause would condemn 282 live fixtures.
+#
+# THAT ARGUMENT DOES NOT CARRY TO tests/golden/, AND THIS COMMENT WAS BEING READ
+# AS THOUGH IT DID. Measured 2026-10-28 by enumerating the access paths rather
+# than assuming them -- include_str!, read_to_string, fs::read*, File::open, a
+# "tests/golden" directory literal, .join("golden"), read_dir, a glob, and
+# CARGO_MANIFEST_DIR composition. Every .join("golden") site in this tree
+# composes tests/fixtures/golden, not tests/golden, so NO path-constructing
+# consumer of tests/golden exists and a literal-path predicate is complete
+# there. It is 2 of 113.
+#
+# That measurement lives in scripts/check-golden-consumption.py, which reports
+# the ratio on every run and enforces only a FLOOR on the number of artifacts
+# actually read -- because requiring consumption would red 111 of 113 surfaces
+# in this gate, which cannot land. The remaining question is still bd-qzr0v's:
+# what each unread artifact should become.
+#
+# The earlier reading of this comment also cited "88% of the convention backed by
+# a real consumer". That figure counts whether the surface NAME appears anywhere
+# in .rs/.sh/.py/.md/.toml. A name is not a consumer, and the two numbers differ
+# by a factor of 49.
 #
 # Both inventories are captured once because audit mode checks hundreds of
 # surfaces and the artifacts do not change during one lint invocation.

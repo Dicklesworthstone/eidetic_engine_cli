@@ -2098,6 +2098,15 @@ run_stage "RCH Doc Examples Lint" "python3 scripts/check-rch-doc-examples.py --j
 run_stage "Action Pins Contract" "python3 scripts/check-action-pins.py"
 run_stage "Degraded Code Classification Contract" "python3 scripts/check-degraded-code-classified.py"
 run_stage "ee Spawn Isolation Ratchet" "python3 scripts/check-ee-spawn-isolation.py"
+# The `implements-surface` convention is discharged by an artifact nobody opens,
+# 111 times out of 113. `closure-lint.sh` requires a golden to EXIST and (since
+# 85a8e5f2b) to be non-empty; nothing requires a test to READ it, and measured
+# 2026-10-28 exactly TWO of the 113 files in tests/golden/ are read by any code,
+# both via `include_str!`. This stage does NOT require consumption -- demanding
+# it would red 111 surfaces in a gate that blocks -- it enforces a FLOOR on the
+# number read, so the two that are load-bearing cannot be deleted silently.
+# bd-qzr0v owns what each unread artifact should become.
+run_stage "Golden Consumption Floor (bd-qzr0v)" "python3 scripts/check-golden-consumption.py"
 # This repository is PUBLIC and its one disclosure control could not be run by
 # the person about to publish. `tests/fleet_identifier_guard.rs` ends in
 # `assert!(total_violations == 0)` and was RED at HEAD on 1173 carrying lines
