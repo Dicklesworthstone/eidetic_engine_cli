@@ -57,6 +57,13 @@
 #   0  clean, OR inconclusive (fail-open). A warning is always printed when
 #      inconclusive, so a 0 is never silent about which kind it is.
 #   1  formatting drift, a reachability finding, or a failed include-only check.
+#   3  --self-test only: NOT RUN. The pinned toolchain's rustfmt is unavailable,
+#      so zero arms executed. Distinct from 1 because a self-test that cannot
+#      run is not a self-test that failed, and distinct from the fail-open 0
+#      above because a self-test reporting success having verified nothing is
+#      the exact defect this checker exists to catch. Added 2026-10-28; this
+#      path returned 1 before, which made a host with no rustfmt look like a
+#      broken format checker.
 #
 # Missing tooling warns and fails open, as required by the original bead.
 # This is not a CI pass. Existing reachability failure handling is preserved;
@@ -491,7 +498,29 @@ main() {
     resolve_toolchain || toolchain_available=0
     case "${1:-}" in
         --self-test)
-            [ "$toolchain_available" -eq 1 ] || exit 1
+            # 3, NOT 1, AND NOT 0 EITHER. This line read `|| exit 1`, which is
+            # the code `self_test` uses for a FAILED ARM -- so a host with no
+            # rustfmt was indistinguishable from a broken format checker, while
+            # the message `resolve_toolchain` had just printed said
+            # "inconclusive, not blocking". That also contradicted this file's
+            # own exit contract 430 lines up, which assigns 1 to "formatting
+            # drift, a reachability finding, or a failed include-only check".
+            #
+            # 0 would be worse. The contract's fail-open 0 is right for the
+            # CHECK paths, where missing tooling must not block a push, but a
+            # SELF-TEST that exits 0 having run ZERO arms is the vacuous green
+            # this file exists to prevent -- `self_test`'s own header says "a
+            # format checker that cannot fail is the defect it removes".
+            #
+            # So: a third code meaning NOT RUN, matching
+            # scripts/check-include-fmt.sh which uses 3 for the same condition.
+            # On this host, where no rustfmt exists at all while the USB volume
+            # is unmounted, that is the difference between a red and an honest
+            # "cannot answer".
+            if [ "$toolchain_available" -ne 1 ]; then
+                warn "self-test INCONCLUSIVE, not run: the pinned toolchain's rustfmt is unavailable, so zero arms executed (exit 3; a failed arm is exit 1)"
+                exit 3
+            fi
             self_test; exit $?
             ;;
         --reachability) run_reachability; exit $? ;;
