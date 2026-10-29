@@ -925,6 +925,7 @@ enum OutcomeAdmissionTestStage {
     BeforeOwnerFence,
     AfterEventLookup,
     AfterAdmissionRead,
+    BeforeAntiPatternProposal,
 }
 
 #[cfg(test)]
@@ -1460,6 +1461,11 @@ fn record_outcome_inner(
         && is_harmful_signal(&report.signal)
         && let Some(event_id) = report.event_id.as_deref()
     {
+        #[cfg(test)]
+        observe_outcome_admission_for_test(
+            OutcomeAdmissionTestStage::BeforeAntiPatternProposal,
+            &connection,
+        );
         match maybe_propose_anti_pattern_candidate(
             &connection,
             &report.workspace_id,
@@ -2168,6 +2174,20 @@ fn maybe_propose_anti_pattern_candidate(
                     target_id: Some(candidate_id.clone()),
                     details: Some(details.clone()),
                 },
+            )?;
+            // The feedback job can finish before this optional transaction
+            // starts. Candidate creation advances the workspace generation,
+            // so it needs its own durable publication work even though the
+            // memory's canonical search document has not changed.
+            connection.insert_search_index_job(
+                &anti_pattern_candidate_index_job_id(event_id),
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.to_owned(),
+                    job_type: crate::db::SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(target_id.to_owned()),
+                    documents_total: 1,
+                },
             )
         })
         .map_err(|error| DomainError::Storage {
@@ -2199,6 +2219,13 @@ fn anti_pattern_candidate_id(workspace_id: &str, target_id: &str) -> String {
     let hash = blake3::hash(format!("{workspace_id}\0anti-pattern\0{target_id}").as_bytes());
     let suffix = hash.to_hex().to_string();
     format!("curate_{}", &suffix[..26])
+}
+
+fn anti_pattern_candidate_index_job_id(event_id: &str) -> String {
+    let hash =
+        blake3::hash(format!("ee.outcome.anti_pattern_candidate_index.v1:{event_id}").as_bytes());
+    let suffix = hash.to_hex().to_string();
+    format!("sidx_{}", &suffix[..26])
 }
 
 fn anti_pattern_candidate_content(memory_content: &str, harmful_count: usize) -> String {

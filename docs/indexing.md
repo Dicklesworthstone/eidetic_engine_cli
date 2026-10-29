@@ -115,6 +115,13 @@ Neutral signals, unchanged posteriors and dry runs create no index work.
 Quarantined observations queue work only when released and applied; rejection
 and repeated review leave the existing queue unchanged.
 
+Repeated harmful feedback can also propose an anti-pattern candidate after the
+feedback transaction commits. Creating that candidate advances the workspace
+generation, so its separate transaction commits its own deterministic memory
+index job with the candidate and audit. This keeps publication durable even if
+a worker already finished the feedback job. A failed candidate job insert rolls
+back the optional proposal without undoing the committed feedback.
+
 The normal worker publishes the updated source generation without a manual
 full rebuild:
 

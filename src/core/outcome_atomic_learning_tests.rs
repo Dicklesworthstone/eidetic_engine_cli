@@ -87,6 +87,7 @@ fn concurrent_outcome_results(
                             #[cfg(not(unix))]
                             let _ = &database;
                         }
+                        OutcomeAdmissionTestStage::BeforeAntiPatternProposal => {}
                     },
                     || record_outcome(&options),
                 )
@@ -248,6 +249,13 @@ impl Fixture {
         options
     }
 
+    fn anti_pattern_options(&self, ordinal: u32) -> OutcomeRecordOptions<'_> {
+        let mut options = self.harmful_options();
+        options.event_id = Some(format!("fb_{ordinal:026}"));
+        options.source_id = Some(format!("anti-pattern-source-{ordinal}"));
+        options
+    }
+
     fn queue_harmful_feedback(&self, source_type: &str) -> String {
         let mut options = self.harmful_options();
         options.harmful_per_source_per_hour = 1;
@@ -281,22 +289,27 @@ impl Fixture {
     }
 
     fn feedback_state(&self) -> FeedbackState {
-        let mut audits = self.db.list_audit_entries(None, None).unwrap();
+        Self::feedback_state_for(&self.db)
+    }
+
+    fn feedback_state_for(db: &DbConnection) -> FeedbackState {
+        let mut audits = db.list_audit_entries(None, None).unwrap();
         audits.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut index_jobs = db.list_search_index_jobs(WORKSPACE, None).unwrap();
+        index_jobs.sort_by(|left, right| left.id.cmp(&right.id));
         FeedbackState {
-            events: self.db.list_feedback_events(WORKSPACE).unwrap(),
-            quarantine: self.db.list_feedback_quarantine(WORKSPACE, None).unwrap(),
-            quarantine_rows: self.db.count_table_rows("feedback_quarantine").unwrap(),
-            memory: self.db.get_memory(MEMORY).unwrap(),
-            posterior: self.posterior(),
-            profile: self
-                .db
+            events: db.list_feedback_events(WORKSPACE).unwrap(),
+            quarantine: db.list_feedback_quarantine(WORKSPACE, None).unwrap(),
+            quarantine_rows: db.count_table_rows("feedback_quarantine").unwrap(),
+            memory: db.get_memory(MEMORY).unwrap(),
+            posterior: db.get_memory_bayes_posterior(MEMORY).unwrap().unwrap(),
+            profile: db
                 .get_agent_context_profile(WORKSPACE, REPLAY_AGENT, MEMORY)
                 .unwrap(),
-            profile_rows: self.db.count_table_rows("agent_context_profiles").unwrap(),
+            profile_rows: db.count_table_rows("agent_context_profiles").unwrap(),
             audits,
-            index_jobs: self.index_jobs(),
-            workspace_generation: self.db.get_workspace_generation(WORKSPACE).unwrap(),
+            index_jobs,
+            workspace_generation: db.get_workspace_generation(WORKSPACE).unwrap(),
         }
     }
 
@@ -410,6 +423,270 @@ fn memory_index_jobs_are_event_stable_and_distinct_after_completed_work() {
         );
         assert_eq!(fixture.feedback_state(), learned);
     }
+}
+
+#[test]
+fn anti_pattern_index_job_survives_feedback_coalescer_interleaving() {
+    use crate::core::index::{
+        IndexHealth, IndexProcessingOptions, IndexProcessingStatus, IndexStatusOptions,
+        get_index_status, process_index_jobs_coalesced,
+    };
+
+    let fixture = Fixture::new();
+    let _embedder = crate::core::index::install_test_hash_workspace_embedder(WORKSPACE);
+    for ordinal in 1..3 {
+        assert_eq!(
+            record_outcome(&fixture.anti_pattern_options(ordinal))
+                .unwrap()
+                .status,
+            OutcomeRecordStatus::Recorded,
+        );
+    }
+    let index_dir = fixture._root.path().join("index");
+    let processing = IndexProcessingOptions {
+        workspace_path: fixture._root.path().to_path_buf(),
+        database_path: Some(fixture.database.clone()),
+        index_dir: Some(index_dir.clone()),
+        dry_run: false,
+        job_limit: None,
+    };
+    let status_options = IndexStatusOptions {
+        workspace_path: processing.workspace_path.clone(),
+        database_path: processing.database_path.clone(),
+        index_dir: Some(index_dir),
+    };
+    let interleaved_processing = processing.clone();
+    let interleaved_status = status_options.clone();
+    let published_generation = std::rc::Rc::new(std::cell::Cell::new(None));
+    let observed_generation = published_generation.clone();
+    let options = fixture.anti_pattern_options(3);
+    let report = with_admission_observer(
+        move |stage, _connection| {
+            if stage != OutcomeAdmissionTestStage::BeforeAntiPatternProposal {
+                return;
+            }
+            // Run the real worker in the gap between the committed feedback
+            // and its optional proposal, as a background coalescer can do.
+            let drained = process_index_jobs_coalesced(&interleaved_processing).unwrap();
+            assert_eq!(
+                drained.status,
+                IndexProcessingStatus::Success,
+                "{drained:?}"
+            );
+            assert_eq!(drained.completed_jobs, 3);
+            let status = get_index_status(&interleaved_status).unwrap();
+            assert_eq!(status.health, IndexHealth::Ready, "{status:?}");
+            assert_eq!(status.index_generation, status.db_generation);
+            observed_generation.set(status.index_generation);
+        },
+        || record_outcome(&options),
+    )
+    .unwrap();
+    assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+    assert!(
+        report
+            .degraded
+            .iter()
+            .any(|entry| entry.code == ANTI_PATTERN_PROPOSED_CODE)
+    );
+    let before_proposal = published_generation
+        .get()
+        .expect("worker ran before proposal");
+    let candidate_id = anti_pattern_candidate_id(WORKSPACE, MEMORY);
+    assert!(
+        fixture
+            .db
+            .get_curation_candidate(WORKSPACE, &candidate_id)
+            .unwrap()
+            .is_some()
+    );
+    let jobs = fixture.index_jobs();
+    assert_eq!(jobs.len(), 4);
+    assert_eq!(
+        jobs.iter().filter(|job| job.status == "completed").count(),
+        3
+    );
+    let pending = jobs.iter().find(|job| job.status == "pending").unwrap();
+    assert_eq!(
+        pending.id,
+        anti_pattern_candidate_index_job_id(options.event_id.as_deref().unwrap())
+    );
+    assert_eq!(pending.document_source.as_deref(), Some("memory"));
+    assert_eq!(pending.document_id.as_deref(), Some(MEMORY));
+    let stale = get_index_status(&status_options).unwrap();
+    assert_eq!(stale.health, IndexHealth::Stale, "{stale:?}");
+    assert_eq!(stale.index_generation, Some(before_proposal));
+    assert_eq!(stale.db_generation, Some(before_proposal + 1));
+
+    let committed = fixture.feedback_state();
+    assert_eq!(
+        record_outcome(&options).unwrap().status,
+        OutcomeRecordStatus::AlreadyRecorded
+    );
+    assert_eq!(fixture.feedback_state(), committed);
+    let repaired = process_index_jobs_coalesced(&processing).unwrap();
+    assert_eq!(
+        repaired.status,
+        IndexProcessingStatus::Success,
+        "{repaired:?}"
+    );
+    assert_eq!(repaired.completed_jobs, 1);
+    assert_eq!(repaired.jobs[0].job_id, pending.id);
+    assert!(
+        repaired.jobs[0].processing_mode.ends_with("_staged_delta"),
+        "{repaired:?}"
+    );
+    let ready = get_index_status(&status_options).unwrap();
+    assert_eq!(ready.health, IndexHealth::Ready, "{ready:?}");
+    assert_eq!(ready.index_generation, ready.db_generation);
+    assert_eq!(ready.index_generation, Some(before_proposal + 1));
+    assert_eq!(
+        fixture
+            .db
+            .get_search_index_job(&pending.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "completed"
+    );
+    let published = fixture.feedback_state();
+    assert_eq!(
+        record_outcome(&options).unwrap().status,
+        OutcomeRecordStatus::AlreadyRecorded
+    );
+    assert_eq!(fixture.feedback_state(), published);
+}
+
+#[test]
+fn anti_pattern_index_insert_failure_preserves_committed_feedback() {
+    let fixture = Fixture::new();
+    for ordinal in 1..3 {
+        assert_eq!(
+            record_outcome(&fixture.anti_pattern_options(ordinal))
+                .unwrap()
+                .status,
+            OutcomeRecordStatus::Recorded,
+        );
+    }
+    let prior = fixture.posterior();
+    let options = fixture.anti_pattern_options(3);
+    let candidate_id = anti_pattern_candidate_id(WORKSPACE, MEMORY);
+    let index_job_id = anti_pattern_candidate_index_job_id(options.event_id.as_deref().unwrap());
+    fixture
+        .db
+        .execute_raw(&format!(
+            "CREATE TRIGGER reject_anti_pattern_index BEFORE INSERT ON search_index_jobs \
+         WHEN NEW.id = '{index_job_id}' \
+         BEGIN SELECT RAISE(ABORT, 'anti-pattern index failure'); END;"
+        ))
+        .unwrap();
+    let committed_feedback = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let observed_feedback = committed_feedback.clone();
+    let report = with_admission_observer(
+        move |stage, connection| {
+            if stage == OutcomeAdmissionTestStage::BeforeAntiPatternProposal {
+                *observed_feedback.borrow_mut() = Some(Fixture::feedback_state_for(connection));
+            }
+        },
+        || record_outcome(&options),
+    )
+    .unwrap();
+    assert_eq!(report.status, OutcomeRecordStatus::Recorded);
+    let failure = report
+        .degraded
+        .iter()
+        .find(|entry| entry.code == "anti_pattern_proposal_failed")
+        .expect("optional queue failure must be reported without undoing feedback");
+    assert!(
+        failure
+            .details
+            .as_ref()
+            .and_then(|details| details["errorMessage"].as_str())
+            .is_some_and(|message| message.contains("anti-pattern index failure")),
+        "{failure:?}"
+    );
+    let committed = committed_feedback.borrow_mut().take().unwrap();
+    assert_eq!(
+        fixture.feedback_state(),
+        committed,
+        "candidate, audit, generation and publication work must roll back together"
+    );
+    assert_eq!(
+        fixture.posterior(),
+        (prior.0, prior.1 + DEFAULT_HARMFUL_WEIGHT)
+    );
+    assert!(
+        fixture
+            .db
+            .get_feedback_event(options.event_id.as_deref().unwrap())
+            .unwrap()
+            .is_some()
+    );
+    fixture.assert_pending_memory_jobs(3);
+    assert!(
+        fixture
+            .db
+            .get_curation_candidate(WORKSPACE, &candidate_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .db
+            .get_search_index_job(&index_job_id)
+            .unwrap()
+            .is_none()
+    );
+
+    let cleanup = DbConnection::open_file(&fixture.database).unwrap();
+    cleanup
+        .execute_raw("DROP TRIGGER reject_anti_pattern_index")
+        .unwrap();
+    cleanup.close().unwrap();
+    assert_eq!(
+        record_outcome(&options).unwrap().status,
+        OutcomeRecordStatus::AlreadyRecorded
+    );
+    assert_eq!(fixture.feedback_state(), committed);
+
+    // A later observation may retry the optional proposal under its own job
+    // identity, while replaying the committed event never learns it twice.
+    let next_options = fixture.anti_pattern_options(4);
+    let next = record_outcome(&next_options).unwrap();
+    assert_eq!(next.status, OutcomeRecordStatus::Recorded);
+    assert!(
+        next.degraded
+            .iter()
+            .any(|entry| entry.code == ANTI_PATTERN_PROPOSED_CODE)
+    );
+    assert_eq!(
+        fixture.posterior(),
+        (prior.0, prior.1 + 2.0 * DEFAULT_HARMFUL_WEIGHT)
+    );
+    assert!(
+        fixture
+            .db
+            .get_curation_candidate(WORKSPACE, &candidate_id)
+            .unwrap()
+            .is_some()
+    );
+    let next_index_job_id =
+        anti_pattern_candidate_index_job_id(next_options.event_id.as_deref().unwrap());
+    assert_ne!(next_index_job_id, index_job_id);
+    let job = fixture
+        .db
+        .get_search_index_job(&next_index_job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, "pending");
+    assert_eq!(job.document_id.as_deref(), Some(MEMORY));
+    fixture.assert_pending_memory_jobs(5);
+    let retried = fixture.feedback_state();
+    assert_eq!(
+        record_outcome(&next_options).unwrap().status,
+        OutcomeRecordStatus::AlreadyRecorded
+    );
+    assert_eq!(fixture.feedback_state(), retried);
 }
 
 #[test]
